@@ -64,6 +64,34 @@ def pump_once():
         task_reaper.reaper_loop()
 
 
+@pytest.mark.parametrize("closure", ["confirmed", "unconfirmed: process table unreadable"])
+def test_confirmed_timeout_sweeps_bridge_scope_without_rolling_back(timed_out, monkeypatch, closure):
+    from ouroboros import mcp_task_sessions
+
+    t = timed_out
+    swept = []
+    monkeypatch.setattr(mcp_task_sessions, "settle_dead_task",
+                        lambda root, task_id: swept.append((root, task_id)) or {"closure": closure})
+    pump_once()
+    assert swept == [(t.root, "old-task")]
+    for frame in t.frames:
+        events.dispatch_event(frame, t.ctx)
+    assert load_task_result(t.root, "old-task")["status"] == "completed"
+
+
+def test_unconfirmed_timeout_worker_death_does_not_sweep_bridge(timed_out, monkeypatch):
+    from ouroboros import mcp_task_sessions
+
+    swept = []
+    monkeypatch.setattr(mcp_task_sessions, "settle_dead_task",
+                        lambda *_a: swept.append(True))
+    monkeypatch.setattr(task_reaper, "_kill_and_confirm_worker_dead", lambda *_a: False)
+    monkeypatch.setattr(task_reaper, "_hold_wedged_worker", lambda *_a: None)
+    pump_once()
+    assert swept == []
+    assert load_task_result(timed_out.root, "old-task")["status"] == "running"
+
+
 @pytest.mark.parametrize("replacement", [False, True])
 def test_deferred_timeout_recovers_files_without_replacing_a_new_busy_worker(timed_out, monkeypatch, replacement):
     t = timed_out

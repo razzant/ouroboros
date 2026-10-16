@@ -31,8 +31,10 @@ def _capture(page, name):
         page.screenshot(path=str(pathlib.Path(root) / f"{getattr(page, '_evidence_engine', 'chromium')}-{name}.png"), animations="disabled", full_page=False)
 
 
-def _open_mcp(page, url):
+def _open_mcp(page, url, *, open_drawer=False):
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    if open_drawer:
+        page.locator('[data-mobile-nav-toggle]:visible').first.click()
     page.click('[data-nav-page="settings"]')
     page.locator('[data-settings-tab="advanced"]').click()
     page.locator("#btn-mcp-import").wait_for(state="visible", timeout=15_000)
@@ -772,8 +774,11 @@ def test_mcp_import_replaces_legacy_ui(direct_server_with_data, loopback, engine
             disk = _disk(data_dir)
             assert disk["legacy_docs"]["headers"] == {"Authorization": BASIC, "X-Api-Key": CUSTOM}
             assert disk["legacy_docs"]["auth_token"] == "" and disk["legacy_docs"]["enabled"] is True
+            # Save normalizes every server's browser opt-in, including unselected import rows.
+            # HTTP entries remain ordinary MCP connections; the file cannot enable the bridge.
             assert disk["keep_me"] == {**seed[1], "id": "keep_me", "name": "", "command": "", "args": [],
-                                       "auth_header": "Authorization", "auth_token": "", "allowed_tools": []}
+                                       "auth_header": "Authorization", "auth_token": "", "allowed_tools": [],
+                                       "browser_bridge": False, "browser_protocol": "playwright"}
             assert disk["fresh"]["enabled"] is False and disk["fresh"]["url"].endswith("?k=synthetic-query")
             seen_before = len(http_app.seen)
             cards.nth(0).locator("[data-mcp-refresh]").click()

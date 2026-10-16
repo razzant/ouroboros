@@ -1147,6 +1147,7 @@ def _finish_captured_running(
     """
     q = _queue_module()
     from supervisor.worker_pool_lifecycle import kill_worker_tree
+    from ouroboros.mcp_task_sessions import settle_dead_task
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
     task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
@@ -1180,6 +1181,8 @@ def _finish_captured_running(
         _release_intent_claim(q, task_id, error="worker survived kill escalation", intent=intent)
         return CANCEL_FAILED
 
+    # Its death revoked every bridge call; close what the bridges left behind.
+    settle_dead_task(q.DRIVE_ROOT, task_id)
     _reconcile_dead_review_owner(q.DRIVE_ROOT, int(getattr(worker.proc, "pid", 0) or 0))
     with q._queue_lock:
         from supervisor.worker_health import retire_confirmed_worker_consumers
@@ -1564,18 +1567,13 @@ def _append_cascade_snapshot_log(
     teardown, leaving a cancel-requested tree still running. Losing a log line is
     the strictly smaller loss.
     """
+    descendants = [tid for tid in cancel_order if tid != task_id]
     try:
-        q.append_jsonl(
-            pathlib.Path(q.DRIVE_ROOT) / "logs" / "supervisor.jsonl",
-            {
-                "ts": utc_now_iso(),
-                "type": "task_cancel_subtree_snapshot",
-                "root_task_id": task_id,
-                "descendant_task_ids": [tid for tid in cancel_order if tid != task_id],
-                "descendant_count": len([tid for tid in cancel_order if tid != task_id]),
-                "resweep": bool(already),
-            },
-        )
+        q.append_jsonl(pathlib.Path(q.DRIVE_ROOT) / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(), "type": "task_cancel_subtree_snapshot",
+            "root_task_id": task_id, "descendant_task_ids": descendants,
+            "descendant_count": len(descendants), "resweep": bool(already),
+        })
     except Exception:
         log.warning("Failed to log the cascade snapshot for %s", task_id, exc_info=True)
 

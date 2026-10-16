@@ -15,7 +15,8 @@ const TRANSPORTS = [
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
-    'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings']);
+    'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
+    'browser_bridge', 'browser_protocol', 'browser_skill_binding']);
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -49,6 +50,8 @@ function emptyServer() {
         auth_header: 'Authorization',
         auth_token: '',
         allowed_tools: [],
+        browser_bridge: false,
+        browser_protocol: 'playwright',
     };
 }
 
@@ -249,6 +252,22 @@ function renderServerCard(server, index) {
             </div>
             ${isStdio ? `
             <div class="form-row">
+                <label class="mcp-server-enabled">
+                    <input class="ui-checkbox" type="checkbox" data-mcp-field="browser_bridge" ${server.browser_bridge === true ? 'checked' : ''}>
+                    <span>Task-owned browser bridge</span>
+                </label>
+            </div>
+            <div class="form-row">
+                <div class="form-field ui-field">
+                    <label for="mcp-${index}-browser-protocol">Browser protocol</label>
+                    <select class="ui-control" id="mcp-${index}-browser-protocol" data-mcp-field="browser_protocol" aria-label="MCP server ${index + 1}: Browser protocol">
+                        <option value="playwright" ${server.browser_protocol !== 'ouroboros_chrome' ? 'selected' : ''}>Playwright MCP</option>
+                        <option value="ouroboros_chrome" ${server.browser_protocol === 'ouroboros_chrome' ? 'selected' : ''}>Ouroboros Chrome</option>
+                    </select>
+                    <span class="ui-field-help">Chrome requires a task-owned bridge and a connected extension.</span>
+                </div>
+            </div>
+            <div class="form-row">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-args">Arguments (one per line)</label>
                     <textarea class="ui-control" id="mcp-${index}-args" aria-label="MCP server ${index + 1}: Arguments (one per line)" data-mcp-field="args" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/path/to/folder" autocomplete="off" spellcheck="false">${escapeHtml(args.join('\n'))}</textarea>
@@ -299,8 +318,8 @@ function bindCardEvents(card) {
         input.addEventListener('input', () => {
             const field = input.dataset.mcpField;
             const server = rowServer;
-            if (field === 'enabled') {
-                server.enabled = Boolean(input.checked);
+            if (field === 'enabled' || field === 'browser_bridge') {
+                server[field] = Boolean(input.checked);
             } else if (field === 'allowed_tools') {
                 server.allowed_tools = String(input.value || '')
                     .split(',')
@@ -325,8 +344,9 @@ function bindCardEvents(card) {
             serverEdited(server);
         });
         input.addEventListener('change', () => {
-            if (input.dataset.mcpField === 'enabled') {
-                rowServer.enabled = Boolean(input.checked);
+            const field = input.dataset.mcpField;
+            if (field === 'enabled' || field === 'browser_bridge') {
+                rowServer[field] = Boolean(input.checked);
                 serverEdited(rowServer);
             }
         });
@@ -577,6 +597,8 @@ export function applyMcpSettings(settings) {
             auth_header: String(s.auth_header ?? 'Authorization'),
             auth_token: String(s.auth_token ?? ''),
             allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
+            browser_bridge: s.browser_bridge === true,
+            browser_protocol: s.browser_protocol === 'ouroboros_chrome' ? 'ouroboros_chrome' : 'playwright',
         };
         savedMcpSecrets.set(server, { identity: serverIdentity(s), url: server.url });
         return server;
@@ -590,7 +612,15 @@ export function validateMcpSettings() {
     const errors = [];
     document.querySelectorAll('[data-mcp-card]').forEach((card) => {
         const server = mcpServers[Number(card.dataset.mcpIndex)];
-        if (server) errors.push(...validateHeaderFields(card, server, savedMcpSecrets.get(server)?.identity));
+        if (server) {
+            errors.push(...validateHeaderFields(card, server, savedMcpSecrets.get(server)?.identity));
+            if (server.browser_protocol === 'ouroboros_chrome'
+                    && (server.transport !== 'stdio' || server.browser_bridge !== true)) {
+                errors.push({ input: card.querySelector('[data-mcp-field="browser_protocol"]')
+                    || card.querySelector('[data-mcp-field="transport"]'),
+                    message: 'Ouroboros Chrome requires a local stdio server with Task-owned browser bridge enabled.' });
+            }
+        }
     });
     document.querySelectorAll('[data-mcp-field="env"], [data-mcp-field="env_from_settings"]').forEach((input) => {
         let value, parsed = false;
@@ -626,6 +656,8 @@ function collectServer(s) {
         auth_header: String(s.auth_header || 'Authorization').trim() || 'Authorization',
         auth_token: String(s.auth_token || ''),
         allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
+        browser_bridge: String(s.transport || 'streamable_http') === 'stdio' && s.browser_bridge === true,
+        browser_protocol: s.browser_protocol === 'ouroboros_chrome' ? 'ouroboros_chrome' : 'playwright',
         ...credentialPayload(s),
     };
 }

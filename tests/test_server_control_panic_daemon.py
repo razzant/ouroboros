@@ -243,7 +243,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
         assert diagnostics[0]["controls_written"] is True
         if fault != "executor-import":
             assert set(diagnostics[0]["requests"]) == {
-                "local-model", "daemon", "commands", "executors", "services", "companions",
+                "local-model", "daemon", "commands", "executors", "services", "mcp-browser", "companions",
                 "restart-successor", "scope-census", "child-123", "startup-audit", "evidence-packer",
             }
             # The installation-scope census is one more independent request; this root planted no marker.

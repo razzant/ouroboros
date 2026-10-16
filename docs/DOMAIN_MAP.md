@@ -12,7 +12,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 43 | 0 |
 | D03 | Context assembly, fit & compaction | 20 | 0 |
 | D04 | Tool execution: registry, access & typed results | 22 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 38 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 40 | 0 |
 | D06 | Review stack | 85 | 0 |
 | D07 | Delegation, subagents & Claudexor | 66 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 62 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 25 | 0 |
 | D19 | Frozen contracts (ABI) | 11 | 0 |
 | D20 | Presence | 13 | 0 |
-| **total** | | **738** | **0** |
+| **total** | | **740** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -354,9 +354,11 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/code_navigation.py`
 - `ouroboros/code_occurrences.py`
 - `ouroboros/code_search_rg.py`
+- `ouroboros/mcp_chrome_protocol.py`
 - `ouroboros/mcp_client.py`
 - `ouroboros/mcp_headers.py`
 - `ouroboros/mcp_import.py`
+- `ouroboros/mcp_task_sessions.py`
 - `ouroboros/process_interpreters.py`
 - `ouroboros/query_data_sql.py`
 - `ouroboros/repo_diff_capture.py`

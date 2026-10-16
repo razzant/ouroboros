@@ -1,6 +1,6 @@
 # 9. Shutdown & Process Cleanup
 
-Close keeps the shared daemon; Restart stops this generation's work before transfer; Panic never waits for cleanup. Signals, logical wait expiry and engine terminal facts prove no OS exit. Body collection closes new work on generation exit, retaining physical jobs until they return; cold receipts preserve responsibility, not permission to resume (§6). Switching restores packed handles and still needs stop evidence; startup retries unconfirmed custody.
+Close keeps the daemon; Restart stops this generation; Panic never waits. Signals/wait expiry/engine terminals prove no exit. Exit closes collection, retains physical jobs; cold receipts grant no Resume (§6). Switches restore packed handles with stop evidence; boot retries custody.
 
 ### Shutdown doors
 
@@ -39,6 +39,8 @@ Panic latches at ingress; failed thread start executes synchronously. Owned stop
 Claudexor 4 first-start import can keep an authenticated daemon in `recovery_only` for minutes: `ensure_owned_gateway` waits `CLAUDEXOR_ADMISSION_WAIT_SEC`, then refuses typed `daemon_recovery_only` without killing it; passive status still shows migration progress. Engine storage, forward-only compatibility and logical/physical quarantine: PERSISTENCE.md. External-host CLI/MCP bindings only attach; this manager keeps start/stop ownership; standalone installations keep their own.
 
 ### Process custody
+
+Task stdio and pre-ledger marked-container stops: `mcp_task_sessions.py`, [bridge contract](../browser-task-bridge.md). Revocation/detach/exit differ.
 
 `_active_subprocesses`, task-attributed executor records (§1) and ledgered task processes are named by `state/owned_processes.json` (contended registrations land in `owned_processes.pending/`), read by exit and Panic instead of walking `data/state`; a boot thread indexes older records once. Groups and Jobs miss escaped descendants, so signals need measured identity; startup recovery settles no executor backend, retrying only stamped stops. Docker CLI exit proves no backend exit: `backend_completed` persists before marker deletion; a lost reply retains evidence, never signalling a completed CLI PID. `docker_process_observer.py` reads container `/proc`: a zombie leader is exited (return code unknown), stops and writer fences need no live group member, unreadable stat stays unknown custody. Host unwind or exact worker death retires the local invocation only (§6); unknown effects never authorize replay.
 

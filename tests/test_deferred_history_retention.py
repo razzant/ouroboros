@@ -114,6 +114,7 @@ def test_gc_owes_unreferenced_physical_calls_including_old_and_cancelled_rows(tm
 
 def test_public_exact_review_reader_works_while_history_is_deferred(tmp_path):
     from pathlib import Path
+
     from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
     from ouroboros.task_finalization import review_source_reader
     from ouroboros.tools.registry import ToolContext, ToolRegistry
@@ -237,7 +238,7 @@ def test_shared_drive_successor_is_retried_by_task_id_and_its_custody_survives_p
     assert observability.read_blob_ref(parent, stored["full_payload_ref"]) == {"answer": "exact successor"}
 
 
-@pytest.mark.parametrize("guard", ["live", "liveness_unknown", "unknown_occupant"])
+@pytest.mark.parametrize("guard", ["live", "liveness_unknown", "unknown_occupant", "unknown_legacy_occupant"])
 def test_shared_drive_is_kept_while_a_successor_is_live_or_unknown(tmp_path, guard):
     """A settled, fully promoted successor still keeps the owner's drive while it is live, its
     liveness is unknown, or the drive holds an occupant that is not a task id."""
@@ -249,6 +250,9 @@ def test_shared_drive_is_kept_while_a_successor_is_live_or_unknown(tmp_path, gua
         # JSON result files are inert after import; an unowned artifact directory
         # is still an occupant that the current custody census must retain.
         (child / "task_results" / "artifacts" / "not a task id!").mkdir(parents=True)
+    elif guard == "unknown_legacy_occupant":
+        # A file-only occupant participates in custody, but not CURRENT reads.
+        (child / "task_results" / "not a task id!.json").write_text("{}", encoding="utf-8")
     probe = {"live": lambda task: True if task == successor else False,
              "liveness_unknown": lambda task: None if task == successor else False}.get(guard, lambda _task: False)
 
@@ -257,4 +261,9 @@ def test_shared_drive_is_kept_while_a_successor_is_live_or_unknown(tmp_path, gua
     assert not report["pruned"] and child.exists(), report
     reason = {"live": "task_live", "liveness_unknown": "liveness_unknown"}.get(guard, "drive_occupant_unknown")
     assert {"task_id": "shared-owner", "reason": reason} in report["custody_pending"], report
-    assert load_task_result(child, successor)["result"] == "successor answer"
+    retained = load_task_result(child, successor, strict=True)
+    assert retained["status"] == "completed" and retained["result"] == "successor answer"
+    if guard == "unknown_occupant":
+        assert (child / "task_results" / "artifacts" / "not a task id!").is_dir()
+    elif guard == "unknown_legacy_occupant":
+        assert (child / "task_results" / "not a task id!.json").read_text(encoding="utf-8") == "{}"

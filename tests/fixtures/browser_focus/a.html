@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Ouroboros · agent focus test A</title>
+<style>
+  body { font: 18px system-ui; margin: 3rem; }
+  #stage { position: relative; width: 240px; height: 80px; }
+  #count { width: 220px; height: 60px; }
+  #cover { display: none; position: absolute; inset: 0; background: #d44a; opacity: .7; z-index: 2; }
+  #stage.covered #cover { display: block; }
+</style>
+<h1>Agent focus test A</h1>
+<p>Only this local test page has an action target.</p>
+<div id="stage"><button id="count" type="button">Count</button><div id="cover">Overlay</div></div>
+<p>Counter: <output id="value">0</output></p>
+<script>
+  const events = [];
+  let counter = 0;
+  for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+    document.addEventListener(type, event => {
+      const record = { seq: events.length + 1, type, target: event.target.id || event.target.tagName.toLowerCase(),
+                       isTrusted: event.isTrusted, time: performance.now() };
+      events.push(record);
+      navigator.sendBeacon('/event', JSON.stringify(record));
+    }, true);
+  }
+  document.querySelector('#count').addEventListener('click', () => {
+    counter += 1;
+    document.querySelector('#value').textContent = String(counter);
+    navigator.sendBeacon('/state', JSON.stringify({counter}));
+  });
+  window.probe = {
+    state: () => ({ counter, events: events.map(({type, target, isTrusted}) => ({type, target, isTrusted})),
+                   visibilityState: document.visibilityState, hasFocus: document.hasFocus() }),
+    cover: () => document.querySelector('#stage').classList.add('covered'),
+    uncover: () => document.querySelector('#stage').classList.remove('covered'),
+    detach: () => document.querySelector('#count').remove(),
+  };
+</script>

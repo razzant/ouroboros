@@ -50,7 +50,7 @@ test('an untouched field saves nothing; an edit, a cleared blank included, saves
 });
 
 test('Settings applies the loaded value without a fallback and collects through the edited-only rule', () => {
-    const source = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.match(source, /applyInputValue\('s-ui-dir', s\.OUROBOROS_UI_DIR\);/);
     assert.match(source, /Object\.assign\(body, uiDirChange\(fieldValue\('s-ui-dir'\), currentSettings\?\.OUROBOROS_UI_DIR\)\);/);
     // Never an always-sent INPUT_FIELDS row: that would author the key on every save.

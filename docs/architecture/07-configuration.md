@@ -164,7 +164,7 @@ A registry of `config.SETTINGS_DEFAULTS` (defaults canonical in `settings_defaul
 | OUROBOROS_RUNTIME_MODE | advanced | Effective Access light/advanced/pro/cyber_pro, persisted as the next-boot value (§6 Safety and runtime mode) |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Extra skills checkout path (expanded at read time, never cloned or pulled) |
 | MCP_ENABLED | false | MCP client toggle (§6 MCP and browser-facing external tools) |
-| MCP_SERVERS | [] | MCP server list; persisted in settings, never env-exported |
+| MCP_SERVERS | [] | MCP entries; stdio browser_bridge/browser_protocol/browser_skill_binding: docs/browser-task-bridge.md; disk-only |
 | MCP_TOOL_TIMEOUT_SEC | 60 | Per-MCP-tool timeout |
 | OUROBOROS_HUB_CATALOG_URL | `https://raw.githubusercontent.com/razzant/OuroborosHub/main/catalog.json` | OuroborosHub catalog URL (automatic fetch limited to catalog JSON; installs verify SHA-256) |
 | OUROBOROS_CLAWHUB_REGISTRY_URL | `https://clawhub.ai/api/v1` | ClawHub registry URL |

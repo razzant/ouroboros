@@ -31,9 +31,9 @@ from ouroboros._outcome_tool_errors import (
 from ouroboros.loop_tool_execution import _typed_execution_failure, _typed_result_metadata
 from ouroboros.tools.tool_result import TOOL_CODE_SPECS, LegacyTextResultAdapter
 from tests.tool_classification_corpus import (
-    Case,
-    GOLDEN_SOURCE_SHA,
     _MARKER_RE,
+    GOLDEN_SOURCE_SHA,
+    Case,
     build_corpus,
     harvested_identifiers,
     harvested_native_codes,
@@ -103,6 +103,7 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "MCP_DISABLED": Delta(False, "ok", True, "unavailable", "A.3", "an MCP provider that is off is unavailable, not a success"),
     "MCP_TOOL_DISALLOWED": Delta(False, "ok", True, "blocked", "A.3", "an MCP tool refused by policy is a denial, not a success"),
     "MCP_TOOL_ERROR": Delta(True, "error", True, "mcp_error", "A.17", "the MCP error gets its own bucket, homed to the blocking partition"),
+    "native:MCP_ERROR:MCP_TOOL_ERROR": Delta(True, "error", True, "mcp_error", "A.17", "the native alias has the same retired plain input and the MCP error bucket"),
     # Owner decision on #1262 (item 3): a name the current MCP catalog does not list
     # is the caller's unknown tool, not a provider outage; a known disabled server
     # or an unlisted catalog keeps `unavailable` (MCP_DISABLED, MCP_CATALOG_UNAVAILABLE).
@@ -406,6 +407,10 @@ CURRENT_PRODUCER_CONTRACTS = {
     "SAFETY_ADVICE": (False, "ok"),
     "LIGHT_MODE_REPO_CHANGED": (False, "ok"),
     "BROWSER_ACTION_OUTCOME_UNKNOWN": (True, "error"),
+    # Browser-bridge producers added after the frozen historical corpus. Pin
+    # their live refusal/timeout semantics without inventing historical rows.
+    "BROWSER_REQUEST_BLOCKED": (True, "blocked"),
+    "MCP_TOOL_TIMEOUT": (True, "timeout"),
     # tools/vision.py `_no_image_route`: no configured model could take the image at all,
     # told apart from VLM_NO_VISION_MODEL (every candidate confirmed unable); same VLM family answer.
     "VLM_NO_MODEL": (True, "vlm_error"),
@@ -525,6 +530,7 @@ def test_current_producer_contracts_have_explicit_live_answers(subject, detail):
 
 def test_spent_execution_budget_publishes_the_actual_scheduling_refusal(tmp_path, monkeypatch):
     from queue import Queue
+
     from ouroboros.tools import control_scheduling
     from ouroboros.tools.registry import ToolContext
     from tests.test_control_native_results import _published
@@ -577,6 +583,7 @@ def test_syntax_warning_suffix_keeps_the_applied_edit_successful(tool):
 def test_single_classifier_matches_the_retired_pair_except_approved_deltas() -> None:
     golden = _golden()
     corpus = build_corpus()
+    by_key = {case.key: case for case in corpus}
     assert len(corpus) >= 600, "the corpus collapsed; a harvest regression would hide every delta"
 
     unexpected: list[tuple[str, dict, tuple[bool, str]]] = []
@@ -588,8 +595,16 @@ def test_single_classifier_matches_the_retired_pair_except_approved_deltas() -> 
             contract = CURRENT_PRODUCER_CONTRACTS.get(case.subject, CURRENT_PRODUCER_CONTRACTS[identifier])
             assert _live_answer(case) == contract, case.key
             continue
-        assert case.key in golden, f"no golden answer for {case.key}: regenerate before trusting this run"
-        old = golden[case.key]
+        if case.key not in golden and case.subject in APPROVED_DELTAS and case.key.startswith("native:"):
+            # Native codes are absent from the retired text pair. Reuse only its
+            # recorded, byte-identical plain input; never invent a golden row.
+            plain = by_key[f"ident:{case.key.split(':', 2)[2]}:plain"]
+            assert (case.tool, case.text) == (plain.tool, plain.text)
+            assert plain.key in golden
+            old = golden[plain.key]
+        else:
+            assert case.key in golden, f"no golden answer for {case.key}: regenerate before trusting this run"
+            old = golden[case.key]
         live = _live_answer(case)
         if live == (old["is_error"], old["status"]):
             continue
@@ -624,6 +639,11 @@ def test_native_golden_answers_have_identical_retired_text_inputs() -> None:
         assert (native.tool, native.text) == (plain.tool, plain.text)
         if key in golden:
             assert golden[key] == golden[plain.key]
+        elif native.subject in APPROVED_DELTAS:
+            assert plain.key in golden
+            delta = APPROVED_DELTAS[native.subject]
+            assert golden[plain.key] == {"is_error": delta.old_is_error, "status": delta.old_status}
+            assert _live_answer(native) == (delta.new_is_error, delta.new_status)
         else:
             identifier = native.subject.split(":", 2)[-1]
             assert identifier in CURRENT_PRODUCER_CONTRACTS

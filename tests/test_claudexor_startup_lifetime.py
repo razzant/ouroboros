@@ -377,12 +377,22 @@ def test_peer_stop_never_promotes_invalid_or_foreign_discovery_to_authority(star
     assert manager._terminate_child() is True
 
 
-def test_crashed_startup_reports_current_pid_build_and_log_interval(startup):
+def test_crashed_startup_reports_current_pid_build_and_log_interval(startup, monkeypatch):
     old = b"old runtime 3.8.2 failed for an unrelated reason\n"
     (startup.home / "daemon.log").write_bytes(old)
     (startup.home / "crash").touch()
     (startup.home / "publish").touch()
     manager = owned.OwnedClaudexorDaemon()
+    spawn = manager._spawn
+
+    def spawn_crashed(*args, **kwargs):
+        spawn(*args, **kwargs)
+        # This test exercises diagnostics after an actual exit, not whether
+        # interpreter startup and child teardown fit a .5-second caller wait.
+        # The separate live-startup test retains the wait-expiry contract.
+        assert manager._proc.wait(timeout=15) == 7
+
+    monkeypatch.setattr(manager, "_spawn", spawn_crashed)
     with pytest.raises(ClaudexorUnavailable) as failed:
         manager.ensure_running(startup_wait_sec=.5)
     elected = _read_json(startup.home / "elected.json")

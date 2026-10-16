@@ -28,7 +28,7 @@ class Parked(BaseException):
     pass
 
 
-def paused_retry(host, monkeypatch, clock, reaper, door):
+def paused_retry(host, monkeypatch, clock, reaper, door):  # noqa: F811 - imported pytest fixtures
     task = (_ordinary_retry(host, monkeypatch, clock, reaper) if door == "queued"
             else _running_actor(host, monkeypatch, clock, reaper, "retry"))
     child = queue.enqueue_task({"id": "unselected", "type": "task", "text": "child work", "chat_id": 0,

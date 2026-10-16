@@ -17,11 +17,13 @@ from ouroboros.task_results import load_task_result, resolve_task_lineage
 from supervisor import queue, workers
 from supervisor.events_budget import install_exact_budget_pause
 from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _mock_pause_observation
-from tests.test_execution_clock_resume_handover import _dispatch_one, _save_first_attempt, clock as clock
+from tests.test_execution_clock_resume_handover import _dispatch_one, _save_first_attempt, clock as _clock
 from tests.test_main_state_projection import _attention_rows, _main_consumer, _member_http, _member_owner
 from tests.test_project_hold_recovery import accepted
-from tests.test_retry_pause_identity import _assign, _reap, _successors, reaper as reaper
-from tests.test_swarm_host_admission import host as host
+from tests.test_retry_pause_identity import _assign, _reap, _successors, reaper as _reaper
+from tests.test_swarm_host_admission import host as _host
+
+clock, reaper, host = _clock, _reaper, _host  # Register shared pytest fixtures.
 
 pytestmark = pytest.mark.serial
 

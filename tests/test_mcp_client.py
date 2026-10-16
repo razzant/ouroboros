@@ -59,6 +59,35 @@ def _good_server(**overrides) -> dict:
     return base
 
 
+def test_chrome_protocol_is_explicit_stdio_browser_bridge_only():
+    stdio = {"id": "browser", "enabled": True, "transport": "stdio",
+             "command": "node", "args": ["chrome_browser.js"], "browser_bridge": True}
+    assert mcp_client.normalize_server_config(stdio).browser_protocol == "playwright"
+    assert mcp_client.normalize_server_config({**stdio, "browser_protocol": "ouroboros_chrome"}).browser_protocol == "ouroboros_chrome"
+    for entry in ({**stdio, "browser_protocol": "other"},
+                  {**stdio, "browser_bridge": False, "browser_protocol": "ouroboros_chrome"},
+                  {**_good_server(), "browser_protocol": "ouroboros_chrome"}):
+        errors = []
+        assert mcp_client.normalize_server_config(entry, errors=errors) is None
+        assert errors
+
+
+def test_chrome_skill_binding_requires_exact_identity_and_declared_path():
+    stdio = {"id": "browser", "enabled": True, "transport": "stdio",
+             "command": "node", "args": ["/tmp/skill/scripts/chrome_browser.js"],
+             "browser_bridge": True, "browser_protocol": "ouroboros_chrome"}
+    binding = {"skill_name": "chrome_browser",
+               "script_path": "scripts/chrome_browser.js"}
+    cfg = mcp_client.normalize_server_config({**stdio, "browser_skill_binding": binding})
+    assert cfg.browser_skill_binding == ("chrome_browser", "scripts/chrome_browser.js")
+    for bad in ({**binding, "script_path": "../other.js"},
+                {**binding, "content_hash": "stale"},
+                {**binding, "extra": "unreviewed"}):
+        assert mcp_client.normalize_server_config({**stdio, "browser_skill_binding": bad}) is None
+    assert mcp_client.normalize_server_config({**stdio, "browser_protocol": "playwright",
+                                               "browser_skill_binding": binding}) is None
+
+
 # ---------------------------------------------------------------------------
 # Slug + tool name normalization
 # ---------------------------------------------------------------------------

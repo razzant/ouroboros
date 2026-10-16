@@ -1,18 +1,20 @@
 """Real contention defers the same preparation, never repeats its physical copy."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import queue as stdqueue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from ouroboros import store
 from ouroboros.task_results import STATUS_SCHEDULED
-from supervisor import queue, task_admission, workspace_preparation as prep
+from supervisor import queue, task_admission
+from supervisor import workspace_preparation as prep
 from tests.test_admission_contention import database_reader
-from tests.test_workspace_preparation import env as env, spy_provisions, _WAIT_SEC
+from tests.test_workspace_preparation import _WAIT_SEC, spy_provisions
+from tests.test_workspace_preparation import env as env
 
 pytestmark = pytest.mark.serial
 
@@ -299,6 +301,7 @@ def test_refusal_committed_before_busy_readback_rejoins_its_same_receipt(env, mo
 def test_readonly_child_rejoins_real_contention_without_preparation(env, monkeypatch, seam):
     bus = env.ctx.event_queue = stdqueue.Queue()
     event = env.readonly("readonly-busy")
+    original_event = dict(event)
     copies = spy_provisions(monkeypatch)
     reached, proceed = threading.Event(), threading.Event()
     if seam != "entry":
@@ -322,12 +325,22 @@ def test_readonly_child_rejoins_real_contention_without_preparation(env, monkeyp
             proceed.set()
             assert future.result(timeout=3)
             retained = bus.get(timeout=2)
-            assert retained == event
+            assert event == original_event  # admission owns retry metadata, not its producer
+            if seam == "final":
+                transition_id = retained["_scheduled_transition_id"]
+                assert isinstance(transition_id, str) and transition_id
+                assert {key: value for key, value in retained.items()
+                        if key != "_scheduled_transition_id"} == original_event
+            else:
+                assert retained == original_event
             assert env.pending_ids() == [] and copies == [] and not prep._LIVE
     assert env.dispatch_returns(retained)
+    assert event == original_event
     assert env.pending_ids() == ["readonly-busy"] and copies == []
     row = env.row("readonly-busy")
     assert row["status"] == STATUS_SCHEDULED and prep.MARKER not in row
+    if seam == "final":
+        assert row["delegation_admission"]["transition_id"] == transition_id
     assert not any("not scheduled" in text for _, text, _ in env.ctx.sent)
 
 

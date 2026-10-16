@@ -1257,7 +1257,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         channel_key = "OUROBOROS_UPDATE_CHANNEL"
         if channel_key in body:
             from ouroboros.update_channels import UPDATE_CHANNEL_BRANCHES
-
             raw_channel = str(body.get(channel_key) or "").strip().lower()
             if raw_channel not in UPDATE_CHANNEL_BRANCHES:
                 return unsaved_error(
@@ -1335,7 +1334,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             body.update(parsed_budget)
         old_settings = load_settings()
         from ouroboros.config import get_runtime_mode, normalize_runtime_mode as _norm_runtime_mode
-
         raw_old_settings = _owner_read_settings_raw()
         pending_runtime_mode = _norm_runtime_mode(
             raw_old_settings.get("OUROBOROS_RUNTIME_MODE", old_settings.get("OUROBOROS_RUNTIME_MODE"))
@@ -1357,7 +1355,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 return unsaved_error(str(exc), 400, code="MCP_CONFIG_ERROR")
         current = _merge_settings_payload(old_effective_settings, body)
         from ouroboros.runtime_mode_policy import runtime_mode_at_least
-
         requested_runtime_mode = _norm_runtime_mode(current.get("OUROBOROS_RUNTIME_MODE"))
         runtime_authored = "OUROBOROS_RUNTIME_MODE" in body and runtime_mode_at_least(current_runtime_mode, "cyber_pro")
         runtime_changed = runtime_authored and requested_runtime_mode != pending_runtime_mode

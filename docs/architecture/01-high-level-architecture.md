@@ -179,7 +179,7 @@ ouroboros/ — agent core and shared runtime (§6)
   llm_probe.py — oversized-context probe and Provider Test transport; no retry, fallback or learning
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
   upgrade_notices.py, notice_receipts.py — once-only owner notices with chat receipts (§7)
-  mcp_client.py — MCP client: canonical server identity, token masking, `mcp_<server>__<tool>` names, per-server launch admission, credential origin guard, untrusted descriptions/results (§6 MCP and browser-facing external tools)
+  mcp_client.py, mcp_task_sessions.py, mcp_chrome_protocol.py — configured MCP; task-attempt/process ownership; Chrome wire, ready-skill and lease admission (§6; docs/browser-task-bridge.md)
   mcp_headers.py, mcp_import.py — header validation/masks/restoration; draft-only import preview (§6 MCP)
   safety.py — Safety Supervisor call (typed outcomes: §6 Safety Supervisor outcomes)
   consciousness.py, consciousness_wake.py — the background alarm admitting an ordinary Main turn through the supervisor tick (`handle_wake_direct`); the complete wake user input and `wake_task_metadata` envelope (§6 Background consciousness)

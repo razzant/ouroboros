@@ -645,6 +645,10 @@ paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
 its counted producer sites.
 
+Rollback transition receipts (`rollback_notice`) and refused or abandoned storage
+switches (`storage_switch_notice`) report the runtime's current or pending version
+state. They are runtime-state facts, not model speech or task completion.
+
 Language follows the same line. The install's interface language
 (`OUROBOROS_UI_LANGUAGE`, Settings → Appearance → Language) translates chrome and
 System voice at render — status words, cause sentences and question status by their

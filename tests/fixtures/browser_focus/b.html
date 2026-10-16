@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Ouroboros · owner focus test B</title>
+<h1>Owner focus test B</h1>
+<p>Keep this page selected after the Extension has attached to A. It has no agent action target.</p>
+<button id="ready" type="button">I am back on B; start the three clicks in A</button>
+<output id="status"></output>
+<script>
+  document.querySelector('#ready').addEventListener('click', async () => {
+    const response = await fetch('/ready', {method: 'POST', body: 'owner-on-b'});
+    document.querySelector('#status').textContent = response.ok ? 'Ready sent' : 'Ready failed';
+  });
+  window.focusProbe = () => ({ visibilityState: document.visibilityState,
+                              hasFocus: document.hasFocus(), at: Date.now() });
+</script>

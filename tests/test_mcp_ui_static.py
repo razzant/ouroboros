@@ -173,6 +173,62 @@ assert.equal(collectMcpSettings().MCP_SERVERS[0].args, 'unsupported');
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.serial
+@pytest.mark.parametrize("transport,opt_in,expected", [
+    ("stdio", True, True),
+    ("stdio", False, False),
+    ("streamable_http", True, False),
+    ("sse", True, False),
+])
+def test_mcp_ui_collection_keeps_browser_opt_in_stdio_only(transport, opt_in, expected):
+    """Run the real Save projection without dropping other server metadata."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+const host = { innerHTML: '', querySelectorAll: () => [] };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null };
+globalThis.fetch = async () => ({ ok: false });
+const [transport, optIn, expected] = JSON.parse(process.argv[1]);
+const server = { id: 'kept', enabled: false, transport, command: 'python3', args: ['server.py'],
+    url: 'https://example.test/mcp', headers: {'X-Keep': 'literal'},
+    allowed_tools: ['read'], browser_bridge: optIn, future_field: { retained: true } };
+applyMcpSettings({ MCP_SERVERS: [server] });
+const saved = collectMcpSettings().MCP_SERVERS[0];
+for (const key of Object.keys(server)) {
+    assert.deepEqual(saved[key], key === 'browser_bridge' ? expected : server[key], key);
+}
+assert.equal(Object.hasOwn(saved, 'browser_bridge'), true);
+'''
+    import json
+
+    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script,
+                             json.dumps([transport, opt_in, expected])], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_mcp_ui_preserves_explicit_chrome_protocol_on_load_and_save():
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+const host = { innerHTML: '', querySelectorAll: () => [] };
+globalThis.document = { getElementById: id => id === 'mcp-servers-list' ? host : null };
+globalThis.fetch = async () => ({ ok: false });
+const savedEntry = { id: 'chrome', enabled: true, transport: 'stdio', command: 'node',
+    args: ['chrome_browser.js'], browser_bridge: true, browser_protocol: 'ouroboros_chrome',
+    browser_skill_binding: {skill_name: 'chrome_browser', script_path: 'scripts/server.js'} };
+applyMcpSettings({ MCP_SERVERS: [savedEntry] });
+assert.equal(collectMcpSettings().MCP_SERVERS[0].browser_protocol, 'ouroboros_chrome');
+assert.deepEqual(collectMcpSettings().MCP_SERVERS[0].browser_skill_binding, savedEntry.browser_skill_binding);
+assert.match(host.innerHTML, /Ouroboros Chrome/);
+applyMcpSettings({ MCP_SERVERS: [{...savedEntry, browser_protocol: undefined}] });
+assert.equal(collectMcpSettings().MCP_SERVERS[0].browser_protocol, 'playwright');
+'''
+    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
 def test_mcp_test_button_preserves_saved_url_only_credentials():
     """Exercise the registered click handler, not a copy of its payload expression."""
     node = _node_bin()

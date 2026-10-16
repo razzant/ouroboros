@@ -81,7 +81,8 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
 
     No fixture commits, live configuration reads, or admission/cap overrides.
     ``h.script(messages)`` supplies model replies; ``h.release`` unblocks the
-    reviewer. ``h.factory`` only observes the actual production constructor.
+    reviewer. ``h.review_entry`` gates transport entry to exercise delayed
+    worker scheduling. ``h.factory`` only observes the production constructor.
     """
     from ouroboros import agent_task_pipeline as pipeline, context_health, review_custody
     from ouroboros.review_execution import ReviewAttemptResult
@@ -110,6 +111,8 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
                         executions=PresenceTurnExecutions(), release=threading.Event(), entered=threading.Event(),
                         settled=threading.Event(), inputs=[], calls=0, reviews=[], agents=[], verdict="PASS",
                         lock=threading.Lock(), script=[])
+    h.review_entry = threading.Event()
+    h.review_entry.set()
     original_settle = review_custody._settle_review_attempt
 
     def settle(*args, **kwargs):
@@ -140,6 +143,7 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
             return {}
 
         def execute(self):
+            assert h.review_entry.wait(30), "test failed to admit reviewer transport"
             from ouroboros.review_dispatch import invoke_review_paid_stamp
             from ouroboros.review_evidence_refs import acceptance_evidence_ref_vocabulary
 
@@ -192,9 +196,12 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
     return h
 
 
+@pytest.mark.parametrize("defer_entry", [False, True], ids=["normal_entry", "deferred_entry"])
 @pytest.mark.parametrize("review_mode", ["auto", "required"])
-def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tmp_path, monkeypatch, review_mode):
+def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tmp_path, monkeypatch, review_mode, defer_entry):
     h = install_bootstrap_harness(monkeypatch, tmp_path / "data", review_mode=review_mode)
+    if defer_entry:
+        h.review_entry.clear()
     first = event()
 
     def model(messages):
@@ -217,7 +224,12 @@ def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tm
     try:
         initial = execution.initial.result(timeout=40)
         assert initial.status == "continuing" and initial.outcome == "deferred" and not initial.text
-        assert not execution.result.done() and h.entered.is_set()
+        assert not execution.result.done()
+        if defer_entry:
+            assert not h.entered.is_set()
+        h.review_entry.set()
+        wait_for(h.entered.is_set, what="reviewer transport entry")
+        assert not execution.result.done()
         ctx = h.agents[0].tools._ctx
         assert isinstance(h.agents[0], agent_module.OuroborosAgent)
         assert ctx.review_wait_callback is h.agents[0].review_wait_callback
@@ -239,6 +251,7 @@ def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tm
         row = load_task_result(h.data, initial.task_id)
         assert row["status"] == "completed" and row["review_status"]["eligibility"] == "eligible"
     finally:
+        h.review_entry.set()
         h.release.set()
         if h.entered.is_set():
             assert h.settled.wait(15)

@@ -1,9 +1,10 @@
 """Client-only MCP integration for external HTTP/SSE/stdio tool servers.
 
 Configured servers are hot-reloaded from settings, listed tools are exposed
-through ToolRegistry as provider-safe ``mcp_<server>__<tool>`` names, and each
-call opens a fresh session. Secrets, server descriptions/results, and obvious
-metadata SSRF targets are handled defensively because MCP servers are external.
+through ToolRegistry as provider-safe ``mcp_<server>__<tool>`` names. Ordinary
+calls open fresh sessions; browser bridges retain one task-owned connection.
+Secrets, server descriptions/results, and obvious metadata SSRF targets are
+handled defensively because MCP servers are external.
 
 For ``stdio``, ``command`` is an executable and ``args`` is passed as an exact
 list without a shell. Optional cwd, literal and settings-backed environment selections
@@ -27,19 +28,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from ouroboros.secret_masking import (
-    looks_masked_secret as looks_masked_secret,
-)
+from ouroboros.config import get_runtime_mode
+from ouroboros.mcp_headers import mask_headers, validate_headers
+from ouroboros.platform_layer import IS_WINDOWS
+from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.secret_masking import (
     MCP_RESPONSE_ONLY_FIELDS,
     mask_prefixed_secret,
     redact_known_values,
 )
-from ouroboros.mcp_headers import mask_headers, validate_headers
-from ouroboros.tools.tool_result import ToolResult
-from ouroboros.platform_layer import IS_WINDOWS
-from ouroboros.config import get_runtime_mode
-from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
+from ouroboros.secret_masking import (
+    looks_masked_secret as looks_masked_secret,
+)
+from ouroboros.tools.tool_result import ToolResult, _compose_execute_result_result, _replace_tool_result
 from ouroboros.workspace_executor import resolve_process_env, validate_process_env
 
 log = logging.getLogger(__name__)
@@ -107,6 +108,9 @@ class MCPServerConfig:
     env: Dict[str, str] = field(default_factory=dict, repr=False)
     secret_values: tuple[str, ...] = field(default=(), repr=False)
     configuration_warnings: tuple[str, ...] = ()
+    browser_bridge: bool = False
+    browser_protocol: str = "playwright"
+    browser_skill_binding: tuple[str, str] | None = None
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
 
     def has_auth(self) -> bool:
@@ -414,22 +418,19 @@ def normalize_server_config(
         if errors is not None:
             errors.append(f"MCP_CONFIG_ERROR: {message}")
         log.warning("Invalid MCP server config: %s", message)
-
     if not isinstance(raw, dict):
         return invalid("server must be an object")
     raw = {key: value for key, value in raw.items() if key not in MCP_RESPONSE_ONLY_FIELDS}
-
     server_slug = raw_server_id(raw)
     if not server_slug:
         return invalid("server id or name is required")
-
     transport = str(raw.get("transport") or "streamable_http").strip().lower()
     if transport not in SUPPORTED_TRANSPORTS:
         return invalid("unsupported transport; use streamable_http, sse, or stdio")
-
     try:
         known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
-                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings", "headers"}
+                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings",
+                 "browser_bridge", "browser_protocol", "browser_skill_binding", "headers"}
         unknown = set(raw) - known
         warnings = ("Fields retained but not applied: " + ", ".join(sorted(map(str, unknown))),) if unknown else ()
         cwd = raw.get("cwd", "")
@@ -442,12 +443,12 @@ def normalize_server_config(
             raise ValueError("fields unsupported by this transport: " + ", ".join(key for key in unused if raw.get(key)))
         if transport == "stdio" and raw.get("auth_header", "Authorization") not in (None, "", "Authorization"):
             raise ValueError("auth_header is unsupported for stdio")
+        from ouroboros.mcp_chrome_protocol import normalize_browser_entry
+        browser_bridge, browser_protocol, browser_skill_binding = normalize_browser_entry(raw, transport)
         if transport == "stdio":
-            url = ""
             command = _validate_stdio_command(raw.get("command"))
             args = _validate_stdio_args(raw.get("args"))
-            auth_header = "Authorization"
-            auth_token = ""
+            url, auth_header, auth_token = "", "Authorization", ""
         else:
             url = _validate_url(raw.get("url") or "")
             parsed_url = urllib.parse.urlparse(url)
@@ -463,16 +464,13 @@ def normalize_server_config(
         headers = validate_headers(raw.get("headers"), legacy_header=auth_header, legacy_token=auth_token)
     except ValueError as exc:
         return invalid(str(exc))
-
     name = str(raw.get("name") or raw.get("label") or server_slug).strip() or server_slug
     enabled_raw = raw.get("enabled", False)
     if isinstance(enabled_raw, bool):
         enabled = enabled_raw
     else:
         enabled = str(enabled_raw or "").strip().lower() in {"1", "true", "yes", "on"}
-
     allowed_tools = _coerce_str_list(raw.get("allowed_tools"))
-
     return MCPServerConfig(
         id=server_slug,
         name=name,
@@ -489,6 +487,9 @@ def normalize_server_config(
         env=env,
         secret_values=secret_values,
         configuration_warnings=warnings,
+        browser_bridge=browser_bridge,
+        browser_protocol=browser_protocol,
+        browser_skill_binding=browser_skill_binding,
         headers=headers,
     )
 
@@ -632,7 +633,6 @@ def _redacted_sdk_logs(cfg: MCPServerConfig, logger_name: str):
     the filters leave with the connection.
     """
     sdk_logs = (logging.getLogger(logger_name), logging.getLogger())
-
     def project_log(record: logging.LogRecord) -> bool:
         if _SDK_DIAGNOSTIC_CONFIG.get() is cfg:
             message = record.getMessage()
@@ -641,7 +641,6 @@ def _redacted_sdk_logs(cfg: MCPServerConfig, logger_name: str):
                 record.exc_info = record.exc_text = None
             record.msg, record.args = _redact_error_text(message, cfg), ()
         return True
-
     token = _SDK_DIAGNOSTIC_CONFIG.set(cfg)
     for sdk_log in sdk_logs:
         sdk_log.addFilter(project_log)
@@ -677,7 +676,6 @@ class MCPRedirectRefused(RuntimeError):
 def _origin(url: Any) -> tuple:
     """``(scheme, host, port)`` with the scheme's default port made explicit."""
     import httpx
-
     parsed = url if isinstance(url, httpx.URL) else httpx.URL(str(url))
     return parsed.scheme, parsed.host, parsed.port or {"http": 80, "https": 443}.get(parsed.scheme, 0)
 
@@ -722,7 +720,6 @@ class _CredentialOriginGuard:
                 # SSE message POST would otherwise wait for its tool timeout.
                 await client.aclose()
                 raise self.refusal
-
             client.event_hooks["request"].append(stay_on_origin)
         return client
 
@@ -784,7 +781,6 @@ async def _list_tools_async(cfg: MCPServerConfig, *, timeout_sec: int) -> List[D
             "MCP client SDK not installed. Add `mcp>=1.10` to the runtime."
         )
     from ouroboros.owner_pause import submit_async_preparation
-
     async def _do_with_session() -> List[Dict[str, Any]]:
         async with _transport_factory(cfg) as transport_ctx:
             # Both transports yield read/write streams.
@@ -828,7 +824,6 @@ async def _list_tools_async(cfg: MCPServerConfig, *, timeout_sec: int) -> List[D
                             "nextCursor still present; catalog is PARTIAL",
                         )
                 return tools_raw
-
     # A task's discovery passes that task's launch admission before each
     # transport entry (a stdio server starts there); Settings probes name none.
     return await asyncio.wait_for(
@@ -882,7 +877,6 @@ async def _call_tool_async(
             refusal.mcp_unsent_joined = True
             raise refusal
         return _tool_result_from_call_result(result)
-
     # Launch admission precedes transport entry: a stdio server starts there.
     try:
         pending = submit_async_preparation(_do)
@@ -946,7 +940,7 @@ def _tool_result_from_call_result(result: Any) -> ToolResult:
 def _serialize_content_part(item: Any) -> Dict[str, Any]:
     """Best-effort conversion of an MCP content part into a JSON-safe dict."""
     out: Dict[str, Any] = {}
-    for attr in ("type", "uri", "mimeType", "data", "annotations"):
+    for attr in ("type", "text", "uri", "mimeType", "data", "annotations"):
         value = getattr(item, attr, None)
         if value is not None and not callable(value):
             out[attr] = value
@@ -975,18 +969,14 @@ def _run_async(coro_factory: Callable[[], Awaitable[Any]], *, join_timeout: Opti
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro_factory())
-
     # Existing loop: run the coroutine in a sub-thread.
     holder: Dict[str, Any] = {}
-
     def _runner() -> None:
         try:
             holder["value"] = asyncio.run(coro_factory())
         except BaseException as exc:
             holder["error"] = exc
-
     import contextvars
-
     context = contextvars.copy_context()
     thread = threading.Thread(target=lambda: context.run(_runner), name="mcp-sync-runner", daemon=True)
     thread.start()
@@ -1071,7 +1061,10 @@ class MCPManager:
                 else:
                     new_servers[cfg.id] = MCPServerRuntime(config=cfg)
             self._servers = new_servers
-            return True
+        # Closing a held browser bridge waits for its process scan: never under this lock.
+        from ouroboros.mcp_task_sessions import revoke_changed
+        revoke_changed(new_configs if bool(settings.get("MCP_ENABLED")) else [])
+        return True
 
     # -- introspection ------------------------------------------------------
 
@@ -1113,9 +1106,7 @@ class MCPManager:
                    for item in self._configuration_errors if item["enabled"]]
             for runtime in self._servers.values():
                 cfg = runtime.config
-                if not cfg.enabled:
-                    continue
-                if not runtime.tools:
+                if cfg.enabled and not runtime.tools:
                     out.append({"id": cfg.id, "last_error": _redact_error_text(runtime.last_error or "", cfg)})
             return out
 
@@ -1133,21 +1124,18 @@ class MCPManager:
                 for tool in runtime.tools:
                     if allowed and tool.raw_name not in allowed:
                         continue
-                    results.append(
-                        {
-                            "name": tool.prefixed_name,
-                            "description": _model_facing_description(tool),
-                            "schema": tool.schema,
-                            "server_id": tool.server_id,
-                            "raw_name": tool.raw_name,
-                            "raw_description": _redact_error_text(tool.description, cfg),
-                        }
-                    )
+                    results.append({
+                        "name": tool.prefixed_name,
+                        "description": _model_facing_description(tool),
+                        "schema": tool.schema,
+                        "server_id": tool.server_id,
+                        "raw_name": tool.raw_name,
+                        "raw_description": _redact_error_text(tool.description, cfg),
+                    })
             return results
 
     def tool_name_collisions(self) -> List[Dict[str, str]]:
         """Return provider-name collisions omitted by first-wins normalization."""
-
         with self._lock:
             if not self._enabled:
                 return []
@@ -1191,17 +1179,10 @@ class MCPManager:
                         "env_from_settings": dict(cfg.env_from_settings),
                         "configuration_warnings": list(cfg.configuration_warnings),
                         "tool_count": len(runtime.tools),
-                        "tools": [
-                            {
-                                "name": tool.raw_name,
-                                "prefixed_name": tool.prefixed_name,
-                                "description": _redact_error_text(tool.description, cfg),
-                            }
-                            for tool in runtime.tools
-                        ],
-                        "tool_name_collisions": [
-                            dict(item) for item in runtime.tool_name_collisions
-                        ],
+                        "tools": [{"name": tool.raw_name, "prefixed_name": tool.prefixed_name,
+                                   "description": _redact_error_text(tool.description, cfg)}
+                                  for tool in runtime.tools],
+                        "tool_name_collisions": [dict(item) for item in runtime.tool_name_collisions],
                         "last_error": runtime.last_error,
                         "last_refreshed": runtime.last_refreshed,
                         "last_attempted": runtime.last_attempted,
@@ -1229,28 +1210,33 @@ class MCPManager:
                 for error in self._configuration_errors:
                     if error["id"] == server_id:
                         return {"ok": False, "code": error["code"], "error": error["last_error"]}
-                return {
-                    "ok": False,
-                    "error": f"unknown server id: {server_id!r}",
-                }
+                return {"ok": False, "error": f"unknown server id: {server_id!r}"}
             cfg = runtime.config
             if not cfg.enabled:
                 return {"ok": False, "error": f"MCP server {server_id!r} is disabled."}
             timeout = self._tool_timeout_sec
-
         from ouroboros.owner_pause import OwnerPauseRefused
-
         attempted_at = datetime.now(timezone.utc).isoformat()
         token = _DISCOVERY_AUTHORITY.set(authority)
+        borrowed: List[Any] = []  # The bridge session this listing reads, by object.
         try:
-            tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
+            if cfg.browser_bridge:
+                if authority is None:
+                    return {"ok": False, "not_started": True,
+                            "error": "MCP browser bridge requires a task discovery owner"}
+                from ouroboros.mcp_task_sessions import listing
+
+                tools_raw = _run_async(lambda: listing(cfg, authority, timeout, borrowed), join_timeout=timeout + 3)
+            else:
+                tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
         except OwnerPauseRefused as exc:
             return {"ok": False, "not_started": True, "error": f"MCP listing NOT STARTED: {exc}"}
         except BaseException as exc:  # noqa: BLE001 - surface any failure
             err_text = f"{type(exc).__name__}: {_redact_error_text(exc, cfg)}"
             with self._lock:
                 target = self._servers.get(server_id)
-                if target is not None:
+                # A failure of a replaced entry says nothing about its replacement.
+                if target is runtime:
                     target.last_error = err_text
                     target.last_attempted = attempted_at
                     target.tools = []
@@ -1259,33 +1245,27 @@ class MCPManager:
         finally:
             _DISCOVERY_AUTHORITY.reset(token)
 
-        pagination_truncated = any(
-            isinstance(item, dict) and item.get("_pagination_truncated")
-            for item in tools_raw
-        )
+        pagination_truncated = any(isinstance(item, dict) and item.get("_pagination_truncated") for item in tools_raw)
         tools_raw = [
             item for item in tools_raw
             if not (isinstance(item, dict) and item.get("_pagination_truncated"))
         ]
-        normalized = [
-            MCPTool(
+        # Normalize and deduplicate in one pass, preserving first-descriptor order.
+        seen: Dict[str, MCPTool] = {}
+        collisions: List[Dict[str, str]] = []
+        for item in tools_raw:
+            if not str(item.get("name") or "").strip():
+                continue
+            tool = MCPTool(
                 server_id=cfg.id,
                 raw_name=str(item.get("name") or "").strip(),
                 prefixed_name=make_tool_name(cfg.id, item.get("name") or ""),
                 description=_redact_error_text(str(item.get("description") or ""), cfg)[:1024],
                 schema=_normalize_input_schema(item.get("input_schema"), cfg),
             )
-            for item in tools_raw
-            if str(item.get("name") or "").strip()
-        ]
-        normalized = [tool for tool in normalized if tool.prefixed_name]
-        # Drop duplicates caused by slug collisions. A residual collision (the
-        # 12-hex tail makes it astronomically rare) DROPS a tool — a capability
-        # omission that must be disclosed, not silently swallowed (#447 P1).
-        seen: Dict[str, MCPTool] = {}
-        deduped: List[MCPTool] = []
-        collisions: List[Dict[str, str]] = []
-        for tool in normalized:
+            if not tool.prefixed_name:
+                continue
+            # A residual slug collision DROPS a tool; disclose the omission (#447 P1).
             if tool.prefixed_name in seen:
                 kept = seen[tool.prefixed_name]
                 collisions.append({
@@ -1295,7 +1275,7 @@ class MCPManager:
                 })
                 continue
             seen[tool.prefixed_name] = tool
-            deduped.append(tool)
+        deduped = list(seen.values())
         omission_notes: List[str] = []
         if collisions:
             log.error(
@@ -1316,12 +1296,11 @@ class MCPManager:
         finished_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             target = self._servers.get(server_id)
-            if target is not None and target.config != cfg:
-                return {
-                    "ok": False,
-                    "error": f"stale MCP refresh discarded for server {server_id!r}",
-                }
-            if target is not None:
+            # Only the runtime it read, and a bridge's own live session: an equal entry
+            # restored meanwhile is a new runtime with a session of its own.
+            stale = (not self._enabled or target is not runtime
+                     or (cfg.browser_bridge and not (borrowed and borrowed[0].is_current())))
+            if not stale:
                 target.tools = deduped
                 target.tool_name_collisions = collisions
                 # A successful refresh with omissions keeps the omission note
@@ -1330,20 +1309,22 @@ class MCPManager:
                 target.last_error = "; ".join(omission_notes)
                 target.last_attempted = attempted_at
                 target.last_refreshed = finished_at
+        if stale:
+            # Settings changed between this listing's configuration read and its
+            # publication: close exactly the bridge session it borrowed.
+            from ouroboros.mcp_task_sessions import release_stale
+
+            closed = release_stale(borrowed[0]) if borrowed else None
+            return {"ok": False, "error": f"stale MCP refresh discarded for server {server_id!r}",
+                    **({"bridge_closure": closed["closure"]} if closed else {})}
         return {
             "ok": True,
             "server_id": cfg.id,
             "tool_count": len(deduped),
             "configuration_warnings": list(cfg.configuration_warnings),
             "tool_name_collisions": [dict(item) for item in collisions],
-            "tools": [
-                {
-                    "name": tool.raw_name,
-                    "prefixed_name": tool.prefixed_name,
-                    "description": tool.description,
-                }
-                for tool in deduped
-            ],
+            "tools": [{"name": tool.raw_name, "prefixed_name": tool.prefixed_name,
+                       "description": tool.description} for tool in deduped],
         }
 
     def refresh_all(self, *, authority: Any = None, unlisted_only: bool = False) -> Dict[str, Any]:
@@ -1353,14 +1334,16 @@ class MCPManager:
             if not self._enabled:
                 return {"refreshed": {}, "error": "MCP client is disabled."}
             ids = [cfg_id for cfg_id, rt in self._servers.items()
-                   if rt.config.enabled and not (unlisted_only and rt.last_attempted)]
+                   if rt.config.enabled and (authority is not None or not rt.config.browser_bridge)
+                   and not (unlisted_only and rt.last_attempted and not rt.config.browser_bridge)]
         for server_id in ids:
             outcomes[server_id] = self.refresh_server(server_id, authority=authority)
         return {"refreshed": outcomes}
 
     def refresh_all_background(self, *, reason: str = "settings") -> None:
         with self._lock:
-            should_start = self._enabled and any(rt.config.enabled for rt in self._servers.values())
+            should_start = self._enabled and any(
+                rt.config.enabled and not rt.config.browser_bridge for rt in self._servers.values())
             if not should_start or self._refresh_running:
                 return
             self._refresh_running = True
@@ -1382,19 +1365,17 @@ class MCPManager:
         errors: List[str] = []
         cfg = normalize_server_config(raw_config, settings=settings, errors=errors)
         if cfg is None:
-            return {
-                "ok": False,
-                "code": "MCP_CONFIG_ERROR",
-                "error": "Invalid MCP server config: " + "; ".join(errors),
-            }
+            return {"ok": False, "code": "MCP_CONFIG_ERROR",
+                    "error": "Invalid MCP server config: " + "; ".join(errors)}
         timeout = self._tool_timeout_sec
+        if cfg.browser_bridge:
+            return {"ok": False, "code": "MCP_TASK_OWNER_REQUIRED",
+                    "error": "Browser bridge probing requires a bound task; Settings will not launch it."}
         try:
             tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
         except BaseException as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {_redact_error_text(exc, cfg)}"}
-        truncated = any(
-            isinstance(t, dict) and t.get("_pagination_truncated") for t in tools_raw
-        )
+        truncated = any(isinstance(t, dict) and t.get("_pagination_truncated") for t in tools_raw)
         tools_raw = [
             t for t in tools_raw
             if not (isinstance(t, dict) and t.get("_pagination_truncated"))
@@ -1405,13 +1386,9 @@ class MCPManager:
             "tool_count": len(tools_raw),
             "configuration_warnings": list(cfg.configuration_warnings),
             **({"pagination_truncated": True} if truncated else {}),
-            "tools": [
-                {
-                    "name": str(t.get("name") or ""),
-                    "description": _redact_error_text(str(t.get("description") or ""), cfg)[:512],
-                }
-                for t in tools_raw
-            ],
+            "tools": [{"name": str(t.get("name") or ""),
+                       "description": _redact_error_text(str(t.get("description") or ""), cfg)[:512]}
+                      for t in tools_raw],
         }
 
     def _resolve_locked(self, prefixed_name: str) -> tuple[MCPNameResolution, Any, Any]:
@@ -1449,7 +1426,7 @@ class MCPManager:
             return self._resolve_locked(prefixed_name)[0]
 
     def _call_tool_result(
-        self, prefixed_name: str, arguments: Dict[str, Any]
+        self, prefixed_name: str, arguments: Dict[str, Any], *, ctx: Any = None
     ) -> ToolResult:
         """Invoke one MCP tool while retaining host-attested provider facts."""
         with self._lock:
@@ -1457,15 +1434,28 @@ class MCPManager:
             timeout = self._tool_timeout_sec
         if resolution.status != "callable":
             return resolution.refusal(prefixed_name)
+        from ouroboros.mcp_task_sessions import BrowserBridgeRefusal, CALL_FAILURES, failure_result
+        from ouroboros.mcp_task_sessions import call as scoped_call
         from ouroboros.tool_custody import external_handoff
         confirmed = external_handoff("mcp_transport")
+        advice = note = ""
         try:
-            result = _run_async(
-                lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
-                join_timeout=timeout + 3,
-            )
+            if cfg.browser_bridge:
+                result, advice, note = scoped_call(cfg, prefixed_name, tool.raw_name, arguments or {}, ctx, timeout)
+            else:
+                result = _run_async(
+                    lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
+                    join_timeout=timeout + 3,
+                )
             if not isinstance(result, ToolResult):
                 raise TypeError("MCP transport returned a non-ToolResult outcome")
+        except CALL_FAILURES as exc:  # Before asyncio.TimeoutError, which is TimeoutError on 3.11+.
+            # A host pre-dispatch refusal discharges only this call's token.
+            # Broken/timeout outcomes and independent session custody stay held;
+            # none of these failures is a returned MCP call.
+            if isinstance(exc, BrowserBridgeRefusal):
+                confirmed()
+            return failure_result(exc, lambda value: _redact_error_text(value, cfg))
         except asyncio.TimeoutError as exc:
             unsent = getattr(exc, "mcp_unsent_joined", False) is True
             if unsent:
@@ -1487,34 +1477,31 @@ class MCPManager:
                 isinstance(exc, OwnerPauseRefused) and active and active[2].get("not_started") is True)
             if unsent:
                 confirmed()  # no call, with either no transport entry or joined cleanup
+            if cfg.browser_bridge and _is_task_control(exc):
+                raise  # Stop and Pause reach the loop as they do from any Safety check.
             if unsent and isinstance(exc, (OwnerPauseRefused, StoreError)):
-                from ouroboros.tools.tool_result import launch_refusal_result, _replace_tool_result
+                from ouroboros.tools.tool_result import launch_refusal_result
                 return _replace_tool_result(launch_refusal_result(exc),
                                             meta_updates={"mcp_call_not_sent": True})
             body = f"⚠️ MCP_TOOL_ERROR: {type(exc).__name__}: {_redact_error_text(exc, cfg)}"
             text = _model_facing_result(cfg, tool.raw_name, body)
-            return ToolResult(
-                status="error",
-                code="MCP_ERROR",
-                text=text,
-                meta={"dynamic_provider": True, "mcp_call_not_sent": bool(unsent)},
-            )
+            return ToolResult(status="error", code="MCP_ERROR", text=text,
+                              meta={"dynamic_provider": True, "mcp_call_not_sent": bool(unsent)})
         # Joined normal return (either SDK error bit): this invocation's call is over.
         from ouroboros.owner_pause import record_mcp_call_returned
 
         record_mcp_call_returned(prefixed_name)
         confirmed()
-        text = _model_facing_result(
-            cfg,
-            tool.raw_name,
-            _redact_error_text(result.text, cfg),
-        )
-        return ToolResult(
-            status=result.status,
-            code=result.code,
-            text=text,
-            meta={**dict(result.meta), "dynamic_provider": True},
-        )
+        text = _redact_error_text(result.text, cfg)
+        if not (cfg.browser_bridge and result.meta.get("host_verdict")):
+            text = _model_facing_result(cfg, tool.raw_name, text)
+        final = _replace_tool_result(result, text=text, meta_updates={"dynamic_provider": True})
+        if not advice and not note:
+            return final
+        # The bridge's Safety assessment ran after its page read and its guard
+        # judged the call's requests: host notes, annotated like dispatch does.
+        return _replace_tool_result(_compose_execute_result_result(prefixed_name, final, note, advice),
+                                    meta_updates={"safety_warning": True} if advice else None)
 
     def call_tool(self, prefixed_name: str, arguments: Dict[str, Any]) -> str:
         """Synchronously invoke an MCP tool and return its text projection."""
@@ -1571,6 +1558,10 @@ def ensure_configured_from_settings(*, refresh: bool = False, authority: Any = N
     except OSError:
         mtime_ns = None
     if manager.is_configured() and manager.settings_mtime_ns() is None:
+        # The server process configures from saved Settings without an mtime; its
+        # direct turns still discover a task-owned bridge, which nothing else lists.
+        if refresh:
+            manager.refresh_all(authority=authority, unlisted_only=True)
         return
     changed = False
     if not (manager.is_configured() and manager.settings_mtime_ns() == mtime_ns):
@@ -1588,6 +1579,21 @@ def call_mcp_tool(name: str, arguments: Dict[str, Any]) -> str:
     return get_manager().call_tool(name, arguments or {})
 
 
-def _call_mcp_tool_result(name: str, arguments: Dict[str, Any]) -> ToolResult:
+def _is_task_control(exc: BaseException) -> bool:
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.owner_pause import OwnerPauseRefused
+
+    return isinstance(exc, (ModelWaitInterrupted, OwnerPauseRefused))
+
+
+def is_browser_bridge_tool(name: str) -> bool:
+    """Whether ``name`` resolves to a task-owned browser bridge server."""
+    manager = get_manager()
+    with manager._lock:
+        cfg = manager._resolve_locked(name)[1]
+    return bool(cfg is not None and cfg.browser_bridge)
+
+
+def _call_mcp_tool_result(name: str, arguments: Dict[str, Any], *, ctx: Any = None) -> ToolResult:
     """Internal typed ToolRegistry call helper."""
-    return get_manager()._call_tool_result(name, arguments or {})
+    return get_manager()._call_tool_result(name, arguments or {}, ctx=ctx)

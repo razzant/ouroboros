@@ -269,7 +269,9 @@ class ProcessContainer:
     teardown — but only when the API confirms it). Prefer ``spawn`` over ``Popen`` + ``adopt``:
     POSIX ``adopt`` can neither plant the token nor vouch for a pid or group."""
 
-    def __init__(self) -> None:
+    def __init__(self, scope: str = "") -> None:
+        if scope and not scope.replace("_", "").isalnum():
+            raise ValueError("a container scope may contain only letters, digits and '_'")
         self._job = None
         # The pid `spawn` started and the group it leads: known WITHOUT having to be read.
         self._root = 0
@@ -280,7 +282,21 @@ class ProcessContainer:
         # Non-empty when containment was never ESTABLISHED: else it reads as "everything reaped".
         self._setup_error = ""
         # Unique per instance: a nested preflight and its outer run never claim each other's.
-        self._token = f"{CONTAINMENT_ENV_PREFIX}{uuid.uuid4().hex}"
+        # A ``scope`` precedes the uuid so ``for_scope`` can name every container sharing it.
+        self._token = f"{CONTAINMENT_ENV_PREFIX}{scope}{uuid.uuid4().hex}"
+
+    @classmethod
+    def for_scope(cls, scope: str) -> "ProcessContainer":
+        """A root-less container over every token created with ``scope``.
+
+        Membership is a substring test of the live environment, so the scoped
+        prefix names each member of each such container without any record
+        having been written first. ``reap`` keeps its detection contract."""
+        if not scope:
+            raise ValueError("a container scope must be non-empty")
+        container = cls(scope)
+        container._token = f"{CONTAINMENT_ENV_PREFIX}{scope}"
+        return container
 
     def containment_env(self) -> "dict[str, str]":
         """Environment entries that make a process and its descendants members. ``spawn`` applies

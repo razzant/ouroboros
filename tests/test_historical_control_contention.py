@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import queue
-import threading
 
 import pytest
 
 from ouroboros import acceptance_history, model_wait, review_operation, store
 from ouroboros.task_results import load_task_result
-from tests.test_acceptance_late_consumers import late as late, delivered
 from tests.test_acceptance_history import _caller, _request, _source
+from tests.test_acceptance_late_consumers import delivered
+from tests.test_acceptance_late_consumers import late as late
+from tests.test_admission_contention import database_reader
 from tests.test_review_operation_collection import fresh_sends as fresh_sends
 from tests.test_review_operation_lifetime import until
-from tests.test_admission_contention import database_reader
 
 pytestmark = pytest.mark.serial
 
@@ -22,37 +22,50 @@ def test_real_historical_panel_waits_through_nested_control_contention(late, tmp
     ctx = _caller(f)
     ctx.event_queue = queue.Queue()
     original = acceptance_history.historical_review_controls
-    once, lock = [], threading.Lock()
+    link = review_operation._link_historical_controls
+    once = []
 
     def contend(*args, **kwargs):
-        with lock:
-            first = model_wait.control_probe_requires_current() and not once
-            if first:
-                once.append(True)
-        if first:
+        if model_wait.control_probe_requires_current() and not once:
+            once.append(True)
             # The outer subject read already succeeded. The real lower
             # historical control owner now meets an independently held store.
             with database_reader(f.root, exclusive=True):
                 return original(*args, **kwargs)
         return original(*args, **kwargs)
 
+    def probe_after_link(operation, entry):
+        link(operation, entry)
+        if not once:
+            # This is the real retained operation, before its three physical
+            # workers launch. Only the intended nested control read sees the
+            # injected lock; concurrent slot probes retain their own authority.
+            with pytest.raises(store.StoreBusy):
+                operation.wait.control_reason(strict_current=True)
+            assert once == [True] and not operation._control
+
     monkeypatch.setattr(acceptance_history, "historical_review_controls", contend)
+    monkeypatch.setattr(review_operation, "_link_historical_controls", probe_after_link)
     result = _request(f, ctx, _source(ctx, text="Review this delivered historical answer."))
     assert result["status"] in {"pending", "announced", "published", "settled"}
     until(lambda: any(p.get("late_settlement") for p in
                      (load_task_result(f.root, f.tid).get("review_projection") or {}).get("panels", [])))
     until(lambda: not review_operation._LIVE)
-    assert once == [True] and len(late.calls) == 3
     row = load_task_result(f.root, f.tid)
+    panel = next(p for p in row["review_projection"]["panels"] if p.get("late_settlement"))
+    assert once == [True]
+    assert len(late.calls) == 3, [(actor["slot_id"], actor["transport_status"],
+                                  actor["operation_state"], actor["reason"])
+                                 for actor in panel["actors"]]
     assert len(row["review_operations"]) == 1
     assert len(row["task_acceptance_review_accounting"]["claims_by_binding"]) == 1
-    panel = next(p for p in row["review_projection"]["panels"] if p.get("late_settlement"))
     assert panel["coverage"]["transport_success"] == 3
 
 
 def test_actual_stop_still_refuses_historical_review_after_a_busy_probe(late, tmp_path, monkeypatch):
-    from ouroboros import cancel_intents
     from types import SimpleNamespace
+
+    from ouroboros import cancel_intents
 
     f = delivered(tmp_path, monkeypatch)
     row = load_task_result(f.root, f.tid)

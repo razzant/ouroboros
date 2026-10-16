@@ -348,6 +348,7 @@ def execute_panic_stop(
         from ouroboros.claudexor_daemon import get_owned_daemon
         from ouroboros.extension_companion import panic_kill_all
         from ouroboros.local_model import get_manager
+        from ouroboros.mcp_task_sessions import stop_scope as stop_mcp_bridges
         from ouroboros.tools.services import kill_all_services
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
         from ouroboros.workspace_executor import kill_all_foreground
@@ -366,6 +367,7 @@ def execute_panic_stop(
         attempt("commands", lambda: kill_all_tracked_subprocesses(request_only=True))
         attempt("executors", lambda: kill_all_foreground(data_dir, request_only=True))
         attempt("services", lambda: kill_all_services(data_dir, request_only=True))
+        attempt("mcp-browser", lambda: stop_mcp_bridges(data_dir, request_only=True))
         attempt("companions", lambda: panic_kill_all(request_only=True))
         attempt("restart-successor", stop_restart_successor)
         # One more bounded request attempt: every live member of the installation scope
@@ -405,6 +407,7 @@ def execute_panic_stop(
         attempt("commands", kill_all_tracked_subprocesses, settle=True)
         attempt("executors", lambda: kill_all_foreground(data_dir, wait=False), settle=True)
         attempt("services", lambda: kill_all_services(data_dir, wait=False), settle=True)
+        attempt("mcp-browser", lambda: stop_mcp_bridges(data_dir), settle=True)
         attempt("companions", panic_kill_all, settle=True)
         # Workers received private lifeline requests above. Root-first tree cleanup
         # here would destroy their local child ownership before those requests run.

@@ -1,11 +1,13 @@
 """A Resume retries only its fence publication after a preparer was handed off."""
 from __future__ import annotations
 
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import acceptance_late, cancel_intents, owner_pause
+from ouroboros.store import StoreBusy
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader
 from tests.test_acceptance_late_consumers import late as late
@@ -27,7 +29,11 @@ def _contend_publication(monkeypatch, *, outside=None, acquire_wait_sec=0.0):
         if not publications:
             publications.append((root, task_id))
             with database_reader(root, exclusive=True, acquire_wait_sec=acquire_wait_sec):
-                return actual(root, task_id, **kwargs)
+                try:
+                    return actual(root, task_id, **kwargs)
+                except StoreBusy as exc:
+                    assert exc.reason == "contention" and exc.rollback_confirmed
+                    raise
         return actual(root, task_id, **kwargs)
 
     def wait(_seconds):
@@ -49,9 +55,33 @@ def _contend_publication(monkeypatch, *, outside=None, acquire_wait_sec=0.0):
 def test_combined_resume_hands_the_real_preparer_once_while_publication_retries(late, tmp_path, monkeypatch):
     from tests.test_combined_late_resume import test_one_resume_restores_post_task_and_dead_acceptance_preparation
 
+    review_entered, published = Event(), Event()
+    actual_review = acceptance_late._run_historical_acceptance
+
+    def review_after_publication(*args, **kwargs):
+        review_entered.set()
+        assert published.wait(20), "review preparation outlived fence publication"
+        return actual_review(*args, **kwargs)
+
+    # The retained preparer is already handed off. Hold its historical reads
+    # outside the exclusive lock used to fail only the fence publication.
+    monkeypatch.setattr(acceptance_late, "_run_historical_acceptance", review_after_publication)
     calls, publications, waits = _contend_publication(monkeypatch, acquire_wait_sec=1.0)
-    test_one_resume_restores_post_task_and_dead_acceptance_preparation(late, tmp_path, monkeypatch, False)
-    assert calls == [1] and len(publications) == 1 and waits
+    release = owner_pause.release_fence
+
+    def release_after_handoff(root, task_id, **kwargs):
+        if not publications:
+            assert review_entered.wait(20), "retained preparer was not handed off"
+        result = release(root, task_id, **kwargs)
+        published.set()
+        return result
+
+    monkeypatch.setattr(owner_pause, "release_fence", release_after_handoff)
+    try:
+        test_one_resume_restores_post_task_and_dead_acceptance_preparation(late, tmp_path, monkeypatch, False)
+    finally:
+        published.set()
+    assert review_entered.is_set() and calls == [1] and len(publications) == 1 and waits
     assert len(late.calls) == 3
 
 

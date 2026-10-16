@@ -241,6 +241,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
     hands the request to ``supervisor.workspace_preparation``, whose FIFO thread
     calls back with ``preparation`` (its claim) to run these same gates there.
     """
+    evt = dict(evt)  # Transition metadata belongs to admission, not the producer's event.
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
     try:

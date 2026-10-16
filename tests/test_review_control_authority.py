@@ -8,7 +8,9 @@ from ouroboros import usage_accounting as ua
 from ouroboros.review_custody import _ReviewAttemptHistory, _review_exception_projection
 from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 from ouroboros.review_substrate import run_review_request
-from tests.test_native_tool_round_executor import _assignment, _ScriptedLLM, _tool_call, subject_repo as subject_repo
+from tests.test_native_tool_round_executor import _assignment, _ScriptedLLM, _tool_call, subject_repo as _subject_repo
+
+subject_repo = _subject_repo  # Register the shared pytest fixture.
 
 
 @pytest.mark.parametrize("cause", ["dispatch_publication_unconfirmed", "dispatch_document_unreadable"])
