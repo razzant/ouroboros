@@ -42,6 +42,11 @@ def _active_direct_roots(ctx: Any) -> list:
 
     roots = []
     for entry in get_direct_activity_registry().actors():
+        if str(getattr(entry, "kind", "") or "") == "call":
+            # A live call is not a text turn to steer: a typed line in its room opens
+            # an ordinary turn, and the call hears that row through live_awareness.
+            # The census still lists it for Stop, Panic and the update drain.
+            continue
         lock = getattr(entry.actor, "_owner_message_admission_lock", None)
         if lock is None:
             continue

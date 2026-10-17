@@ -125,6 +125,7 @@ PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = (
 # Primary credential env var per provider (single-key providers).
 PROVIDER_ENV_KEYS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "cloudru": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
@@ -152,6 +153,7 @@ MODEL_PROVIDER_CREDENTIAL_KEYS: frozenset[str] = frozenset({
 PROVIDER_CREDENTIAL_GROUPS: dict[str, tuple[str, ...]] = {
     "openrouter": ("OPENROUTER_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
+    "google": ("GOOGLE_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
     "minimax": ("MINIMAX_API_KEY", "MINIMAX_REGION"),
     "cloudru": ("CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL"),

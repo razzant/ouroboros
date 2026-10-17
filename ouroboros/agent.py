@@ -848,14 +848,22 @@ class OuroborosAgent:
         review_env = self.env if canonical_drive.resolve(strict=False) == self.env.drive_root.resolve(strict=False) else replace(self.env, drive_root=canonical_drive)
         from ouroboros.config import get_context_mode
         from ouroboros.tool_policy import initial_tool_schemas  # the schemas count in the memory view's floor
+        from ouroboros.live_call_route import call_context_plan
+
+        # A live call's route (window, first tool view) precedes the fit; its room feed starts before the read.
+        live_plan, context_captured_at = call_context_plan(task, self.tools, self.env.drive_root), utc_now_iso()
         messages, cap_info = build_llm_messages(
             env=self.env,
             memory=self.memory,
             task=task,
             review_context_builder=lambda: build_review_context(review_env),
             ctx=ctx,
-            tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode()),
+            tool_schemas=(live_plan.tool_schemas if live_plan is not None
+                          else initial_tool_schemas(self.tools, context_mode=get_context_mode())),
+            **(live_plan.fit_kwargs if live_plan is not None else {}),
         )
+        if live_plan is not None:
+            cap_info.update(live_call_spec=live_plan.spec, live_call_context_captured_at=context_captured_at)
         # The second of the three places a reduction must reach (the durable record
         # above is the first, `[SUBTASK_OUTCOME]` the third). It is appended HERE,
         # after the context is built, because it is a fact about THIS dispatch —
@@ -1061,6 +1069,7 @@ class OuroborosAgent:
             llm_trace: Dict[str, Any] = {"reasoning_notes": [], "tool_calls": []}
             task_type_str = str(task.get("type") or "").lower()
             initial_effort = _initial_effort_for(task, task_type_str)
+            live_spec = cap_info.get("live_call_spec")  # a live call's resolved CallSpec, else None
             # The owner's first phase-6 UI directive: the LEDE must show that THIS
             # bubble / subagent runs on codex (a chip, not a badge). The fact is
             # recorded onto the live task metadata that `_subagent_progress_meta`
@@ -1079,59 +1088,30 @@ class OuroborosAgent:
             elif str(cap_info.get("executor_blocked_reason") or ""):
                 text, usage, llm_trace = _blocked_executor_terminal(cap_info, task)
             elif task_type_str == "deep_self_review":
-                # Deep self-review bypasses the tool loop: review_change(subject=system,
-                # surface=system) on the row the request named, else Main (decision 3A).
-                # It writes memory/deep_review.md itself and keeps the last report on failure.
+                # No tool loop: the review driver owns its episode (deep_self_review).
+                from ouroboros.deep_self_review import drive_deep_self_review
+
+                text, usage, llm_trace = drive_deep_self_review(self, ctx, task, drive_logs)
+            elif live_spec is not None:
+                # A live voice call: one engine session is this turn's model round;
+                # the driver returns the ordinary triple with a host-authored terminal.
+                from ouroboros.live_turn import run_live_turn
+
+                with self._owner_message_admission_lock:
+                    self._accepting_owner_messages = True
                 try:
-                    from ouroboros.deep_self_review import deep_review_unavailable_text
-                    from ouroboros.tools.review_change import ReviewChangeArgumentError, run_system_review
-                    self._emit_progress("Starting deep self-review... This may take several minutes.")
-                    try:
-                        outcome = run_system_review(
-                            ctx, reviewer=str(task.get("reviewer") or ""), llm=self.llm,
-                            emit_progress=self._emit_progress,
-                            deadline_at=str((self._current_task_metadata or {}).get("deadline_at") or ""),
-                        )
-                        text, usage = str(outcome.get("report") or ""), dict(outcome.get("usage") or {})
-                        if outcome.get("record_id"):
-                            text += f"\n\nReview record: {outcome['record_id']} (surface=system)"
-                    except ReviewChangeArgumentError as exc:
-                        text = deep_review_unavailable_text(str(exc))
-                        usage = {"execution_status": "infra_failed", "reason_code": "deep_self_review_unavailable"}
-                    if usage:
-                        self._pending_events.append({
-                            "type": "llm_usage",
-                            "ts": utc_now_iso(),
-                            "task_id": str(task.get("id") or ""),
-                            "model": str(usage.get("resolved_model") or ""),
-                            "usage": usage,
-                            "category": "deep_self_review",
-                        })
-                    if str(usage.get("execution_status") or "") == "infra_failed":
-                        # The last report stays: an error is the task result plus a
-                        # typed event, never the durable memory of the review.
-                        append_jsonl(drive_logs / "events.jsonl", {
-                            "ts": utc_now_iso(), "type": "task_error",
-                            "task_id": task.get("id"), "error": text,
-                            "reason_code": str(usage.get("reason_code") or ""),
-                        })
-                    llm_trace = {"reasoning_notes": ["deep_self_review"], "tool_calls": []}
-                except BudgetExceeded:
+                    text, usage, llm_trace = run_live_turn(
+                        messages=messages, tools=self.tools, llm=self.llm, drive_logs=drive_logs,
+                        emit_progress=self._emit_progress, incoming_messages=self._incoming_messages,
+                        task_id=str(task.get("id") or ""), task_type=task_type_str,
+                        budget_remaining_usd=budget_remaining, event_queue=self._event_queue,
+                        drive_root=self.env.drive_root, spec=live_spec, task=task,
+                        context_captured_at=str(cap_info.get("live_call_context_captured_at") or ""),
+                    )
+                except (BudgetExceeded, BudgetPauseRequested):
                     raise
                 except Exception as e:
-                    tb = traceback.format_exc()
-                    log.error("Deep self-review failed for task %s", task.get("id"), exc_info=e)
-                    append_jsonl(drive_logs / "events.jsonl", {
-                        "ts": utc_now_iso(), "type": "task_error",
-                        "task_id": task.get("id"), "error": repr(e),
-                        "traceback": truncate_for_log(tb, 2000),
-                    })
-                    text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
-                    usage = {
-                        "execution_status": "infra_failed",
-                        "reason_code": "deep_self_review_error",
-                    }
-                    llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
+                    text, usage, llm_trace = _task_exception_terminal(self.env, task, e, drive_logs)
             else:
                 with self._owner_message_admission_lock:
                     if inline_execution(task):
@@ -1393,6 +1373,8 @@ class OuroborosAgent:
             # metadata: a reader that sees no key is reading an older worker or a
             # row written before the fact existed, and keeps the legacy reading.
             progress_meta["narration"] = bool(narration)
+            # Final call utterances are durable conversation rows, including their playback receipt.
+            event["is_progress"] = not (narration and bool(progress_meta.get("spoken")))
             event["progress_meta"] = progress_meta
             self._event_queue.put(event)
         except Exception:

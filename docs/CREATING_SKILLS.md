@@ -592,6 +592,7 @@ calls and runtime behaviours:
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
+| `call_peer` | The skill may attach audio peers to live calls through the Host Service call door (see "Live call peer"). Requires an explicit owner grant; the grant is bound to one admitted call and its directions, and a peer never speaks as the owner. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. Chat topics require owner permission grants; `skill.lifecycle` does not. |
 | `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` carries a host row or `task:<task_id>` address as a reference, never routing. The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
@@ -685,6 +686,7 @@ presence:
   runtime_defaults:
     model_slot: main             # main | light
     inline_max_rounds: 10
+    execution: event             # event | call (one live call per meeting; see "Live call peer")
   capability_requests:
     - id: research
       kind: tool                 # tool | script | resource
@@ -772,6 +774,19 @@ pre-dispatch retry certificate; `blocked` needs configuration repair, whereas
 of these. Missing or unknown dispositions remain retryable for compatibility.
 Older Host/consumer pairs may still hold input queues until both are upgraded.
 Never project a retained refusal as `completed/silent` or as a successful handoff.
+
+#### Live call peer
+
+A skill with the `call_peer` grant brings audio into a live call, the owner's or a Presence binding's:
+
+- **Owner calls.** A tool running inside an owner call reads the call's id from `ctx.task_metadata["live_call"]["call_id"]`. Its companion then posts `POST /call/open {role: "meeting", call_id, mic, speaker}` to the Host Service with its skill token.
+- **Presence calls.** A transport skill whose binding's effective runtime has `execution: call` posts `{role: "meeting", binding_id, event, label, mic, speaker}`. The `event` is the same object `/presence/turn` takes. Opening needs the skill's `presence` grant as well as `call_peer` (else `presence_forbidden`, 403); attaching to a running call needs `call_peer` alone. The host admits a Presence call that holds one active slot until it ends, under the binding's ceiling.
+- **Answers.** Success is `{call_id, peer_path}`; a refusal is `{ok: false, code, error}` in plain words.
+- **The socket.** On `WS peer_path`, with the same token, the first frame is `hello {protocol: 1, role: "meeting", mic, speaker, rate}`; a hello may narrow the granted directions, never widen them. Frames carry the peer's true rate and the latest `flush` epoch (`ouroboros/call_protocol.py`).
+- **Meeting facts.** A peer reports what the mind should know as `context {text, source}` and who the platform says is speaking as `participant {label, speaking}`. A peer without a speaker sends no `played`.
+- **Ending.** `bye` ends the peer's part. A call no peer attaches to, or that every peer left, ends after a rejoin grace.
+- **Audio session.** A companion also receives the host's `XDG_RUNTIME_DIR` and `PULSE_SERVER` when they are set: locators of the user's audio session, not credentials.
+- **Reference skills.** `skills/meeting_audio/`, `skills/meeting_browser/`, `skills/zoom_meeting/`.
 
 #### Presence continuation
 

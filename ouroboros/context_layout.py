@@ -194,6 +194,26 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
     ).text
 
 
+def book_map_section(book: ReferenceBook, section_id: str) -> str:
+    """A compact book view as a host section: its operative view names each chapter and its physical path.
+
+    The navigation map itself is already the on-demand form of the book; under a physically
+    small window its chapter list stays and the map is one retained read away. A legacy
+    single-file revision has no chapters, so its map is its only view.
+    """
+    from ouroboros.section_floor import HostSection  # section_floor reads TIER0_ALWAYS_FULL from here
+
+    navigation = book_navigation(book)
+    if book.legacy or not book.chapters:
+        return navigation
+    title = book.entrypoint.headings[0].title if book.entrypoint.headings else book.book_id
+    chapters = [f"- {chapter.headings[0].title if chapter.headings else chapter.source_path}: "
+                f"`{chapter.source_path}`" for chapter in book.chapters]
+    return HostSection(section_id, navigation, "\n".join([
+        f"## {title} (chapters)", "", *chapters, "",
+        'Each chapter reads with `read_file(root="system_repo", path=...)` at its physical path.']))
+
+
 def architecture_context_section(
     env: Any,
     *,
@@ -212,7 +232,7 @@ def architecture_context_section(
         # navigable overview and a full mode asks for the composition. Both
         # answers are defined for a legacy revision too.
         if context_mode in {"low", "nano"}:
-            return book_navigation(book)
+            return book_map_section(book, "architecture_map")
         if text is None:
             text = compose_book(book)
     if text is None:
@@ -269,7 +289,7 @@ def reference_doc_sections(
         dev_text = compose_book(development_book)
     if dev_text.strip():
         if context_mode in {"low", "nano"}:
-            parts.append(book_navigation(development_book) if development_book is not None
+            parts.append(book_map_section(development_book, "development_map") if development_book is not None
                          else generate_doc_nav_map(dev_text, title="DEVELOPMENT.md", rel_path="docs/DEVELOPMENT.md"))
         elif include_development:
             development = "## DEVELOPMENT.md\n\n" + dev_text

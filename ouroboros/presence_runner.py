@@ -11,17 +11,31 @@ import json
 import logging
 import os
 import threading
-import time
 from datetime import datetime, timezone
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ouroboros.artifacts import stage_task_attachments
 from ouroboros.contracts.task_contract import attach_task_contract
-from ouroboros.presence_admission import PresenceAdmission
+from ouroboros.presence_admission import PresenceAdmission, PresenceAdmissionError
 from ouroboros.presence_authority import presence_ceiling_payload
+# The gate (cap, serialization, lease) lives in presence_gate; these names stay
+# importable here because callers and tests reach them through the runner.
+from ouroboros.presence_gate import (  # noqa: F401
+    _GATE_POLL_SEC,
+    _GATE_STOP_POLL_SEC,
+    _GATES,
+    _GATES_LOCK,
+    _LIVE_LOCK,
+    _LIVE_PRESENCE_TASKS,
+    PresenceTurnGate,
+    PresenceTurnLease,
+    _configured_gate,
+    _try_exclusive,
+    admit_configured_gate,
+    presence_turn_is_live,
+)
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -198,287 +212,67 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     }
 
 
-_GATE_POLL_SEC = 0.05
-# A stop check reads task controls from disk; a queued reacquisition asks at this cadence.
-_GATE_STOP_POLL_SEC = 1.0
-
-
-def _try_exclusive(fd: int) -> bool:
-    from ouroboros.platform_layer import file_lock_exclusive_nb
-
-    try:
-        file_lock_exclusive_nb(fd)
-    except OSError:
-        return False
-    return True
-
-
-class PresenceTurnLease:
-    """The gate resources one admitted turn holds; its owner releases them exactly once.
-
-    A lease minted by a gate can also be LENT at a qualified review wait (#1536): the
-    conversation and active slot return to the gate while the same author stays live, and
-    ``reacquire`` takes both again, in admission order, before any model or tool step.
-    ``execution`` is the Host turn whose initial envelope that author may publish.
-    """
-
-    def __init__(self, conversation_key: str, resources: ExitStack,
-                 gate: "PresenceTurnGate | None" = None) -> None:
-        self.conversation_key = conversation_key
-        self._resources: ExitStack | None = resources
-        self._lock = threading.Lock()
-        self._gate = gate
-        self._ended = False
-        self.execution: PresenceTurnExecution | None = None
-
-    def release(self) -> None:
-        with self._lock:
-            resources, self._resources, self._ended = self._resources, None, True
-        if resources is not None:
-            resources.close()
-
-    def lendable(self) -> bool:
-        """Held, minted by a gate and not ended: ``lend`` can return it and ``reacquire`` take it back."""
-        with self._lock:
-            return self._gate is not None and not self._ended and self._resources is not None
-
-    def lend(self) -> bool:
-        """Return the held resources while keeping the lease reacquirable; False when it cannot."""
-        with self._lock:
-            if self._gate is None or self._ended or self._resources is None:
-                return False
-            resources, self._resources = self._resources, None
-        resources.close()
-        return True
-
-    def held(self) -> bool:
-        with self._lock:
-            return self._resources is not None
-
-    def reacquire(self, should_stop: Callable[[], bool]) -> bool:
-        """Wait for the conversation and a slot again; False when ``should_stop`` ends the wait.
-
-        A stop seen before the first attempt or right after the last one leaves nothing held,
-        so a stopped author never acts even when both resources were free at once.
-        """
-        if self._gate is None:
-            return False
-        if self.held():
-            return not should_stop()
-        resources = self._gate.acquire_resources(self.conversation_key, should_stop)
-        if resources is None:
-            return False
-        with self._lock:
-            if self._ended or self._resources is not None:
-                stale = resources
-            else:
-                self._resources, stale = resources, None
-        if stale is not None:
-            stale.close()
-        return stale is None
-
-
-class PresenceTurnGate:
-    """Cross-process cap plus one active turn for each conversation.
-
-    ``run`` waits on a thread (the tool path); ``admit`` takes the same resources as a
-    coroutine for the Host, whose queued turns must hold no thread while they wait.
-    """
-
-    def __init__(self, max_active: int = 2, *, state_root: Path | None = None) -> None:
-        self._max_active = max(1, int(max_active))
-        self._slots = threading.BoundedSemaphore(max(1, int(max_active)))
-        self._guard = threading.Lock()
-        self._conversations: dict[str, threading.Lock] = {}
-        self._state_root = Path(state_root).resolve(strict=False) if state_root is not None else None
-        self._claimed_slots: set[int] = set()
-
-    def _gate_file(self, name: str) -> Path:
-        root = self._state_root / "presence_turn_gate"
-        root.mkdir(parents=True, exist_ok=True)
-        return root / name
-
-    def _conversation(self, conversation_key: str) -> tuple[str, threading.Lock]:
-        key = str(conversation_key or "").strip()
-        if not key:
-            raise PresenceTurnError("presence_conversation_key_required", "conversation_key")
-        with self._guard:
-            return key, self._conversations.setdefault(key, threading.Lock())
-
-    def _conversation_file(self, key: str) -> Path:
-        return self._gate_file(f"conversation-{hashlib.sha256(key.encode('utf-8')).hexdigest()}.lock")
-
-    @contextmanager
-    def _file_lock(self, path: Path):
-        from ouroboros.platform_layer import file_lock_exclusive, file_unlock
-
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            file_lock_exclusive(fd)
-            yield
-        finally:
-            try:
-                file_unlock(fd)
-            finally:
-                os.close(fd)
-
-    def _try_slot(self) -> Callable[[], None] | None:
-        """Claim one free active slot without waiting: its release, or None while all are taken."""
-        if self._state_root is None:
-            return self._slots.release if self._slots.acquire(blocking=False) else None
-        from ouroboros.platform_layer import file_unlock
-
-        for index in range(self._max_active):
-            with self._guard:
-                if index in self._claimed_slots:
-                    continue
-                self._claimed_slots.add(index)
-            try:
-                fd = os.open(self._gate_file(f"slot-{index}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
-            except BaseException:  # an unopenable slot is an error, never a slot left claimed
-                with self._guard:
-                    self._claimed_slots.discard(index)
-                raise
-            if not _try_exclusive(fd):  # another process holds it
-                os.close(fd)
-                with self._guard:
-                    self._claimed_slots.discard(index)
-                continue
-
-            def release(index: int = index, fd: int = fd) -> None:
-                try:
-                    file_unlock(fd)
-                finally:
-                    os.close(fd)
-                    with self._guard:
-                        self._claimed_slots.discard(index)
-
-            return release
-        return None
-
-    def run(self, conversation_key: str, callback: Callable[[], PresenceTurnResult]) -> PresenceTurnResult:
-        lease = self.acquire(conversation_key)
-        try:
-            return callback()
-        finally:
-            lease.release()
-
-    def _acquisition(self, conversation_key: str):
-        """Take what ``run`` takes, in the same order, without ever blocking.
-
-        A generator that yields while a resource is busy and returns the ExitStack holding
-        everything; closing it early releases whatever was already taken. The coroutine and
-        the thread admissions differ only in how they sleep between attempts.
-        """
-        from ouroboros.platform_layer import file_unlock
-
-        key, conversation_lock = self._conversation(conversation_key)
-        with ExitStack() as held:
-            while not conversation_lock.acquire(blocking=False):
-                yield
-            held.callback(conversation_lock.release)
-            if self._state_root is not None:
-                fd = os.open(self._conversation_file(key), os.O_CREAT | os.O_RDWR, 0o600)
-                held.callback(os.close, fd)
-                while not _try_exclusive(fd):
-                    yield
-                held.callback(file_unlock, fd)
-            while (release_slot := self._try_slot()) is None:
-                yield
-            held.callback(release_slot)
-            return held.pop_all()
-
-    async def admit(self, conversation_key: str) -> PresenceTurnLease:
-        """Take what ``run`` takes, in the same order, as a coroutine.
-
-        Every attempt is non-blocking and every wait is an asyncio sleep, so a turn queued
-        behind its conversation or the active cap parks no thread. Cancellation releases
-        whatever was already taken; success hands it all to the returned lease.
-        """
-        key, _lock = self._conversation(conversation_key)
-        steps = self._acquisition(key)
-        try:
-            while True:
-                try:
-                    next(steps)
-                except StopIteration as done:
-                    return PresenceTurnLease(key, done.value, self)
-                await asyncio.sleep(_GATE_POLL_SEC)
-        finally:
-            steps.close()
-
-    def acquire_resources(self, conversation_key: str,
-                          should_stop: Callable[[], bool] | None = None) -> ExitStack | None:
-        """The thread form of ``admit``; None when ``should_stop`` ends the wait.
-
-        ``should_stop`` is asked before the first attempt, every ``_GATE_STOP_POLL_SEC``
-        while waiting, and once more after the last attempt succeeds: what was taken as a
-        stop landed is returned at once instead of handed to a stopped caller.
-        """
-        if should_stop is not None and should_stop():
-            return None
-        steps = self._acquisition(conversation_key)
-        checked = time.monotonic()
-        try:
-            while True:
-                try:
-                    next(steps)
-                except StopIteration as done:
-                    resources = done.value
-                    break
-                if should_stop is not None and time.monotonic() - checked >= _GATE_STOP_POLL_SEC:
-                    checked = time.monotonic()
-                    if should_stop():
-                        return None
-                time.sleep(_GATE_POLL_SEC)
-        finally:
-            steps.close()
-        if should_stop is not None and should_stop():
-            resources.close()
-            return None
-        return resources
-
-    def acquire(self, conversation_key: str) -> PresenceTurnLease:
-        key, _lock = self._conversation(conversation_key)
-        return PresenceTurnLease(key, self.acquire_resources(key), self)
-
-
-_GATES_LOCK = threading.Lock()
-_GATES: dict[tuple[str, int], PresenceTurnGate] = {}
-_LIVE_LOCK = threading.Lock()
-_LIVE_PRESENCE_TASKS: set[tuple[str, str]] = set()
-
-
-def presence_turn_is_live(task_id: str, *, drive_root: Path | None = None) -> bool:
-    """Root-scoped local liveness; never an owner-addressable actor."""
-    with _LIVE_LOCK:
-        if drive_root is not None:
-            return (str(Path(drive_root).resolve()), str(task_id or "")) in _LIVE_PRESENCE_TASKS
-        return any(tid == str(task_id or "") for _root, tid in _LIVE_PRESENCE_TASKS)
-
-
-def _configured_gate(drive_root: Path | None = None) -> PresenceTurnGate:
-    from ouroboros.config import SETTINGS_DEFAULTS, _bounded_positive_int_setting
-
-    limit = _bounded_positive_int_setting(
-        "OUROBOROS_PRESENCE_MAX_ACTIVE",
-        default=int(SETTINGS_DEFAULTS["OUROBOROS_PRESENCE_MAX_ACTIVE"]),
-        hard_max=20,
-    )
-    state_root = Path(drive_root).resolve(strict=False) / "state" if drive_root is not None else None
-    key = (str(state_root or ""), limit)
-    with _GATES_LOCK:
-        return _GATES.setdefault(key, PresenceTurnGate(limit, state_root=state_root))
-
-
-async def admit_configured_gate(drive_root: Path, conversation_key: str) -> PresenceTurnLease:
-    """Coroutine admission into the configured gate ``run_presence_turn`` would otherwise take."""
-    return await _configured_gate(Path(drive_root)).admit(conversation_key)
-
-
 def _stable_numeric_id(prefix: str, value: str) -> int:
     digest = hashlib.sha256(f"{prefix}\0{value}".encode("utf-8")).digest()
     return (1 << 40) + (int.from_bytes(digest[:6], "big") & ((1 << 40) - 1))
+
+
+def presence_chat_id(conversation_key: str) -> int:
+    """The chat id every turn of one conversation shares; a live call reuses it exactly."""
+    return _stable_numeric_id("presence-conversation", conversation_key)
+
+
+# The exact event payload the Host door and the call door accept; nothing else is a Presence event.
+PRESENCE_EVENT_FIELDS = frozenset({
+    "source_event_id", "provider", "account_id", "conversation_id", "thread_id",
+    "conversation_key", "actor", "conversation", "message", "text",
+})
+
+
+def presence_turn_event(event_payload: Any, admission: PresenceAdmission, *,
+                        delivery_reporting_version: int = 0, continuation_version: int = 0) -> PresenceTurnEvent:
+    """Build the one event shape a Presence turn runs on from a transport payload.
+
+    Shared by ``/presence/turn`` and the call door so both check the same facts: the
+    payload shape, that the provider facts match the owner-created binding, and that the
+    identity facts are present. The transport authenticates provider facts, but it does
+    not get to choose the concurrency/history identity: the conversation key is derived
+    from the binding-checked origin facts, never taken from the payload.
+    """
+    from ouroboros.presence_bindings import conversation_key
+
+    if not isinstance(event_payload, Mapping) or set(event_payload) != PRESENCE_EVENT_FIELDS:
+        raise PresenceAdmissionError("presence_event_invalid", "event", "invalid presence event")
+    provider = str(event_payload.get("provider") or "").strip()
+    account_id = str(event_payload.get("account_id") or "").strip()
+    conversation_id = str(event_payload.get("conversation_id") or "").strip()
+    thread_id = str(event_payload.get("thread_id") or "").strip()
+    if (
+        provider != admission.origin.transport
+        or account_id != admission.origin.account_id
+        or (admission.origin.conversation_id != "*" and conversation_id != admission.origin.conversation_id)
+        or (admission.origin.thread_id and thread_id != admission.origin.thread_id)
+    ):
+        raise PresenceAdmissionError("presence_origin_mismatch", "event",
+                                     "presence event does not match its owner-created binding")
+    event = PresenceTurnEvent(
+        source_event_id=str(event_payload["source_event_id"] or "").strip(),
+        provider=provider,
+        account_id=account_id,
+        conversation_id=conversation_id,
+        thread_id=thread_id,
+        conversation_key=conversation_key(provider, account_id, conversation_id, thread_id),
+        actor=dict(event_payload["actor"]) if isinstance(event_payload["actor"], Mapping) else {},
+        conversation=dict(event_payload["conversation"]) if isinstance(event_payload["conversation"], Mapping) else {},
+        message=dict(event_payload["message"]) if isinstance(event_payload["message"], Mapping) else {},
+        text=str(event_payload["text"] or ""),
+        delivery_reporting_version=delivery_reporting_version,
+        continuation_version=continuation_version,
+    )
+    if not event.source_event_id or not event.conversation_key or not event.actor:
+        raise PresenceAdmissionError("presence_identity_missing", "event",
+                                     "presence event is missing identity facts")
+    return event
 
 
 def presence_turn_task_id(binding_id: str, source_event_id: str) -> str:
@@ -989,11 +783,16 @@ def _log_dialogue(
     event: PresenceTurnEvent,
     task: Mapping[str, Any],
     task_id: str,
+    speaker: Mapping[str, Any] | None = None,
 ) -> None:
+    """Append one Presence dialogue row. ``speaker`` names who spoke when it is not the
+    event's actor (a live call's correspondent utterance); the event identity stays the
+    turn's own, so a later replay of the same event still recognizes its rows."""
     from types import SimpleNamespace
     from ouroboros import chat_chain
     from ouroboros.dialogue_provenance import presence_provenance_from_task
 
+    actor = dict(speaker) if speaker is not None else dict(event.actor)
     state = read_json_dict(drive_root / "state" / "state.json") or {}
     row = {
         "ts": utc_now_iso(),
@@ -1004,8 +803,8 @@ def _log_dialogue(
         "text": text,
         "format": "markdown" if direction == "out" else "",
         "source": f"presence:{event.provider}",
-        "sender_label": str(event.actor.get("display_name") or event.actor.get("username") or ""),
-        "sender_session_id": str(event.actor.get("platform_actor_id") or event.actor.get("id") or ""),
+        "sender_label": str(actor.get("display_name") or actor.get("username") or ""),
+        "sender_session_id": str(actor.get("platform_actor_id") or actor.get("id") or ""),
         "client_message_id": event.source_event_id,
         "presence_event_identity": presence_event_identity(str(task["metadata"]["presence"]["binding_id"]), event),
         "transport": {
@@ -1014,7 +813,7 @@ def _log_dialogue(
             "conversation_id": event.conversation_id,
             "thread_id": event.thread_id,
             "conversation_key": event.conversation_key,
-            "actor": dict(event.actor),
+            "actor": actor,
             "conversation": dict(event.conversation),
             "message": dict(event.message),
             **({"delivery": {"state": "authored"}} if direction == "out" else {}),
@@ -1047,11 +846,14 @@ def _build_task(
     drive_root: Path,
     staged_files: Sequence[Path],
     physical_task_id: str = "",
+    live_call: Any = None,
 ) -> dict[str, Any]:
+    """The fresh task one turn runs as. ``live_call`` (a ``call_protocol.CallSpec``) marks a
+    turn that is one live audio session: the driver reads ``metadata["live_call"]``."""
     from ouroboros.config import runtime_setting
 
     task_id = physical_task_id or _task_id(admission, event)
-    chat_id = _stable_numeric_id("presence-conversation", event.conversation_key)
+    chat_id = presence_chat_id(event.conversation_key)
     actor_id = _stable_numeric_id(
         "presence-actor",
         f"{event.provider}:{event.account_id}:{event.actor.get('platform_actor_id') or event.actor.get('id') or ''}",
@@ -1111,6 +913,8 @@ def _build_task(
         "inline_max_rounds": admission.inline_max_rounds,
         "presence": presence_context,
     }
+    if live_call is not None:
+        metadata["live_call"] = live_call.as_metadata()
     if admission.model_slot == "light":
         from ouroboros.config import get_light_model
 
@@ -1188,12 +992,15 @@ def run_presence_turn(
     agent_factory: Callable[..., Any] | None = None,
     gate: PresenceTurnGate | None = None,
     admitted: PresenceTurnLease | None = None,
+    live_call: Any = None,
 ) -> PresenceTurnResult:
     """Run one bounded turn; adapters retain durable provider custody.
 
     ``admitted`` is a lease the caller already took for this conversation (``PresenceTurnGate.admit``):
     the turn runs under it instead of waiting on ``gate``, and the caller keeps releasing it.
     Either lease may be lent at a qualified review wait (``presence_continuation``).
+    ``live_call`` turns the task into one live audio session (``presence_call``); every
+    other step — admission record, lost-attempt refusal, pointer, dialogue rows — is the same.
     """
 
     task_id = _task_id(admission, event)
@@ -1266,6 +1073,7 @@ def run_presence_turn(
             drive_root=Path(drive_root),
             staged_files=tuple(Path(item) for item in staged_files),
             physical_task_id=task_id,
+            live_call=live_call,
         )
         chat_id = int(task["chat_id"])
         actor_id = _stable_numeric_id("presence-actor-log", str(task.get("actor_id") or ""))
@@ -1589,6 +1397,8 @@ __all__ = [
     "PresenceTurnResult",
     "admit_configured_gate",
     "build_presence_result_event",
+    "presence_chat_id",
+    "presence_turn_event",
     "presence_turn_is_live",
     "presence_turn_replay",
     "presence_turn_task_id",

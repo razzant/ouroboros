@@ -323,6 +323,19 @@ The socket has no resume cursor: frames sent while you were disconnected are not
   - `503 history_source_unavailable` or `migrating`.
 - **Incomplete windows.** `window.complete` is true only when nothing bounded the read; `window.truncated_by` names each cause (`quota`, `page`, `lineage_cap`, or a stream gap such as `chat_source_unavailable`). Never treat an incomplete window as an empty conversation. `coverage` reports which stored bytes were delivered, for clients that page; it says nothing about chronology.
 
+### Live calls
+
+A room holds at most one owner call; its audio travels on its own socket, never on `/ws`. `GET /api/contract` describes it under `call`.
+
+- **Opening.** `POST /api/call/open` with `{chat_id, client_message_id?, model?, voice?}` answers `{call_id, ws_path}`. Calls use Google Gemini Live. When the room already has a call, the answer adds `joined: true` and this surface joins that call, which keeps its own model and voice. A refusal is `{ok: false, code, error}`, where `error` is a sentence for the owner; a missing Google AI key is refused here (`missing_credential_google`), before any turn. The defaults come from Settings (Models → Live calls).
+- **Typed words during a call.** A message typed in the room still starts its own ordinary turn. The call learns of it as context and speaks about it when it next talks.
+- **The socket.** Open `ws_path` with the same authentication as `/ws`. The first text frame is `hello` `{type: "hello", protocol: 1, role: "owner", mic, speaker, rate, label}`, where `rate` is the device's sample rate; the core resamples.
+- **Audio frames.** Binary frames carry a 16-byte little-endian header (magic `OC`, version 1, kind 1 = to the core or 2 = from the core, epoch u16, sequence u32, rate u32, stream u16) and then PCM16 mono.
+- **Your control frames.** `mute {muted}`, `played {item_id, played_ms}` (milliseconds of that item actually rendered) and `bye {reason}`.
+- **The core's control frames.** `state {state, reason, engine, phase?, detail?, action?}`, `activity {activity, label}`, `caption {speaker, text, final, item_id}` and `flush {epoch}`. A call is `preparing` (`phase: "memory"`) while its turn reads memory, `connecting` only while its engine opens, then `live`. A `state` reason is a code (`owner_stop`, `max_minutes`, `missing_credential`, `provider_closed`, `invalid_request`, `transport_lost:<detail>`, …): a client shows its own words for it, with `detail` and the one next step `action` (`settings` or `retry`). For a provider's close or error (`provider_closed`, `invalid_request`, `provider_error`, `rate_limit`) `detail` is the provider's own sentence or empty, never the core's description; for the core's own refusals it is the core's sentence. `activity` is `working` with the tools' own names while a tool batch runs, then `idle`. A `bye` before the engine opens ends the call without opening one.
+- **Binding audio to an item.** Output frames carry no item id. An `ouroboros` caption, possibly empty, names the item before its first frame. After `flush`, drop every frame of an older epoch.
+- **History.** The owner's speech is stored as owner rows with `source: "call"`. Speech heard while meeting audio was in the call is a System row with `system_type: "call_heard"`. Ouroboros's speech is a narration progress row whose meta carries `spoken {call_id, item_id, status, played_ms}`, where status is `generated`, `played` or `interrupted`.
+
 ## 6. Projects and tasks
 
 **Projects:**

@@ -327,7 +327,7 @@ def test_bundled_extension_seeds_declare_the_plugin_api_field():
     """Q6/Q-B: bundled skills ship the field in the same release that closes
     native-seed trust to field-less extensions."""
     repo_root = pathlib.Path(__file__).parents[1]
-    for name in ("telegram", "unix_computer_use"):
+    for name in ("telegram", "unix_computer_use", "meeting_audio", "meeting_browser", "zoom_meeting"):
         from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 
         manifest = parse_skill_manifest_text(

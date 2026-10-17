@@ -32,14 +32,18 @@ _OVERRIDE_FIELDS = frozenset({"model_slot", "inline_max_rounds"})
 def _runtime_projection(profile: Any, state: PresenceState) -> dict[str, Any]:
     defaults = profile.runtime_defaults
     overrides = state.runtime_overrides
+    # ``execution`` appears only when it departs from the event default, so clients
+    # written before the field existed keep seeing the shape they pinned.
     return {
         "defaults": {
             "model_slot": defaults.model_slot,
             "inline_max_rounds": defaults.inline_max_rounds,
+            **({"execution": defaults.execution} if defaults.execution != "event" else {}),
         },
         "overrides": {
             "model_slot": overrides.model_slot,
             "inline_max_rounds": overrides.inline_max_rounds,
+            **({"execution": overrides.execution} if overrides.execution is not None else {}),
         },
         "state_fingerprint": presence_state_fingerprint(state),
         "workspace_root": state.workspace_root,
@@ -73,8 +77,8 @@ def _parse_overrides(body: Any) -> tuple[str, Mapping[str, Any]]:
     raw = body.get("runtime_overrides")
     if not isinstance(expected, str) or not isinstance(raw, Mapping):
         raise ValueError("expected_state_fingerprint must be a string and runtime_overrides an object")
-    if set(raw) != _OVERRIDE_FIELDS:
-        raise ValueError("runtime_overrides must contain exactly model_slot and inline_max_rounds")
+    if set(raw) - {"execution"} != _OVERRIDE_FIELDS:
+        raise ValueError("runtime_overrides must contain model_slot and inline_max_rounds, with optional execution")
     if "workspace_root" in body and not isinstance(body["workspace_root"], str):
         raise ValueError("workspace_root must be a string; empty clears the selection")
     return expected, raw
@@ -100,6 +104,7 @@ def _update_runtime_overrides(
     overrides = PresenceRuntimeOverrides(
         model_slot=raw.get("model_slot"),
         inline_max_rounds=raw.get("inline_max_rounds"),
+        execution=raw.get("execution"),
     )
     updated = replace(state, runtime_overrides=overrides)
     if "workspace_root" in body:

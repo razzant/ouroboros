@@ -43,7 +43,7 @@ CHECKLISTS item 27 `size_cap_paydown`, advisory when applicable.
 
 SOLID serves the body's health, not minimalism for its own sake: fewer moving parts and
 one owner per fact leave fewer places for bugs and a body Ouroboros can still
-understand. It is a direction, not a demand for classes or framework surface:
+understand. It is a direction:
 
 - **SRP — Single Responsibility Principle:** one coherent reason and one authority for
   a unit to change.
@@ -84,7 +84,7 @@ Apply ARCHITECTURE §10 invariant 10 to current-state readers; review and growth
 - **Passive GET.** Read handlers perform no new steady-state durable writes.
   `ouroboros/usage_store.py::read` may initialize an empty store when nothing awaits
   import; display reads leave pending imports to startup and report unavailable data.
-  Enforced by `tests/test_usage_store.py`; the read path never starts a history import.
+  Enforced by `tests/test_usage_store.py`.
 - **House precedents, reuse these shapes:** archive-aware chat log rotation
   (`supervisor/state.py::rotate_chat_log_if_needed`); current rows reduced by the writing
   transaction beside an unbounded event log (`ouroboros/delegate_custody_current.py`); the
@@ -155,7 +155,6 @@ here, and enroll it in `hot_store_growth_notes` in the same change.
 | Store / surface | Complete source → interactive projection | Growth and retention proof |
 |---|---|---|
 | Chat and biography | `logs/chat.jsonl` with its rotated generations and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and archive-aware `chat_history` | Rotation and archive readers carry generation/gap coverage; pages and parts compress the horizon, never delete it; the journal warns at `CHRONICLE_JOURNAL_WARN_BYTES` |
-| Plan/review evidence | ARCHITECTURE §10.1, "Plan/review authority" | Source and retention rules live in that row |
 | Skill-review root tasks | Per-skill `state/skills/<name>/review_history.jsonl`; `skill_review_runner._append_terminal_history` projects terminal identities to `state/skill_review_root_tasks.jsonl` → `skill_readiness._skill_names_from_review_history` reads a bounded newest-first suffix | Append-only and idempotent by root/task/outcome identity; warns at `SKILL_REVIEW_ROOT_TASKS_WARN_BYTES` |
 | Task/project execution | ARCHITECTURE §10.1, "Execution evidence" | Promotion and retention rules live in that row |
 
@@ -217,9 +216,9 @@ check a `destroyed` flag before touching state or re-arming loops. A module widg
 disposer is the ordered dispose with acknowledgement (`WIDGET_DISPOSE_ACK_TIMEOUT_MS`;
 ARCHITECTURE §3 "Skills and Widgets").
 
-Enforcement: the deterministic leak test runs in the release-tier `ui_browser` lane;
-commit-tier coverage is the advisory CHECKLISTS item 9 `perf_lifecycle`. The class is
-closed deterministically for the instrumented surfaces and advisorily for future ones.
+Enforcement: the deterministic leak test covers the instrumented surfaces in the
+release-tier `ui_browser` lane; the advisory CHECKLISTS item 9 `perf_lifecycle` covers
+commit tier and future surfaces.
 
 ### Invariant: Embedded surfaces declare geometry and refresh semantics
 

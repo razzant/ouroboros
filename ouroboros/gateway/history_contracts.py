@@ -68,6 +68,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     history_position: ChatHistoryPosition
     markdown: bool
     source: str
+    spoken: Dict[str, Any]  # live-call item identity, playback position and generated/played/interrupted status
     sender_label: str
     sender_session_id: str
     client_message_id: str  # correlation id; owner rows have role=user, quiz publications also use it

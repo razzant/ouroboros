@@ -1,0 +1,616 @@
+/* Live calls: Talk in the Send capsule, the live capsule in the text row's place, the sheet when
+   Talk cannot work, caption bubbles, the shell's "In call" mark, and visual B (the living capsule)
+   last, as one block another visual replaces. Surfaces, shadows, tones, radii, type and motion are
+   the design bible's tokens (DESIGN.md "Airy dopamine", ui.css "One control, three tones"); the
+   call adds only what is its own: the two voices' light, the one light in the interface that
+   answers sound, on the capsule and never the room. The capsule writes its state on the composer
+   (`.chat-input-wrap[data-call…]`), the light writes `--call-mic` and `--call-out` there. */
+
+:root {
+    --call-amber-rgb: 245, 158, 11;
+    --call-touch-target: 44px;
+    --call-words-leading: 1.2;
+}
+
+:root[data-theme="light"] {
+    /* Amber that a light page can carry as a line (5:1 on white). */
+    --call-amber-rgb: 180, 83, 9;
+}
+
+/* ---- Talk ---------------------------------------------------------------------------------- */
+
+/* Talk and Send keep one width, measured from Talk, so typing the first letter moves nothing. */
+.chat-send-inline[data-call-entry] {
+    min-width: var(--call-entry-width, 0px);
+    justify-content: center;
+}
+
+.chat-send-inline[data-call-entry="talk"] {
+    gap: 6px;
+}
+
+/* ---- The live capsule ------------------------------------------------------------------------ */
+
+.chat-input-wrap[data-call] {
+    isolation: isolate;
+}
+
+.chat-input-wrap[data-call] .chat-text-row {
+    position: relative;
+    container: call-row / inline-size;
+}
+
+/* Focus inside the capsule is a button's own ring, not the text field's: the composer keeps floating. */
+.chat-input-wrap[data-call]:not([data-call-view="keyboard"]) .chat-text-row:focus-within {
+    border-color: transparent;
+    background: var(--surface-float);
+    box-shadow: var(--elev-float);
+}
+
+.chat-input-wrap[data-call-view="voice"] .chat-text-row > :not(.call-capsule):not(.call-rim),
+.chat-input-wrap[data-call-view="sheet"] .chat-text-row > :not(.call-capsule):not(.call-rim) {
+    display: none;
+}
+
+.call-capsule {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: var(--composer-control-height);
+}
+
+.call-capsule[hidden],
+.call-capsule [hidden] {
+    display: none;
+}
+
+.call-visual {
+    position: relative;
+    display: flex;
+    flex: none;
+}
+
+/* Keyboard: the field returns; the visual stays docked and leads back to the call's controls. */
+.chat-input-wrap[data-call-view="keyboard"] .call-capsule {
+    flex: 0 0 auto;
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .call-words,
+.chat-input-wrap[data-call-view="keyboard"] .call-buttons,
+.call-visual-return {
+    display: none;
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .call-visual-return {
+    display: block;
+    position: absolute;
+    inset: -6px -4px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .call-visual-return:hover {
+    background: var(--tone-quiet-hover);
+}
+
+.call-words {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1 1 auto;
+    min-width: 0;
+    line-height: var(--call-words-leading);
+}
+
+.call-state {
+    font-size: var(--type-body);
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.call-sub,
+.call-small {
+    font-size: var(--type-meta);
+    color: var(--text-meta);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.call-small {
+    color: var(--text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chat-input-wrap[data-call-tone="error"] .call-state {
+    color: var(--status-warn-fg);
+}
+
+.call-buttons {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: none;
+}
+
+/* The call's controls are the bible's capsules: standing on the rest shadow in one of three tones, a state
+   changes their colour, never their height. Mute and Keyboard are neutral, Mute switched on takes the crimson
+   tone; End is the red tone; a sheet's next step is the primary action's crimson tone, Close neutral. */
+.call-btn {
+    position: relative;
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--composer-control-height);
+    min-width: var(--composer-control-height);
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: var(--surface-capsule);
+    box-shadow: var(--elev-rest);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--composer-control-font-size);
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.call-btn:hover {
+    background: var(--surface-capsule-hover);
+}
+
+.call-btn:active,
+.call-mark-end:active {
+    filter: var(--press);
+}
+
+.call-btn:focus-visible,
+.call-visual-return:focus-visible,
+.call-mark-open:focus-visible,
+.call-mark-end:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
+}
+
+.call-mute[aria-pressed="true"],
+.call-action {
+    background: var(--tone-crimson);
+    color: var(--tone-crimson-ink);
+}
+
+.call-mute[aria-pressed="true"]:hover,
+.call-action:hover {
+    background: var(--tone-crimson-hover);
+}
+
+.call-keyboard {
+    width: var(--composer-control-height);
+    padding: 0;
+    color: var(--text-meta);
+}
+
+.call-end {
+    padding: 0 var(--space-4);
+    background: var(--tone-red);
+    color: var(--status-error-fg);
+}
+
+.call-end:hover {
+    background: var(--tone-red-hover);
+}
+
+/* A finger gets a 44 px target; the capsule keeps its 32 px controls and its footprint. */
+@media (pointer: coarse) {
+    .call-btn::after,
+    .call-mark-open::after,
+    .call-mark-end::after {
+        content: '';
+        position: absolute;
+        inset: calc((var(--composer-control-height) - var(--call-touch-target)) / 2);
+    }
+
+    .call-mark-open,
+    .call-mark-end {
+        position: relative;
+    }
+}
+
+/* A phone-wide capsule narrows End; Keyboard stays, the only way to type during a call. The state
+   line ellipsizes, so its words never push a control out. */
+@container call-row (max-width: 360px) {
+    .call-end {
+        padding: 0 var(--space-3);
+    }
+}
+
+/* ---- The sheet: how a call ended, or why Talk cannot work here ------------------------------ */
+
+/* It carries a sentence, so it is a card with the object radius; a failed call's card takes the amber tint. */
+.chat-input-wrap[data-call-view="sheet"] .chat-text-row {
+    border-radius: var(--radius-object);
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-capsule {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-words {
+    flex: 1 1 12rem;
+    padding: var(--space-1) 0 var(--space-1) var(--space-2);
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-state,
+.chat-input-wrap[data-call-view="sheet"] .call-sub {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-buttons {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-left: auto;
+}
+
+/* A problem's sheet keeps the call's still amber line; a fact or a surface note needs no visual. */
+.chat-input-wrap[data-call-view="sheet"]:not([data-call-tone="error"]) .call-visual {
+    display: none;
+}
+
+.chat-input-wrap[data-call-tone="error"] .chat-text-row {
+    background: linear-gradient(var(--tone-amber), var(--tone-amber)), var(--surface-float);
+}
+
+/* ---- Captions: ordinary bubbles of the room while they are spoken --------------------------- */
+
+.chat-bubble.call-caption[data-call-caption="streaming"] .message::after {
+    content: '▍';
+    margin-left: 2px;
+    opacity: 0.45;
+}
+
+/* ---- The shell's "In call" mark ---------------------------------------------------------------- */
+
+/* It floats over moving content, so it is the float surface on the float shadow, glass in the dark room. */
+.call-mark {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + var(--space-2));
+    left: 50%;
+    z-index: 75; /* above the phone navigation drawer (70), so End stays reachable while it is open */
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    max-width: calc(100vw - 2 * var(--space-4));
+    padding: var(--space-1);
+    border-radius: var(--pill-radius);
+    background: var(--surface-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
+    box-shadow: var(--elev-float);
+    transform: translateX(-50%);
+}
+
+.call-mark[hidden],
+.call-mark [hidden] {
+    display: none;
+}
+
+.call-mark-label {
+    white-space: nowrap;
+}
+
+/* The way back to the room is a quiet control: no body, a fill only under the pointer. */
+.call-mark-open {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    height: var(--chrome-control-h);
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-body);
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.call-mark-open:hover {
+    background: var(--tone-quiet-hover);
+}
+
+.call-mark .call-entry-mark {
+    color: var(--tone-crimson-ink);
+}
+
+.call-mark-room {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+}
+
+.call-mark-room::before {
+    content: '·';
+    margin-right: var(--space-2);
+    color: var(--text-meta);
+}
+
+.call-mark-time {
+    font-size: var(--type-meta);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-meta);
+}
+
+.call-mark-end {
+    flex: none;
+    height: var(--chrome-control-h);
+    padding: 0 var(--space-4);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: var(--tone-red);
+    box-shadow: var(--elev-rest);
+    color: var(--status-error-fg);
+    font: inherit;
+    font-size: var(--composer-control-font-size);
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.call-mark-end:hover {
+    background: var(--tone-red-hover);
+}
+
+/* Where the navigation column is on screen, the mark sits at its foot, over no page's header:
+   "In call" and the time on one line, the room below it. */
+@media (min-width: 981px) {
+    .call-mark {
+        top: auto;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + var(--space-5) + var(--space-3));
+        left: var(--space-3);
+        width: calc(var(--sidebar-width) - 2 * var(--space-3));
+        padding: var(--space-1);
+        border-radius: var(--radius-object);
+        transform: none;
+    }
+
+    .call-mark-open {
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        grid-template-areas: "sign label time" "sign room room";
+        align-items: center;
+        column-gap: var(--space-2);
+        height: auto;
+        padding: var(--space-1) var(--space-2);
+        border-radius: var(--radius-inner);
+        text-align: left;
+    }
+
+    .call-mark-open .call-entry-mark { grid-area: sign; }
+    .call-mark-label { grid-area: label; }
+    .call-mark-time { grid-area: time; }
+
+    .call-mark-room {
+        grid-area: room;
+        font-size: var(--type-meta);
+        font-weight: 500;
+        color: var(--text-meta);
+    }
+
+    .call-mark-room::before {
+        content: none;
+    }
+}
+
+/* ==== Visual B: the living capsule ============================================================== */
+
+:root {
+    /* The two voices, luminous in the dark room: the owner's blue family and Ouroboros's crimson. */
+    --call-owner-rgb: 106, 166, 255;
+    --call-owner-2-rgb: 56, 189, 248;
+    --call-ouro-rgb: 240, 86, 106;
+    --call-ouro-2-rgb: 255, 122, 154;
+    --call-ouro-hi-rgb: 255, 194, 201;
+    /* The light that travels round the capsule while Ouroboros prepares or thinks: white light in the
+       dark room; on white a neutral streak would read as a smudge, so there it is Ouroboros's crimson. */
+    --call-trace-rgb: var(--neutral-rgb);
+    /* How bright a voice may make the lit area: light is additive on dark, a stain on white. */
+    --call-glow: 1;
+    /* What the wave strokes with, read once per theme by the visual. */
+    --call-wave-owner: rgb(var(--call-owner-rgb));
+    --call-wave-ouroboros: rgb(var(--call-ouro-rgb));
+    --call-wave-idle: rgba(var(--neutral-rgb), 0.55);
+    --call-wave-error: rgb(var(--call-amber-rgb));
+}
+
+:root[data-theme="light"] {
+    --call-owner-rgb: 47, 107, 214;
+    --call-owner-2-rgb: 14, 165, 233;
+    --call-ouro-rgb: 201, 53, 69;
+    --call-ouro-2-rgb: 224, 68, 95;
+    --call-ouro-hi-rgb: 255, 154, 166;
+    --call-trace-rgb: 201, 53, 69;
+    --call-glow: 0.55;
+    --call-wave-idle: rgba(var(--neutral-rgb), 0.4);
+}
+
+.call-wave {
+    display: block;
+    flex: none;
+    width: 64px;
+    height: 30px;
+    margin-left: var(--space-1);
+}
+
+/* The rim: a light running along the capsule's own edge, in the speaker's colour family; the
+   layers cross-fade by opacity, never through a third colour. It takes the edge's place inside
+   the row's box (the border steps aside), so the light never widens the composer. */
+.chat-input-wrap[data-call="live"] .chat-text-row {
+    border-color: transparent;
+}
+
+.call-rim {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+    pointer-events: none;
+}
+
+.chat-input-wrap:not([data-call="live"]) .call-rim {
+    display: none;
+}
+
+.call-rim i {
+    position: absolute;
+    inset: 0;
+    display: block;
+    border-radius: inherit;
+    padding: calc(1.4px + var(--call-rim-level, 0) * 2px);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+}
+
+/* Each layer owns its opacity (a shared `i` rule would outrank the voices' own). */
+.call-rim-trace {
+    background: conic-gradient(from var(--call-spin, 0deg), rgba(var(--call-trace-rgb), 0.06) 0deg,
+        rgba(var(--call-trace-rgb), 0.06) 250deg, rgba(var(--call-trace-rgb), 0.95) 345deg, rgba(var(--call-trace-rgb), 0.06) 360deg);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.call-rim-listen {
+    background: conic-gradient(from var(--call-spin, 0deg), rgba(var(--neutral-rgb), 0.12), rgba(var(--neutral-rgb), 0.45),
+        rgba(var(--neutral-rgb), 0.12), rgba(var(--neutral-rgb), 0.32), rgba(var(--neutral-rgb), 0.12));
+    opacity: 0;
+}
+
+.call-rim-owner {
+    background: conic-gradient(from var(--call-spin, 0deg), rgb(var(--call-owner-rgb)), rgb(var(--call-owner-2-rgb)),
+        rgba(var(--call-owner-rgb), 0.3), rgb(var(--call-owner-2-rgb)), rgb(var(--call-owner-rgb)));
+    opacity: min(1, calc(var(--call-mic, 0) * 1.1));
+}
+
+.call-rim-ouroboros {
+    background: conic-gradient(from var(--call-spin, 0deg), rgb(var(--call-ouro-rgb)), rgb(var(--call-ouro-2-rgb)),
+        rgba(var(--call-ouro-rgb), 0.3), rgb(var(--call-ouro-hi-rgb)), rgb(var(--call-ouro-rgb)));
+    opacity: min(1, calc(var(--call-out, 0) * 1.1));
+}
+
+.chat-input-wrap[data-call-light="trace"] .call-rim-trace {
+    opacity: 1;
+}
+
+.chat-input-wrap[data-call-light="listen"] .call-rim-listen {
+    opacity: calc((1 - var(--call-mic, 0)) * 0.9);
+}
+
+.chat-input-wrap[data-call-light="think"] .call-rim-ouroboros {
+    opacity: max(0.7, min(1, calc(var(--call-out, 0) * 1.1)));
+}
+
+/* Whose voice may light it: while Ouroboros is heard, the owner's light (or an echo) stays out. */
+.chat-input-wrap:not([data-call-voice="owner"]) .call-rim-owner,
+.chat-input-wrap:not([data-call-voice="owner"]) .call-aura-owner {
+    opacity: 0;
+}
+
+/* The glow behind the frosted glass: the capsule is lit from within and the light spills just
+   around it. Brightness stays in a narrow band; the voice mostly widens the light. */
+.call-aura {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: -1;
+    height: var(--call-row-height, 50px);
+    border-radius: var(--pill-radius);
+    pointer-events: none;
+}
+
+.chat-input-wrap:not([data-call="live"]) .call-aura {
+    display: none;
+}
+
+.call-aura i {
+    position: absolute;
+    inset: 2px 6px;
+    display: block;
+    border-radius: inherit;
+    filter: blur(16px);
+}
+
+.call-aura-owner {
+    background: linear-gradient(90deg, rgb(var(--call-owner-rgb)), rgb(var(--call-owner-2-rgb)) 50%, rgb(var(--call-owner-rgb)));
+    opacity: calc(var(--call-mic, 0) * 0.75 * var(--call-glow));
+    transform: scaleY(calc(1 + var(--call-mic, 0) * 0.5));
+}
+
+.call-aura-ouroboros {
+    background: linear-gradient(90deg, rgb(var(--call-ouro-rgb)), rgb(var(--call-ouro-hi-rgb)) 50%, rgb(var(--call-ouro-rgb)));
+    opacity: calc(var(--call-out, 0) * 0.75 * var(--call-glow));
+    transform: scaleY(calc(1 + var(--call-out, 0) * 0.5));
+}
+
+.chat-input-wrap[data-call-light="think"] .call-aura-ouroboros {
+    opacity: calc(max(var(--call-out, 0) * 0.75, 0.3) * var(--call-glow));
+}
+
+/* Talk's sign, and the shell mark's: five still bars of a voice. */
+.call-entry-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+    height: 14px;
+}
+
+.call-entry-mark i {
+    display: block;
+    width: 2.5px;
+    height: 5px;
+    border-radius: 2px;
+    background: currentColor;
+}
+
+.call-entry-mark i:nth-child(2),
+.call-entry-mark i:nth-child(4) {
+    height: 9px;
+}
+
+.call-entry-mark i:nth-child(3) {
+    height: 13px;
+}
+
+/* Reduced motion: the light holds still and only changes whose colour it is, as fades of at most
+   200 ms; the visual draws a still wave and the words say the rest. */
+@media (prefers-reduced-motion: reduce) {
+    .call-aura i {
+        transform: none;
+    }
+
+    .call-rim i,
+    .call-aura i {
+        transition: opacity 0.2s ease;
+    }
+}

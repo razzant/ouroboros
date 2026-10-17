@@ -61,6 +61,7 @@ from ouroboros.launcher_onboarding import (
 )
 from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env,
                                            request_tray_cleanup, stop_tray_before_exit)
+from ouroboros.desktop_media import attach_media_permissions, display_ready as _display_ready
 from ouroboros.launcher_server_reaper import (
     reap_same_install_strays as _reap_same_install_strays_impl,
 )
@@ -984,28 +985,6 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     )
 
 
-def _display_ready(backend) -> tuple[bool, str]:
-    """Linux: does a usable DISPLAY actually exist for the chosen backend?
-
-    `initialize()` only proves the backend MODULE imports (the first real
-    display access is `BrowserView.__init__` → `Gdk.Display.get_default()`
-    inside webview.start()), so a box WITH gi bindings but WITHOUT a display
-    passed the import probe and crashed. The session-env check runs BEFORE
-    initialize() in _webview_ready; here the chosen backend is refined: GTK's
-    display handle answers None on a dead display, never a raise. DISCLOSED
-    RESIDUAL: Qt is judged on the env alone (probing Qt constructs a
-    QGuiApplication, which ABORTS). Full rationale: ARCHITECTURE.
-    """
-    if str(getattr(backend, "__name__", "")).endswith(".gtk"):
-        try:
-            from gi.repository import Gdk
-        except Exception as exc:  # gi vanished between import and probe
-            return False, f"GTK backend without gi.repository.Gdk: {type(exc).__name__}: {exc}"
-        if Gdk.Display.get_default() is None:
-            return False, "GTK backend has no default display (DISPLAY/WAYLAND_DISPLAY is unusable)"
-    return True, ""
-
-
 def _webview_ready() -> tuple[bool, str]:
     """Probe whether pywebview can actually run a GUI window here.
 
@@ -1574,7 +1553,8 @@ def main(argv=()):
         background_color="#0d0b0f",
         text_select=True, hidden=background.start_hidden(options.launch_intent),
     )
-    _webview_window = background.attach(window)  # Persist cookies and website data (ouroboros.theme); rebuild/limits: ARCHITECTURE §3.
+    # Persist cookies and website data (ouroboros.theme); rebuild/limits: ARCHITECTURE §3.
+    _webview_window = attach_media_permissions(background.attach(window), url)
     webview.start(func=background.run, debug=False, private_mode=False,
                   menu=setup_recovery_menu(window, lambda: _generation_port))
 

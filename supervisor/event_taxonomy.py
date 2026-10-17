@@ -114,7 +114,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "external_wait_lease": _handled(
         "supervisor.events_worker_reports", "ouroboros/delegate_progress.py", idle_input=True),
     "llm_usage": _handled(
-        "supervisor.events_budget", "ouroboros/agent.py",
+        "supervisor.events_budget", "ouroboros/deep_self_review.py",
         "ouroboros/pricing.py", "ouroboros/tools/search.py", "ouroboros/tools/vision.py",
         "ouroboros/tools/skill_publish.py", idle_input=True, lane=TELEMETRY_LANE,
         note="the producer's per-task endpoint stamps lineage and chat by value; "

@@ -53,6 +53,31 @@ def test_every_emitted_note_declares_its_voice_explicitly():
     assert fallback["progress_meta"]["toast_once"] == "lane"
 
 
+def test_call_narration_is_a_durable_chat_row(tmp_path, monkeypatch):
+    agent, events = _agent()
+    spoken = {"call_id": "call", "item_id": "item", "status": "interrupted", "played_ms": 2000}
+    _emit(agent, "Spoken words", narration=True, _progress_meta_override={"spoken": spoken})
+    frame = events.get_nowait()
+    assert frame["is_progress"] is False
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(message_bus, "_BRIDGE", message_bus.LocalChatBridge())
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_: None)
+    delivery = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, send_with_budget=message_bus.send_with_budget,
+                               append_jsonl=lambda *_: pytest.fail("delivery raised"))
+    events_chat_delivery._handle_send_message(frame, delivery)
+    rows = [json.loads(line) for line in (tmp_path / "logs/chat.jsonl").read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["spoken"] == spoken and rows[0]["narration"] is True
+    assert rows[0]["direction"] == "out"
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "10"})))
+    replay = json.loads(response.body)["messages"]
+    assert any(row.get("spoken") == spoken for row in replay)
+    _emit(agent, "Ordinary text narration", narration=True)
+    assert events.get_nowait()["is_progress"] is True
+    _emit(agent, "Host note", _progress_meta_override={"spoken": spoken})
+    assert events.get_nowait()["is_progress"] is True
+
+
 def test_the_tool_context_abi_stays_a_host_voice():
     """``ctx.emit_progress_fn`` takes a single positional argument, so every tool
     note keeps the default without the ABI having to know the fact exists."""

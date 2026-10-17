@@ -84,7 +84,7 @@ safety, budget, transport and evidence expiry. A missing channel is a capability
 host-attested owner-origin root a Main voice; no chat number, Main's included, is owner
 proof.
 
-`prompts/SYSTEM.md` is tier-0 for every Main and task profile in both context modes and
+`prompts/SYSTEM.md` is tier-0 for every Main and task profile in every context mode and
 competes with the task for context. It carries identity and tone, the decision loop,
 cross-tool policy, prohibitions and safety invariants stated once, and the memory
 contract's resident rule: active summaries stay in the index, archived sources remain
@@ -124,9 +124,7 @@ review-only.
 ### Documentation contract
 
 `docs/ARCHITECTURE.md` is the present-tense map of the body in BIBLE P6's three layers:
-what exists and where, how it flows, why. `docs/DEVELOPMENT.md` is how the body is
-changed: one rule per change class, each naming its enforcing test, gate or CI lane or
-saying review-only. ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` are pointed
+what exists and where, how it flows, why. ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` are pointed
 to, never restated; the ARCHITECTURE settings and endpoint tables are test-checked
 registries of those owners, not second authorities.
 
@@ -178,8 +176,7 @@ Local surfaces never block: the edit
 tools, `plan_task`, the free `preflight_review(deterministic_only=True)` diagnostic
 and `codebase_health` report the running balance as a fact. Contribution is measured
 against the displayed merge-base of the cached official development ref; an unknown
-base stays unknown, and no network refresh is implied. Free diagnostics label book
-bytes as worktree separately from the selected release-metadata source.
+base stays unknown, and no network refresh is implied.
 Equivalent historical prose stays review-only under CHECKLISTS item 5.
 
 ### Current state first (ARCHITECTURE invariant 10)
@@ -323,11 +320,12 @@ probes live in cited docstrings or linked contracts.
 | `ouroboros/reasoning_artifacts.py::SIGNED_PORTABLE` and its sealed classifier | Which families' sealed reasoning artifacts survive a same-model cross-provider replay; readable artifacts are portable by shape | Short vouched roster plus a shape-first classifier that fails closed on unreadable artifacts; extend only by a fresh cross-provider replay probe of the exact family | False positive 400s the replayed turn (strip-and-retry is the net); false negative pins a portable transcript to one endpoint |
 | `ouroboros/provider_models.py::_ANTHROPIC_MODEL_ALIASES` / `migrate_model_value` | Direct-provider id spelling compatibility | Shipped mapping; a catalog confirms a current id, not whether a saved spelling was intentional; retire an alias only through a documented window | Removing an alias breaks upgrades; guessing one silently reroutes |
 | `ouroboros/server_runtime.py::_SHIPPED_LEGACY_HEAVY_DEFAULTS`, `_SCOPE_REVIEW_PRIOR_DEFAULTS`, `_normalize_direct_scope_review_model` | Only the retired Heavy/scope keys classify exact former Ouroboros defaults; active slots keep saved ids; no retired-model list exists | Release history, under regression tests; a catalog shows availability, never intent | Over-broad classification overwrites an owner's choice; a retired model fails loudly at first call |
-| `ouroboros/pricing.py::get_pricing`; `ouroboros/llm_pricing.py::fetch_openrouter_pricing` / `fetch_cloudru_pricing` | Exact-route model tariffs | Live catalog fetch with nullable unknowns; provider-settled usage wins; no runtime tariff table | A static price looks authoritative after becoming wrong and corrupts admission |
+| `ouroboros/pricing.py::get_pricing`; `ouroboros/llm_pricing.py::fetch_openrouter_pricing` / `fetch_cloudru_pricing`; `ouroboros/pricing_catalog.py` (direct routes) | Exact-route model tariffs | Live catalog fetch with nullable unknowns; provider-settled usage wins; no runtime tariff table | A static price looks authoritative after becoming wrong and corrupts admission |
 | `ouroboros/llm_claudexor.py::cache_key_for_model` | Codex prefix reuse across conversations needs one `prompt_cache_key` + `session_id`; per-conversation turn states stay valid under it | Measurement in the docstring; re-measure cache reads and turn state across two conversations before changing the scope | Stale positive pays cold prefixes or breaks turn state |
 | `ouroboros/llm_openai_compatible.py` DeepSeek send projection | Thinking accepts only `auto`/`none` tool choice; required and named calls return 400 | Probe beside the projection and its transport tests; re-probe the exact endpoint when the dialect changes | Removed early, forced calls break; kept after a change, supported thinking is suppressed |
 | `ouroboros/provider_models.py::ZAI_REASONING_EFFORT_ALIASES` (Z.ai send projection) | GLM-5.3 accepts only `low`/`high`/`max`, serves an absent tier at max, cannot disable thinking, takes forced tool_choice with thinking on; GLM-5.2 accepts the wider scale | Probe beside the projection and its tests; re-probe when the enum or a GLM release changes | Dropping the projection bills every call at max; a stale one rewrites tiers the provider accepts |
 | `ouroboros/provider_models.py::PROVIDER_TOOL_SCHEMA_LIMITS` | Tool-schema ceilings per execution provider; an absent provider declares no ceiling | One bounded send of ceiling + 1 schemas to the exact route (the provider canaries); change a number only on a documented limit or such a send | Too high, requests above the ceiling are refused; too low or invented, overflow schemas leave the request needlessly (still loadable) |
+| `ouroboros/live_call_route.py::REALTIME_ROUTE_FACTS` | Realtime engine route facts: input limit, documented output maximum, speech-sized reply allowance and session cap, per exact engine model | Each fact carries its documentation URL and read date; recorded as asserted evidence, never as provider-confirmed metadata; the output maximum is evidence, never the fit's reserve; an unlisted model has no fact and the call fits as for any route without capacity evidence; re-read the cited pages when a model is added or a limit changes | A stale limit fits too small or too large, and a setup the provider refuses ends the call with its words; a stale session cap reconnects early or lets the provider end the session |
 
 ### Provider Independence
 
@@ -353,10 +351,7 @@ streamed wire recorded (redacted) into `tests/fixtures/llm_wire/` and replayed, 
 a hand-written fixture is not evidence of a dialect.
 
 Local-only installs keep their local route; an unauthored slot is proposed blank,
-explicit owner values stay. Scope runs in every context-size mode; window
-evidence governs send sizing, not review authority. Reading coverage is diagnostic
-under BIBLE P3: missing observations do not discard a received verdict or remove a
-responding reviewer from quorum. Current model ids and defaults belong in code and
+explicit owner values stay. Current model ids and defaults belong in code and
 config, not here: a new active consumer reads
 `provider_models.ACTIVE_MODEL_SETTING_KEYS`; `LEGACY_MODEL_SETTING_KEYS` is migration
 only, and `OUROBOROS_MODEL_HEAVY` with its paired `USE_LOCAL_HEAVY` only seeds a

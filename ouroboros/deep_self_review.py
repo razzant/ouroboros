@@ -824,6 +824,70 @@ def _run_retrieving_review(
     return _provenance_header(delivery, model, usage, task_facts["memory"], coverage, human, incomplete=incomplete) + text, usage
 
 
+def drive_deep_self_review(
+    agent: Any, ctx: Any, task: Dict[str, Any], drive_logs: pathlib.Path,
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """The agent's deep-self-review driver: the loop's ``(text, usage, llm_trace)``
+    triple without a tool loop.
+
+    Deep self-review bypasses the tool loop: ``review_change(subject=system,
+    surface=system)`` runs on the row the request named, else Main (decision
+    3A). It writes ``memory/deep_review.md`` itself and keeps the last report
+    on failure, so an error here is the task result plus a typed event, never
+    the durable memory of the review. The agent's own rails stay in charge:
+    ``BudgetExceeded`` propagates to its budget-pause checkpoint, usage is
+    queued on its pending events, and progress goes through its emitter.
+    """
+    import traceback
+
+    from ouroboros.utils import append_jsonl, truncate_for_log
+
+    try:
+        from ouroboros.tools.review_change import ReviewChangeArgumentError, run_system_review
+        agent._emit_progress("Starting deep self-review... This may take several minutes.")
+        try:
+            outcome = run_system_review(
+                ctx, reviewer=str(task.get("reviewer") or ""), llm=agent.llm,
+                emit_progress=agent._emit_progress,
+                deadline_at=str((agent._current_task_metadata or {}).get("deadline_at") or ""),
+            )
+            text, usage = str(outcome.get("report") or ""), dict(outcome.get("usage") or {})
+            if outcome.get("record_id"):
+                text += f"\n\nReview record: {outcome['record_id']} (surface=system)"
+        except ReviewChangeArgumentError as exc:
+            text = deep_review_unavailable_text(str(exc))
+            usage = {"execution_status": "infra_failed", "reason_code": "deep_self_review_unavailable"}
+        if usage:
+            agent._pending_events.append({
+                "type": "llm_usage",
+                "ts": utc_now_iso(),
+                "task_id": str(task.get("id") or ""),
+                "model": str(usage.get("resolved_model") or ""),
+                "usage": usage,
+                "category": "deep_self_review",
+            })
+        if str(usage.get("execution_status") or "") == "infra_failed":
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "task_error",
+                "task_id": task.get("id"), "error": text,
+                "reason_code": str(usage.get("reason_code") or ""),
+            })
+        return text, usage, {"reasoning_notes": ["deep_self_review"], "tool_calls": []}
+    except BudgetExceeded:
+        raise
+    except Exception as e:
+        tb = traceback.format_exc()
+        log.error("Deep self-review failed for task %s", task.get("id"), exc_info=e)
+        append_jsonl(drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(), "type": "task_error",
+            "task_id": task.get("id"), "error": repr(e),
+            "traceback": truncate_for_log(tb, 2000),
+        })
+        text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
+        usage = {"execution_status": "infra_failed", "reason_code": "deep_self_review_error"}
+        return text, usage, {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
+
+
 def run_deep_self_review(
     repo_dir: pathlib.Path,
     drive_root: pathlib.Path,

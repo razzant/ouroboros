@@ -156,6 +156,23 @@ test(`importing the onboarding wizard renders the '${step}' step without throwin
 });
 }
 
+test('a Google AI key alone opens live calls only, so the access step still asks for a text model source', async () => {
+    const accountsIndex = BOOTSTRAP.stepOrder.indexOf('accounts');
+    const startingWith = (keys) => ({
+        ...BOOTSTRAP,
+        stepOrder: [...BOOTSTRAP.stepOrder.slice(accountsIndex), ...BOOTSTRAP.stepOrder.slice(0, accountsIndex)],
+        initialState: { ...BOOTSTRAP.initialState, ...keys },
+    });
+    const nextDisabled = /id="next-btn" type="button" disabled/;
+    await withWizard(startingWith({ googleKey: 'google-live-key-not-a-secret' }), 'google-only', ({ doc }) => {
+        assert.match(doc.getElementById('root').innerHTML, nextDisabled);
+    });
+    await withWizard(startingWith({ googleKey: 'google-live-key-not-a-secret', openaiKey: 'openai-key-not-a-secret' }),
+        'google-beside-openai', ({ doc }) => {
+            assert.doesNotMatch(doc.getElementById('root').innerHTML, nextDisabled);
+        });
+});
+
 test('the setup contract renders Cyber Pro beside the independent Blocking choice', async () => {
     const reviewIndex = BOOTSTRAP.stepOrder.indexOf('review_mode');
     const bootstrap = {

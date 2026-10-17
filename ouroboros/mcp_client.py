@@ -1105,7 +1105,7 @@ class MCPManager:
         Lets the tool registry surface a capability-omission when MCP is enabled and
         configured but a server returned no tools without raising (unreachable / slow
         / auth-failed) — otherwise the absence is silent and reads to the user as
-        "the agent doesn't see my MCP server" (D1)."""
+        "the agent doesn't see my MCP server" (D1). A server never attempted says so."""
         with self._lock:
             if not self._enabled:
                 return []
@@ -1116,7 +1116,8 @@ class MCPManager:
                 if not cfg.enabled:
                     continue
                 if not runtime.tools:
-                    out.append({"id": cfg.id, "last_error": _redact_error_text(runtime.last_error or "", cfg)})
+                    note = runtime.last_error or ("" if runtime.last_attempted else "not listed yet")
+                    out.append({"id": cfg.id, "last_error": _redact_error_text(note, cfg)})
             return out
 
     def list_tools_for_registry(self) -> List[Dict[str, Any]]:
@@ -1358,9 +1359,12 @@ class MCPManager:
             outcomes[server_id] = self.refresh_server(server_id, authority=authority)
         return {"refreshed": outcomes}
 
-    def refresh_all_background(self, *, reason: str = "settings") -> None:
+    def refresh_all_background(self, *, reason: str = "settings", authority: Any = None,
+                               unlisted_only: bool = False) -> None:
+        """``refresh_all`` on a daemon thread, one at a time; with nothing to list, none starts."""
         with self._lock:
-            should_start = self._enabled and any(rt.config.enabled for rt in self._servers.values())
+            should_start = self._enabled and any(rt.config.enabled and not (unlisted_only and rt.last_attempted)
+                                                 for rt in self._servers.values())
             if not should_start or self._refresh_running:
                 return
             self._refresh_running = True
@@ -1368,7 +1372,7 @@ class MCPManager:
         def _runner() -> None:
             try:
                 log.info("Refreshing MCP tools in background (%s)", reason)
-                self.refresh_all()
+                self.refresh_all(authority=authority, unlisted_only=unlisted_only)
             except Exception:
                 log.warning("Background MCP refresh failed", exc_info=True)
             finally:
@@ -1560,8 +1564,9 @@ def reconfigure_from_settings(settings: Dict[str, Any]) -> None:
 def ensure_configured_from_settings(*, refresh: bool = False, authority: Any = None) -> None:
     """Configure this process's manager; workers have separate Python heaps.
 
-    A refreshing read lists changed settings, and any server a refused
-    ``authority`` (see ``refresh_server``) left never attempted.
+    A refreshing read (a task's schema read) never waits for a listing: it starts the
+    background listing of every server after a settings change, else of those never
+    attempted (one a refused ``authority``, see ``refresh_server``, left unlisted).
     """
     from ouroboros.config import SETTINGS_PATH, load_settings
 
@@ -1576,7 +1581,7 @@ def ensure_configured_from_settings(*, refresh: bool = False, authority: Any = N
     if not (manager.is_configured() and manager.settings_mtime_ns() == mtime_ns):
         changed = manager.reconfigure(load_settings(), settings_mtime_ns=mtime_ns)
     if refresh:
-        manager.refresh_all(authority=authority, unlisted_only=not changed)
+        manager.refresh_all_background(reason="discovery", authority=authority, unlisted_only=not changed)
 
 
 def refresh_all_background(*, reason: str = "settings") -> None:

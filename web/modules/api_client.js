@@ -332,6 +332,17 @@ export function updateStrategyForPlan(plan = {}) {
 }
 
 export const apiClient = {
+    /** Admit one room call; a retry of admission keeps its client_message_id. */
+    openCall: (payload) => jsonPost('/api/call/open', payload, { rejectOkFalse: true }),
+    /** Call PCM has its own socket; session cookies follow the same-origin URL. */
+    callSocket: (path, { location = globalThis.location, WebSocket = globalThis.WebSocket } = {}) => {
+        const url = new URL(path, location.href);
+        if (url.origin !== location.origin || !/^\/ws\/call\/[^/]+$/.test(url.pathname)
+            || url.username || url.password || url.search || url.hash)
+            throw new Error('The server returned an invalid call socket address.');
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        return new WebSocket(url.href);
+    },
     harnessMaintenanceInventory,
     startHarnessMaintenance,
     harnessMaintenanceOperation,

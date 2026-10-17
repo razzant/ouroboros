@@ -1,0 +1,4470 @@
+{
+  "header": {
+    "provenance": "recorded_live",
+    "model": "gemini-3.8-live",
+    "recorded_on": "2026-10-17",
+    "recorder": "devtools/live_call_probe.py",
+    "notes": "Audio is a two-sample stand-in beside its recorded length; resume handles are labels; the setup's instruction is its length and digest."
+  },
+  "events": [
+    {
+      "direction": "client",
+      "message": {
+        "setup": {
+          "model": "models/gemini-3.8-live",
+          "systemInstruction": {
+            "recorded_chars": 108723,
+            "sha256": "b9f1e3ef3097aba709b95fc402d0981356ebf7738c439417683539ec9d022cfb"
+          },
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "compact_context",
+                  "description": "Reclaim complete-input context with an authored working_note (inspect optional). Main also supports restore_unit_refs alone or helper summaries without a note. Native review runs no helper and does not apply schema_names, review_notes or review_transfers. Its inspect response reports window evidence, serialized characters and previous-request input, not current free tokens. Authored views address complete tool units, earlier records, your completed replies and host prose (inspect lists kind/eligibility); the owner's words and your typed owner-directed dialogue, the assignment and the system view stay whole. Earlier notes stay in place unless selected for replacement; select several to merge them. The note occupies the first replaced unit. Rewriting can lose prefix-cache reuse from the earliest change: fold for space/clarity in useful batches, with a note shorter than its sources. A selected older assistant tool call and all of its contiguous matching results stay atomic; Ouroboros checkpoints their exact actor-visible bytes before replacement, with checkpoint/CAS provenance. Raw evidence remains retrievable (restore_unit_refs; an emergency record lists its checkpoint once and its member units separately).",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "inspect": {
+                        "type": "boolean",
+                        "description": "Return and pin the last observed view revision, complete unit IDs, source references and current schema names without changing context."
+                      },
+                      "expected_view_revision": {
+                        "type": "string",
+                        "description": "Optional view_revision from inspect, checked exactly. Omitted binds the actual model-send view that produced this call; inspect is not required to replace all completed units."
+                      },
+                      "working_note": {
+                        "type": "string",
+                        "description": "For a future reader without selected sources in view: preserve the source-supported situation and purpose behind conclusions, who decided what, its status within those sources, scope, changes, corrections and unresolved work. Distinguish inference and gaps; invent no detail. Later grants/cancellations supersede only their scope, not unaffected branches. Proposals are not approvals; do not retain obsolete restrictions after a later scoped approval. Be concise, no fixed template. Required in native review except inspect; Main may use a helper without it."
+                      },
+                      "keep_unit_ids": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "Exact inspected complete units to retain raw; takes precedence over keep_last_n, empty keeps none eligible. If both selectors are omitted, an authored note keeps all. Owner words, the assignment, the system view and the newer tail are preserved whatever the selection."
+                      },
+                      "restore_unit_refs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "checkpoint_ref": {
+                              "type": "object"
+                            },
+                            "unit_id": {
+                              "type": "string"
+                            },
+                            "raw_sha256": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "checkpoint_ref",
+                            "unit_id",
+                            "raw_sha256"
+                          ]
+                        },
+                        "description": "Read exact checkpoint-local units back as labelled sources, never live tool protocol replay. In Main a nonempty list may be used alone; native review also requires working_note (empty is valid). Supply a note to combine restoration with other view selectors."
+                      },
+                      "schema_names": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "Nano only: desired canonical schemas. This selects residency, never execution permissions. Low/Max retain their full permitted envelope."
+                      },
+                      "review_notes": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "bound_decision": {
+                              "anyOf": [
+                                {
+                                  "type": "object"
+                                },
+                                {
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            "bound_decisions": {
+                              "type": "array",
+                              "items": {
+                                "anyOf": [
+                                  {
+                                    "type": "object"
+                                  },
+                                  {
+                                    "type": "string"
+                                  }
+                                ]
+                              }
+                            },
+                            "remark": {
+                              "type": "string"
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "remark",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "description": "With working_note: bound_decision keeps one decision's status with your short remark/reason. Alternatively bound_decisions explicitly replaces a group of closed historical decisions with your account. Use exact bindings or decision_ref values from this observed view; positional IDs alone do not bind a version. Current contracts/statuses, open/deferred/pending facts and gaps stay visible. Missing/stale entries stay full with reasons; no new verdict, host clipping or helper summary."
+                      },
+                      "review_transfers": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "object"
+                            },
+                            "operative_spec_sha256": {
+                              "type": "string"
+                            },
+                            "decision_ids": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "operative_spec_sha256",
+                            "decision_ids"
+                          ]
+                        },
+                        "description": "With working_note only: explicitly declare that an attachment's decisions and reasons have been transferred into the named current plan spec decisions. Inspect supplies exact source/spec identities. No semantic completeness is inferred; absent or stale transfer keeps the attachment full."
+                      },
+                      "keep_last_n": {
+                        "type": "integer",
+                        "description": "Number of recent completed atomic tool units to keep raw (range 2-20). With working_note, used only when explicitly supplied and keep_unit_ids is omitted. Without a note, Main defaults to 6 for helper summarization; native review requires a note."
+                      }
+                    },
+                    "required": []
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "promote_chat_to_task",
+                  "description": "Start a supervised pooled task while this conversation remains available. Use for independent work needing its own queue slot, admission and reviews, or an owner's explicit request for a separate task; tools/files/multiple steps alone can stay here. For an EXISTING artifact, ground-truth its existence with one cheap probe (list_skills/list_files): memory of past work is not evidence it still exists. Give a short human-readable title. project_name creates a named Project and a NEW task there; project_id uses an existing Project. Interpret the owner's intended name, not keywords. To move THIS task instead, use ensure_project_scope. An unmet Swarm force_plan obligation moves to the new task; further work here is unplanned. Use predecessor_task_id for one settled result (see argument); steer_task for a live root. workspace_root selects the working folder; by default a Project task's file/shell/git tools use its registered folder, not the Ouroboros repo. workspace='none' opts out. Owner follow-ups can steer the task. Claim creation only on OK, never PROMOTE_REJECTED or PROMOTE_UNCONFIRMED; do not retry UNCONFIRMED automatically.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "objective": {
+                        "type": "string",
+                        "description": "What the task must accomplish."
+                      },
+                      "title": {
+                        "type": "string",
+                        "description": "Short task name the owner sees on its card and on the Main receipt, <=80 chars; also the Project name if the owner converts the task. The objective is not shown in its place."
+                      },
+                      "project_name": {
+                        "type": "string",
+                        "description": "Display name of a NEW Project for the NEW task; its filesystem id is derived. Use ensure_project_scope to move THIS task instead.",
+                        "default": ""
+                      },
+                      "expected_output": {
+                        "type": "string",
+                        "description": "What done looks like.",
+                        "default": ""
+                      },
+                      "project_id": {
+                        "type": "string",
+                        "description": "Optional EXISTING project scope (filesystem-clean id).",
+                        "default": ""
+                      },
+                      "workspace_root": {
+                        "type": "string",
+                        "description": "Absolute ordinary folder or Git worktree root outside Ouroboros repo/data, validated at admission. File/process work supports ordinary folders; Git operations need a worktree. Omit for the Project's registered working_dir or, in Main, Ouroboros's own repo.",
+                        "default": ""
+                      },
+                      "workspace": {
+                        "type": "string",
+                        "description": "'none' opts out of the Project's default folder; empty otherwise.",
+                        "default": ""
+                      },
+                      "context_requires_self_body_docs": {
+                        "type": "boolean",
+                        "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max. Low/Nano and helpers keep their usual book maps.",
+                        "default": false
+                      },
+                      "source": {
+                        "type": "string",
+                        "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.",
+                        "default": ""
+                      },
+                      "predecessor_task_id": {
+                        "type": "string",
+                        "description": "Required: empty for fresh work, or one settled result id from the host manifest/recent_tasks/get_task_result. Any settled status/project; lists are hints. Name the root for a helper's result. Live roots and pending promotes refuse."
+                      },
+                      "reasoning_effort": {
+                        "type": "string",
+                        "enum": [
+                          "none",
+                          "minimal",
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max",
+                          "ultra"
+                        ],
+                        "description": "Optional: the reasoning effort the NEW task starts on; applied in Cyber Pro only — otherwise the task starts at my human's recommended level and the result says so. Omit for that level."
+                      }
+                    },
+                    "required": [
+                      "objective",
+                      "title",
+                      "predecessor_task_id"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "chat_history",
+                  "description": "Retrieve live and recent archived chat messages. Supports exact provenance/date filters, substring search, and pagination.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "count": {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Number of messages (from latest)"
+                      },
+                      "offset": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Skip N from end (pagination)"
+                      },
+                      "search": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Text filter"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Exact transport provider"
+                      },
+                      "account_id": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Exact transport account ID"
+                      },
+                      "conversation_id": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Exact transport conversation ID"
+                      },
+                      "thread_id": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Exact transport thread ID"
+                      },
+                      "actor_id": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Exact platform actor ID"
+                      },
+                      "date_from": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Inclusive ISO-8601 lower timestamp bound"
+                      },
+                      "date_to": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Inclusive ISO-8601 upper timestamp bound"
+                      },
+                      "snapshot": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Opaque snapshot returned by the first page; reuse it with offset to refuse shifted/mixed pages"
+                      }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "update_scratchpad",
+                  "description": "Append a block to your working memory (scratchpad). Each call adds a timestamped block; oldest blocks are auto-evicted when either cap is reached (10 blocks, 60000 characters of content). Write what matters NOW — active tasks, decisions, observations. Persists across sessions, read at every task start. Project rooms included — the scratchpad is the same working memory in every room.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "content": {
+                        "type": "string",
+                        "description": "Content for this scratchpad block"
+                      }
+                    },
+                    "required": [
+                      "content"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "send_user_message",
+                  "description": "Send a separate reply to the owner while work continues: the first line of longer work (what I am about to do and why), or a mid-work insight, a question, or an invitation to collaborate. It appears in the conversation as a normal reply and leaves the work running; later progress stays in the card and the final answer is delivered automatically.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "description": "Message text"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "description": "Why you're reaching out (logged, not sent)"
+                      },
+                      "destination": {
+                        "type": "string",
+                        "enum": [
+                          "current",
+                          "main"
+                        ],
+                        "default": "current",
+                        "description": "'current' (default): this conversation's room. 'main': the owner's main chat, for a brief plain-text notice that belongs there while this work lives in an owner-visible Project room. It never appears in the Project thread and is not this task's answer. Delegated, Presence and agent-to-agent work cannot use it."
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "update_identity",
+                  "description": "Update your identity manifest (who you are, who you want to become). Persists across sessions. Obligation to yourself (Principle 1: Continuity). Read your current identity first, then evolve it — add, refine, deepen. Full rewrites are allowed but should be rare; continuity of self matters. Use this only after substantive reflection or real experience — not on a greeting or trivial turn. This is the only correct way to write identity; never write memory/identity.md through write_file/edit_text. Project rooms included — identity is the same continuous file in every room.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "content": {
+                        "type": "string",
+                        "description": "Full identity content (prefer evolving over rewriting from scratch)"
+                      }
+                    },
+                    "required": [
+                      "content"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "read_file",
+                  "description": "Read a UTF-8 text file from a declared resource root. With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. Use max_lines (default 2000) and start_line (default 1) to read large files in chunks. The result header shows root:path and 'lines X–Y of Z'; each displayed source line has a cat -n style number and tab. Line numbers are display guides, not file content: exclude them when copying edit context. Prefer this over cat/head/sed-as-reader in run_command; to locate code first use query_code (symbols/definitions/callers) or search_code (text/regex), then read_file the hit.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "root": {
+                        "type": "string",
+                        "enum": [
+                          "active_workspace",
+                          "system_repo",
+                          "runtime_data",
+                          "task_drive",
+                          "skill_payload",
+                          "artifact_store",
+                          "user_files",
+                          "subagent_projects",
+                          "deliverables"
+                        ],
+                        "description": "When omitted, relative paths use active_workspace; absolute paths select the permitted physical root (including user_files for home paths). Explicit roots remain explicit."
+                      },
+                      "max_lines": {
+                        "type": "integer",
+                        "default": 2000,
+                        "description": "Maximum number of lines to return (default 2000)."
+                      },
+                      "start_line": {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "1-indexed line to start reading from (default 1 = beginning)."
+                      },
+                      "start_char": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Source-character cursor: skip this many characters (Unicode code points) of the selected source window before adding display line numbers. Use it to advance WITHIN a single line longer than what one turn can hold; a partial result view names the exact start_char of its omitted range."
+                      },
+                      "max_chars": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Exact source-character budget for THIS view of the selected window, counted after start_char; display line numbers are not counted. Choose the piece instead of having the result cut from outside; the header names the next start_char. Omit for the whole window."
+                      },
+                      "bucket": {
+                        "type": "string",
+                        "description": "Required only for root=skill_payload."
+                      },
+                      "skill_name": {
+                        "type": "string",
+                        "description": "Required only for root=skill_payload."
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "knowledge_read",
+                  "description": "Read the current complete knowledge note, active or archived, with its state, canonical address and exact source revision. Paths and relative Markdown links survive archival. Read current understanding before revising it.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "topic": {
+                        "type": "string",
+                        "description": "Shelf-relative topic path without .md; nested paths and Unicode names are supported; no scope prefixes (global/, project/)."
+                      },
+                      "scope": {
+                        "type": "string",
+                        "description": "global or project:<exact project id>. Omitted uses this task's project shelf, otherwise global. Global knowledge remains explicitly reachable from a project. Understanding of people and relationships, and anything that should outlive the project, belongs in global. Reserved topics (improvement-backlog, overview, patterns) always resolve to global."
+                      },
+                      "start_char": {
+                        "type": "integer",
+                        "description": "Optional half-open character range start in the exact complete note (omitted = 0). Use ranges to read a large source in parts."
+                      },
+                      "end_char": {
+                        "type": "integer",
+                        "description": "Exclusive range end (omitted = the end; a value past the end is lowered to it); complete_chars and revision are returned with every view. Omit both bounds, or pass 0 and 0, for the full note."
+                      }
+                    },
+                    "required": [
+                      "topic"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "knowledge_write",
+                  "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. An active note's summary stays resident in the index; body text never replaces it. Archive hides default navigation rows while direct reads and explicit Presence topics remain available. Restore removes archive metadata, even malformed values in readable YAML, from CURRENT text including subsequent edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "topic": {
+                        "type": "string",
+                        "description": "Shelf-relative topic path without .md; nested paths and Unicode names are supported; no scope prefixes (global/, project/)."
+                      },
+                      "scope": {
+                        "type": "string",
+                        "description": "global or project:<exact project id>. Omitted uses this task's project shelf, otherwise global. Global knowledge remains explicitly reachable from a project. Understanding of people and relationships, and anything that should outlive the project, belongs in global. Reserved topics (improvement-backlog, overview, patterns) always resolve to global."
+                      },
+                      "content": {
+                        "type": "string",
+                        "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. Required except for a summary-only edit; omit for archive/restore. No summary is generated from the body."
+                      },
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "overwrite",
+                          "append",
+                          "edit",
+                          "archive",
+                          "restore"
+                        ],
+                        "description": "overwrite replaces the body; append adds text; edit replaces one exact old_str and/or summary. archive/restore preserve body bytes and require a current revision; archive requires reason. overview, patterns and improvement-backlog always stay active. Missing notes are created by overwrite/append only."
+                      },
+                      "reason": {
+                        "type": "string",
+                        "description": "Required non-empty explanation for archive only; no automatic classification or summarization occurs."
+                      },
+                      "old_str": {
+                        "type": "string",
+                        "description": "Non-empty exact body substring for mode=edit; it must occur once. content is the replacement, including empty text for a justified deletion. Omit both to change only the summary."
+                      },
+                      "summary": {
+                        "type": "string",
+                        "description": "mode=edit only: the new authored summary, alone or beside the old_str replacement, in the same revision-checked write."
+                      },
+                      "expected_revision": {
+                        "type": "string",
+                        "description": "Source revision returned by knowledge_read. Required for overwrite/edit of existing notes and archive/restore. Omit or pass empty only to create a missing note; drift returns the current source without replacing it."
+                      }
+                    },
+                    "required": [
+                      "topic"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "knowledge_list",
+                  "description": "List current knowledge with authored summaries and source links. Default active view includes the archive count and address; archived/all reveal archived notes with archive time and reason. Legacy index prose can still mention archived notes until an authored global overview retires it.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "scope": {
+                        "type": "string",
+                        "description": "global or project:<exact project id>. Omitted uses this task's project shelf, otherwise global. Global knowledge remains explicitly reachable from a project. Understanding of people and relationships, and anything that should outlive the project, belongs in global. Reserved topics (improvement-backlog, overview, patterns) always resolve to global."
+                      },
+                      "view": {
+                        "type": "string",
+                        "enum": [
+                          "active",
+                          "archived",
+                          "all"
+                        ],
+                        "description": "active (default), archived only, or complete inventory."
+                      }
+                    },
+                    "required": []
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "memory_read",
+                  "description": "Read memory by address, as text: a room's records and active marks (first line: room and head), one record with its stamp and corrections (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), or a retained source (source_ref). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer. Choose the depth yourself.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "node_id": {
+                        "type": "string",
+                        "description": "One record: as it acts now, its host stamp, coverage, original text, corrections and decisions."
+                      },
+                      "room_id": {
+                        "type": "string",
+                        "description": "Room address: its chat id as text (1 is Main). Default: this task's own room."
+                      },
+                      "after_seq": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Room records and active marks after this sequence (the previous page's next_after_seq)."
+                      },
+                      "rows": {
+                        "type": "boolean",
+                        "description": "true: the room's chat rows verbatim, one header line each, filtered by from/to, task_id, period."
+                      },
+                      "from": {
+                        "type": "string",
+                        "description": "Chat row address row:<chat_id>@<ts>#<sha12>, as memory_read prints it."
+                      },
+                      "to": {
+                        "type": "string",
+                        "description": "Chat row address row:<chat_id>@<ts>#<sha12>, as memory_read prints it."
+                      },
+                      "task_id": {
+                        "type": "string",
+                        "description": "rows: only rows of this task (its own, parent or root lineage)."
+                      },
+                      "period": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "rows: inclusive ISO-8601 bounds.",
+                        "properties": {
+                          "from": {
+                            "type": "string"
+                          },
+                          "to": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "source_ref": {
+                        "type": "object",
+                        "description": "A retained source reference exactly as a record or reader returned it."
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Character position to continue a record, source or long row from (the previous page's next_start or start)."
+                      },
+                      "revision": {
+                        "type": "string",
+                        "description": "node_id: read the record as of this revision (its own id, or one of its correction ids, as an account's sources name them): the original and the corrections up to it; later ones are named, not shown."
+                      }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "memory_mark",
+                  "description": "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); room or global scope; an optional quote is verified as an exact substring of the target. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release it (release_id, reason) when it no longer holds.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "description": "What matters, in my own words."
+                      },
+                      "node_id": {
+                        "type": "string",
+                        "description": "Target: a chronicle record."
+                      },
+                      "address": {
+                        "type": "string",
+                        "description": "Chat row address row:<chat_id>@<ts>#<sha12>, as memory_read prints it."
+                      },
+                      "task_id": {
+                        "type": "string",
+                        "description": "Target: a task (a quote is checked against its final words in chat)."
+                      },
+                      "source_ref": {
+                        "type": "object",
+                        "description": "A retained source reference exactly as a record or reader returned it."
+                      },
+                      "quote": {
+                        "type": "string",
+                        "description": "Optional exact substring of the target, kept beside the mark."
+                      },
+                      "room_id": {
+                        "type": "string",
+                        "description": "Room address: its chat id as text (1 is Main). Default: this task's own room."
+                      },
+                      "scope": {
+                        "type": "string",
+                        "enum": [
+                          "room",
+                          "global"
+                        ]
+                      },
+                      "mark_id": {
+                        "type": "string",
+                        "description": "Change an active mark's visible detail with visibility and reason."
+                      },
+                      "visibility": {
+                        "type": "string",
+                        "enum": [
+                          "full",
+                          "meaning"
+                        ]
+                      },
+                      "release_id": {
+                        "type": "string",
+                        "description": "Release an active mark (with reason); its history stays."
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "web_search",
+                  "description": "Search the web with the configured Source and Model. Auto uses the eligible built-in routes listed in this task's runtime facts; a specific source is strict. Skills, MCP and browser tools are independent choices. A per-call model override follows the same source selection. Empty model uses the saved choice or provider defaults. For a COMPOUND question (several distinct facts/entities/time ranges in one ask), issue one focused web_search per sub-question instead of one broad query — narrow queries return sharper sources. These read-only searches run in parallel. The returned `answer` is a SUMMARY/lead (answer_type=summary), not a primary source: confirm load-bearing facts by opening the returned sources (browse_page) before relying on them.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "query": {
+                        "type": "string",
+                        "description": "A single focused search query (split compound asks into separate calls)."
+                      },
+                      "model": {
+                        "type": "string",
+                        "description": "Search model override; native id or routed source::model. Must agree with a pinned Source."
+                      },
+                      "search_context_size": {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ],
+                        "description": "How much context to fetch (default: medium)"
+                      },
+                      "reasoning_effort": {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ],
+                        "description": "Reasoning effort (default: high)"
+                      }
+                    },
+                    "required": [
+                      "query"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "list_available_tools",
+                  "description": "List the tools this task can call now, from the current catalog, in every context mode: per-namespace counts (builtin, each MCP server mcp_<server>, each extension) plus the built-in names, marking which schemas are already loaded. Use namespace to list one namespace completely; an MCP namespace shows each raw MCP name beside its callable name. Includes the capability omission manifest.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace to list completely, e.g. builtin or mcp_<server>."
+                      }
+                    },
+                    "required": []
+                  },
+                  "behavior": "NON_BLOCKING"
+                },
+                {
+                  "name": "enable_tools",
+                  "description": "Compatibility check for named tools (comma-separated). Tasks start with the selected envelope active, so this confirms registration instead of granting delayed core tools.",
+                  "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                      "tools": {
+                        "type": "string",
+                        "description": "Comma-separated tool names to enable"
+                      }
+                    },
+                    "required": [
+                      "tools"
+                    ]
+                  },
+                  "behavior": "NON_BLOCKING"
+                }
+              ]
+            },
+            {
+              "googleSearch": {}
+            }
+          ],
+          "generationConfig": {
+            "responseModalities": [
+              "AUDIO"
+            ]
+          },
+          "inputAudioTranscription": {},
+          "outputAudioTranscription": {},
+          "contextWindowCompression": {
+            "triggerTokens": 122880,
+            "slidingWindow": {
+              "targetTokens": 82651
+            }
+          },
+          "sessionResumption": {}
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "setupComplete": {}
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "clientContent": {
+          "turns": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "[Live call] A live voice call is open in this room. The conversation is spoken; its transcript is written to this chat."
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "[SYSTEM NOTICE]\nYou have 15 core tools loaded. There are 119 additional tools available (use `list_available_tools` to see them, `enable_tools` to activate). Core tools cover most tasks. Enable extras only when needed."
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "[SYSTEM NOTICE]\n[CAPABILITY_OMISSION_MANIFEST]\n- tools: missing_credential (close_github_issue, comment_on_issue, comment_on_pr, create_github_issue, generate_evolution_stats, get_github_checks, get_github_issue, get_github_pr, list_github_issues, list_github_prs, pr_merge, submit_skill_to_hub)"
+                }
+              ]
+            }
+          ],
+          "turnComplete": false
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "sessionResumptionUpdate": {
+          "newHandle": "recorded-handle-1",
+          "resumable": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "0.200s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Привет."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "1.600s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 2
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Привет. Чем я "
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 12960
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 28800
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "могу помочь?"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "interrupted": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "1.920s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 33920,
+          "responseTokenCount": 62,
+          "totalTokenCount": 33982,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 32204
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 239
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 62
+            }
+          ],
+          "thoughtsTokenCount": 86
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Ты меня слышишь? Ответь одним коротким предложением."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "6.640s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Да, я вас "
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "отлично слышу."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 34079,
+          "responseTokenCount": 57,
+          "totalTokenCount": 34136,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 32225
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 363
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 57
+            }
+          ],
+          "thoughtsTokenCount": 53
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "9.160s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Найди в интернете, какая сейчас погода в Москве. И скажи."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "16.160s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "toolCall": {
+          "functionCalls": [
+            {
+              "name": "web_search",
+              "args": {
+                "query": "погода в Москве сейчас"
+              },
+              "id": "call_2014001"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 34321,
+          "responseTokenCount": 16,
+          "totalTokenCount": 34337,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 32249
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 565
+            }
+          ],
+          "thoughtsTokenCount": 38
+        }
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "toolResponse": {
+          "functionResponses": [
+            {
+              "id": "call_2014001",
+              "name": "web_search",
+              "response": {
+                "result": "{\n  \"answer\": \"- Точная погода в Москве на 14 дней подробно (г. Москва, Россия)...: Точный подробный прогноз погоды на 14 дней (2 недели) в Москве, г. Москва, Россия. Метеоданные о температуре, осадках, ветре, давлении, влажности на две недели.+10°. значительная облачность, без осадков. (https://pogoda7.ru/prognoz/gorod134242-Russia-g_Moskva-Moskva/14days/full)\\n- GISMETEO: Погода в Москве сегодня, прогноз погоды Москва...: Подробный прогноз погоды в Москве на сегодня.Солнце и Луна сегодня. Долгота дня: 10 ч 25 мин. Восход —. Заход —. Сегодня день на 4 минуты короче, чем вчера. Луна растущая: 29,2%. Восход —. Заход —. Полнолуние — 26 октября. (https://www.gismeteo.by/weather-moscow-4368/)\\n- Погода в Москве сегодня - точный прогноз погоды в Москве на...: Прогноз погоды по дням. Сегодня 17 октября, погода +14°C. Пасмурно, ветер тихий, юго-восточный 0.9 м/с. Атмосферное давление 751 мм рт. ст. Относительная влажность воздуха 73%. (https://world-weather.ru/pogoda/russia/moscow/)\\n- Погода в Москве (ВДНХ) - РП5: В Москве (ВДНХ) сегодня ожидается +13 °C, без осадков, легкий ветер. (https://rp5.ru/Погода_в_Москве_(ВДНХ))\\n- Погода в Москве на сегодня, точный прогноз... - Рамблер/погода: Прогноз погоды в Москве на сегодня, завтра, неделю с учетом возможных изменений в течение дня: ветер, осадки, давление, влажность, ощущаемая температура, а также геомагнитная обстановка и UV индекс. (https://weather.rambler.ru/v-moskve/)\\n- Погода в Москве на 10 дней - подробный прогноз - Погода Mail: Подробно о погоде на 10 дней в Москве и других городах России и мира. Мы покажем, как в Москве будут изменяться температура воздуха, облачность, осадки, давление, влажность, а также проинформируем вас о времени восхода и захода Солнца и фазах Луны. (https://pogoda.mail.ru/prognoz/moskva/extended/)\\n- Погода в Москве на 3 дня, подробный точный... - Pogoda.Ru: Точный почасовой прогноз погоды на 3 дня в Москве (Москва, России) по всем метеопараметрам + восход-заход солнца, продолжительность дня. (https://pogoda.ru/Russia/Moscow/Moscow__/weather-3-day)\\n- Погода в Москве — точный прогноз, температура, ветер, онлайн...: Погода в Москве: температура воздуха, прогноз на сегодня и завтра, ветер, осадки, влажность. Подробно и онлайн с обновлением в реальном времени. (https://2gis.ru/moscow/weather)\\n- Погода в Москве сегодня и сейчас - точная погода в реальном...: Погода сейчас и почасовой точный прогноз погоды в Москве (Москва, России) на сегодня 3 октября 2026, восход-заход солнца, продолжительность дня. Температура, давление, влажность, скорость и направление ветра. (https://www.hmn.ru/next/Russia/Moscow/Moscow__/weather-now-today-hourly)\\n- Прогноз погоды Москва (ВДНХ)(Москва и область, Россия) на...: Точный прогноз погоды для пункта Москва (ВДНХ) на сегодня, завтра, выходные, 7 дней и ближайшие месяцы. (https://meteoinfo.ru/forecasts/russia/moscow-area/moscow)\",\n  \"answer_type\": \"summary\",\n  \"sources\": [\n    {\n      \"url\": \"https://pogoda7.ru/prognoz/gorod134242-Russia-g_Moskva-Moskva/14days/full\",\n      \"title\": \"Точная погода в Москве на 14 дней подробно (г. Москва, Россия)...\",\n      \"snippet\": \"Точный подробный прогноз погоды на 14 дней (2 недели) в Москве, г. Москва, Россия. Метеоданные о температуре, осадках, ветре, давлении, влажности на две недели.+10°. значительная облачность, без осадков.\"\n    },\n    {\n      \"url\": \"https://www.gismeteo.by/weather-moscow-4368/\",\n      \"title\": \"GISMETEO: Погода в Москве сегодня, прогноз погоды Москва...\",\n      \"snippet\": \"Подробный прогноз погоды в Москве на сегодня.Солнце и Луна сегодня. Долгота дня: 10 ч 25 мин. Восход —. Заход —. Сегодня день на 4 минуты короче, чем вчера. Луна растущая: 29,2%. Восход —. Заход —. Полнолуние — 26 октября.\"\n    },\n    {\n      \"url\": \"https://world-weather.ru/pogoda/russia/moscow/\",\n      \"title\": \"Погода в Москве сегодня - точный прогноз погоды в Москве на...\",\n      \"snippet\": \"Прогноз погоды по дням. Сегодня 17 октября, погода +14°C. Пасмурно, ветер тихий, юго-восточный 0.9 м/с. Атмосферное давление 751 мм рт. ст. Относительная влажность воздуха 73%.\"\n    },\n    {\n      \"url\": \"https://rp5.ru/Погода_в_Москве_(ВДНХ)\",\n      \"title\": \"Погода в Москве (ВДНХ) - РП5\",\n      \"snippet\": \"В Москве (ВДНХ) сегодня ожидается +13 °C, без осадков, легкий ветер.\"\n    },\n    {\n      \"url\": \"https://weather.rambler.ru/v-moskve/\",\n      \"title\": \"Погода в Москве на сегодня, точный прогноз... - Рамблер/погода\",\n      \"snippet\": \"Прогноз погоды в Москве на сегодня, завтра, неделю с учетом возможных изменений в течение дня: ветер, осадки, давление, влажность, ощущаемая температура, а также геомагнитная обстановка и UV индекс.\"\n    },\n    {\n      \"url\": \"https://pogoda.mail.ru/prognoz/moskva/extended/\",\n      \"title\": \"Погода в Москве на 10 дней - подробный прогноз - Погода Mail\",\n      \"snippet\": \"Подробно о погоде на 10 дней в Москве и других городах России и мира. Мы покажем, как в Москве будут изменяться температура воздуха, облачность, осадки, давление, влажность, а также проинформируем вас о времени восхода и захода Солнца и фазах Луны.\"\n    },\n    {\n      \"url\": \"https://pogoda.ru/Russia/Moscow/Moscow__/weather-3-day\",\n      \"title\": \"Погода в Москве на 3 дня, подробный точный... - Pogoda.Ru\",\n      \"snippet\": \"Точный почасовой прогноз погоды на 3 дня в Москве (Москва, России) по всем метеопараметрам + восход-заход солнца, продолжительность дня.\"\n    },\n    {\n      \"url\": \"https://2gis.ru/moscow/weather\",\n      \"title\": \"Погода в Москве — точный прогноз, температура, ветер, онлайн...\",\n      \"snippet\": \"Погода в Москве: температура воздуха, прогноз на сегодня и завтра, ветер, осадки, влажность. Подробно и онлайн с обновлением в реальном времени.\"\n    },\n    {\n      \"url\": \"https://www.hmn.ru/next/Russia/Moscow/Moscow__/weather-now-today-hourly\",\n      \"title\": \"Погода в Москве сегодня и сейчас - точная погода в реальном...\",\n      \"snippet\": \"Погода сейчас и почасовой точный прогноз погоды в Москве (Москва, России) на сегодня 3 октября 2026, восход-заход солнца, продолжительность дня. Температура, давление, влажность, скорость и направление ветра.\"\n    },\n    {\n      \"url\": \"https://meteoinfo.ru/forecasts/russia/moscow-area/moscow\",\n      \"title\": \"Прогноз погоды Москва (ВДНХ)(Москва и область, Россия) на...\",\n      \"snippet\": \"Точный прогноз погоды для пункта Москва (ВДНХ) на сегодня, завтра, выходные, 7 дней и ближайшие месяцы.\"\n    }\n  ],\n  \"backend\": \"ddgs\",\n  \"model\": \"\",\n  \"route\": {\n    \"scope\": \"builtin_web_search\",\n    \"source\": \"auto\",\n    \"model\": \"gpt-5.2\",\n    \"legs\": [\n      {\n        \"source\": \"ddgs\",\n        \"backend\": \"ddgs\",\n        \"model\": \"\",\n        \"model_source\": \"provider_default\"\n      }\n    ],\n    \"unavailable\": [\n      {\n        \"source\": \"openai\",\n        \"backend\": \"openai_responses\",\n        \"model\": \"gpt-5.2\",\n        \"model_source\": \"selection\"\n      },\n      {\n        \"source\": \"openrouter\",\n        \"backend\": \"openrouter_server_tool\",\n        \"model\": \"openai/gpt-5.2\",\n        \"model_source\": \"selection\"\n      },\n      {\n        \"source\": \"anthropic\",\n        \"backend\": \"anthropic_server_tool\",\n        \"model\": \"claude-sonnet-4-6\",\n        \"model_source\": \"provider_default\"\n      }\n    ],\n    \"note\": \"Applies only to built-in web_search; skills, MCP and browser tools remain independent choices.\"\n  },\n  \"legs_tried\": [\n    {\n      \"source\": \"ddgs\",\n      \"backend\": \"ddgs\",\n      \"model\": \"\",\n      \"model_source\": \"provider_default\",\n      \"outcome\": \"succeeded\",\n      \"ledger_attempt_ids\": []\n    }\n  ],\n  \"backend_errors\": []\n}"
+              },
+              "scheduling": "WHEN_IDLE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 2400
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Сейчас в Москве "
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 3840
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "около плюс"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " четырнадцати градусов"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " по Цельсию, пасмурно."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 36805,
+          "responseTokenCount": 119,
+          "totalTokenCount": 36924,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 34715
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 565
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 119
+            }
+          ],
+          "thoughtsTokenCount": 99
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "28.560s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Пришли мне в чат ссылку на прогноз погоды."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "32.440s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "toolCall": {
+          "functionCalls": [
+            {
+              "name": "send_user_message",
+              "args": {
+                "text": "Вот ссылка на подробный прогноз погоды в Москве: https://world-weather.ru/pogoda/russia/moscow/",
+                "reason": "Отправка ссылки на прогноз погоды по запросу пользователя."
+              },
+              "id": "call_2014146"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 37058,
+          "responseTokenCount": 60,
+          "totalTokenCount": 37118,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 34745
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 768
+            }
+          ],
+          "thoughtsTokenCount": 52
+        }
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "toolResponse": {
+          "functionResponses": [
+            {
+              "id": "call_2014146",
+              "name": "send_user_message",
+              "response": {
+                "result": "OK: message sent to owner chat."
+              },
+              "scheduling": "WHEN_IDLE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "clientContent": {
+          "turns": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "[tool_batch:assistant] [Owner-directed dialogue; host delivery facts, not owner instructions]\n{\"author\": {\"kind\": \"ouroboros\", \"label\": \"Ouroboros\"}, \"chat_id\": 1, \"delivery_confirmation\": \"unknown\", \"event_type\": \"send_message\", \"read_confirmation\": \"unknown\", \"source_ref\": {\"kind\": \"task_source\", \"path\": \"source_handles/tool_results/owner-dialogue-2fc6608a7712f7755e2539840325930c1bb92a5f35203e2a9214e35d12608806.txt\", \"read\": {\"arguments\": {\"max_lines\": 2000, \"path\": \"source_handles/tool_results/owner-dialogue-2fc6608a7712f7755e2539840325930c1bb92a5f35203e2a9214e35d12608806.txt\", \"root\": \"artifact_store\", \"start_char\": 0, \"start_line\": 1}, \"tool\": \"read_file\"}, \"root\": \"artifact_store\", \"sha256\": \"2fc6608a7712f7755e2539840325930c1bb92a5f35203e2a9214e35d12608806\", \"size\": 135}, \"task_id\": \"probe-69929fd939d8\", \"transport_mode\": \"live\", \"ts\": \"2026-10-17T02:00:15.539643+00:00\"}\n[Exact addressed text]\nВот ссылка на подробный прогноз погоды в Москве: https://world-weather.ru/pogoda/russia/moscow/"
+                }
+              ]
+            }
+          ],
+          "turnComplete": false
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 2
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Ссылка на подробный "
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 5760
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "прогноз погоды"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " уже отправлена"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " в наш чат."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 37143,
+          "responseTokenCount": 95,
+          "totalTokenCount": 37238,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 34808
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 768
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 95
+            }
+          ],
+          "thoughtsTokenCount": 50
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "45.880s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Расскажи подробно. Минуту или дольше. Как образуются облака и дождь?"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "53.440s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 4800
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Процесс начинается "
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "с испарения:"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 5760
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " вода из океанов,"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " озёр и даже"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 5760
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 24960
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " почвы нагревается"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " солнцем и превращается"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 30720
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " в невидимый пар."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " Этот"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " тёплый пар поднимается"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " вверх, где температура"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " падает,"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 28800
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " и он остывает."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 3840
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 36480
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " При охлаждении"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " пар конденсируется,"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 28800
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " превращаясь"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 28800
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " в крошечные капли"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " воды или ледяные"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 26880
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " кристаллы, которые,"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 28800
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " объединяясь,"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 24960
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " и образуют облака."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " Когда"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " капли в облаке"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 24960
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": " становятся слишком"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "55.680s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "interrupted": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 37959,
+          "responseTokenCount": 562,
+          "totalTokenCount": 38521,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 35333
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 1039
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 562
+            }
+          ],
+          "thoughtsTokenCount": 40
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Stop. Достаточно. Скажи только, хорошо, остановился."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "62s"
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 6720
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Хорошо, "
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "остановился."
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {}
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA==",
+                  "recorded_bytes": 3840
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 38280,
+          "responseTokenCount": 52,
+          "totalTokenCount": 38332,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 35368
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 1305
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 52
+            }
+          ],
+          "thoughtsTokenCount": 31
+        }
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "clientContent": {
+          "turns": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "[mailbox] [Message from my human]: Typed during the call: remember the blue umbrella."
+                }
+              ]
+            }
+          ],
+          "turnComplete": false
+        }
+      }
+    }
+  ]
+}

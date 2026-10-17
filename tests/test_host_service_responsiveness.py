@@ -18,7 +18,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import presence_runner
 from ouroboros.gateway import host_service
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import PresenceTurnError, PresenceTurnGate
@@ -31,7 +30,9 @@ BUDGET = "telegram-bot:presence"
 @pytest.fixture(autouse=True)
 def _isolated_gates(monkeypatch):
     """The configured-gate cache is process-global; each test gets its own, at two active turns."""
-    monkeypatch.setattr(presence_runner, "_GATES", {})
+    from ouroboros import presence_gate
+
+    monkeypatch.setattr(presence_gate, "_GATES", {})
     monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "2")
 
 

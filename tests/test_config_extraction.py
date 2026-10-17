@@ -375,5 +375,8 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     # (+ its shared «migrated» line) the read seam, the RC auditor and the boot notice read.
     # 538 -> 560: the main-interface key (OUROBOROS_UI_DIR) with its export exclusion and the
     # saved-choice precedence the config read and persist seams share.
-    assert counts["ouroboros.settings_defaults"] <= 560
+    # 560 -> 563: live calls — the Gemini model and voice, native-search and minute-ceiling keys,
+    # the Gemini Live credential beside the other provider keys, and the first release's
+    # engine choice and second-engine keys retired.
+    assert counts["ouroboros.settings_defaults"] <= 563
     assert (PACKAGE / "config.py").is_file()

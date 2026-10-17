@@ -260,6 +260,7 @@ def _admit_chat_task(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    kind: str = "direct_chat",
 ) -> Optional[Dict[str, Any]]:
     """Build and REGISTER one direct turn; ``None`` when it was refused.
 
@@ -269,7 +270,10 @@ def _admit_chat_task(
     contract and the authoritative start receipt. The returned bundle is a
     registered execution that ``_execute_chat_task`` MUST run (it owns the
     unregister); a refusal or an admission failure has already unregistered
-    itself and, for a failure, reported it to the chat.
+    itself and, for a failure, reported it to the chat. ``kind`` is the census
+    kind of the turn (``direct_chat``; ``call`` for a live voice call, which
+    the room's steering skips while Stop, Panic and the update drain still
+    find it).
     """
     client_msg_id = ""
     if task_metadata:
@@ -278,7 +282,6 @@ def _admit_chat_task(
             client_msg_id = str(_cmid_ref.get("client_message_id") or "")
         if not client_msg_id:
             client_msg_id = str(task_metadata.get("client_message_id") or "")
-    kind = "direct_chat"
     task: Dict[str, Any] = {
         "id": uuid.uuid4().hex[:8],
         "type": "task",
@@ -654,6 +657,20 @@ def handle_wake_direct(
             bind_input(admitted["task"])
         except Exception:
             log.warning("wake %s input binding failed; the complete text stays its input", task_id, exc_info=True)
+    return _start_direct_turn_thread(admitted, f"wake-turn-{task_id}", on_finished)
+
+
+def _start_direct_turn_thread(
+    admitted: Dict[str, Any], name: str, on_finished: Optional[Callable[[str, bool], None]],
+) -> Dict[str, Any]:
+    """Run a registered direct turn on its own daemon thread; the typed receipt.
+
+    The turn is already in the census, so a thread that cannot start must
+    unregister it: a registered turn nobody runs would read as a live owner
+    turn forever. ``on_finished(task_id, ok)`` fires once the body has ended,
+    ``ok=False`` when the runner failed.
+    """
+    task_id = str(admitted["task"]["id"])
 
     def _run() -> None:
         ok = False
@@ -664,18 +681,62 @@ def handle_wake_direct(
                 try:
                     on_finished(task_id, ok)
                 except Exception:
-                    log.debug("wake on_finished callback failed", exc_info=True)
+                    log.debug("%s on_finished callback failed", name, exc_info=True)
 
     import threading
 
     try:
-        threading.Thread(target=_run, name=f"wake-turn-{task_id}", daemon=True).start()
+        threading.Thread(target=_run, name=name, daemon=True).start()
     except Exception:
-        # A registered turn nobody runs would read as a live owner turn forever.
-        log.warning("wake turn %s could not start its thread", task_id, exc_info=True)
+        log.warning("%s could not start its thread", name, exc_info=True)
         admitted["registry"].unregister(task_id)
         return {"admitted": False, "task_id": "", "reason": "admission_failed"}
     return {"admitted": True, "task_id": task_id, "reason": ""}
+
+
+def handle_call_direct(
+    chat_id: int, spec: Any, on_finished: Optional[Callable[[str, bool], None]] = None,
+) -> Dict[str, Any]:
+    """Start a live voice call as a direct turn of its room; a typed receipt.
+
+    A call is admitted exactly like the owner's typed turn (the repo-writer
+    gate, a known strict budget), registered in the census under kind
+    ``call`` before this returns, and run on its own thread; the agent picks
+    the live driver from ``task["metadata"]["live_call"]`` (``CallSpec``
+    metadata). It is not a steerable text turn: the routing context skips
+    kind ``call``, so a typed line in the room still opens an ordinary turn
+    while the call keeps hearing the room through ``live_awareness``. A
+    Project room's call runs in the project's scope, resolved from the chat.
+    """
+    if not wake_gate_open():
+        return {"admitted": False, "task_id": "", "reason": "repo_writer_gate_closed"}
+    from supervisor.state import budget_remaining, load_state
+
+    try:
+        remaining = budget_remaining(load_state(), strict=True)
+    except Exception:
+        return {"admitted": False, "task_id": "", "reason": "cost_accounting_unavailable"}
+    if remaining <= 0:
+        return {"admitted": False, "task_id": "", "reason": "budget_exhausted"}
+    metadata: Dict[str, Any] = {"live_call": spec.as_metadata(), "client_message_id": str(spec.client_message_id or "")}
+    from ouroboros.contracts.chat_id_policy import is_project_chat_id
+
+    if is_project_chat_id(chat_id):
+        from ouroboros.project_admission import reserved_project_for_chat
+
+        try:
+            project_id = str(reserved_project_for_chat(_pool().DRIVE_ROOT, int(chat_id)).get("id") or "")
+        except Exception:
+            return {"admitted": False, "task_id": "", "reason": "project_room_unavailable"}
+        if project_id:
+            metadata["project_id"] = project_id
+    text = (f"[Live call] A live voice call is open in this room (engine {spec.engine}, model {spec.model}). "
+            "The conversation is spoken; its transcript is written to this chat.")
+    admitted = _admit_chat_task(None, int(chat_id), text, None, task_metadata=metadata, kind="call")
+    if admitted is None:
+        reason = "repo_writer_gate_closed" if not wake_gate_open() else "admission_failed"
+        return {"admitted": False, "task_id": "", "reason": reason}
+    return _start_direct_turn_thread(admitted, f"call-turn-{admitted['task']['id']}", on_finished)
 
 
 def auto_resume_after_restart() -> None:

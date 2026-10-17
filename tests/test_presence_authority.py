@@ -199,6 +199,58 @@ def test_payload_digest_and_shape_are_fail_closed():
     assert caught.value.code == "presence_authority_digest_mismatch"
 
 
+# The digest of a ceiling minted before ``execution`` existed, computed by that code.
+_CEILING_DIGEST_BEFORE_EXECUTION = "85bb8793c4c8484e7cf85b53548ad3da0552a155fab992b5112394f339f60587"
+
+
+def _ceiling_with(runtime: ResolvedPresenceRuntime):
+    resolution = _resolution(PresenceToolTarget("builtin", "chat_history"))
+    resolution = PresenceProfileResolution(
+        active=resolution.active, missing_required=(), missing_optional=(), orphaned=(),
+        runtime=runtime, profile_fingerprint="a" * 64, selection_fingerprint="b" * 64,
+        required_selections_present=True,
+    )
+    return build_presence_capability_ceiling(
+        skill_name="moderator", skill_content_hash="c" * 64, state_fingerprint="d" * 64,
+        resolution=resolution,
+    )
+
+
+def test_ceiling_digest_is_byte_identical_without_execution_and_carries_call():
+    event = _ceiling_with(ResolvedPresenceRuntime("main", 10, 10, False))
+    explicit_event = _ceiling_with(ResolvedPresenceRuntime("main", 10, 10, False, execution="event"))
+    call = _ceiling_with(ResolvedPresenceRuntime("main", 10, 10, False, execution="call"))
+
+    assert event.digest == explicit_event.digest == _CEILING_DIGEST_BEFORE_EXECUTION
+    assert event.execution == "event" and call.execution == "call"
+    assert call.digest != event.digest
+
+    # Shape: the field is written only as ``call`` and read back exactly.
+    assert "execution" not in presence_ceiling_payload(event)["runtime"]
+    call_payload = presence_ceiling_payload(call)
+    assert call_payload["runtime"]["execution"] == "call"
+    assert presence_ceiling_from_payload(call_payload) == call
+    assert presence_ceiling_from_payload(presence_ceiling_payload(event)) == event
+
+    # A payload written before the field existed (no ``execution`` key) still verifies.
+    legacy = json.loads(json.dumps(presence_ceiling_payload(event)))
+    assert set(legacy["runtime"]) == {"model_slot", "inline_max_rounds"}
+    assert presence_ceiling_from_payload(legacy).execution == "event"
+
+    # Changing the carried value after minting is a digest mismatch, not a quiet downgrade.
+    tampered = json.loads(json.dumps(call_payload))
+    del tampered["runtime"]["execution"]
+    with pytest.raises(PresenceAuthorityError) as caught:
+        presence_ceiling_from_payload(tampered)
+    assert caught.value.code == "presence_authority_digest_mismatch"
+    for bad in ("event", "voice"):
+        tampered = json.loads(json.dumps(call_payload))
+        tampered["runtime"]["execution"] = bad
+        with pytest.raises(PresenceAuthorityError) as caught:
+            presence_ceiling_from_payload(tampered)
+        assert caught.value.code == "presence_authority_invalid_runtime"
+
+
 def test_task_contract_preserves_only_verified_ceiling():
     ceiling = build_presence_capability_ceiling(
         skill_name="moderator",

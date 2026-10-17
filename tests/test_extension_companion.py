@@ -1012,3 +1012,20 @@ def test_companion_base_env_forwards_login_identity_without_secrets(monkeypatch)
     env = _companion_base_env()
     assert env["USER"] == env["LOGNAME"] == env["USERNAME"] == "synthetic-login"
     assert "USER_API_TOKEN" not in env
+
+
+def test_companion_base_env_carries_the_users_audio_session_only_when_the_host_has_it(monkeypatch) -> None:
+    """A meeting companion's audio libraries find the user's PulseAudio/PipeWire server through
+    XDG_RUNTIME_DIR or PULSE_SERVER; they reach the companion as the host has them, never invented."""
+    from ouroboros.extension_companion import _companion_base_env
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1001")
+    monkeypatch.setenv("PULSE_SERVER", "unix:/srv/aika/pulse/native")
+    monkeypatch.setenv("PULSE_SERVER_SECRET_TOKEN", "synthetic-host-only")
+    env = _companion_base_env()
+    assert (env["XDG_RUNTIME_DIR"], env["PULSE_SERVER"]) == ("/run/user/1001", "unix:/srv/aika/pulse/native")
+    assert "PULSE_SERVER_SECRET_TOKEN" not in env
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    monkeypatch.delenv("PULSE_SERVER")
+    env = _companion_base_env()
+    assert "XDG_RUNTIME_DIR" not in env and "PULSE_SERVER" not in env

@@ -1,4 +1,4 @@
-"""Compact, durable identity for owner-visible subagent and task-card messages."""
+"""Compact, durable identity and metadata for owner-visible conversation and task-card messages."""
 
 from __future__ import annotations
 
@@ -165,3 +165,73 @@ def subagent_message_meta(
     if event:
         meta["subagent_event"] = str(event)
     return meta
+
+
+def apply_chat_row_metadata(record, message_meta, *, direction="", task_id="", root=None):
+    """Attach supported producer metadata without storing arbitrary transport fields."""
+    from ouroboros.chat_uploads import stored_refs
+
+    # Speech rows persist only the compact identity required to route a
+    # child final after progress retention/rotation has removed its cards.
+    meta = dict(message_meta or {})
+    text, record_type = record.get("text", ""), record.get("type", "")
+    if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
+        from ouroboros.chat_references import origin_reply
+        meta["reply_to"] = origin_reply(root, task_id)
+    for key in ("reply_to", "relay"):
+        if isinstance(meta.get(key), dict) and meta[key]:
+            record[key] = dict(meta[key])
+    if meta.get("reply_to_relay"):
+        record["reply_to_relay"] = str(meta["reply_to_relay"])
+    if meta.get("late_answer"):
+        from ouroboros.owner_quiz import late_answer_ref
+        accepted_answer = late_answer_ref(meta["late_answer"])
+        if accepted_answer:
+            record["late_answer"] = accepted_answer
+    if meta.get("attachments"):  # owner attachments: server-measured refs, never paths or bytes
+        record["attachments"] = stored_refs(meta["attachments"])
+    if meta.get("text_placeholder") is True and text:  # the host wrote TEXT; the sender sent no words
+        record["text_placeholder"] = True
+    for key in SUBAGENT_MESSAGE_FIELDS:
+        if key in meta:
+            record[key] = meta[key]
+    if "narration" in meta:
+        record["narration"] = bool(meta["narration"])
+    if isinstance(meta.get("spoken"), dict):
+        record["spoken"] = dict(meta["spoken"])
+    if record_type in ("project_started", "project_handoff", "project_completion_summary"):
+        for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes"):
+            if key in meta:
+                record[key] = meta[key]
+    if meta.get("delivery_id"):
+        record["delivery_id"] = str(meta["delivery_id"])
+    if "task_terminal_status" in meta:
+        record["task_terminal_status"] = str(meta.get("task_terminal_status") or "")
+    # The turn's origin label (a consciousness wake-up) survives the row
+    # like the terminal status: a final bubble is labelled on reload too.
+    if meta.get("initiator"):
+        record["initiator"] = str(meta.get("initiator") or "")
+    if isinstance(meta.get("origin_message_ref"), dict):
+        record["origin_message_ref"] = dict(meta["origin_message_ref"])
+    # The host's placement fact for a task-keyed System row: the row belongs
+    # to the task's card, not beside it. Only the two named placements are
+    # persisted, and the row's stable identity rides with one of them or not
+    # at all — a bare id without a placement names nothing on reload.
+    if meta.get("card_row") in CARD_ROW_PLACEMENTS:
+        record["card_row"] = str(meta["card_row"])
+        card_row_id = str(meta.get("card_row_id") or "")
+        if card_row_id and len(card_row_id) <= 200:
+            record["card_row_id"] = card_row_id
+            revision = meta.get("card_row_revision")
+            if type(revision) is int and revision >= 0:
+                record["card_row_revision"] = revision
+    if record_type == "acceptance_late_settlement" and isinstance(meta.get("late_evidence"), dict):
+        record["late_evidence"] = dict(meta["late_evidence"])
+
+
+def copy_chat_replay_metadata(record, entry):
+    """Replay lineage, placement and spoken receipts verbatim when present."""
+    for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "card_row", "card_row_id", "card_row_revision",
+                  "late_evidence", "narration", "spoken"):
+        if field in entry:
+            record[field] = entry[field]

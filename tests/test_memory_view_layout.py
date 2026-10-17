@@ -154,8 +154,12 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
     assert narrowed.projection("max").system_content_json != plan.projection("max").system_content_json
     assert sum(text.startswith("## DEVELOPMENT.md\n") for text in texts) == int(book)
     assert all("Changed after capture" not in text for text in texts)
-    assert (narrowed.projection("max").memory_facts["floor"]["physical_allowance_tokens"]
-            - plan.projection("max").memory_facts["floor"]["physical_allowance_tokens"]) == tight - 1_000_000
+    # The host floor answers first (the subagent catalog is a host section with a view); the memory
+    # allowance moves by the window delta plus what it saved, to the estimator's rounding per section.
+    saved = [row["tokens_saved"] for row in narrowed.projection("max").memory_facts.get("host_sections_addressed", [])]
+    delta = (narrowed.projection("max").memory_facts["floor"]["physical_allowance_tokens"]
+             - plan.projection("max").memory_facts["floor"]["physical_allowance_tokens"])
+    assert abs(delta - (tight - 1_000_000) - sum(saved)) <= len(saved)
 
 
 def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tmp_path):

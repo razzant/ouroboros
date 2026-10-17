@@ -139,6 +139,17 @@
       },
       {
         "group": "more",
+        "id": "google-key",
+        "inputType": "password",
+        "label": "Google AI API Key (Live)",
+        "note": "Optional. Enables Gemini live calls alongside your text model.",
+        "placeholder": "Google AI key",
+        "settingKey": "GOOGLE_API_KEY",
+        "settingsInputId": "s-google",
+        "stateKey": "googleKey"
+      },
+      {
+        "group": "more",
         "id": "cloudru-key",
         "inputType": "password",
         "label": "Cloud.ru Foundation Models API Key",
@@ -398,6 +409,7 @@
     "consciousnessModel": "",
     "deepseekKey": "",
     "fallbackModel": "openai/gpt-5.6-luna",
+    "googleKey": "",
     "lightModel": "openai/gpt-6-luna",
     "localChatFormat": "",
     "localContextLength": 16384,

@@ -34,6 +34,11 @@ import { accountRowFacts } from './harness_accounts.js';
         const STEP_META = Object.fromEntries((SETUP_CONTRACT.steps || []).map((step) => [step.id, step]));
         const PROVIDER_FIELDS = SETUP_CONTRACT.providerFields || [];
         const PROVIDER_PROFILES = SETUP_CONTRACT.providerProfiles || {};
+        // Fields that configure no model by themselves: companions of another field.
+        const COMPANION_FIELD_KEYS = ['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'];
+        // The Google AI key opens live calls only: API spending, but no text model. The server's
+        // copy of both lists is settings_setup_contract._NOT_TEXT_ACCESS_KEYS.
+        const LIVE_CALL_ONLY_KEYS = ['GOOGLE_API_KEY'];
         // The backend contract exports active slots only. Heavy remains a
         // bounded stored-value migration input and never enters this editor.
         const MODEL_SLOTS = SETUP_CONTRACT.modelSlots || [];
@@ -129,9 +134,15 @@ import { accountRowFacts } from './harness_accounts.js';
         agentsStep?.setProcessingPreference(state.processingPreference);
     }
 
+    // Any API credential: what the API spending limits govern.
     function hasApiAccess() {
-        return PROVIDER_FIELDS.some((field) => !['MINIMAX_REGION', 'ZAI_PLAN', 'OPENAI_COMPATIBLE_API_KEY'].includes(field.settingKey)
-            && trim(state[field.stateKey]));
+        return PROVIDER_FIELDS.some((field) => !COMPANION_FIELD_KEYS.includes(field.settingKey) && trim(state[field.stateKey]));
+    }
+
+    // A credential that makes a text model usable; a live-calls-only key is not one.
+    function hasTextModelAccess() {
+        return PROVIDER_FIELDS.some((field) => !COMPANION_FIELD_KEYS.includes(field.settingKey)
+            && !LIVE_CALL_ONLY_KEYS.includes(field.settingKey) && trim(state[field.stateKey]));
     }
 
     function hasModelSubscription() {
@@ -139,7 +150,7 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function clearFreshSubscriptionDefaults() {
-        if (bootstrap.freshInstall !== true || state.modelsDirty || !hasModelSubscription() || hasApiAccess() || hasLocalModel()) return;
+        if (bootstrap.freshInstall !== true || state.modelsDirty || !hasModelSubscription() || hasTextModelAccess() || hasLocalModel()) return;
         const defaults = MODEL_DEFAULTS.openrouter || {};
         for (const [key, name] of [['mainModel', 'main'], ['lightModel', 'light'], ['fallbackModel', 'fallback']]) {
             if (state[key] === defaults[name]) state[key] = '';
@@ -408,7 +419,7 @@ import { accountRowFacts } from './harness_accounts.js';
             // one value the wizard can never replace.
             const shortKey = keyValues.find(([field, value]) => value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
-            const hasRemote = keyValues.some(([field, value]) => value && !['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey));
+            const hasRemote = hasTextModelAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
                 return state.agentsConnected.length
                     ? 'A Main model source has not been confirmed. Retry discovery, add an API key, or choose a local model.'
@@ -579,9 +590,10 @@ import { accountRowFacts } from './harness_accounts.js';
 
     function summaryRows() {
         const rows = [
-            ['Connected access', hasModelSubscription() && !hasApiAccess()
+            ['Connected access', hasModelSubscription() && !hasTextModelAccess()
                 ? modelSources.filter((source) => state.agentsConnected.includes(source.credentialHarness))
-                    .map((source) => source.label || source.id).join(', ') + ' subscription · no API key'
+                    .map((source) => source.label || source.id).join(', ')
+                    + (hasApiAccess() ? ' subscription · live-call API key only' : ' subscription · no API key')
                 : profileLabel(activeProviderProfile())],
             ['Review mode', reviewLabel(state.reviewEnforcement)],
             ['Runtime mode', runtimeModeLabel(state.runtimeMode)],

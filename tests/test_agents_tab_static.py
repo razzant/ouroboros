@@ -155,7 +155,8 @@ def test_every_moved_control_now_lives_in_the_delegation_section() -> None:
 def test_every_moved_control_still_round_trips_to_its_settings_key() -> None:
     """Moving markup must not detach a control from its key: settings.js maps
     id → key, so the pair has to survive the move intact."""
-    settings_js = _read("settings.js")
+    # settings.js spreads the id → key table it imports from settings_ui.js.
+    settings_js = _read("settings.js") + "\n" + _read("settings_ui.js")
     for control_id, key in MOVED_CONTROLS.items():
         if control_id == "s-allow-mutative-subagents":
             # This one is not in a table: it is collected explicitly because

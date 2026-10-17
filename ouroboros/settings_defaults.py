@@ -57,6 +57,7 @@ OPENROUTER_REVIEW_DEFAULTS = {
 SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OPENROUTER_API_KEY": "",
     "OPENAI_API_KEY": "",
+    "GOOGLE_API_KEY": "",
     "OPENAI_BASE_URL": "",
     "OPENAI_COMPATIBLE_API_KEY": "",
     "OPENAI_COMPATIBLE_BASE_URL": "",
@@ -104,6 +105,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_MODEL_FALLBACKS": OPENROUTER_DEFAULTS["fallback"],
     "OUROBOROS_SERVED_MODEL_REDOS": 2,  # redos of a round another model answered (`llm_substitution.py`)
     "OUROBOROS_MAX_WORKERS": 10, "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,
+    # Live calls (Google Gemini Live): model, voice ("" = provider default), Gemini's native search,
+    # the owner's optional minute ceilings ("" = none; a Presence call holds a slot).
+    "OUROBOROS_CALL_MODEL_GOOGLE": "gemini-3.8-live",
+    "OUROBOROS_CALL_VOICE_GOOGLE": "", "OUROBOROS_CALL_NATIVE_SEARCH": True,
+    "OUROBOROS_CALL_MAX_MINUTES": "", "OUROBOROS_PRESENCE_CALL_MAX_MINUTES": "",
     "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6,
     "OUROBOROS_MAX_SUBAGENT_DEPTH": 3,
     # Mutative ("acting") subagents master toggle. Empty = follow runtime mode
@@ -400,6 +406,7 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_EFFORT_SCOPE_REVIEW",
     "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
     "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
+    "OUROBOROS_CALL_ENGINE", "OUROBOROS_CALL_MODEL_OPENAI", "OUROBOROS_CALL_VOICE_OPENAI",  # calls: Gemini Live only
 )
 
 

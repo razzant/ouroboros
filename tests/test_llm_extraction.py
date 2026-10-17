@@ -137,10 +137,10 @@ _MIXIN_OWNERS = {
     ),
 }
 
-# Members llm.py keeps: the composition itself, the caller-facing chat surface,
+# Members llm.py keeps: the composition itself, the caller-facing chat and live surfaces,
 # and the tool-schema/tool-call translators every lane reaches by class name.
 _PARENT_MEMBERS = frozenset({
-    "__init__", "chat", "chat_async", "vision_query", "default_model",
+    "__init__", "chat", "chat_async", "vision_query", "default_model", "open_live",
     "available_models", "_strip_reasoning_wrappers", "_parse_tool_calls_from_content",
     "_stringify_tool_description", "_sanitize_chat_completion_tools", "_build_anthropic_tools",
     "_gigachat_sanitize_schema", "_gigachat_functions",
@@ -226,6 +226,7 @@ def test_llm_client_member_inventory_is_unchanged():
     places complete remote dispatch with the existing provider/client owner.
     (5) Explicit OpenRouter receipt reconciliation retires the unused
     ``_fetch_generation_cost`` compatibility stub and its empty mixin.
+    (6) Live calls add ``open_live``, the one place realtime engines open.
     """
     assert _defined_members(pathlib.Path(llm.__file__), "LLMClient") == _PARENT_MEMBERS
     moved = {name for names in _MIXIN_OWNERS.values() for name in names.split()}
@@ -233,7 +234,7 @@ def test_llm_client_member_inventory_is_unchanged():
     assert hashlib.sha256(
         json.dumps(composed, separators=(",", ":")).encode()
 
-    ).hexdigest() == "4d444f433e693f9692ebbdff2e1f71cb1a223f0c1674d9e148b970329856430c"
+    ).hexdigest() == "d5eb757f4fbac267cc9e73f2b46ece8920217b551eb797f2f6542a99071c4f8a"
     for name in composed:
         assert hasattr(LLMClient, name), name
 

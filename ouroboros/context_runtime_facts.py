@@ -172,6 +172,10 @@ def snapshot_labelled(section: str, captured_at: str) -> str:
     These sections are rendered once per run and stay byte-stable in the cached
     prefix; the label says so instead of refreshing them every round.
     """
+    from ouroboros.section_floor import HostSection, labelled_section
+
+    if isinstance(section, HostSection):
+        return labelled_section(section, lambda text: snapshot_labelled(text, captured_at))
     heading, sep, body = str(section or "").partition("\n")
     if not heading.startswith(("## Recent ", "## Drive state")) or not captured_at:
         return section

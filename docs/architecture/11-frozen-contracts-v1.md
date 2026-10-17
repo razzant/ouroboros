@@ -1,6 +1,6 @@
 # 11. Frozen Contracts v1 (`ouroboros/contracts/`)
 
-ABI promise: the frozen shapes and helper semantics skills and browser consumers rely on, their extension rules, what stays deliberately unpinned, and the one break window an upgrading install must know. A removed field needs a versioned successor.
+ABI promise for skills and browser consumers, with one upgrade break window. A removed field needs a versioned successor.
 
 `ouroboros/contracts/` freezes §11.1 shapes/helpers. Additive browser ABI: `ouroboros/gateway/contracts.py`, JSDoc re-exports in `web/modules/api_types.js`, parity tests, `gateway/schema.py`-derived schemas, published by `GET /api/contract`.
 
@@ -49,7 +49,7 @@ ABI promise: the frozen shapes and helper semantics skills and browser consumers
 
 ### 11.3 What to do when extending
 
-Add the field to its active frozen owner (§11.1), keep existing consumers working, and enforce the new surface in the contract/parity tests (CHECKLISTS item 23, `gateway_parity`, owns the review-time criteria). Removing anything from 11.1 is a deliberate ABI break needing a versioned successor and a release-row migration note; 11.4 carries only the current window's upgrade facts, the release ledger the rest.
+Add the field to its active frozen owner (§11.1), keep existing consumers working and enforce the new surface in contract/parity tests (review criteria: CHECKLISTS item 23, `gateway_parity`). Any removal from 11.1 is a deliberate ABI break requiring a versioned successor and release-row migration note; 11.4 carries only the current window's upgrade facts, the release ledger the rest.
 
 ### 11.4 Recent ABI Retirements
 

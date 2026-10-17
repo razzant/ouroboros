@@ -26,6 +26,7 @@ from ouroboros.presence_capabilities import (
     PresenceScriptTarget,
     PresenceToolTarget,
 )
+from ouroboros.presence_runtime import EXECUTION_CALL, EXECUTION_EVENT
 from ouroboros.tool_capabilities import COGNITIVE_MEMORY_TOOL_NAMES
 
 PRESENCE_CEILING_SCHEMA_VERSION = 1
@@ -144,6 +145,10 @@ class PresenceCapabilityCeiling:
     tool_grants: tuple[PresenceToolGrant, ...]
     resource_grants: tuple[PresenceResourceGrant, ...]
     digest: str
+    # ``event`` (the bounded text turn) or ``call`` (the binding may open one live
+    # audio session). Part of the digest only as ``call``, so every ceiling minted
+    # before the field existed verifies unchanged.
+    execution: str = EXECUTION_EVENT
 
     def __post_init__(self) -> None:
         _text(self.skill_name, "capability_ceiling.skill_name")
@@ -159,6 +164,8 @@ class PresenceCapabilityCeiling:
             raise PresenceAuthorityError("presence_authority_invalid_model_slot", "capability_ceiling.model_slot")
         if isinstance(self.inline_max_rounds, bool) or not isinstance(self.inline_max_rounds, int) or self.inline_max_rounds < 1:
             raise PresenceAuthorityError("presence_authority_invalid_rounds", "capability_ceiling.inline_max_rounds")
+        if self.execution not in {EXECUTION_EVENT, EXECUTION_CALL}:
+            raise PresenceAuthorityError("presence_authority_invalid_execution", "capability_ceiling.execution")
         if len({grant.name for grant in self.tool_grants}) != len(self.tool_grants):
             raise PresenceAuthorityError("presence_authority_duplicate_tool", "capability_ceiling.tool_grants")
 
@@ -176,6 +183,7 @@ def presence_ceiling_payload(ceiling: PresenceCapabilityCeiling) -> dict[str, An
         "runtime": {
             "model_slot": ceiling.model_slot,
             "inline_max_rounds": ceiling.inline_max_rounds,
+            **({"execution": EXECUTION_CALL} if ceiling.execution == EXECUTION_CALL else {}),
         },
         "tools": [
             {"name": grant.name, "bindings": [_binding_payload(item) for item in grant.bindings]}
@@ -250,7 +258,11 @@ def presence_ceiling_from_payload(value: Any) -> PresenceCapabilityCeiling:
     runtime = value.get("runtime")
     tools = value.get("tools")
     resources = value.get("resources")
-    if not isinstance(runtime, Mapping) or set(runtime) != {"model_slot", "inline_max_rounds"}:
+    if (not isinstance(runtime, Mapping)
+            or set(runtime) - {"execution"} != {"model_slot", "inline_max_rounds"}
+            or runtime.get("execution", EXECUTION_CALL) != EXECUTION_CALL):
+        # ``execution`` is carried only as ``call``; an explicit ``event`` is not a shape
+        # this version ever writes, so it is refused rather than normalized.
         raise PresenceAuthorityError("presence_authority_invalid_runtime", "capability_ceiling.runtime")
     if not isinstance(tools, list) or not isinstance(resources, list):
         raise PresenceAuthorityError("presence_authority_invalid_payload", "capability_ceiling")
@@ -295,6 +307,7 @@ def presence_ceiling_from_payload(value: Any) -> PresenceCapabilityCeiling:
         tool_grants=tuple(tool_grants),
         resource_grants=tuple(resource_grants),
         digest=value.get("digest"),
+        execution=runtime.get("execution", EXECUTION_EVENT),
     )
     if _digest(value) != ceiling.digest:
         raise PresenceAuthorityError("presence_authority_digest_mismatch", "capability_ceiling.digest")
@@ -365,6 +378,7 @@ def build_presence_capability_ceiling(
         tool_grants=tuple(sorted(tools, key=lambda item: item.name)),
         resource_grants=tuple(sorted(resources, key=lambda item: (item.root, item.path_prefix))),
         digest="0" * _SHA256_LEN,
+        execution=resolution.runtime.execution,
     )
     payload = presence_ceiling_payload(provisional)
     return PresenceCapabilityCeiling(

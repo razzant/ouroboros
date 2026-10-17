@@ -215,7 +215,7 @@ CONTRACT_MODULES = (
     "ouroboros.gateway.contracts", "ouroboros.gateway.client_contracts",
     "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts",
     "ouroboros.gateway.ui_i18n_contracts", "ouroboros.gateway.mcp_import_contracts",
-    "ouroboros.gateway.model_route_contracts",
+    "ouroboros.gateway.model_route_contracts", "ouroboros.gateway.call_contracts",
 )
 _CONTRACT_CACHE: Dict[str, Any] = {}
 
@@ -300,7 +300,12 @@ def contract_document() -> Dict[str, Any]:
         names.update(name for name in (inbound, outbound) if name)
         messages.append({"type": ws_type, **({"inbound": inbound} if inbound else {}),
                          **({"outbound": outbound} if outbound else {})})
+    from ouroboros.gateway.call_contracts import PEER_CONTROLS, SERVER_CONTROLS, socket_contract
+
+    names.update(cls.__name__ for cls in (*PEER_CONTROLS.values(), *SERVER_CONTROLS.values()))
+    names.update(("CallSocketContract", "HostCallOpenRequest", "HostCallOpenResponse"))
     document = {
+        "call": socket_contract(),
         "abi_version": GATEWAY_ABI_VERSION,
         "runtime_version": get_version(),
         "core_paths": list(index.CORE_PATHS),

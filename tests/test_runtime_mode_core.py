@@ -327,7 +327,7 @@ def test_settings_ui_renders_runtime_mode_and_skills_path():
 
 def test_settings_js_reads_and_writes_phase2_keys():
     src = "\n".join((REPO / "web" / "modules" / name).read_text(encoding="utf-8")
-                     for name in ("settings.js", "settings_local_model.js"))
+                     for name in ("settings.js", "settings_ui.js", "settings_local_model.js"))
     assert "OUROBOROS_RUNTIME_MODE" in src
     assert "OUROBOROS_CONTEXT_MODE'" in src
     assert "OUROBOROS_SKILLS_REPO_PATH" in src

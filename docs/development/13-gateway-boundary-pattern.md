@@ -2,7 +2,7 @@
 
 This chapter owns dependency direction at the browser boundary: inbound routes enter through `ouroboros/gateway/`, outbound provider and harness adapters live in `ouroboros/gateways/` and carry no domain policy, and every interface, the builtin one included, is a client of one published contract (why the facade exists: ARCHITECTURE §1 "Gateway Boundary v1").
 
-Frontend calls go through `web/modules/api_client.js`. Do not copy policy into an outbound adapter, do not promote the `gateway/host_service.py` callback surface into a general owner/task API, and do not require a class where established function owners already preserve the boundary. Enforcement: CHECKLISTS item 23 (`gateway_parity`) and `tests/test_gateway_parity.py`.
+Frontend calls go through `web/modules/api_client.js`. Do not promote the `gateway/host_service.py` callback surface into a general owner/task API, and do not require a class where established function owners already preserve the boundary. Enforcement: CHECKLISTS item 23 (`gateway_parity`) and `tests/test_gateway_parity.py`.
 
 Publish routes/WS types via `gateway/endpoint_index.py`, `HTTP_SHAPES`/`WS_SHAPES`, contract TypedDicts and field-identical JSDoc twins; `/api/contract` derives from them. Update client-visible meaning in CLIENT_CONTRACT with code. Applied `ServedUI` alone selects optional setup/login pages; auth and settings retain their writers. Builtin recovery assets and the author kit stay builtin; never mix fallback files. Enforcement: `tests/test_client_contract_coverage.py`, `tests/test_gateway_client_contract.py`, `tests/test_client_contract_bindings.py`, `tests/test_ui_serving.py`.
 

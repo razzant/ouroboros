@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_
 
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
-    _normalized_input_token_usage, _reported_token_count, processing_receipt, observed_processing_mode, usage_from_response,
+    _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
     _plain, _provider_exception_facts, physical_failure_evidence, provider_failure_payload, provider_cost_value,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
@@ -59,7 +59,7 @@ __all__ = (
     "execute_physical_attempt", "execute_physical_attempt_async",
     "last_physical_attempt_capture", "last_root_accounting", "physical_attempt_capture_from_exception",
     "mark_dispatched", "mark_unresolved", "physical_attempt_limit",
-    "record_subscription_session",
+    "record_subscription_session", "record_received_attempt",
     "record_unmetered_external_dispatch", "refresh_root_accounting",
     "release_attempt", "reserve_attempt", "settle_attempt",
     "apply_provider_price_receipt", "bind_provider_generation",
@@ -324,6 +324,8 @@ class AttemptRequest:
     effort: Optional[Dict[str, Any]] = None
     allow_live_fetch: bool = True  # False only for a price display: cached tariffs, never a fetch
     provider_receipt_binding: Optional[Dict[str, str]] = None
+    cost_evidence: Optional[Dict[str, Any]] = None
+    rendered_mode: str = ""
 @dataclass(frozen=True)
 class AttemptReservation:
     attempt_id: str
@@ -642,6 +644,7 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
                      "prompt_cache_ttl": prompt_cache_ttl},
         allow_live_fetch=request.allow_live_fetch,
         provider=request.provider,
+        **({"drive_root": request.drive_root} if request.provider in {"openai", "anthropic", "google"} else {}),
         **({"processing_mode": request.submitted_processing_mode}
            if request.submitted_processing_mode else {}),
     )
@@ -785,6 +788,9 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                         "candidate_context_size_bytes": request.candidate_context_size_bytes,
                         "candidate_measurement_kind": request.candidate_measurement_kind,
                         "physical_context": asdict(request.physical_context) if request.physical_context else None,
+                        **({"rendered_mode": request.rendered_mode} if request.rendered_mode else {}),
+                        **({"cost_evidence": copy.deepcopy(request.cost_evidence)}
+                           if request.cost_evidence is not None else {}),
                         **({"provider_receipt_binding": copy.deepcopy(request.provider_receipt_binding)}
                            if request.provider_receipt_binding else {}),
                         **({"effort": copy.deepcopy(request.effort)} if request.effort is not None else {}),
@@ -1267,47 +1273,36 @@ def _retain_physical_failure(reservation, *, exc=None, response=None):
 
 
 def _settlement_fields(reservation, usage, cost_usd, cost_final) -> Dict[str, Any]:
-    """Normalize reported usage before the monetary transaction; no live pricing I/O."""
-    normalized = dict(usage or {})
-    receipt = processing_receipt(reservation.provider, normalized,
-                                 requested=reservation.processing_preference,
-                                 submitted_native=reservation.submitted_processing_mode)
-    if receipt is not None:
-        normalized["processing"] = receipt
-    prompt_tokens = _reported_token_count(normalized, "prompt_tokens", "input_tokens")
-    completion_tokens = _reported_token_count(normalized, "completion_tokens", "output_tokens")
-    cached_tokens = _reported_token_count(normalized, "cached_tokens")
-    cache_write_tokens = _reported_token_count(normalized, "cache_write_tokens")
-    cost = _number(cost_usd)
-    pricing_mode = observed_processing_mode(reservation.provider, normalized)
-    has_usage = bool((prompt_tokens or 0) or (completion_tokens or 0))
-    if cost is None and str(reservation.provider or "").lower() == "local":
-        cost, cost_final = 0.0, True
-    elif cost is None and cost_usd is None and not normalized.get("cost_invalid") and has_usage:
-        cost = estimate_cost_optional(
-            reservation.model,
-            int(prompt_tokens or 0),
-            int(completion_tokens or 0),
-            cache_usage={"cached_tokens": int(cached_tokens or 0),
-                         "cache_write_tokens": int(cache_write_tokens or 0),
-                         "cache_write_tokens_by_ttl": normalized.get("cache_write_tokens_by_ttl"),
-                         "prompt_cache_ttl": str(normalized.get("prompt_cache_ttl") or "")},
-            allow_live_fetch=False,
-            provider=reservation.provider,
-            **({"processing_mode": pricing_mode} if pricing_mode else {}),
-        )
-        cost_final = False
-    return dict(
-        cost_usd=cost,
-        cost_final=bool(cost_final and cost is not None),
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cached_tokens=cached_tokens,
-        cache_write_tokens=cache_write_tokens,
-        prompt_cache_ttl=str(normalized.get("prompt_cache_ttl") or ""),
-        **{key: copy.deepcopy(normalized[key]) for key in ("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_evidence")
-           if key in normalized},
-    )
+    from ouroboros._usage_settlement import settlement_fields
+
+    return settlement_fields(reservation, usage, cost_usd, cost_final,
+                             estimate_cost_optional=estimate_cost_optional)
+
+def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, cost_usd=None) -> str:
+    """Record an already billed receipt; admission cannot veto past provider spend.
+
+    Transcription has no start event. Its receipt still traverses the same row
+    states and reducer, without rechecking permission to send something already
+    received. Subsequent reservations see this charge under the ordinary scope.
+    """
+    request, scope = _merge_scope(request)
+    root = _drive_root(scope.drive_root)
+    reservation = AttemptReservation(uuid.uuid4().hex, root, request.model, request.provider, None, scope=scope)
+    fields = _settlement_fields(reservation, usage, cost_usd, False)
+    row = {key: value for key, value in asdict(scope).items() if key != "drive_root"}
+    row.update(kind="attempt", attempt_id=reservation.attempt_id, model=request.model, provider=request.provider,
+               reservation_upper_bound_usd=None, pricing_known=False, reservation_basis="receipt_already_received",
+               candidate_measurement_kind="opaque", rendered_mode=request.rendered_mode,
+               physical_context=asdict(request.physical_context) if request.physical_context else None)
+    with _locked(root) as view:
+        current = None
+        for state in ("reserved", "dispatched", "settled"):
+            row = {**row, "state": state, **(fields if state == "settled" else {})}
+            current = view.write(row, current)
+    collector = _ATTEMPT_COLLECTOR.get()
+    if collector is not None:
+        collector.append(reservation.attempt_id)
+    return reservation.attempt_id
 
 
 def _observe_token_density(request: AttemptRequest, usage: Optional[Dict[str, Any]]) -> None:

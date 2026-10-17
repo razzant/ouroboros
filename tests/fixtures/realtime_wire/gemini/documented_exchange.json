@@ -1,0 +1,236 @@
+{
+  "header": {
+    "provenance": "synthetic_from_docs",
+    "live_wire": "NOT_RUN",
+    "sources": [
+      "https://ai.google.dev/api/live",
+      "https://ai.google.dev/gemini-api/docs/live-api/tools",
+      "https://ai.google.dev/api/generate-content#FunctionResponse"
+    ],
+    "notes": "Constructed protocol examples. Gemini does not supply response or audio-item IDs; tool IDs and resume handles are synthetic stand-ins. Scheduling follows the normative FunctionResponse.scheduling wire field; the Live tool tutorial nests it inside response in examples, which disagrees with the schema."
+  },
+  "events": [
+    {
+      "direction": "server",
+      "message": {
+        "setupComplete": {}
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "sessionResumptionUpdate": {
+          "newHandle": "synthetic-handle-1",
+          "resumable": true
+        }
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "realtimeInput": {
+          "audio": {
+            "mimeType": "audio/pcm;rate=16000",
+            "data": "AAABAA=="
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Look up fixture.",
+            "finished": true
+          }
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "modelTurn": {
+            "role": "model",
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AAABAA=="
+                }
+              },
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "data": "AgADAA=="
+                }
+              }
+            ]
+          },
+          "outputTranscription": {
+            "text": "I will check.",
+            "finished": true
+          }
+        },
+        "usageMetadata": {
+          "promptTokenCount": 12,
+          "responseTokenCount": 3,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 8
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 4
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "toolCall": {
+          "functionCalls": [
+            {
+              "id": "synthetic-call-1",
+              "name": "lookup",
+              "args": {
+                "query": "fixture"
+              }
+            },
+            {
+              "id": "synthetic-call-2",
+              "name": "lookup",
+              "args": {
+                "query": "cancelled"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "toolCallCancellation": {
+          "ids": [
+            "synthetic-call-2"
+          ]
+        }
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "toolResponse": {
+          "functionResponses": [
+            {
+              "id": "synthetic-call-1",
+              "name": "lookup",
+              "response": {
+                "result": "42"
+              },
+              "scheduling": "WHEN_IDLE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "usageMetadata": {
+          "promptTokenCount": 19,
+          "cachedContentTokenCount": 5,
+          "responseTokenCount": 8,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 10
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 6
+            },
+            {
+              "modality": "IMAGE",
+              "tokenCount": 3
+            }
+          ],
+          "cacheTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 3
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 2
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 2
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 6
+            }
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "serverContent": {
+          "turnComplete": true
+        }
+      }
+    },
+    {
+      "direction": "client",
+      "message": {
+        "clientContent": {
+          "turns": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "[room] A typed message."
+                }
+              ]
+            }
+          ],
+          "turnComplete": false
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "sessionResumptionUpdate": {
+          "newHandle": "synthetic-handle-2",
+          "resumable": true
+        }
+      }
+    },
+    {
+      "direction": "server",
+      "message": {
+        "goAway": {
+          "timeLeft": "12.5s"
+        }
+      }
+    }
+  ]
+}

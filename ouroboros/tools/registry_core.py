@@ -649,9 +649,11 @@ class ToolRegistry:
     def _mcp_rows(self, *, refresh: bool, record: bool) -> List[Dict[str, Any]]:
         """Configured MCP descriptors (with ``raw_name``) under the same filters.
 
-        ``schemas()`` passes both flags: a changed MCP setting may re-list servers
-        and collisions/empty servers enter the omission ledger. A name-miss read
-        passes neither, so it causes no transport, refresh or ledger write.
+        ``schemas()`` passes both flags: it reads the rows listed so far, never waiting
+        for a listing, and starts the background one this task's admission governs
+        (``ensure_configured_from_settings``); collisions and empty or not yet listed
+        servers enter the omission ledger. A name-miss read passes neither, so it
+        causes no transport, refresh or ledger write.
         """
         from ouroboros.mcp_client import ensure_configured_from_settings as _mcp_ensure_configured, get_manager as _mcp_get_manager
 

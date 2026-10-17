@@ -726,9 +726,9 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     lineage = row_lineage(root)
     notes = _notes_by_room(store) if spec.room_id is not None or spec.live_rooms != "none" else {}
     if spec.live_rooms != "none":
-        by_room = memory_inventory.open_rows_by_room(root)
+        by_room = memory_inventory.open_rows_by_room(root, store)
     elif spec.room_id is not None:  # the room's facts are counted from its open rows whatever the view prints of them
-        by_room = {spec.room_id: memory_inventory.open_room_rows(root, spec.room_id)}
+        by_room = {spec.room_id: memory_inventory.open_room_rows(root, spec.room_id, store)}
     else:
         by_room = {}
     room = (_capture_room(store, root, spec, label, by_room.get(spec.room_id, []), notes, lineage, story)
@@ -742,7 +742,8 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
 
     Before the import has completed (another importer holds the legacy lock, the
     import was refused, the journal cannot be opened) the snapshot carries only the
-    reason and the room id: no story, lanes or live rooms, and no chain read.
+    reason and the room id: no story, lanes or live rooms, and no chain read. Every
+    chronicle read of a capture comes from one ``read_session`` (one lock, one state).
     """
     root = pathlib.Path(drive_root)
     owner_words = _owner_words_block(task) if spec.owner_words else ""
@@ -752,10 +753,10 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
     if status["state"] != "active":
         return MemoryViewSnapshot(spec=spec, store_status=status, frontier={}, room=bare, owner_words=owner_words)
     try:
-        store = ChronicleStore(root)
-        frontier = legacy_frontier(store)
-        story, story_status, refusals = _capture_story(store, root, label) if spec.story else ([], {}, [])
-        room, live, marks = _capture_live(store, root, spec, label, story)
+        with ChronicleStore(root).read_session() as store:
+            frontier = legacy_frontier(store)
+            story, story_status, refusals = _capture_story(store, root, label) if spec.story else ([], {}, [])
+            room, live, marks = _capture_live(store, root, spec, label, story)
     except Exception as exc:  # a journal that turns unreadable mid-capture still leaves a view with its reason
         log.warning("memory view: the chronicle could not be read", exc_info=True)
         return MemoryViewSnapshot(spec=spec, store_status={"state": "journal_unreadable",

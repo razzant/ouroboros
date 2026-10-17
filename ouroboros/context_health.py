@@ -15,7 +15,7 @@ import logging
 import pathlib
 import re
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.context_budget import SCRATCHPAD_BLOAT_WARN_CHARS
 from ouroboros.utils import iter_jsonl_objects, read_json_dict, read_text
@@ -281,13 +281,69 @@ def _unread_output_line(custody_root: Any, run: Any, task_id: str) -> str:
             f"EOF (owner task {run.task_id or '?'}). {action}")
 
 
+# The operative view lists delegated-run obligations under their kind: the kind line carries the
+# severity, the count and the verb an obligation asks of its owner; each obligation keeps one line
+# of its own with its ids, the state its kind does not already name, and its verb when it is the
+# reader's own. ``Brief`` is ``(severity, kind, line)``.
+Brief = Tuple[str, str, str]
+_KIND_VERBS = {
+    "DELEGATED RESULT AVAILABLE": "its owner task reads each retained output",
+    "DELEGATED RESULT NEVER READ": "its owner task reads each to EOF",
+    "OWN DELEGATED RUN ENDED": "this task reads each retained output",
+    "DELEGATED PATCH AWAITS DISPOSITION": ("its owner task decides each while live, then a live top-level task "
+                                           "may apply or reject it with integrate_delegated_patch"),
+}
+
+
+def _brief(severity: str, kind: str, run: Any, *, state: str = "", verb: str = "") -> Brief:
+    """One obligation's operative line: built from the same run facts as the full line, never parsed from it.
+
+    Addresses, paths and the ownership rule stay in the full section the view points at.
+    """
+    return severity, kind, (f"run {run.run_id or '?'}, owner task {run.task_id or '?'}"
+                            + (f", {state}" if state else "") + (f": {verb}" if verb else ""))
+
+
+def _foreign(run: Any, task_id: str) -> bool:
+    return bool(task_id and run.task_id and task_id != run.task_id)
+
+
+def _unread_output_brief(run: Any, task_id: str) -> Brief:
+    verb = "" if _foreign(run, task_id) else "this task reads it to EOF"
+    if getattr(run, "terminal_source", None) and not run.unread_disclosed:
+        return _brief("INFO", "DELEGATED RESULT AVAILABLE", run, verb=verb)
+    return _brief("WARNING", "DELEGATED RESULT NEVER READ", run, verb=verb)
+
+
+def _health_view(heading: str, checks: List[str], briefs: Dict[str, Brief]) -> str:
+    """Non-passing checks exact, obligations as one line each under their kind, then the passing count."""
+    rows: List[Any] = []
+    kinds: Dict[str, List[Any]] = {}
+    for check in checks:
+        if check.startswith("OK:"):  # OK is this producer's passing-check tag
+            continue
+        if check not in briefs:
+            rows.append(check)
+            continue
+        severity, kind, line = briefs[check]
+        if kind not in kinds:
+            kinds[kind] = [severity, kind, []]
+            rows.append(kinds[kind])
+        kinds[kind][2].append(line)
+    rendered = [row if isinstance(row, str) else (
+        f"{row[0]}: {row[1]} — {len(row[2])}: {_KIND_VERBS[row[1]]}." + "".join(f"\n  - {line}" for line in row[2]))
+        for row in rows]
+    passing = sum(check.startswith("OK:") for check in checks)
+    return heading + "\n".join([*(f"- {row}" for row in rendered), f"- {passing} passing checks; details retained."])
+
+
 # One line per own settled run, bounded like ``terminal_custody_notice``.
 _OWN_RUN_OUTCOME_LINES = 10
 
 
 def _own_run_outcome_lines(custody_root: Any, custody_state: Any, task_id: str,
-                           attempt_key: str) -> List[str]:
-    """The reader's OWN settled runs whose terminal payload its current transcript lacks.
+                           attempt_key: str) -> List[Tuple[str, Optional[Brief]]]:
+    """``(full line, operative line or None)`` for the reader's OWN settled runs its transcript lacks.
 
     #1573: a run the sweep settled while its owner was parked (or that it never
     waited on) left no fact in the owner's context. From the ONE custody state the
@@ -323,18 +379,21 @@ def _own_run_outcome_lines(custody_root: Any, custody_state: Any, task_id: str,
         address = staged_output_address(custody_root, run)
         retained = ("retained full output" if run.output_complete else
                     "retained INCOMPLETE payload (unverified engine preview, never acknowledgeable as read)")
-        lines.append(
-            f"INFO: OWN DELEGATED RUN ENDED — run {run.run_id} {run.terminal_state}"
-            + (f" ({run.terminal_reason})" if run.terminal_reason else "")
+        ended = f"{run.terminal_state}" + (f" ({run.terminal_reason})" if run.terminal_reason else "")
+        lines.append((
+            f"INFO: OWN DELEGATED RUN ENDED — run {run.run_id} {ended}"
             + (f" at {run.settled_at}" if run.settled_at else "")
             + "; at context capture, no terminal-wake acknowledgement was recorded for this attempt"
             + ("; engine-owned, may be reclaimed: " + "; ".join(engine) if engine else "")
             + (f"; {retained}: read_file root='{address['root']}' path='{address['path']}'"
                if address else "")
-            + ".")
+            + ".",
+            _brief("INFO", "OWN DELEGATED RUN ENDED", run, state=ended + (
+                "" if address and run.output_complete else ", retained payload incomplete" if address
+                else ", only engine-owned locators"))))
     if len(runs) > _OWN_RUN_OUTCOME_LINES:
-        lines.append(f"INFO: OWN DELEGATED RUNS ENDED — +{len(runs) - _OWN_RUN_OUTCOME_LINES} older "
-                     "settled runs also lacked this attempt's acknowledgement at context capture.")
+        lines.append((f"INFO: OWN DELEGATED RUNS ENDED — +{len(runs) - _OWN_RUN_OUTCOME_LINES} older "
+                      "settled runs also lacked this attempt's acknowledgement at context capture.", None))
     return lines
 
 
@@ -484,6 +543,14 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     # remaining block replay for itself, under its own fail-soft arm.
     custody_root = None
     custody_state = None
+    # Each obligation's operative line, keyed by its exact full line (which stays in ``checks``).
+    briefs: Dict[str, Brief] = {}
+
+    def obligation(line: str, brief: Optional[Brief]) -> None:
+        if brief is not None:
+            briefs[line] = brief
+        checks.append(line)
+
     try:
         from ouroboros.delegate_custody import replay as replay_custody
         from ouroboros.delegate_custody_current import health_runs
@@ -506,12 +573,13 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
             # nothing is live and nothing is mutating — but it stays visible until the
             # read happens, which is the whole difference between a disclosure and a fact
             # someone acts on. It clears itself the moment the acknowledgement lands.
-            checks.append(_unread_output_line(custody_root, run, task_id))
+            obligation(_unread_output_line(custody_root, run, task_id), _unread_output_brief(run, task_id))
     except Exception:
         pass
 
     try:
-        checks.extend(_own_run_outcome_lines(custody_root, custody_state, task_id, attempt_key))
+        for line, brief in _own_run_outcome_lines(custody_root, custody_state, task_id, attempt_key):
+            obligation(line, brief)
     except Exception:
         pass
 
@@ -547,7 +615,9 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
             # wording is STATIC — stating the rule costs no per-orphan
             # task_result read, and the tool itself is the authority on whether
             # this particular caller may dispose this particular run.
-            if task_id and run.task_id and task_id != run.task_id:
+            foreign = _foreign(run, task_id)
+            verb = "" if foreign else "this task applies or rejects it"
+            if foreign:
                 decide_clause = (
                     f"Only its owner task {run.task_id} can decide it while that task "
                     f"is live; once that task is terminal, a live top-level task may dispose it: "
@@ -562,6 +632,7 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                 # left it guessing (sixteen such rows in one prompt). No per-orphan
                 # task_result read is added, and the tool re-verifies every guard.
                 if active_root and orphan_apply_target_ok(run.target_root, active_root):
+                    verb = "once its owner is terminal, your active root fits its target"
                     decide_clause += (
                         f" Your own active root already satisfies that target, so once the owner "
                         f"is terminal the call is integrate_delegated_patch(run_id='{run.run_id}', "
@@ -572,12 +643,13 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                     f"decide with integrate_delegated_patch(run_id='{run.run_id}', "
                     f"decision='apply'|'reject')."
                 )
-            checks.append(
+            obligation(
                 f"WARNING: DELEGATED PATCH AWAITS DISPOSITION — run {run.run_id or '?'} "
                 f"(owner task {run.task_id or '?'}) {state_clause} and no apply/reject "
                 f"recorded. Nothing reaches the shared tree by itself: {decide_clause} "
-                f"{persist_clause}"
-            )
+                f"{persist_clause}",
+                _brief("WARNING", "DELEGATED PATCH AWAITS DISPOSITION", run, verb=verb,
+                       state="patch captured" if run.patch_captured else "snapshot only, no patch captured"))
     except Exception:
         pass
 
@@ -589,11 +661,10 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
             # An overpowered mutating run we asked to stop and could not verify stopped
             # is an incident, not a tool-result string. It stays CRITICAL until a
             # terminal receipt or a settlement clears it.
-            checks.append(
-                f"CRITICAL: DELEGATED RUN MAY STILL BE LIVE — run {fault.get('run_id') or '?'} "
-                f"({fault.get('reason') or 'unverified'}), owner task "
-                f"{fault.get('task_id') or '?'}, since {fault.get('ts') or '?'}"
-            )
+            line = (f"CRITICAL: DELEGATED RUN MAY STILL BE LIVE — run {fault.get('run_id') or '?'} "
+                    f"({fault.get('reason') or 'unverified'}), owner task "
+                    f"{fault.get('task_id') or '?'}, since {fault.get('ts') or '?'}")
+            checks.append(line)  # already one short exact line with its ids
     except Exception:
         pass
 
@@ -617,7 +688,13 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     _collect_log_analysis_checks(env, checks)
     if not checks:
         return ""
-    return "## Health Invariants\n\n" + "\n".join(f"- {check}" for check in checks)
+    from ouroboros.section_floor import HostSection
+
+    heading = "## Health Invariants\n\n"
+    # Every non-passing fact stays, unknown health included; a delegated-run obligation keeps
+    # its ids, state and verb, its addresses and ownership rule remain in the full section.
+    return HostSection("health_invariants", heading + "\n".join(f"- {check}" for check in checks),
+                       _health_view(heading, checks, briefs))
 
 
 def _compute_cache_hit_rate(env: Any) -> Optional[float]:

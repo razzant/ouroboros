@@ -294,12 +294,6 @@ def _projection_rows(root: Any, frontier: Mapping[str, Any]) -> List[Entry]:
 _SEALED: Dict[str, Tuple[Tuple[int, int], Dict[str, FrozenSet[str]]]] = {}
 
 
-def _authority(store: ChronicleStore) -> Tuple[int, int]:
-    """Identity of the chronicle's append-only authority: the same bytes project the same index."""
-    stat = store.log_path.stat()
-    return stat.st_size, stat.st_mtime_ns
-
-
 def _sealed(store: ChronicleStore, room: str, authority: Tuple[int, int]) -> FrozenSet[str]:
     """``store.sealed_row_refs(room)``, read once per room for one state of the authority."""
     key = str(store.data_root.resolve())
@@ -329,13 +323,16 @@ def rows_after_frontier(root: Any) -> List[Entry]:
     return [] if frontier is None else _projection_rows(root, frontier)
 
 
-def open_rows_by_room(root: Any) -> Dict[str, List[Entry]]:
-    """The open rows of every room that has one: after the frontier, outside the room's sealed set."""
-    store = ChronicleStore(root)
+def open_rows_by_room(root: Any, store: Optional[ChronicleStore] = None) -> Dict[str, List[Entry]]:
+    """The open rows of every room that has one: after the frontier, outside the room's sealed set.
+
+    ``store`` is the reader's own (a capture's ``read_session``); by default the chronicle at ``root``.
+    """
+    store = store or ChronicleStore(root)
     frontier = _active_frontier(store)
     if frontier is None:
         return {}
-    facts, authority = membership_facts(root), _authority(store)
+    facts, authority = membership_facts(root), store.authority()
     grouped: Dict[str, List[Entry]] = {}
     for entry in _projection_rows(root, frontier):
         for room in rooms_of_row(entry[1], facts):
@@ -371,13 +368,13 @@ def _room_entries(root: Any, store: ChronicleStore, room: str,
             if room in rooms_of_row(stream[pos][1], facts)]
 
 
-def open_room_rows(root: Any, room_id: Any) -> List[Entry]:
-    """``(address, row_meta, pos)`` of one room's open rows, in append order."""
-    store, room = ChronicleStore(root), str(room_id)
+def open_room_rows(root: Any, room_id: Any, store: Optional[ChronicleStore] = None) -> List[Entry]:
+    """``(address, row_meta, pos)`` of one room's open rows, in append order (``store`` as above)."""
+    store, room = store or ChronicleStore(root), str(room_id)
     entries = _room_entries(root, store, room)
     if not entries:
         return []
-    sealed = _sealed(store, room, _authority(store))
+    sealed = _sealed(store, room, store.authority())
     return [entry for entry in entries if entry[0]["row_sha256"] not in sealed]
 
 
@@ -503,7 +500,7 @@ def legacy_units(store: ChronicleStore, root: Any) -> List[LegacyUnit]:
     if not store.log_path.exists():
         return []
     root = pathlib.Path(root)
-    authority, facts = _authority(store), membership_facts(root)
+    authority, facts = store.authority(), membership_facts(root)
     key = (authority, facts.fingerprint(), tuple(sig for _path, sig in chat_chain.generation_signatures(root)))
     cached = _UNITS.get(str(root.resolve()))
     if cached is not None and cached[0] == key:
@@ -699,7 +696,7 @@ def open_segments(root: Any, store: ChronicleStore, room_id: Any, *,
         entries = entries[:hits[-1] + 1] if hits else []
     if not entries:
         return
-    sealed = _sealed(store, room, _authority(store))
+    sealed = _sealed(store, room, store.authority())
     head = store.room_head(room)
     run: List[Entry] = []
     seen = set()

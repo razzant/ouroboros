@@ -109,6 +109,26 @@ def _provider_catalog_class():
 
 
 @pytest.fixture(autouse=True)
+def _no_public_price_catalog_fetch(request, monkeypatch):
+    """Tests never fetch the public LiteLLM price catalog; a test that needs prices brings them.
+
+    ``pricing_catalog`` keeps a process-wide cache, so it is cleared on both sides.
+    """
+    from ouroboros import pricing_catalog
+
+    pricing_catalog._cache.clear()
+    pricing_catalog._retry_after.clear()
+    if "catalog_fixture" not in request.fixturenames:
+        def _offline():
+            raise OSError("the public price catalog is not fetched in tests")
+
+        monkeypatch.setattr(pricing_catalog, "_fetch_catalog", _offline)
+    yield
+    pricing_catalog._cache.clear()
+    pricing_catalog._retry_after.clear()
+
+
+@pytest.fixture(autouse=True)
 def _provider_catalog_state_returns():
     """Hand `LLMClient`'s provider-catalog class state back as the test found it.
 

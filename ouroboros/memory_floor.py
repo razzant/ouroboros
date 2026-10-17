@@ -280,7 +280,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                        lowered_from=lowered_from))
 
 
-TRACE_FIELDS = ("role", "room_id", "floor", "story_status")  # what a task trace keeps of a view receipt
+TRACE_FIELDS = ("role", "room_id", "floor", "story_status", "host_sections_addressed")  # view receipt fields in a task trace
 
 
 def trace_facts(receipt: Mapping[str, Any]) -> Dict[str, Any]:

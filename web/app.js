@@ -4,7 +4,7 @@ import { createWS } from './modules/ws.js';
 import { apiFetch, fetchJson } from './modules/api_client.js';
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade } from './modules/scroll_fade.js';
-import { initChat, createChatInstance } from './modules/chat.js';
+import { initChat, createChatInstance as createChatRoom } from './modules/chat.js';
 import { createStateSnapshotSequencer } from './modules/chat_activity.js';
 import {
     buildProjectActivityIndex,
@@ -297,7 +297,36 @@ function closeNotificationReaders() {
     for (const inst of projectInstances.values()) inst.closeTransient?.();
 }
 
-mainChat = initChat(ctx);
+// Every room carries Talk. A call keeps its room while it lasts (`hasPendingWork`): leaving the
+// screen hides a Project room instead of destroying it, the shell's mark leads back, and when the
+// call ends a hidden room that nothing else holds is released. Destroying a room hangs up.
+function withRoomCall(room) {
+    const project = () => lastProjectRows.find((row) => row.id === room.projectId) || null;
+    import('./modules/call.js').then(({ mountRoomCall }) => {
+        if (!room.page.isConnected) return;
+        mountRoomCall({
+            room, page: room.page, chatId: room.chatId, ws,
+            label: () => (room.projectId ? project()?.name || room.projectId : 'Main'),
+            onScreen: () => (room.projectId
+                ? navState.activeProjectId === room.projectId && !room.page.hidden
+                : state.activePage === 'chat' && !navState.activeProjectId),
+            reveal: () => (room.projectId
+                ? project() && openProjectPanel(project(), { openOnly: true })
+                : showPage('chat')),
+            openSettings: (tab) => openSettingsTab(tab),
+            release: () => {
+                if (room.projectId && navState.activeProjectId !== room.projectId
+                    && projectInstances.get(room.projectId) === room) destroyProjectInstance(room.projectId);
+            },
+        });
+    });
+    return room;
+}
+function createChatInstance(options) {
+    return withRoomCall(createChatRoom(options));
+}
+
+mainChat = withRoomCall(initChat(ctx));
 initFiles(ctx);
 
 function hydrateOpenChatsFromState(data, snapshotRequestedAt) {

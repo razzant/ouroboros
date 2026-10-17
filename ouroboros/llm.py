@@ -11,7 +11,9 @@ import logging
 import re
 import threading  # noqa: F401  (prior import surface)
 import time  # noqa: F401  (prior import surface)
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple
+
+from ouroboros.gateways.realtime_engine import EngineRoute, LiveEngine, SessionConfig
 
 from ouroboros.model_wait import dispatch_deadline_remaining_sec, model_waitable
 from ouroboros.deadline_utils import caller_deadline_scoped
@@ -175,6 +177,18 @@ class LLMClient(
         self._remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
         self._async_remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
         self._gigachat_clients: Dict[Tuple[str, str, str, str, str, bool], Any] = {}
+
+    def open_live(self, route: EngineRoute, config: Optional[SessionConfig] = None) -> "LiveEngine | Awaitable[LiveEngine]":
+        """Resolve a live engine before fitting, or await its configured opening.
+
+        ``open_live(route)`` returns the frozen LiveEngine lifecycle; callers
+        may instead ``await open_live(route, config)`` to open in one operation.
+        The live driver owns per-response accounting, not the text-call ledger.
+        """
+        from ouroboros.llm_live import make_live_engine, open_configured_engine
+
+        engine = make_live_engine(self, route)
+        return engine if config is None else open_configured_engine(engine, route, config)
 
     @caller_deadline_scoped
     @model_waitable

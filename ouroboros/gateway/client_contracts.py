@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ouroboros.gateway.call_contracts import CallSocketContract
+
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
@@ -252,6 +254,7 @@ class GatewayContractResponse(TypedDict):
     interface_paths: List[str]  # the replaceable main interface ("/" and "/static")
     http: List[ContractHttpEntry]
     ws: ContractWs
+    call: NotRequired[CallSocketContract]
     schemas: Dict[str, Dict[str, Any]]
 
 

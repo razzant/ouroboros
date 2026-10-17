@@ -68,7 +68,10 @@ Material 3 tonal colour; no gradient behind content, and no glows, textures, out
 6. **Colour answers touch.** A press answers with the capsule's own colour, never a
    sink or a lift; live work loops as three moving dots; nothing else animates by
    itself, and a state change never moves a neighbour, resizes a bar or changes a
-   height.
+   height. A live call is the one light that answers sound: the composer capsule
+   carries the speaker's colour (owner blue, Ouroboros crimson) along its rim and
+   through its glass, moved only by the heard voice and the call's phases, on that
+   capsule alone and never the room; reduced motion keeps its words and colour.
 
 **Seed (light | dark)**
 

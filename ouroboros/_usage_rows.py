@@ -177,6 +177,10 @@ def _merge_processing_summary(total: dict, addition: dict) -> None:
             bucket[label] = bucket.get(label, 0) + int(count)
 
 
+# Evidence keys that state a cash or valuation fact; usage counts or a tariff quote state neither.
+_COST_FACT_KEYS = frozenset({"valuationUsd", "valuationKnowledge", "cashUsd", "estimatedUsd", "knowledge"})
+
+
 def _processing_summary(rows: Sequence[Dict[str, Any]], *, decimal_values: bool = False) -> dict:
     """Valuation and unclassified amounts are disclosures, never added to cash."""
     total: dict = {}
@@ -192,7 +196,8 @@ def _processing_summary(rows: Sequence[Dict[str, Any]], *, decimal_values: bool 
             "usageCost": {"valuationUsd": evidence.get("valuationUsd"),
                           "valuationKnowledge": evidence.get("valuationKnowledge", "unknown"),
                           "cashUsd": evidence.get("cashUsd") if evidence.get("cashUsd") is not None else evidence.get("estimatedUsd"),
-                          "cashKnowledge": evidence.get("knowledge", "unknown")} if evidence else {},
+                          "cashKnowledge": evidence.get("knowledge", "unknown")}
+                         if _COST_FACT_KEYS.intersection(evidence) else {},
         }]
         for entry in entries:
             if not isinstance(entry, dict):

@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from ouroboros.artifacts import store_chat_media_bytes
-from ouroboros.chat_uploads import stored_refs
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.event_bus import CHAT_DOCUMENT, CHAT_LINKS, CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ, CHAT_QUIZ_STATE, CHAT_TYPING, CHAT_VIDEO, publish_event
 from supervisor.state import append_jsonl, load_state
@@ -28,7 +27,7 @@ from ouroboros.tools.core import (
     validate_quiz_payload,
 )
 from ouroboros.utils import utc_now_iso
-from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, SUBAGENT_MESSAGE_FIELDS, is_task_card_message
+from ouroboros.subagent_messages import apply_chat_row_metadata, is_task_card_message
 
 log = logging.getLogger(__name__)
 
@@ -1347,59 +1346,7 @@ def log_chat(
             # Per-message sending-surface provenance (Owner Surface Fact);
             # optional column, never a "type":"chat" literal (AST-scan hygiene).
             record["client_surface"] = dict(client_surface)
-        # Speech rows persist only the compact identity required to route a
-        # child final after progress retention/rotation has removed its cards.
-        meta = dict(message_meta or {})
-        if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
-            from ouroboros.chat_references import origin_reply
-            meta["reply_to"] = origin_reply(root, task_id)
-        for key in ("reply_to", "relay"):
-            if isinstance(meta.get(key), dict) and meta[key]:
-                record[key] = dict(meta[key])
-        if meta.get("reply_to_relay"):
-            record["reply_to_relay"] = str(meta["reply_to_relay"])
-        if meta.get("late_answer"):
-            from ouroboros.owner_quiz import late_answer_ref
-            accepted_answer = late_answer_ref(meta["late_answer"])
-            if accepted_answer:
-                record["late_answer"] = accepted_answer
-        if meta.get("attachments"):  # owner attachments: server-measured refs, never paths or bytes
-            record["attachments"] = stored_refs(meta["attachments"])
-        if meta.get("text_placeholder") is True and text:  # the host wrote TEXT; the sender sent no words
-            record["text_placeholder"] = True
-        for key in SUBAGENT_MESSAGE_FIELDS:
-            if key in meta:
-                record[key] = meta[key]
-        if "narration" in meta:
-            record["narration"] = bool(meta["narration"])
-        if record_type in ("project_started", "project_handoff", "project_completion_summary"):
-            for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes"):
-                if key in meta:
-                    record[key] = meta[key]
-        if meta.get("delivery_id"):
-            record["delivery_id"] = str(meta["delivery_id"])
-        if "task_terminal_status" in meta:
-            record["task_terminal_status"] = str(meta.get("task_terminal_status") or "")
-        # The turn's origin label (a consciousness wake-up) survives the row
-        # like the terminal status: a final bubble is labelled on reload too.
-        if meta.get("initiator"):
-            record["initiator"] = str(meta.get("initiator") or "")
-        if isinstance(meta.get("origin_message_ref"), dict):
-            record["origin_message_ref"] = dict(meta["origin_message_ref"])
-        # The host's placement fact for a task-keyed System row: the row belongs
-        # to the task's card, not beside it. Only the two named placements are
-        # persisted, and the row's stable identity rides with one of them or not
-        # at all — a bare id without a placement names nothing on reload.
-        if meta.get("card_row") in CARD_ROW_PLACEMENTS:
-            record["card_row"] = str(meta["card_row"])
-            card_row_id = str(meta.get("card_row_id") or "")
-            if card_row_id and len(card_row_id) <= 200:
-                record["card_row_id"] = card_row_id
-                revision = meta.get("card_row_revision")
-                if type(revision) is int and revision >= 0:
-                    record["card_row_revision"] = revision
-        if record_type == "acceptance_late_settlement" and isinstance(meta.get("late_evidence"), dict):
-            record["late_evidence"] = dict(meta["late_evidence"])
+        apply_chat_row_metadata(record, message_meta, direction=direction, task_id=task_id, root=root)
         if filename:
             record["filename"] = filename
         if mime:
@@ -1427,7 +1374,9 @@ def log_chat(
         )
         if written:
             from ouroboros.notice_receipts import record as record_notice_receipt
+            from ouroboros.live_awareness import notify_chat_row  # a live call hears the room's new rows
             record_notice_receipt(root, record)
+            notify_chat_row(root, record)
         if require_write and not written:
             raise RuntimeError("canonical message acceptance could not be persisted")
         return record if written else None

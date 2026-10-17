@@ -290,6 +290,7 @@ def _capture_declared_context_core(
     retries and fitting operate on the resulting immutable ContextCore.
     """
     from ouroboros.subagent_work_order import input_source_selection_receipt
+    from ouroboros.section_floor import capture_sections
     from ouroboros.subagent_runtime import current_model_visible_subagent_catalog, review_facts_block, review_records_block
 
     canonical_root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
@@ -321,6 +322,8 @@ def _capture_declared_context_core(
         architecture_md=sources["architecture_md"], development_md=sources["development_md"],
         semi_stable_text="\n\n".join(part for part in (catalog_text, review_text) if part),
         dynamic_text="\n\n".join(parts),
+        dynamic_sections=capture_sections(parts, prefix="declared"),
+        section_root=str(env.drive_root), section_task_id=str(task["id"]),
         user_content_json=json.dumps(user_builder(task), ensure_ascii=False, sort_keys=True),
         docs_need_development=_task_requires_self_body_docs(task),
         reference_books=tuple(sources["books"]), reference_book_errors=tuple(sources["book_errors"]),

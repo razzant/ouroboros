@@ -521,6 +521,9 @@ def _runtime_overrides_payload(overrides: PresenceRuntimeOverrides) -> dict[str,
     return {
         "model_slot": overrides.model_slot,
         "inline_max_rounds": overrides.inline_max_rounds,
+        # Present only when the owner set it: every state written before the field
+        # existed keeps its stored shape and fingerprint.
+        **({"execution": overrides.execution} if overrides.execution is not None else {}),
     }
 
 
@@ -723,13 +726,14 @@ def _state_from_payload(value: Any) -> PresenceState:
     )
     _require_exact_fields(
         overrides_raw,
-        _RUNTIME_OVERRIDE_FIELDS,
+        _RUNTIME_OVERRIDE_FIELDS | {"execution"} if "execution" in overrides_raw else _RUNTIME_OVERRIDE_FIELDS,
         field_name="presence_state.runtime_overrides",
     )
     try:
         overrides = PresenceRuntimeOverrides(
             model_slot=overrides_raw["model_slot"],
             inline_max_rounds=overrides_raw["inline_max_rounds"],
+            execution=overrides_raw.get("execution"),
         )
     except ValueError as exc:
         raise _error(

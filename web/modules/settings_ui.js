@@ -10,6 +10,30 @@ import { bindSecretReveal } from './settings_secrets.js';
 // does what → behavior → technical. "Agents", not "Coding agents" (D-10): the
 // same subscriptions build presentations and run arbitrary tasks, so the
 // narrower word named only one of their uses.
+export const SETTINGS_INPUT_FIELDS = [
+    ['s-openai-base-url', 'OPENAI_BASE_URL'], ['s-openai-compatible-base-url', 'OPENAI_COMPATIBLE_BASE_URL'], ['s-cloudru-base-url', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'],
+    ['s-gigachat-scope', 'GIGACHAT_SCOPE'], ['s-gigachat-user', 'GIGACHAT_USER'], ['s-gigachat-base-url', 'GIGACHAT_BASE_URL'], ['s-gigachat-verify-ssl', 'GIGACHAT_VERIFY_SSL_CERTS'],
+    ['s-minimax-region', 'MINIMAX_REGION'],
+    ['s-zai-plan', 'ZAI_PLAN'],
+    ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'],
+    // No review route is authored here: the review pool is the Reviewer mark
+    // on the Available subagents rows.
+    ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
+    ['s-extra-ca-bundle', 'OUROBOROS_EXTRA_CA_BUNDLE'],
+    ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-source', 'OUROBOROS_WEBSEARCH_BACKEND', 'auto'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
+    ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
+    ['s-subagent-worktree-root', 'OUROBOROS_SUBAGENT_WORKTREE_ROOT'], ['s-subagent-projects-root', 'OUROBOROS_SUBAGENT_PROJECTS_ROOT'],
+    ['s-evo-budget', 'OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD', '0'],
+    ['s-consciousness-daily-usd', 'OUROBOROS_CONSCIOUSNESS_DAILY_USD', '20'],  // float: NUMBER_FIELDS would truncate 20.5 to 20
+    ['s-evo-objective', 'OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE', ''],
+    // Optional task bounds: a positive integer or "unlimited" (SSOT: ouroboros/settings_scales.py); a blank is refused by the server.
+    ['s-max-rounds', 'OUROBOROS_MAX_ROUNDS', 'unlimited'], ['s-task-lifetime', 'OUROBOROS_TASK_ABS_CEILING_SEC', 'unlimited'],
+    // Live calls run on one engine, Google's Gemini Live: its model and voice are the call's only routes.
+    ['s-call-model-google', 'OUROBOROS_CALL_MODEL_GOOGLE'], ['s-call-voice-google', 'OUROBOROS_CALL_VOICE_GOOGLE'],
+    ['s-call-native-search', 'OUROBOROS_CALL_NATIVE_SEARCH', 'true'],
+    ['s-call-max-minutes', 'OUROBOROS_CALL_MAX_MINUTES'], ['s-presence-call-max-minutes', 'OUROBOROS_PRESENCE_CALL_MAX_MINUTES'],
+];
+
 const SETTINGS_TABS = [
     { value: 'providers', label: 'Accounts' },
     { value: 'secrets', label: 'Secrets' },
@@ -79,6 +103,11 @@ const PROVIDER_CARDS = [
         fields: [{ id: 's-openai', settingKey: 'OPENAI_API_KEY', label: 'OpenAI API Key', placeholder: 'sk-...' }],
         testProvider: 'openai', testInputs: { 's-openai': 'OPENAI_API_KEY' },
         note: 'Pick OpenAI as the source in Models or Agents to route a role through this key. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros auto-remaps them to official OpenAI defaults.',
+    },
+    {
+        id: 'google', title: 'Google', hint: 'Gemini live calls',
+        fields: [{ id: 's-google', settingKey: 'GOOGLE_API_KEY', label: 'Google API Key', placeholder: 'Google AI Studio key' }],
+        note: 'Live calls (Talk) use this key; their model, voice and limits are in Models → Live calls.',
     },
     {
         id: 'compatible', title: 'OpenAI Compatible', icon: '/static/providers/openai-compatible.svg', hint: 'Custom OpenAI-style endpoint',
@@ -199,6 +228,7 @@ function providerSettingsCard(spec) {
 export const SECRET_KEYS = [
     ['OPENROUTER_API_KEY', 'OpenRouter API Key', 'sk-or-...'],
     ['OPENAI_API_KEY', 'OpenAI API Key', 'sk-...'],
+    ['GOOGLE_API_KEY', 'Google AI API Key (Live)', 'Google AI key'],
     ['OPENAI_COMPATIBLE_API_KEY', 'OpenAI-compatible API Key', 'Compatible provider key'],
     ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'Cloud.ru Foundation Models API Key', 'Cloud.ru key'],
     ['GIGACHAT_CREDENTIALS', 'GigaChat Authorization Key', 'Base64 client_id:secret'],
@@ -360,6 +390,33 @@ export function renderSettingsPage() {
                             </div>
                         </div>
                         <div class="ui-field-help" id="s-websearch-preview" role="status"></div>
+                    </div>
+                    <div class="form-section">
+                        <h3>Live calls</h3>
+                        <div class="settings-section-copy">Talk with Ouroboros by voice in any room: press Talk in an empty message field. Calls run on Google’s Gemini Live with the Google AI key in Accounts → Google. Changes apply to the next call.</div>
+                        <div class="form-grid two">
+                            <div class="form-field ui-field">
+                                <label for="s-call-native-search">Google native search</label>
+                                <select id="s-call-native-search" class="ui-control"><option value="false">Off</option><option value="true">On</option></select>
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-call-model-google">Gemini Live model</label>
+                                <input id="s-call-model-google" class="ui-control" type="text" placeholder="Use engine default">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-call-voice-google">Voice</label>
+                                <input id="s-call-voice-google" class="ui-control" type="text" placeholder="Use engine default">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-call-max-minutes">Call limit (minutes)</label>
+                                <input id="s-call-max-minutes" class="ui-control" type="number" min="1" step="1" placeholder="No limit" aria-describedby="s-call-duration-help">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-presence-call-max-minutes">Presence call limit (minutes)</label>
+                                <input id="s-presence-call-max-minutes" class="ui-control" type="number" min="1" step="1" placeholder="No limit" aria-describedby="s-call-duration-help">
+                            </div>
+                        </div>
+                        <div id="s-call-duration-help" class="settings-inline-note ui-field-help">Leave a duration empty for no time limit. The shared spending limit still applies.</div>
                     </div>
                 </section>
 

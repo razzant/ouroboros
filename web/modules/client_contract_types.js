@@ -231,6 +231,7 @@
  * @property {string[]} interface_paths
  * @property {ContractHttpEntry[]} http
  * @property {ContractWs} ws
+ * @property {CallSocketContract=} call
  * @property {Object.<string,Object>} schemas
  */
 
@@ -279,6 +280,7 @@
  * @property {ChatHistoryPosition=} history_position
  * @property {boolean=} markdown
  * @property {string=} source
+ * @property {Object=} spoken  // live-call item identity, playback position and generated/played/interrupted status
  * @property {string=} sender_label
  * @property {string=} sender_session_id
  * @property {string=} client_message_id  // correlation id, not proof of owner authorship; use role

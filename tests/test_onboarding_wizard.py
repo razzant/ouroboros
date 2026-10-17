@@ -336,10 +336,39 @@ def test_prepare_onboarding_settings_rejects_openai_compatible_key_without_base_
 
 
 def test_onboarding_frontend_uses_base_url_first_compatible_validation():
+    import re
+
+    from ouroboros.settings_setup_contract import _NOT_TEXT_ACCESS_KEYS
+
     source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
 
-    assert "!['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey)" in source
+    def js_list(name):
+        return set(re.findall(r"'([A-Z_]+)'", re.search(rf"const {name} = \[([^\]]*)\];", source).group(1)))
+
+    companions, live_only = js_list("COMPANION_FIELD_KEYS"), js_list("LIVE_CALL_ONLY_KEYS")
+    assert companions == {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN"}
+    assert companions | live_only == _NOT_TEXT_ACCESS_KEYS
+    assert "const hasRemote = hasTextModelAccess();" in source
     assert "const hasRemote = keyValues.some(([, value]) => value);" not in source
+
+
+def test_a_google_ai_key_alone_is_no_text_provider_for_setup_or_startup():
+    """The Google AI key opens live calls only: with nothing else, setup still asks for a text model
+    source and startup still waits for one; beside a text provider it is saved as usual."""
+    from ouroboros.server_runtime import has_startup_ready_provider
+
+    payload = _base_payload()
+    payload["GOOGLE_API_KEY"] = "google-live-key-1234567890"
+    prepared, error = prepare_onboarding_settings(payload, {})
+    assert prepared == {}
+    assert error == "Connect Codex, an API provider, or a local model before continuing."
+    assert not has_startup_ready_provider({"GOOGLE_API_KEY": "google-live-key-1234567890"})
+
+    payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
+    prepared, error = prepare_onboarding_settings(payload, {})
+    assert error is None and prepared["GOOGLE_API_KEY"] == "google-live-key-1234567890"
+    assert has_startup_ready_provider({"GOOGLE_API_KEY": "google-live-key-1234567890",
+                                       "OPENAI_API_KEY": "sk-openai-1234567890"})
 
 
 def test_build_onboarding_html_serves_a_real_page_with_linked_modules():
@@ -616,6 +645,7 @@ def test_setup_contract_groups_rarely_used_providers():
     assert {field["settingKey"]: field["group"] for field in fields} == {
         "OPENROUTER_API_KEY": "primary",
         "OPENAI_API_KEY": "primary",
+        "GOOGLE_API_KEY": "more",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY": "more",
         "MINIMAX_API_KEY": "more",
         "MINIMAX_REGION": "more",
@@ -692,6 +722,7 @@ def test_setup_contract_has_no_secret_values():
 _SECRET_CANARIES = {
     "OPENROUTER_API_KEY": "sk-or-SECRETCANARY123",
     "OPENAI_API_KEY": "sk-openai-SECRETCANARY124",
+    "GOOGLE_API_KEY": "google-onboarding-canary-secret",
     "OPENAI_COMPATIBLE_API_KEY": "compat-SECRETCANARY125",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-SECRETCANARY126",
     "MINIMAX_API_KEY": "minimax-SECRETCANARY127",

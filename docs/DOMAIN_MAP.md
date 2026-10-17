@@ -8,9 +8,9 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 55 | 0 |
-| D02 | LLM client, routing & providers | 43 | 0 |
-| D03 | Context assembly, fit & compaction | 20 | 0 |
+| D01 | Agent core & main loop | 62 | 0 |
+| D02 | LLM client, routing & providers | 48 | 0 |
+| D03 | Context assembly, fit & compaction | 22 | 0 |
 | D04 | Tool execution: registry, access & typed results | 22 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 39 | 0 |
 | D06 | Review stack | 88 | 0 |
@@ -18,17 +18,17 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D08 | Supervisor: queue, workers, events & runtime control | 67 | 0 |
 | D09 | Cancellation, owner control & process custody | 23 | 0 |
 | D10 | Git, update & release machinery | 33 | 0 |
-| D11 | Gateway, server & Web UI | 84 | 0 |
+| D11 | Gateway, server & Web UI | 88 | 0 |
 | D12 | Settings & configuration | 21 | 0 |
 | D13 | Safety, guards & runtime mode | 9 | 0 |
 | D14 | Skills & extensions | 58 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 29 | 0 |
-| D16 | Observability, usage accounting & cost | 21 | 0 |
+| D16 | Observability, usage accounting & cost | 23 | 0 |
 | D17 | Projects, workspaces & task results | 37 | 0 |
-| D18 | Launcher, packaging, platform & shared substrate | 25 | 0 |
+| D18 | Launcher, packaging, platform & shared substrate | 26 | 0 |
 | D19 | Frozen contracts (ABI) | 12 | 0 |
-| D20 | Presence | 13 | 0 |
-| **total** | | **765** | **0** |
+| D20 | Presence | 15 | 0 |
+| **total** | | **788** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -209,10 +209,17 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/agent_startup_checks.py`
 - `ouroboros/agent_task_pipeline.py`
 - `ouroboros/budget_pause.py`
+- `ouroboros/call_peers.py`
+- `ouroboros/call_protocol.py`
 - `ouroboros/control_actor.py`
 - `ouroboros/deadline_utils.py`
 - `ouroboros/external_runs.py`
 - `ouroboros/focus.py`
+- `ouroboros/live_awareness.py`
+- `ouroboros/live_call_route.py`
+- `ouroboros/live_session_view.py`
+- `ouroboros/live_tool_batch.py`
+- `ouroboros/live_turn.py`
 - `ouroboros/live_works.py`
 - `ouroboros/loop.py`
 - `ouroboros/loop_acceptance.py`
@@ -258,6 +265,9 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/anthropic_native_custody.py`
 - `ouroboros/fallback_cooldown.py`
 - `ouroboros/gateways/image_api.py`
+- `ouroboros/gateways/realtime_engine.py`
+- `ouroboros/gateways/realtime_gemini.py`
+- `ouroboros/gateways/realtime_transport.py`
 - `ouroboros/image_preparation.py`
 - `ouroboros/llm.py`
 - `ouroboros/llm_anthropic.py`
@@ -266,6 +276,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/llm_claudexor.py`
 - `ouroboros/llm_fallback.py`
 - `ouroboros/llm_gigachat.py`
+- `ouroboros/llm_live.py`
 - `ouroboros/llm_local.py`
 - `ouroboros/llm_messages.py`
 - `ouroboros/llm_observability.py`
@@ -285,6 +296,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/openrouter_attribution.py`
 - `ouroboros/openrouter_cost.py`
 - `ouroboros/pricing.py`
+- `ouroboros/pricing_catalog.py`
 - `ouroboros/provider_models.py`
 - `ouroboros/reasoning_artifacts.py`
 - `ouroboros/request_wire_attempt.py`
@@ -311,6 +323,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/context_layout.py`
 - `ouroboros/context_mode_compat.py`
 - `ouroboros/context_runtime_facts.py`
+- `ouroboros/context_sections.py`
 - `ouroboros/context_source_view.py`
 - `ouroboros/main_context_authority.py`
 - `ouroboros/memory_floor.py`
@@ -319,6 +332,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/memory_view_legacy.py`
 - `ouroboros/response_limits.py`
 - `ouroboros/review_history_view.py`
+- `ouroboros/section_floor.py`
 - `ouroboros/tool_result_record.py`
 - `ouroboros/tools/compact_context.py`
 
@@ -688,6 +702,8 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/__init__.py`
 - `ouroboros/gateway/_helpers.py`
 - `ouroboros/gateway/attachment_contracts.py`
+- `ouroboros/gateway/call_contracts.py`
+- `ouroboros/gateway/call_ws.py`
 - `ouroboros/gateway/claudexor_accounts.py`
 - `ouroboros/gateway/claudexor_contracts.py`
 - `ouroboros/gateway/claudexor_passive.py`
@@ -707,6 +723,8 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/history_contracts.py`
 - `ouroboros/gateway/history_paging.py`
 - `ouroboros/gateway/history_segments.py`
+- `ouroboros/gateway/host_auth.py`
+- `ouroboros/gateway/host_call.py`
 - `ouroboros/gateway/host_notify.py`
 - `ouroboros/gateway/host_service.py`
 - `ouroboros/gateway/logs.py`
@@ -903,6 +921,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/_usage_money.py`
 - `ouroboros/_usage_response.py`
 - `ouroboros/_usage_rows.py`
+- `ouroboros/_usage_settlement.py`
 - `ouroboros/_usage_wait.py`
 - `ouroboros/cost_projection.py`
 - `ouroboros/event_token_totals.py`
@@ -910,6 +929,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/evidence_packer.py`
 - `ouroboros/evidence_packs.py`
 - `ouroboros/finalization_timing.py`
+- `ouroboros/live_usage.py`
 - `ouroboros/model_send_seal.py`
 - `ouroboros/observability.py`
 - `ouroboros/process_logging.py`
@@ -968,6 +988,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/cli.py`
 - `ouroboros/confined_files.py`
 - `ouroboros/desktop_autostart.py`
+- `ouroboros/desktop_media.py`
 - `ouroboros/desktop_notifications.py`
 - `ouroboros/jsonl_tail.py`
 - `ouroboros/launcher_appearance.py`
@@ -1009,10 +1030,12 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/presence_admission.py`
 - `ouroboros/presence_authority.py`
 - `ouroboros/presence_bindings.py`
+- `ouroboros/presence_call.py`
 - `ouroboros/presence_capabilities.py`
 - `ouroboros/presence_context.py`
 - `ouroboros/presence_continuation.py`
 - `ouroboros/presence_delivery.py`
+- `ouroboros/presence_gate.py`
 - `ouroboros/presence_observations.py`
 - `ouroboros/presence_profile.py`
 - `ouroboros/presence_recovery.py`

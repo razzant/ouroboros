@@ -113,11 +113,11 @@ def test_foreign_root_and_attempt_never_prove_ownership(tmp_path, kind):
 
 
 def test_local_presence_witness_is_root_scoped(tmp_path, monkeypatch):
-    from ouroboros import presence_runner
+    from ouroboros import presence_gate
     own, foreign = tmp_path / "own", tmp_path / "foreign"
     one = _seed(own, "same-id", "presence")
     two = _seed(foreign, "same-id", "presence")
-    monkeypatch.setattr(presence_runner, "_LIVE_PRESENCE_TASKS", {(str(own.resolve()), "same-id")})
+    monkeypatch.setattr(presence_gate, "_LIVE_PRESENCE_TASKS", {(str(own.resolve()), "same-id")})
     assert task_execution_observation(own, one)["state"] == "active"
     assert task_execution_observation(foreign, two)["state"] == "unknown"
 

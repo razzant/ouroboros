@@ -166,3 +166,27 @@ def test_host_view_callback_is_invoked_but_never_recorded_as_a_model_argument(tm
                            model="model", model_context_observer=callback)
     assert len(views) == 1 and recorded
     assert all("model_context_observer" not in payload.get("kwargs", {}) for payload in recorded)
+
+
+def test_usage_counts_or_a_tariff_quote_state_no_cash_fact():
+    from ouroboros._usage_rows import _processing_summary
+
+    quoted = {"cost_usd": 0.01, "cost_evidence": {"tariff_quote": {"url": "litellm"},
+                                                  "usage": {"audio_input_tokens": 3}}}
+    assert _processing_summary([quoted]) == {}
+    unknown = {"cost_evidence": {"knowledge": "unknown"}}
+    assert _processing_summary([quoted, unknown])["unknown_cash_rows"] == 1
+
+
+
+def test_audio_usage_is_kept_beside_the_counters_and_text_usage_is_not_copied(data_root):
+    from ouroboros._usage_settlement import settlement_fields
+
+    reservation = ua.AttemptReservation(attempt_id="a", drive_root=data_root, model="gpt-x",
+                                        provider="openrouter", reservation_upper_bound_usd=None)
+    text = {"prompt_tokens": 10, "completion_tokens": 2}
+    audio = {"prompt_tokens": 10, "completion_tokens": 2, "audio_input_tokens": 7}
+    for usage, kept in ((text, False), (audio, True)):
+        fields = settlement_fields(reservation, usage, 0.01, True, estimate_cost_optional=lambda *a, **k: None)
+        assert fields["prompt_tokens"] == 10
+        assert ("usage" in fields["cost_evidence"]) is kept

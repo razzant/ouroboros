@@ -382,10 +382,19 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None) -> str:
 def review_records_block(*, drive_root: Any, task_id: str) -> str:
     """``## Review records``: this task's newest review-ledger records (:func:`_recent_review_records`),
     a changing fact that belongs in the dynamic context part, never in the cached prefix."""
+    from ouroboros.section_floor import HostSection
+
     records, unseen = _recent_review_records(drive_root, task_id)
-    return "## Review records\n\n" + json.dumps({
+    full = "## Review records\n\n" + json.dumps({
         "recent_records": records, "omitted": {"records": unseen}, "full_source": "state/review_ledger/",
     }, ensure_ascii=False, separators=(",", ":"))
+    # These rows are historical verdicts, not the current review authority
+    # (which the runtime block retains whole).
+    operative = "## Review records\n\n" + "\n".join(
+        f"- {row.get('record_id')}: {row.get('surface')}, {row.get('aggregate')}" for row in records)
+    operative += f"\nOlder records omitted from the capture: {unseen}."
+    return HostSection("review_records", full, operative,
+                       "read_file(root='runtime_data', path='state/review_ledger/')")
 
 
 def _recent_review_records(drive_root: Any, task_id: str) -> tuple[list[dict[str, Any]], Any]:

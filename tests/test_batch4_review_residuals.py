@@ -6,6 +6,7 @@ R2: a task's MCP discovery passes that task's launch admission before EACH
     transport entry; Settings probes carry no task authority.
 """
 import subprocess
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -200,9 +201,23 @@ def _mcp_names(registry):
                   if schema["function"]["name"].startswith("mcp_"))
 
 
+def _listed(registry):
+    """What a task sees once the listing its schema read started in the background has ended.
+
+    A read never waits for a listing (``ensure_configured_from_settings``); the second read may
+    start one more for a server still owed (a refused listing), so each read's listing is joined.
+    """
+    for _read in range(2):
+        names = _mcp_names(registry)
+        for thread in threading.enumerate():
+            if thread.name.startswith("mcp-refresh-"):
+                thread.join(15)
+    return names
+
+
 def test_task_discovery_lists_every_server_when_not_paused(tmp_path, monkeypatch):
     registry, events = _discovery(tmp_path, monkeypatch)
-    assert _mcp_names(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
+    assert _listed(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
     assert events == [("transport", "alpha"), ("initialize", "alpha"),
                       ("transport", "beta"), ("initialize", "beta")]
 
@@ -215,13 +230,13 @@ def test_pause_before_discovery_opens_no_transport_and_owes_the_listing(tmp_path
     registry, events = _discovery(tmp_path, monkeypatch)
     assert request_owner_pause("root", request_id="pause-before")["ok"]
 
-    assert _mcp_names(registry) == [] and events == []
+    assert _listed(registry) == [] and events == []
     status = {row["id"]: row for row in mcp_client.get_manager().status_payload()["servers"]}
     assert all(not row["last_error"] and not row["last_attempted"] for row in status.values()), status
     # Another, unpaused task in this worker process performs the owed listing.
     write_task_result(tmp_path, "other", "running", root_task_id="other", chat_id=0)
     registry._ctx.task_id = registry._ctx.root_task_id = "other"
-    assert _mcp_names(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
+    assert _listed(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
     assert [kind for kind, _ in events].count("transport") == 2
     assert _mcp_names(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
     assert [kind for kind, _ in events].count("transport") == 2, "a listed catalog is not re-listed"
@@ -235,7 +250,7 @@ def test_pause_between_listings_keeps_the_admitted_one_and_refuses_the_next(tmp_
             assert request_owner_pause("root", request_id="pause-between")["ok"]
 
     registry, events = _discovery(tmp_path, monkeypatch, on_initialize=pause_during)
-    assert _mcp_names(registry) == ["mcp_alpha__lookup"]
+    assert _listed(registry) == ["mcp_alpha__lookup"]
     assert events == [("transport", "alpha"), ("initialize", "alpha")]
 
 

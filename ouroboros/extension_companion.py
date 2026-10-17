@@ -36,9 +36,11 @@ _SERVER_PROCESS_PID = int(os.environ.get("OUROBOROS_SERVER_PROCESS_PID") or "-1"
 _GLOBAL_SUPERVISOR: Optional["CompanionSupervisor"] = None
 # The login identity rides along: CLIs a companion may call (gh, claude, codex,
 # cursor-agent) key their keychain/credential lookups on it (parity with
-# workspace_executor.service_env()).
+# workspace_executor.service_env()). So does the user's audio session, which a
+# meeting companion's audio libraries locate by XDG_RUNTIME_DIR or PULSE_SERVER;
+# both are addresses the same user can already reach, never credentials.
 _COMPANION_BASE_ENV_KEYS = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "HOME", "USERPROFILE",
-                            "USER", "LOGNAME", "USERNAME"}
+                            "USER", "LOGNAME", "USERNAME", "XDG_RUNTIME_DIR", "PULSE_SERVER"}
 
 
 def _companion_base_env() -> Dict[str, str]:

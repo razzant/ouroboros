@@ -161,6 +161,7 @@ _STEP_ORDER = [step["id"] for step in _STEPS]
 _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "label", "placeholder", "note", "inputType", "group"), (
     ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.", "password", "primary"),
     ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills OpenAI's own model ids.", "password", "primary"),
+    ("google-key", "googleKey", "GOOGLE_API_KEY", "s-google", "Google AI API Key (Live)", "Google AI key", "Optional. Enables Gemini live calls alongside your text model.", "password", "more"),
     ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "Optional. If this is the only remote key, the next step prefills Cloud.ru's own model ids.", "password", "more"),
     ("minimax-key", "minimaxKey", "MINIMAX_API_KEY", "s-minimax-key", "MiniMax API Key", "MiniMax API key", "Optional. If this is the only remote key, the next step prefills MiniMax's own model ids.", "password", "more"),
     ("minimax-region", "minimaxRegion", "MINIMAX_REGION", "s-minimax-region", "MiniMax Region", "global_en or cn_zh", "Choose global_en for the global endpoint or cn_zh for the China endpoint.", "text", "more"),
@@ -171,6 +172,12 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
     ("openai-compatible-url", "compatibleBaseUrl", "OPENAI_COMPATIBLE_BASE_URL", "s-compatible-url", "OpenAI-compatible Base URL", "http://localhost:11434/v1", "Base URL for your OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM). Required whenever a slot uses the OpenAI-compatible endpoint as its source.", "url", "more"),
     ("openai-compatible-key", "compatibleApiKey", "OPENAI_COMPATIBLE_API_KEY", "s-compatible-key", "OpenAI-compatible API Key", "Leave empty for no auth", "API key for the endpoint. Leave empty if your server does not require authentication.", "password", "more"),
 ))
+
+# Fields that make no text model usable by themselves: companions of another field (the
+# compatible endpoint's key without its base URL, MiniMax's region, Z.ai's plan) and the
+# Google AI key, which opens live calls only. onboarding_wizard.js mirrors this set as
+# COMPANION_FIELD_KEYS plus LIVE_CALL_ONLY_KEYS.
+_NOT_TEXT_ACCESS_KEYS = frozenset({"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "GOOGLE_API_KEY"})
 
 # Secret-key membership and its configured marker are re-exported from the
 # leaf wire contract so onboarding, Settings, repair, and persistence cannot drift.
@@ -585,11 +592,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         ):
             return {}, f"{field['label'].replace(' API Key', '')} API key looks too short."
 
-    has_remote = any(
-        value
-        for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN"}
-    )
+    has_remote = any(value for setting_key, value in keys.items() if setting_key not in _NOT_TEXT_ACCESS_KEYS)
     has_local = bool(local_source)
     if not has_remote and not has_local and not (pending_subscription or selected_subscription):
         return {}, "Connect Codex, an API provider, or a local model before continuing."

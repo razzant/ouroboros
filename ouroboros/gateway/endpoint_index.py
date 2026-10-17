@@ -18,6 +18,8 @@ from typing import NamedTuple
 HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/health",
     "GET /api/contract",
+    "POST /api/call/open",
+    "WS /ws/call/{call_id}",
     "GET /api/state",
     "GET /api/settings",
     "POST /api/settings",
@@ -191,6 +193,7 @@ _IN_LANE = "runs in the one skill lifecycle lane until it settles (watch GET /ap
 _ENGINE = "relays the bundled Claudexor engine"
 
 HTTP_SHAPES: dict[str, Shape] = {
+    "POST /api/call/open": Shape("200:CallOpenResponse 400,409,413,503:CallRefusal", "CallOpenRequest"),
     "GET /api/health": Shape("200:HealthResponse"),
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse"),

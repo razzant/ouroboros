@@ -16,6 +16,9 @@ from tests.test_llm_claudexor import setup as setup
 
 pytestmark = pytest.mark.serial
 
+# Cold ledger/control-store setup is not the cancellation latency under test.
+_RECEIPT_SETUP_WAIT_SEC = 10
+
 
 @pytest.mark.parametrize("terminal", ["settled", "unresolved", "dispatched"])
 @pytest.mark.parametrize("deadline", [False, True])
@@ -69,7 +72,7 @@ def test_real_api_consumer_cancel_retains_response_capture_and_claim(data_root, 
     async def run():
         with ua.usage_scope(_scope(data_root, "task-async")), ua.physical_attempt_limit(1):
             task = asyncio.create_task(operation())
-            assert await asyncio.to_thread(entered.wait, 3)
+            assert await asyncio.to_thread(entered.wait, _RECEIPT_SETUP_WAIT_SEC)
             waiter = asyncio.create_task(asyncio.wait_for(task, .01)) if deadline else None
             if not deadline:
                 task.cancel()
@@ -125,7 +128,7 @@ def test_subscription_consumer_cancel_keeps_wire_receipt_and_stops_before_finish
             raise
     async def run():
         operation = asyncio.create_task(receive())
-        assert await asyncio.to_thread(entered.wait, 3)
+        assert await asyncio.to_thread(entered.wait, _RECEIPT_SETUP_WAIT_SEC)
         operation.cancel()
         await asyncio.sleep(.01)
         operation.cancel()

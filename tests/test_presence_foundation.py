@@ -402,6 +402,92 @@ def test_runtime_values_fail_closed(factory):
         factory()
 
 
+# ``execution`` (event | call) is additive: parse, override, resolution, and two
+# frozen fingerprints that must not move for a profile/state written without it.
+# These literals were computed from the code that predates the field.
+_PROFILE_FINGERPRINT_BEFORE_EXECUTION = "5ac34b2c70b71616e40d3262212ede130e32396d8019f4418ad1e56fac79e911"
+_STATE_FINGERPRINT_BEFORE_EXECUTION = "b537ab97fb003f7c84cdc220df7088b3ca361682856085fcba7034e2daa135e8"
+
+
+def test_execution_parses_overrides_and_resolves_with_event_as_the_default(tmp_path):
+    absent = parse_presence_profile(_manifest(presence={"runtime_defaults": {}}), tmp_path)
+    call = parse_presence_profile(
+        _manifest(presence={"runtime_defaults": {"execution": "call"}}), tmp_path)
+    assert absent.runtime_defaults.execution == "event"
+    assert call.runtime_defaults.execution == "call"
+
+    assert resolve_presence_runtime(call.runtime_defaults, None, global_max_rounds=None).execution == "call"
+    assert resolve_presence_runtime(
+        call.runtime_defaults, PresenceRuntimeOverrides(execution="event"), global_max_rounds=None,
+    ).execution == "event"
+    assert resolve_presence_runtime(
+        absent.runtime_defaults, PresenceRuntimeOverrides(execution="call"), global_max_rounds=None,
+    ).execution == "call"
+    assert resolve_presence_runtime(None, None, global_max_rounds=None).execution == "event"
+
+    with pytest.raises(PresenceProfileError) as refused:
+        parse_presence_profile(_manifest(presence={"runtime_defaults": {"execution": "voice"}}), tmp_path)
+    assert refused.value.code == "invalid_execution"
+    assert PresenceRuntimeOverrides(execution=None).execution is None  # the override's absence
+    for bad in ("", "Call", 1):
+        with pytest.raises(PresenceRuntimeError):
+            PresenceRuntimeOverrides(execution=bad)
+        with pytest.raises(PresenceRuntimeError):
+            PresenceRuntimeDefaults(execution=bad)
+
+
+def test_profile_fingerprint_is_byte_identical_without_execution_and_moves_with_call():
+    before = presence_profile_fingerprint(_profile())
+    explicit_event = presence_profile_fingerprint(
+        _profile(runtime=PresenceRuntimeDefaults(execution="event")))
+    with_call = presence_profile_fingerprint(_profile(runtime=PresenceRuntimeDefaults(execution="call")))
+
+    assert before == explicit_event == _PROFILE_FINGERPRINT_BEFORE_EXECUTION
+    assert with_call != before
+
+
+def test_owner_override_door_accepts_execution_and_projects_it_only_when_set():
+    from ouroboros.gateway.presence_settings import _parse_overrides, _runtime_projection
+
+    legacy_body = {"expected_state_fingerprint": "f" * 64,
+                   "runtime_overrides": {"model_slot": "main", "inline_max_rounds": 7}}
+    assert _parse_overrides(legacy_body)[1] == legacy_body["runtime_overrides"]
+    call_body = {"expected_state_fingerprint": "f" * 64,
+                 "runtime_overrides": {"model_slot": None, "inline_max_rounds": None, "execution": "call"}}
+    assert _parse_overrides(call_body)[1]["execution"] == "call"
+    with pytest.raises(ValueError):
+        _parse_overrides({"expected_state_fingerprint": "f" * 64, "runtime_overrides": {"execution": "call"}})
+
+    projected = _runtime_projection(_profile(), PresenceState())
+    assert projected["defaults"] == {"model_slot": "main", "inline_max_rounds": 10}
+    assert projected["overrides"] == {"model_slot": None, "inline_max_rounds": None}
+    enabled = _runtime_projection(
+        _profile(runtime=PresenceRuntimeDefaults(execution="call")),
+        PresenceState(runtime_overrides=PresenceRuntimeOverrides(execution="event")),
+    )
+    assert enabled["defaults"]["execution"] == "call" and enabled["overrides"]["execution"] == "event"
+
+
+def test_state_fingerprint_and_stored_shape_ignore_an_unset_execution_override(tmp_path):
+    assert presence_state_fingerprint(PresenceState()) == _STATE_FINGERPRINT_BEFORE_EXECUTION
+    with_call = PresenceState(runtime_overrides=PresenceRuntimeOverrides(execution="call"))
+    assert presence_state_fingerprint(with_call) != _STATE_FINGERPRINT_BEFORE_EXECUTION
+
+    # Round trip: an override set to ``call`` is stored and read back; one left unset
+    # writes the shape every earlier version wrote (no ``execution`` key at all).
+    save_presence_state(tmp_path, "community-helper", with_call,
+                        expected_state_fingerprint=_STATE_FINGERPRINT_BEFORE_EXECUTION)
+    stored = json.loads((tmp_path / "state" / "skills" / "community-helper" / PRESENCE_PROFILE_STATE_FILENAME)
+                        .read_text(encoding="utf-8"))
+    assert stored["runtime_overrides"] == {"model_slot": None, "inline_max_rounds": None, "execution": "call"}
+    assert load_presence_state(tmp_path, "community-helper") == with_call
+    save_presence_state(tmp_path, "community-helper", PresenceState(),
+                        expected_state_fingerprint=presence_state_fingerprint(with_call))
+    stored = json.loads((tmp_path / "state" / "skills" / "community-helper" / PRESENCE_PROFILE_STATE_FILENAME)
+                        .read_text(encoding="utf-8"))
+    assert stored["runtime_overrides"] == {"model_slot": None, "inline_max_rounds": None}
+
+
 # ---------------------------------------------------------------------------
 # Exact local selections and durable state
 # ---------------------------------------------------------------------------

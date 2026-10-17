@@ -9,6 +9,8 @@ server is required.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from ouroboros import mcp_client
@@ -160,7 +162,7 @@ def test_web_tool_restriction_preserves_mcp_discovery_and_dispatch(
     assert len(fake.call_calls) == 1
 
 
-def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeypatch):
+def test_schemas_cold_worker_loads_settings_and_lists_once_in_the_background(registry, monkeypatch):
     fake = _FakeTransport(
         [{"name": "ping", "description": "Ping", "input_schema": {"type": "object", "properties": {}}}]
     )
@@ -174,6 +176,10 @@ def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeyp
         lambda: _settings(_good_server(id="svc")),
     )
 
+    registry.schemas()  # configures this process's manager and starts the listing; it waits for none
+    for thread in threading.enumerate():
+        if thread.name.startswith("mcp-refresh-"):
+            thread.join(15)
     names = {schema["function"]["name"] for schema in registry.schemas()}
     assert "mcp_svc__ping" in names
     assert len(fake.list_calls) == 1

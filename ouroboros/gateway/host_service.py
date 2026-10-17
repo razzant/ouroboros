@@ -28,6 +28,7 @@ from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN,
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
+from ouroboros.gateway.host_auth import HostServiceAuthError, _authenticated, _bounded_host_read, _token_from_websocket
 from ouroboros.server_control import dispatch_accepted_restart
 from ouroboros import chat_uploads
 from ouroboros.chat_uploads import store_upload
@@ -56,10 +57,6 @@ NOTIFY_VERSION = 1
 # The out-of-process WS progress relay (``POST /ui/ws-message``) is the one token-bucket lane: a
 # 60-message burst reserve that refills one message per second (owner decision 2026-09-06: a burst
 # must not silence a widget for the rest of a minute). Every other lane keeps the sliding window.
-
-
-class HostServiceAuthError(Exception):
-    """Raised when a skill token cannot be authenticated."""
 
 
 class _RateLimiter:
@@ -361,52 +358,6 @@ class HostServiceContext:
                 },
             )
             return chat_id
-
-
-async def _bounded_host_read(ctx: HostServiceContext, operation: Callable[[], Any]) -> Any:
-    """Keep pre-reservation disk work off-loop without filling the shared executor."""
-    while not ctx._auth_capacity.acquire(blocking=False):
-        await asyncio.sleep(0.01)
-    try:
-        work = asyncio.get_running_loop().run_in_executor(None, operation)
-    except BaseException:
-        ctx._auth_capacity.release()
-        raise
-    # A disconnected caller must not release a permit while its worker still runs.
-    work.add_done_callback(lambda _done: ctx._auth_capacity.release())
-    return await asyncio.shield(work)
-
-
-async def _authenticated(
-    ctx: HostServiceContext, raw_token: str, permission: str = "",
-) -> tuple[str, Dict[str, Any]]:
-    """Resolve the request's skill (and one grant) off the event loop.
-
-    Token discovery reads every registered skill's token, review, enablement and grants
-    from disk; inline, one slow walk stalled every request on the loop the owner's API
-    shares. It is short read-only work, so the default executor serves it: Presence turns
-    no longer wait there (``presence_runner.PresenceTurnExecutions``).
-    """
-
-    def resolve() -> tuple[str, Dict[str, Any]]:
-        skill_name, token_payload = ctx.authenticate_token_payload(raw_token)
-        if permission:
-            ctx.require_permission(skill_name, token_payload, permission)
-        return skill_name, token_payload
-
-    return await _bounded_host_read(ctx, resolve)
-
-
-def _token_from_websocket(websocket: WebSocket) -> str:
-    header = websocket.headers.get("x-skill-token", "")
-    if header:
-        return header
-    for protocol in websocket.scope.get("subprotocols") or []:
-        text = str(protocol or "")
-        prefix = "ouroboros.host.events.v1."
-        if text.startswith(prefix):
-            return text[len(prefix):]
-    return ""
 
 
 def _identity_facts(ctx: HostServiceContext) -> tuple[str, str]:
@@ -830,6 +781,12 @@ def _presence_error(message: str, status: int, code: str, disposition: str, **fa
                          "disposition": disposition, **facts}, status_code=status)
 
 
+# Event-shape refusals keep their legacy HTTP status: a bad event is the transport's fault (400),
+# an event for another room is a 403; both are "rejected", never a retry.
+_PRESENCE_EVENT_REJECTIONS = {"presence_event_invalid": 400, "presence_origin_mismatch": 403,
+                              "presence_identity_missing": 400}
+
+
 def _presence_exception(exc: Exception, status: int) -> JSONResponse:
     code = str(getattr(exc, "code", "presence_admission_failed"))
     disposition = "blocked"
@@ -891,12 +848,12 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
     if await _bounded_host_read(ctx, functools.partial(store.migrating, ctx.data_dir)):  # P1: the turn writes its result
         return _presence_error("the task store is importing; retry shortly", 503, "migrating", "retry")
     from ouroboros.presence_admission import PresenceAdmissionError
-    from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_continuation import continuation_version, turn_response
     from ouroboros.presence_runner import (
+        PRESENCE_EVENT_FIELDS,
         PresenceTurnError,
-        PresenceTurnEvent,
         PresenceTurnNotStarted,
+        presence_turn_event,
         presence_turn_replay,
         presence_turn_task_id,
         presence_event_identity,
@@ -911,54 +868,18 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         reporting_version = delivery_reporting_version(payload.get("delivery_reporting_version", 0))
         continuing = continuation_version(payload.get("continuation_version", 0))
         event_payload = payload.get("event")
-        expected = {
-            "source_event_id", "provider", "account_id", "conversation_id", "thread_id",
-            "conversation_key", "actor", "conversation", "message", "text",
-        }
-        if not isinstance(event_payload, dict) or set(event_payload) != expected:
+        if not isinstance(event_payload, dict) or set(event_payload) != PRESENCE_EVENT_FIELDS:
             return _presence_error("invalid presence event", 400, "presence_event_invalid", "rejected")
 
         admission = await _bounded_host_read(
             ctx, functools.partial(_admit_presence, ctx, skill_name, str(payload.get("binding_id") or "")))
-        provider = str(event_payload.get("provider") or "").strip()
-        account_id = str(event_payload.get("account_id") or "").strip()
-        conversation_id = str(event_payload.get("conversation_id") or "").strip()
-        thread_id = str(event_payload.get("thread_id") or "").strip()
-        if (
-            provider != admission.origin.transport
-            or account_id != admission.origin.account_id
-            or (
-                admission.origin.conversation_id != "*"
-                and conversation_id != admission.origin.conversation_id
-            )
-            or (admission.origin.thread_id and thread_id != admission.origin.thread_id)
-        ):
-            return _presence_error("presence event does not match its owner-created binding", 403,
-                                   "presence_origin_mismatch", "rejected")
-        event = PresenceTurnEvent(
-            source_event_id=str(event_payload["source_event_id"] or "").strip(),
-            provider=provider,
-            account_id=account_id,
-            conversation_id=conversation_id,
-            thread_id=thread_id,
-            # The transport authenticates provider facts, but it does not get
-            # to choose the concurrency/history identity. Derive that identity
-            # from the binding-checked origin facts above.
-            conversation_key=conversation_key(provider, account_id, conversation_id, thread_id),
-            actor=dict(event_payload["actor"]) if isinstance(event_payload["actor"], dict) else {},
-            conversation=(
-                dict(event_payload["conversation"])
-                if isinstance(event_payload["conversation"], dict)
-                else {}
-            ),
-            message=dict(event_payload["message"]) if isinstance(event_payload["message"], dict) else {},
-            text=str(event_payload["text"] or ""),
-            delivery_reporting_version=reporting_version,
-            continuation_version=continuing,
-        )
-        if not event.source_event_id or not event.conversation_key or not event.actor:
-            return _presence_error("presence event is missing identity facts", 400,
-                                   "presence_identity_missing", "rejected")
+        try:
+            event = presence_turn_event(event_payload, admission, delivery_reporting_version=reporting_version,
+                                        continuation_version=continuing)
+        except PresenceAdmissionError as exc:
+            if exc.code not in _PRESENCE_EVENT_REJECTIONS:
+                raise
+            return _presence_error(str(exc), _PRESENCE_EVENT_REJECTIONS[exc.code], exc.code, "rejected")
         if "transport_queue" in event.conversation:
             from ouroboros.presence_observations import validate_transport_queue
 
@@ -1549,6 +1470,7 @@ def create_host_service_app(
 ) -> Starlette:
     # host_notify imports this module's helpers; mounted here, imported lazily.
     from ouroboros.gateway.host_notify import _api_notify
+    from ouroboros.gateway.host_call import host_call_routes
 
     app = Starlette(
         routes=[
@@ -1566,6 +1488,7 @@ def create_host_service_app(
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
             Route("/notify", _api_notify, methods=["POST"]),
             WebSocketRoute("/events", _ws_events),
+            *host_call_routes(),
         ]
     )
     app.state.host_service_context = HostServiceContext(

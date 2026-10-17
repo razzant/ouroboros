@@ -7,7 +7,8 @@ transaction ``{"kind": "transaction", "schema": 1, "records": [...],
 replays the journal into the same rows, sequences, page coverage and folds; a
 torn or invalid transaction becomes an addressed ``gap`` record and its
 neighbours stay intact. ``scan_state`` merges by top-level key, so one writer's
-frontier never erases another's.
+frontier never erases another's. A reader of many records (a memory capture) takes one
+``read_session``: the caught-up index copied into memory under one lock, then read without it.
 
 A record is never rewritten. A ``page`` seals a SET of row refs of its room
 (``page_rows``: chat ``row_sha256`` values and ``note:<id>``), once per level:
@@ -256,11 +257,16 @@ class ChronicleStore:
         self.log_path = self.data_root / "memory" / "chronicle" / "records.jsonl"
         self.index_path = self.data_root / "memory" / "chronicle" / "index.sqlite3"
         self.lock_path = self.data_root / "memory" / "chronicle" / ".publication.lock"
+        self._copy: Optional[sqlite3.Connection] = None  # a read session's projection (``read_session``)
+        self._identity: Optional[Tuple[int, int]] = None  # the journal's identity at that copy
 
     # --- projection --------------------------------------------------------------------------------
 
     @contextmanager
     def _index(self):
+        if self._copy is not None:  # a read session reads its one copy: no lock, no catch-up
+            yield self._copy
+            return
         assert_test_data_path(self.directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         fd = acquire_exclusive_file_lock(self.lock_path, timeout_sec=10, stale_sec=90, owner_aware_stale=True)
@@ -287,6 +293,32 @@ class ChronicleStore:
             if db is not None:
                 db.close()
             release_exclusive_file_lock(self.lock_path, fd)
+
+    @contextmanager
+    def read_session(self):
+        """The projection as of now for one reader: ONE publication-lock session, then no lock.
+
+        The index is caught up and copied into memory under the lock, which is released before
+        the reader runs; every read of the yielded store sees that one state, ``authority()``
+        is the journal's at the copy, and the yielded store publishes nothing.
+        """
+        session = ChronicleStore(self.data_root)
+        with self._index() as db:
+            copy = sqlite3.connect(":memory:")
+            db.backup(copy)
+            session._identity = self.authority() if self.log_path.exists() else None
+        session._copy = copy
+        try:
+            yield session
+        finally:
+            copy.close()
+
+    def authority(self) -> Tuple[int, int]:
+        """The append-only authority's identity (size, mtime): the same bytes project the same index."""
+        if self._identity is not None:
+            return self._identity
+        stat = self.log_path.stat()
+        return stat.st_size, stat.st_mtime_ns
 
     @staticmethod
     def _state(db, key, default=None):
@@ -546,6 +578,8 @@ class ChronicleStore:
                                       "author": author, "reason": reason, **fields}])
 
     def _commit(self, db, records, scan_state=None, *, quotes_verified=False, pre=None) -> PublishResult:
+        if self._copy is not None:
+            raise RuntimeError("a chronicle read session publishes nothing")
         if scan_state is not None and not isinstance(scan_state, dict):
             return _refuse("invalid", "scan_state is an object merged by top-level key")
         if not isinstance(records, (list, tuple)) or not all(isinstance(r, dict) for r in records):

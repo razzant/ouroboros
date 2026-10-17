@@ -598,6 +598,7 @@ def _web_search_openai(
         progress_sent = False
         response_completed = False
         reported_cost, reported_cost_final = None, False
+        server_search_calls = None
 
         for event in stream:
             etype = getattr(event, "type", "")
@@ -644,13 +645,18 @@ def _web_search_openai(
                     if receipt is not None:
                         usage["processing"] = receipt
                     sources = _extract_sources_from_response(resp_obj)
+                    output = getattr(resp_obj, "output", None)
+                    if isinstance(output, list):
+                        server_search_calls = sum(getattr(item, "type", "") == "web_search_call" for item in output)
 
         text = "".join(text_parts)
-        input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
         usage["ledger_attempt_ids"] = [reservation.attempt_id]
         try:
             if response_completed:
+                if reported_cost is None:
+                    from ouroboros.pricing_catalog import search_response_cost
+                    reported_cost = search_response_cost(active_model, usage, calls=server_search_calls,
+                                                         context_size=active_context, drive_root=request.drive_root)
                 settle_attempt(reservation, usage, cost_usd=reported_cost,
                                cost_final=reported_cost_final)
             else:
@@ -676,9 +682,10 @@ def _web_search_openai(
                 "ledger_attempt_ids": attempt_ids,
             }, ensure_ascii=False, indent=2)
 
-        # Track web search cost (estimate from tokens — OpenAI usage has no total_cost)
+        # The display uses the same whole-attempt amount, including server tools,
+        # as settlement; a second token-only estimate would hide unknown charges.
         if usage and hasattr(ctx, "pending_events"):
-            cost = _estimate_openai_cost(active_model, input_tokens, output_tokens)
+            cost = reported_cost
             metadata = getattr(ctx, "task_metadata", {})
             if not isinstance(metadata, dict):
                 metadata = {}

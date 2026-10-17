@@ -164,6 +164,8 @@ _AUTHORITATIVE_ENV_EXACT = frozenset({
     "OUROBOROS_MODEL_FALLBACK",
     "USE_LOCAL_CODE",
     "TOTAL_BUDGET",
+    # The Gemini Live credential; other GOOGLE_* variables belong to the host's own tools.
+    "GOOGLE_API_KEY",
 })
 
 # A strict isolated server receives the digest of the post-port-patch settings

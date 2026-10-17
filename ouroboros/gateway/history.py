@@ -13,6 +13,8 @@ returns an error body with the exact input cursor as ``next_cursor`` and
 
 from __future__ import annotations
 
+from ouroboros.subagent_messages import copy_chat_replay_metadata
+
 import asyncio
 import json
 import logging
@@ -109,7 +111,7 @@ _PROGRESS_META_FIELDS = (
     "initiator",  # the turn's origin label (a consciousness wake-up)
     # The frame's voice: a replayed host note must stay a host note, or a reload
     # would hand the card title back to the very line live rendering refused it.
-    "narration",
+    "narration", "spoken",
     "card_row", "card_row_id", "card_row_revision",
     "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
 )
@@ -908,12 +910,7 @@ def _collect_chat_rows(
             if "task_terminal_status" in entry:
                 rec["task_terminal_status"] = str(entry.get("task_terminal_status") or "")
             _copy_task_summary_metadata(rec, entry)
-            # Lineage, the origin label, the host's card placement (card_row / card_row_id) and a late-review
-            # row's evidence pointer (#1369, stored on that type only) replay verbatim; an absent key is omitted.
-            for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "card_row", "card_row_id", "card_row_revision",
-                          "late_evidence", "narration"):
-                if field in entry:
-                    rec[field] = entry[field]
+            copy_chat_replay_metadata(rec, entry)
             combined.append(rec)
     except StoreMigrating:
         raise  # the endpoint's own typed 503 (the store is importing), never a disclosed gap

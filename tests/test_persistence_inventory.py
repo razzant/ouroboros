@@ -595,6 +595,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
             "projects/*/knowledge/index-full.md",
             "projects/*/knowledge_history.jsonl",
         })
+    # The small-window section floor names each retained capture in section_address()
+    # and joins it to the drive root in _retain(); the resolver sees neither half alone.
+    if (root / "ouroboros" / "section_floor.py").exists():
+        paths.add("state/context_views/*/*/*.md")
     return frozenset(paths)
 
 
@@ -770,7 +774,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # earlier records keep theirs, nothing writes one any more.
 # 377 -> 378 (test health): adoption reads the receipt directory ``state/preflight_receipts``
 # (``ouroboros/preflight_qualification.py``; the existing receipts row).
-EXPECTED_SCAN_PATHS = 378
+# 378 -> 380 (live calls): the direct-route price catalog cache ``state/pricing/litellm.json``
+# (``ouroboros/pricing_catalog.py``; a section-2 row) and the small-window section captures
+# ``state/context_views/*/*/*.md`` (``ouroboros/section_floor.py``; a section-4 row).
+EXPECTED_SCAN_PATHS = 380
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

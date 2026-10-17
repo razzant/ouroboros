@@ -1,0 +1,19 @@
+{
+  "note": "Participant probe results proven before release. A vendor is offered only after a PASS here or in an owner-run probe on the computer (state/skills/meeting_browser/vendor_probes.json). Known facts are what a probe should expect, not results.",
+  "vendors": {
+    "zoom": {
+      "result": "NOT_RUN",
+      "reason": "no real Zoom meeting was available to the release probe",
+      "known": "Zoom's web client shows guests a CAPTCHA since 2026-07-22; a signed-in Ouroboros account may avoid it."
+    },
+    "meet": {
+      "result": "NOT_RUN",
+      "reason": "no real Google Meet meeting was available to the release probe",
+      "known": "Meet holds unknown guests in a waiting queue until the host admits them."
+    },
+    "teams": {
+      "result": "NOT_RUN",
+      "reason": "no real Microsoft Teams meeting was available to the release probe"
+    }
+  }
+}

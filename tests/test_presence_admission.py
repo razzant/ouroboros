@@ -25,7 +25,7 @@ from ouroboros.skill_loader import (
 )
 
 
-def _install_behavior(drive_root, *, enabled: bool = True, required: bool = True):
+def _install_behavior(drive_root, *, enabled: bool = True, required: bool = True, execution: str = ""):
     skill_dir = drive_root / "skills" / "external" / "community-helper"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
@@ -40,7 +40,8 @@ def _install_behavior(drive_root, *, enabled: bool = True, required: bool = True
         "  runtime_defaults:\n"
         "    model_slot: light\n"
         "    inline_max_rounds: 10\n"
-        "  capability_requests:\n"
+        + (f"    execution: {execution}\n" if execution else "")
+        + "  capability_requests:\n"
         "    - id: history\n"
         "      kind: tool\n"
         f"      required: {'true' if required else 'false'}\n"
@@ -153,6 +154,36 @@ def test_admission_freezes_reviewed_behavior_runtime_digests_and_authority(tmp_p
     assert admission.capability_ceiling.profile_fingerprint == admission.profile_fingerprint
     assert admission.capability_ceiling.state_fingerprint == admission.state_fingerprint
     assert admission.capability_ceiling.selection_fingerprint == admission.selection_fingerprint
+    assert admission.execution == "event" and admission.capability_ceiling.execution == "event"
+
+
+@pytest.mark.parametrize("profile_execution, override, expected", [
+    ("call", None, "call"),          # the reviewed default alone
+    ("", "call", "call"),            # the owner's local override alone
+    ("call", "event", "event"),      # the owner turns a call-capable profile back to text
+])
+def test_admission_resolves_execution_into_the_admission_and_its_ceiling(
+        tmp_path, profile_execution, override, expected):
+    from dataclasses import replace
+
+    from ouroboros.presence_capabilities import load_presence_state
+    from ouroboros.presence_runtime import PresenceRuntimeOverrides
+
+    drive_root = tmp_path / "data"
+    skill_dir = _install_behavior(drive_root, execution=profile_execution)
+    _select_history(drive_root, skill_dir)
+    if override is not None:
+        state = load_presence_state(drive_root, "community-helper")
+        save_presence_state(
+            drive_root, "community-helper",
+            replace(state, runtime_overrides=PresenceRuntimeOverrides(execution=override)),
+            expected_state_fingerprint=presence_state_fingerprint(state),
+        )
+    admission = _admit(drive_root, _binding(drive_root))
+
+    assert admission.execution == expected
+    assert admission.capability_ceiling.execution == expected
+    assert admission.inline_max_rounds == 8  # unrelated to the execution mode
 
 
 def test_admission_rejects_binding_owned_by_another_transport(tmp_path):

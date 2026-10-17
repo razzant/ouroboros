@@ -161,6 +161,7 @@ def test_exceptions_are_counted_and_stale_rows_fail():
 HOST_ROW_CLASSES = {
     "acceptance_late_settlement": ("card_row", 1),
     "budget_notice": ("runtime_state", 1),
+    "call_heard": ("signed_words", 1),  # heard meeting speech, never attributed to the owner
     "cancel_receipt": ("owner_act_receipt", 2),
     "command_reply": ("owner_act_receipt", 2),
     "consciousness_notice": ("runtime_state", 1),

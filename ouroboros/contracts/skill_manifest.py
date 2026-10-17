@@ -42,6 +42,7 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "subscribe_event",
         "inject_chat",
         "presence",
+        "call_peer",
         # Owner notices through the Host Service (`POST /notify`): one bounded
         # sentence shown in the owner's chat as a System row signed with the
         # skill's name; never a model turn. Narrower than inject_chat, granted separately.

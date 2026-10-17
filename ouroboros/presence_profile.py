@@ -10,7 +10,7 @@ from typing import Any, Mapping, Optional
 
 from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError
 from ouroboros.contracts.skill_payload_policy import is_skill_payload_control_filename
-from ouroboros.presence_runtime import PresenceRuntimeDefaults, PresenceRuntimeError
+from ouroboros.presence_runtime import EXECUTION_CALL, PresenceRuntimeDefaults, PresenceRuntimeError
 
 PRESENCE_PROFILE_SCHEMA_VERSION = 1
 PRESENCE_CAPABILITY_KINDS = frozenset({"tool", "script", "resource"})
@@ -25,7 +25,7 @@ _PROFILE_FIELDS = frozenset(
         "capability_requests",
     }
 )
-_RUNTIME_FIELDS = frozenset({"model_slot", "inline_max_rounds"})
+_RUNTIME_FIELDS = frozenset({"model_slot", "inline_max_rounds", "execution"})
 _REQUEST_FIELDS = frozenset(
     {
         "id",
@@ -378,6 +378,10 @@ def presence_profile_fingerprint(profile: PresenceProfile) -> str:
             "runtime_defaults": {
                 "model_slot": profile.runtime_defaults.model_slot,
                 "inline_max_rounds": profile.runtime_defaults.inline_max_rounds,
+                # Present only for ``call``: every profile written before the field
+                # existed keeps the fingerprint its review recorded.
+                **({"execution": EXECUTION_CALL}
+                   if profile.runtime_defaults.execution == EXECUTION_CALL else {}),
             },
             "capability_requests": [
                 {

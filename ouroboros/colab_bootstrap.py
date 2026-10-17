@@ -25,7 +25,7 @@ DEFAULT_COLAB_APP_ROOT = "/content/drive/MyDrive/Ouroboros"
 DEFAULT_COLAB_REPO_DIR = "/content/ouroboros_repo"
 DEFAULT_OFFICIAL_REPO_URL = "https://github.com/razzant/ouroboros.git"
 
-_SECRET_KEYS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GITHUB_TOKEN", "TELEGRAM_BOT_TOKEN")
+_SECRET_KEYS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GITHUB_TOKEN", "TELEGRAM_BOT_TOKEN")
 
 
 def _run_colab_git_network(args: list[str], *, cwd: pathlib.Path | None = None) -> str:
@@ -107,6 +107,8 @@ def collect_colab_secrets() -> Dict[str, str]:
     if not any(out.get(key) for key in provider_keys):
         # Ensure at least one runnable provider; OpenRouter is the default route.
         out["OPENROUTER_API_KEY"] = get_colab_secret("OPENROUTER_API_KEY")
+    # Live-only access does not replace a runnable text provider at bootstrap.
+    out["GOOGLE_API_KEY"] = get_colab_secret("GOOGLE_API_KEY", required=False)
     out["GITHUB_TOKEN"] = get_colab_secret("GITHUB_TOKEN", required=False)
     return out
 

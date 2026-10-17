@@ -530,7 +530,8 @@ def install_deps(context: BootstrapContext) -> bool:
 
 
 _SEED_COMPLETE_MARKER = ".bootstrap-seed-complete"
-_POST_BOOTSTRAP_NEW_NATIVE_SEEDS = frozenset({"telegram", "unix_computer_use"})
+_POST_BOOTSTRAP_NEW_NATIVE_SEEDS = frozenset({"telegram", "unix_computer_use", "meeting_audio", "meeting_browser",
+                                              "zoom_meeting"})
 
 
 def _read_skill_manifest(skill_dir: pathlib.Path):

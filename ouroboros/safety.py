@@ -646,6 +646,7 @@ def _classify_safety_parse_failure(msg: Dict[str, Any], usage: Optional[Dict[str
 _REMOTE_PROVIDER_KEYS = (
     "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
     "ANTHROPIC_API_KEY",
     "MINIMAX_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -669,6 +670,7 @@ _LOCAL_ROUTING_KEYS = (
 _PROVIDER_KEY_ENV = {
     "openrouter": "OPENROUTER_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",

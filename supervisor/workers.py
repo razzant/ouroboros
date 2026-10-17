@@ -2242,6 +2242,7 @@ from supervisor.worker_chat_lane import (  # noqa: E402, F401 -- intentional pub
     _handle_chat_direct_locked,
     _run_chat_task,
     auto_resume_after_restart,
+    handle_call_direct,
     handle_chat_direct,
     handle_wake_direct,
 )
