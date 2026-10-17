@@ -1,0 +1,43 @@
+# TEMPORARY qualification workflow for PR #1776 (windows_computer_use).
+# Lives only on the scratch branch qa/pr1776-windows-desktop; never merged.
+name: PR1776 Windows desktop QA (temporary)
+on:
+  push:
+    branches: [qa/pr1776-windows-desktop]
+permissions:
+  contents: read
+jobs:
+  windows-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+      - name: Desktop session facts
+        shell: pwsh
+        run: |
+          [System.Environment]::UserInteractive
+          query user 2>$null; Get-Process explorer -ErrorAction SilentlyContinue | Select-Object Id,SessionId
+          python -c "import sys; print(sys.version)"
+      - name: Native desktop qualification (OUROBOROS_WINDOWS_DESKTOP_QA=1)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        shell: bash
+        env:
+          OUROBOROS_WINDOWS_DESKTOP_QA: "1"
+        run: |
+          mkdir -p "$RUNNER_TEMP/qa"
+          PY="$GITHUB_WORKSPACE/.venv/Scripts/python.exe"; test -x "$PY" || { echo "venv python missing"; ls -la .venv || true; exit 2; }
+          "$PY" -c "import pytest, sys; print(sys.executable, pytest.__version__)"
+          python -I -S scripts/safe_test.py -- "$PY" -m pytest tests/test_windows_computer_use_native.py -v -rA -p no:cacheprovider --timeout=900 --timeout-method=thread --junitxml="$RUNNER_TEMP/qa/native.xml" 2>&1 | tee "$RUNNER_TEMP/qa/native.log"
+          exit "${PIPESTATUS[0]}"
+      - name: Upload evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr1776-windows-desktop-qa
+          path: ${{ runner.temp }}/qa
+          if-no-files-found: warn
+          retention-days: 14
