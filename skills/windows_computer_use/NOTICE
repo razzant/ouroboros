@@ -1,0 +1,21 @@
+windows_computer_use - NOTICE
+==============================
+
+This skill is a Python port of the UI Automation modules of the Praxis/Hélène
+project, designed and authored by Yegor Kosyrev (@josephsteuerjr),
+who explicitly commissioned this port for Ouroboros.
+
+Original sources (Apache-2.0):
+  uia.rs     - https://github.com/josephsteuerjr/praxis/blob/main/helene/core/body/crates/praxis-body/src/uia.rs
+  element.rs - https://github.com/josephsteuerjr/praxis/blob/main/helene/core/body/crates/praxis-body/src/element.rs
+  Repository - https://github.com/josephsteuerjr/praxis (repo-root LICENSE, Apache-2.0)
+
+The port reimplements the module contracts in Python (window tree as text,
+pattern-based element actions, ambiguity refusal with candidates, Win32
+fallback); it does not include original source code.
+
+The contribution is offered under this repository's MIT license with the
+original author's permission. This NOTICE was drafted by Ouroboros, the
+agent acting for @josephsteuerjr: he commissioned the port and approved
+adding this NOTICE, but has not reviewed its wording. It preserves the
+port's lineage and attribution; it is not a legal statement he has checked.
