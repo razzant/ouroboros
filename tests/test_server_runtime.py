@@ -567,10 +567,10 @@ def test_cloudru_only_factory_pool_stays_on_cloudru():
 def test_apply_runtime_provider_defaults_minimax_only_uses_current_models():
     normalized = _loaded({"MINIMAX_API_KEY": "minimax-key"})
 
-    assert normalized["OUROBOROS_MODEL"] == "minimax::MiniMax-M3"
+    assert normalized["OUROBOROS_MODEL"] == "minimax::MiniMax-M3.1-Flash"
     assert "OUROBOROS_MODEL_HEAVY" not in normalized
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "minimax::MiniMax-M2.7"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "minimax::MiniMax-M2.7"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "minimax::MiniMax-M3.1-Flash"
+    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "minimax::MiniMax-M3"
     # The retired deep-review key is never introduced (PR-3: the read seam migrates it).
     assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in normalized
     # ABI-10: retired comma keys are never introduced into settings.
@@ -580,7 +580,15 @@ def test_apply_runtime_provider_defaults_minimax_only_uses_current_models():
 
 def test_minimax_only_factory_pool_is_the_provider_role_panel():
     pool = _factory_pool_models({"MINIMAX_API_KEY": "minimax-key", "OUROBOROS_MODEL": "minimax::MiniMax-M3"})
-    assert pool == ["minimax::MiniMax-M3", "minimax::MiniMax-M2.7", "minimax::MiniMax-M2.7"]
+    assert pool == ["minimax::MiniMax-M3", "minimax::MiniMax-M3.1-Flash", "minimax::MiniMax-M3.1-Flash"]
+
+
+def test_minimax_defaults_preserve_saved_legacy_and_custom_slots():
+    for model in ("minimax::MiniMax-M2.7", "minimax::MiniMax-M3.1", "minimax::owner-custom"):
+        saved = {"MINIMAX_API_KEY": "minimax-key", **dict.fromkeys(
+            ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"), model)}
+        normalized = _loaded(saved)
+        assert all(normalized[key] == value for key, value in saved.items())
 
 
 def test_apply_runtime_provider_defaults_cloudru_keeps_saved_shipped_values():

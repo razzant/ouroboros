@@ -199,6 +199,22 @@ function routeCatalogItems(route, items = []) {
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
+function ordinaryModelSuggestions(items) {
+    // Suggestion policy only: retain the live catalog and every saved/custom id.
+    // Direct ids: platform.minimax.io/docs/guides/models-intro (2026-10-20).
+    // OpenRouter /api/v1/models/.../endpoints verifies Flash :free and M3.
+    // Gateway ids are never synthesized; each must occur in its own live catalog.
+    const rank = (item) => {
+        if (!['minimax', 'openrouter'].includes(item?.provider_id)) return -1;
+        const current = [item.provider_id === 'openrouter' ? 'minimax-m3.1-flash:free' : 'minimax-m3.1-flash', 'minimax-m3'];
+        const id = String(item.id || item.value || '').replace(/^minimax::|^minimax\//i, '').toLowerCase();
+        if (item.provider_id === 'openrouter' && !String(item.id || item.value).startsWith('minimax/')) return -1;
+        return /^minimax-(m\d|text-)/.test(id) ? current.indexOf(id) + 1 : -1;
+    };
+    const kept = items.filter((item) => rank(item) !== 0);
+    return [...kept.filter((item) => rank(item) === 1), ...kept.filter((item) => rank(item) !== 1)];
+}
+
 /**
  * One suggestion per model: the label names the model and makes no account claim
  * (DESIGN.md §7). Availability, the reading account and its observation time are
@@ -209,7 +225,7 @@ function routeCatalogItems(route, items = []) {
  */
 export function catalogModelOptions(items = []) {
     const values = new Map();
-    for (const item of items) {
+    for (const item of ordinaryModelSuggestions(items)) {
         const value = String(item?.value || item?.id || item);
         const name = String(item?.name || item?.label || '');
         if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set() });
@@ -227,7 +243,7 @@ export function catalogModelOptions(items = []) {
 
 /** Suggestions carry the model alone; the source select already names the provider. */
 export function routeModelSuggestions(route, items = []) {
-    return routeCatalogItems(route, items)
+    return ordinaryModelSuggestions(routeCatalogItems(route, items))
         .map((item) => parseModelSource(String(item?.value || item?.id || item)).model);
 }
 

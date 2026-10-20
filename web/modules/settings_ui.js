@@ -115,7 +115,7 @@ const PROVIDER_CARDS = [
         ],
         testProvider: 'minimax',
         testInputs: { 's-minimax-key': 'MINIMAX_API_KEY', 's-minimax-region': 'MINIMAX_REGION' },
-        note: 'Pick MiniMax as the source in Models or Agents, then choose MiniMax-M3 or MiniMax-M2.7. Leave Region empty for <code>global_en</code>; use <code>cn_zh</code> for the China endpoint.',
+        note: 'Pick MiniMax as the source in Models or Agents, then choose MiniMax-M3.1-Flash (recommended) or MiniMax-M3. Leave Region empty for <code>global_en</code>; use <code>cn_zh</code> for the China endpoint.',
     },
     {
         id: 'deepseek', title: 'DeepSeek', icon: '', hint: 'Direct OpenAI-compatible runtime (v4 family)', advanced: true,

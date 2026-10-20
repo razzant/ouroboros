@@ -41,13 +41,17 @@ def make_client(monkeypatch):
     monkeypatch.setenv("MINIMAX_REGION", "global_en")
     clients = []
 
-    def make(script, *, asynchronous=False, expected_replay=None):
+    def make(script, *, asynchronous=False, expected_replay=None, region="global_en"):
+        monkeypatch.setenv("MINIMAX_REGION", region)
+        host = "api.minimaxi.com" if region == "cn_zh" else "api.minimax.io"
+        base_url = f"https://{host}/v1"
         client, sent = LLMClient(), []
 
         def respond(request):
             payload = json.loads(request.content)
             sent.append(payload)
             assert request.url.path == "/v1/chat/completions"
+            assert request.url.host == host
             assert "extra_body" not in payload, "the SDK must flatten extensions onto HTTP JSON"
             assistant = next((m for m in payload["messages"] if m.get("tool_calls")), {})
             missing_echo = expected_replay is not None and any(
@@ -68,11 +72,16 @@ def make_client(monkeypatch):
 
         transport = httpx.MockTransport(respond)
         remote = (openai.AsyncOpenAI if asynchronous else openai.OpenAI)(
-            api_key="fixture-not-live", base_url="https://minimax.invalid/v1", max_retries=0,
+            api_key="fixture-not-live", base_url=base_url, max_retries=0,
             http_client=(httpx.AsyncClient if asynchronous else httpx.Client)(transport=transport))
         clients.append(remote)
-        monkeypatch.setattr(client, "_get_remote_client", lambda *_a, **_kw: remote)
-        monkeypatch.setattr(client, "_get_async_remote_client", lambda *_a, **_kw: remote)
+        def routed_remote(target):
+            if target:  # Negative fixture self-checks call the HTTP peer directly.
+                assert target["base_url"] == base_url
+            return remote
+
+        monkeypatch.setattr(client, "_get_remote_client", routed_remote)
+        monkeypatch.setattr(client, "_get_async_remote_client", routed_remote)
         return client, sent
 
     yield make
@@ -83,9 +92,9 @@ def make_client(monkeypatch):
             remote.close()
 
 
-def _call(client, history, *, stream=False, asynchronous=False, model="minimax::MiniMax-M3.1"):
+def _call(client, history, *, stream=False, asynchronous=False, model="minimax::MiniMax-M3.1-Flash", effort="medium"):
     kwargs = dict(messages=history, model=model, tools=TOOLS, stream=stream,
-                  max_tokens=1024, wait_for_resources=False)
+                  reasoning_effort=effort, max_tokens=1024, wait_for_resources=False)
     return asyncio.run(client.chat_async(**kwargs)) if asynchronous else client.chat(**kwargs)
 
 
@@ -96,7 +105,9 @@ def _response(message, finish="tool_calls"):
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("carrier", ["reasoning_content", "reasoning_details", "both"])
-def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client, asynchronous, stream, carrier):
+@pytest.mark.parametrize("model", ["minimax::MiniMax-M3.1-Flash", "minimax::MiniMax-M3"])
+@pytest.mark.parametrize("region", ["global_en", "cn_zh"])
+def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client, asynchronous, stream, carrier, model, region):
     reasoning = {}
     if carrier in {"reasoning_content", "both"}:
         reasoning["reasoning_content"] = "\n Check the weather.  "
@@ -114,9 +125,9 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
         first = WireResponse(sse(*(chunk(delta) for delta in deltas),
                                  chunk(finish="tool_calls", usage=completion()["usage"])))
     final = _response({"role": "assistant", "content": "Sunny.", **reasoning}, "stop")
-    client, sent = make_client([first, final], asynchronous=asynchronous, expected_replay=reasoning)
+    client, sent = make_client([first, final], asynchronous=asynchronous, expected_replay=reasoning, region=region)
     history = [{"role": "user", "content": "Weather?"}]
-    msg, usage = _call(client, history, stream=stream, asynchronous=asynchronous)
+    msg, usage = _call(client, history, stream=stream, asynchronous=asynchronous, model=model)
     assert {key: msg.get(key) for key in reasoning} == reasoning
     assert msg["content"] == "" and msg["tool_calls"] == [CALL]
     assert usage["provider"] == "minimax"
@@ -126,7 +137,8 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
         assert usage["stream_receipt"]["manifest_ref"]
     history.extend([msg, {"role": "tool", "tool_call_id": CALL["id"], "content": "Sunny"}])
     canonical = copy.deepcopy(history)
-    result, _ = _call(client, history, asynchronous=asynchronous)
+    result, _ = _call(client, history, asynchronous=asynchronous, model=model)
+    assert all(payload["model"] == model.split("::", 1)[1] for payload in sent)
     assert result["content"] == "Sunny."
     assert _visible_round_text(result["content"]) == "Sunny."
     assert history == canonical
@@ -137,6 +149,44 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
     assert replay["tool_calls"] == [CALL]
     assert "response_id" not in replay
     assert [(row["state"], row["revision"]) for row in rows(isolated)] == [("settled", 3)] * 2
+
+
+@pytest.mark.parametrize("saved", [None, "minimax::MiniMax-M2.7", "minimax::owner-custom"])
+def test_fresh_and_saved_default_reaches_sdk_http(isolated, make_client, saved):
+    from ouroboros.settings_setup_contract import build_setup_bootstrap
+
+    settings = {"MINIMAX_API_KEY": "fixture-not-live"}
+    if saved:
+        settings["OUROBOROS_MODEL"] = saved
+    selected = build_setup_bootstrap(settings, "desktop")["initialState"]["mainModel"]
+    client, sent = make_client([_response({"role": "assistant", "content": "done"}, "stop")])
+    _call(client, [{"role": "user", "content": "hello"}], model=selected)
+    assert sent[0]["model"] == (saved or "minimax::MiniMax-M3.1-Flash").split("::", 1)[1]
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_flash_effort_reaches_sdk_http_unchanged(isolated, make_client, effort, asynchronous):
+    client, sent = make_client([_response({"role": "assistant", "content": "done"}, "stop")],
+                               asynchronous=asynchronous)
+    _call(client, [{"role": "user", "content": "hello"}], effort=effort, asynchronous=asynchronous)
+    assert sent[0]["model"] == "MiniMax-M3.1-Flash"
+    assert sent[0]["reasoning_effort"] == effort
+    assert sent[0]["reasoning_split"] is True
+    assert "thinking" not in sent[0]
+    assert "service_tier" not in sent[0]
+
+
+@pytest.mark.parametrize("requested,applied", [("none", "low"), ("minimal", "low"), ("ultra", "max")])
+def test_flash_maps_host_only_tiers_and_discloses_effective_effort(isolated, make_client, requested, applied):
+    client, sent = make_client([_response({"role": "assistant", "content": "done"}, "stop")])
+    _, usage = _call(client, [{"role": "user", "content": "hello"}], effort=requested)
+    assert sent[0]["reasoning_effort"] == applied
+    assert "thinking" not in sent[0]
+    assert usage["reasoning_effort_clamped"] == {
+        "requested": requested, "applied": applied,
+        "reason": "provider_wire_mapping", "model": "MiniMax-M3.1-Flash",
+    }
 
 
 @pytest.mark.parametrize("reasoning", [
