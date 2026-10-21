@@ -32,6 +32,33 @@ test('API-model and reviewer pins filter per-account entries; Auto keeps every m
     }
 });
 
+test('MiniMax suggestions prefer Flash and M3 without changing saved ids or catalog evidence', () => {
+    for (const [provider_id, prefix, modelPrefix] of [['minimax', 'minimax::', 'MiniMax-'], ['openrouter', 'minimax/', 'minimax-']]) {
+        const rows = ['M2.7', 'M3.1', 'M3', 'M3.1-Flash'].map((suffix) => {
+            const model = modelPrefix + (provider_id === 'openrouter'
+                ? suffix.toLowerCase() + (suffix === 'M3.1-Flash' ? ':free' : '') : suffix);
+            return { provider_id, id: provider_id === 'openrouter' ? prefix + model : model, value: prefix + model };
+        });
+        const media = { provider_id, id: 'speech-2.8-hd', value: prefix + 'speech-2.8-hd' };
+        const other = { provider_id: 'openai', id: 'gpt-5', value: 'openai::gpt-5' };
+        const all = [...rows, media, other];
+        const original = structuredClone(all);
+        assert.deepEqual(catalogModelOptions(all).map((item) => item.value), [rows[3].value, rows[2].value, media.value, other.value]);
+        assert.deepEqual(all, original);
+        for (const selected of [rows[0].value, rows[1].value, prefix + 'owner-custom']) {
+            const route = { kind: 'api_model', target_id: selected };
+            const before = structuredClone(route);
+            const html = routeModelInputHtml('data-model', route, all, 'minimax-models');
+            assert.ok(html.includes(`value="${provider_id === 'minimax' ? selected.slice(prefix.length) : selected}"`));
+            assert.deepEqual(route, before);
+        }
+        // A failed or incomplete discovery never invents the new model.
+        assert.deepEqual(catalogModelOptions([rows[2]]).map((item) => item.value), [rows[2].value]);
+    }
+    assert.deepEqual(catalogModelOptions([{ provider_id: 'openai-compatible', id: 'MiniMax-M2.7' }]),
+        [{ value: 'MiniMax-M2.7', label: 'MiniMax-M2.7' }]);
+});
+
 test('duplicate chooser values collapse to one model suggestion that makes no account claim', () => {
     const repeated = entries.map((item) => ({ ...item, value: 'same', id: 'same', name: 'Same model' }));
     const options = catalogModelOptions(repeated);

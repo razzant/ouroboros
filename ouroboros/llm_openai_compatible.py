@@ -242,6 +242,17 @@ class _OpenAICompatibleLaneMixin:
                         "reason": "provider_wire_mapping",
                         "model": resolved_model,
                     })
+            if provider == "minimax" and resolved_model == "MiniMax-M3.1-Flash":
+                # Flash is adaptive-only; map the host's wider effort scale to
+                # the documented wire tiers and disclose any changed request.
+                applied = {"none": "low", "minimal": "low", "ultra": "max"}.get(requested_effort, requested_effort)
+                kwargs["reasoning_effort"] = applied
+                _EFFORT_CLAMP_CVAR.set(None)
+                if applied != requested_effort:
+                    _EFFORT_CLAMP_CVAR.set({
+                        "requested": requested_effort, "applied": applied,
+                        "reason": "provider_wire_mapping", "model": resolved_model,
+                    })
             if temperature is not None:
                 kwargs["temperature"] = temperature
             if response_format:

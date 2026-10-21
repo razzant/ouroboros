@@ -265,7 +265,7 @@
       },
       "minimax": {
         "label": "MiniMax",
-        "modelCopy": "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M2.7.",
+        "modelCopy": "MiniMax-only setup detected. These defaults prefer MiniMax-M3.1-Flash, with MiniMax-M3 as fallback.",
         "providerCopy": "MiniMax is present, so the next step prefills MiniMax's own model ids."
       },
       "openai": {
@@ -488,9 +488,9 @@
     },
     "minimax": {
       "consciousness": "",
-      "fallback": "minimax::MiniMax-M2.7",
-      "light": "minimax::MiniMax-M2.7",
-      "main": "minimax::MiniMax-M3",
+      "fallback": "minimax::MiniMax-M3",
+      "light": "minimax::MiniMax-M3.1-Flash",
+      "main": "minimax::MiniMax-M3.1-Flash",
       "vision": ""
     },
     "openai": {
@@ -548,8 +548,8 @@
     "zai::glm-5.3-flash",
     "openai-compatible::meta-llama/compatible",
     "cloudru::zai-org/GLM-4.7",
-    "minimax::MiniMax-M3",
-    "minimax::MiniMax-M2.7"
+    "minimax::MiniMax-M3.1-Flash",
+    "minimax::MiniMax-M3"
   ],
   "secretPlaceholder": "***set***",
   "stepOrder": [
