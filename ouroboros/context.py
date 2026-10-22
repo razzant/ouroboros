@@ -60,6 +60,7 @@ from ouroboros.contracts.task_contract import normalize_bool, task_input_sources
 from ouroboros.memory import Memory, render_scratchpad_markdown
 from ouroboros.update_letter import official_update_projection  # contract: never raises
 from ouroboros.i18n_memory import current_language as _ui_language_tag
+from ouroboros.context_timing import section_spans, timed, timed_section
 from ouroboros.utils import (
     get_git_info,
     read_text,
@@ -333,6 +334,7 @@ def _task_authority_projection(env: Any, task: Dict[str, Any]) -> Dict[str, Any]
     return projection
 
 
+@timed_section("runtime")
 def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, scheduled_tasks_digest_out: Optional[Dict[str, Any]] = None,
                           captured_at: str = "", supplementary_messages_out: Optional[List[Dict[str, Any]]] = None) -> str:
     declared = task_input_sources(task) == "declared"
@@ -644,6 +646,7 @@ _SHARED_UNDERSTANDING_GAP = (
 )
 
 
+@timed_section("knowledge")
 def build_knowledge_sections(
     env: Any,
     *,
@@ -1029,6 +1032,7 @@ def build_recent_sections(memory: Memory, env: Any, task_id: str = "", project_i
 
 
 
+@timed_section("registry")
 def _build_registry_digest(env: Any) -> str:
     reg_path = env.drive_path("memory/registry.md")
     if not reg_path.exists():
@@ -1073,6 +1077,7 @@ def _registry_row(source_id: str, fields: dict) -> str:
     return f"| {source_id} | {path} | {updated} | {gaps} |"
 
 
+@timed_section("installed_skills")
 def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: Optional[List[Any]] = None) -> str:
     try:  # ``skills``: the context build's own discovery, so this catalog and its always-on block agree
         from ouroboros.skill_catalogue import always_in_context_skills, discover_context_skills
@@ -1151,6 +1156,7 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: O
     return "\n".join(lines)
 
 
+@timed_section("drive_state")
 def _drive_state_section(env: Any) -> str:
     """Typed projection of ``state/state.json`` + an on-demand pointer. Keys =
     what the agent REASONS about; the rest is internal caches or a second spend
@@ -1300,7 +1306,7 @@ def _capture_context_core(
         log.warning("Failed to build the Review block", exc_info=True)
     semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable"))
     from ouroboros.skill_catalogue import always_in_context_section, discover_context_skills
-    skills = discover_context_skills(canonical_root)  # one view: the always-on block here, the catalog below
+    skills = timed("installed_skills", discover_context_skills, canonical_root)  # shared with the catalog below
     if always_on := always_in_context_section(skills):
         semi_stable_parts.append(always_on)
     # Knowledge leads the changing block (its edits never cost the cached story) and
@@ -1331,7 +1337,7 @@ def _capture_context_core(
     try:
         from ouroboros.subagent_runtime import review_records_block
 
-        dynamic_parts.append(review_records_block(drive_root=canonical_root, task_id=str(task.get("id") or "")))
+        dynamic_parts.append(timed("review_records", review_records_block, drive_root=canonical_root, task_id=str(task.get("id") or "")))
     except Exception:
         log.warning("Failed to build the Review records block", exc_info=True)
     dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile", include_scratchpad=not is_child))
@@ -1468,6 +1474,7 @@ def _deep_review_pointer(path: pathlib.Path, reader: Callable[[], str]) -> str:
             f"Read: {reader()}.")
 
 
+@timed_section("memory_view")
 def _capture_memory_view(task: Dict[str, Any], canonical_root: pathlib.Path, ctx: Any) -> Tuple[Any, Any, str]:
     """``(ViewSpec, MemoryViewSnapshot, its canonical JSON)``, captured once from the canonical root."""
     from ouroboros.memory_view import capture_memory_view, snapshot_json, view_spec_for_task
@@ -1523,7 +1530,7 @@ def _record_memory_view(env: Any, memory: Memory, task: Dict[str, Any], ctx: Any
 
     root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
     if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view",
-                                                     "task_id": str(task.get("id") or ""), **facts}):
+                                                     "task_id": str(task.get("id") or ""), **facts, **section_spans()}):
         log.warning("Context memory view receipt could not be written")
     return facts
 

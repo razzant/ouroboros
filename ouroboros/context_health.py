@@ -21,6 +21,7 @@ from typing import Any, Dict, List
 from ouroboros.context_budget import SCRATCHPAD_BLOAT_WARN_CHARS
 from ouroboros.utils import iter_jsonl_objects, read_json_dict, read_text
 from ouroboros.store import StoreError
+from ouroboros.context_timing import timed_section
 
 log = logging.getLogger(__name__)
 
@@ -349,6 +350,7 @@ def _own_run_outcome_lines(custody_root: Any, custody_state: Any, task_id: str,
     return lines
 
 
+@timed_section("health")
 def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                             attempt_key: str = "") -> str:
     """Render the health-invariant WARNING block for one reader's context.

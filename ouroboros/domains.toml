@@ -193,6 +193,7 @@ D20 = "Presence"
 "ouroboros/context_anchor.py" = "D03"  # this conversation's own size anchor and accepted-input floor
 "ouroboros/context_renewal.py" = "D03"  # the refusal path's floor: the same task in a fresh view of its record
 "ouroboros/context_health.py" = "D03"
+"ouroboros/context_timing.py" = "D03"  # each host section's wall time on its build's memory-view receipt
 "ouroboros/context_layout.py" = "D03"
 "ouroboros/context_mode_compat.py" = "D03"
 "ouroboros/memory_view.py" = "D03"  # the acting mind's resident memory view: roles, capture, story and live part

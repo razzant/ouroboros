@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List
 
 from ouroboros.finalization_timing import emit_post_answer_timing, finalization_child_scope
 from ouroboros.observability import timed_phase
+from ouroboros.context_timing import timed_section
 from ouroboros.settings_integrity import copy_task_settings_context
 from ouroboros.cost_projection import cost_projection, resolve_cost_pair
 from ouroboros.task_results import (
@@ -1360,6 +1361,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         log.warning("Task result stored; subagent history unavailable: %s", e)
 
 
+@timed_section("review_context")
 def build_review_context(env: Any) -> str:
     """Build a compact review continuity section for the main reasoning context."""
     try:

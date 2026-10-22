@@ -27,6 +27,7 @@ from ouroboros.reference_books import ReferenceBook
 # lives in ``tool_result_delivery``; the consolidator imports its contract here.
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
+from ouroboros.context_timing import timed_section
 
 log = logging.getLogger(__name__)
 
@@ -796,6 +797,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[str, ...
             for mode, (story, room, receipt) in views.items()}, start
 
 
+@timed_section("fit")
 def build_context_fit_plan(
     env: Any,
     core: ContextCore,

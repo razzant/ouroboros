@@ -95,9 +95,13 @@ def _normalized(address: Any) -> Dict[str, Any]:
     return wanted
 
 
-def stored_address(root: Any, entry: ds.Row) -> Dict[str, Any]:
-    """Content identity, with an imported physical hint or a new SQL coordinate."""
-    legacy = ds.legacy_address(root, entry.seq) if entry.stream == "chat" else None
+def stored_address(root: Any, entry: ds.Row, legacy_map: Optional[Dict[int, Tuple[str, int]]] = None) -> Dict[str, Any]:
+    """Content identity, with an imported physical hint or a new SQL coordinate (``legacy_map``: the
+    chunk's ``ds.legacy_addresses``, read once for many rows)."""
+    if entry.stream != "chat":
+        legacy = None
+    else:
+        legacy = ds.legacy_address(root, entry.seq) if legacy_map is None else legacy_map.get(int(entry.seq))
     address = row_address(entry.row, gen=legacy[0], line=legacy[1]) if legacy else row_address(entry.row)
     if legacy is None:
         address["hint"]["seq"] = entry.seq
@@ -203,12 +207,47 @@ def generation_cursor(root: Any, meta: Dict[str, Any]) -> Tuple[int, bool]:
     return 0, True
 
 
+# Rows are addressed in chunks: a chunk's positions and legacy addresses are two reads, not two per row.
+# Per-row store transactions on a thread that shares the interpreter with a busy server each wait their
+# turn for the GIL; a technical bound on the read-ahead, not a judgment.
+_ADDRESS_CHUNK = 200
+
+
 def _addressed(root: Any, entries: Iterable[ds.Row]) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
-    for entry in entries:
+    chunk: list = []
+    source = iter(entries)
+    while True:
+        try:
+            entry = next(source)
+        except StopIteration:
+            break
+        except Exception:
+            if chunk:  # the rows read before the failure, then the failure
+                yield from _addressed_chunk(root, chunk)
+            raise
         if is_a2a_chat_id(entry.row.get("chat_id", 1)):
             continue
-        ordinal = dp.ordinal_at(root, "chat", entry.seq)
-        yield stored_address(root, entry), entry.row, ordinal.pos
+        chunk.append(entry)
+        if len(chunk) == _ADDRESS_CHUNK:
+            yield from _addressed_chunk(root, chunk)
+            chunk = []
+    if chunk:
+        yield from _addressed_chunk(root, chunk)
+
+
+def _addressed_chunk(root: Any, chunk: list) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
+    """A chunk's rows with two reads; when they cannot be read the rows are read one by one as before,
+    so the rows before an unreadable one and the typed outcome at it stay the per-row reader's."""
+    try:
+        ordinals = dp.ordinals_of(root, "chat", [entry.seq for entry in chunk])
+        legacy = ds.legacy_addresses(root, [entry.seq for entry in chunk if entry.stream == "chat"])
+    except Exception:
+        for entry in chunk:
+            ordinal = dp.ordinal_at(root, "chat", entry.seq)
+            yield stored_address(root, entry), entry.row, ordinal.pos
+        return
+    for entry in chunk:
+        yield stored_address(root, entry, legacy), entry.row, ordinals.get(int(entry.seq)).pos
 
 
 def iter_rows(root: Any, *, from_addr: Any = None, lower: int = 0,

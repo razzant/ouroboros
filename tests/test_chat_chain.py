@@ -483,3 +483,126 @@ def test_a_redelivered_message_stays_two_addressable_rows(tmp_path):
     assert [pos for _a, _r, pos in ours] == [0, 1] and ours[0][0]["row_sha256"] != ours[1][0]["row_sha256"]
     # The evidence view folds a repeated client id into its first copy; the stream does not.
     assert [row["text"] for row in read_room_source(tmp_path, 1)["rows"]] == ["same words"]
+
+
+# --- rows addressed in chunks ------------------------------------------------------------------
+
+def _per_row(root, entries):
+    """The reader before chunking, as the oracle: a position read and a legacy-address read per row."""
+    from ouroboros import dialogue_positions as dp
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+
+    for entry in entries:
+        if is_a2a_chat_id(entry.row.get("chat_id", 1)):
+            continue
+        with ds.transaction(root, write=False) as conn:
+            record = conn.execute("SELECT gen, line FROM legacy_addresses INDEXED BY legacy_seq WHERE seq=? LIMIT 1",
+                                  (entry.seq,)).fetchone()
+        address = cc.row_address(entry.row, gen=record[0], line=record[1]) if record else cc.row_address(entry.row)
+        if record is None:
+            address["hint"]["seq"] = entry.seq
+        yield address, entry.row, dp.ordinal_at(root, "chat", entry.seq).pos
+
+
+def _stream(root):
+    return ds.iter_rows(root, "chat", upper=ds.stream_end(root, "chat"))
+
+
+def _long_chain(tmp_path, rows=450):
+    """An imported archive and live file longer than two chunks, A2A rows among them, then rows appended here."""
+    live, archive = _layout(tmp_path)
+    _append(archive / "chat_20260901T000000.jsonl", *[
+        _msg(f"2026-08-31T10:{i // 60:02d}:{i % 60:02d}+00:00", f"old-{i}", chat_id=-3 if i % 7 == 0 else 1)
+        for i in range(rows)])
+    _append(live, *[_msg(f"2026-09-02T10:00:{i:02d}+00:00", f"live-{i}") for i in range(30)])
+    import_all(tmp_path)
+    _append(live, *[_msg(f"2026-09-03T10:00:{i:02d}+00:00", f"here-{i}") for i in range(5)])
+
+
+def test_rows_are_addressed_in_chunks_exactly_as_row_by_row(tmp_path, monkeypatch):
+    _long_chain(tmp_path)
+    expected = list(_per_row(tmp_path, _stream(tmp_path)))
+    room = list(_per_row(tmp_path, cc.room_rows(tmp_path, 1)))
+    reads = {"n": 0}
+    real = ds.transaction
+
+    def counted(*args, **kwargs):
+        reads["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ds, "transaction", counted)
+    streamed = list(cc.iter_rows(tmp_path))
+    assert streamed == expected and len(streamed) > 2 * cc._ADDRESS_CHUNK
+    assert {"gen", "line"} <= set(streamed[0][0]["hint"]) and "seq" in streamed[-1][0]["hint"]
+    # Two reads per chunk and the stream's own pages, where row by row would be two per row.
+    assert reads["n"] <= 2 * -(-len(streamed) // cc._ADDRESS_CHUNK) + 10, reads
+    assert list(cc.iter_room_rows(tmp_path, "1")) == room
+
+
+def test_an_unreadable_row_mid_chunk_keeps_the_rows_before_it_and_its_typed_outcome(tmp_path, monkeypatch):
+    from ouroboros import dialogue_positions as dp
+    from ouroboros.store import StoreMigrating
+
+    _long_chain(tmp_path, rows=60)
+    expected = list(_per_row(tmp_path, _stream(tmp_path)))
+    bad = [entry.seq for entry in _stream(tmp_path) if entry.row.get("chat_id") != -3][25]
+    real = dp.ordinals_of
+
+    def unsettled(root, stream, seqs):
+        seqs = list(seqs)
+        if bad in seqs:
+            raise StoreMigrating("the segment holding this row is still importing")
+        return real(root, stream, seqs)
+
+    monkeypatch.setattr(dp, "ordinals_of", unsettled)
+    got = []
+    with pytest.raises(StoreMigrating):
+        for item in cc.iter_rows(tmp_path):
+            got.append(item)
+    assert got == expected[:25]
+
+
+def test_the_batched_legacy_reader_keeps_each_rows_first_alias(tmp_path):
+    _chain(tmp_path)
+    seqs = [entry.seq for entry in _stream(tmp_path)]
+    target = next(seq for seq in seqs if ds.legacy_address(tmp_path, seq))
+    with ds.transaction(tmp_path, write=True) as conn:
+        conn.execute("INSERT INTO legacy_addresses (gen, line, seq) VALUES (?, ?, ?)", ("0" * 64, 1, target))
+        conn.execute("INSERT INTO legacy_addresses (gen, line, seq) VALUES (?, ?, ?)", ("f" * 64, 99, target))
+    with ds.transaction(tmp_path, write=False) as conn:
+        oracle = {seq: tuple(record) for seq in seqs if (record := conn.execute(
+            "SELECT gen, line FROM legacy_addresses INDEXED BY legacy_seq WHERE seq=? LIMIT 1", (seq,)).fetchone())}
+    assert oracle[target] == ("0" * 64, 1)
+    assert ds.legacy_addresses(tmp_path, seqs) == oracle
+    assert all(ds.legacy_address(tmp_path, seq) == oracle.get(seq) for seq in seqs)
+
+
+
+def test_a_failing_row_source_still_yields_the_rows_read_before_it(tmp_path):
+    _long_chain(tmp_path, rows=60)
+    entries = list(_stream(tmp_path))
+    expected = list(_per_row(tmp_path, entries[:30]))
+
+    def failing():
+        yield from entries[:30]
+        raise RuntimeError("the page after these rows could not be read")
+
+    got = []
+    with pytest.raises(RuntimeError, match="could not be read"):
+        for item in cc._addressed(tmp_path, failing()):
+            got.append(item)
+    assert got == expected and len(got) > 20
+
+
+def test_the_first_row_reads_one_chunk_ahead_not_the_whole_stream(tmp_path):
+    _long_chain(tmp_path)
+    pulled = {"n": 0}
+
+    def counted():
+        for entry in _stream(tmp_path):
+            pulled["n"] += 1
+            yield entry
+
+    first = next(cc._addressed(tmp_path, counted()))
+    assert first == next(_per_row(tmp_path, _stream(tmp_path)))
+    assert pulled["n"] <= 2 * cc._ADDRESS_CHUNK < len(list(_stream(tmp_path)))

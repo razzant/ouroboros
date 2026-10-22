@@ -836,11 +836,21 @@ def resolve_legacy(root: Any, gen: str, line: int) -> Optional[Row]:
 
 
 def legacy_address(root: Any, seq: int) -> Optional[Tuple[str, int]]:
-    """The ``(gen, line)`` an imported chat row had (``None`` for a row appended here); one indexed
-    probe (``legacy_seq``), whatever the other rooms imported."""
+    """The ``(gen, line)`` an imported chat row had (``None`` for a row appended here)."""
+    return legacy_addresses(root, [seq]).get(int(seq))
+
+
+def legacy_addresses(root: Any, seqs: Iterable[int]) -> Dict[int, Tuple[str, int]]:
+    """``legacy_address`` for many rows in one transaction (500 seqs per statement): each imported
+    seq's first ``(gen, line)`` in the ``legacy_seq`` order, an appended row absent."""
+    wanted, found = sorted({int(seq) for seq in seqs}), {}
     with transaction(root, write=False) as conn:
-        record = conn.execute("SELECT gen, line FROM legacy_addresses INDEXED BY legacy_seq WHERE seq=? LIMIT 1", (seq,)).fetchone()
-    return None if record is None else (record["gen"], record["line"])
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            for record in conn.execute("SELECT seq, gen, line FROM legacy_addresses INDEXED BY legacy_seq WHERE seq IN "
+                                       f"({','.join('?' * len(chunk))}) ORDER BY seq, gen, line", chunk):
+                found.setdefault(record["seq"], (record["gen"], record["line"]))
+    return found
 
 
 def legacy_generation(root: Any, gen: str) -> Optional[Dict[str, Any]]:
