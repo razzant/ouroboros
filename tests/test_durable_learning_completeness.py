@@ -179,4 +179,5 @@ def test_wake_context_discloses_a_durable_dialogue_gap(tmp_path):
 def test_wake_context_discloses_an_omitted_schedule_count(tmp_path):
     _write_schedules(tmp_path, 9)
     context = _wake_context(tmp_path)
-    assert '"omitted_count": 1' in context
+    runtime = json.loads(context.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
+    assert runtime["scheduled_tasks"]["omitted_count"] == 1

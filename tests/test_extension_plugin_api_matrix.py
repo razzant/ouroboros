@@ -151,7 +151,8 @@ def test_recorded_fingerprint_matches_the_live_surface():
 def test_unknown_version_key_fails_closed(monkeypatch):
     monkeypatch.setattr(
         papi, "PLUGIN_API_SURFACE_FINGERPRINTS",
-        {PLUGIN_API_VERSION: plugin_api_surface_fingerprint(), "2.9": "unused"},
+        {"2.0": PLUGIN_API_SURFACE_FINGERPRINTS["2.0"],
+         PLUGIN_API_VERSION: plugin_api_surface_fingerprint(), "2.9": "unused"},
     )
     monkeypatch.setattr(papi, "PLUGIN_API_VERSION", "2.9")
     # Declared "2.0" is inside major/minor range for host 2.9 but has no
@@ -210,10 +211,10 @@ def test_declared_2_0_extension_loads_and_carries_the_generation(tmp_path):
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root, _force_in_process=True)
     assert err is None, err
     entry = extension_loader.get_tool(extension_surface_name("gen2ext", "t1"))
-    assert entry is not None and entry.get("plugin_api_generation") == "2.0"
+    assert entry is not None and entry.get("plugin_api_generation") == PLUGIN_API_VERSION
     with extension_loader._lock:
         bundle = extension_loader._extensions["gen2ext"]
-        assert bundle.plugin_api_generation == "2.0"
+        assert bundle.plugin_api_generation == PLUGIN_API_VERSION
 
 
 def test_grandfathered_fieldless_extension_still_loads_as_legacy(tmp_path):

@@ -131,6 +131,8 @@ def continuation_eligibility(result: Dict[str, Any], task_id: str) -> Dict[str, 
         return {"eligible": False, "cause": "", "refusal": "predecessor_live"}
     if not _is_root(result, task_id):
         return {"eligible": False, "cause": "", "refusal": "not_a_root_task"}
+    if (result.get("metadata") or {}).get("execution_transport") is not None:
+        return {"eligible": False, "cause": "realtime_transport", "refusal": "realtime_restart_required"}
     reason = str(result.get("reason_code") or "")
     if reason in HARD_LIMIT_REASON_CODES:
         return {"eligible": False, "cause": reason, "refusal": "hard_limit_reached"}

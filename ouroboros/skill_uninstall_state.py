@@ -56,6 +56,7 @@ def delete_local_skill(
     """Delete the exact local external payload after host action admission; the path, symlink
     and same-name checks are rmtree safety, not eligibility (``removal_action`` is)."""
     from ouroboros import extension_loader
+    from ouroboros.extension_registry_state import _lifecycle_lock_for
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import discover_skills
 
@@ -84,11 +85,21 @@ def delete_local_skill(
     state_dir = state_root / loaded.name
     if state_root.is_symlink() or state_dir.is_symlink() or not state_dir.is_relative_to(state_root):
         return refuse(f"refusing to delete unsafe state path for {loaded.name!r}", 500)
-    extension_loader.unload_extension(loaded.name)
-    shutil.rmtree(payload_dir)
-    deleted_state = state_dir.exists()
-    if deleted_state:
-        shutil.rmtree(state_dir)
+    with _lifecycle_lock_for(loaded.name):
+        extension_loader.unload_extension(loaded.name)
+        shutil.rmtree(payload_dir)
+        had_state = state_dir.exists()
+        if had_state:
+            shutil.rmtree(state_dir)
+        deleted_state = had_state and not state_dir.exists()
+    from ouroboros.extension_reconcile_queue import announce_extension_state_change
+    announce_extension_state_change(drive, loaded.name, reason="deleted")
+    try:
+        from supervisor.queue import sync_skill_schedules
+
+        sync_skill_schedules(discover_skills(drive, repo_path=repo_path), drive_root=drive)
+    except Exception:
+        log.debug("local skill delete schedule sync failed", exc_info=True)
     if payload_dir.exists() or state_dir.exists():
         return refuse(f"failed to fully delete local skill {loaded.name!r}", 500)
     return {

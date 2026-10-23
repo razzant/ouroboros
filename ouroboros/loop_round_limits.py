@@ -469,7 +469,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         from ouroboros.memory_floor import owner_note_capsule
         try:
             note = owner_note_capsule(memory_plan, addresses, proposal.get("working_note", ""), request,
-                drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, task_id=ctx.task_id)
+                drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, task_id=ctx.task_id, mode=mode)
             candidate = memory_plan.reproject_transcript(candidate, mode) + ([note] if note else [])
             receipt.update(status="applied", memory_view=memory_price)
         except ValueError as exc:

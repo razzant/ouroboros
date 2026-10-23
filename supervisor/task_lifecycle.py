@@ -711,7 +711,8 @@ def cancel_task_custody(
         # ownership wins over the settled fast path; the stored terminal
         # stays the answer either way.
         turn = workers.direct_chat_turn(task_id)
-        if turn is not None or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
+        actor = workers.get_direct_chat_agent(task_id)
+        if turn is not None or actor is not None or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
             from supervisor.cancel_publication import _finish_captured_chat_turn
 
             return _finish_captured_chat_turn(q, task_id, turn, intent=intent, deliver=deliver)

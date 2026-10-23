@@ -18,6 +18,22 @@ def row(task_id, phase="working", **extra):
 
 # ---- one member ---------------------------------------------------------------------------------------
 
+@pytest.mark.parametrize("is_call", [False, True])
+def test_stopped_call_has_no_resume_release_but_text_still_does(is_call, tmp_path):
+    parked = row("call", "budget_paused", pause_cause="restart", can_resume=True)
+    metadata = {"execution_transport": {"type": "live_conversation"}} if is_call else {}
+    raw = {"metadata": metadata, "_budget_pause_hold": {"reason": "owner_restart_hold"}}
+    facts = wp._member_raw(parked, raw, wp._Observations(tmp_path), "call")
+    state = ws.classify_member(parked, facts)
+    # A stopped call has ended: nobody resumes it. A text task keeps the release the stop view gives it.
+    assert (state["release"] == "none") is is_call
+    if is_call:
+        assert state["turn"] == [] and state.get("resumable") is False
+    actions = {control["action"] for control in ws.controls_for(state, parked)}
+    assert ("resume" in actions) is (not is_call)
+    assert "stop" in actions
+
+
 def test_working_member_names_its_exact_call():
     state = ws.classify_member(row("t", model_activity={"phase": "awaiting_response"}))
     assert (state["activity"], state["call"], state["release"]) == ("working", "sending", "self")

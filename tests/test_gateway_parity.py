@@ -602,6 +602,7 @@ def test_skill_lifecycle_queue_contract_matches_runtime_shape():
 
 def test_skill_delete_contract_matches_runtime_shape():
     fields = set(SkillDeleteResponse.__annotations__)
+    assert "state_delete_pending" not in fields
 
     assert {
         "ok",

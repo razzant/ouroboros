@@ -844,6 +844,9 @@ calls and runtime behaviours:
 | `ws_handler` | The skill may call `register_ws_handler` and `send_ws_message`. |
 | `route` | The skill may call `register_route`. |
 | `tool` | The skill may call `register_tool`. |
+| `realtime_provider` | The skill may call `register_realtime_provider` (PluginAPI 2.1, in-process only). |
+| `live_conversation` | The skill may register the in-process Live Conversation feature (PluginAPI 2.1); the host retains admission, tools, memory, budget and Stop. |
+| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; Presence admission still requires its binding and `presence` grant. External speech conveys no owner authority. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
@@ -1338,13 +1341,13 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.0, ABI 7.0):
+(PluginAPI 2.1; declarations of 2.0 remain supported):
 
 ```yaml
-plugin_api: "2.0"            # major strict; minor = required minimum
+plugin_api: "2.1"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.0"
+#   version: "2.1"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
@@ -1352,6 +1355,67 @@ A payload without the field binds the legacy "1.3" generation by
 construction: an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
+
+`register_realtime_provider(name, *, route, session, catalog)` publishes an in-process
+provider as `<skill>:<name>`, with the `realtime_provider` permission. `RealtimeRoute`
+names its accounting provider, socket endpoint and model prefix. `ProviderCatalog`
+names models, default, voices, vision, honoured settings and credential setting names;
+`RouteFacts` carries the conversation window, accepted-input evidence, working reserve,
+units (`provider` or `estimator`), source and date. Acceptance never raises or invalidates the window.
+An unknown window stays unknown. Credentials use ordinary `get_settings` grants.
+
+`register_live_conversation(name, handler, *, configure, call_tools=())` registers the
+in-process feature, requiring `live_conversation`. `configure()` returns `LiveConfig`;
+an empty model selects the catalog default, an unknown model refuses admission.
+`call_offer(config)` in `ouroboros.live_conversation` computes availability from enabled,
+loaded provider and its credential grants. Beta defaults off. No connection duration
+or per-call dollar limit exists; responses share the ordinary spending limit.
+
+`handler(host)` receives the `LiveHost` protocol in `contracts/live_conversation.py`.
+The host owns admission, current canonical history, ordinary context fitting, tools,
+mailbox, accounting and Stop. The feature owns call state, media, captions, language
+choices and session renewal. It calls `session(consume, LiveOptions(...))`; every reopen
+refits current rows and schemas through the ordinary window ladder. Feature instructions
+then owner instructions are included in the fit. Known overflow refuses with a typed
+sentence if the ladder cannot fit it. Provider windows use the route's ordinary density
+(cold 1.0); split text-input usage calibrates selected text only, never media. Estimator
+windows use raw chars/4; Grok usage excludes instructions and never teaches density.
+The sealed wire, including provider language additions, is budgeted before opening.
+The final physical guard honours the route reserve.
+
+The session factory receives immutable `RealtimeInput`, options and a wire recorder.
+It declares its native output bound or `None`; the host supplies fresh exact-route
+output-limit evidence in `LiveOptions.model_output_bound_tokens`. A provider owns wire
+layout and normalization, and must never cut selected input. It reports each response's
+start, finish, status and usage axes, including interrupted/tool-only responses.
+`connected_seconds` is a cumulative connection watermark, including idle and closing
+time. The factory's `observe("usage", raw)` reports JSON
+`{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
+its final sample before returning. Samples and responses share one watermark. The host
+settles growth after Stop/budget exhaustion without admitting work or inventing responses;
+response IDs dedupe across the call, including resumed connections. Reservations
+survive reconnects; final call teardown abandons responses without a receipt.
+`billable_audio_seconds` remains evidence.
+The host uses the retained exact LiteLLM quote. Unpriced
+usage remains unknown; settlement never silently fetches a newer tariff. Catalog warmup precedes the audio loop.
+
+Call tools join ordinary schemas; collisions refuse admission. Their async
+`handler(host, arguments)` runs on the serialized tool lane with pre/post-effect
+checkpoints and ordinary history rows. `tool_batch` returns a list-compatible
+`ToolBatch`; forward its `silent` ids in `ToolOutputs.silent`. `observe_context(row)`
+records a labelled peer observation without private host access. Final captions are
+durable immediately; whole-turn checkpoints are coalesced. The server's host-attributed
+`call:<call_id>:open` fact answers the owner's admitted action; the feature sends
+`Respond(host.opening)` once per call, including across reconnections.
+
+`renewal_due()` uses held input and observed growth against the route reserve/window.
+Provider-specific audio-drop policy stays in the provider. `renewal_ready` carries
+native input/transcription work; the feature also waits for tools and playback.
+`final_captions()` returns received unfinished words at teardown without new wire work.
+Automatic feature/provider reload refuses with `live_call_active` and retries later.
+Owner disable cancels the call; host teardown joins its sockets and started tools. Page contributions use `provides: conversation`,
+`runtime: client`, `render.kind: host` under the ordinary `page_module` grant.
+Companion framing and call doors: `CLIENT_CONTRACT.md`, “Live Conversation”.
 
 ```python
 def register(api):

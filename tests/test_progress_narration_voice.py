@@ -115,6 +115,21 @@ def test_task_bound_progress_keeps_lineage_meta_after_worker_moves_to_child():
     assert meta["executor_observation"] == observation
 
 
+def test_bound_spoken_row_keeps_task_provenance():
+    agent, events = _agent()
+    agent._emit_progress = partial(OuroborosAgent._emit_progress, agent)
+    bound = OuroborosAgent._bind_task_progress(agent, "call-task", 5,
+        {"root_task_id": "bound-root", "initiator": "consciousness"}, 2)
+    agent._current_task_id, agent._current_chat_id = "next-task", 9
+    spoken = {"call_id": "synthetic-call", "item_id": "item-1", "played_ms": 120, "status": "interrupted"}
+    bound("Words generated before interruption.", narration=True,
+          _progress_meta_override={"spoken": spoken, "root_task_id": "wrong-root", "source": "live_call"})
+    event = events.get_nowait()
+    assert (event["task_id"], event["chat_id"]) == ("call-task", 5)
+    assert event["progress_meta"] == {"spoken": spoken, "root_task_id": "bound-root",
+        "initiator": "consciousness", "source": "live_call", "narration": True}
+
+
 @pytest.mark.parametrize("content, msg, expected", [
     ("The answer is 42.", {}, "The answer is 42."),
     ([{"type": "thinking", "thinking": "x"}], {"reasoning": "weighing the options"},
@@ -143,7 +158,8 @@ def test_voice_rides_the_live_frame_the_stored_row_and_the_replay(tmp_path, monk
     """
     agent, events = _agent()
     _emit(agent, "Checkpoint 3 at round 12")
-    _emit(agent, "Reading the failing test first.", narration=True)
+    spoken = {"call_id": "synthetic", "item_id": "one", "played_ms": 60, "status": "interrupted"}
+    _emit(agent, "Reading the failing test first.", narration=True, _progress_meta_override={"spoken": spoken})
     frames = [events.get_nowait() for _ in range(2)]
 
     (tmp_path / "logs").mkdir()
@@ -174,6 +190,7 @@ def test_voice_rides_the_live_frame_the_stored_row_and_the_replay(tmp_path, monk
         assert [row["narration"] for row in rows] == [False, True], rows
         assert [row["role"] for row in rows] == ["system", "assistant"], rows
         assert [row["system_type"] for row in rows] == ["host_progress", "model_narration"], rows
+        assert rows[1]["spoken"] == spoken, rows
     # The voice is presentation only: the host note keeps its liveness semantics
     # (that marker is supervisor-authored HOST_NARRATION, a different key).
     assert all(events_chat_delivery.HOST_NARRATION not in row for row in live)

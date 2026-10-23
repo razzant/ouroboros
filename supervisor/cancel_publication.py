@@ -752,6 +752,15 @@ def _finish_captured_chat_turn(
             intent=intent,
         )
         return CANCEL_FAILED
+    from supervisor.active_activity import get_direct_activity_registry
+
+    if get_direct_activity_registry().get(task_id) is not None:
+        # Closed message admission is not execution completion, also when it
+        # closed after Stop captured a live turn. Preparation or async teardown
+        # can still own the actor; it observes the durable Stop through task
+        # control. The registry releases only after its runner exits.
+        _release_intent_claim(q, task_id, error="direct activity still owns work", intent=intent)
+        return CANCEL_FAILED
     stored = load_task_result(q.DRIVE_ROOT, task_id) or {}
     if str(stored.get("status") or "") not in SETTLED_STATUSES:
         return _finalize_cancel_intent_on_miss(q, task_id, intent=intent)

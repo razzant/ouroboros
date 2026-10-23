@@ -25,6 +25,54 @@ WAKE = {"id": "wake", "chat_id": 1, "_is_direct_chat": True,
         "metadata": {"initiator": "consciousness", "usage_category": "consciousness"}}
 
 
+def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
+    from ouroboros import memory_view as mv, memory_floor as mf
+    from tests.test_memory_view_floor import note_snapshot
+    snap = note_snapshot()
+    snap.room['notes'][1]['text'] = 'A long first sentence ' * 30 + '.\nSecond sentence stays in the source.'
+    snap.room['notes'][2].update(role='child', date='2026-09-03')
+    level = mf.level_with(snap, mv.FULL_VIEW, ['F8:' + note['id'] for note in snap.room['notes']])
+    rendered = mv.render_room(snap, level)
+    first = snap.room['notes'][0]
+    assert (f"note {first['id']} by root on 2026-09-02: Label 0.; memory_read(node_id='{first['id']}')") in rendered
+    long_line = mv._note_pointer(snap.room['notes'][1])
+    label = long_line.split(': ', 1)[1].split('; memory_read')[0]
+    assert len(label) <= 160 and label.endswith('…') and '\n' not in long_line
+    aggregate = mf.level_with(snap, level, ['F8a:1'])
+    text = mv.render_room(snap, aggregate)
+    assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
+    assert all(note['id'] in text for note in snap.room['notes'])
+    assert '(memory_read(node_id=…))' in text
+    for other in snap.live_rooms:
+        assert '\n'.join(mv._live_room(other)) in text
+    assert mv.render_story(snap, aggregate) == mv.render_story(snap)
+
+
+def test_note_forms_leave_exact_sources_readable_and_do_not_capture_this_rounds_note(tmp_path):
+    from ouroboros import memory_floor as mf, memory_view as mv
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.tools.chronicle import _memory_read
+    from tests.test_chronicle_tools import ctx_for, write
+    ctx = ctx_for(tmp_path)
+    sources = [write(ctx, kind='note', text=f'Label {i}.\n' + 'Unsealed exact words. ' * 160) for i in range(3)]
+    assert all(source['ok'] for source in sources)
+    task = {'id': 'next-turn', 'chat_id': 1, '_is_direct_chat': True}
+    snap = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
+    assert len(snap.room['notes']) == 3
+    original = mv.snapshot_json(snap)
+    later = write(ctx_for(tmp_path, task_id='next-turn'), kind='note', text='New this round. Keep this exact wording.')
+    assert later['ok']
+    for aggregate in (False, True):
+        level = mf.level_with(snap, mv.FULL_VIEW, ['F8:' + n['id'] for n in snap.room['notes']]
+                              + (['F8a:1'] if aggregate else []))
+        text = mv.render_room(snap, level)
+        for note in snap.room['notes']:
+            assert note['id'] in text and note['text'] in _memory_read(ctx, node_id=note['id'])
+        assert later['node_id'] not in {i for _s, ids in level.addressed for i in ids}
+    assert mv.snapshot_json(snap) == original
+    assert ChronicleStore(tmp_path).get(later['node_id'])['text'] == 'New this round. Keep this exact wording.'
+
+
 def _messages(env, memory, task, **kwargs):
     from ouroboros.context import build_llm_messages
 
@@ -138,7 +186,7 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
     chapter.write_text("# Rules\n\nChanged after capture.\n", encoding="utf-8")
     rebuilt = plan.reproject_for_route(window_tokens=2_000_000, known_window=True, ratio=1.0,
                                       output_reserve=plan.output_reserve_tokens, tool_schemas=None)
-    # A window the Max request cannot hold narrows Max's memory: D is still the captured one, counted the same.
+    # Physical pressure first narrows host facts; D remains the complete captured handbook.
     tight = plan.projection("max").estimated_tokens + plan.output_reserve_tokens - 1
     narrowed = plan.reproject_for_route(window_tokens=tight, known_window=True, ratio=1.0,
                                        output_reserve=plan.output_reserve_tokens, tool_schemas=None)
@@ -154,9 +202,17 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
     texts = [block["text"] for block in narrowed.messages_for("max")[0]["content"]]
     assert narrowed.projection("max").system_content_json != plan.projection("max").system_content_json
     assert sum(text.startswith("## DEVELOPMENT.md\n") for text in texts) == int(book)
+    if book:
+        assert texts[1] == "## DEVELOPMENT.md\n\n" + core.development_md
     assert all("Changed after capture" not in text for text in texts)
-    assert (narrowed.projection("max").memory_facts["floor"]["physical_allowance_tokens"]
-            - plan.projection("max").memory_facts["floor"]["physical_allowance_tokens"]) == tight - 1_000_000
+    facts = narrowed.projection("max").memory_facts
+    receipts = facts["host_sections_addressed"]
+    freed = (facts["floor"]["physical_allowance_tokens"]
+             - plan.projection("max").memory_facts["floor"]["physical_allowance_tokens"]
+             - (tight - 1_000_000))
+    # Separate section estimates round individually; the complete request rounds once.
+    assert freed > 0 and abs(freed - sum(row["tokens_saved"] for row in receipts)) <= len(receipts) + 1
+    assert not {row["section_id"] for row in receipts} & {"architecture", "development"}
 
 
 def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tmp_path):
@@ -520,7 +576,7 @@ def test_the_task_input_pointer_is_a_physical_rescue_and_the_floor_counts_reside
     # Owner 7A: a window that holds the whole request but not its start work room names the start; the words stay whole.
     writes = []
     store = artifacts.store_actor_source_bytes
-    monkeypatch.setattr(artifacts, "store_actor_source_bytes", lambda *a, **kw: writes.append(a) or store(*a, **kw))
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", lambda *a, **kw: (writes.append(a) if kw.get("source_id") == "task_input" else None) or store(*a, **kw))
     with pytest.raises(context_fit.MinimumViewUnfit, match="Core, assignment, resident control tools and work room") as unfit:
         plan(heavy_meta, 1.0, full + 10_000)  # holds the request, not its ~21K start work room
     assert not unfit.value.physical and writes == []
@@ -556,3 +612,15 @@ def test_the_task_input_pointer_is_a_physical_rescue_and_the_floor_counts_reside
     # The first request keeps the owner-mode selection: a full list is not what Nano sends there.
     assert (built.nano_projection.memory_facts["floor"]["physical_allowance_tokens"]
             == plan(meta + big, 1.0).nano_projection.memory_facts["floor"]["physical_allowance_tokens"])
+
+
+def test_aggregate_range_keeps_interleaved_verbatim_rows_in_place():
+    from ouroboros import memory_view as mv, memory_floor as mf
+    from tests import _memory_view_synthetic as syn
+    rows = [syn.spoken(i, 'ouroboros', 1000) for i in range(5)]
+    snap = syn.snapshot(room_facts=syn.room(lane1=rows))
+    level = mf.level_with(snap, mv.FULL_VIEW, ['F2:' + rows[i]['address'] for i in (1, 3)] + ['F7a:1'])
+    text = mv.render_room(snap, level)
+    assert text.index(rows[0]['line']) < text.index('2 earlier rows') < text.index(rows[2]['line']) < text.index(rows[4]['line'])
+    assert rows[1]['line'] not in text and rows[3]['line'] not in text
+    assert f"from='{rows[1]['address']}', to='{rows[3]['address']}'" in text

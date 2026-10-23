@@ -175,12 +175,13 @@ def _move_aside(skill_dir: pathlib.Path, name: str) -> pathlib.Path:
 
 
 def _unload(name: str) -> None:
-    try:
-        from ouroboros.extension_loader import unload_extension
+    from ouroboros.extension_loader import unload_extension
+    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
 
+    with _lifecycle_lock_for(name):
+        if refusal := realtime_load_refusal(name):
+            raise SkillInstallError(refusal, "A live call is using this skill; retry after it ends.")
         unload_extension(name)
-    except Exception:
-        log.debug("unload before replacing %s failed", name, exc_info=True)
 
 
 def _land_builtin(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[str, Any], *,
@@ -405,7 +406,12 @@ def settle_pending_updates_at_startup(drive_root: pathlib.Path) -> None:
 
 def settle_before_replacement(drive_root: pathlib.Path, name: str) -> None:
     """A later explicit replacement first returns an unfinished candidate to its kept base."""
-    result = settle_pending_update(drive_root, name, force=True)
+    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
+
+    with _lifecycle_lock_for(name):
+        if refusal := realtime_load_refusal(name):
+            raise SkillInstallError(refusal, "A live call is using this skill; retry after it ends.")
+        result = settle_pending_update(drive_root, name, force=True)
     if result["status"] == "restore_failed":
         raise SkillInstallError("restore_failed", f"The previous update of {name} could not be restored; "
                                                  "its payload and state evidence were kept.")
@@ -659,7 +665,9 @@ def uninstall_installed(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
         if not result.ok:
             raise SkillInstallError("uninstall_failed", result.error)
         return {"ok": True, "name": name, "source": "clawhub"}
-    _unload(name)
+    from ouroboros.extension_loader import unload_extension
+
+    unload_extension(name)  # an explicit owner removal keeps ordinary cancellation
     shutil.rmtree(skill_dir)  # nothing seeds built-ins at startup, so a removed one stays removed
     discard_update_snapshot(pathlib.Path(drive_root), name)
     (skill_state_dir_path(pathlib.Path(drive_root), name) / DEPS_STATE_FILENAME).unlink(missing_ok=True)

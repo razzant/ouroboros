@@ -175,13 +175,17 @@ def test_capability_and_queue_digest_in_runtime_context(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
     env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path,
                           drive_path=lambda p: tmp_path / p)
+
+    def capabilities(section):
+        return json.loads(section.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])["capabilities"]
+
     section = ctx_mod.build_runtime_section(env, {"id": "t1", "type": "task"})
-    assert '"allow_mutative_subagents": true' in section
+    assert capabilities(section)["allow_mutative_subagents"] is True
     assert "MASTER gate" in section  # the honest note teaching forward reasoning
 
     monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "false")
     section_off = ctx_mod.build_runtime_section(env, {"id": "t1", "type": "task"})
-    assert '"allow_mutative_subagents": false' in section_off
+    assert capabilities(section_off)["allow_mutative_subagents"] is False
 
 
 def test_tree_tools_in_core_and_initial_schemas():

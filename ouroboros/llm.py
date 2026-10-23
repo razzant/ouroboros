@@ -160,7 +160,8 @@ class LLMClient(
         base_url: str = "https://openrouter.ai/api/v1",
     ):
         self._api_key_override = api_key
-        self._api_key = api_key or runtime_setting("OPENROUTER_API_KEY", "")
+        # Route resolution owns credentials at dispatch. Constructing an ordinary
+        # actor for preparation must not fetch an unused provider key.
         self._base_url = base_url
         self._client = None
         self._client_api_key: Optional[str] = None

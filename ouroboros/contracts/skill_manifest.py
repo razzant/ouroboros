@@ -49,6 +49,9 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "notify_owner",
         "page_module",  # Trusted same-origin JavaScript in the owner's page.
         "context_snapshot",
+        "realtime_provider",
+        "live_conversation",
+        "call_peer",
     }
 )
 _EVENT_TOPIC_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")

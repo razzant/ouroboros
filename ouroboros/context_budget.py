@@ -99,7 +99,8 @@ def start_room_levels(role: str, *, focus_wake: bool = False, direct_chat: bool 
     return 2 if role == "integrator" and not direct_chat else 1
 
 
-def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) -> Tuple[Optional[int], int]:
+def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int, *,
+                        working_reserve_tokens: Optional[int] = None) -> Tuple[Optional[int], int]:
     """``(owner target, reply reserve)`` of a rendered mode.
 
     A target binds only the mode the owner selected: task-local Low and a mode the
@@ -108,7 +109,8 @@ def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) 
     the memory floor and the mode selection use the same R as the send.
     """
     target = {"low": OWNER_LOW_TARGET_TOKENS, "nano": OWNER_NANO_TARGET_TOKENS}.get(mode) if mode == owner_mode else None
-    return target, min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    reserve = min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    return target, max(reserve, working_reserve_tokens or 0)
 
 
 def _reply_floor(caller_max_tokens: int, nano: bool) -> Tuple[int, int]:

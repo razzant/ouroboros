@@ -155,6 +155,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         state["model_handoffs"] = list(raw.get("model_handoffs") or ())
         if _owner_actions({**row, "stop": view["stop"], "refusal": view["refusal"]})[1]:
             state["turn"].append({"kind": "action", "task_id": task_id, "code": view["reason"]["code"]})
+        if raw.get("execution_transport") is not None:  # a stopped call has ended; it never resumes
+            state.update(release="none", turn=[], resumable=False)
         return state
     wait = _owner_wait(row)
     if wait == "owner_wait":

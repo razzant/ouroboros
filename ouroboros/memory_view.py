@@ -38,6 +38,7 @@ import datetime
 import json
 import logging
 import pathlib
+import re
 from collections import Counter
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -926,6 +927,20 @@ def _row_pointer(item: Mapping[str, Any], what: str) -> str:
     return f"{item['head']} ({what}, {item['chars']} chars — read by address)"
 
 
+def _rows_line(room: Mapping[str, Any], items: List[Dict[str, Any]]) -> str:
+    first, last = min(items, key=lambda i: i['pos']), max(items, key=lambda i: i['pos'])
+    mine = sum(item['kind'] == 'ouroboros' for item in items)
+    return (f"{len(items)} earlier rows, oldest first, by address ({mine} my replies, "
+            f"{len(items) - mine} people's words), {_minute(first['ts'])} → {_minute(last['ts'])}; "
+            f"memory_read(room_id='{room['room_id']}', rows=true, from='{first['address']}', to='{last['address']}'). "
+            "Verbatim rows within this range remain below in place.")
+
+
+def _story_line(items: List[Dict[str, Any]]) -> str:
+    return (f"{len(items)} older pages, parts and accounts by address, {items[0]['period']} → {items[-1]['period']}; "
+            "memory_read(story=true, start=0) lists every id and its exact reader.")
+
+
 def _facts_line(room: Mapping[str, Any], items: List[Dict[str, Any]]) -> str:
     """The earliest task lines of this room as one address line with their period (F1)."""
     last = max(items, key=lambda item: item["last_pos"])
@@ -1038,10 +1053,17 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
         lines += ["", "### Old memory retold by a helper before the update (not lived; exact sources readable by id)"]
         lines += retold_lines(pointers, taken)
     shown = set(gone.get("F5", ()))
+    aggregate = [entry for entry in pages if entry['id'] in shown] if gone.get('F5a') else []
     # A selected form changes this entry alone, without regrouping unrelated entries or changing their headers.
     for entry in pages:
-        lines += (["", _page_pointer(entry)] if entry["id"] in shown else _page_lines(entry))
-        lines += _told_lines(entry["id"], told)
+        if aggregate and entry is aggregate[0]:
+            lines += ['', '### My older pages, parts and accounts, by address', _story_line(aggregate)]
+        if not aggregate or entry['id'] not in shown:
+            lines += (["", _page_pointer(entry)] if entry["id"] in shown else _page_lines(entry))
+        told_lines = _told_lines(entry["id"], told)
+        if aggregate and entry['id'] in shown and told_lines:
+            lines += [f"Account {entry['id']}; memory_read(node_id='{entry['id']}')"]
+        lines += told_lines
     lines += ["", _pages_line(snapshot.legacy_blocks)]
     if snapshot.legacy_blocks.get("accounts"):
         lines.append(accounts_line(snapshot.legacy_blocks))
@@ -1052,6 +1074,35 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
 def _note_lines(notes: List[Dict[str, Any]]) -> List[str]:
     """Authored source bytes and their stamp only; the start allowance never changes a note's rendering."""
     return [f"note {note['id']} by {note['role']} on {note['date']}\n{_indented(note['text'])}" for note in notes]
+
+
+def _note_pointer(note: Mapping[str, Any]) -> str:
+    """A source-derived label, never a summary or a function of the start allowance."""
+    sentence = re.split(r'(?<=[.!?。！？])\s+', ' '.join(note['text'].split()), maxsplit=1)[0]
+    label = sentence if len(sentence) <= 160 else sentence[:159].rstrip() + '…'
+    return (f"note {note['id']} by {note['role']} on {note['date']}: {label}; "
+            f"memory_read(node_id='{note['id']}')")
+
+
+def _notes_line(notes: List[Dict[str, Any]]) -> str:
+    dates = sorted(note['date'] for note in notes)
+    roles = ', '.join(sorted({note['role'] for note in notes}))
+    return (f"{len(notes)} notes not yet sealed, {dates[0]} → {dates[-1]}, by {roles}; "
+            f"ids: {', '.join(note['id'] for note in notes)} (memory_read(node_id=…))")
+
+
+def _room_note_lines(notes: List[Dict[str, Any]], gone: Mapping[str, Any]) -> List[str]:
+    addressed = set(gone.get('F8', ()))
+    aggregate = [note for note in notes if note['id'] in addressed] if gone.get('F8a') else []
+    lines = []
+    for note in notes:
+        if aggregate and note is aggregate[0]:
+            lines.append(_notes_line(aggregate))
+        if note['id'] not in addressed:
+            lines.extend(_note_lines([note]))
+        elif not aggregate:
+            lines.append(_note_pointer(note))
+    return lines
 
 
 _LATE_REVIEW_INTRO = ("Reviewer feedback that settled after its work ended, kept here by the host for this room "
@@ -1115,11 +1166,20 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
         lines += [f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] " + _indented(item["text"]).lstrip()
                   for item in room["origins"]]
     if room["notes"]:
-        lines += ["", "### My notes not yet sealed"] + _note_lines(room["notes"])
+        lines += ["", "### My notes not yet sealed"] + _room_note_lines(room["notes"], gone)
     if room["lane1"]:
         lines += ["", f"### Open conversation since {room['since']} (verbatim: people and my replies)"]
-        lines += [_row_pointer(item, "my reply") if item["address"] in mine else _row_pointer(item, "words")
-                  if item["address"] in people else item["line"] for item in room["lane1"]]
+        addressed = mine | people
+        aggregate = [item for item in room['lane1'] if item['address'] in addressed
+                     and not item.get('immune')] if gone.get('F7a') else []
+        grouped = {item['address'] for item in aggregate}
+        for item in room['lane1']:
+            if aggregate and item is aggregate[0]:
+                lines.append(_rows_line(room, aggregate))
+            if item['address'] not in grouped:
+                lines.append(item['line'] if item.get('immune') else _row_pointer(item, 'my reply')
+                             if item['address'] in mine else _row_pointer(item, 'words')
+                             if item['address'] in people else item['line'])
     if room["lane2"]:
         early = [item for item in room["lane2"] if item["first"] in facts]
         lines += ["", "### Task facts of this conversation (host; one line per task; a row:… address reads with "

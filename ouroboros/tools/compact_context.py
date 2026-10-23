@@ -155,7 +155,7 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "call inspect again with that offset). Select complete unit IDs to keep and write a local working_note; "
                  "a restore_unit_refs entry is {checkpoint_ref: restore_checkpoint, unit_id, raw_sha256}. Earlier notes "
                  "stay where they are unless selected for replacement; select several to merge their account and sources. "
-                 "view_address selects listed memory forms from this snapshot. Core, governing words, the assignment "
+                 "view_address selects listed memory forms from this snapshot; a note's restore_view_address restores it whole. Core, governing words, the assignment "
                  "and newer owner/tool messages stay whole."),
     }
     start = max(0, int(offset or 0))
@@ -291,7 +291,7 @@ def get_tools() -> List[ToolEntry]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact memory form addresses from inspect. Apply at the next tool boundary from the same snapshot, retaining earlier choices and new arrivals. May accompany a working_note fold. Core and governing words cannot be selected. The receipt prices prefix re-reading and measures the complete result."},
+                        "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact memory form addresses from inspect; a note's restore_view_address restores it whole. Apply at the next tool boundary from the same snapshot, retaining earlier choices and new arrivals. May accompany a working_note fold. Core and governing words cannot be selected. The receipt prices prefix re-reading and measures the complete result."},
                         "inspect": {"type": "boolean", "description": "Return and pin the last observed view revision: an inventory by kind and size, one page of complete unit IDs, the restore checkpoint and current schema names, without changing context."},
                         "offset": {"type": "integer", "minimum": 0, "description": "With inspect: zero-based position of the first unit of the page; the reply names next_offset while units remain."},
                         "expected_view_revision": {"type": "string", "description": "Optional view_revision from inspect, checked exactly. Omitted binds the actual model-send view that produced this call; inspect is not required to replace all completed units."},

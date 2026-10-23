@@ -609,7 +609,7 @@ def _rebind_context_fit_plan(
         estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
         view_kind=plan.view_kind,
     )
-    from ouroboros.context_window import resolve_window
+    from ouroboros.context_window import estimator_ratio, resolve_window, route_window_kwargs
     output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
     scope = route.get("window_observation_fp", evidence.route_fp)
     bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
@@ -633,10 +633,11 @@ def _rebind_context_fit_plan(
             "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or ""),
         } if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
+        **route_window_kwargs(evidence),
         window_record=window, window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),
     ).reproject_for_route(  # the shown view kept while it fits this route's window, else narrowed
-        window_tokens=window_tokens, known_window=known_window, ratio=ratio, output_reserve=output_reserve,
-        tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)
+        window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio),
+        output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)
     mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
     shown = messages[0] if messages else None
@@ -868,7 +869,7 @@ def _measure_main_context_view(plan, messages, schemas, mode, effort, round_id, 
 
 
 @contextlib.contextmanager
-def _presend_context_fit(ctx: _RoundModelCallContext):
+def _presend_context_fit(ctx: _RoundModelCallContext | None = None):
     """Use the final physical candidate for the existing strict-shrink recovery, without a paid send."""
     from ouroboros.llm_attempt import main_context_fit_refusal
 
@@ -882,7 +883,7 @@ def _presend_context_fit(ctx: _RoundModelCallContext):
     try:
         yield admit
     except PhysicalAttemptPreconditionFailed:
-        if refused is None:
+        if refused is None or ctx is None:
             raise  # a failed strict-shrink or custody check is not a size prediction
         ctx.accumulated_usage.update({
             REFUSED_CANDIDATE_KEY: refused, "_last_llm_error_kind": "context_overflow", "reason_code": "context_overflow",

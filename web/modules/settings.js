@@ -278,6 +278,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
     const items = Array.isArray(sections) ? sections : [];
     if (!items.length) {
         host.innerHTML = '<div class="muted">No extension settings registered.</div>';
+        globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'));
         return;
     }
     const hydrated = new Map();
@@ -377,6 +378,9 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                 if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
                 const outcome = extensionActionStatus(data);
                 setInlineStatus(status, outcome.text, outcome.tone);
+                if (data.ok !== false) window.dispatchEvent(new CustomEvent('ouro:settings-updated', {
+                    detail: { reason: 'extension settings saved', source: 'settings', skill, route },
+                }));
             } catch (err) {
                 setInlineStatus(status, err.message || String(err), 'danger');
             } finally {
@@ -388,6 +392,9 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
             }
         });
     });
+    // Already-granted page modules may enhance their own declared forms. The
+    // schema, hydration, write route and Save outcome remain host-owned.
+    globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'));
 }
 
 function collectSecretValue(id, body) {

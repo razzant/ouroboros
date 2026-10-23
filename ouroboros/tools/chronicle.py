@@ -865,15 +865,24 @@ def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> st
                    lambda n: f"memory_read(room_id='*', start={n})")
 
 
+def _read_story(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
+    from ouroboros import memory_view as mv
+
+    story, _status, _refusals = mv._capture_story(store, root, mv._labeler(root))
+    entries = [entry for entry in story if entry.get('kind') != 'legacy' and not entry.get('told_by')]
+    return _window(f"My story: {len(entries)} pages, parts and accounts", '\n'.join(map(mv._page_pointer, entries)),
+                   start, limit, lambda n: f'memory_read(story=true, start={n})')
+
+
 @completed_local_read
 def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: int = 0, rows: bool = False,
                  task_id: str = "", period: Any = None, source_ref: Any = None, start: int = 0, revision: str = "",
-                 **bounds: Any) -> str:
+                 story: bool = False, **bounds: Any) -> str:
     unknown = sorted(set(bounds) - {"from", "to"})
     if unknown:
         return _arg_error(ctx, f"unknown argument(s): {', '.join(unknown)}")
-    if sum(bool(mode) for mode in (node_id, source_ref, rows)) > 1:
-        return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, or a room's records")
+    if sum(bool(mode) for mode in (node_id, source_ref, rows, story)) > 1 or story and room_id is not None:
+        return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, or a room's records")
     if revision and not node_id:
         return _arg_error(ctx, "revision reads one record (node_id) as of that revision")
     if type(after_seq) is not int or after_seq < 0 or type(start) is not int or start < 0:
@@ -882,7 +891,9 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     try:
         root = _root(ctx)
         store = _activated(root)
-        if str(room_id) == "*":
+        if story:
+            text = _read_story(root, store, start, limit)
+        elif str(room_id) == "*":
             text = _read_rooms(root, store, start, limit)
         elif str(room_id) == "candidates":
             candidates = store.pending_candidates()
@@ -1044,6 +1055,7 @@ def chronicle_tools() -> List[ToolEntry]:
         "reason": {"type": "string", "description": "decision or selection: why."},
     }
     read = {
+        "story": {"type": "boolean", "description": "true: list every current page, part and selected account with its id and reader; continue with start."},
         "node_id": {"type": "string", "description": "One record: as it acts now, its host stamp, coverage, original text, corrections and decisions."},
         "room_id": {**room, "description": room["description"] + " '*' lists every live room as one directory line (label, period, counts, reader); 'candidates' lists the helper drafts awaiting my decision."},
         "after_seq": {"type": "integer", "minimum": 0, "description": "Room records and active marks after this sequence (the previous page's next_after_seq)."},

@@ -225,6 +225,7 @@ class ChatOutbound(ChatReferenceFields):
     cancelable: NotRequired[bool]
     _is_direct_chat: NotRequired[bool]  # lane fact stamped on a direct turn's own frames
     narration: NotRequired[bool]  # progress VOICE: the model's own round narration (true) vs a host note (false); absent = legacy
+    spoken: NotRequired[Dict[str, Any]]  # call_id, item_id, played_ms, status: played/generated/interrupted
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
     # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since
@@ -1434,6 +1435,7 @@ from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
 from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState  # noqa: E402,F401
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
+    "conversation_finished",
     "chat",
     "command",
     "panic_accepted",  # immediate acceptance only, not proof of process exit

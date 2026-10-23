@@ -354,6 +354,10 @@ def process_extension_reconcile_requests(
                 repo_path=repo_path,
                 retry_load_error=True,
             )
+            if state.get("reason") == "live_call_active":
+                processed.append({"skill": skill, "action": state["action"],
+                                  "reason": state["reason"], "marker_removed": False})
+                continue
             companion_state = ensure_companions_running(
                 skill,
                 pathlib.Path(drive_root),

@@ -1797,6 +1797,36 @@ stop it. With no engine chosen it uses one on this device. The row menu's Read a
 voice… lists Automatic (a voice on this device) and every voice, "On
 this device" only when the browser marks it local, otherwise "Online voice".
 
+Live Conversation keeps the glass wave, phone controls and collapsed transcript.
+Talk occupies empty Send only when Calls (beta) is enabled and the server confirms
+the selected engine is loaded and its credential grants are current. Text or a
+file restores equal-width Send; empty Enter never calls. The dictation mic hides
+during the call and returns with the draft intact. The glass keeps the composer's
+fixed corner as it becomes a card; End remains visible in phone and keyboard
+views. A model without vision hides Show and says, “This voice engine does not
+accept images.” A hidden room's mark names the room and reopens it.
+
+Calls (beta) settings default to Gemini, with calls off independently of keys.
+Engine, model and voice choices come from loaded catalogs; an unavailable choice
+is named, never replaced silently. Pause, interruptions, thinking and search
+appear only where the selected model honours them, otherwise its catalog note
+explains why. Instructions apply to the next call. The selected catalog names
+where audio goes and its memory window per session, including the source and
+whether it has been measured. Microphone, speaker, camera and echo/noise/gain
+choices stay on this client and reach an active call immediately. Local device
+tests release capture on leaving Settings and never take it from a live call.
+
+Calls retain microphone, playback and socket when the room or document is hidden,
+where the platform allows; dictation still stops on hide. End, Stop, Panic,
+pagehide, device loss, unload and a successful Calls-off read end them. Failed
+configuration reads keep the last good value; mount, focus, visible return and
+successful Settings saves refresh it. There is no call time cap or separate
+per-call reserve; the ordinary shared spending limit applies. The feature's
+instructions keep the ordinary identity, memory and tools. It greets once per
+call, never on reconnect. `set_call_languages` records recognition languages for
+the owner or Presence binding and applies them at the next quiet renewal;
+`end_call` is silent and ends only after the goodbye has played.
+
 ### Conversation activity block
 
 A task's activity block is in the transcript exactly when the record already

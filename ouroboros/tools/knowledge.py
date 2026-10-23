@@ -229,10 +229,13 @@ def _knowledge_write(
 
 
 @completed_local_read
-def _knowledge_list(ctx: ToolContext, scope: str = "", view: str = "active") -> str:
+def _knowledge_list(ctx: ToolContext, scope: str = "", view: str = "active",
+                    topics: List[str] | None = None) -> str:
     try:
         address = _address(ctx, "topic", scope)
-        return knowledge_store.knowledge_index_view(address, view)
+        if topics is not None and (not isinstance(topics, list) or any(not isinstance(t, str) for t in topics)):
+            raise ValueError("topics must be an array of topic paths or directory prefixes ending in /")
+        return knowledge_store.knowledge_index_view(address, view, topics=tuple(topics or ()))
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}"))
@@ -255,7 +258,7 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_read),
         ToolEntry("knowledge_write", {
             "name": "knowledge_write",
-            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. An active note's summary stays resident in the index; body text never replaces it. Archive hides default navigation rows while direct reads and explicit Presence topics remain available. Restore removes archive metadata, even malformed values in readable YAML, from CURRENT text including subsequent edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
+            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. Each active summary stays resident in the index's whole view; body text never replaces it. Under physical window pressure, the outline names every active topic and keeps type person summaries; others remain readable with knowledge_list. Archive hides default navigation rows; direct reads and explicit Presence topics stay available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, including later edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. Required except for a summary-only edit; omit for archive/restore. No summary is generated from the body."},
@@ -268,8 +271,9 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_write),
         ToolEntry("knowledge_list", {
             "name": "knowledge_list",
-            "description": "List current knowledge with authored summaries and source links. Default active view includes the archive count and address; archived/all reveal archived notes with archive time and reason. Legacy index prose can still mention archived notes until an authored global overview retires it.",
+            "description": "List current knowledge with authored summaries and source links. Optional topics select exact topics or directory prefixes ending in /. Default active view includes the archive count and address; archived/all reveal archived notes with archive time and reason. Legacy index prose can still mention archived notes until an authored global overview retires it.",
             "parameters": {"type": "object", "properties": {"scope": scope,
+                "topics": {"type": "array", "items": {"type": "string"}, "description": "Optional exact topic paths or directory prefixes ending in /; omitted lists the whole shelf."},
                 "view": {"type": "string", "enum": ["active", "archived", "all"], "description": "active (default), archived only, or complete inventory."}}, "required": []},
         }, _knowledge_list),
     ] + chronicle_tools()

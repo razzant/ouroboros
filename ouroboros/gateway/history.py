@@ -113,7 +113,7 @@ _PROGRESS_META_FIELDS = (
     "initiator",  # the turn's origin label (a consciousness wake-up)
     # The frame's voice: a replayed host note must stay a host note, or a reload
     # would hand the card title back to the very line live rendering refused it.
-    "narration",
+    "narration", "spoken",
     "card_row", "card_row_id", "card_row_revision",
     "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
 )
@@ -785,6 +785,8 @@ def _collect_chat_rows(
                 continue
             direction = str(entry.get("direction", "")).lower()
             role = {"in": "user", "out": "assistant", "system": "system"}.get(direction)
+            if entry.get("role") == "system":
+                role = "system"
             if role is None:
                 continue
             rec = {
@@ -792,7 +794,7 @@ def _collect_chat_rows(
                 "role": role,
                 "ts": str(entry.get("ts", "")),
                 "is_progress": False,
-                "system_type": str(entry.get("type", "")),
+                "system_type": str(entry.get("system_type") or entry.get("type", "")),
                 "markdown": str(entry.get("format", "")).lower() == "markdown",
                 "source": str(entry.get("source", "")),
                 "sender_label": str(entry.get("sender_label", "")),

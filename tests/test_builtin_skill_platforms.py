@@ -38,7 +38,8 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 SEEDS = REPO / "skills"
 UNIX = "unix_computer_use"
 WINDOWS = "windows_computer_use"
-EVERYWHERE = ["ui_design", "design_demo", "templates", "device_voice"]  # on by default on every host
+EVERYWHERE = ["ui_design", "design_demo", "templates", "device_voice",  # on by default on every host
+              "live_conversation", "gemini_live", "grok_realtime", "openai_realtime"]  # inert until Calls (beta)
 UNIX_043 = "1e237c1bc89f0600a7362f69eddafdff4ddd1f2d"  # official history: os any, permissions with net
 log = logging.getLogger(__name__)
 

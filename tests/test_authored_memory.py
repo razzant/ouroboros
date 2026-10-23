@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import knowledge as store
+from ouroboros.context_fit import PATTERN_REGISTER_POINTER
 from ouroboros.task_results import load_task_result
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_consolidator_context_fit import fit  # noqa: F401 — offline Light route/window facts
@@ -631,9 +632,10 @@ def test_every_role_and_mode_keeps_its_register_and_carries_history_as_dated_poi
         # No automatic historical prose anywhere: not the old lesson, not the old report body.
         assert "OLD AUTOMATIC LESSON BODY" not in text and "OLD DEEP REVIEW BODY" not in text, where
         if integrating:
-            # The full current register, in every mode, exactly where it already lived.
-            assert all(f"| class-{n:02d} |" in text for n in range(REGISTER_ROWS)), where
-            assert "LAST REGISTER LINE" in text, where
+            # The full current register in Max and Low, exactly where it already lived; Nano carries its
+            # reader line there instead (owner, 2026-10-20: the register out of Nano, a link kept).
+            shown = [f"| class-{n:02d} |" in text for n in range(REGISTER_ROWS)] + ["LAST REGISTER LINE" in text]
+            assert (not any(shown) and text.count(PATTERN_REGISTER_POINTER) == 1) if mode == "nano" else all(shown), where
             assert "Historical automatic reflections: 1 row(s)" in text and "dated 2026-09-01T10:00:00" in text, where
             assert "read_file(root='runtime_data', path='logs/task_reflections.jsonl')" in text, where
             assert "subject to this task's tool/resource restrictions and Presence grants" in text, where
@@ -754,14 +756,18 @@ def test_context_readers_open_canonical_history_in_every_mode_and_focus(tmp_path
     rels = ("memory/deep_review.md", "logs/task_reflections.jsonl")
     expected = [f"read_file(root='runtime_data', path={str((env.drive_root / rel).resolve())!r})"
                 if forked else f"read_file(root='runtime_data', path={rel!r})" for rel in rels]
-    for text in texts.values():
+    for context_mode, text in texts.items():
         if focus.endswith("child"):
             assert not _readers(text) and "LAST REGISTER LINE" not in text
         else:
             assert _readers(text) == expected
             for reader, marker in zip(_readers(text), ("OLD DEEP REVIEW BODY", "OLD AUTOMATIC LESSON BODY")):
                 assert marker in _run(actor, reader)
-            assert "LATE CRITICISM" in text and "LAST REGISTER LINE" in text
+            # The register rides whole in Max and Low; Nano's reader line opens the same canonical note.
+            assert "LATE CRITICISM" in text and ("LAST REGISTER LINE" in text) == (context_mode != "nano")
+            if context_mode == "nano":
+                call = PATTERN_REGISTER_POINTER.split(": ", 1)[1].removesuffix(".")
+                assert PATTERN_REGISTER_POINTER in text and "LAST REGISTER LINE" in _run(actor, call)
     for rel in (*rels, "settings.json", "memory/knowledge_history.jsonl"):
         source = env.drive_root / rel
         if not source.exists():

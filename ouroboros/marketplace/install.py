@@ -858,8 +858,15 @@ def update_skill(
     if not slug:
         return InstallResult(False, sanitized_name, error="provenance is missing slug")
     from ouroboros.skill_install_record import read_install_record, settle_pending_update
+    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
 
-    if settle_pending_update(drive_root, sanitized_name, force=True).get("status") == "restore_failed":
+    with _lifecycle_lock_for(sanitized_name):
+        if refusal := realtime_load_refusal(sanitized_name):
+            return InstallResult(False, sanitized_name,
+                                 error="A live call is using this skill; retry after it ends.",
+                                 error_code=refusal, error_status=409)
+        settlement = settle_pending_update(drive_root, sanitized_name, force=True)
+    if settlement.get("status") == "restore_failed":
         return InstallResult(False, sanitized_name, error="The previous update could not be restored; its evidence was kept.",
                              error_code="restore_failed", error_status=409)
 
@@ -878,14 +885,16 @@ def update_skill(
     except ValueError as exc:
         return InstallResult(False, sanitized_name, error=str(exc), error_code="bad_check", error_status=400)
     # Preserve live extension state across unload/swap when possible.
-    was_live = False
-    try:
-        from ouroboros.extension_loader import is_extension_live, unload_extension
+    from ouroboros.extension_loader import is_extension_live, unload_extension
+
+    with _lifecycle_lock_for(sanitized_name):
+        if refusal := realtime_load_refusal(sanitized_name):
+            return InstallResult(False, sanitized_name,
+                                 error="A live call is using this skill; retry after it ends.",
+                                 error_code=refusal, error_status=409)
         was_live = bool(is_extension_live(sanitized_name, drive_root))
-        _progress("Unloading existing extension…")
         unload_extension(sanitized_name)
-    except Exception:  # pragma: no cover — defensive
-        log.debug("pre-update unload failed for %s", sanitized_name, exc_info=True)
+    _progress("Unloaded existing extension")
     result = install_skill(
         drive_root,
         repo_dir,

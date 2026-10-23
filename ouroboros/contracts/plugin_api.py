@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, TypedDict, runtime_checkable
 
+from ouroboros.contracts.live_conversation import CallTool, LiveConfig, SessionFactory
+from ouroboros.contracts.realtime import ProviderCatalog, RealtimeRoute
 from ouroboros.contracts.skill_manifest import VALID_SKILL_PERMISSIONS
 from ouroboros.skill_token import SkillToken
 
@@ -27,7 +29,7 @@ from ouroboros.skill_token import SkillToken
 # refused a NEW PASS at issuance (``extension_new_pass_admission_error``).
 # 2.0 absorbs 1.4's presence capability (reviewed transport skills may submit
 # authenticated non-owner presence events through the Host Service ceiling).
-PLUGIN_API_VERSION = "2.0"
+PLUGIN_API_VERSION = "2.1"  # additive: in-process realtime voice providers and the live conversation feature
 # The generation an extension WITHOUT the manifest field binds against —
 # "absent ≡ 1.3 by construction" (owner-ratified §6.1-Δ; deliberately NOT 1.4).
 LEGACY_PLUGIN_API_GENERATION = "1.3"
@@ -55,8 +57,8 @@ class ExecutionMode(enum.Enum):
 
     ``OUT_OF_PROCESS`` is the short-lived, per-call child used for isolated-dep /
     native-marker extensions (``OUROBOROS_EXTENSION_PROCESS_CHILD == "1"``). Such a
-    child cannot host a persistent in-process subscription or asyncio task, so two
-    capabilities are unavailable there; a manifest-declared ``companion_process``
+    child cannot host a persistent in-process subscription, asyncio task or
+    realtime provider. A manifest-declared ``companion_process``
     (host-spawned and supervised) is the supported alternative for long-running
     work and host-event subscription.
     """
@@ -73,7 +75,7 @@ class ExecutionMode(enum.Enum):
 MATRIX_CAPABILITIES: frozenset[str] = frozenset({
     "register_tool", "register_route", "register_ws_handler", "register_ui_tab",
     "register_settings_section", "send_ws_message", "register_companion_process",
-    "register_supervised_task", "subscribe_event", "on_unload",
+    "register_supervised_task", "subscribe_event", "on_unload", "register_realtime_provider", "register_live_conversation",
 })
 
 # Runtime-access/introspection methods always available in every execution mode
@@ -84,12 +86,13 @@ ALWAYS_AVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
 })
 
 # Capabilities a short-lived OUT_OF_PROCESS child cannot use directly: a persistent
-# host-event subscription and an in-process supervised asyncio task have no meaning
-# in a per-call child. Long-running work, host events, and supervised loops belong
-# in a manifest-declared companion_process.
+# host-event subscription, in-process supervised task and realtime provider have
+# no lifetime in a per-call child. Long-running general work and host events can
+# use a companion_process; realtime providers and the live conversation feature are in-process only.
 OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "subscribe_event",
     "register_supervised_task",
+    "register_realtime_provider", "register_live_conversation",
 })
 
 
@@ -198,6 +201,7 @@ def plugin_api_surface_fingerprint() -> str:
 # change without a version bump) refuses negotiation until the version is
 # bumped and the new fingerprint recorded here.
 PLUGIN_API_SURFACE_FINGERPRINTS: Dict[str, str] = {
+    "2.1": "648ecc02839e2ef5fc7bb18bb14f66acf6836f0ce041da9c6b19d3d2e143f336",
     "2.0": "03fabdf4334e6b2bde217b4cb83a80faaebc773ddce870546dd2108b75de17ca",
 }
 
@@ -330,6 +334,39 @@ class PluginAPI(Protocol):
     """Runtime-checkable ABI exposed to each extension's ``register(api)``."""
 
     # registration
+
+    def register_realtime_provider(
+        self,
+        name: str,
+        *,
+        route: RealtimeRoute,
+        session: SessionFactory,
+        catalog: ProviderCatalog,
+    ) -> None:
+        """Register an in-process realtime voice provider as ``<skill>:<name>``.
+
+        Requires ``realtime_provider``. ``session(selected, options, *, observe)``
+        returns a duplex LiveSession (contracts/live_conversation.py) over the
+        host-selected input; it speaks the provider's wire and reports each
+        response's usage in host axes (``USAGE_AXES``). ``route`` declares the
+        accounting provider, endpoint and model prefix; ``catalog`` the models,
+        voices, honoured call settings, credential setting names and each model's
+        route facts. Selection, fitting, tools, history, spending and Stop remain
+        host-owned.
+        """
+        ...
+
+    def register_live_conversation(self, name: str, handler: Callable[..., Awaitable[Any]],
+                                   *, configure: Callable[[], LiveConfig],
+                                   call_tools: Sequence[CallTool] = ()) -> None:
+        """Register the Live Conversation feature. Requires live_conversation, in-process.
+
+        ``configure()`` returns the owner's LiveConfig for the next call;
+        ``handler(host)`` runs an admitted call over its LiveHost port.
+        ``call_tools`` exist only inside this feature's calls. No serializable
+        request grants the port.
+        """
+        ...
 
     def register_tool(
         self,

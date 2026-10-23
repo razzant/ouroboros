@@ -19,6 +19,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 # (path, qualified function, shape): (number of sites, reason)
 EXCEPTIONS = {
+    ("ouroboros/live_conversation.py", "ConversationHost.caption.write", "envelope"): (1, "Projects the durable owner/model/participant caption row with its recorded role and system_type; test_live_host_captions pins both spoken voices."),
+    ("supervisor/message_ingress.py", "handle_web_message", "envelope"): (1, "Echoes the accepted canonical row: owner words remain user, host call openings retain system/call_open; test_call_open_ingress pins both paths."),
     ("ouroboros/upgrade_notices.py", "startup_upgrade_notices", "call"): (1, "Host notice uses literal system role and a type from its finite owed-notice tuples; test_reviewer_delivery_defaults and test_legacy_memory_notice pin all three emitted types."),
     ("supervisor/message_bus.py", "_send_markdown", "call"): (1, "Forwards the caller's role/type to the bridge."),
     ("supervisor/message_bus.py", "send_with_budget", "call"): (1, "Forwards caller authorship, not a producer of new text."),

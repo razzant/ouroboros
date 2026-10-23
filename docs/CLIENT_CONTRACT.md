@@ -242,6 +242,8 @@ answer through §7.
 - **Core to client, stored as history rows:** `chat` (a message or a progress line), `photo`, `video`, `document`, `links`, `quiz` and `card` (a living card, §5 "Living cards").
 - **Core to client, signals only:**
   - `panic_accepted` confirms the emergency latch, not process exit (§15).
+  - `conversation_finished` says the room's live call ended; it carries the chat, call and task ids
+    and the reason (§5, the call socket).
   - `quiz_state` updates a question card; history shows the merged state.
   - `card_state` says a shown living card changed: read it again (§5 "Living cards").
   - `log` carries one runtime event row in `data` (`data.type` names the event) for live activity displays; the task's durable facts come from §6.
@@ -261,7 +263,7 @@ Send `{"type": "chat", "content": "...", "client_message_id": "<unique id>", "ch
 - **Attachments.** Upload each file with `POST /api/chat/upload` (multipart field `file`), then list it in `attachments` as `{filename: <stored id from the upload>, display_name, mime}`; the core measures size and checksum itself.
 - **Replies.** `reply_to: "<row_address>"` (a work card: `task:<task_id>` of its current episode) names the row meant; the core stores its resolved reference on the owner row as a fact for Ouroboros, routing nothing.
 - **What "sent" means.** A socket send only means the socket took the frame; the message is accepted when the core echoes it as a `chat` frame from `role: "user"` with your `client_message_id` and `ingress_accepted: true`. `ingress_pending` and `ingress_dispatched` say what this core process knows of it and are lost on a restart.
-- **Retrying.** The same `client_message_id` with the same words and attachments joins the already accepted message; with different content it is refused.
+- **Retrying.** The same `client_message_id` with the same words, attachments, Reply and execution transport joins the already accepted message; changing these fields is refused.
 - **What is lost.** A frame sent while the socket is down is lost unless your client keeps it: the core keeps no client outbox.
 - **Commands.** Slash commands go as `{"type": "command", "cmd": "/restart"}` and so on, or through `POST /api/command` (§15).
 
@@ -270,6 +272,56 @@ Send `{"type": "chat", "content": "...", "client_message_id": "<unique id>", "ch
 **Origin correlation.** Optional `origin_message_ref` (`{chat_id, client_message_id, ts, text_sha256}`) names the accepted owner row; its hash checks that row's text, not reply text. Match its thread and owner-message id, then track `task_id`; an absent reference establishes no causation.
 
 **Thread filtering.** The socket broadcasts several destinations: apply the merge rules below only to stored-row deliveries of the history view being read, never comparing every frame with Main history, inferring Main from a missing `chat_id` or taking transient notices for missing stored rows.
+
+### Live Conversation
+
+`POST /api/call/open` accepts `CallOpenRequest`:
+`{chat_id, client_message_id, feature?}`. The feature key names a loaded
+`register_live_conversation` registration; its explicit configuration selects
+the provider, native model, voice, duration and per-connection exposure reserve.
+The beta is off by default. Credentials alone never enable it. Admission uses
+the ordinary owner ingress and current common context. Repeating the same
+message ID rejoins its existing call; a different message ID in an active room
+is refused.
+`CallOpenResponse` returns `{call_id, ws_path, vision, joined?}`.
+Failure returns `{ok:false, code, error}` with its HTTP status.
+
+The separate `/ws/call/{call_id}` socket carries bounded JSON controls and
+binary PCM16 media. `GET /api/contract` publishes its header, payload limits
+and control-schema names as `call_socket` (`gateway/call_contracts.py`);
+`call_protocol.py` owns the codec. A peer first sends
+`{type:"hello", protocol:1, role:"owner", mic, speaker, rate, video?}`.
+Directions may narrow its admitted rights. `mute`, `played`, `context`,
+`participant` and `bye` are controls, never tool or owner-control authority.
+Playback acknowledgements name the item and actual played milliseconds.
+The server sends `state`, `activity`, `turn`, `caption` and `flush`.
+`caption.replace:true` replaces cumulative/revised text instead of appending it;
+`flush.epoch` invalidates older playback. A closed state carries its reason,
+detail and optional next action. The ordinary chat socket also publishes
+`conversation_finished` with `chat_id`, `call_id`, `task_id` and `reason`.
+
+The host executes native model tool calls through ordinary policy, checkpoints
+and effect custody; final captions enter canonical history with provenance and
+playback status (`spoken: {call_id, item_id, played_ms, status}`, with
+`status: played|generated|interrupted` retained on replay).
+New typed owner messages reach the same actor. Ordinary Stop,
+End, device loss or owner disable end the call. Automatic skill replacement
+waits while a call is live; unload cancels without joining teardown. Interrupted generated speech is not labelled heard.
+Each renewed connection requires current ordinary context fit and an ordinary
+attempt reservation. Unknown modality cost retains exposure. Connection loss
+does not authorize an automatic paid retry.
+
+Companions retain `POST /call/open` and `/call/{call_id}/peer` on the Host Service.
+`X-Skill-Token` and `call_peer` grant bind the reviewed payload and media directions.
+Opening a Presence call also needs its enabled binding, source event, ceiling
+and `presence` grant. Its existing meeting protocol remains available; external
+participants' audio/context stay attributed observations, never owner messages.
+
+The feature page owns Talk in an empty Send slot, same-width Send for text/files,
+the existing call capsule and collapsed transcript. Empty Enter does not call.
+Dictation hides during a call and returns without losing the draft. Browser
+capture uses shared audio/visual leases and releases them on End, Panic,
+hidden room or contribution disposal.
 
 ### History rows
 
@@ -507,7 +559,7 @@ Files produced by tasks are covered in §6.
 - **Grant keys or permissions:** `POST /api/skills/{skill}/grants` (`SkillGrantRequest`). Only current manifest requests can be granted; a repeat merges. Optional `enable_after_grant: true` carries an explicit Enable through the same job, even after a pending response. Omission grants only, preserving an existing install-time turn-on request. Terminal `setup_error` means grants succeeded but setup did not; `enabled` reports explicit Enable's result.
 - **Review:** `POST /api/skills/{skill}/review` answers 200 with the review's outcome (`SkillReviewResponse`). A review already running for the same revision answers `status: "pending"` with its `job_id`. `GET /api/skills/{skill}/review-history/{job_id}` renders a finished review.
 - **Attest a review:** `POST /api/owner/skills/{skill}/attest-review` records the owner's verdict: 200 with `ok: true` (possibly pending above), otherwise 409.
-- **Delete:** `POST /api/skills/{skill}/delete` removes an external or self-authored skill and its state; a repeat answers 404.
+- **Delete:** `POST /api/skills/{skill}/delete` unloads an external or self-authored skill and removes its payload and state; a repeat answers 404. `deleted_state` confirms state removal.
 - **Places:** `GET /api/places` returns records and connector declarations; `POST /api/places` (`PlaceConnectRequest`) connects one. `POST /api/places/{place_id}` (`PlaceUpdateRequest`) atomically edits owner choices; `expected_revision` detects concurrent edits. `DELETE /api/places/{place_id}` disconnects it, keeping room history. Records and connector ingress: CREATING_SKILLS, “Places and focus transport ingress”.
 - **Publication check:** `POST /api/skills/{skill}/publish-preflight` is read-only; every status answers the same shape, and `state: "hard_block"` is a refusal. An optional body `{destination: {source_id, mode}}` (`SkillPublishPreflightRequest`; mode `origin`, `entry` or `new_entry`) picks where it would go; the answer's `repository` is that destination (default: where the skill came from, else the hub). Missing publication prerequisites may answer `409` before the skill is looked up; read `reason_code`, not an assumed `404` for an unknown name.
 - **Reconcile:** `POST /api/skills/{skill}/reconcile` brings one extension's live state in line with its saved state.

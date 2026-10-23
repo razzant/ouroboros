@@ -103,6 +103,9 @@ SUBROOT_ALIASES = {
     "__extension_imports/*/skill": "state/skills/*/__extension_imports/*/skill",
     "__extension_imports/*/skill/*": "state/skills/*/__extension_imports/*/skill/*",
     ".extension-*.lock": "state/skills/*/.extension-*.lock",
+    # The import lock is beside skill_state_dir, so deleting that skill's state
+    # cannot make a concurrent acquirer lock another inode.
+    ".*-extension-imports.lock": "state/skills/.*-extension-imports.lock",
 }
 
 # The same human promise for a parameter whose NAME is the audited root, read
@@ -833,6 +836,13 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # the switch helper (body adoption row).
 # 409 -> 414: the place seam (one path the inherited pin missed) plus focus, the gate directory and its
 # author-census member family, documented in section 2.
+# 414 -> 417 (live calls):
+# Live calls retain conversation-wire.jsonl and the sibling extension-imports lock.
+# The unused realtime-wire and realtime-prepared probe writers are retired by the host lane.
+# The host's exact-route tariff cache adds state/pricing/litellm.json.
+# PERSISTENCE names its overwrite lifetime; reconcile markers already exist on base.
+
+
 # 414 -> 415: ``state/sent_history_changes.json``, the running code's record of sent-history changes
 # (``ouroboros/transcript_prefix.py``, its own section-2 row).
 # The skill-review fold (tool-reuse-20261020) removed the root-task projection (+ its gaps file), the
@@ -850,7 +860,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # and a candidate run's named-evidence ``.../delegated_runs/*/evidence/summary.json`` reread.
 # 416 -> 417 (this branch): retained bootstrap identity ``state/delegate_bootstrap/*.json`` and per-target
 # payload mutation locks ``state/delegate_payload_mutations/*.lock``; the retired global claim spelling is gone.
-EXPECTED_SCAN_PATHS = 417
+# 417 -> 420: merge live wire evidence, the extension import lock and live tariff cache.
+EXPECTED_SCAN_PATHS = 420
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1360,3 +1371,11 @@ def test_dynamic_source_handle_arguments_do_not_certify_named_rows(tmp_path):
         encoding="utf-8",
     )
     assert scan_data_paths(tmp_path) == frozenset()
+
+
+def test_live_call_evidence_replaces_unused_probe_artifacts():
+    paths = scan_data_paths()
+    assert "state/skills/.*-extension-imports.lock" in paths
+    assert ".*-extension-imports.lock" not in paths
+    assert "task_results/artifacts/*/conversation-wire.jsonl" in paths
+    assert not any("/realtime-wire.jsonl" in path or "/realtime-prepared-" in path for path in paths)

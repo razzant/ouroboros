@@ -8,6 +8,20 @@ export async function apiFetch(url, init = {}) {
     return fetch(url, init);
 }
 
+/** Owner admission uses the ordinary authenticated gateway and canonical ingress. */
+export function openLiveConversation(payload) {
+    return fetchJson('/api/call/open', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+        { rejectOkFalse: true });
+}
+
+export function liveConversationSocket(path) {
+    if (!/^\/ws\/call\/[a-f0-9]+$/.test(path)) throw new Error('Invalid call address');
+    const url = new URL(path, window.location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new WebSocket(url.href);
+}
+
 /**
  * The core's own same-origin sign-in, returning to this page. Only its network
  * gate answers 401 on the readiness and state reads that send a page here: a

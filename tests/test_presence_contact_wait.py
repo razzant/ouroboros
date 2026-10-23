@@ -24,8 +24,9 @@ from ouroboros.owner_quiz import quiz_states
 from ouroboros.presence_runner import PresenceTurnError, presence_event_identity, presence_turn_task_id, run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_presence_continuation_bootstrap import finish, install_bootstrap_harness, tool_call, wait_for
-from tests.test_presence_owner_contact import _answer, _ask, _run, contact_runtime, focus  # noqa: F401
+from tests.test_presence_owner_contact import _answer, _ask, _run, contact_runtime as _contact_runtime, focus  # noqa: F401
 
+contact_runtime = _contact_runtime
 pytestmark = pytest.mark.serial
 
 
