@@ -1409,7 +1409,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     left: var(--page-header-padding-x);
     right: auto;
     max-width: min(560px, calc(100% - 2 * var(--page-header-padding-x)));
-    z-index: var(--z-page-header);
+    /* Keep this later sibling below the header's menus and Shade. */
+    z-index: calc(var(--z-page-header) - 1);
     padding: 2px 0 var(--space-2);
     pointer-events: none;
 }

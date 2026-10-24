@@ -106,6 +106,76 @@ def test_main_coverage_status_remains_readable_away_from_history_control(direct_
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_more_menu_stays_above_history_failure(direct_server_with_data, browser_engine, theme, tmp_path):
+    """The real history-error chip must neither cover nor intercept More's controls."""
+    import io
+    from PIL import Image, ImageChops
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+            page.route('**/api/chat/history*', lambda route: route.fulfill(
+                status=503, json={'error': 'Synthetic history read failure'}))
+            _open(page, direct_server_with_data['url'])
+            note = page.locator('#page-chat .chat-page-note .chat-history-status')
+            note.wait_for(state='visible')
+            assert 'Some saved history could not be loaded' in note.inner_text()
+            more = page.locator('#page-chat .chat-header-more')
+            summary = more.locator(':scope > summary')
+            menu = more.locator('.chat-header-menu')
+            for width in (1280, 390):
+                page.set_viewport_size({'width': width, 'height': 850})
+                page.evaluate(_FRAMES)
+                summary.click()
+                menu.wait_for(state='visible')
+                page.evaluate(_FRAMES)
+                _screenshot(page, tmp_path, f'more-failure-{theme}-{width}-{browser_engine}')
+                if width == 390:
+                    a, b = note.bounding_box(), menu.bounding_box()
+                    assert min(a['x'] + a['width'], b['x'] + b['width']) > max(a['x'], b['x'])
+                    assert min(a['y'] + a['height'], b['y'] + b['height']) > max(a['y'], b['y'])
+                # Inspect every actual control, including the budget row moved into More on phones.
+                for control in menu.locator('button, summary, input').all():
+                    if control.is_visible():
+                        assert control.evaluate('''el => {
+                            const r = el.getBoundingClientRect();
+                            return [0.2, 0.5, 0.8].every(y => {
+                                const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height * y);
+                                return hit === el || el.contains(hit);
+                            });
+                        }'''), 'History chip must not intercept a More control'
+                # A pointer-transparent overlay can still obscure text. The light menu is opaque;
+                # hiding a lower chip must not change its pixels. Dark glass legitimately changes.
+                if theme == 'light':
+                    painted = Image.open(io.BytesIO(menu.screenshot(animations='disabled'))).convert('RGB')
+                    note.evaluate("el => { el.style.visibility = 'hidden'; }")
+                    try:
+                        clear = Image.open(io.BytesIO(menu.screenshot(animations='disabled'))).convert('RGB')
+                    finally:
+                        note.evaluate("el => { el.style.removeProperty('visibility'); }")
+                    delta = ImageChops.difference(painted, clear).tobytes()
+                    changed = sum(sum(delta[i:i + 3]) > 24 for i in range(0, len(delta), 3))
+                    assert changed / (len(delta) // 3) <= 0.002, 'History chip must not paint over More'
+                first = more.locator('.chat-header-menu-item').first
+                first.click(trial=True)  # Do not change consciousness or other runtime controls.
+                first.focus()
+                page.keyboard.press('Escape')
+                assert more.get_attribute('open') is None
+                summary.focus()
+                summary.press('Enter')
+                menu.wait_for(state='visible')
+                summary.click()
+                assert more.get_attribute('open') is None and note.is_visible()
+            assert page.locator('#chat-messages .chat-load-older-btn').inner_text() == 'Retry loading messages'
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 def test_late_latest_cannot_erase_newer_physical_coverage(direct_server_with_data, browser_engine, tmp_path):
     """A late newest read cannot erase a newer one's coverage. A room reads its newest page one read at
     a time (#1954): a reconnect that comes while that read is unanswered waits for it, so the late answer
