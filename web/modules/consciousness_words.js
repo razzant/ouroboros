@@ -81,9 +81,11 @@ export const capitalized = (text) => {
 export const wakeFactWord = (fact) => WAKE_FACT_WORDS[fact] || String(fact || '').replace(/_/g, ' ');
 
 /** «wakes for direct messages, mentions and replies», or '' when nothing wakes it here. */
-export function wakesForText(wakes = []) {
+export function wakesForText(wakes = [], attentionNames = []) {
     const facts = [...new Set(wakes.map((item) => item?.fact).filter(Boolean))];
-    return facts.length ? `wakes for ${listWords(facts.map(wakeFactWord))}` : '';
+    const words = facts.map(wakeFactWord);
+    if (attentionNames.length) words.push('names and aliases');
+    return words.length ? `wakes for ${listWords(words)}` : '';
 }
 
 export const authorWord = (author) => AUTHOR_WORDS[author] || (author ? `added by ${author}` : '');
@@ -98,7 +100,7 @@ export const placeStateWord = (state) => placeStateOf(state)?.word || 'state unk
  */
 export function placeStatusText(place) {
     const parts = [placeStateWord(place?.state)];
-    if (place?.state === 'active' || place?.state === 'silent') parts.push(wakesForText(place.wakes));
+    if (place?.state === 'active' || place?.state === 'silent') parts.push(wakesForText(place.wakes, place.attentionNames));
     if (Number.isInteger(place?.unanswered) && place.unanswered > 0) parts.push(`${place.unanswered} unanswered`);
     return parts.filter(Boolean).join(' · ');
 }

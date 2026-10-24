@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 import uuid
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -90,6 +92,8 @@ class Place:
     destination: Mapping[str, str] | None = None
     scope: str = "account"
     contribution_id: str = ""
+    attention_names: tuple[str, ...] = ()
+    attention_names_author: str = ""
 
 
 def places_path(drive_root: Any) -> Path:
@@ -118,6 +122,10 @@ def _validate(place: Place) -> Place:
         raise PlaceError("place_note_invalid", "notes")
     if any(not a.platform_actor_id for a in place.owner_accounts):
         raise PlaceError("place_account_invalid", "owner_accounts")
+    if (any(not isinstance(n, str) or not n.strip() or "\n" in n or "\r" in n for n in place.attention_names)
+            or place.attention_names_author not in ("", AUTHOR_OWNER, AUTHOR_OUROBOROS)
+            or (place.attention_names and not place.attention_names_author)):
+        raise PlaceError("place_attention_names_invalid", "attention_names")
     return place
 
 
@@ -126,7 +134,9 @@ def _decode(value: Any) -> Place:
         data = dict(value)
         for name, cls in (("wakes", WakeItem), ("notes", NoteEntry), ("owner_accounts", OwnerAccount)):
             data[name] = tuple(cls(**item) for item in data.get(name, ()))
-        for name in ("context_topics", "legacy_binding_ids"):
+        if not isinstance(data.get("attention_names", []), (list, tuple)):
+            raise PlaceError("place_attention_names_invalid", "attention_names")
+        for name in ("context_topics", "legacy_binding_ids", "attention_names"):
             data[name] = tuple(data.get(name, ()))
         return _validate(Place(**data))
     except (TypeError, AttributeError, KeyError) as exc:
@@ -284,6 +294,25 @@ def wake_matches(place: Place, facts: Iterable[str]) -> tuple[WakeItem, ...]:
     return tuple(item for item in place.wakes if item.fact in present or item.fact == FACT_ANY_MESSAGE)
 
 
+def attention_name_matches(place: Place, text: str, facts: Iterable[str]) -> tuple[str, ...]:
+    """Host-authored literal condition, not a provider mention or an obligation to reply.
+
+    Match the delivered body (which may include connector-added text), never actor,
+    conversation or attachment metadata. Hyphens/apostrophes separate words; Unicode
+    letters, marks, numbers and connector punctuation (including _) do not.
+    """
+    if FACT_FROM_BOT in facts and not any(w.fact == FACT_FROM_BOT for w in place.wakes):
+        return ()
+    folded = text.casefold()
+    def word(char):
+        return bool(char) and (char.isalnum() or unicodedata.category(char)[0] == "M"
+                               or unicodedata.category(char) == "Pc")
+    return tuple(name for name in place.attention_names if any(
+        not word(folded[m.start() - 1] if m.start() else "")
+        and not word(folded[m.end()] if m.end() < len(folded) else "")
+        for m in re.finditer(re.escape(name.casefold()), folded)))
+
+
 def is_owner_account(place: Place, platform_actor_id: str, account_id: str = "") -> bool:
     actor = str(platform_actor_id or "").strip()
     return bool(actor) and any(a.platform_actor_id == actor and (not a.account_id or a.account_id == account_id)
@@ -370,6 +399,14 @@ def _change_place(old: Place | None, action: str, author: str, values: dict) -> 
         if not isinstance(facts, list) or any(f not in (*WAKE_FACTS, FACT_LEGACY_ADDRESSED) for f in facts):
             raise PlaceError("place_wake_invalid", "wakes")
         return replace(old, wakes=tuple(next((w for w in old.wakes if w.fact == fact), WakeItem(fact, author)) for fact in dict.fromkeys(facts)))
+    if action == "set_attention_names":
+        names = values.get("attention_names")
+        if not isinstance(names, list) or any(not isinstance(n, str) or not n.strip() or "\n" in n or "\r" in n for n in names):
+            raise PlaceError("place_attention_names_invalid", "attention_names")
+        unique = {}
+        for name in names:
+            unique.setdefault(name.strip().casefold(), name.strip())
+        return replace(old, attention_names=tuple(unique.values()), attention_names_author=author)
     if action in {"add_wake", "remove_wake"}:
         fact = values.get("fact", "")
         if fact not in (*WAKE_FACTS, FACT_LEGACY_ADDRESSED):

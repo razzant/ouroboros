@@ -5,17 +5,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ouroboros import presence_admission
-from ouroboros.places import FACT_LEGACY_ADDRESSED, PlaceError, get_place, wake_matches
+from ouroboros.places import FACT_LEGACY_ADDRESSED, PlaceError, attention_name_matches, get_place, wake_matches
 
 
 def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
     """Return silent / retry / focus, consulting current owner choices each time."""
+    decision, info, _place = attention_snapshot(root, admission, event)
+    return decision, info
+
+
+def attention_snapshot(root: Path, admission, event):
+    """Keep the exact Place used for this decision available to focus provenance."""
     try:
         place = get_place(root, admission.place.place_id)
     except PlaceError as exc:
         if exc.code != "place_not_found":
             raise
-        return "silent", {"reason": "disconnected"}
+        return "silent", {"reason": "disconnected"}, None
+    decision, info = _decide_for_place(root, place, event)
+    return decision, info, place
+
+
+def _decide_for_place(root, place, event):
     facts = event.facts if event.facts is not None else (FACT_LEGACY_ADDRESSED,)
     if event.actor.get("is_bot") is True:
         facts = (*facts, "from_bot")
@@ -23,7 +34,7 @@ def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
         return "silent", {"reason": "paused"}
     if not presence_admission.focus_enabled(root):
         return "silent", {"reason": "off"}
-    if not wake_matches(place, facts):
+    if not wake_matches(place, facts) and not attention_name_matches(place, event.text, facts):
         return "silent", {"reason": "no_wake_match"}
     allowance = presence_admission.focus_allowance(root)
     if allowance.get("status") != "available":

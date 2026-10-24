@@ -361,7 +361,7 @@ PLACEHOLDERS = ("who", "place", "when", "waiting_line", "event", "place_state", 
 def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> dict:
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
     from ouroboros.presence_runner import presence_event_identity
-    from ouroboros.places import FACT_LEGACY_ADDRESSED, is_owner_account, wake_matches
+    from ouroboros.places import FACT_LEGACY_ADDRESSED, attention_name_matches, is_owner_account, wake_matches
     place = admission.place
     facts = event.facts if event.facts is not None else (FACT_LEGACY_ADDRESSED,)
     if event.actor.get("is_bot") is True:
@@ -379,6 +379,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
                             "owner_confirmed": is_owner_account(place, actor, event.account_id),
                             "is_bot": event.actor.get("is_bot") is True or "from_bot" in facts},
                   "matched_wakes": [w.fact for w in wake_matches(place, facts)],
+                  "matched_attention_names": list(attention_name_matches(place, event.text, facts)),
                   "addressed": bool(set(facts) & {"direct_message", "group_dm", "mention", "reply_to_me",
                                                   "review_requested", "assigned", "legacy_addressed"})},
         "focus_allowance": allowance,
@@ -424,7 +425,9 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
         "event": content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)),
         "place_state": state + (". " + SILENT_DISCLOSURE if state == "silent" else ""),
         "notes": json.dumps(place.get("notes") or [], ensure_ascii=False),
-        "wake_item": json.dumps([w for w in place.get("wakes", []) if w["fact"] in matched], ensure_ascii=False),
+        "wake_item": json.dumps({"provider_wakes": [w for w in place.get("wakes", []) if w["fact"] in matched],
+                                 "host_name_rule": {"names": focus.get("matched_attention_names") or [],
+                                                    "author": place.get("attention_names_author", "")}}, ensure_ascii=False),
         "actor_facts": json.dumps(actor, ensure_ascii=False),
         "work_here": work or "No earlier work recorded here; recent_tasks reads current work.",
         "spent_line": json.dumps(allowance, ensure_ascii=False),

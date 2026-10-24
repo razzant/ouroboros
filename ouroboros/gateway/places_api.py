@@ -10,12 +10,13 @@ from ouroboros.place_projection import connect_declared_place, place_view, place
 
 
 def update_place(root, place_id: str, body: dict) -> dict:
-    allowed = {"state", "wakes", "add_note", "remove_note", "working_folder", "model",
+    allowed = {"state", "wakes", "attention_names", "add_note", "remove_note", "working_folder", "model",
                "confirm_owner_account", "revoke_owner_account", "expected_revision"}
     if not isinstance(body, dict) or not body or set(body) - allowed:
         raise PlaceError("place_update_invalid")
     actions = []
     mapping = {"state": ("set_state", "state"), "wakes": ("set_wakes", "wakes"),
+               "attention_names": ("set_attention_names", "attention_names"),
                "add_note": ("add_note", "text"), "remove_note": ("remove_note", "note_id"),
                "working_folder": ("set_working_folder", "working_folder"), "model": ("set_model", "model"),
                "revoke_owner_account": ("revoke_owner_account", "platform_actor_id")}

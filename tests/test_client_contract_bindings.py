@@ -328,6 +328,7 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     path = f"/api/places/{place['place_id']}"
     change = {
         "state": "silent", "wakes": ["direct_message"], "add_note": "Owner choice",
+        "attention_names": ["Vic", "Ouroboros"],
         "working_folder": str(client.files_root), "model": "test-model",
         "confirm_owner_account": {"platform_actor_id": "person", "label": "Me", "account_id": "account"},
         "expected_revision": place["revision"],
@@ -341,15 +342,18 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert changed.status_code == 200, changed.text
     place = changed.json()["place"]
     assert place["state"] == "silent" and place["wakes"] == [{"fact": "direct_message", "author": "owner"}]
+    assert place["attention_names"] == change["attention_names"] and place["attention_names_author"] == "owner"
     assert place["notes"][0]["text"] == "Owner choice" and place["notes"][0]["author"] == "owner"
     assert place["working_folder"] == change["working_folder"] and place["model"] == change["model"]
     assert place["owner_accounts"][0]["platform_actor_id"] == "person"
     remove = {"remove_note": place["notes"][0]["note_id"], "revoke_owner_account": "person",
+              "attention_names": [],
               "expected_revision": place["revision"]}
     assert _declared("PlaceUpdateRequest") == set(change) | set(remove)
     assert not validate_ingress(remove, update_type)
     removed = client.post(path, json=remove)
     assert removed.status_code == 200, removed.text
     assert removed.json()["place"]["notes"] == removed.json()["place"]["owner_accounts"] == []
+    assert removed.json()["place"]["attention_names"] == []
     conflict = client.post(path, json=change)
     assert conflict.status_code == 409 and conflict.json()["code"] == "place_revision_conflict"

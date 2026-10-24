@@ -1107,8 +1107,8 @@ def run_presence_turn(
                 and not any(row.get("direction") == "in" for row in prior_rows)):
             log_dialogue(direction="in", user_id=actor_id, text=event.text or task["text"])
         if admission.place is not None:
-            from ouroboros.place_intake import decide_attention, settle_heard
-            decision, allowance = decide_attention(Path(drive_root), admission, event)
+            from ouroboros.place_intake import attention_snapshot, settle_heard
+            decision, allowance, attention_place = attention_snapshot(Path(drive_root), admission, event)
             if decision == "silent":
                 return settle_heard(Path(drive_root), task, event, allowance["reason"],
                                     captured_task_id=_task_id(admission, event))
@@ -1117,6 +1117,17 @@ def run_presence_turn(
                 error.disposition, error.retry_after = "retry", allowance["retry_after"]
                 raise error
             task["metadata"]["focus_allowance"] = allowance
+            # Intake may have queued before names were edited. Freeze the same
+            # name-rule snapshot that admitted this focus, not another store read.
+            from ouroboros.places import attention_name_matches
+            facts = event.facts if event.facts is not None else ()
+            if event.actor.get("is_bot") is True:
+                facts = (*facts, "from_bot")
+            task["metadata"]["focus"]["matched_attention_names"] = list(
+                attention_name_matches(attention_place, event.text, facts))
+            task["metadata"]["presence"]["place"].update(
+                attention_names=list(attention_place.attention_names),
+                attention_names_author=attention_place.attention_names_author)
             remaining = allowance.get("remaining_usd")
             if remaining is not None:
                 task["metadata"]["root_cost_ceiling_usd"] = min(float(remaining), float(

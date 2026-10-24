@@ -54,7 +54,7 @@ const WAKE_NOTES = {
     paused: 'While this place is not Active, nothing here wakes it.',
 };
 
-function wakesHtml(place) {
+function wakesHtml(place, ui) {
     const listed = new Set(place.wakes.map((item) => item.fact));
     const items = place.wakes.map((item) => `<li class="place-wake-item">
             <span>${escapeHtml(capitalized(wakeFactWord(item.fact)))}</span>
@@ -67,8 +67,16 @@ function wakesHtml(place) {
             ${offers.map((fact) => `<button type="button" class="btn btn-default btn-sm" data-place-act="add-wake" data-fact="${escapeHtml(fact)}">${escapeHtml(capitalized(wakeFactWord(fact)))}</button>`).join('')}
         </div>` : '';
     const note = WAKE_NOTES[place.state] || '';
-    return `${items ? `<ul class="place-wake-list">${items}</ul>` : '<p class="place-sheet-note">Nothing here wakes it at once.</p>'}
-        ${add}${note ? `<p class="place-sheet-note">${escapeHtml(note)}</p>` : ''}`;
+    const names = place.attentionNames || [];
+    const value = ui.drafts.attentionNames ?? names.join('\n');
+    return `${items ? `<ul class="place-wake-list">${items}</ul>` : (!names.length ? '<p class="place-sheet-note">No provider events selected.</p>' : '')}
+        ${add}
+        <label class="ui-field">Names and aliases
+            <textarea class="ui-control" rows="2" data-place-draft="attentionNames" aria-describedby="place-names-help" spellcheck="false">${escapeHtml(value)}</textarea></label>
+        <div class="ui-field-help" id="place-names-help">One literal name per line. Wakes for whole words in delivered message text, ignoring case; not a platform @mention. Empty turns this rule off. Bots still need Messages from bots.</div>
+        ${names.length ? chipHtml(authorWord(place.attentionNamesAuthor), 'neutral') : ''}
+        <div class="place-sheet-actions"><button type="button" class="btn btn-default btn-sm" data-place-act="save-names">Save names</button><button type="button" class="btn btn-ghost btn-sm" data-place-act="clear-names">Clear names</button></div>
+        ${note ? `<p class="place-sheet-note">${escapeHtml(note)}</p>` : ''}`;
 }
 
 function accountsHtml(place, ui) {
@@ -150,7 +158,7 @@ export function placeSheetBodyHtml(place, ui = {}) {
     const view = { drafts: {}, status: {}, ...ui };
     return [
         section('state', '', stateHtml(place, view), view),
-        section('wakes', 'Wakes it at once', wakesHtml(place), view),
+        section('wakes', 'Wakes it at once', wakesHtml(place, view), view),
         section('accounts', 'Your accounts here', accountsHtml(place, view), view),
         section('notes', 'Notes', notesHtml(place, view), view),
         section('folder', 'Working folder', folderHtml(place, view), view),
@@ -209,6 +217,8 @@ export function placeChangeFor(action, place, { value = '', fact = '', note = ''
     case 'state': return value && value !== place.state ? { state: value } : null;
     case 'add-wake': return facts.includes(fact) ? null : { wakes: [...facts, fact] };
     case 'remove-wake': return { wakes: facts.filter((entry) => entry !== fact) };
+    case 'save-names': return { attention_names: String(drafts.attentionNames ?? (place.attentionNames || []).join('\n')).split(/\r?\n/).map((name) => name.trim()).filter(Boolean) };
+    case 'clear-names': return { attention_names: [] };
     case 'add-note': return String(drafts.note || '').trim() ? { add_note: String(drafts.note).trim() } : null;
     case 'remove-note': return note ? { remove_note: note } : null;
     case 'confirm': return actor ? { confirm_owner_account: { platform_actor_id: actor, label: actorLabel } } : null;
@@ -224,10 +234,12 @@ export function placeChangeFor(action, place, { value = '', fact = '', note = ''
 }
 
 const SECTION_OF = {
+    'save-names': 'wakes', 'clear-names': 'wakes',
     state: 'state', 'add-wake': 'wakes', 'remove-wake': 'wakes', 'add-note': 'notes', 'remove-note': 'notes',
     confirm: 'accounts', 'confirm-typed': 'accounts', revoke: 'accounts', 'save-folder': 'folder', 'save-model': 'more',
 };
 const DONE_WORDS = {
+    'save-names': () => 'Names saved.', 'clear-names': () => 'Name rule off.',
     state: (place) => `Now ${placeStateOf(place.state)?.label || place.state}.`, 'add-wake': () => 'Added.', 'remove-wake': () => 'Removed.',
     'add-note': () => 'Note added.', 'remove-note': () => 'Note removed.', confirm: () => 'Confirmed as you.',
     'confirm-typed': () => 'Confirmed as you.', revoke: () => 'Removed from your accounts.',
@@ -267,6 +279,8 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
     async function write(action, options = {}) {
         if (ui.busy) return;
         const change = placeChangeFor(action, current, { ...options, drafts: ui.drafts });
+        // The field stays editable during the request; only retire the draft this press saw.
+        const submittedNames = ui.drafts.attentionNames;
         const key = SECTION_OF[action];
         if (!change) {
             ui.status[key] = { text: action === 'add-note' ? 'Write the note first.' : 'Nothing to save.', tone: 'muted' };
@@ -282,7 +296,13 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
             if (action === 'confirm-typed') { ui.drafts.actorId = ''; ui.drafts.actorLabel = ''; ui.adding = false; }
             if (action === 'save-folder') delete ui.drafts.folder;
             if (action === 'save-model') delete ui.drafts.model;
-            ui.status = { [key]: { text: DONE_WORDS[action](current), tone: 'ok' } };
+            const newerNames = (action === 'save-names' || action === 'clear-names')
+                && ui.drafts.attentionNames !== submittedNames;
+            if ((action === 'save-names' || action === 'clear-names') && !newerNames) delete ui.drafts.attentionNames;
+            const done = newerNames
+                ? `${action === 'save-names' ? 'Earlier names saved.' : 'Name rule off.'} Your newer edits are not saved.`
+                : DONE_WORDS[action](current);
+            ui.status = { [key]: { text: done, tone: newerNames ? 'muted' : 'ok' } };
         } catch (error) {
             ui.status = { [key]: { text: error?.message || String(error), tone: 'error' } };
         } finally {

@@ -49,6 +49,8 @@ export function normalizePlace(raw) {
         wakes: list(place.wakes).map((item) => ({ fact: text(item?.fact), author: text(item?.author) }))
             .filter((item) => item.fact),
         wakeSuggestions: [...new Set(list(place.wake_suggestions).map(text).filter(Boolean))],
+        attentionNames: list(place.attention_names).filter((name) => typeof name === 'string'),
+        attentionNamesAuthor: text(place.attention_names_author),
         notes: list(place.notes).map((note) => ({
             id: text(note?.note_id), text: text(note?.text), author: text(note?.author), at: text(note?.at),
         })).filter((note) => note.text),
@@ -195,7 +197,7 @@ export async function connectPlace({ connector, accountId = '', conversationId =
 
 /**
  * One owner change to a place. `change` uses the contract's keys: `state`, `wakes` (the whole fact list),
- * `add_note`, `remove_note`, `working_folder`, `model`, `confirm_owner_account`, `revoke_owner_account`.
+ * `attention_names`, `add_note`, `remove_note`, `working_folder`, `model`, `confirm_owner_account`, `revoke_owner_account`.
  */
 export async function updatePlace(placeId, change) {
     return placeAnswer(await jsonPost(`/api/places/${encodeURIComponent(placeId)}`, change));

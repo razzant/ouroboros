@@ -4,15 +4,79 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import { setup } from './dashboard_dom_fixture.js';
 
 import { normalizePlacesResponse } from '../modules/consciousness_api.js';
-import { SILENT_CARD } from '../modules/consciousness_words.js';
-import { connectListHtml, placeChangeFor, placeSheetBodyHtml, placeSheetMetaText } from '../modules/place_sheet.js';
+import { SILENT_CARD, placeStatusText } from '../modules/consciousness_words.js';
+import { connectListHtml, openPlaceSheet, placeChangeFor, placeSheetBodyHtml, placeSheetMetaText } from '../modules/place_sheet.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
 const { places, connectors } = normalizePlacesResponse(FIXTURE.places);
 const [slack, community, mail] = places;
 const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+for (const action of ['save-names', 'clear-names']) {
+    for (const newer of [undefined, 'Newer name', '']) {
+        test(`${action} response preserves ${newer === undefined ? 'unchanged' : JSON.stringify(newer)} draft in the open sheet`, async (t) => {
+            let sheet;
+            t.after(() => sheet?.close());
+            const { document } = setup(t);
+            const place = { ...slack, attentionNames: ['Saved name'] };
+            let resolveUpdate;
+            const requests = [];
+            sheet = openPlaceSheet(place, { update: (id, change) => {
+                requests.push({ id, change });
+                return new Promise((resolve) => { resolveUpdate = resolve; });
+            } });
+            const body = document.body.querySelector('[data-place-body]');
+            const input = async (value) => {
+                const field = body.querySelector('[data-place-draft="attentionNames"]');
+                field.value = value;
+                await body.fire('input', { target: field });
+            };
+            await input(' Submitted name ');
+            const pending = body.fire('click', { target: body.querySelector(`[data-place-act="${action}"]`) });
+            assert.deepEqual(requests, [{ id: place.id, change: { attention_names: action === 'save-names' ? ['Submitted name'] : [] } }]);
+            assert.match(body.innerHTML, /Saving…/);
+            const field = body.querySelector('[data-place-draft="attentionNames"]');
+            assert.equal(field.disabled, false, 'typing stays available while the update is pending');
+            if (newer !== undefined) await input(newer);
+            resolveUpdate({ ...place, attentionNames: requests[0].change.attention_names });
+            await pending;
+            assert.deepEqual(sheet.place.attentionNames, requests[0].change.attention_names, 'the saved record is the confirmed response, not the newer draft');
+            assert.equal(body.querySelector('[data-place-draft="attentionNames"]').textContent,
+                newer ?? (action === 'save-names' ? 'Submitted name' : ''));
+            const status = body.querySelector('.place-sheet-status');
+            assert.equal(status.textContent, newer === undefined
+                ? (action === 'save-names' ? 'Names saved.' : 'Name rule off.')
+                : `${action === 'save-names' ? 'Earlier names saved.' : 'Name rule off.'} Your newer edits are not saved.`);
+            assert.equal(status.getAttribute('data-tone'), newer === undefined ? 'ok' : 'muted');
+            if (newer !== undefined) {
+                const resave = body.fire('click', { target: body.querySelector('[data-place-act="save-names"]') });
+                assert.deepEqual(requests[1].change, { attention_names: newer ? [newer] : [] }, 'the next Save submits the retained draft');
+                resolveUpdate({ ...place, attentionNames: requests[1].change.attention_names });
+                await resave;
+                assert.equal(body.querySelector('.place-sheet-status').textContent, 'Names saved.');
+            }
+        });
+    }
+}
+
+test('name rule defaults empty, edits and clears separately from provider wakes', () => {
+    assert.deepEqual(slack.attentionNames, []);
+    const place = { ...slack, wakes: [], attentionNames: ['Вик', 'Ouroboros'], attentionNamesAuthor: 'owner' };
+    const html = placeSheetBodyHtml(place);
+    assert.match(html, /data-place-draft="attentionNames"[^>]*>Вик\nOuroboros<\/textarea>/);
+    assert.match(html, /not a platform @mention/);
+    assert.match(html, /Bots still need Messages from bots/);
+    assert.match(strip(html), /added by you/);
+    assert.match(placeStatusText(place), /wakes for names and aliases/);
+    assert.deepEqual(placeChangeFor('save-names', place, { drafts: { attentionNames: ' Вик \n\n Broboros, Vic ' } }),
+        { attention_names: ['Вик', 'Broboros, Vic'] }, 'commas remain literal; one alias per line');
+    assert.deepEqual(placeChangeFor('clear-names', place), { attention_names: [] });
+    assert.deepEqual(placeChangeFor('save-names', place, { drafts: { attentionNames: '' } }), { attention_names: [] });
+    assert.doesNotMatch(placeSheetBodyHtml({ ...place, attentionNames: ['<unsafe>'] }), /<unsafe>/);
+});
 
 test('the head names the connector and how much of it the place covers', () => {
     assert.equal(placeSheetMetaText(slack), 'Slack · whole account · T024BE7LD');

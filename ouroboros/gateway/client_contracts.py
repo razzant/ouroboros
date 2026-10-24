@@ -329,6 +329,7 @@ class PlaceUpdateRequest(TypedDict, total=False):
 
     state: Literal["active", "silent", "paused"]
     wakes: List[str]
+    attention_names: List[str]
     add_note: str
     remove_note: str
     working_folder: str

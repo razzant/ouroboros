@@ -61,17 +61,19 @@ def _cancel_presence_work(ctx: ToolContext, work_ref: str, reason: str = "") -> 
 def get_tools() -> list[ToolEntry]:
     return [ToolEntry(name="configure_presence", schema={
         "name": "configure_presence",
-        "description": "Inspect places and their connector choices; edit state, wakes, notes, folder or model. "
+        "description": "Inspect places and their connector choices; edit state, wakes, attention names, notes, folder or model. "
                        "Only an owner-door turn may confirm an owner account. A folder is an address, not a fence. "
                        "Connect uses the installed connector's place declaration; disconnect keeps room history.",
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["list", "inspect", "connect", "disconnect", "set_state",
-                "add_wake", "remove_wake", "add_note", "remove_note", "set_working_folder", "set_model",
+                "add_wake", "remove_wake", "set_attention_names", "add_note", "remove_note", "set_working_folder", "set_model",
                 "confirm_owner_account", "revoke_owner_account"]},
             "place_id": {"type": "string"}, "connector": {"type": "string"},
             "account_id": {"type": "string"}, "conversation_id": {"type": "string"},
             "state": {"type": "string", "enum": ["active", "silent", "paused"]},
             "fact": {"type": "string"}, "text": {"type": "string"}, "note_id": {"type": "string"},
+            "attention_names": {"type": "array", "items": {"type": "string"},
+                "description": "Literal names/aliases, case-insensitive whole Unicode words in delivered event text; [] clears. Host attention only, never a provider mention or forced reply. Bots still need from_bot."},
             "working_folder": {"type": "string"}, "model": {"type": "string"},
             "platform_actor_id": {"type": "string"}, "label": {"type": "string"},
             "expected_revision": {"type": "integer"},

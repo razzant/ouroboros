@@ -534,6 +534,7 @@
  * @typedef {Object} PlaceUpdateRequest
  * @property {'active'|'silent'|'paused'=} state
  * @property {Array<string>=} wakes
+ * @property {Array<string>=} attention_names
  * @property {string=} add_note
  * @property {string=} remove_note
  * @property {string=} working_folder

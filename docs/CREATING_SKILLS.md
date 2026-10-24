@@ -979,11 +979,11 @@ access, supported event kinds and outgoing tools remain the connector's responsi
 
 A reviewed connector declares `permissions: [presence]` and `provides: place`.
 The owner connects it in Consciousness > Places or through `configure_presence`.
-A place stores its state (Active, Silent or Paused), authored wake facts and notes,
-confirmed owner accounts, working-folder address and model choice. Connector updates
-never replace those choices. The old behavior skill's `presence:` block is migration
-input only: its instructions, topics, folder and model are copied once, and its skill
-stays enabled. Frozen old task ceilings remain readable; new focuses have no ceiling.
+A place stores state, authored wakes/notes, optional `attention_names`, owner accounts,
+folder and model. Names are a host literal-text rule, never connector wake facts;
+see ARCHITECTURE §12. Connector updates preserve choices. Legacy `presence:` supplies
+instructions/topics/folder/model once; its skill stays enabled. Old task ceilings
+remain readable; new focuses have no ceiling.
 
 Use the connector's ordinary content-hash-bound skill token for:
 
