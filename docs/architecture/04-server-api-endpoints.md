@@ -102,6 +102,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/places` | place records and installed connector declarations |
 | POST | `/api/places` | connect a place |
 | POST | `/api/places/{place_id}` | atomic owner-authored choices |
+| GET | `/api/places/{place_id}/rooms` | captured canonical conversation rooms (§12) |
 | DELETE | `/api/places/{place_id}` | disconnect, retaining room history |
 | POST | `/api/owner/capability-ack` | |
 | GET | `/api/ui/contributions` | live skill controls, speech providers, offers |

@@ -5,8 +5,9 @@ import asyncio
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from ouroboros.gateway._helpers import request_drive_root, run_sync_to_completion
-from ouroboros.places import AUTHOR_OWNER, PlaceError, edit_place
+from ouroboros.places import AUTHOR_OWNER, PlaceError, edit_place, place_room_index
 from ouroboros.place_projection import connect_declared_place, place_view, places_view
+from ouroboros.store import StoreError
 
 
 def update_place(root, place_id: str, body: dict) -> dict:
@@ -58,6 +59,20 @@ async def api_places(request):
                             status_code=409 if getattr(exc, "code", "") == "place_revision_conflict" else 400)
 
 
+async def api_place_rooms(request):
+    """Lazy owner read of captured rooms, not remote-provider history or task admission."""
+    try:
+        place_id = str(request.path_params['place_id'])
+        rooms = await asyncio.to_thread(place_room_index, request_drive_root(request), place_id)
+        return JSONResponse({'place_id': place_id, 'rooms': rooms}, headers={'Cache-Control': 'no-store'})
+    except PlaceError as exc:
+        return JSONResponse({'ok': False, 'code': exc.code, 'error': str(exc)},
+                            status_code=404 if exc.code == 'place_not_found' else 503)
+    except (OSError, ValueError, StoreError) as exc:
+        return JSONResponse({'ok': False, 'code': 'place_rooms_unavailable', 'error': str(exc)}, status_code=503)
+
+
 def places_routes():
     return [Route("/api/places", api_places, methods=["GET", "POST"]),
+            Route("/api/places/{place_id}/rooms", api_place_rooms, methods=["GET"]),
             Route("/api/places/{place_id}", api_places, methods=["POST", "DELETE"])]

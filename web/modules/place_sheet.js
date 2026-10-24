@@ -7,6 +7,7 @@
 import { bindDialogFocus } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { renderSegmentedField } from './page_header.js';
+import { openPlaceHistory } from './place_history.js';
 import { chipHtml, skillIconHtml } from './skill_presentation.js';
 import { connectPlace, disconnectPlace, PLACES_CHANGED_EVENT, readPlaces, updatePlace } from './consciousness_api.js';
 import {
@@ -151,6 +152,7 @@ export function placeSheetBodyHtml(place, ui = {}) {
     return [
         section('state', '', stateHtml(place, view), view),
         section('wakes', 'Wakes it at once', wakesHtml(place), view),
+        section('conversations', 'Conversations', '<button type="button" class="btn btn-default btn-sm" data-place-act="conversations">Open captured conversations</button><p class="place-sheet-note">Read the shared room history without starting work or sending a message.</p>', view),
         section('accounts', 'Your accounts here', accountsHtml(place, view), view),
         section('notes', 'Notes', notesHtml(place, view), view),
         section('folder', 'Working folder', folderHtml(place, view), view),
@@ -241,10 +243,11 @@ const DONE_WORDS = {
 export function openPlaceSheet(place, { returnFocus = document.activeElement, onClose = null, update = updatePlace,
     disconnect = disconnectPlace } = {}) {
     let current = place;
+    let history = null;
     const ui = { drafts: {}, status: {}, busy: false, adding: false, confirmDisconnect: false, moreOpen: false };
     const dialog = sheetShell(`<span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 22)}</span><span>${escapeHtml(place.label)}</span>`,
         placeSheetMetaText(place));
-    const sheet = showSheet(dialog, { returnFocus, onClose: () => { window.removeEventListener(PLACES_CHANGED_EVENT, onExternal); onClose?.(); } });
+    const sheet = showSheet(dialog, { returnFocus, onClose: () => { history?.close(); window.removeEventListener(PLACES_CHANGED_EVENT, onExternal); onClose?.(); } });
     const { body } = sheet;
 
     function paint() {
@@ -313,6 +316,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         const button = event.target.closest('[data-place-act]');
         if (!button || button.disabled) return;
         const act = button.dataset.placeAct;
+        if (act === 'conversations') { history?.close(); history = openPlaceHistory(current, { returnFocus: button }); return; }
         if (act === 'add-mine') { ui.adding = true; paint(); body.querySelector('[data-place-draft="actorId"]')?.focus(); return; }
         if (act === 'cancel-add') { ui.adding = false; paint(); return; }
         if (act === 'open-connector') { sheet.close(); openSkillsFor({ skill: current.connector }); return; }
@@ -375,7 +379,7 @@ export function connectListHtml({ connectors = null, error = '', status = {} } =
 }
 
 /** Open the Connect flow; a connected place opens its own sheet at once. */
-export function openConnectPlace({ returnFocus = document.activeElement, read = readPlaces, connect = connectPlace } = {}) {
+export function openConnectPlace({ returnFocus = document.activeElement, read = readPlaces, connect = connectPlace, connector = '' } = {}) {
     const dialog = sheetShell('Connect a place', 'From the connectors installed here', 'place-connect');
     const sheet = showSheet(dialog, { returnFocus });
     const view = { connectors: null, error: '', status: {} };
@@ -384,7 +388,7 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
         view.error = '';
         view.connectors = null;
         paint();
-        try { view.connectors = (await read()).connectors; } catch (error) { view.error = `Couldn’t read the connectors: ${error?.message || error}`; }
+        try { view.connectors = (await read()).connectors.filter((row) => !connector || row.connector === connector); } catch (error) { view.error = `Couldn’t read the connectors: ${error?.message || error}`; }
         if (!sheet.closed) paint();
     };
     sheet.body.addEventListener('click', async (event) => {
@@ -406,6 +410,37 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
             view.status = { [name]: { text: error?.message || String(error), tone: 'error' } };
             if (!sheet.closed) paint();
         }
+    });
+    void load();
+    return sheet;
+}
+
+/** Navigation only: Skills never connects, enables, or selects an account by opening this door. */
+export function openConnectorPlaces(connector, { returnFocus = document.activeElement, read = readPlaces } = {}) {
+    const dialog = sheetShell('Places', connector);
+    const controller = new AbortController();
+    const sheet = showSheet(dialog, { returnFocus, onClose: () => controller.abort() });
+    let places = [];
+    const load = async () => {
+        sheet.body.textContent = 'Reading connected places…';
+        try {
+            const data = await read({ signal: controller.signal });
+            if (sheet.closed) return;
+            places = data.places.filter((place) => place.connector === connector);
+            if (places.length === 1) { sheet.close(); openPlaceSheet(places[0], { returnFocus }); return; }
+            sheet.body.innerHTML = places.length
+                ? `<section class="place-sheet-section"><p>Select the account or conversation.</p><div class="place-sheet-actions">${places.map((place, index) => `<button type="button" class="btn btn-default btn-sm" data-connector-place="${index}">${escapeHtml([place.label, place.accountId, place.conversationId].filter(Boolean).join(' · '))}</button>`).join('')}</div></section>`
+                : '<section class="place-sheet-section"><p>No connected place for this connector.</p><button type="button" class="btn btn-default btn-sm" data-connector-connect>Connect a place</button></section>';
+        } catch (error) {
+            if (!sheet.closed) sheet.body.innerHTML = `<section class="place-sheet-section"><p role="alert">${escapeHtml(error?.message || String(error))}</p><button type="button" class="btn btn-default btn-sm" data-connector-retry>Try again</button></section>`;
+        }
+    };
+    sheet.body.addEventListener('click', (event) => {
+        if (event.target.closest('[data-connector-retry]')) { void load(); return; }
+        if (event.target.closest('[data-connector-connect]')) { sheet.close(); openConnectPlace({ returnFocus, connector }); return; }
+        const button = event.target.closest('[data-connector-place]');
+        const place = button && places[Number(button.dataset.connectorPlace)];
+        if (place) { sheet.close(); openPlaceSheet(place, { returnFocus }); }
     });
     void load();
     return sheet;

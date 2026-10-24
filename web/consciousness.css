@@ -216,6 +216,7 @@ textarea.ui-control.consciousness-owner-words {
 .place-sheet-section { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-width: 720px; margin: 0 auto; }
 .place-sheet-section > h3 { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 .place-sheet-section p { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
+.place-history-plain { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 .place-sheet-section .place-sheet-note, .place-sheet-note { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .place-sheet-status { margin: 0; font-size: var(--type-meta); line-height: var(--line-meta); }
 .place-sheet-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }

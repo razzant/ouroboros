@@ -175,6 +175,18 @@ export async function readPlaces(init = {}) {
     return normalizePlacesResponse(await fetchJson('/api/places', { cache: 'no-store', ...init }));
 }
 
+/** Lazy captured-room index; missing fields are a failed read, never an empty room list. */
+export async function readPlaceRooms(placeId, init = {}) {
+    const value = await fetchJson(`/api/places/${encodeURIComponent(placeId)}/rooms`, { cache: 'no-store', ...init });
+    if (value?.place_id !== placeId || !Array.isArray(value.rooms)
+        || value.rooms.some((room) => !Number.isSafeInteger(room?.room_chat_id) || room.room_chat_id <= 0
+            || typeof room.address !== 'string' || !(room.unanswered_count === null
+                || (Number.isSafeInteger(room.unanswered_count) && room.unanswered_count >= 0)))) {
+        throw new Error('Captured conversations could not be read.');
+    }
+    return value.rooms;
+}
+
 // ---- place writes (owner-authored on the server) ----------------------------------------------------
 function placeAnswer(data) {
     if (!data || data.ok !== true || !object(data.place)) {

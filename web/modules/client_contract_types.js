@@ -522,6 +522,20 @@
  */
 
 /**
+ * A captured local conversation, not a complete remote-provider history.
+ * @typedef {Object} PlaceRoomSummary
+ * @property {number} room_chat_id
+ * @property {number|null} unanswered_count
+ * @property {string} address
+ */
+
+/**
+ * @typedef {Object} PlaceRoomsResponse
+ * @property {string} place_id
+ * @property {Array<PlaceRoomSummary>} rooms
+ */
+
+/**
  * Confirm a person; omitted account_id uses the place's account.
  * @typedef {Object} PlaceOwnerAccountRequest
  * @property {string} platform_actor_id

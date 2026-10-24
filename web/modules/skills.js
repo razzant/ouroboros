@@ -19,7 +19,8 @@ import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import {
     openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
 } from './skill_dialogs.js';
-import { plural, popularityText, repoLabel, routeExternalLink, versionText } from './skill_presentation.js';
+import { connectsServices, plural, popularityText, repoLabel, routeExternalLink, versionText } from './skill_presentation.js';
+import { openConnectorPlaces } from './place_sheet.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
 import {
@@ -759,6 +760,10 @@ export function initSkills(ctx = {}) {
         const origin = skill.install?.source;
         sheet = openSkillDetailSheet({
             item, installed: skill, source, returnFocus: opener,
+            actionsHtml: connectsServices(skill).length ? '<button type="button" class="btn btn-default btn-sm" data-sheet-action="open_place">Places</button>' : '',
+            onAction: (action) => {
+                if (action === 'open_place') { sheet?.close(); openConnectorPlaces(name, { returnFocus: opener }); }
+            },
             readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
         });
     }

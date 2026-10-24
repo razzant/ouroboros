@@ -316,6 +316,19 @@ class PlaceConnectRequest(TypedDict):
     conversation_id: NotRequired[str]
 
 
+class PlaceRoomSummary(TypedDict):
+    """One captured local conversation; an unknown open-focus count stays null."""
+
+    room_chat_id: int
+    unanswered_count: Optional[int]
+    address: str
+
+
+class PlaceRoomsResponse(TypedDict):
+    place_id: str
+    rooms: List[PlaceRoomSummary]
+
+
 class PlaceOwnerAccountRequest(TypedDict):
     """Confirm a person; omitted account_id uses the place's account."""
 
