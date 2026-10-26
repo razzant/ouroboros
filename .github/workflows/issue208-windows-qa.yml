@@ -1,0 +1,56 @@
+# Evidence-only #208 qualification; copy to .github/workflows/ on the dedicated
+# qualification branch only. No secrets, no Environment, no signing.
+name: issue208 Windows signing qualification
+on:
+  push:
+    branches: [qualification/issue208-windows-signing]
+permissions:
+  contents: read
+concurrency:
+  group: issue208-windows-qa
+  cancel-in-progress: false
+jobs:
+  qualify:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Preserve repository LF bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        id: python
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Mocked signing tests in a dependency-only environment
+        timeout-minutes: 8
+        shell: pwsh
+        env:
+          QA_BASE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: ./.review-evidence/windows-qa/run.ps1 -Phase tests
+      - name: Native Authenticode and bundled-runtime observations of the v7.8.0 ZIP
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./.review-evidence/windows-qa/run.ps1 -Phase native
+      - name: Package evidence with a SHA-256 manifest
+        if: ${{ always() }}
+        timeout-minutes: 2
+        shell: pwsh
+        run: ./.review-evidence/windows-qa/run.ps1 -Phase package
+      - name: Upload evidence regardless of result
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: issue208-windows-qa-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue208-qa/pack
+          if-no-files-found: error
+          retention-days: 14
