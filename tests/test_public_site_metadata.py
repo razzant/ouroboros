@@ -24,6 +24,7 @@ INDEXABLE = {
     "/": SITE / "index.html",
     "/about/": SITE / "about" / "index.html",
     "/paper/": SITE / "paper" / "index.html",
+    "/community/": SITE / "community" / "index.html",
     "/install/": SITE / "install" / "index.html",
     "/benchmarks/": SITE / "benchmarks" / "index.html",
     "/history/first-48-hours/": SITE / "history" / "first-48-hours" / "index.html",
@@ -134,6 +135,7 @@ def test_llms_file_is_a_small_absolute_navigation_map():
     assert f"{ORIGIN}/install/" in linked_urls
     assert f"{ORIGIN}/benchmarks/" in linked_urls
     assert f"{ORIGIN}/paper/" in linked_urls
+    assert f"{ORIGIN}/community/" in linked_urls
     assert linked_urls[0] == f"{ORIGIN}/install/"
     for url in linked_urls:
         assert url == "https://claudexor.ai/" or url.startswith(
@@ -303,6 +305,27 @@ def test_paper_page_exposes_citation_metadata_and_bibtex():
     assert page.meta["citation_pdf_url"] == "https://arxiv.org/pdf/2608.08311"
     assert "@techreport{razzhigaev2026ouroboros" in html
     assert "archivePrefix = {arXiv}" in html
+
+
+def test_community_page_is_discoverable_and_keeps_install_first():
+    route = "/community/"
+    assert f"{ORIGIN}{route}" in (REPO / "README.md").read_text(encoding="utf-8")
+    for root in (SITE, DOCS):
+        for relative in ("index.html", "paper/index.html"):
+            assert f'href="{route}"' in (root / relative).read_text(encoding="utf-8")
+        html = (root / "community/index.html").read_text(encoding="utf-8")
+        assert html.index('href="/install/"') < html.index('href="/paper/"')
+        assert 'class="btn btn-primary" href="/install/"' in html
+        assert "https://github.com/mikhashev/dpc-messenger/blob/" in html
+        assert "https://github.com/dmmdea/offload-harness/blob/" in html
+        for paper in ("2608.03392v4", "2609.11873v3", "2609.15364v2", "2609.06396v2"):
+            assert f'https://arxiv.org/html/{paper}' in html
+
+
+def test_install_openrouter_anchor_follows_downloads():
+    for root in (SITE, DOCS):
+        html = (root / "install/index.html").read_text(encoding="utf-8")
+        assert html.index('class="download-grid platform-downloads"') < html.index('id="openrouter"')
 
 
 def test_og_preview_has_declared_dimensions_and_current_status():

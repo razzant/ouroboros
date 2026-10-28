@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Projects adapting Ouroboros code and ideas, and research papers citing its approach to agent self-development.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://ouroboros-agent.ai/community/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ouroboros">
+  <meta property="og:title" content="Ouroboros in projects and research">
+  <meta property="og:description" content="Code adaptations, design reuse, and research that cites Ouroboros.">
+  <meta property="og:url" content="https://ouroboros-agent.ai/community/">
+  <meta property="og:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=44a9e298f8">
+  <meta property="og:image:alt" content="Ouroboros, a self-developing frontier coding agent">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=44a9e298f8">
+  <meta name="twitter:image:alt" content="Ouroboros, a self-developing frontier coding agent">
+  <title>Ouroboros in projects and research</title>
+  <link rel="icon" href="/assets/icon_1024.png" type="image/png">
+  <link rel="stylesheet" crossorigin href="/assets/ouroboros-CMTHrJbp.css">
+</head>
+<body class="text-page">
+  <div class="ambient" aria-hidden="true"></div>
+  <header class="text-nav"><a class="brand" href="/" aria-label="Ouroboros home"><img src="/assets/icon_1024.png" alt=""><span>Ouroboros</span></a><nav aria-label="Text pages"><a href="/install/">Install</a><a href="/paper/">Paper</a><a href="/benchmarks/">Benchmarks</a></nav></header>
+  <main class="text-document">
+    <p class="chapter-index">COMMUNITY / PROJECTS AND RESEARCH</p>
+    <h1>Ouroboros in projects and research.</h1>
+    <p class="text-lede">Ouroboros is finding its way into other projects and research on self-developing agents. Here are examples with links to the work itself.</p>
+    <div class="hero-actions"><a class="btn btn-primary" href="/install/">Download the desktop app</a><a class="btn btn-quiet" href="/paper/">Read the technical report</a></div>
+
+    <h2>Projects adapting code and ideas</h2>
+    <ul class="link-list">
+      <li><a href="https://github.com/mikhashev/dpc-messenger">DPC Messenger</a> adapts Ouroboros's agent for its messaging system, with its own model manager, context, tools, and local state. Its <a href="https://github.com/mikhashev/dpc-messenger/blob/8b7da3903303f7f512ddf2057ee891446985208f/dpc-client/core/dpc_client_core/dpc_agent/agent.py#L1-L16">agent source</a> credits Ouroboros and explains the changes.</li>
+      <li><a href="https://github.com/dmmdea/offload-harness">offload-harness</a> reuses Ouroboros ideas for tracking failure classes, retaining review evidence, and recording checks that were not run. Its <a href="https://github.com/dmmdea/offload-harness/blob/bc9a591da38a2de622e86157184480cb838ac934/docs/architecture/decisions/0090-capability-review-2026-10-dispositions-and-reopen-triggers.md#L89">design decision</a> names the ideas it adopted.</li>
+    </ul>
+
+    <h2>Research that cites Ouroboros</h2>
+    <ul class="link-list">
+      <li><a href="https://arxiv.org/html/2608.03392v4">Self-Evolving Coding Agents</a> discusses persistent implementation changes and the distinction between a frozen benchmark snapshot and an agent that keeps developing.</li>
+      <li><a href="https://arxiv.org/html/2609.11873v3">The Last AI Built by Humans: Toward Genuine Recursive Self-Improvement</a> discusses Ouroboros as a case of post-deployment changes to agent software.</li>
+      <li><a href="https://arxiv.org/html/2609.15364v2">RSIAgent: Autonomous Exploration for Recursive Self-improvement in New Environments</a> cites Ouroboros in its related work on recursive self-improvement.</li>
+      <li><a href="https://arxiv.org/html/2609.06396v2">MetaRSI / RSI2: A Meta-Recursive Self-Improving System for Recursive Self-Improving Systems Themselves</a> includes Ouroboros in its survey of evaluation domains and verification methods.</li>
+    </ul>
+
+    <h2>Share what you are building</h2>
+    <p>If you have adapted Ouroboros, used its public evidence, or written about it, <a href="https://github.com/razzant/ouroboros/discussions">tell us in Discussions</a>. Contributions to Ouroboros itself start with the <a href="https://github.com/razzant/ouroboros/blob/ouroboros/CONTRIBUTING.md">contribution guide</a>.</p>
+  </main>
+  <footer class="text-footer"><a href="/">Home</a><a href="/install/">Install</a><a href="/paper/">Paper</a><a href="/benchmarks/">Benchmarks</a><a href="/llms.txt">llms.txt</a></footer>
+</body>
+</html>
