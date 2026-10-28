@@ -267,7 +267,8 @@ def prepare_terminal_send_event(
     )
 
 
-def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | None = None,
+                           title: str | None = "") -> Dict[str, Any]:
     """Carry current custody and origin facts without minting empty custody envelopes."""
     from ouroboros.delegate_terminal import _stored_disclosure_matches
 
@@ -287,7 +288,11 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     if usage.get("wake_silent") is True:
         fields["wake_silent"] = True
     if usage.get("wake_summary"):
-        fields["wake_summary"] = fields["suggested_name"] = str(usage["wake_summary"])
+        # The run's one sentence for its human names the card only when no authored name does
+        # (a wake); a schedule-born root keeps the schedule's name and shows the sentence under it.
+        fields["wake_summary"] = str(usage["wake_summary"])
+        if not str(title or prior.get("title") or "").strip():
+            fields["suggested_name"] = fields["wake_summary"]
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:

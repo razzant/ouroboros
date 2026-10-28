@@ -995,6 +995,7 @@
         "tool_calls": 16,
         "_is_direct_chat": true,
         "initiator": "consciousness",
+        "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,

@@ -829,6 +829,7 @@ def _write_receipt(item: Dict[str, Any], record: Dict[str, Any]) -> bool:
             result="Scheduled task queued.", metadata=dict(task.get("metadata") or {}),
             schedule_id=item["schedule_id"], schedule_name=str(record.get("name") or ""),
             schedule_admission=receipt,
+            **{key: task[key] for key in ("title", "suggested_name") if task.get(key)},
             **({"reasoning_effort": task["reasoning_effort"]} if task.get("reasoning_effort") else {}),
             **({"billing_group": task["metadata"]["billing_group"]}
                if (task.get("metadata") or {}).get("billing_group") else {}),
@@ -841,8 +842,14 @@ def _write_receipt(item: Dict[str, Any], record: Dict[str, Any]) -> bool:
         log.warning("Scheduled admission receipt failed for %s", task.get("id"), exc_info=True)
         return False
     got = stored.get("schedule_admission") if isinstance(stored.get("schedule_admission"), dict) else {}
-    return (stored.get("task_id") == task["id"] and str(stored.get("status") or "") == STATUS_SCHEDULED
-            and got == receipt)
+    landed = (stored.get("task_id") == task["id"] and str(stored.get("status") or "") == STATUS_SCHEDULED
+              and got == receipt)
+    if landed and task.get("suggested_name"):
+        from supervisor.worker_chat_lane import _broadcast_task_named
+
+        # The live card is born named (pooled progress frames carry no name); replay reads the document.
+        _broadcast_task_named({"type": "task_named", "task_id": str(task["id"]), "suggested_name": str(task["suggested_name"])})
+    return landed
 
 
 class ReceiptChanged(ValueError):

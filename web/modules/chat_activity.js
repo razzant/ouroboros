@@ -1541,7 +1541,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         [chip ? 'Coordinator' : 'Agent model', coordinator ? escapeHtml(provenance ? `${coordinator} (${provenance})` : coordinator) : ''],
         // An unobserved execution of a card without an executor is its compact model fact already.
         [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
-        ['Started by', record.initiator === 'consciousness' ? 'Consciousness' : ''],
+        ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
         ['Tool calls', !supervision && record.toolCalls === 0 ? '0' : ''],
         ['Rounds', !supervision && rounds ? `${record.rounds} · usable solve response${record.rounds === 1 ? '' : 's'}` : ''],
         ['Supervision', supervision && (rounds || toolCalls)

@@ -327,7 +327,8 @@ def _periodic_supervisor_maintenance(
     Each tick starts the schedule duty when its previous pass ended;
     the 20 s cadence independently starts cancel, delivery, question, notice, usage and synthesis duties,
     plus the held-Continue re-check while a pending Continue waits under its writer hold; every 600 s
-    the custody block (reaping, delegated runs, then the working copies' retirers); every 300 s the reconcile
+    the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
+    retirers); every 300 s the reconcile
     block (zombie heal, the age-only retirers, drive settlement, then the maintenance dispatcher). The first
     two stamp here before handing off; the reconcile pass stamps when it ENDS (issue #1230). A due cadence
     whose latch is still held journals the duty's stall once, with its thread's stack (``_duty_busy``).
@@ -459,8 +460,16 @@ def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> No
             if _stop_requested(stop_event):
                 return
             _cursor_refresh_settled_terminals(_live_task_ids)
+            # The engine's per-route failure shares, after the runs above settled: attach-only, one row
+            # when they changed, so the Runtime vitals and deep self-review read them without a UI poll.
+            step = "refresh_route_health"
+            if _stop_requested(stop_event):
+                return
+            from ouroboros.claudexor_exit_facts import refresh_route_health
+
+            refresh_route_health()
             for name in ("reap_orphaned_processes", "settle_task_scopes", "reconcile_delegated_runs",
-                         "cursor_refresh_settled_terminals"):
+                         "cursor_refresh_settled_terminals", "refresh_route_health"):
                 _step_recovered(name)
         except Exception:
             _step_failed(step, "Periodic custody step %s failed")

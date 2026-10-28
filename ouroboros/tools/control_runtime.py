@@ -942,33 +942,30 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "") -> str:
-    """Stage an author act; an own-clock or focused wake, or a schedule-born root, may choose silence."""
+    """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
+    without a Presence binding) may choose silence and may leave one sentence for its human."""
     from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.task_results import resolve_ctx_lineage
 
     metadata = getattr(ctx, "task_metadata", None) or {}
-    wake = bool(getattr(ctx, "is_direct_chat", False)) and (is_own_clock_wake(metadata) or is_focus_wake(metadata))
+    occurrence = metadata.get("schedule_occurrence")
+    self_started = (bool(getattr(ctx, "is_direct_chat", False)) and (is_own_clock_wake(metadata) or is_focus_wake(metadata))
+                    or (isinstance(occurrence, dict)
+                        and str(occurrence.get("schedule_id") or "").strip()
+                        and str(occurrence.get("token") or "").strip()
+                        and resolve_ctx_lineage(ctx)["is_root_task"]
+                        and presence_caller_binding(ctx) is None))
     summary = " ".join(str(summary or "").split())
-    if summary and not wake:
+    if silent and action != "finish":
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-            text="ERROR: COMPLETION_ARGUMENT: summary is available only on a consciousness wake's own turn"))
+            text="ERROR: COMPLETION_ARGUMENT: silent requires action=finish"))
+    if (summary or silent) and not self_started:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+            text="ERROR: COMPLETION_ARGUMENT: silent and summary are available only on a self-started run: "
+                 "a consciousness wake's own turn, or a schedule-born root without a Presence binding"))
     allow_empty = False
     if silent:
-        if action != "finish":
-            return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-                text="ERROR: COMPLETION_ARGUMENT: silent requires action=finish"))
-        from ouroboros.dialogue_provenance import presence_caller_binding
-        from ouroboros.task_results import resolve_ctx_lineage
-
-        occurrence = metadata.get("schedule_occurrence")
-        scheduled_root = (isinstance(occurrence, dict)
-                          and str(occurrence.get("schedule_id") or "").strip()
-                          and str(occurrence.get("token") or "").strip()
-                          and resolve_ctx_lineage(ctx)["is_root_task"]
-                          and presence_caller_binding(ctx) is None)
-        if not (wake or scheduled_root):
-            return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-                text="ERROR: COMPLETION_ARGUMENT: silent is available only on a consciousness wake's own turn, "
-                     "or a schedule-born root without a Presence binding"))
         allow_empty = True
         if answer is None and not answer_sha256:
             answer = ""  # silence needs no words; complete bytes given anyway stay an internal result

@@ -365,7 +365,7 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
     parent = str(row.get("parent_task_id") or result.get("parent_task_id") or "")
     role = str(row.get("delegation_role") or result.get("delegation_role") or "")
     noun = f"child task {task_id} of {parent}" if role == "subagent" and parent else f"task {task_id}"
-    return f"- {noun} {status}{cost_text}{where}, {when}: {title}".rstrip(": ")
+    return f"- {noun} {status}{cost_text}{where}, {when}: {title}".rstrip(": ") + summary
 
 
 # --- canonical transitions: identities in the task results, not chat rows or stamps --------

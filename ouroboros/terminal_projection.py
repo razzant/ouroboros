@@ -262,7 +262,7 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
         "project_id": resolve_project_id(row), "chat_id": chat_id,
         "delegation_role": str(row.get("delegation_role") or ""), "role": role,
         "status": row["status"], "outcome": outcome, "outcome_phase": phase, "outcome_final": True,
-        "wake_silent": row.get("wake_silent") is True, "quiet_effective": quiet, **{key: row[key] for key in ("suggested_name", "wake_summary") if row.get(key)},
+        "wake_silent": row.get("wake_silent") is True, "quiet_effective": quiet, **{key: row[key] for key in ("suggested_name", "wake_summary", "schedule_name") if row.get(key)},
         "outcome_authority": "canonical_task_result_after_finalization",
         # Memory stamps copy the recorded objective; readers interpret it using answer provenance.
         "outcome_axes": row.get("outcome_axes") or {}, "reason_code": str(row.get("reason_code") or ""),

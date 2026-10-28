@@ -785,9 +785,13 @@ export function createChatInstance({
             || (work ? record.lastHumanHeadline || (record.finished ? 'Task activity' : '') : '');
     }
 
-    // Write only on change: a rewrite would destroy a selection being copied.
+    // Write only on change: a rewrite would destroy a selection being copied. A finished root's own sentence is its
+    // line under an authored title; a wake's sentence is its title, so its last narration stays the line; a host cause
+    // holding the line stays.
     function syncCardHeadline(record) {
-        const title = cardTitle(record), line = record.collapsedActivity;
+        const title = cardTitle(record);
+        const own = record.finished && !record.isSubagent && !record.causeHeld && record.wakeSummary;
+        const line = own && own !== title ? own : record.collapsedActivity;
         if (record.titleEl.textContent !== title) { record.titleEl.textContent = title; portals.relabel(record); }
         renderCollapsedActivity(record, projectCollapsedActivity({ isSubagent: record.isSubagent, suggestedName: title, headline: line, body: line }));
     }
@@ -1099,12 +1103,14 @@ export function createChatInstance({
     function noteTaskDetails(record, detail) {
         const files = syncSettledItems(record, detail, { write: withStableViewport });
         const words = record && detail && 'wake_summary' in detail && record.wakeSummary !== detail.wake_summary;
-        if (words) record.wakeSummary = detail.wake_summary;
+        if (words) { record.wakeSummary = detail.wake_summary; syncCardHeadline(record); }  // live and replay meet here: the sentence is also the finished card's line
+        const origin = record && detail?.schedule_name && record.scheduleName !== detail.schedule_name;
+        if (origin) record.scheduleName = detail.schedule_name;
         const history = syncHistoryRetentionItem(record, detail);
         const candidate = syncCandidateRemainderItem(record, detail);
         const chain = episodes.note(record, detail);
         const receipt = syncSwarmReceipt(record, detail);
-        return Boolean((words || files || history || candidate) && (renderLiveCardMeta(record), updateLiveCardCount(record), renderLiveCardTimeline(record), true))
+        return Boolean((words || origin || files || history || candidate) && (renderLiveCardMeta(record), updateLiveCardCount(record), renderLiveCardTimeline(record), true))
             || chain || receipt;
     }
 
@@ -2399,7 +2405,7 @@ export function createChatInstance({
 
                 const historicalTerminalProjections = new Set();
                 for (const msg of messages) if (msg.historical_terminal && msg.task_id) {
-                    historicalTerminals.set(msg.task_id, { ...msg.historical_terminal, wake_summary: msg.wake_summary });
+                    historicalTerminals.set(msg.task_id, { ...msg.historical_terminal, wake_summary: msg.wake_summary, suggested_name: msg.suggested_name, schedule_name: msg.schedule_name });
                     if (msg.summary_kind === 'terminal_root_projection' || msg.outcome_final === true) {
                         historicalTerminalProjections.add(msg.task_id);
                     }
@@ -2534,6 +2540,7 @@ export function createChatInstance({
                     if (subagentChildParents.has(tid)) return routeSubagentTerminalToCard(tid, terminalRecord);
                     const record = liveCardRecords.get(tid);
                     if (!record) return;
+                    if (terminalRecord.suggested_name) applySuggestedName(tid, terminalRecord.suggested_name);  // evidence names a card whose own rows lie elsewhere
                     record.quietEffective = terminalRecord.quiet_effective ?? record.quietEffective;
                     noteTaskDetails(record, terminalRecord);
                     insertCardIfNeeded(tid);

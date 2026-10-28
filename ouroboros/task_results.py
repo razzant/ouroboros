@@ -500,7 +500,7 @@ def write_task_result(
 
             title = wake_cause_title(projected_fields.get("metadata", existing.get("metadata")) or {})
             if title or existing.get("wake_summary"):
-                projected_fields.update(wake_summary=None, suggested_name=title or None)
+                projected_fields.update(wake_summary=None, suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if _terminal_observed else None, replica=_terminal_time_source))

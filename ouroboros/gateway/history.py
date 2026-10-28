@@ -315,7 +315,7 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     for key in ("model_execution", "review_projection", "history_retention", "terminal_time", "cancel_origin"):
         if isinstance(entry.get(key), dict):
             rec[key] = dict(entry[key])
-    for key in ("suggested_name", "wake_summary"):
+    for key in ("suggested_name", "wake_summary", "schedule_name"):
         if entry.get(key): rec[key] = str(entry[key])
     for key in ("tool_calls", "rounds", "tool_errors", "routing_tool_calls", "completion_tool_calls"):
         if key in entry:
@@ -482,6 +482,7 @@ def _annotate_terminal_task_truth(
                 for key in ("model_execution", "cancel_origin", "review_projection"):
                     if isinstance(result.get(key), dict):
                         terminal_truth[key] = dict(result[key])
+                terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name") if result.get(key)})
                 if isinstance(result.get("delegated_runs_unreconciled"), list):  # the current debt (#1583)
                     terminal_truth["delegated_runs_unreconciled"] = list(result["delegated_runs_unreconciled"])
                 retention = retention_summary(result)
@@ -758,7 +759,7 @@ def _collect_chat_rows(
                                             "system_type": "task_summary", "summary_kind": entry["summary_kind"],
                                             "task_id": tid, "ts": historical["ts"],
                                             "historical_terminal": dict(historical), **_history_identity(entry)})
-                    replay_evidence[-1].update({**{k: entry[k] for k in ("wake_silent", "quiet_effective") if type(entry.get(k)) is bool}, **{k: str(entry[k]) for k in ("suggested_name", "wake_summary") if entry.get(k)}})
+                    replay_evidence[-1].update({**{k: entry[k] for k in ("wake_silent", "quiet_effective") if type(entry.get(k)) is bool}, **{k: str(entry[k]) for k in ("suggested_name", "wake_summary", "schedule_name") if entry.get(k)}})
             # Skip A2A virtual chat_ids so A2A task traffic does not appear in human chat history.
             if is_a2a_chat_id(entry.get("chat_id", 1)):
                 continue

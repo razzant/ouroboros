@@ -395,8 +395,9 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor_metadata.py — handshake/catalog cache (`storeId`)
     claudexor_run_events.py, claudexor_observation.py — Catalog-negotiated, bounded run-journal SSE frames and durable seq cursors, no polling owner; the run observation adapter (§6 Delegated subagents)
     claudexor_routing.py — Catalog-negotiated passive read of the engine's account/model marks (§3 Agent accounts)
+    claudexor_route_health.py — Catalog-negotiated passive read of the engine's per-route failure shares (§9)
   claudexor_runtime.py, claudexor_runtime_retention.py — Reviewed next-spawn pin in `data/state/cx`: seed/download, verify/probe, atomic promote; no mutable current; override `OUROBOROS_CLAUDEXOR_BIN` (§6); copies neither pinned nor serving retire (§5)
-  claudexor_exit_facts.py — Bounded saved exits; live memory/loop/store/admission facts and dated capacity snapshots, without lifecycle policy (§9)
+  claudexor_exit_facts.py — Bounded saved exits; live memory/loop/store/admission facts, dated capacity snapshots, route-health rows and the newest one's file, without lifecycle policy (§9)
   claudexor_daemon.py, claudexor_harness_install.py — Owned `data/claudexor`: lazy start, authenticated attach, `stop_outcome`, failed-start latch; vendor-CLI repair by the pinned installer (§9)
   claudexor_startup_failure.py — Stdlib `ExitFact`; `failed_without_control` drives spawn latch; diagnostic-only log labels and latch record (§9)
   gateway/ — Gateway Boundary v1 (below): browser-facing route ownership and the frontend contract SSOT
@@ -672,6 +673,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── post_task_evolution_counter.json ← per-drive every_n counter
 │   │   ├── scheduled_tasks.json   ← cron/one-shot schedules and `kind:"notify"` notes (§5)
 │   │   ├── claudexor_rotation_provisioning.json ← last rotation receipt
+│   │   ├── claudexor_route_health.json ← the engine's newest per-route failure shares, replaced on change
 │   │   ├── subagent_last_delegation.json ← dated helper observations, not dispatch authority
 │   │   ├── update_letter.json     ← update letter with `last_good`
 │   │   ├── projects.json          ← Project registry; tombstones are durable

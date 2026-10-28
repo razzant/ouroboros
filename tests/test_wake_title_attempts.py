@@ -125,10 +125,13 @@ def test_admission_titles_use_only_typed_wake_causes_and_place_labels(metadata, 
     assert wake_cause_title(metadata) == expected
 
 
-@pytest.mark.parametrize("metadata,expected", [({"initiator": "owner"}, "Old coined title"),
-    ({"initiator": "consciousness", "wake_cause": "own_clock"}, "Own time")])
-def test_new_attempt_resets_a_wakes_legacy_name_but_preserves_owner_naming(tmp_path, metadata, expected):
-    seed_wake(tmp_path, status="running", metadata=metadata, task_attempt=1, suggested_name="Old coined title")
+@pytest.mark.parametrize("metadata,fields,expected", [({"initiator": "owner"}, {}, "Old coined title"),
+    ({"initiator": "consciousness", "wake_cause": "own_clock"}, {}, "Own time"),
+    # A schedule-born root's sentence goes with its attempt; the schedule's authored name comes back.
+    ({"schedule_occurrence": {"schedule_id": "daily-check", "token": "t1"}},
+     {"title": "Daily check", "wake_summary": "Checked the disk: 30 GiB free."}, "Daily check")])
+def test_new_attempt_resets_a_wakes_legacy_name_but_preserves_owner_naming(tmp_path, metadata, fields, expected):
+    seed_wake(tmp_path, status="running", metadata=metadata, task_attempt=1, suggested_name="Old coined title", **fields)
     row = write_task_result(tmp_path, "214a31b6", "running", task_attempt=2)
     assert row["suggested_name"] == expected and not row.get("wake_summary")
 

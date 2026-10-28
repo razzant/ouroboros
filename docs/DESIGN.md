@@ -631,8 +631,10 @@ describe lifecycle state, while the adjacent Disable/Enable, Restore and Delete
 controls state the owner action. Lifecycle and the last run's outcome are
 separate facts: the outcome line says the settled word as stored (`completed`,
 `failed`, `cancelled`), `ran · no message` for a quiet run, or `outcome not
-observed yet` until the scheduler has read the settled result; it never says
-running, and only the host's own observation writes `previous run still open`.
+observed yet` until the scheduler has read the settled result, then the run's
+line: a host notice, else the sentence the run wrote for its human (whole),
+else the end of its answer; it never says running, and only the host's own
+observation writes `previous run still open`.
 A consumed one-shot is history whether its task succeeded or failed; the status
 never implies a result. A row is headed by its name; the instruction stays
 readable and expands by touch, and a waiting row says why inline, never in a
@@ -1614,7 +1616,7 @@ Expanded ordinary cards disclose earlier Files, timeline, Reviews and children
 in collapsible sections using their original content, never duplicate cards.
 A Project portal still reaches that content through its room.
 
-**Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and a terse `Done · no message` row in its own room; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
+**Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
 
 History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Model metadata says `Last solve response`, naming the initial request only when the route changed.
 
@@ -2173,14 +2175,14 @@ action changes model/account only. Closing the chat disposes view resources
 without claiming it stopped the task; continuation requires the Ouroboros
 process to keep running.
 
-A wake keeps the ordinary task card: its accepted summary fills the existing title slot and leads Details as “In its words”; its answer remains its own note when it finishes silently.
-While running, the server supplies Own time or the focus's cause label in that
-same title slot; no summary leaves that title in place. Old wakes retain their
-stored title, with no invented sentence. Model waits, controls and temporary
-model changes last until the turn ends; the persistence checkbox still saves
-the consciousness role. `Started by: Consciousness` keeps the origin in Details
-and on any delivered answer. The summary is authored text, not another message
-or card.
+A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary fills the title slot when the run has no authored name (a wake), else it is the card's line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
+While running, the server supplies Own time, the focus's cause label or the
+schedule's name in that title slot; no summary leaves the title in place, with
+no invented sentence. Model waits, controls and temporary model changes last
+until the turn ends; the persistence checkbox still saves the consciousness
+role. `Started by: Schedule · <name>` keeps the origin in Details;
+`Started by: Consciousness` keeps it in Details and on its delivered answers.
+The summary is authored text, not another message or card.
 
 An already-delivered answer does not close a still-open post-task synthesis.
 Consolidation or chooser waits use the same role controls in that task's

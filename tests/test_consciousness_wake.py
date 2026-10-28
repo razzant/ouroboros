@@ -192,6 +192,19 @@ def test_only_direct_turns_with_authored_lines_join_the_observation_text(tmp_pat
     assert row["result"] not in observation.full_text(), "the whole note has its separate previous-wake slot"
 
 
+@pytest.mark.parametrize("summary", ["Checked the disk: 30 GiB free.", ""])
+def test_a_scheduled_runs_sentence_joins_its_terminal_line_and_its_note_stays_out(tmp_path, summary):
+    since = T0 - 3600
+    seed_result(tmp_path, "sched1", {"task_id": "sched1", "status": "completed", "ts": _iso(since + 5),
+        "updated_at": _iso(since + 5), "_schema_version": 1, "description": "Daily check", "metadata": {},
+        "result": "Private note.", "wake_silent": True, **({"wake_summary": summary} if summary else {})})
+    _chat(tmp_path, _summary("sched1", since + 10))
+    observation = _observe(tmp_path)
+    line = next(line for kind, _, line in observation.events if kind == "task_terminal" and "sched1" in line)
+    assert line.endswith(": Daily check" + (f": {summary}" if summary else ""))
+    assert "Private note." not in observation.full_text()
+
+
 def _iso(ts):
     return wake._iso(ts)
 

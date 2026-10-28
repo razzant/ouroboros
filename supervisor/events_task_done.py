@@ -778,7 +778,7 @@ def _resolve_lifecycle_fault(
             default=HIDDEN_CHAT_ID,
         ),
         "status": status,
-        "wake_silent": stored.get("wake_silent") is True, **({"wake_summary": stored["wake_summary"]} if stored.get("wake_summary") else {}),
+        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "schedule_name") if stored.get(key)},
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
@@ -1047,7 +1047,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
-        "wake_silent": known_result.get("wake_silent") is True, **({"wake_summary": known_result["wake_summary"]} if known_result.get("wake_summary") else {}),
+        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "schedule_name") if known_result.get(key)},
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys
         # its chrome on host truth: the worker frame carries it, the durable

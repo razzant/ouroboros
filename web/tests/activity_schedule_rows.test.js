@@ -80,15 +80,16 @@ test('last-run outcomes keep settled words and use the canonical end time', () =
     assert.doesNotMatch(untimed, /<time/);
 });
 
-test('quiet completion hides internal words while a notice-bearing run shows its notice', () => {
-    const quiet = { state: 'completed', quiet: true, notice: false, line: 'Internal words' };
+test('a quiet completion shows the run\'s own sentence after ran · no message; a notice stays the host\'s', () => {
+    // The server decides what the line is (a notice, the run's sentence, an answer's end); the row shows it as authored words.
+    const quiet = { state: 'completed', quiet: true, notice: false, line: 'Checked: <nothing> changed.' };
     const html = scheduleRowHtml({ ...standing, outcome: quiet });
-    assert.match(html, /last run: ran · no message/);
-    assert.doesNotMatch(html, /Internal words/);
+    assert.match(html, /last run: ran · no message · <span data-i18n-authored>Checked: &lt;nothing&gt; changed\.<\/span><\/span>/);
+    assert.match(scheduleRowHtml({ ...standing, outcome: { ...quiet, line: '' } }), /last run: ran · no message<\/span>/);
     const notice = scheduleRowHtml({ ...standing,
         outcome: { ...quiet, quiet: false, notice: true, line: 'Unsettled <review>' } });
-    assert.match(notice, /last run: completed · notice: Unsettled &lt;review&gt;/);
-    assert.doesNotMatch(notice, /no message|delivered/);
+    assert.match(notice, /last run: completed · notice: Unsettled &lt;review&gt;<\/span>/);
+    assert.doesNotMatch(notice, /no message|delivered|data-i18n-authored>Unsettled/);
     const failed = scheduleRowHtml({ ...standing, outcome: { ...quiet, state: 'failed' } });
     assert.match(failed, /last run: failed/);
     assert.doesNotMatch(failed, /ran · no message/);

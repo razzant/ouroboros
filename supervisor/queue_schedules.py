@@ -652,7 +652,7 @@ def _scan_outcomes(root, snapshot):
     """
     from ouroboros.task_results import load_task_result
     from ouroboros.task_status import SETTLED_STATUSES
-    from ouroboros.task_finalization import terminal_host_notice_text
+    from ouroboros.task_finalization import quiet_finish, terminal_host_notice_text
     from ouroboros.terminal_time import terminal_time_fact
     from ouroboros.store import acquisition_budget
 
@@ -667,13 +667,14 @@ def _scan_outcomes(root, snapshot):
             if not result or result.get("status") not in SETTLED_STATUSES:
                 continue
             notice = terminal_host_notice_text(result)
-            silent = result.get("wake_silent") is True
-            # A host notice is the run's public line; a quiet run's own words never are.
-            text = str(notice or ("" if silent else result.get("result")) or "").strip()
+            words = str(result.get("wake_summary") or "").strip()
+            # A host notice is the run's public line, else the sentence it wrote for its human (whole),
+            # else the end of a spoken answer; a quiet run's internal note never is.
+            text = str(notice or ("" if words or result.get("wake_silent") is True else result.get("result")) or "").strip()
             observed[str(row.get("id") or "")] = {
-                "task_id": task_id, "state": result["status"], "quiet": silent and not bool(notice),
+                "task_id": task_id, "state": result["status"], "quiet": quiet_finish(result),
                 "notice": bool(notice), "ended_at": terminal_time_fact(result)["occurred_at"],
-                "line": text.splitlines()[-1][:160] if text else "",
+                "line": text.splitlines()[-1][:160] if text else words,
             }
         except Exception:
             log.debug("schedule result %s not observed this pass", task_id, exc_info=True)

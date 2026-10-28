@@ -180,7 +180,7 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("finish_task", {"name": "finish_task",
             "description": "Select the complete answer and request completion of your current task. "
                 "Use finish after considering the observed work, or stop with a rationale naming unfinished work. "
-                "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a consciousness wake's own turn or a schedule-born root without a Presence binding, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
+                "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a root's owner reads it as your reply, a child's parent as your report."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
@@ -189,8 +189,8 @@ def get_tools() -> List[ToolEntry]:
                 }, "required": ["owner_source_sha256"]},
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
-                "silent": {"type": "boolean", "default": False, "description": "A consciousness wake or a schedule-born root without a Presence binding may finish without a message when no human reply is owed; any answer stays in the durable result as internal text (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "On a consciousness wake's own turn: one plain sentence for your human, in their language: what this wake did or decided. It titles the wake's card and its row on the Consciousness page; your answer or note stays as written."},
+                "silent": {"type": "boolean", "default": False, "description": "A self-started run may finish without a message when no human reply is owed; any answer stays in the durable result as internal text (wake_silent)."},
+                "summary": {"type": "string", "default": "", "description": "On a self-started run: one short plain sentence for your human, in their language: what this run did, found or decided. When you finish silently it is what they see instead of a message: on the run's card (a wake's title; a scheduled run's line under the schedule's name) and first in its Details, as the schedule's last-run line in Activity or the wake's row on the Consciousness page; the next run of the same schedule, or the next wake, reads it. Your answer or note stays as written."},
             }, "required": ["action"]}}, _finish_task),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",

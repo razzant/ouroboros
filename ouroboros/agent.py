@@ -149,7 +149,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
             trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),
-            **effort_result_fields(task), **terminal_result_fields(usage),
+            **effort_result_fields(task), **terminal_result_fields(usage, title=task.get("title")),
         )
     except Exception:
         log.debug("Failed to persist task exception projection", exc_info=True)
