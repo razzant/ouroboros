@@ -1,0 +1,36 @@
+name: Disposable NTFS holder measurement
+on:
+  workflow_dispatch:
+  push:
+    branches: [qualification/update-ntfs-39e]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Choose a fresh disposable directory
+        run: |
+          $runDir = Join-Path $env:RUNNER_TEMP ('ntfs-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+          "NTFS_RUN_ROOT=$runDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Record native measurements
+        run: ./devtools/update_ntfs_probe/run.ps1 -RunRoot $env:NTFS_RUN_ROOT
+      - name: Retain raw evidence even when the probe fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ntfs-holder-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.NTFS_RUN_ROOT }}/evidence/
+            ${{ env.NTFS_RUN_ROOT }}/measurement/events.jsonl
+            ${{ env.NTFS_RUN_ROOT }}/measurement/*/*.stdout
+            ${{ env.NTFS_RUN_ROOT }}/measurement/*/*.stderr
+          if-no-files-found: warn
+          retention-days: 14

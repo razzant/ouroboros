@@ -1,0 +1,10 @@
+{
+  "python_version": "3.10.11",
+  "python_url": "https://api.nuget.org/v3-flatcontainer/python/3.10.11/python.3.10.11.nupkg",
+  "python_size": 16283939,
+  "python_sha512_base64": "I6YAwLtkdpiALaZ5IA/0TAj02CuTnhCZM2gaWfn13TDSyvPuCRGKl1mAGbbk0HvXn/3qITlAWjebwKslkXj5UA==",
+  "python_sha256": "7c6f99b160a36a7e09492dfcff2b0a3a60bb5229ca44cdcc3ecb32871a6144d0",
+  "checksum_source": "https://api.nuget.org/v3/catalog0/data/2023.04.05.01.14.08/python.3.10.11.json",
+  "checkout": "11bd71901bbe5b1630ceea73d27597364c9af683",
+  "upload_artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02"
+}
