@@ -329,3 +329,108 @@ def test_place_reader_reads_again_when_an_import_changes_its_room(skills_browser
         (evidence / f'{prefix}.json').write_text(json.dumps(observations, indent=2))
         skills.close(browser)
         client.close()
+
+
+@pytest.mark.parametrize('engine,width,theme', MATRIX)
+def test_place_reader_shows_reactions_as_labelled_facts(skills_browser, tmp_path, monkeypatch, engine, width, theme):
+    """Real producer rows through the real history API: a person's, a chat's, an aggregate's reaction and my own
+    receipt read as wordless facts at both widths, with nothing typed as a person's or my speech; words a receipt
+    sent beside its reaction stay my speech, followed by its fact."""
+    from dataclasses import replace
+    from ouroboros.place_intake import decide_attention, reaction_refusal, settle_heard
+    from ouroboros.presence_admission import admit_presence_turn
+    from ouroboros.presence_delivery import PresenceDeliveryRecorder
+    from ouroboros.presence_runner import capture_presence_event
+    client, place, _task, event = scenario(tmp_path, monkeypatch)
+    admission = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill='bridge',
+                                    provider='chat', account_id='qa', conversation_id='design')
+    long_excerpt = 'A very long retained target sentence ' * 13
+    target = {'message_id': '1712.0001', 'resolution': 'resolved',
+              'author': {'display_name': 'Maya Private'}, 'excerpt': {'text': long_excerpt.strip()[:500], 'truncated': True}}
+    thumb = {'type': 'name', 'value': 'thumbsup'}
+    for key, actor, fact in (
+        ('person', {'kind': 'user', 'platform_actor_id': 'ann', 'display_name': 'Ann Reader'},
+         {'change': 'add', 'new': [thumb], 'target': target}),
+        ('chat', {'kind': 'chat', 'platform_actor_id': '-100', 'display_name': 'News channel', 'authenticated': False},
+         {'change': 'replace', 'old': [thumb], 'new': [{'type': 'emoji', 'value': '🤣'}],
+          'target': {'message_id': '1712.0002', 'resolution': 'unresolved'}}),
+        ('aggregate', {'kind': 'anonymous', 'authenticated': False},
+         {'change': 'count', 'counts': [{'type': 'emoji', 'value': '🤣', 'count': 4}],
+          'target': {'message_id': '1712.0002', 'resolution': 'unresolved'}}),
+    ):
+        reaction = replace(event, source_event_id=f'qa-reaction-{key}', actor=actor, text='', facts=(),
+                           message={'reaction': {'schema_version': 1, **fact}})
+        assert not reaction_refusal({'message': reaction.message, 'actor': actor, 'text': '', 'thread_id': ''})
+        decision, details = decide_attention(tmp_path, admission, reaction)
+        assert decision == 'silent' and details['reason'] == 'reaction_context_only'
+        settle_heard(tmp_path, capture_presence_event(admission, reaction, drive_root=tmp_path), reaction, details['reason'])
+    PresenceDeliveryRecorder(tmp_path).record('bridge', {
+        'schema_version': 1, 'delivery_id': 'qa-reaction-mine', 'part_id': 'status', 'state': 'delivered', 'provider': 'chat',
+        'account_id': 'qa', 'conversation_id': 'design', 'thread_id': '', 'text': '', 'format': '', 'origin': {'kind': 'tool'},
+        'message': {'kind': 'operation', 'reaction': {'schema_version': 1, 'operation': 'set', 'new': [thumb],
+                    'target': {'message_id': '1712.0001', 'resolution': 'resolved'}, 'effect': 'applied'}}})
+    PresenceDeliveryRecorder(tmp_path).record('bridge', {
+        'schema_version': 1, 'delivery_id': 'qa-reaction-words', 'part_id': '0', 'state': 'delivered', 'provider': 'chat',
+        'account_id': 'qa', 'conversation_id': 'design', 'thread_id': '', 'text': 'Noted, **thanks**.', 'format': '',
+        'origin': {'kind': 'tool'}, 'message': {'reaction': {'schema_version': 1, 'operation': 'add', 'new': [thumb],
+                    'target': {'message_id': '1712.0002', 'resolution': 'resolved'}, 'effect': 'applied'}}})
+    skill = fixture('extensions_fix_r1.json')['skills'][0]
+    skill.update(name='bridge', description='Synthetic connector for captured conversations.', connects=['chat'], install=None)
+    evidence = Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(tmp_path / 'evidence'))) / 'place-reader-reactions'
+    evidence.mkdir(parents=True, exist_ok=True)
+    browser = getattr(skills_browser, engine).launch(headless=True)
+    page = browser.new_page(viewport={'width': width, 'height': 844 if width == 390 else 900}, device_scale_factor=1)
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    skills = open_skills(page, extensions=[skill])
+    page.route(URL, lambda route: route.fulfill(content_type='text/html; charset=utf-8',
+        body=_document().replace('<head>', '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">')))
+    def api(request):
+        assert request.method == 'GET', request.url
+        url = urlsplit(request.url)
+        response = client.get(url.path + ('?' + url.query if url.query else ''))
+        return response.status_code, response.json()
+    for path in ('/api/places', f'/api/places/{place.place_id}/rooms', '/api/chat/history'):
+        skills.answers[path] = api
+    try:
+        page.goto(URL, wait_until='networkidle')
+        page.add_script_tag(url='/static/purify.min.js')
+        page.add_script_tag(url='/static/marked.min.js')
+        page.add_style_tag(url='/static/settings.css')
+        page.add_style_tag(url='/static/consciousness.css')
+        page.evaluate("({theme,width}) => { document.documentElement.classList.add('ouro-ui'); document.documentElement.dataset.theme=theme; "
+                      "document.documentElement.dataset.layout=width < 720 ? 'stacked' : 'wide'; }", {'theme': theme, 'width': width})
+        page.locator('.skills-card[data-skill="bridge"] .skills-card-name').click()
+        page.locator(f'.skills-detail-sheet [data-place-open="{place.place_id}"]').click()
+        sheet = page.locator('.place-sheet')
+        sheet.locator('[data-place-room]').first.click()
+        reactions = sheet.locator('.place-convo-row:has(.place-convo-reaction)')
+        reactions.first.wait_for()
+        assert reactions.count() == 5
+        rows = reactions.evaluate_all("""nodes => nodes.map(row => ({who: row.querySelector('.place-convo-who').textContent,
+            words: row.querySelector('.place-convo-reaction').textContent, facts: row.querySelector('.place-convo-meta').textContent,
+            speech: row.querySelectorAll('.place-convo-text').length, voice: row.className,
+            said: row.querySelector('.place-convo-text strong')?.textContent || '',
+            order: [...row.children].map(node => ['place-convo-meta', 'place-convo-text', 'place-convo-reaction']
+                .find(name => node.classList.contains(name)) || node.className)}))""")
+        assert [row['who'] for row in rows] == ['Ann Reader', 'News channel', 'Anonymous reactions', 'Ouroboros', 'Ouroboros']
+        assert rows[0]['words'].startswith('Reaction: added thumbsup on message 1712.0001 from Maya Private: "')
+        assert rows[0]['words'].endswith('(excerpt, truncated)')
+        assert rows[1]['words'] == 'Reaction: changed thumbsup to 🤣 on message 1712.0002; its conversation is not resolved'
+        assert rows[2]['words'] == 'Reaction: counts observed: 🤣 4 on message 1712.0002; its conversation is not resolved'
+        assert rows[3]['words'] == 'Reaction: set reaction thumbsup, requested on message 1712.0001'
+        assert all(row['speech'] == 0 for row in rows[:4]) and all('Heard as context' in row['facts'] for row in rows[:3])
+        assert 'Delivered' in rows[3]['facts'] and 'is-assistant' in rows[3]['voice']
+        assert rows[4]['words'] == 'Reaction: added reaction thumbsup, requested on message 1712.0002'
+        assert (rows[4]['speech'], rows[4]['said'], 'is-assistant' in rows[4]['voice']) == (1, 'thanks', True)
+        assert rows[4]['order'] == ['place-convo-meta', 'place-convo-text', 'place-convo-reaction']  # words, then the act
+        assert not any('is-owner' in row['voice'] for row in rows)
+        reactions.first.scroll_into_view_if_needed()
+        page.screenshot(path=str(evidence / f'{engine}-{width}-{theme}.png'))
+        geometry = sheet.evaluate("""el => { const body = el.querySelector('[data-place-body]');
+            return {page: document.documentElement.scrollWidth, width: innerWidth, body: [body.clientWidth, body.scrollWidth],
+                    fits: [...el.querySelectorAll('.place-convo-reaction')].every(n => n.getBoundingClientRect().right <= body.getBoundingClientRect().right + 1)}; }""")
+        assert geometry['page'] <= geometry['width'] and geometry['body'][1] <= geometry['body'][0] + 1 and geometry['fits'], geometry
+        assert not errors, errors
+    finally:
+        browser.close()

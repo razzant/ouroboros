@@ -613,7 +613,8 @@ and manifest `labels`, without `identity` or `can_confirm`. `PlaceStatusPayload`
 and overlays status labels on manifest labels; absent fields preserve older rendering. `RecentWake.as` declares
 the optional `{label, owner}` account stamp.
 `PlaceHistoryFacts`, alongside `PlaceHistoryAttention` in the Place twins, declares optional heard `facts`,
-captured `identity`, outgoing `sends_as` / `sends_as_owner`, and held `held_text` / `held` / `checked`. These are
+captured `identity`, outgoing `sends_as` / `sends_as_owner`, held `held_text` / `held` / `checked`, and
+`reaction` (`{summary}`, host English for a row's typed reaction, never speech; words it sent stay `text`). These are
 retained room facts, not guesses from current settings. Every consumed wire key stays pinned by
 `tests/test_client_contract_bindings.py`.
 

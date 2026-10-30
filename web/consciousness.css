@@ -338,6 +338,7 @@ textarea.ui-control.consciousness-owner-words {
 .place-convo-row time { font-variant-numeric: tabular-nums; }
 .place-convo-fact::before { content: '·'; margin-inline-end: var(--space-2); }
 .place-convo-text { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
+.place-convo-reaction { overflow-wrap: anywhere; }
 .place-convo-text.chat-markdown > :first-child { margin-top: 0; }
 .place-convo-text.chat-markdown > :last-child { margin-bottom: 0; }
 .place-convo-row.is-system { padding: var(--space-2) var(--space-4); border-radius: var(--radius-inner); background: var(--system-bubble-bg); }

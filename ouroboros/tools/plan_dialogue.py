@@ -221,6 +221,9 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
 def _line(number: int, row: dict) -> str:
     body = _quiz_text(row, provenance=True) if row.get("type") in {"quiz", "quiz_answer", "quiz_closed"} and isinstance(row.get("quiz"), dict) \
         else str(row.get("text") or "")
+    reaction = row.get("reaction") if isinstance(row.get("reaction"), dict) else {}
+    fact = str(reaction.get("words") or "")  # a reaction's labelled fact, beside the row's own words, never in them
+    body = f"{body}\n{fact}" if body and fact else body or fact
     names = [next((str(a[k]) for k in _ATTACHMENT_NAME_KEYS if a.get(k)), "")
              for a in (row.get("attachments") or []) if isinstance(a, dict)]
     body = body.replace("\n", "\n  ") + (f" [attachments: {', '.join(n for n in names if n)}]" if any(names) else "")

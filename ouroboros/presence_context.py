@@ -55,6 +55,13 @@ def frame_presence_user_content(task: Mapping[str, Any], content: Any) -> Any:
     return [{**content[0], "text": prefix + content[0]["text"]}, *content[1:]]
 
 
+def _reaction_actions(actions: Any) -> list[str]:
+    """Reaction receipts as labelled operations, in the place speech is listed but never quoted as speech."""
+    from ouroboros.dialogue_provenance import reaction_action_words
+    return [f"action, not speech: {reaction_action_words(action, str(action.get('state') or ''))}"
+            for action in actions or [] if isinstance(action, Mapping)]
+
+
 def _previous_turn_line(previous: Mapping[str, Any]) -> str:
     """The conversation's last executed turn; quoted text is correspondent-facing data, not instructions."""
     try:
@@ -76,6 +83,7 @@ def _previous_turn_line(previous: Mapping[str, Any]) -> str:
         said.append(f"finish note {json.dumps(note, ensure_ascii=False)}")
     if previous.get("previous_text_unverified"):
         said.append("legacy previous text unverified as speech (source unavailable)")
+    said += _reaction_actions(previous.get("transport_actions"))
     body = " / ".join(said) or "nothing sent"
     work = ""
     if previous.get("work_ref"):
@@ -220,7 +228,7 @@ def _started_work_section(drive_root: Path, value: Mapping[str, Any], task_id: s
 
 def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
     """Transport sends of this task confirmed so far in its own conversation, or honest unknown."""
-    from ouroboros.presence_runner import _live_task_rows, _turn_sends
+    from ouroboros.presence_runner import _live_task_rows, _turn_actions, _turn_sends
 
     value = value if isinstance(value, Mapping) else {}
     key = str((value.get("event") or {}).get("conversation_key") or "")
@@ -236,7 +244,8 @@ def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
     said = " / ".join(json.dumps(text, ensure_ascii=False) for text in sent if text) or "none"
     if partial:
         said += " (live chat log only; receipts rotated into archived history are not covered, so there may be more)"
-    return said + (f"; {uncertain} more part(s) have an uncertain outcome and may have landed" if uncertain else "")
+    actions = "".join(f"; {action}" for action in _reaction_actions(_turn_actions(rows, same_generation=partial)))
+    return said + (f"; {uncertain} more part(s) have an uncertain outcome and may have landed" if uncertain else "") + actions
 
 
 def presence_finish_not_accepted_note(ctx: Any, completion: Mapping[str, Any]) -> str:

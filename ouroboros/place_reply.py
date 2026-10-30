@@ -143,6 +143,10 @@ def record_late_delivery(root, skill: str, payload: dict, client_id: str):
         return
     from ouroboros.presence_bindings import conversation_key
     key = conversation_key(*(payload[k] for k in ("provider", "account_id", "conversation_id", "thread_id")))
+    from ouroboros.dialogue_provenance import reaction_action_words, reaction_fact
+    reaction = reaction_fact(payload.get("message"))
+    action = reaction_action_words(reaction, payload["state"]) if reaction else ""
+    words = "; ".join(part for part in (payload["text"], action) if part)  # the action follows any words sent beside it
     record_notice(root, place_id=place.place_id, conversation_key=key, task_id="",
-                  text=f"Delivery reported while {place.label} is {place.state.title()}: {payload['text']}",
+                  text=f"Delivery reported while {place.label} is {place.state.title()}: {words}",
                   identity=client_id + ":late", transport={"conversation_key": key, "receipt": payload})

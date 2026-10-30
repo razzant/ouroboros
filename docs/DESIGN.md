@@ -2000,7 +2000,11 @@ Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with
 sheet labels or fact words; hide `any_message`. Whole held replies follow System,
-authored and labelled “held, unchecked”. Missing fields add nothing.
+authored and labelled “held, unchecked”. A reaction adds one meta line, “Reaction: …”,
+with a translated prefix and the authored `place_history.reaction` summary, and no
+bubble of its own (owner decision 2026-10-30: reactions are context only and wake
+nothing). Words a receipt sent beside it stay its speech; failed and uncertain receipts
+and the late notice while Silent keep their System rows. Missing fields add nothing.
 
 ### Voice controls
 

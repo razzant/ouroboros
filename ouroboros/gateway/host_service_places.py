@@ -172,6 +172,10 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             return _presence_error("actor must be an object; authenticated must be a boolean", 400,
                                    "presence_actor_invalid", "rejected")
 
+        from ouroboros.place_intake import reaction_refusal
+        if refusal := reaction_refusal(event_payload, payload.get("staged_files")):
+            return _presence_error(refusal, 400, "presence_reaction_invalid", "rejected")
+
         provider = str(event_payload.get("provider") or "").strip()
         account_id = str(event_payload.get("account_id") or "").strip()
         conversation_id = str(event_payload.get("conversation_id") or "").strip()

@@ -58,7 +58,8 @@ from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
 from ouroboros.chronicle_quotes import SPEAKERS
 from ouroboros.chronicle_store import (DELEGATED_FOCUS_ROLES, STORY_KINDS, ChronicleStore, PublishResult, capture,
                                        draft_signer, source_time_span, verify_quotes)
-from ouroboros.dialogue_provenance import memory_row_header, recorded_finality, render_row_text, row_author
+from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recorded_finality, render_row_text,
+                                          row_author, wordless_reaction)
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
 from ouroboros.memory_view_account import source_change_lines
@@ -310,7 +311,8 @@ def host_stamp(root: Any, task_ids: Iterable[Any], *, rows: Iterable[Any] = ()) 
 
 def _quote_resolver(root: Path, lineage: Dict[str, Any],
                     positions: Optional[Dict[str, int]] = None) -> Callable[[Any], Optional[Tuple[str, str]]]:
-    """``address -> (rendered row text, author kind)`` for ``verify_quotes``; reads chat, takes no lock."""
+    """``address -> (the row's quotable words, author kind)`` for ``verify_quotes``; reads chat, takes no lock.
+    The words are ``quote_words``: never a host label rendered beside a typed reaction carrier's own text."""
     def resolve(address: Any) -> Optional[Tuple[str, str]]:
         try:
             row, found = chat_chain.resolve_row(root, address)
@@ -327,7 +329,7 @@ def _quote_resolver(root: Path, lineage: Dict[str, Any],
             if pos is None:
                 return None
             author = _author_of(row, pos, lineage)
-        return render_row_text(row), author["kind"]
+        return quote_words(row), author["kind"]
     return resolve
 
 
@@ -1006,11 +1008,13 @@ def _source_texts(root: Path, ref: Dict[str, Any]) -> List[str]:
 
 
 def _task_final_text(root: Path, task_id: str) -> str:
-    """The task's last outgoing row in chat: its final words to people."""
+    """The task's last outgoing row in chat: its final words to people (``quote_words``). A wordless reaction
+    receipt is a gesture, no words, so the words before it stay final."""
     final = ""
     for _address, row, _pos in chat_chain.iter_rows(root):
-        if str(row.get("task_id") or "") == task_id and str(row.get("direction") or "") in ("out", "outgoing"):
-            final = render_row_text(row)
+        if (str(row.get("task_id") or "") == task_id and str(row.get("direction") or "") in ("out", "outgoing")
+                and not wordless_reaction(row)):
+            final = quote_words(row)
     return final
 
 
@@ -1026,7 +1030,7 @@ def _mark_target(ctx: Any, root: Path, store: ChronicleStore, a: Dict[str, Any])
         row, found = chat_chain.resolve_row(root, a["address"])
         if row is None:
             return None, None, str(found.get("status") or "row_missing")
-        if quote and quote not in render_row_text(row):
+        if quote and quote not in quote_words(row):
             return None, None, "quote_mismatch"
         return found["address"], None, ""
     if a["task_id"]:

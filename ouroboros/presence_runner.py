@@ -559,29 +559,57 @@ def _live_task_rows(drive_root: Path, task_id: str, conversation_key: str) -> li
     return rows
 
 
-def _turn_sends(rows: Sequence[Mapping[str, Any]], own_start: int = 0,
-                same_generation: bool = False) -> tuple[list[str] | None, int]:
-    """``(confirmed v1 sends or None, parts whose latest receipt is uncertain)`` among *rows*.
+def _latest_receipts(rows: Sequence[Mapping[str, Any]], own_start: int = 0,
+                     same_generation: bool = False) -> list[Mapping[str, Any]] | None:
+    """Each delivery part's latest receipt row among *rows* (a later one settles an earlier), else None.
 
-    A later receipt for a part settles an earlier one. An attempt's rows follow its inbound row, so
-    that row means every receipt is there too and the whole task counts. Without it the attempt's
-    trace is incomplete: the sends are unknown (None), not zero, unless the caller vouches that
-    this execution's own rows (``own_start`` onwards) all landed (``same_generation``). Uncertain
-    parts are neither confirmed nor refused, so they may have landed.
-    """
+    An attempt's rows follow its inbound row, so that row means every receipt is there and the whole task
+    counts. Without it the trace is incomplete (None), unless the caller vouches that this execution's own
+    rows (``own_start`` onwards) all landed (``same_generation``)."""
     if any(row.get("direction") == "in" for row in rows):
         own_start = 0
     elif not same_generation:
-        return None, 0
-    latest: dict[tuple[str, str], tuple[str, str]] = {}
+        return None
+    latest: dict[tuple[str, str], Mapping[str, Any]] = {}
     for row in rows[own_start:]:
         transport = row.get("transport") if isinstance(row.get("transport"), Mapping) else {}
         delivery = transport.get("delivery") if isinstance(transport.get("delivery"), Mapping) else {}
         if row.get("type") == "presence_delivery" and delivery.get("state"):
-            latest[(str(delivery.get("delivery_id")), str(delivery.get("part_id")))] = (
-                str(delivery["state"]), str(row.get("text") or ""))
-    return ([text for state, text in latest.values() if state in {"delivered", "accepted"}],
-            sum(1 for state, _text in latest.values() if state == "uncertain"))
+            latest[(str(delivery.get("delivery_id")), str(delivery.get("part_id")))] = row
+    return list(latest.values())
+
+
+def _turn_sends(rows: Sequence[Mapping[str, Any]], own_start: int = 0,
+                same_generation: bool = False) -> tuple[list[str] | None, int]:
+    """``(confirmed v1 sends or None, parts whose latest receipt is uncertain)`` over ``_latest_receipts``.
+
+    None is unknown, not zero; an uncertain part may have landed. A wordless typed reaction receipt is an
+    action (``_turn_actions``), no sent part; words sent beside a reaction are one."""
+    from ouroboros.dialogue_provenance import wordless_reaction
+    latest = _latest_receipts(rows, own_start, same_generation)
+    if latest is None:
+        return None, 0
+    parts = [(str(row["transport"]["delivery"]["state"]), str(row.get("text") or ""))
+             for row in latest if not wordless_reaction(row)]
+    return ([text for state, text in parts if state in {"delivered", "accepted"}],
+            sum(1 for state, _text in parts if state == "uncertain"))
+
+
+def _turn_actions(rows: Sequence[Mapping[str, Any]], own_start: int = 0,
+                  same_generation: bool = False) -> list[dict[str, Any]]:
+    """The typed reaction receipts over ``_latest_receipts``, each with its part's state: actions, never speech.
+    Without a complete trace there are none; an older connector's own ``reaction`` key is no typed action."""
+    from ouroboros.dialogue_provenance import reaction_fact
+    actions = []
+    for row in _latest_receipts(rows, own_start, same_generation) or []:
+        fact = reaction_fact(row["transport"].get("message"))
+        if not fact:
+            continue
+        target = fact.get("target") if isinstance(fact.get("target"), Mapping) else {}
+        actions.append({**{key: fact[key] for key in ("operation", "old", "new", "effect") if key in fact},
+                        "target": {key: target[key] for key in ("message_id", "resolution") if key in target},
+                        "state": str(row["transport"]["delivery"]["state"])})
+    return actions
 
 
 def _previous_turn_path(drive_root: Path, conversation_key: str) -> Path:
@@ -625,7 +653,7 @@ def _previous_turn_source_view(drive_root: Path, pointer: dict[str, Any]) -> dic
 def _write_previous_turn(drive_root: Path, conversation_key: str, task_id: str, *, outcome: str, message: str,
                          sends: Sequence[str], work_ref: str, finished_at: str, delivery: str,
                          finish_note: str = "", lent_at: str = "", continuing: bool = False,
-                         strict: bool = False) -> None:
+                         strict: bool = False, actions: Sequence[Mapping[str, Any]] = ()) -> None:
     """Best effort: the pointer is a projection, and a turn that already answered is not failed over it.
 
     It also lists the conversation's still-continuing authors (``open_turns``, refs only:
@@ -639,6 +667,7 @@ def _write_previous_turn(drive_root: Path, conversation_key: str, task_id: str, 
         "conversation_key": conversation_key, "task_id": task_id, "outcome": outcome, "message": message,
         **({"finish_note": finish_note} if finish_note else {}),
         "transport_sends": [text for text in sends if text], "work_ref": work_ref,
+        **({"transport_actions": [dict(action) for action in actions]} if actions else {}),
         "finished_at": finished_at, "delivery": delivery, **({"continuing": True} if continuing else {}),
     }
     try:
@@ -672,6 +701,7 @@ def record_continuing_turn(drive_root: Path, conversation_key: str, task_id: str
     conversation, since a successor would otherwise run without seeing it is still open.
     """
     _write_previous_turn(drive_root, conversation_key, task_id, outcome=outcome, message=message, sends=[],
+                         actions=_turn_actions(_live_task_rows(drive_root, task_id, conversation_key), same_generation=True),
                          work_ref=work_ref, finished_at=lent_at, delivery="unknown", continuing=True, strict=True,
                          lent_at=_first_lent_at(load_task_result(drive_root, task_id) or {}) or lent_at)
 
@@ -696,11 +726,12 @@ def _repair_pointer(drive_root: Path, conversation_key: str, physical_id: str) -
     if _terminal_refusal(stored) or not _pointer_behind(Path(drive_root), conversation_key, physical_id):
         return
     settled = presence_result_from_stored(stored, physical_id)
-    sends = (_turn_sends(_live_task_rows(Path(drive_root), physical_id, conversation_key))[0]
-             if settled.delivery_reporting_version else [])
+    rows = _live_task_rows(Path(drive_root), physical_id, conversation_key) if settled.delivery_reporting_version else []
+    sends = _turn_sends(rows)[0] if settled.delivery_reporting_version else []
     outcome, message = _pointer_speech(stored, settled.outcome, settled.text)
     _write_previous_turn(Path(drive_root), conversation_key, physical_id, outcome=outcome, message=message,
-                         sends=sends or [], work_ref=settled.work_ref, finished_at=str(stored.get("ts") or ""),
+                         sends=sends or [], actions=_turn_actions(rows), work_ref=settled.work_ref,
+                         finished_at=str(stored.get("ts") or ""),
                          delivery=_delivery_state(settled.delivery_reporting_version, sends, message, outcome),
                          lent_at=_first_lent_at(stored))
 
@@ -789,7 +820,7 @@ def _log_dialogue(
     Every new arrival, live or imported, keeps its provider send time and order (``source_order``)."""
     from types import SimpleNamespace
     from ouroboros import chat_chain
-    from ouroboros.dialogue_provenance import presence_provenance_from_task
+    from ouroboros.dialogue_provenance import ANONYMOUS_REACTIONS, presence_provenance_from_task, reaction_fact
     from ouroboros.presence_history import source_order_block
 
     state = read_json_dict(drive_root / "state" / "state.json") or {}
@@ -806,7 +837,9 @@ def _log_dialogue(
         "text": text,
         "format": "markdown" if direction == "out" else "",
         "source": f"presence:{event.provider}",
-        **({"sender_label": str((speaker or event.actor).get("display_name") or event.actor.get("username") or ""),
+        **({"sender_label": str((speaker or event.actor).get("display_name") or event.actor.get("username") or
+                                (ANONYMOUS_REACTIONS if event.actor.get("kind") == "anonymous" and reaction_fact(event.message)
+                                 else "")),
             "sender_session_id": str((speaker or event.actor).get("platform_actor_id") or event.actor.get("id") or "")}
            if direction == "in" else {}),
         "client_message_id": client_message_id or event.source_event_id,
@@ -1261,12 +1294,14 @@ def run_presence_turn(
         # Still under the conversation lock. A replay writes only through the cached-replay repair, under
         # this same lock, and it leaves a pointer that names a newer turn alone.
         sends: list[str] | None = []
+        actions: list[dict[str, Any]] = []
         if event.delivery_reporting_version:
-            sends = _turn_sends(_live_task_rows(Path(drive_root), task_id, event.conversation_key), own_start,
-                                same_generation=True)[0]  # the store holds every row this execution wrote
+            rows = _live_task_rows(Path(drive_root), task_id, event.conversation_key)
+            sends = _turn_sends(rows, own_start, same_generation=True)[0]  # the store holds every row this execution wrote
+            actions = _turn_actions(rows, own_start, same_generation=True)
         outcome, message = _pointer_speech(terminal, result.outcome, str(row.get("message") or result.text))
         _write_previous_turn(Path(drive_root), event.conversation_key, task_id, outcome=outcome, message=message,
-                             sends=sends or [], work_ref=result.work_ref, finished_at=utc_now_iso(),
+                             sends=sends or [], actions=actions, work_ref=result.work_ref, finished_at=utc_now_iso(),
                              delivery=_delivery_state(event.delivery_reporting_version, sends, result.text or message, outcome),
                              finish_note=str(row.get("finish_note") or ""), lent_at=_first_lent_at(terminal))
         return result
