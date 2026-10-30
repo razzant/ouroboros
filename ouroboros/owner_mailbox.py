@@ -127,6 +127,17 @@ def place_event_retained(drive_root: pathlib.Path, task_id: str, msg_id: str) ->
         return bool(locked) and _holds(_mailbox_path(drive_root, task_id), msg_id)
 
 
+def place_arrival_wake(entry: Any) -> Optional[bool]:
+    """A drained place arrival's host-written ``place_arrival.wake`` (``place_intake.offer_to_author``):
+    ``True`` ends its author's ordinary wait whatever it selected, ``False`` is context the next drain
+    delivers and never ends one. ``None`` (no fact, a non-bool, other mail) keeps the ordinary mail rule."""
+    if not isinstance(entry, dict) or entry.get("kind") != KIND_TASK_MESSAGE or entry.get("provenance") != "place_event":
+        return None
+    arrival = entry.get("place_arrival")
+    wake = arrival.get("wake") if isinstance(arrival, dict) else None
+    return wake if isinstance(wake, bool) else None
+
+
 def acknowledged_task_message_ids(
     drive_root: pathlib.Path,
     task_id: str,
@@ -763,10 +774,14 @@ def drain_owner_entries(
 
 
 class OwnerMailboxPeek:
-    """One wait's proven-empty mailbox snapshot; never delivery or ACK authority."""
+    """One wait's proven-empty mailbox snapshot; never delivery or ACK authority.
 
-    def __init__(self) -> None:
+    ``waking_only`` (an ordinary wait's peek) does not count a ``False`` place arrival
+    (``place_arrival_wake``): it stays unread for the next drain."""
+
+    def __init__(self, *, waking_only: bool = False) -> None:
         self._empty_key: Any = None
+        self._waking_only = waking_only
 
     @staticmethod
     def _fingerprint(root: pathlib.Path, task_id: str, attempt: Any, seen: set) -> tuple:
@@ -790,6 +805,8 @@ class OwnerMailboxPeek:
         status: Dict[str, bool] = {}
         # Drain changes only this private set; normal loop delivery owns the real one.
         entries = drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
+        if self._waking_only:
+            entries = [entry for entry in entries if place_arrival_wake(entry) is not False]
         if not entries and before is not None and status.get("complete"):
             try:
                 if before == self._fingerprint(root, task_id, attempt, seen):

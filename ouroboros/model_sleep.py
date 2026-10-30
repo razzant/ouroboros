@@ -5,6 +5,8 @@ model's choice, never a duration threshold. It selects senders, readable task
 terminals, own run terminals, own service exits (warm only) and/or a wake time.
 Without selectors, any addressed mail wakes it. Owner words/controls and typed
 descendant escalations bypass sender filters; ordinary unselected mail waits.
+A place arrival's typed ``place_arrival.wake`` decides for itself (``owner_mailbox.place_arrival_wake``):
+``True`` wakes its author past any selector, ``False`` never wakes, not even any mail; without it, mail.
 New questions from any ordinary run THIS author owns also wake it, never a
 foreign run or reviewer custody. Exact question sources reach its transcript;
 exposure is remembered per run/interaction only after delivery, never an answer.
@@ -494,7 +496,8 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
                 wake_fact: Dict[str, Any] | None = None) -> str:
     """Why the sleep is ready now (``""`` = not yet). Owner input is never filtered."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
-    from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE
+    from ouroboros.owner_mailbox import (KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED,
+                                         KIND_TASK_MESSAGE, place_arrival_wake)
     from ouroboros.owner_wait import _wait_entries
     first_error = None
     if wake_fact is not None:
@@ -523,6 +526,11 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
         if kind != KIND_TASK_MESSAGE:
             return f"control:{kind}"  # finalize_now, hurry, owner_pause, ... always wake
         source = str(entry.get("source_task_id") or "")
+        place_wake = place_arrival_wake(entry)  # the host's typed fact; without one, ordinary mail
+        if place_wake is not None:
+            if place_wake:
+                return f"mail:{source or 'unknown'}"  # its author's wake, whatever it selected
+            continue  # context only: unread, the next drain delivers it
         attention = entry.get("work_attention")
         attention = attention if isinstance(attention, dict) else {}
         if (entry.get("provenance") == "system" and attention.get("kind") == "silence"

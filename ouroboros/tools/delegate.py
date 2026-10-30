@@ -1437,7 +1437,7 @@ def get_tools() -> List[ToolEntry]:
                 "An observed terminal, a new interaction, "
                 "fault, addressed owner/task message, a direct-child attention/terminal event, "
                 "cancel/deadline control, recovery judgment, or an explicit one-shot checkpoint "
-                "wakes exactly once. "
+                "wakes exactly once. Host-marked context-only place arrivals stay unread until a genuine wake. "
                 "A host-confirmed retry successor may retrieve a predecessor's proven terminal result; live control stays with its starter. "
                 "Usable terminal output returns before pending host capture/accounting; "
                 "rereading it is immediate, not a wait for that preparation. A wake's leaf_live_input is the "
