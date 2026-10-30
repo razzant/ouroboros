@@ -28,9 +28,9 @@ def _binary(part: dict) -> tuple[dict, str] | None:
 
 
 def project_browser_result(raw: Any, source: dict | None, retention_gap: str,
-                           *, source_root: pathlib.Path | None, owner_task_id: str) -> ToolResult:
+                           *, source_root: pathlib.Path | None, owner_task_id: str, cfg: Any = None) -> ToolResult:
     """Use the ordinary MCP adapter, replacing only retained binary fields in its view."""
-    from ouroboros.mcp_client import _serialize_content_part, _tool_result_from_call_result
+    from ouroboros.mcp_client import _redact_error_text, _serialize_content_part, _tool_result_from_call_result
 
     content, binary_count = [], 0
     for index, item in enumerate(getattr(raw, "content", None) or []):
@@ -62,6 +62,8 @@ def project_browser_result(raw: Any, source: dict | None, retention_gap: str,
     result = _tool_result_from_call_result(projected)
     if not binary_count:
         return result
+    # Capture producer text only after the same configured-secret masking as MCP delivery.
+    result = _replace_tool_result(result, text=_redact_error_text(result.text, cfg))
     if source is None:
         note = (f"Binary response retention failed ({retention_gap or 'unknown'}); "
                 "original content kept inline; automatic image attachment unavailable.")
@@ -84,6 +86,7 @@ def project_browser_result(raw: Any, source: dict | None, retention_gap: str,
 def attach_browser_images(ctx: Any, result: ToolResult, *, staged_messages: list | None = None) -> dict:
     """Consume only host-minted owner/source metadata through the existing vision path."""
     from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS
     from ouroboros.mcp_task_sessions import _data_root, _owner
     from ouroboros.tools.vision import _VLM_MAX_FILE_BYTES, attach_local_image_to_context
 
@@ -104,12 +107,18 @@ def attach_browser_images(ctx: Any, result: ToolResult, *, staged_messages: list
             container, field = binary
             if part.get("type") != "image" and not str(container.get("mimeType", "")).startswith("image/"):
                 continue
+            if len(items) >= MAX_LIVE_IMAGE_BLOCKS:
+                items.append({"content_index": index, "status": "source_only",
+                              "note": "Automatic image batch limit reached; read the retained response source."})
+                continue
             item = {"content_index": index, "status": "unavailable"}
             try:
                 encoded = container[field]
                 if len(encoded) > 4 * ((_VLM_MAX_FILE_BYTES + 2) // 3):
                     raise ValueError("image exceeds the local image byte limit")
                 data = base64.b64decode(encoded, validate=True)
+                if len(data) > _VLM_MAX_FILE_BYTES:
+                    raise ValueError("image exceeds the local image byte limit")
                 image = store_actor_source_bytes(ctx.drive_root, _owner(ctx)[0], category="tool_results",
                                                  source_id=f"mcp-image-{index}", data=data, extension="bin")
                 path = task_artifact_dir_path(ctx.drive_root, _owner(ctx)[0], create=False) / image["path"]

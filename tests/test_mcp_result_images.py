@@ -95,6 +95,28 @@ def test_browser_screenshot_enters_loop_as_pixels_not_base64_prose(tmp_path, mon
     assert encoded.encode() not in producer
 
 
+@pytest.mark.parametrize("retention_fails", [False, True])
+def test_binary_producer_source_masks_configured_secret(tmp_path, monkeypatch, retention_fails):
+    secret = "fixture-private-value"
+    raw = _response()
+    raw.content[0].text = f"diagnostic {secret}"
+    raw.structuredContent = {"nested": [secret]}
+    store = artifacts.store_actor_source_bytes
+    result, calls = _call(tmp_path, monkeypatch, raw, secret_values=(secret,), store_fails=retention_fails)
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", store)
+    assert result.status == "ok" and sum(dispatch for _, dispatch in calls) == 1
+    assert secret not in result.text
+    assert secret not in result.producer_text
+    ctx, trace = _ctx(tmp_path), {"tool_calls": []}
+    process_tool_results([_row(result)], ctx.messages, trace, lambda *_a, **_k: None,
+                         tools=SimpleNamespace(_ctx=ctx))
+    producer = artifacts.read_actor_source_bytes(tmp_path, "response-task",
+                                                 trace["tool_calls"][0]["producer_source_ref"])
+    assert secret.encode() not in producer
+    assert trace["tool_calls"][0].get("image_attachment", {}).get("status") == (
+        None if retention_fails else "attached")
+
+
 @pytest.mark.parametrize("kind", ["image", "audio", "resource"])
 def test_annotated_sdk_binary_parts_project_without_post_dispatch_failure(tmp_path, monkeypatch, kind):
     annotations = Annotations(audience=["user"], priority=0.5)
@@ -259,6 +281,46 @@ def test_multiple_images_and_nonimage_blob_have_separate_outcomes(tmp_path, monk
     assert observation["status"] == "partial"
     assert [item["content_index"] for item in observation["items"]] == [1, 3, 4]
     assert [item["status"] for item in observation["items"]] == ["attached", "attached", "unavailable"]
+
+
+def test_automatic_image_batch_is_bounded_and_excess_remains_in_source(tmp_path, monkeypatch):
+    from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS
+
+    encoded = base64.b64encode(_png()).decode()
+    raw = CallToolResult(content=[ImageContent(type="image", mimeType="image/png", data=encoded)
+                                  for _ in range(MAX_LIVE_IMAGE_BLOCKS + 3)])
+    result, calls = _call(tmp_path, monkeypatch, raw)
+    ctx = _ctx(tmp_path)
+    observation = _maybe_auto_attach_image(_row(result), SimpleNamespace(_ctx=ctx))
+    assert [item["status"] for item in observation["items"]] == (
+        ["attached"] * MAX_LIVE_IMAGE_BLOCKS + ["source_only"] * 3)
+    assert observation["status"] == "partial"
+    assert sum(dispatched for _, dispatched in calls) == 1
+    assert "read_file(root='artifact_store'" in result.text
+    source = artifacts.read_actor_source_bytes(tmp_path, "response-task", result.meta["mcp_response_source"])
+    assert [part["data"] for part in json.loads(source)["content"]] == [encoded] * (MAX_LIVE_IMAGE_BLOCKS + 3)
+    images = [part for row in ctx.messages if isinstance(row["content"], list)
+              for part in row["content"] if part["type"] == "image_url"]
+    assert len(images) == MAX_LIVE_IMAGE_BLOCKS
+    image_sources = list((artifacts.task_artifact_dir_path(tmp_path, "response-task") /
+                          "source_handles" / "tool_results").glob("mcp-image-*.bin"))
+    assert len(image_sources) == MAX_LIVE_IMAGE_BLOCKS
+
+
+def test_decoded_image_size_is_checked_before_materializing(tmp_path, monkeypatch):
+    from ouroboros.tools import vision
+
+    monkeypatch.setattr(vision, "_VLM_MAX_FILE_BYTES", 4)
+    encoded = base64.b64encode(b"hello").decode()
+    result, _ = _call(tmp_path, monkeypatch, _response(encoded=encoded))
+    observation = _maybe_auto_attach_image(_row(result), SimpleNamespace(_ctx=_ctx(tmp_path)))
+    assert observation["items"][0]["status"] == "unavailable"
+    assert "ValueError" in observation["items"][0]["note"]
+    assert encoded in artifacts.read_actor_source_bytes(tmp_path, "response-task",
+                                                        result.meta["mcp_response_source"]).decode()
+    image_sources = list((artifacts.task_artifact_dir_path(tmp_path, "response-task") /
+                          "source_handles" / "tool_results").glob("mcp-image-*.bin"))
+    assert not image_sources
 
 
 def test_source_integrity_failure_does_not_inject_or_fail_call(tmp_path, monkeypatch):

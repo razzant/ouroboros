@@ -2,6 +2,7 @@
 
 import asyncio
 import collections
+import dataclasses
 import json
 import threading
 from contextlib import nullcontext
@@ -43,11 +44,13 @@ def _registered_call(tmp_path, monkeypatch, protocol, outcome, *, store_fails=Fa
                      failure=None, failure_phase="post", observed_state=None, tool_name=None,
                      warm_up=False, target_policy=None, state_during_assessment=None,
                      safety_advice="", guard_note="", tool_arguments=None,
-                     canonical_root=None, execution_root=None):
+                     canonical_root=None, execution_root=None, response=None,
+                     secret_values=(), handoff_out=None):
     cfg = mcp_client.normalize_server_config({
         "id": "browser", "enabled": True, "transport": "stdio", "command": "node",
         "args": ["unused.js"], "browser_bridge": True, "browser_protocol": protocol,
     })
+    cfg = dataclasses.replace(cfg, secret_values=secret_values)
     name = tool_name or ("browser_action" if protocol == "ouroboros_chrome" else "browser_snapshot")
     prefixed = mcp_client.make_tool_name("browser", name)
     manager = mcp_client.MCPManager()
@@ -97,7 +100,7 @@ def _registered_call(tmp_path, monkeypatch, protocol, outcome, *, store_fails=Fa
                 raise mcp_task_sessions.BrowserBridgeTimeout("action response timed out")
             if guard_note:
                 session._blocked.append(guard_note)
-            return _response()
+            return response if response is not None else _response()
         if outcome == "post_timeout" and len(calls) == 4:
             raise mcp_task_sessions.BrowserBridgeTimeout("post-state read timed out")
         if protocol == "ouroboros_chrome":
@@ -115,7 +118,8 @@ def _registered_call(tmp_path, monkeypatch, protocol, outcome, *, store_fails=Fa
     else:
         from ouroboros import owner_pause
 
-        monkeypatch.setattr(owner_pause, "operation_start", lambda: nullcontext())
+        if handoff_out is None:
+            monkeypatch.setattr(owner_pause, "operation_start", lambda: nullcontext())
         loop = asyncio.new_event_loop()
         worker = threading.Thread(target=loop.run_forever, daemon=True)
         worker.start()
@@ -133,6 +137,12 @@ def _registered_call(tmp_path, monkeypatch, protocol, outcome, *, store_fails=Fa
             assert manager._call_tool_result(prefixed, args, ctx=ctx).status == "ok"
         if observed_state is not None:
             current_state = observed_state
+        if handoff_out is not None:
+            from ouroboros.owner_pause import tool_handoff
+
+            with tool_handoff(ctx, prefixed) as handoff:
+                handoff_out.append(handoff)
+                return manager._call_tool_result(prefixed, args, ctx=ctx), calls
         return manager._call_tool_result(prefixed, args, ctx=ctx), calls
     finally:
         if transport:
@@ -305,6 +315,52 @@ def test_post_response_task_control_still_reaches_caller(tmp_path, monkeypatch, 
     with pytest.raises(OwnerPauseRefused, match="owner paused"):
         _registered_call(tmp_path, monkeypatch, protocol, "success",
                          failure=OwnerPauseRefused("owner paused"))
+
+
+@pytest.mark.parametrize("protocol", ["ouroboros_chrome", "playwright"])
+def test_retained_response_masks_configured_secret_recursively(tmp_path, monkeypatch, protocol):
+    from mcp.types import CallToolResult, TextContent
+
+    secret = "review-secret-token"
+    raw = CallToolResult(content=[TextContent(type="text", text=f"value={secret}")],
+                         structuredContent={secret: {"nested": [f"prefix-{secret}-suffix"]}})
+    result, calls = _registered_call(tmp_path, monkeypatch, protocol, "detached" if protocol == "ouroboros_chrome"
+                                     else "broken_read", response=raw, secret_values=(secret,))
+    source = result.meta["mcp_response_source"]
+    published = artifacts.read_actor_source_bytes(tmp_path, "response-task", source).decode()
+    assert secret not in published and "***" in published
+    assert sum(dispatched for _, dispatched in calls) == 1
+
+
+@pytest.mark.parametrize("protocol", ["ouroboros_chrome", "playwright"])
+@pytest.mark.parametrize("phase,returned_response", [("action", False), ("post", True)])
+def test_registered_manager_records_return_only_after_sdk_response(tmp_path, monkeypatch, protocol,
+                                                                   phase, returned_response):
+    from ouroboros.owner_pause import OwnerPauseRefused
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    write_task_result(tmp_path, "response-task", STATUS_RUNNING)
+    handoffs = []
+    returned = []
+    real_record = __import__("ouroboros.owner_pause", fromlist=["record_mcp_call_returned"]).record_mcp_call_returned
+
+    def record(name):
+        returned.append(name)
+        real_record(name)
+
+    monkeypatch.setattr("ouroboros.owner_pause.record_mcp_call_returned", record)
+    with pytest.raises(OwnerPauseRefused, match="owner paused"):
+        _registered_call(tmp_path, monkeypatch, protocol, "success",
+                         failure=OwnerPauseRefused("owner paused"), failure_phase=phase,
+                         handoff_out=handoffs)
+    expected_name = mcp_client.make_tool_name("browser", "browser_action" if protocol == "ouroboros_chrome"
+                                              else "browser_snapshot")
+    assert returned == ([expected_name] if returned_response else [])
+    assert len(handoffs) == 1
+    assert handoffs[0].get("mcp_call_returned") is (True if returned_response else None)
+    sources = list((artifacts.task_artifact_dir_path(tmp_path, "response-task") /
+                    "source_handles" / "tool_results").glob("mcp-browser-*.json"))
+    assert len(sources) == (1 if returned_response else 0)
 
 
 @pytest.mark.parametrize("tool_name", ["browser_state", "browser_action", "browser_handoff", "browser_disconnect"])

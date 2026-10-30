@@ -94,18 +94,25 @@ lease identity, including between calls. The live guard, target policy and
 unchanged owner/executor/tab/document/lease generation still gate that refresh;
 URL drift during Safety assessment still refuses dispatch.
 After an action response arrives, Core saves its complete SDK value before
-projection or post-state reads. Later processing/SDK failures return
+projection or post-state reads, recursively masking configured secrets in the
+task-readable saved source. Later processing/SDK failures return
 `BROWSER_POLICY_POST_DISPATCH` with the cause and readable saved-source pointer
 (or an explicit retention gap), and the manager records exactly one returned
 call. The action is never replayed; unknown/blocked post-state remains an error.
-Task-control exceptions still propagate to the task loop.
+Task-control exceptions after the SDK response still record that one returned
+call in the registered manager and propagate to the task loop.
 Chrome binary content (`image`/`audio` data and embedded resource blobs) is
 projected as a reference to that complete response, not base64 prose. Text and
 `structuredContent` stay intact. Only a successful, post-state-validated Chrome
 return stamps host-owned task/attempt metadata for same-round image delivery.
 `mcp_result_images.py` reads and verifies the saved response, materializes image
 parts locally and uses `vision.attach_local_image_to_context` on staged messages;
-the existing root, size, MIME, image-budget and model-route behavior still applies.
+at most `MAX_LIVE_IMAGE_BLOCKS` image parts per returned response are decoded and
+offered automatically, each under the existing 20 MB local image cap. Excess
+parts remain in the readable saved response and are reported as `source_only`.
+The existing root, MIME, image-budget and model-route behavior still applies.
+Retention keeps the response JSON, decoded image source and existing vision copy;
+task artifact retention and the existing upload lifecycle own their cleanup.
 No server-provided path/URL or `_meta` value grants this capability, including a
 generic MCP server named `chrome_browser`. Images in error/withheld responses do
 not attach. Attachment failures are reported separately without failing or

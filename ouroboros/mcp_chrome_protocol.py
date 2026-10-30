@@ -674,7 +674,7 @@ def call_chrome(self, prefixed: str, name: str, args: dict, ctx: Any,
         try:
             result = project_browser_result(raw, source, retention_gap,
                                             source_root=getattr(self, "data_root", None),
-                                            owner_task_id=self.key[0])
+                                            owner_task_id=self.key[0], cfg=self.cfg)
             after = self._observe(timeout, allow_closed=name in {STATE_TOOL, "browser_disconnect", "browser_handoff"})
             reason = action_reason(ctx, "browser_state", {}, after)
             if not reason and after["connected"]:
@@ -685,6 +685,7 @@ def call_chrome(self, prefixed: str, name: str, args: dict, ctx: Any,
                     reason = reason or "BROWSER_REQUEST_GUARD_UNAVAILABLE: new lease is not armed"
         except Exception as exc:
             if _is_task_control(exc):
+                exc._mcp_browser_response_returned = True
                 raise
             # The action already returned. SDK/projection/state failures must
             # keep that response source and reach the manager's returned accounting.

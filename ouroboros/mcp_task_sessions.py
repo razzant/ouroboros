@@ -228,9 +228,9 @@ def _data_root(ctx: Any) -> pathlib.Path:
     return canonical_data_root(ctx)
 
 
-def _source_bytes_from_call_result(result: Any) -> bytes:
-    """Keep the complete SDK response as received, before its text projection."""
-    from ouroboros.mcp_client import _serialize_content_part
+def _source_bytes_from_call_result(result: Any, cfg: Any = None) -> bytes:
+    """Keep the complete response shape, masking configured secrets before publication."""
+    from ouroboros.mcp_client import _redact_error_text, _serialize_content_part
 
     dump = getattr(result, "model_dump", None)
     payload = None
@@ -244,10 +244,18 @@ def _source_bytes_from_call_result(result: Any) -> bytes:
             "isError": bool(getattr(result, "isError", False) or getattr(result, "is_error", False)),
             "content": [_serialize_content_part(part) for part in (getattr(result, "content", None) or [])],
         }
-        structured = getattr(result, "structuredContent", None)
-        if structured is not None:
+        if (structured := getattr(result, "structuredContent", None)) is not None:
             payload["structuredContent"] = structured
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # The source is readable by the task. Apply the serving-side metadata
+    # redaction contract to every string, including nested keys and annotations.
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {redact(key): redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return _redact_error_text(value, cfg) if isinstance(value, str) else value
+
+    return json.dumps(redact(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _retain_returned_response(session: "TaskBrowserSession", raw: Any) -> tuple[dict[str, Any] | None, str]:
@@ -258,7 +266,7 @@ def _retain_returned_response(session: "TaskBrowserSession", raw: Any) -> tuple[
         source = store_actor_source_bytes(
             session.data_root, session.key[0], category="tool_results",
             source_id=f"mcp-browser-{uuid.uuid4().hex}",
-            data=_source_bytes_from_call_result(raw), extension="json")
+            data=_source_bytes_from_call_result(raw, session.cfg), extension="json")
         return source, ""
     except Exception as exc:
         log.warning("Could not retain returned MCP browser response", exc_info=True)
@@ -288,15 +296,12 @@ def _post_dispatch_error(name: str, reason: str, source: dict[str, Any] | None,
               f"the result is withheld. {pointer} Reconcile before any retry."))
 
 
-
-
 def _scope(data_root: Any, task_id: str = "") -> str:
     """Marker scope of this installation's bridges, or of one task's."""
     def tag(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
-    scope = f"mcpb{tag(str(pathlib.Path(data_root).resolve(strict=False)))}_"
-    return scope + (f"{tag(task_id)}_" if task_id else "")
+    return f"mcpb{tag(str(pathlib.Path(data_root).resolve(strict=False)))}_" + (f"{tag(task_id)}_" if task_id else "")
 
 
 def _page_state(result: Any) -> dict[str, Any]:
@@ -777,6 +782,7 @@ class TaskBrowserSession:
                 reason = _block_reason(ctx, after["url"])
             except Exception as exc:
                 if _is_task_control(exc):
+                    exc._mcp_browser_response_returned = True
                     raise
                 # Only post-response processing is caught; the action is never retried.
                 reason = f"{type(exc).__name__}: {exc}"

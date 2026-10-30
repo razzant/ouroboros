@@ -1437,6 +1437,7 @@ class MCPManager:
         from ouroboros.mcp_task_sessions import BrowserBridgeRefusal, CALL_FAILURES, failure_result
         from ouroboros.mcp_task_sessions import call as scoped_call
         from ouroboros.tool_custody import external_handoff
+        from ouroboros.owner_pause import OwnerPauseRefused, _TOOL_OPERATION, record_mcp_call_returned
         confirmed = external_handoff("mcp_transport")
         advice = note = ""
         try:
@@ -1470,7 +1471,6 @@ class MCPManager:
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": unsent})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
-            from ouroboros.owner_pause import OwnerPauseRefused, _TOOL_OPERATION
             from ouroboros.store import StoreError
             active = _TOOL_OPERATION.get()
             unsent = getattr(exc, "mcp_unsent_joined", False) is True or (
@@ -1478,6 +1478,9 @@ class MCPManager:
             if unsent:
                 confirmed()  # no call, with either no transport entry or joined cleanup
             if cfg.browser_bridge and _is_task_control(exc):
+                if getattr(exc, "_mcp_browser_response_returned", False):
+                    record_mcp_call_returned(prefixed_name)
+                    confirmed()
                 raise  # Stop and Pause reach the loop as they do from any Safety check.
             if unsent and isinstance(exc, (OwnerPauseRefused, StoreError)):
                 from ouroboros.tools.tool_result import launch_refusal_result
@@ -1488,8 +1491,6 @@ class MCPManager:
             return ToolResult(status="error", code="MCP_ERROR", text=text,
                               meta={"dynamic_provider": True, "mcp_call_not_sent": bool(unsent)})
         # Joined normal return (either SDK error bit): this invocation's call is over.
-        from ouroboros.owner_pause import record_mcp_call_returned
-
         record_mcp_call_returned(prefixed_name)
         confirmed()
         text = _redact_error_text(result.text, cfg)
