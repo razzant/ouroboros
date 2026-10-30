@@ -99,6 +99,19 @@ projection or post-state reads. Later processing/SDK failures return
 (or an explicit retention gap), and the manager records exactly one returned
 call. The action is never replayed; unknown/blocked post-state remains an error.
 Task-control exceptions still propagate to the task loop.
+Chrome binary content (`image`/`audio` data and embedded resource blobs) is
+projected as a reference to that complete response, not base64 prose. Text and
+`structuredContent` stay intact. Only a successful, post-state-validated Chrome
+return stamps host-owned task/attempt metadata for same-round image delivery.
+`mcp_result_images.py` reads and verifies the saved response, materializes image
+parts locally and uses `vision.attach_local_image_to_context` on staged messages;
+the existing root, size, MIME, image-budget and model-route behavior still applies.
+No server-provided path/URL or `_meta` value grants this capability, including a
+generic MCP server named `chrome_browser`. Images in error/withheld responses do
+not attach. Attachment failures are reported separately without failing or
+replaying the action; a retention failure keeps the original content inline and
+discloses the gap rather than discarding the only copy. Generic MCP and legacy
+Playwright projection/attachment behavior is unchanged.
 Connection callbacks use primitive `operation:"connect"` or `"resume"` with
 the exact control-call `args`; the callback must carry the newly armed lease.
 `browser_connect` accepts exactly `{url}` for an owner-controlled new background

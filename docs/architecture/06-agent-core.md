@@ -607,7 +607,7 @@ Thread-sticky Playwright/greenlet sessions bind their generation before Safety v
 
 `browser_policy.py` admits owner-control from actual HTTP requests and three-valued service identity, not JavaScript text, per-request LLMs or a second policy engine. Cyber root/acting requests retain control/target reach; explicit readonly contracts still bind. Live `state/server_port.bindings.json` proves our endpoints; expectations (`state/server_port`, `state/server_process.json`, Host Service config, local-model custody) with unverified processes refuse as unknown, not foreign (`server_process.runtime_service_identity`). Other ports are ordinary; unclassifiable restricted DNS targets refuse `BROWSER_POLICY_UNAVAILABLE` before navigation. Redirect callbacks see only the first URL, so `tools/browser.py` rechecks `redirected_from` with that predicate before returning content. An allowed→blocked→allowed chain withholds content/actions, but the blocked request has already left: no pre-request or DNS-rebinding guarantee. Cookies, POSTs, service workers and native redirects remain unchanged; no proxy, CDP fork, pre-probe or refetch.
 
-MCP custody: `mcp_task_sessions.py`; Chrome wire/readiness and shared active/idle admission: `mcp_chrome_protocol.py`. [Contract](../browser-task-bridge.md) covers reconnect and limits; unknown effects never replay.
+MCP custody: `mcp_task_sessions.py`; Chrome wire and active/idle admission: `mcp_chrome_protocol.py`; retained images: `mcp_result_images.py`. [Contract](../browser-task-bridge.md): readiness, reconnect, no unknown-effect replay.
 
 ### Budget tracking
 

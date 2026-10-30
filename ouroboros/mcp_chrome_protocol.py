@@ -616,7 +616,9 @@ def observe_before_call(self: Any, name: str, timeout: int) -> dict[str, Any]:
 
 def call_chrome(self, prefixed: str, name: str, args: dict, ctx: Any,
                  timeout: int) -> tuple[ToolResult, str, str]:
-    from ouroboros.mcp_client import _is_task_control, _tool_result_from_call_result
+    from ouroboros.mcp_client import _is_task_control
+    from ouroboros.mcp_result_images import project_browser_result
+    from ouroboros.tools.tool_result import _replace_tool_result
     from ouroboros.mcp_task_sessions import BrowserBridgeRefusal, _chrome_binding_reason, _owner
     from ouroboros.safety import check_safety
 
@@ -670,7 +672,9 @@ def call_chrome(self, prefixed: str, name: str, args: dict, ctx: Any,
             self._chrome_navigation_pending = False
         blocked = [self._blocked.popleft() for _ in range(len(self._blocked))]
         try:
-            result = _tool_result_from_call_result(raw)
+            result = project_browser_result(raw, source, retention_gap,
+                                            source_root=getattr(self, "data_root", None),
+                                            owner_task_id=self.key[0])
             after = self._observe(timeout, allow_closed=name in {STATE_TOOL, "browser_disconnect", "browser_handoff"})
             reason = action_reason(ctx, "browser_state", {}, after)
             if not reason and after["connected"]:
@@ -688,8 +692,14 @@ def call_chrome(self, prefixed: str, name: str, args: dict, ctx: Any,
         if reason:
             from ouroboros.mcp_task_sessions import _post_dispatch_error
 
-            result = _post_dispatch_error(name, reason, source, retention_gap)
+            result = _post_dispatch_error(name, reason, source, retention_gap,
+                                          source_root=getattr(self, "data_root", None),
+                                          owner_task_id=self.key[0])
         elif result.status == "ok" and not self.revoked:
+            if result.meta.get("mcp_response_source"):
+                # Host-bound task/session provenance, never a remote field or name prefix.
+                result = _replace_tool_result(result, meta_updates={
+                    "mcp_browser_image_owner": [self.key[0], self.attempt]})
             if (name == "browser_disconnect" and not after["connected"]
                     and after["closure"] == {"revoked": False, "detached": True}):
                 self._chrome_clean_disconnect = lease_key(after)

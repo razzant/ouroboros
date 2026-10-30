@@ -42,7 +42,8 @@ def _text_result(text):
 def _registered_call(tmp_path, monkeypatch, protocol, outcome, *, store_fails=False, transport=True,
                      failure=None, failure_phase="post", observed_state=None, tool_name=None,
                      warm_up=False, target_policy=None, state_during_assessment=None,
-                     safety_advice="", guard_note=""):
+                     safety_advice="", guard_note="", tool_arguments=None,
+                     canonical_root=None, execution_root=None):
     cfg = mcp_client.normalize_server_config({
         "id": "browser", "enabled": True, "transport": "stdio", "command": "node",
         "args": ["unused.js"], "browser_bridge": True, "browser_protocol": protocol,
@@ -54,10 +55,11 @@ def _registered_call(tmp_path, monkeypatch, protocol, outcome, *, store_fails=Fa
     manager._servers["browser"] = mcp_client.MCPServerRuntime(
         config=cfg, tools=[mcp_client.MCPTool("browser", name, prefixed, "", {})])
     ctx = SimpleNamespace(task_id="response-task", task_attempt=1, task_lifecycle_bound=True,
-                          messages=[], drive_root=tmp_path)
+                          messages=[], drive_root=execution_root or tmp_path,
+                          budget_drive_root=canonical_root or tmp_path)
     session = object.__new__(mcp_task_sessions.TaskBrowserSession)
     session.cfg, session.ctx, session.key, session.attempt = cfg, ctx, (ctx.task_id, cfg.id), "1"
-    session.data_root = tmp_path
+    session.data_root = canonical_root or tmp_path
     session.revoked = False
     session._call_lock = threading.Lock()
     session._blocked = collections.deque(maxlen=20)
@@ -124,7 +126,8 @@ def _registered_call(tmp_path, monkeypatch, protocol, outcome, *, store_fails=Fa
                 return request(tool, args, 1, dispatch=dispatch)
 
         session._loop, session._session = loop, Transport()
-    args = {"operation": "snapshot", "args": {}} if name == "browser_action" else {}
+    args = tool_arguments if tool_arguments is not None else (
+        {"operation": "snapshot", "args": {}} if name == "browser_action" else {})
     try:
         if warm_up:
             assert manager._call_tool_result(prefixed, args, ctx=ctx).status == "ok"
@@ -168,7 +171,9 @@ def test_returned_response_retained_before_failed_post_state(tmp_path, monkeypat
     assert "BROWSER_POLICY_POST_DISPATCH" in result.text
     source = result.meta["mcp_response_source"]
     assert result.meta["host_verdict"] and result.meta["dynamic_provider"]
-    assert f"read_file(root='artifact_store', path='{source['path']}')" in result.text
+    source_path = (artifacts.task_artifact_dir_path(tmp_path, "response-task") / source["path"]
+                   if protocol == "ouroboros_chrome" else source["path"])
+    assert f"read_file(root='artifact_store', path='{source_path}')" in result.text
     assert f"size={source['size']} bytes; sha256={source['sha256']}" in result.text
     data = artifacts.read_actor_source_bytes(tmp_path, "response-task", source)
     assert len(data) == source["size"]
@@ -187,7 +192,7 @@ def test_normal_result_is_still_normal(tmp_path, monkeypatch, protocol):
     result, _ = _registered_call(tmp_path, monkeypatch, protocol, "success")
     assert (result.status, result.code) == ("ok", "OK")
     assert "exact returned text\nλ" in result.text
-    assert "mcp_response_source" not in result.meta
+    assert ("mcp_response_source" in result.meta) == (protocol == "ouroboros_chrome")
     assert len(returned) == 1
 
 
@@ -241,7 +246,9 @@ def test_post_response_exception_keeps_source_and_one_return(tmp_path, monkeypat
     assert "Reconcile before any retry" in result.text
     assert result.meta["host_verdict"] and result.meta["dynamic_provider"]
     source = result.meta["mcp_response_source"]
-    assert f"read_file(root='artifact_store', path='{source['path']}')" in result.text
+    source_path = (artifacts.task_artifact_dir_path(tmp_path, "response-task") / source["path"]
+                   if protocol == "ouroboros_chrome" else source["path"])
+    assert f"read_file(root='artifact_store', path='{source_path}')" in result.text
     decoded = json.loads(artifacts.read_actor_source_bytes(tmp_path, "response-task", source))
     assert decoded == _response().model_dump(mode="json", by_alias=True)
     assert "exact returned text" not in result.text

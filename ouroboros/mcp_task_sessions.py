@@ -266,11 +266,17 @@ def _retain_returned_response(session: "TaskBrowserSession", raw: Any) -> tuple[
 
 
 def _post_dispatch_error(name: str, reason: str, source: dict[str, Any] | None,
-                         retention_gap: str) -> ToolResult:
+                         retention_gap: str, *, source_root: pathlib.Path | None = None,
+                         owner_task_id: str = "") -> ToolResult:
     """Withhold an untrusted post-state response while exposing its original source."""
     if source is not None:
+        source_path = source["path"]
+        if source_root is not None:
+            from ouroboros.artifacts import task_artifact_dir_path
+
+            source_path = str(task_artifact_dir_path(source_root, owner_task_id, create=False) / source_path)
         pointer = (f"Returned response retained: read_file(root='artifact_store', "
-                   f"path='{source['path']}'); size={source['size']} bytes; sha256={source['sha256']}.")
+                   f"path='{source_path}'); size={source['size']} bytes; sha256={source['sha256']}.")
         meta = {"host_verdict": True, "mcp_response_source": source}
     else:
         pointer = f"Returned response retention failed ({retention_gap or 'unknown'}); source unavailable."

@@ -8,6 +8,7 @@ import concurrent.futures
 import copy
 import contextlib
 import contextvars
+import dataclasses
 import json
 import logging
 import os
@@ -1283,42 +1284,35 @@ def _maybe_auto_attach_image(
     exec_result: Dict[str, Any],
     tools: Optional[ToolRegistry],
     *, staged_messages: Optional[list] = None,
-) -> Optional[Dict[str, str]]:
-    """Same-round image attachment for tool results that explicitly offer one.
+) -> Optional[Dict[str, Any]]:
+    """Attach offered images through the same local-image path as ``view_image``.
 
-    A successful result whose JSON carries ``auto_attach_image: <local path>`` — a
-    typed, opt-in field (the unix_computer_use screenshot emits it) — gets that
-    image attached to the conversation immediately, through the SAME
-    implementation the ``view_image`` tool uses: identical trust boundary
-    (allowed roots, size cap, fail-closed MIME sniff), identical durable copy
-    under ``uploads/views``, identical message shape (the mid-round user(image)
-    injection the transport already repairs adjacency for). This removes the
-    mandatory second ``view_image`` round per observation, which consumed ~21%
-    of the round budget on computer-use benches (v6.81.0 OSWorld run: 3,830
-    view_image rounds after 3,893 screenshots).
-
-    Parses the FULL result, not the truncated view: per-tool truncation can cut
-    the JSON tail. Failure of any kind is strictly non-fatal and must never
-    convert a successful tool call into a failed one — the result still carries
-    the path, so the agent can view it manually, which is exactly the pre-6.81.1
-    behavior.
-
-    EXTENSION tool results only (the ``ext_`` surface): this capability is
-    defined for first-party skills, whose payloads the review/grant lifecycle
-    already governs. MCP results are untrusted server-supplied data — honoring
-    the field there would let a remote server convert an agent-chosen context
-    mutation into a data-driven automatic one. (The perimeter below would still
-    hold — same roots/size/MIME as view_image — but the narrower surface is the
-    honest contract.)"""
+    Extensions offer a path in their full producer JSON. A task-owned Chrome
+    session instead mints host metadata referencing its retained binary response;
+    remote MCP text, metadata and tool-name spellings grant no such capability.
+    Both paths use staged messages and the existing roots/size/MIME checks.
+    Attachment failures never change the tool's execution status.
+    """
     if tools is None or exec_result.get("is_error"):
         return
+    typed = exec_result.get("tool_result")
+    if isinstance(typed, ToolResult) and typed.meta.get("mcp_browser_image_owner"):
+        from ouroboros.mcp_result_images import attach_browser_images
+
+        observation = attach_browser_images(tools._ctx, typed, staged_messages=staged_messages)
+        note = "Host image attachment: " + json.dumps(observation, ensure_ascii=False)
+        text = typed.text + "\n\n" + note
+        exec_result.update(result=text, tool_result=dataclasses.replace(
+            typed, text=text,
+            producer_text=typed.producer_text if typed.producer_text is not None else typed.text,
+            host_annotations=typed.host_annotations + (note,)))
+        return observation
     if not str(exec_result.get("fn_name") or "").startswith("ext_"):
         return
     # A payload that declares its own failure must not have an image lifted out of
     # it, even when the executor call itself did not raise. Read the typed code the
     # dispatcher published rather than re-deriving the JSON fact here: this guard
     # is the SECOND consumer of that fact and must not drift from the first.
-    typed = exec_result.get("tool_result")
     if isinstance(typed, ToolResult) and typed.code == "TOOL_REPORTED_FAILURE":
         return
     raw = (typed.producer_text if isinstance(typed, ToolResult)
