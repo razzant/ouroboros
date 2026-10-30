@@ -94,14 +94,20 @@ macOS, resolved physically), with its path/inode record in the ungranted task dr
 tree and never reached through a link, and adds only these exact directories as
 `execution.auxiliaryWritableRoots`; the binding, a seat's checking text and the facts then
 name that scratch instead of the default parent (`workspace_preflight.session_service_directories`).
+A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
+sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
+Every naming declares it disposable before use (`delegate_start_instructions.DISPOSABLE_SCRATCH`): never
+captured, retired with the starting task's drive, nothing reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
 The native profile's existing temporary-directory permissions are unchanged. Directory grants do
 not grant IPC or process inspection: a blocked check stays unverified, with its command and
 diagnostics retained. After inspecting the candidate, the integrating mind may run it through
 existing host tools under its own authority. This runs candidate code with ordinary OS-user rights;
 safe_test isolates environment and process custody, not the OS. No automatic Full, network change,
 new verifier or weakened check follows from a refusal.
-Any other route gets no such field and a typed limitation in its facts; read-only, full
-access and a `tool_policy` route (an unconfined shell) keep their on-demand behavior; an exact
+Any other route gets no such field and a typed limitation in its facts (at full access, a scratch
+that cannot be made is `scratch_unavailable`); read-only, a `workspace_write` `tool_policy` route,
+an in-place `workspace_write` run, an engine folder copy and a review thread's turns keep their
+on-demand behavior, with no owned scratch; an exact
 retry replays its recorded request, without recreating paths the OS or the original task's
 drive may already have retired. A continuation binds its own start's rights; one from another
 task need not reuse prior scratch; a new start replaces scratch removed by OS aging, never a

@@ -219,16 +219,19 @@ def package_downloads_root(data_root: Any) -> pathlib.Path:
 # The starting task's drive holds ownership records, never the physical scratch: nesting
 # safe_test beneath that long path breaks AF_UNIX consumers on macOS (PERSISTENCE).
 SESSION_SCRATCH_DIRNAME = "session_scratch_owners"
+# The typed limitation of a full-access start whose scratch could not be made: no grant was ever due.
+SCRATCH_UNAVAILABLE = "scratch_unavailable"
 
 
 class ServiceDirectories(NamedTuple):
     """What ONE writable session start may write outside its copy, as its engine negotiated (#1775).
 
     ``roots`` (the scratch, then the download cache's uv/pip/npm folders) ride the start request
-    as ``execution.auxiliaryWritableRoots``, and ``scratch`` is the place its instructions name;
-    ``limitation`` says, typed, why a ``workspace_write`` session got none. All empty: nothing to
-    negotiate (read-only, full access or an unconfined ``tool_policy`` route, whose on-demand
-    behavior needs no engine grant)."""
+    as ``execution.auxiliaryWritableRoots``, and ``scratch`` is the place its instructions name:
+    at full access the host still owns and names one, but ``roots`` stays empty, since full
+    access needs no grant; ``limitation`` says, typed, why a writable session got none. All
+    empty: nothing to make (read-only, or a ``workspace_write`` ``tool_policy`` route, whose
+    on-demand behavior needs no engine grant)."""
 
     roots: Tuple[str, ...] = ()
     scratch: str = ""
@@ -385,25 +388,28 @@ def session_service_directories(gateway: Any, route_id: str, *, access: str, mod
                                 drive_root: Any, task_id: str, key: str, execution_root: Any) -> ServiceDirectories:
     """The directories one writable session may write besides its copy, made and named once (#1775).
 
-    Only an Agent ``workspace_write`` start whose route negotiates auxiliary writable roots gets
-    any: a short physical scratch under ``default_temp_parent()`` (macOS /tmp), recorded under
-    ``task_drives/<task_id>/session_scratch_owners/<key>`` in the starting task's own drive, and the shared
-    download cache's ``uv``/``pip``/``npm`` folders. Only these exact directories are granted, never
-    the temp parent or ownership records. No install, no links, and no Git ancestor. The engine
-    never creates, captures or deletes them; drive settlement's trash removal retires the scratch
-    unless its producer retained it; the cache stays (PERSISTENCE). A route without that
-    capability prepares nothing, and a folder that cannot be made so grants nothing either: both
-    are a typed ``limitation`` and the start goes on without the field. Read-only and full access,
-    and a ``tool_policy`` route, whose allowed shell no filesystem fence confines, keep their
-    on-demand behavior: nothing to negotiate. A retry replays its recorded request and never
-    comes here.
+    An Agent start gets a short physical scratch under ``default_temp_parent()`` (macOS /tmp),
+    recorded under ``task_drives/<task_id>/session_scratch_owners/<key>`` in the starting task's own
+    drive, when it is ``workspace_write`` on a route that negotiates auxiliary writable roots, or
+    ``full``. Only the former is granted it, with the shared download cache's ``uv``/``pip``/``npm``
+    folders: these exact directories, never the temp parent or ownership records. Full access
+    reaches the scratch already, so no catalog is read and nothing is sent: the host only owns and
+    names it. No install, no links, and no Git ancestor. The engine never creates, captures or
+    deletes them; the instructions declare the scratch disposable before use
+    (``DISPOSABLE_SCRATCH``); drive settlement's trash removal retires it unless its producer
+    retained it; the cache stays (PERSISTENCE). A route without that capability prepares nothing,
+    and a folder that cannot be made grants nothing either: both are a typed ``limitation`` and the
+    start goes on without the field. Read-only, and a ``workspace_write`` ``tool_policy`` route,
+    keep their on-demand behavior: nothing is made. A retry replays its
+    recorded request and never comes here.
     """
-    if mode != "agent" or access != "workspace_write":
+    if mode != "agent" or access not in ("workspace_write", "full"):
         return ServiceDirectories()
-    row = _route_row(gateway, route_id)
+    granted = access == "workspace_write"
+    row = _route_row(gateway, route_id) if granted else {}
     if row.get("writeMechanism") == "tool_policy":  # relevance read from confinement, never support
         return ServiceDirectories()
-    if not route_grants_auxiliary_roots(row):
+    if granted and not route_grants_auxiliary_roots(row):
         return ServiceDirectories(limitation="auxiliary_roots_unsupported: this route's engine negotiates no "
                                              "writable directory outside the copy")
     try:
@@ -413,11 +419,13 @@ def session_service_directories(gateway: Any, route_id: str, *, access: str, mod
         owner = _owned_directory(drive_root, ("task_drives", validate_task_id(task_id),
                                               SESSION_SCRATCH_DIRNAME, key), execution)
         caches = [_owned_directory(data_root, (PACKAGE_DOWNLOADS_DIRNAME, name), execution)
-                  for name, _variable in _CACHE_VARIABLES]
+                  for name, _variable in (_CACHE_VARIABLES if granted else ())]
         scratch = _session_scratch(owner, execution)
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return ServiceDirectories(limitation=f"service_directories_unavailable: {type(exc).__name__}: {exc}")
-    return ServiceDirectories(roots=tuple(str(path) for path in (scratch, *caches)), scratch=str(scratch))
+        return ServiceDirectories(limitation=f"{'service_directories_unavailable' if granted else SCRATCH_UNAVAILABLE}: "
+                                             f"{type(exc).__name__}: {exc}")
+    return ServiceDirectories(roots=tuple(str(path) for path in (scratch, *caches)) if granted else (),
+                              scratch=str(scratch))
 
 
 def _dependency_files(root: pathlib.Path) -> List[Tuple[str, str]]:
@@ -495,17 +503,17 @@ def session_environment_facts(copy_root: Any, *, data_root: Any, body: bool = Fa
     PATH may differ. Executable environments stay private per copy; only downloads are
     shared. A session whose ``write_root`` is a folder below the copy's root still reads
     the root's dependency files, but its environment is disposable state outside every
-    Git working tree. ``service`` is what its engine grants it outside the copy: the
-    granted scratch is then the one such place named, and a typed limitation is said as
-    one. A fact that cannot be gathered is a named gap, never a reason the session does
-    not start.
+    Git working tree. ``service`` is what the host made for it outside the copy: its
+    disposable scratch, granted by its engine or owned at full access, is then the one such
+    place named, and a typed limitation is said as one. A fact that cannot be gathered is a
+    named gap, never a reason the session does not start.
     """
     try:
         return _environment_facts(pathlib.Path(copy_root), data_root, body, environment_note,
                                   pathlib.Path(write_root if write_root is not None else copy_root), service)
     except Exception as exc:  # e.g. an unreadable folder in the copy
         logging.getLogger(__name__).warning("Session environment facts unavailable", exc_info=True)
-        granted = ("\n" + session_service_facts(service, data_root).rstrip("\n")) if service.roots else ""
+        granted = ("\n" + session_service_facts(service, data_root).rstrip("\n")) if service.scratch else ""
         return (f"\n\nPROJECT ENVIRONMENT facts unavailable ({type(exc).__name__}: {exc}); nothing was "
                 "installed for this session: read the copy's own files and report that gap rather than guess."
                 + granted)
@@ -546,16 +554,23 @@ def _environment_facts(root: pathlib.Path, data_root: Any, body: bool, environme
 
 
 def session_service_facts(service: ServiceDirectories, data_root: Any) -> str:
-    """The lines naming what a writable session may write outside its copy: its engine's grant, or the
-    typed limitation, then the shared download cache, by the very folders a grant permits."""
+    """The lines naming what a writable session may write outside its copy: its engine's grant, the
+    scratch the host owns at full access, or the typed limitation, each scratch declared disposable
+    before use, then the shared download cache, by the very folders a grant permits."""
+    from ouroboros.delegate_start_instructions import DISPOSABLE_SCRATCH, scratch_fact
+
     cache = package_downloads_root(data_root)
     caches = service.roots[1:] if service.roots else [str(cache / name) for name, _variable in _CACHE_VARIABLES]
     links = "" if sys.platform == "darwin" else "; with it set UV_LINK_MODE=copy so no installed file is shared"
-    grant = (f"- Writes your engine grants this run outside this copy (execution.auxiliaryWritableRoots): the "
-             f"scratch {service.scratch} for disposable process state (test temporaries, package-manager "
-             "temporaries through TMPDIR, a folder session's environment), owned by this task's drive and "
-             "removed with its retired drive unless the producer retained it; the OS may clear it earlier. "
-             "It is not captured with the copy. The three download-cache folders are listed below.\n" if service.roots else
+    held = (f"the scratch {service.scratch} for disposable process state (test temporaries, package-manager "
+            f"temporaries through TMPDIR, a folder session's environment), {DISPOSABLE_SCRATCH}.")
+    grant = (f"- Writes your engine grants this run outside this copy (execution.auxiliaryWritableRoots): {held} "
+             "The three download-cache folders are listed below.\n" if service.roots else
+             "- Outside this copy the host made this run's own scratch; no engine grant is sent, since full "
+             f"access already reaches it: {held}\n" if service.scratch else
+             f"- Outside this copy: no disposable scratch could be made for this run ({service.limitation}); keep "
+             f"disposable process state outside every Git working tree ({scratch_fact()}), where nothing owns "
+             "or removes it, and report that gap.\n" if service.limitation.startswith(SCRATCH_UNAVAILABLE) else
              f"- Writes outside this copy: your engine grants this run none ({service.limitation}), so your "
              "harness may refuse the scratch and download cache named here; when a check needs one and it is "
              "refused, report that limitation rather than widen access or work around it.\n"
@@ -564,7 +579,8 @@ def session_service_facts(service: ServiceDirectories, data_root: Any) -> str:
             "- Shared download cache (Ouroboros-owned, shared across sessions; the one durable place outside "
             "this copy your package manager may write, through it only; that manager locks it, and it is pruned "
             "only explicitly, with the package manager; never an environment or toolchain location; "
-            + ("granted to this run; " if service.roots else "your harness may not permit writing it; ") +
+            + ("granted to this run; " if service.roots else "your full access reaches it; " if service.scratch
+               else "your harness may not permit writing it; ") +
             f"{'present' if cache.is_dir() else 'created on first use'}): "
             + ", ".join(f"{variable}={path}" for (_name, variable), path in zip(_CACHE_VARIABLES, caches))
             + f"{links}.\n")

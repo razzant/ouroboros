@@ -441,23 +441,36 @@ def session_constitution_pointer(ctx: Any, *, target_root: str, source_root: str
 
 
 def session_service_directories(ctx: Any, gateway: Any, route: Any, authority: Any, *, snapshot: Any,
-                                payload: bool, execution_root: str) -> Any:
+                                payload: bool, execution_root: str, in_place: str = "") -> Any:
     """What ONE first start's private copy may write outside it, prepared before the binding, the host
     references and the request name it (``workspace_preflight.session_service_directories``).
 
     The delegating task's drive owns the short scratch, keyed by the snapshot. A same-tree
-    continuation from another task can receive a different scratch. A skill payload, an engine
-    directory copy and a session without a copy get none; a retry replays recorded old paths and
-    never comes here, even if the original task's drive or the OS already retired them."""
+    continuation from another task can receive a different scratch. ``in_place`` is the invocation
+    of an in-place run, which has no copy: at full access it gets its own scratch, named and never
+    granted; a ``workspace_write`` one gets none, since that would be a new grant. A skill payload,
+    an engine directory copy and any other session without a copy get none; a retry replays
+    recorded old paths and never comes here, even if the original task's drive or the OS already
+    retired them."""
     from ouroboros.tool_access_paths import canonical_data_root
     from ouroboros.workspace_preflight import ServiceDirectories, session_service_directories as prepare
 
-    if snapshot is None or payload:
+    if payload or (snapshot is None and not (in_place and authority.access == "full")):
         return ServiceDirectories()
     return prepare(gateway, route.route_id, access=authority.access, mode=authority.mode,
                    data_root=canonical_data_root(ctx), drive_root=getattr(ctx, "drive_root", ""),
-                   task_id=str(getattr(ctx, "task_id", "") or ""), key=snapshot.snapshot_id,
+                   task_id=str(getattr(ctx, "task_id", "") or ""),
+                   key=snapshot.snapshot_id if snapshot is not None else f"in-place-{in_place}",
                    execution_root=execution_root)
+
+
+def in_place_scratch(ctx: Any, gateway: Any, route: Any, authority: Any, invocation_id: str, target_root: str) -> Any:
+    """One in-place run's scratch preparation, deferred: ``delegate_directory.in_place_start`` calls it
+    only after accepting the start (``session_service_directories`` with ``in_place``)."""
+    from functools import partial
+
+    return partial(session_service_directories, ctx, gateway, route, authority, snapshot=None, payload=False,
+                   execution_root=target_root, in_place=invocation_id)
 
 
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,

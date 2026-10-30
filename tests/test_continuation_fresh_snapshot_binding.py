@@ -76,7 +76,7 @@ _HEADER = "\n\nTHIS RUN'S ACCESS AND WORKSPACE (current host facts of this turn)
 _BINDING = "\n\nDELEGATED EXECUTION BINDING"
 _KINDS = {_BINDING: "copy", "\n\nDELEGATED IN-PLACE BINDING": "in_place",
           "\n\nDELEGATED DIRECTORY COPY BINDING": "folder_copy"}
-_GRANTED = re.compile(r"in (\S+), the scratch your engine grants this run")
+_GRANTED = re.compile(r"in (\S+), this run's disposable scratch")
 _GRANT_ROW = {"writeMechanism": "fs_sandbox", "accessControl": {"auxiliaryWritableRoots": True}}
 
 
@@ -180,7 +180,8 @@ def _turn(request, caller, *, investigation=False):
     Compares values, never substrings alone: the access line is the one ``request.access``
     renders, the binding is byte-identical to the one in the current instructions (so their
     digest and scratch agree), its root is where the engine starts the harness and its
-    scratch is the first ``auxiliaryWritableRoots`` grant, or none is named."""
+    scratch is the first ``auxiliaryWritableRoots`` grant; at full access, which is granted
+    nothing, the one scratch named is the host-owned one; otherwise none is named."""
     prompt, instructions = request["prompt"], request["instructions"]
     assert prompt.count(_HEADER) == 1, prompt
     (line, binding), = _run_blocks(prompt)
@@ -196,7 +197,8 @@ def _turn(request, caller, *, investigation=False):
     if kind == "copy":
         assert execution_binding_fingerprint(root, request["scope"]["root"]) in binding
         assert f"The stable authority/project root {request['scope']['root']} is a read-only identity" in binding
-        assert _GRANTED.findall(binding) == grants[:1], grants
+        named = _GRANTED.findall(binding)
+        assert named == grants[:1] if request["access"] != "full" else len(named) == 1 and not grants, grants
     if kind == "folder_copy":
         assert "Use only the engine-provided working directory/cwd" in binding
         assert "workspaceRoot" not in request["execution"]
@@ -323,13 +325,15 @@ def test_full_lowered_to_workspace_write_restates_access_and_the_newly_granted_s
     ctx = _ctx(tmp_path, "git")
     first, _p = _leg(tmp_path, monkeypatch, ctx, "run-1", prompt="start", access="full", row=_GRANT_ROW)
     assert first["access"] == "full" and not first["execution"].get("auxiliaryWritableRoots")
+    [owned] = _GRANTED.findall(first["instructions"])  # full access: named, never granted
     _settle(tmp_path, "run-1", ctx.task_id)
     request, payload = _leg(tmp_path, monkeypatch, ctx, "run-2", prompt="continue", access="workspace_write",
                             row=_GRANT_ROW, continue_from="run-1")
     facts = _turn(request, "continue")
     assert payload["continuation"]["workspace"] == "same_snapshot" and facts["root"] == _actual_root(first)
     assert request["access"] == "workspace_write" and request["execution"]["auxiliaryWritableRoots"]
-    assert _GRANTED.findall(facts["binding"]) and not _GRANTED.findall(first["instructions"])
+    # The same snapshot keys the same owned scratch: lowered access now grants exactly that folder.
+    assert _GRANTED.findall(facts["binding"]) == [owned] == request["execution"]["auxiliaryWritableRoots"][:1]
     assert access_instruction("full") in first["instructions"] and access_instruction("full") not in request["prompt"]
     _pairings([first], request, facts)
 

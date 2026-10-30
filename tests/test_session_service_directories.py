@@ -3,8 +3,9 @@
 The host makes short physical scratch (owned by the starting task's drive) and the shared download
 cache's folders, and sends them as ``execution.auxiliaryWritableRoots`` only where the route's
 catalog row negotiates ``accessControl.auxiliaryWritableRoots`` and the start is an Agent
-``workspace_write`` one; its instructions name exactly those places. Elsewhere the rights and the
-request stay as they were, an unsupported ``workspace_write`` route hearing a typed limitation.
+``workspace_write`` one; its instructions name exactly those places. A full-access start, which needs no
+grant, gets the same owned scratch named and declared disposable, with nothing sent. Elsewhere the rights
+and the request stay as they were, an unsupported ``workspace_write`` route hearing a typed limitation.
 An exact retry replays the recorded request; a continuation binds the rights of its own start.
 Synthetic engines and isolated roots only: no live engine, provider, Settings or database.
 """
@@ -133,11 +134,37 @@ def test_an_unreadable_catalog_is_no_support(tmp_path):
     assert not (tmp_path / "data").exists()
 
 
-@pytest.mark.parametrize("access, mode", [("readonly", "ask"), ("full", "agent"), ("workspace_write", "ask")])
-def test_readonly_and_full_access_negotiate_nothing(tmp_path, access, mode):
+@pytest.mark.parametrize("access, mode", [("readonly", "ask"), ("full", "ask"), ("workspace_write", "ask"),
+                                          ("readonly", "agent")])
+def test_readonly_and_non_agent_starts_negotiate_nothing(tmp_path, access, mode):
     catalog = _Catalog(GRANTED)
     assert _prepare(tmp_path, catalog, access=access, mode=mode) == ServiceDirectories()
     assert catalog.reads == 0 and not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize("row", [GRANTED, None, {**GRANTED, "writeMechanism": "tool_policy"}],
+                         ids=["negotiating", "engine-predates-row", "tool-policy"])
+def test_full_access_owns_its_scratch_and_negotiates_nothing(tmp_path, row):
+    """Ownership is separate from the grant: full access reaches the scratch already, so the host makes
+    and records it, whatever the route row says, and sends no root and makes no cache folder."""
+    catalog = _Catalog(row)
+    owned = _prepare(tmp_path, catalog, access="full")
+    data = (tmp_path / "data").resolve()
+    scratch = _scratch_for(data, "task-1", "snap-1")
+    assert owned == ServiceDirectories(roots=(), scratch=str(scratch)) and catalog.reads == 0
+    assert scratch.is_dir() and not any(scratch.iterdir()) and not (data / PACKAGE_DOWNLOADS_DIRNAME).exists()
+    assert _prepare(tmp_path, catalog, access="full") == owned  # the same key names the same folder again
+
+
+def test_a_full_access_scratch_that_cannot_be_made_is_a_typed_gap(tmp_path):
+    (tmp_path / "data").write_text("not a folder\n", encoding="utf-8")
+    gap = _prepare(tmp_path, _Catalog(GRANTED), access="full")
+    assert gap.roots == () and gap.scratch == ""
+    assert gap.limitation.startswith(workspace_preflight.SCRATCH_UNAVAILABLE + ":")
+    text = workspace_preflight.session_service_facts(gap, tmp_path / "elsewhere")
+    assert "no disposable scratch could be made for this run (scratch_unavailable:" in text
+    assert f"({scratch_fact()}), where nothing owns or removes it, and report that gap" in text
+    assert "your engine grants this run none" not in text
 
 
 def test_an_unconfined_tool_policy_route_keeps_its_on_demand_behavior(tmp_path):
@@ -342,8 +369,8 @@ def test_the_facts_name_exactly_the_granted_places_and_a_limitation_as_one(tmp_p
     grant = _prepare(tmp_path, _Catalog(GRANTED), execution=copy)
     body = session_environment_facts(copy, data_root=data, body=True, write_root=folder, service=grant)
     assert f"({scratch_fact(launcher=True, granted=grant.scratch)});" in body
-    assert f"pass --temp-parent {grant.scratch}, the scratch your engine grants this run" in body
-    assert (f"disposable process state (in {grant.scratch}, the scratch your engine grants this run), since "
+    assert f"pass --temp-parent {grant.scratch}, this run's disposable scratch" in body
+    assert (f"disposable process state (in {grant.scratch}, this run's disposable scratch), since "
             f"this session writes only in {folder}, a folder of the copy") in body
     assert f"the scratch {grant.scratch} for disposable process state" in body
     for (_name, variable), root in zip(CACHES, grant.roots[1:]):
@@ -384,7 +411,7 @@ def test_a_supported_private_copy_start_sends_and_names_exactly_its_directories(
     assert all(copy not in pathlib.Path(root).parents and pathlib.Path(root) not in copy.parents for root in roots)
     text = request["instructions"]
     binding = text.split("\n\nDELEGATED EXECUTION BINDING", 1)[1].split("\n\nPROJECT ENVIRONMENT", 1)[0]
-    assert f"keep it outside every Git working tree (in {scratch}, the scratch your engine grants this run)" in binding
+    assert f"keep it outside every Git working tree (in {scratch}, this run's disposable scratch)" in binding
     assert f"the scratch {scratch} for disposable process state" in text
     for name, variable in CACHES:
         assert f"{variable}={cache / name}" in text
@@ -534,27 +561,34 @@ def test_a_folder_session_gets_a_legal_environment_place_without_its_source(tmp_
         for tree in (clone, start_folder, project.resolve(), folder.resolve()):
             assert root != tree and tree not in root.parents and root not in tree.parents
     text = request["instructions"]
-    assert (f"disposable process state (in {scratch}, the scratch your engine grants this run), since this "
+    assert (f"disposable process state (in {scratch}, this run's disposable scratch), since this "
             f"session writes only in {start_folder}, a folder of the copy") in text
     assert "safe_test" not in text  # a foreign project is sent to no launcher of the body
     assert pathlib.Path(request["execution"]["workspaceRoot"]).resolve() == start_folder
 
 
-def test_full_access_keeps_its_on_demand_behavior_without_an_engine_grant(tmp_path, monkeypatch):
+def test_full_access_names_its_owned_disposable_scratch_and_sends_no_grant(tmp_path, monkeypatch):
+    from ouroboros.delegate_start_instructions import DISPOSABLE_SCRATCH
     from tests import test_investigation_start_roots as roots_suite
 
     _negotiate(monkeypatch, roots_suite.Engine)
     _project, folder = roots_suite._project(tmp_path)
     ctx, engine, start = roots_suite._consumer(tmp_path, monkeypatch, "full", workspace=folder)
     result = start()
-    custody._CUSTODY.clear()
     assert result["status"] == "started", result
+    held = custody.replay(ctx.drive_root)[result["run_id"]]
+    custody._CUSTODY.clear()
     [request] = engine.starts
     assert request["access"] == "full" and set(request["execution"]) == {"isolation", "delegated", "workspaceRoot"}
-    assert engine.grants == [str(folder)]  # the existing full-access trust, unchanged
+    assert engine.grants == [str(folder)]  # the existing full-access trust, unchanged: nothing more is sent
+    scratch = _scratch_for(pathlib.Path(ctx.drive_root).resolve(), "child", held.snapshot_id)
     text = request["instructions"]
-    assert "grants this run" not in text and "your harness may not permit writing it" in text
-    assert not list(pathlib.Path(ctx.drive_root).glob(f"task_drives/*/{SESSION_SCRATCH_DIRNAME}"))
+    assert scratch.is_dir() and not any(scratch.iterdir())
+    # Declared before use: where it is, that it is disposable, who removes it, what does not come back.
+    assert f"disposable process state (in {scratch}, this run's disposable scratch), since this session" in text
+    assert f"no engine grant is sent, since full access already reaches it: the scratch {scratch} for" in text
+    assert DISPOSABLE_SCRATCH in text and "your full access reaches it" in text
+    assert "grants this run" not in text and scratch_fact() not in text
 
 
 def test_a_payload_copy_negotiates_nothing_and_stays_pure(tmp_path, monkeypatch):
@@ -616,9 +650,9 @@ def test_a_supported_writable_seat_sends_names_and_sizes_exactly_its_directories
     assert execution["auxiliaryWritableRoots"] == [str(scratch), *(str(cache / name) for name, _v in CACHES)]
     area = pathlib.Path(execution["workspaceRoot"])
     text = binding["instructions"]
-    assert f"goes outside every Git working tree (in {scratch}, the scratch your engine grants this run)" in text
+    assert f"goes outside every Git working tree (in {scratch}, this run's disposable scratch)" in text
     # The copy is a linked worktree: its changes are evidence, so no environment goes inside it.
-    assert (f"in {scratch}, the scratch your engine grants this run, never inside this copy, since its changes are "
+    assert (f"in {scratch}, this run's disposable scratch, never inside this copy, since its changes are "
             "retained as evidence") in text and ".gitignore ignores it" not in text
     assert "linked worktree of its repository: branches, tags, stash and Git config are the author's" in text
     assert f"UV_CACHE_DIR={cache / 'uv'}" in text and "granted to this run" in text
@@ -645,27 +679,52 @@ def test_a_supported_writable_seat_sends_names_and_sizes_exactly_its_directories
     assert (scratch / "pip-tmp").read_text(encoding="utf-8") == "disposable\n"
 
 
-@pytest.mark.parametrize("access, row", [("full", GRANTED), ("workspace_write", None),
-                                         ("workspace_write", {"accessControl": {"auxiliaryWritableRoots": False}})],
-                         ids=["full", "engine-predates-row", "route-declines"])
-def test_full_and_unsupported_seats_keep_their_request_and_rights(tmp_path, access, row):
+@pytest.mark.parametrize("row", [None, {"accessControl": {"auxiliaryWritableRoots": False}}],
+                         ids=["engine-predates-row", "route-declines"])
+def test_unsupported_seats_keep_their_request_and_rights(tmp_path, row):
     from ouroboros import review_checking as rc
     from ouroboros.subagents import delegated_run_shape
 
     author, data, source = _frozen_author(tmp_path)
-    gateway = _Catalog(row)
-    gateway.ensure_full_access = lambda root: None
-    binding = rc.session_checking(gateway, custody_drive=data, task_id="task-1", operation_id="op-1",
-                                  root=str(author), source=source, shape=delegated_run_shape(False, access),
+    binding = rc.session_checking(_Catalog(row), custody_drive=data, task_id="task-1", operation_id="op-1",
+                                  root=str(author), source=source, shape=delegated_run_shape(False, "workspace_write"),
                                   route_id="route")
     area = rc.seat_dir(data, "task-1", "op-1") / "area.noindex"
     assert binding["execution"] == {"isolation": "live", "delegated": True, "workspaceRoot": str(area)}
     text = binding["instructions"]
-    assert ("your engine grants this run none (auxiliary_roots_unsupported:" in text) is (access == "workspace_write")
+    assert "your engine grants this run none (auxiliary_roots_unsupported:" in text
     assert "granted to this run" not in text and f"({scratch_fact()})" in text
     assert not list(data.glob(f"task_drives/*/{SESSION_SCRATCH_DIRNAME}"))
     assert not (data / PACKAGE_DOWNLOADS_DIRNAME).exists()
     rc.capture_seat_evidence(data, "task-1", "op-1")
+
+
+def test_a_full_access_seat_owns_named_disposable_scratch_that_its_evidence_never_carries(tmp_path):
+    from ouroboros import review_checking as rc
+    from ouroboros.delegate_start_instructions import DISPOSABLE_SCRATCH
+    from ouroboros.subagents import delegated_run_shape
+
+    author, data, source = _frozen_author(tmp_path)
+    gateway = _Catalog(GRANTED)
+    gateway.ensure_full_access = lambda root: None
+    binding = rc.session_checking(gateway, custody_drive=data, task_id="task-1", operation_id="op-1",
+                                  root=str(author), source=source, shape=delegated_run_shape(False, "full"),
+                                  route_id="route")
+    area = rc.seat_dir(data, "task-1", "op-1") / "area.noindex"
+    assert binding["execution"] == {"isolation": "live", "delegated": True, "workspaceRoot": str(area)}
+    assert gateway.reads == 0  # nothing to negotiate at full access
+    scratch = _scratch_for(data.resolve(), "task-1", f"seat-{rc.seat_dir(data, 'task-1', 'op-1').name}")
+    text = binding["instructions"]
+    assert f"goes outside every Git working tree (in {scratch}, this run's disposable scratch)" in text
+    assert f"in {scratch}, this run's disposable scratch, never inside this copy" in text
+    assert DISPOSABLE_SCRATCH in text and "granted to this run" not in text and scratch_fact() not in text
+    assert not (data / PACKAGE_DOWNLOADS_DIRNAME).exists()
+    (scratch / "venv-marker").write_text("disposable\n", encoding="utf-8")
+    (area / ".review-evidence").mkdir()
+    (area / ".review-evidence" / "check.log").write_text("passed\n", encoding="utf-8")
+    receipt = rc.capture_seat_evidence(data, "task-1", "op-1")
+    assert receipt["status"] == "retained" and str(scratch) not in json.dumps(receipt), receipt
+    assert (scratch / "venv-marker").is_file()  # it goes with the review task's drive, not with the seat
 
 
 def test_a_thread_seat_claims_no_grant_its_turns_cannot_carry(tmp_path):

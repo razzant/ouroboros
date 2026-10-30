@@ -35,7 +35,7 @@ from ouroboros.subagent_work_order import (  # noqa: F401 - compatibility re-exp
     session_design_navigation,
     session_host_references,
 )
-from ouroboros.subagent_work_order import session_service_directories
+from ouroboros.subagent_work_order import in_place_scratch, session_service_directories
 from ouroboros.delegate_source_coverage import (
     add_terminal_source_verification,  # noqa: F401  (leaf reads it through _delegate() at call time)
     prepare_work_order_start_binding,
@@ -537,7 +537,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 target_root = record_auth["target_root"]
                 authority_source = record_auth["source"]
                 if workspace == "in_place":
-                    snapshot, snap_error, resource_ref, run_binding = in_place_start(continuation.snapshot, target_root)
+                    snapshot, snap_error, resource_ref, run_binding = in_place_start(continuation.snapshot, target_root, in_place_scratch(ctx, gateway, route, authority, invocation_id, target_root))
                 elif continuation.snapshot:
                     snapshot, snap_error = continuation.snapshot, None
                 elif authority_source == "skill_payload":

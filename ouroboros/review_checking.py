@@ -99,6 +99,16 @@ def _remove_checking_area(path: pathlib.Path, git: Optional[Mapping[str, Any]] =
     _worktree(common, "remove", "--force", "--force", str(path))
 
 
+def _release_unless_kept(data_root: Any, task_id: str, area: pathlib.Path, summary: Dict[str, Any],
+                         git: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Release a captured copy unless the owner keeps its task (``owner_keep``): the receipt stands either
+    way, and a kept copy goes at a later pass once the keep is lifted. Taken under the seat lock, never waiting."""
+    from ouroboros.owner_keep import gate
+
+    with gate(data_root, task_id, timeout_sec=0) as why:
+        return summary if why else _release_area(area, summary, git)
+
+
 def _move_area(source: pathlib.Path, target: pathlib.Path, git: Optional[Mapping[str, Any]] = None) -> None:
     """Rename a copy; a linked worktree whose facts ``git`` names moves through Git, so its registration
     follows it. A move Git refuses is a plain rename: the copy keeps its objects, and Git's own prune
@@ -665,7 +675,7 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str
         area = unindexed(seat_dir(data_root, task_id, f"thread:{thread_seat}"), "area")
     prior = _receipt(data_root, task_id, operation_id)
     if prior.get("status") in _RECEIPTED:
-        return prior if thread_copy else _release_area(area, prior, marker.get("git"))
+        return prior if thread_copy else _release_unless_kept(data_root, task_id, area, prior, marker.get("git"))
     if area.is_symlink():
         return {"status": "capture_failed", "area": str(area),
                 "error": "checking area was replaced by a symlink; target was not read"}
@@ -729,7 +739,7 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str
 
             _force_rmtree(evidence)  # copies keep read-only modes, which Windows refuses to unlink
         return {"status": "capture_failed", "area": str(area), "error": f"{type(exc).__name__}: {exc}"}
-    return summary if thread_copy or errors else _release_area(area, summary, marker.get("git"))
+    return summary if thread_copy or errors else _release_unless_kept(data_root, task_id, area, summary, marker.get("git"))
 
 
 def _receipt_path(data_root: Any, task_id: str, operation_id: str) -> pathlib.Path:

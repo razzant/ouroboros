@@ -90,12 +90,14 @@ DIAGNOSTIC_OUTPUT_KEYS = (
 OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", *DIAGNOSTIC_OUTPUT_KEYS)
 
 
-def declare_scratch(root, role: str) -> None:
-    """A fresh producer declares reproducibility, never liveness or deletion authority."""
+def declare_scratch(root, role: str, *, owner: str = "") -> None:
+    """A fresh producer declares its tree disposable state it made: purpose, never liveness, deletion
+    authority or a promise that the contents come back byte for byte.
+    ``owner``: a one-line fact naming what it was made for (``copy_environments`` reads it)."""
     if role not in {"pytest-session", "pytest-basetemp", "body-process"}:
         raise ValueError(f"unknown test scratch role: {role}")
     with (Path(root) / SCRATCH_MARKER).open("x", encoding="utf-8") as stream:
-        stream.write(role + "\n")
+        stream.write(role + "\n" + (owner.strip() + "\n" if owner else ""))
 
 
 def retain_tree(root, reason: str) -> bool:
@@ -140,7 +142,7 @@ def _retention_identity(path):
 def scratch_retention(root, *, previous=None, classify=False) -> dict:
     """One walk per quiescent tree; later checks read only its recorded witness.
 
-    A declaration proves reproducibility, not absence of nested retained readers.
+    A declaration states purpose, not absence of nested retained readers.
     Unclassified/changed trees stay retained until an unlocked classification;
     undeclared legacy trees and unreadable subtrees never certify deletion.
     """

@@ -40,6 +40,8 @@ Owner-source acknowledgement (the completion protocol of `finish_task`, argument
 
 `headless.drive_candidates` shares bounded `task_store.drive_retention_facts` batches between preview and prune (writer dates skip young bodies; legacy NULLs classify lazily, the preview in memory only; mtimes stay layout-local). Fresh strict body/age checks precede `task_custody.settle_child_drive`: occupants inactive, row settled, obligations canonical; missing/mismatched material awaits restoration. Rules: `retention.py`, PERSISTENCE.
 
+Every retirer of a task's material asks `owner_keep.gate` at its effect: the owner's keep of exactly that task (authenticated route, or `set_task_retention` on held owner words) withholds deletion, stopping neither running work nor compression. A finished plain copy goes only when `copy_capture_proof` finds its unique bytes already saved; a name never proves them disposable. `copy_environments` retires only producer-declared `<copy>.env` folders, whole, a purpose and owner rather than a promise of reproduction. Limits: PERSISTENCE.
+
 #### Owner routing verbs
 
 `start_task`, `move_to_project` and `tell_task` use the token-matched receipt rail; internal event and receipt names are unchanged. `start_task` creates separate new work, selecting no predecessor. Its full intent and token are durable before emission; a failed write emits nothing. Boot with prior custody proved gone marks only proven unadmitted intent `not_started`, with explicit retry; possibly admitted work stays held; nothing replays itself. Rejection keeps its typed reason; `UNCONFIRMED` means no matching receipt, never license for a duplicate; new-head manifests and the own-act observer expose saved admission separately.

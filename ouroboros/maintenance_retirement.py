@@ -237,7 +237,13 @@ def prune_call_wire_journals(root, retention_days=None, *, now=None) -> dict:
                 report["kept"] += 1
                 keep_until(report, path.lstat().st_mtime, days)
                 continue
-            path.unlink()
+            from ouroboros.owner_keep import gate
+
+            with gate(root, folder.name, timeout_sec=0) as why:
+                if why:
+                    report["kept"] += 1
+                    continue
+                path.unlink()
             report["removed"] += 1
         except FileNotFoundError:
             continue

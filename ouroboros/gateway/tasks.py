@@ -260,7 +260,11 @@ def _admission_rejection_response(
             admission_cleanup={"child_drive_removed": bool(removed)},
         )
     try:
-        shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
+        from ouroboros.owner_keep import gate
+
+        with gate(drive_root, task_id, timeout_sec=0) as kept:  # the owner's keep holds a rejected task's artifacts too
+            if not kept:
+                shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
     except Exception:
         log.warning("Failed to clean rejected task artifacts for %s", task_id, exc_info=True)
     return JSONResponse(

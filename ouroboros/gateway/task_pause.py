@@ -79,6 +79,8 @@ def owner_tree_control_routes() -> list:
     from starlette.routing import Route
 
     from ouroboros.gateway.task_continue import api_task_continue
+    from ouroboros.gateway.task_owner_keep import api_task_owner_keep
 
     return [Route("/api/tasks/{task_id}/pause", endpoint=api_task_pause, methods=["POST"]),
-            Route("/api/tasks/{task_id}/continue", endpoint=api_task_continue, methods=["POST"])]
+            Route("/api/tasks/{task_id}/continue", endpoint=api_task_continue, methods=["POST"]),
+            Route("/api/tasks/{task_id}/owner-keep", endpoint=api_task_owner_keep, methods=["POST"])]

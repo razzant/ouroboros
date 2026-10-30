@@ -1051,6 +1051,8 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     except (OSError, ValueError, StoreError) as exc:
         raise _Retained("task_result_unreadable") from exc
     status = str(current.get("status") or "")
+    if isinstance(current.get("owner_keep"), dict):
+        raise _Retained("owner_keep")
     if admission_rollback and not child and not current.get("started_at") \
             and status not in {"running", "interrupted"}:
         return {"task_id": task_id, "current": current, "plan": [], "rollback": True, "live": live,
@@ -1149,6 +1151,8 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
     and the receipts are exactly what Phase A left (bounded reads, no copy or hash)."""
     task_id = prepared["task_id"]
     current = load_task_result(canonical, task_id, strict=True) or {}
+    if isinstance(current.get("owner_keep"), dict):
+        raise _Retained("owner_keep")  # the writer saves it under this very lock: no keep can follow this move
     if attempt_basis(current) != prepared["basis"] or custody_revision(current) != prepared["revision_after"]:
         raise _Retained("canonical_changed")
     rows, complete = unread_mail_rows(drive, task_id)

@@ -67,8 +67,9 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         page.wait_for_selector("#page-dashboard")
         with page.expect_response(storage_get, timeout=10_000) as first_read:
             page.locator('[data-dashboard-tab="storage"]').click()
-        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Not counted yet", timeout=10_000)
-        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("on the disk the data folder is on")
+        expect(page.get_by_role("region", name="Where it is", exact=True)).to_contain_text("Not counted yet", timeout=10_000)
+        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Free on this disk")
+        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Ouroboros not counted yet")
         assert posts == [], "opening the tab must not start a count"
         first = first_read.value.json()
         assert first["count"] is None and first["counting"] is None and first["error"] is None
@@ -104,8 +105,12 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         for group in ("records", "work", "temporary", "other"):
             expect(page.locator(f'[data-storage-group="{group}"]')).to_be_visible()
         expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Ouroboros uses")
-        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Last count:")
+        expect(page.get_by_role("region", name="Where it is", exact=True)).to_contain_text("Last count:")
         expect(page.locator('[data-storage-place="model_calls"]')).to_contain_text("Model call records")
+        # Each group folds under its head; opening one shows its places with their words.
+        expect(page.locator('[data-storage-place="data_other"]')).to_be_hidden()
+        for group in ("records", "other"):
+            page.locator(f'[data-storage-group="{group}"] > .storage-group-fold > summary').click()
         expect(page.locator('[data-storage-place="data_other"]')).to_contain_text("Everything else in the data folder")
         expect(page.locator('[data-storage-place="program"]')).to_contain_text("Ouroboros program")
         rendered = page.locator("#page-storage").inner_text()
@@ -113,10 +118,10 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         assert page.locator(".storage-bar-seg").count() <= 5
         assert page.locator("#page-storage [title]").count() == 0, "no hover-only meaning"
         _assert_bar_fills_its_card(page)
-        page.locator('[data-storage-place="model_calls"] summary').click()
+        page.locator('[data-storage-place="model_calls"] .storage-parts > summary').click()
         expect(page.locator('[data-storage-place="model_calls"] .storage-parts-list')).to_be_visible()
 
-        # Temporary space: the tray's door previews without side effects over the real server; with no
+        # Free temporary space: the door previews without side effects over the real server; with no
         # finished work in this install the list is empty and the door stays.
         # The server and its worker write housekeeping even while idle (including memory bootstrap).
         # Compare the test-owned data and saved count here. test_preview_is_pure separately checks the
@@ -124,13 +129,12 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         protected = [path for path, _size in markers.values()] + [data_dir / "state" / "storage_measurement.json"]
         before = _file_snapshots(protected)
         tray = page.locator("[data-storage-tray]")
-        expect(tray).to_contain_text("Copies and leftovers of finished work")
         assert page.locator("[data-storage-tray] .btn-danger").count() == 0
         with page.expect_response(lambda response: response.url.endswith("/api/storage/free/preview"), timeout=10_000) as previewed:
-            page.locator("[data-free-preview]").click()
+            page.locator("[data-storage-door]").click()
         assert previewed.value.status == 202 and previewed.value.json()["started"] is True
         expect(tray).to_contain_text("Nothing temporary is waiting", timeout=30_000)
-        expect(page.locator("[data-free-preview]")).to_be_visible()
+        expect(page.locator("[data-storage-door]")).to_be_visible()
         after = _file_snapshots(protected)
         assert after == before, "the preview changed no task data or saved count"
         supervisor_rows = [json.loads(line) for line in (data_dir / "logs" / "supervisor.jsonl").read_text().splitlines()]
@@ -152,7 +156,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         page.locator('[data-dashboard-tab="logs"]').click()
         page.locator('[data-dashboard-tab="storage"]').click()
         expect(page.locator(".storage-status")).to_contain_text("could not be read", timeout=10_000)
-        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Last count:")
+        expect(page.get_by_role("region", name="Where it is", exact=True)).to_contain_text("Last count:")
         expect(page.locator('[data-storage-group="records"]')).to_be_visible()
         page.unroute("**/api/storage*", fail_one_read)
         page.screenshot(path=str(evidence / "storage-desktop.png"), full_page=True)
@@ -189,6 +193,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         page.set_viewport_size({"width": 360, "height": 780})
         page.locator('[data-dashboard-tab="logs"]').click()
         page.locator('[data-dashboard-tab="storage"]').click()
+        page.locator('[data-storage-group="temporary"] > .storage-group-fold > summary').click()
         why = page.locator('[data-storage-place="working_copies"] .storage-place-why')
         expect(why).to_contain_text(f"Not counted: {reason[:40]}", timeout=10_000)
         why.scroll_into_view_if_needed()

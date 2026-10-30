@@ -2359,6 +2359,23 @@ fade dims a card where the list cuts it.
   width that failed to save stays on screen and says so under the list until
   a later width change saves it; nothing retries on its own.
 
+### Storage
+
+Storage leads with free space, when it was read and one `Free temporary space…`,
+replaced by the flow until `Done`; `Where it is` folds its groups (owner decisions
+2026-10-30T11:38Z and 14:09Z). The review is the one confirmation: `Remove N items`
+waits for the whole list, hidden rows keep their choice, counted; a refused plan
+offers only Check again. Details open on request; `Not included, and why` names
+each reason and item, then the saved groups (loss sentences, danger capsule). An
+unanswered Remove or Free holds the flow (no new choice, no hiding); a lost answer
+never reads as nothing removed or offers its list again. A result puts what went
+wrong first; counted size and free space are two facts. An `environment` goes
+whole, with whatever was installed in it. Finished copies with unproven saved
+contents have a separate, initially unchecked choice in the details (owner choice
+2026-10-30T16:48Z). Show the exact copies, the whole-copy loss warning and omitted
+path counts before confirmation; saved results and held commits remain. These
+copies are neither automatic candidates nor falsely labelled unable to go.
+
 ## 6. Account group / row anatomy
 
 For a repeated identity row (a connected agent account, a subagent row,

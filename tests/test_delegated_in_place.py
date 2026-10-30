@@ -176,6 +176,60 @@ def test_a_continuation_of_an_in_place_run_is_told_its_edits_are_already_there(t
     assert pathlib.Path(request["execution"]["workspaceRoot"]).resolve() == _target(ctx) and _records(tmp_path) == []
 
 
+# --------------------------------------------------------------------------- its disposable scratch
+
+def _in_place_owners(ctx) -> pathlib.Path:
+    from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME
+
+    return pathlib.Path(ctx.drive_root) / "task_drives" / ctx.task_id / SESSION_SCRATCH_DIRNAME
+
+
+def test_a_full_access_in_place_run_is_named_its_own_disposable_scratch_and_granted_nothing(tmp_path, monkeypatch):
+    """The host's own folder must stay free of environments, so the run is told, before it starts, the
+    one place its starting task's drive owns for them, and what happens there; the request is unchanged."""
+    from ouroboros.delegate_start_instructions import DISPOSABLE_SCRATCH, scratch_fact
+    from tests.test_continuation_fresh_snapshot_binding import _GRANT_ROW, _ctx, _leg
+
+    ctx = _ctx(tmp_path, "git")
+    request, payload = _leg(tmp_path, monkeypatch, ctx, "run-1", prompt="edit here", access="full", row=_GRANT_ROW,
+                            workspace="in_place")
+    assert payload["workspace"] == "in_place" and request["access"] == "full"
+    assert "auxiliaryWritableRoots" not in request["execution"]  # ownership, never a new grant
+    held = custody.replay(tmp_path)["run-1"]
+    [record] = _in_place_owners(ctx).glob("*/scratch.json")
+    assert record.parent.name == f"in-place-{held.invocation_id}"
+    scratch = pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+    assert scratch.is_dir() and not any(scratch.iterdir()) and _target(ctx) not in scratch.parents
+    binding = request["instructions"].split("\n\nDELEGATED IN-PLACE BINDING", 1)[1]
+    assert f"outside every Git working tree, in {scratch}, this run's disposable scratch, {DISPOSABLE_SCRATCH}." in binding
+    assert scratch_fact() not in request["instructions"]
+
+
+def test_a_workspace_write_in_place_run_keeps_its_rights_and_hears_the_unowned_default(tmp_path, monkeypatch):
+    """Owning a scratch for it would need a grant it never had, so nothing is made or sent: an explicit gap."""
+    from ouroboros.delegate_start_instructions import scratch_fact
+    from tests.test_continuation_fresh_snapshot_binding import _GRANT_ROW, _ctx, _leg
+
+    ctx = _ctx(tmp_path, "git")
+    request, payload = _leg(tmp_path, monkeypatch, ctx, "run-1", prompt="edit here", access="workspace_write",
+                            row=_GRANT_ROW, workspace="in_place")
+    assert payload["workspace"] == "in_place" and "auxiliaryWritableRoots" not in request["execution"]
+    assert f"outside every Git working tree, {scratch_fact()}." in request["instructions"]
+    assert not _in_place_owners(ctx).exists()
+
+
+def test_a_refused_in_place_start_prepares_no_scratch(tmp_path):
+    from ouroboros.delegate_directory import in_place_start
+
+    def prepared():
+        raise AssertionError("a refused start must not make a scratch")
+
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    for adopted, root in ((object(), tmp_path / "repo"), (None, tmp_path)):  # an undisposed copy; no Git tree
+        snapshot, refusal, _ref, binding = in_place_start(adopted, str(root), prepared)
+        assert snapshot is None and json.loads(refusal.text)["reason"] == REFUSED and binding == ""
+
+
 # --------------------------------------------------------------------------- the terminal side
 
 def _finished_in_place(tmp_path, monkeypatch):

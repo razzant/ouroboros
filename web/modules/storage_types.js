@@ -1,7 +1,7 @@
 /** Dependency-free JSDoc mirror of the Dashboard storage envelopes homed in `ouroboros.storage` and
  *  re-exported by `ouroboros.gateway.contracts` (`GET /api/storage`, `POST /api/storage/measure`,
  *  `POST /api/storage/measure/cancel`, `POST /api/storage/free/preview`, `POST /api/storage/free`,
- *  `POST /api/storage/free/cancel`). */
+ *  `POST /api/storage/free/cancel`, `GET /api/storage/free/items`; `view=manual` lists the finished copies discarded by hand). */
 
 /**
  * One depth-1 entry of a place's roots; files directly in a root form the part `(files)`.
@@ -109,9 +109,66 @@
  */
 
 /**
+ * A typed reason and how many items it holds, for what a pool leaves out and what a run kept.
  * @typedef {Object} StorageFreeKept
- * @property {string} reason  // results_pending | in_use | busy | unreadable_record | restart | other
+ * @property {string} reason  // results_pending | in_use | busy | unreadable_record | restart | capture_unproven | unproven_excluded_inputs | retained_evidence | undeclared_environment | owner_keep | changed | other; and, only for what a pool leaves out, advanced_group (offered as a whole saved-work group)
  * @property {number} count
+ * @property {number=} manual_count  // a pool's row only, when above zero: how many of `count` can be discarded by hand (view=manual). Never subtract the pool's global manual count from a row: each row says its own.
+ */
+
+/**
+ * The ordinary pool of one plan: `null` at idle, may be present during `listing` with `bytes` still null or partial, final at `ready`.
+ * `environment` is a whole temporary working environment, never installed packages alone.
+ * @typedef {Object} StorageFreePool
+ * @property {number} count
+ * @property {number|null} bytes  // observed size, never a promise of space freed; null = unknown, never zero
+ * @property {boolean} bytes_complete
+ * @property {{work_folder?: number, working_copy?: number, environment?: number}} kinds
+ * @property {StorageFreeKept[]} excluded  // same reason vocabulary as a run's kept items
+ * @property {{count: number, bytes: number|null, bytes_complete: boolean}} manual  // finished copies the owner may discard one by one, never in `count`; the door shows when `count` > 0; bytes: null = unknown, never zero
+ */
+
+/**
+ * What discarding one finished copy by hand would lose, `view=manual` only. "Not proven saved" means no verified capture holds
+ * those paths; it does NOT mean they are unique or the only copy. The whole folder goes, never selected paths.
+ * @typedef {Object} StorageFreeManual
+ * @property {number} not_proven_saved_count  // all such paths, including those not listed; 0 only when the copy's sole unique work is commits on a branch that stays
+ * @property {number} not_proven_saved_bytes  // sum of lstat sizes, always whole (a path that cannot be read withholds the whole offer)
+ * @property {{path: string, bytes: number}[]} not_proven_saved  // the largest first, at most 50, paths relative to the copy
+ * @property {number} omitted_count  // not_proven_saved_count minus the listed ones: say so when above zero
+ * @property {boolean} keeps_commits  // its branch or pin stays, with any commits it holds
+ */
+
+/**
+ * One filesystem object of a plan. `id` is opaque and valid inside this plan only.
+ * @typedef {Object} StorageFreeEntry
+ * @property {string} id
+ * @property {string} group  // the id of its StorageFreeGroup
+ * @property {'work_folder'|'working_copy'|'environment'|'other'} kind
+ * @property {string} name
+ * @property {string} path
+ * @property {string|null} task_id
+ * @property {number|null} bytes  // observed size (the whole folder); null = unknown, never zero
+ * @property {boolean} bytes_complete
+ * @property {string|null} eligible_after  // the earliest the background may consider it, not a promised deletion; null = never
+ * @property {string|null} reason  // view=excluded and kept outcomes
+ * @property {string|null} outcome  // view=outcomes only: failed | stuck | kept | not_started | deleting | removed
+ * @property {'ordinary'|'saved_group'|'manual_discard'|'none'} availability  // how it can go: the pool, only a saved group, by hand (listed in view=excluded with its reason AND in view=manual), or not now. On view=outcomes it describes the preview, not the result: read `outcome`
+ * @property {StorageFreeManual=} manual  // view=manual only
+ */
+
+/**
+ * `GET /api/storage/free/items?plan=&view=&cursor=&limit=&version=`: one page. The pool and the excluded list are
+ * immutable once ready (their version is the plan id); outcomes settle and can reorder, so a moved version answers
+ * 409 `view_changed` and the client restarts from `cursor=0`. Other 409s: `preview_outdated`, `listing`; 400: `bad_view`.
+ * @typedef {Object} StorageFreeItemsResponse
+ * @property {string} plan
+ * @property {'pool'|'excluded'|'manual'|'outcomes'} view
+ * @property {string} version
+ * @property {number} total
+ * @property {Object<string, number>} counts  // by reason or outcome
+ * @property {number|null} next_cursor
+ * @property {StorageFreeEntry[]} items
  */
 
 /**
@@ -130,6 +187,9 @@
  * @property {number|null} free_after
  * @property {boolean} stopped
  * @property {string|null} error
+ * @property {number=} failed  // items whose deletion failed
+ * @property {number=} not_started  // unreached after a stop: untouched
+ * @property {boolean=} outcomes_ready  // `view=outcomes` answers for this run
  */
 
 /**
@@ -142,15 +202,21 @@
  * @property {number} done  // folders sized so far (listing) or attempted (running)
  * @property {number} total
  * @property {StorageFreeGroup[]} groups
+ * @property {(StorageFreePool|null)=} pool
  * @property {StorageFreeRun|null} run
  * @property {string|null} error
  */
 
 /**
- * `POST /api/storage/free`: the plan id the preview answered with and the groups to free of it.
+ * `POST /api/storage/free`: the plan id the preview answered with and exactly one form: the whole groups to free of it,
+ * the exact items of the ordinary pool, or the exact copies of `view=manual` with `accept_loss: true`; two forms together
+ * answer `selection_conflict`. There is no "select all" on the wire: the client sends each id.
  * @typedef {Object} StorageFreeRequest
  * @property {string} plan
- * @property {string[]} groups  // ids of StorageFreeGroup
+ * @property {string[]=} groups  // ids of StorageFreeGroup
+ * @property {string[]=} items  // ids of StorageFreeEntry; any bad id refuses the whole request
+ * @property {string[]=} manual  // ids of view=manual entries, each one the owner chose; not offered, unknown or outdated refuses the whole request
+ * @property {boolean=} accept_loss  // exactly `true`, only after the owner was told the whole copy goes with whatever is not proven saved in it; anything else answers `loss_not_accepted`
  */
 
 /**
@@ -181,5 +247,5 @@
  * @property {StorageFree} free
  * @property {Object<string, StorageRemover[]>} removers  // place id -> its removers; a place nothing removes is absent
  * @property {boolean=} started
- * @property {string=} reason  // why a free run did not start: preview_outdated | busy | unknown_group | nothing_selected
+ * @property {string=} reason  // why a free run did not start: preview_outdated | busy | unknown_group | unknown_item | not_offered | nothing_selected | selection_conflict | loss_not_accepted
  */

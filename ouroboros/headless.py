@@ -489,7 +489,13 @@ def prune_task_trees(
                 keep_until(report, _timestamp_from_result(result, dir_mtime), days)
                 report["skipped"].append({"root_task_id": root_id, "reason": "younger_than_retention"})
                 continue
-            shutil.rmtree(tree_dir)
+            from ouroboros.owner_keep import gate
+
+            with gate(parent, root_id, timeout_sec=0) as why:
+                if why:
+                    report["skipped"].append({"root_task_id": root_id, "reason": why})
+                    continue
+                shutil.rmtree(tree_dir)
             report["pruned"].append({"root_task_id": root_id, "path": str(tree_dir)})
         except Exception as exc:
             report["errors"].append({"root_task_id": root_id, "error": f"{type(exc).__name__}: {exc}"})
