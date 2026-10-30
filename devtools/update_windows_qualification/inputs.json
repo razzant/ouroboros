@@ -1,0 +1,30 @@
+{
+  "schema": "update-windows-qualification-inputs/1",
+  "candidate": {
+    "sha": "08bfafd851a139bade14fb75cec005ee9824b32f",
+    "tree": "08cd521b988ab93c0573ae226bd2fc17e9fcaeb4",
+    "note": "Bound by the parent at the final freeze, in the one equipment commit whose only parent is this candidate (pushed as qualification/update-windows-<first 12 hex>). run.ps1 refuses placeholders before any download; qualify.py --bind-only refuses a candidate checkout whose HEAD or tree differs and an equipment commit that changes anything beyond devtools/update_windows_qualification/ and its workflow."
+  },
+  "release": {
+    "tag": "v7.8.0",
+    "version": "7.8.0",
+    "url": "https://github.com/razzant/ouroboros/releases/download/v7.8.0/Ouroboros-7.8.0-windows-x64.zip",
+    "size": 772126896,
+    "sha256": "44782370dacfed116363d94c6ce92103a3184f0a42476efa56c7000d6249e2a8",
+    "source_sha": "6f3ddff05ff3e6c6f8d007ff96358df6af872e83",
+    "note": "Size and SHA-256 from the parent's verified GET; source_sha is the v7.8.0 tag commit the app's repo_bundle_manifest.json must name."
+  },
+  "python": {
+    "version": "3.10.11",
+    "url": "https://api.nuget.org/v3-flatcontainer/python/3.10.11/python.3.10.11.nupkg",
+    "size": 16283939,
+    "sha512_base64": "I6YAwLtkdpiALaZ5IA/0TAj02CuTnhCZM2gaWfn13TDSyvPuCRGKl1mAGbbk0HvXn/3qITlAWjebwKslkXj5UA==",
+    "sha256": "7c6f99b160a36a7e09492dfcff2b0a3a60bb5229ca44cdcc3ecb32871a6144d0",
+    "checksum_source": "https://api.nuget.org/v3/catalog0/data/2023.04.05.01.14.08/python.3.10.11.json",
+    "note": "The PSF NuGet CPython pinned and measured by the NTFS probe (run 40791539197). Extracted twice: the driver's interpreter, and separately the bare subject of mode F."
+  },
+  "actions": {
+    "checkout": "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "upload_artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02"
+  }
+}
