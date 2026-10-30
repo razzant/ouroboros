@@ -659,6 +659,9 @@ class OuroborosAgent:
             authority_refusal = validate_task_authority_sources(self.env, task)
         if authority_refusal:
             return None, [], {"authority_source_unavailable": authority_refusal}
+        from ouroboros.realtime_turn import recovery_refusal  # a call resumes only in its admitting process
+        if realtime_refusal := recovery_refusal(task, getattr(self, "_realtime_turn", None)):
+            return None, [], {"realtime_refusal": realtime_refusal}
         drive_logs = self.env.drive_path("logs")
         task = attach_task_contract(apply_consciousness_authority(task))
         from types import SimpleNamespace
@@ -854,25 +857,26 @@ class OuroborosAgent:
         review_env = self.env if canonical_drive.resolve(strict=False) == self.env.drive_root.resolve(strict=False) else replace(self.env, drive_root=canonical_drive)
         from ouroboros.config import get_context_mode
         from ouroboros.tool_policy import initial_tool_schemas  # the schemas count in the memory view's floor
-        messages, cap_info = build_llm_messages(
-            env=self.env,
-            memory=self.memory,
-            task=task,
-            review_context_builder=lambda: build_review_context(review_env),
-            ctx=ctx,
-            tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode()), tool_registry=self.tools,
-        )
-        # The second of the three places a reduction must reach (the durable record
-        # above is the first, `[SUBTASK_OUTCOME]` the third). It is appended HERE,
-        # after the context is built, because it is a fact about THIS dispatch —
-        # the composed child text it used to live in was frozen at enqueue time.
+        from ouroboros.context_timing import measured_sections
+
+        with measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
+            messages, cap_info = build_llm_messages(
+                env=self.env,
+                memory=self.memory,
+                task=task,
+                review_context_builder=lambda: build_review_context(review_env),
+                ctx=ctx,
+                tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode()), tool_registry=self.tools,
+                **({"route_resolver": self._realtime_turn.resolve_route} if getattr(self, "_realtime_turn", None) is not None else {}),
+            )
+        # A reduction reaches the durable record, this dispatch's context, then [SUBTASK_OUTCOME].
+        # Append after building: the composed child text was frozen at enqueue time.
         _delta_block = capability_delta_prompt_block(dispatch)
         if _delta_block:
             messages.append({"role": "user", "content": _delta_block})
-        # The substrate note is the executor-axis half of the same destination: a
-        # harness child must know it is a NANNY (delegate_start/delegate_wait, not
-        # metered thinking), and an `auto` child that fell back to metered spend
-        # must be able to say so instead of discovering it by spending.
+        # The executor note tells a harness child it is a NANNY (delegate_start/delegate_wait,
+        # not metered thinking), and an `auto` child that fell back to metered spend
+        # must be able to say so before spending.
         _exec_note = dispatch_executor_note(
             dispatch.executor_resolution if dispatch is not None else None,
             lane=dispatch.lane if dispatch is not None else None,
@@ -946,11 +950,14 @@ class OuroborosAgent:
     ) -> Callable[[str], Any]:
         """Keep a task's progress address stable after its worker turn ends."""
         def emit_task_progress(text: str, **kwargs: Any) -> None:
+            # A producer can attach per-row facts; the callback's frozen task provenance still wins after this worker changes tasks.
+            meta = dict(kwargs.pop("_progress_meta_override", None) or {})
+            meta.update(progress_meta or {})
             self._emit_progress(
                 text,
                 _task_id_override=task_id,
                 _chat_id_override=chat_id,
-                _progress_meta_override=progress_meta or {},
+                _progress_meta_override=meta,
                 _task_attempt_override=task_attempt,
                 **kwargs,
             )
@@ -1138,6 +1145,14 @@ class OuroborosAgent:
                 text, usage, llm_trace = _authority_source_terminal(authority_refusal)
             elif str(cap_info.get("executor_blocked_reason") or ""):
                 text, usage, llm_trace = _blocked_executor_terminal(cap_info, task)
+            elif cap_info.get("realtime_refusal"):
+                text = "This call cannot resume here. Start a new call in the room."
+                usage = {"terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE, "execution_status": "infra_failed",
+                         "reason_code": cap_info["realtime_refusal"]}
+            elif getattr(self, "_realtime_turn", None) is not None:
+                text, usage, llm_trace = self._realtime_turn.run(
+                    ctx, messages, self.tools, task=task, initial_effort=initial_effort,
+                    incoming_messages=self._incoming_messages, event_queue=self._event_queue)
             elif task_type_str == "deep_self_review":
                 # Deep self-review bypasses the tool loop: review_change(subject=system,
                 # surface=system) on the row the request named, else Main (decision 3A).

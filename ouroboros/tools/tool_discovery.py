@@ -142,6 +142,8 @@ def list_available_tools(
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault(tool_namespace(row["name"]), []).append(row)
+    if selected and selected not in groups and selected != BUILTIN_NAMESPACE:
+        selected = _skill_namespace(selected, groups) or selected  # a skill names its extension namespace
     header = ("Current callable catalog (MCP rows from published listings); [loaded] = the schema is already in "
               "your tool list" + (", enable_tools loads a not-loaded one." if "enable_tools" in callable_rows else "."))
     if selected:
@@ -155,8 +157,15 @@ def list_available_tools(
                      " Use list_available_tools() for the namespace overview."]
     else:
         lines = [header, f"{len(rows)} callable tools. Namespaces — list_available_tools(namespace=...) lists one completely:"]
-        lines += [f"- {name}: {len(items)} tools, {sum(item['loaded'] for item in items)} loaded"
-                  for name, items in sorted(groups.items())]
+        try:
+            skills = _namespace_skills()
+        except Exception as exc:
+            skills = {}
+            omission = {"surface": "extensions", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"}
+            if omission not in omissions:
+                omissions = [*omissions, omission]
+        lines += [f"- {name}{f' (skill {skills[name]})' if name in skills else ''}: {len(items)} tools, "
+                  f"{sum(item['loaded'] for item in items)} loaded" for name, items in sorted(groups.items())]
         # Names only here, so the overview stays bounded; namespace="builtin" adds purposes.
         for state, loaded_flag in (("loaded", True), ("not loaded", False)):
             names = [row["name"] for row in groups.get(BUILTIN_NAMESPACE, []) if row["loaded"] is loaded_flag]
@@ -258,9 +267,10 @@ def enable_tools(
     if hidden:
         parts.append("🚫 Hidden by policy (the tool exists but this task cannot use it): " + "; ".join(hidden))
     if not_found:
-        pointer = (" list_available_tools shows the current callable names."
-                   if "list_available_tools" in usable_selectors(registry) else "")
+        discovery = "list_available_tools" in usable_selectors(registry)
+        pointer = " list_available_tools shows the current callable names." if discovery else ""
         parts.append(f"❌ Not found: {', '.join(not_found)}.{pointer}")
+        parts.extend(_named_namespace_guidance(registry, not_found, discovery=discovery))
     text = "\n".join(parts)
     if not wanted:
         return _publish_tool_result(ctx, ToolResult(
@@ -270,6 +280,74 @@ def enable_tools(
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="TOOL_SCHEMA_LIMIT",
                                                     text="⚠️ TOOL_SCHEMA_LIMIT: nothing new fits this request.\n" + text))
     return text
+
+
+def _namespace_skills() -> Dict[str, str]:
+    """Each loaded extension namespace and the skill it belongs to, so the overview can name the skill."""
+    from ouroboros.extension_loader import _lock as ext_lock, _tools as ext_tools
+
+    with ext_lock:
+        return {tool_namespace(str(tool.get("name") or "")): str(tool.get("skill") or "")
+                for tool in ext_tools.values() if tool.get("skill")}
+
+
+def _skill_namespace(name: str, groups: Dict[str, Any]) -> str:
+    """The extension namespace a skill's name produces (the loader's exact naming rule), when it is listed."""
+    from ouroboros.extension_surface_names import extension_name_prefix
+
+    try:
+        namespace = extension_name_prefix(name)[:-1]
+    except Exception:
+        return ""
+    return namespace if namespace in groups else ""
+
+
+def _named_namespace_guidance(registry: "ToolRegistry", names: List[str], *, discovery: bool) -> List[str]:
+    """A missed name that is a namespace, or the skill an extension namespace is named by, answers
+    with that namespace's callable tools (the exact naming rule, never a likeness): the overview
+    shows an extension as its namespace, and a caller that asks for the skill gets its tools."""
+    from ouroboros.extension_surface_names import extension_name_prefix
+    from ouroboros.tool_policy import name_miss_guidance
+
+    callable_rows = getattr(registry, "callable_rows", None)
+    if callable_rows is None:  # a catalog without dispatch rows answers the plain miss only
+        return []
+    rows = callable_rows() or []
+    namespaces = {tool_namespace(str(row["name"])) for row in rows} - {BUILTIN_NAMESPACE}
+    lines: List[str] = []
+    for name in names:
+        try:
+            namespace = name if name in namespaces else extension_name_prefix(name)[:-1]
+        except Exception:
+            continue
+        if namespace not in namespaces:
+            continue
+        lines.append(f"{name} names the namespace {namespace}, not one tool; enable its tools by their names.")
+        lines.extend(name_miss_guidance(name, namespace, callable_rows(namespace), discovery=discovery))
+    return lines
+
+
+def update_resident_notice(registry, resident, messages):
+    """One host fact about the schemas actually sent, including feature tools."""
+    from ouroboros.context_budget import bound_host_row
+
+    names = [schema["function"]["name"] for schema in resident]
+    remaining = {schema["function"]["name"] for schema in registry.schemas()} - set(names)
+    notice = (bound_host_row("tool_manifest", "[SYSTEM NOTICE]\n"
+            f"Loaded now ({len(names)}): {', '.join(names)}. {len(remaining)} more tools in the catalog are "
+            "equally mine and not loaded yet: `list_available_tools` names them, `enable_tools` loads them. "
+            "Not loaded does not mean unavailable.") if remaining else None)
+    updated = []
+    for row in messages:
+        if row.get('_host_context_kind') == 'tool_manifest':
+            if notice is not None:
+                updated.append(notice)
+                notice = None
+        else:
+            updated.append(row)
+    if notice is not None:
+        updated.append(notice)
+    messages[:] = updated
 
 
 def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]]) -> set:
@@ -319,7 +397,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "namespace": {
                             "type": "string",
-                            "description": "Optional namespace to list completely, e.g. builtin or mcp_<server>.",
+                            "description": "Optional namespace to list completely, e.g. builtin, mcp_<server> or an extension's skill name.",
                         },
                     },
                     "required": [],
@@ -334,7 +412,9 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     'Load call schemas for named tools this task may already call (comma-separated); '
                     '"mcp_<server>" loads every tool of that server. Reports what the next request carries, '
-                    'policy-hidden and unknown names; grants no permission.'
+                    "policy-hidden and unknown names; grants no permission. Another namespace or a skill's name "
+                    "answers with its tools' names. In a live call the new schemas reach the voice session (an "
+                    "engine that cannot take them in place reconnects once)."
                 ),
                 "parameters": {
                     "type": "object",

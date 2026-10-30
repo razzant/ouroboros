@@ -1,13 +1,16 @@
 """Transparent compression of finished records: the maintenance child's ``record_compression`` job.
 
-Finished records stay whole (PERSISTENCE ``[record]``); where the filesystem compresses transparently
-their bytes can occupy less with no byte a reader sees changed. Two planes (``PLANES``):
+Finished records stay whole while retained; where the filesystem compresses transparently their bytes
+can occupy less with no byte a reader sees changed. Task evidence remains PERSISTENCE ``[record]``;
+the call wire journal alone follows shared GC retention (``maintenance_retirement.prune_call_wire_journals``),
+also requiring a task proven over. Compression preserves its age. Two planes (``PLANES``):
 
 - ``evidence``: the published evidence of a task proven over (``subagent_worktrees._task_proven_over``: a
   terminal record, a negative live probe, no lineage process; this child holds no queue, so its probe is
   the queue snapshot's, ``task_has_live_queue_ownership``), ``task_results/artifacts/<task>/delegated_runs/
-  */evidence*/**`` and ``.../source_handles/test-evidence/**``, its row read again right before each
-  replace; a terminal task not proven over yet waits and is asked again on later passes;
+  */evidence*/**``, ``.../source_handles/test-evidence/**`` and a live call's ``conversation-wire.jsonl``,
+  its row read again right before each replace; a terminal task not proven over yet waits and is asked
+  again on later passes;
 - ``seats``: reviewer seat homes ``review_checking_prune.finished_seat_homes`` offers (copy gone, task
   proven over the same way): their ``evidence*`` and ``.test-evidence`` folders, under the seat lock held
   through each replace.
@@ -67,19 +70,26 @@ def _settled(root: pathlib.Path, task_ids: List[str]) -> Dict[str, bool]:
         return {task_id: txn.row(task_id, "status") in SETTLED_STATUSES for task_id in task_ids}
 
 
+WIRE_JOURNAL = "conversation-wire.jsonl"  # a live call's wire evidence (``live_conversation.WireJournal``)
+
+
 def _evidence_part(parts: Tuple[str, ...], directory: bool) -> bool:
-    """``delegated_runs/<run>/evidence*/**`` and ``source_handles/test-evidence/**`` of a task folder."""
+    """``delegated_runs/<run>/evidence*/**``, ``source_handles/test-evidence/**`` and the call wire journal of a
+    task folder."""
+    if parts == (WIRE_JOURNAL,):
+        return not directory
     depth, named = {"delegated_runs": (3, lambda: parts[2].startswith("evidence")),
                     "source_handles": (2, lambda: parts[1] == "test-evidence")}.get(parts[0], (0, None))
     return bool(depth) and (len(parts) < depth or named()) and (directory or len(parts) > depth)
 
 
 def _has_evidence(base: pathlib.Path) -> bool:
-    """A task folder holding either evidence plane (two stats): only such a task is worth its proof. One
+    """A task folder holding evidence (three stats): only such a task is worth its proof. One
     that cannot be looked into stays a candidate: the walk then counts it ``unreadable`` and goes on."""
-    for path in (base / "delegated_runs", base / "source_handles" / "test-evidence"):
+    for path, kind in ((base / "delegated_runs", stat.S_ISDIR), (base / "source_handles" / "test-evidence", stat.S_ISDIR),
+                       (base / WIRE_JOURNAL, stat.S_ISREG)):
         try:
-            if stat.S_ISDIR(os.stat(path).st_mode):
+            if kind(os.stat(path).st_mode):
                 return True
         except (FileNotFoundError, NotADirectoryError):
             continue

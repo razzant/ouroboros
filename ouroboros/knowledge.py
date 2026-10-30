@@ -8,6 +8,7 @@ does not select memories, call models or decide what an observation means.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from collections import Counter
@@ -27,6 +28,7 @@ from ouroboros.utils import append_jsonl, utc_now_iso, write_bytes_atomic
 INDEX_FILE = "index-full.md"
 UNKNOWN_STAMP = "unknown"  # a history stamp the writer could not name; legacy rows read the same way
 OVERVIEW_TOPIC = "overview"
+PERSON_TYPE = "person"  # Authored note type; its summary survives the outline.
 # Only the overview, the shared orientation every integrating context loads, must stay active.
 ALWAYS_ACTIVE_TOPICS = frozenset({OVERVIEW_TOPIC})
 # Topics with one global home whichever room addresses them. ``patterns`` and
@@ -287,7 +289,7 @@ def _navigation_descriptor(address: KnowledgeAddress, raw: bytes | None = None) 
     except (yaml.YAMLError, ValueError) as exc:
         return {**address.as_dict(), "parse_error": f"{type(exc).__name__}: {exc}"}
     error = _archive_error(address.topic, metadata)
-    return {**address.as_dict(), "title": title, "summary": metadata.get("summary"),
+    return {**address.as_dict(), "title": title, "type": metadata.get("type"), "summary": metadata.get("summary"),
             "state": "archived" if "archive" in metadata and not error else "active",
             "archive": metadata.get("archive"), "archive_error": error}
 
@@ -358,7 +360,8 @@ def _label(value: str) -> str:
 
 
 def render_knowledge_index(rows: tuple[dict[str, Any], ...], legacy_context: str = "",
-                           *, include_summaries: bool = True, view: str = "active", scope: str = "global") -> str:
+                           *, include_summaries: bool = True, view: str = "active", scope: str = "global",
+                           selection: tuple[str, ...] = ()) -> str:
     """Generated navigation is separate from authored understanding."""
     if view not in {"active", "archived", "all"}:
         raise ValueError("view must be active, archived or all")
@@ -382,9 +385,20 @@ def render_knowledge_index(rows: tuple[dict[str, Any], ...], legacy_context: str
         if row.get("read_error") or row.get("parse_error") or row.get("archive_error"):
             line += "\n  (source metadata unavailable; read the original note)"
         entries.append(line)
-    rendered = _INDEX_HEADER + ("\n".join(entries) if entries else "(empty)") + "\n"
+    selection_note = ""
+    if selection:
+        selection_note = "Selection: " + json.dumps(list(selection), ensure_ascii=False) + "\n"
+        unmatched = [item for item in selection if not any(
+            _selected(str(row["topic"]), (item,)) and (view == "all" or row.get("state", "active") == view)
+            for row in rows)]
+        if unmatched:
+            selection_note += f"Unmatched selectors in {view} view: " + json.dumps(unmatched, ensure_ascii=False) + "\n"
+        selection_note += "\n"
+    rendered = _INDEX_HEADER + selection_note + ("\n".join(entries) if entries else "(empty)") + "\n"
     archived = sum(row.get("state") == "archived" for row in rows)
-    rendered += (f"\nArchived notes: {archived}. Open with knowledge_list(scope={scope!r}, view='archived'); "
+    archive_label = "Archived notes in this selection" if selection else "Archived notes"
+    selected_arg = f", topics={list(selection)!r}" if selection else ""
+    rendered += (f"\n{archive_label}: {archived}. Open with knowledge_list(scope={scope!r}, view='archived'{selected_arg}); "
                  f"complete inventory: knowledge_list(scope={scope!r}, view='all').\n")
     if legacy_context:
         rendered += ("\n## Earlier generated context\n\n"
@@ -394,13 +408,45 @@ def render_knowledge_index(rows: tuple[dict[str, Any], ...], legacy_context: str
     return rendered
 
 
-def knowledge_index_view(address: KnowledgeAddress, view: str = "active", *,
-                         overview: KnowledgeNote | None = None) -> str:
-    """Read-only, current-source projection shared by context, list and index writers.
+def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: str = "", *,
+                             scope: str = "global") -> str:
+    """The index at a coarser resolution, never a selection: every active note keeps its line.
 
-    Old authored index prose cannot be filtered by lifecycle. Keep it visibly
-    historical until the existing global-overview retirement condition applies.
+    A line is the note's address and its title, grouped by the shelf directory the note was
+    written into (its authored path, never an inferred category). A note whose authored
+    ``type`` is ``person`` keeps its summary: understanding of people is the continuity an
+    outline must not thin. Every summary and body stays one read away.
     """
+    active = [row for row in rows if row.get("state", "active") == "active"]
+    groups: dict[str, list[str]] = {}
+    for row in active:
+        topic, title = str(row["topic"]), str(row.get("title") or row["topic"]).strip()
+        line = f"- {topic}" + (f" — {_label(title)}" if title and title != topic else "")
+        summary = row.get("summary")
+        if str(row.get("type") or "").strip().casefold() == PERSON_TYPE and isinstance(summary, str) and summary.strip():
+            line += "\n" + "\n".join("  " + part for part in summary.splitlines())
+        if row.get("read_error") or row.get("parse_error") or row.get("archive_error"):
+            line += " (source metadata unavailable; read the original note)"
+        groups.setdefault(topic.rsplit("/", 1)[0] + "/" if "/" in topic else "", []).append(line)
+    body = "\n\n".join((f"{group}\n" if group else "") + "\n".join(lines)
+                        for group, lines in sorted(groups.items(), key=lambda item: (item[0] != "", item[0])))
+    archived = sum(row.get("state") == "archived" for row in rows)
+    rendered = (f"Outline: every active note ({len(active)}) by its address and title; people's notes keep their "
+                f"summaries. Full summaries: knowledge_list(scope={scope!r}); one note: "
+                f"knowledge_read(topic=..., scope={scope!r}).\n\n" + (body or "(empty)") + "\n")
+    rendered += f"\nArchived notes: {archived}. Open with knowledge_list(scope={scope!r}, view='archived').\n"
+    if legacy_context:
+        rendered += f"Earlier generated context is retained; knowledge_list(scope={scope!r}) shows it.\n"
+    return rendered
+
+
+def _selected(topic: str, topics: tuple[str, ...]) -> bool:
+    return any(topic == item or (item.endswith("/") and topic.startswith(item)) for item in topics)
+
+
+def _legacy_prose(address: KnowledgeAddress, view: str, overview: KnowledgeNote | None) -> str:
+    """Old authored index prose cannot be filtered by lifecycle. Keep it visibly
+    historical until the existing global-overview retirement condition applies."""
     path = address.shelf / INDEX_FILE
     text = path.read_bytes().decode("utf-8") if path.exists() else ""
     legacy = text.partition(_LEGACY_INDEX_MARKER)[2] if text.startswith(_INDEX_HEADER) else text
@@ -412,8 +458,28 @@ def knowledge_index_view(address: KnowledgeAddress, view: str = "active", *,
                 legacy = ""
         except (OSError, UnicodeDecodeError):
             pass
-    return render_knowledge_index(inventory_knowledge(address, navigation=True, known_note=overview), legacy if view == "active" else "",
-                                  view=view, scope=address.scope)
+    return legacy if view == "active" else ""
+
+
+def knowledge_index_view(address: KnowledgeAddress, view: str = "active", *,
+                         overview: KnowledgeNote | None = None, topics: tuple[str, ...] = ()) -> str:
+    """Read-only, current-source projection shared by context, list and index writers.
+
+    ``topics`` narrows it to exact topics or groups (an entry ending with ``/``), summaries kept.
+    """
+    rows = inventory_knowledge(address, navigation=True, known_note=overview)
+    if topics:
+        return render_knowledge_index(tuple(row for row in rows if _selected(str(row["topic"]), tuple(topics))),
+                                      view=view, scope=address.scope, selection=topics)
+    return render_knowledge_index(rows, _legacy_prose(address, view, overview), view=view, scope=address.scope)
+
+
+def knowledge_index_views(address: KnowledgeAddress, *, overview: KnowledgeNote | None = None) -> tuple[str, str]:
+    """The active index whole and as its outline, from one inventory of the shelf."""
+    rows = inventory_knowledge(address, navigation=True, known_note=overview)
+    legacy = _legacy_prose(address, "active", overview)
+    return (render_knowledge_index(rows, legacy, view="active", scope=address.scope),
+            render_knowledge_outline(rows, legacy, scope=address.scope))
 
 
 @contextmanager
@@ -585,6 +651,20 @@ class KnowledgeWriteResult:
     history_ref: dict[str, Any] | None = None
 
 
+def body_chars(note: KnowledgeNote | None) -> int:
+    """The same stored body the context loader carries, excluding parsed frontmatter."""
+    if note is None:
+        return 0
+    return len(note.source.text_at(note.source.body_span) if note.source else note.text)
+
+
+def overview_residency(note: KnowledgeNote) -> str:
+    """A revision-stable cost line, independent of route, clock or accepted session."""
+    chars = body_chars(note)
+    return (f"Residency: overview body {chars} chars; estimate {chars / 4:.2f} tokens (chars/4); "
+            "loaded whole in every integrating context (Main, tasks, wakes and Presence); helpers read on demand.")
+
+
 def write_knowledge_note(
     address: KnowledgeAddress, content: str, mode: str = "overwrite",
     expected_revision: str | None = None, task_id: str = "", old_str: str | None = None,
@@ -670,6 +750,7 @@ def write_knowledge_note(
                     return KnowledgeWriteResult(False, "publication_incomplete", current, revision)
             return KnowledgeWriteResult(True, "unchanged", current, revision,
                                         {"old_chars": len(current.text), "new_chars": len(current.text),
+                                         "old_body_chars": body_chars(current), "new_body_chars": body_chars(current),
                                          "change_chars": 0, "removed_headings": [],
                                          "body_changed": False, "summary_changed": False})
         # A body edit keeps the preamble bytes; a revised summary may re-render
@@ -695,6 +776,7 @@ def write_knowledge_note(
         old_body, old_summary = ((current.raw[current.source.body_span.start_byte:], current.summary)
                                  if current and current.source else (b"", ""))
         delta = {"old_chars": len(old_text), "new_chars": len(updated.text),
+                 "old_body_chars": body_chars(current), "new_body_chars": body_chars(updated),
                  "change_chars": len(updated.text) - len(old_text), "removed_headings": removed_headings,
                  "body_changed": old_body != raw[updated.source.body_span.start_byte:] if known else None,
                  "summary_changed": old_summary != updated.summary if known else None}

@@ -1,4 +1,5 @@
-"""Read-only, target-bound Apply effects; no engine start, stop or durable state."""
+"""Read-only Apply and Restart to update effects, bound to their target or prepared candidate; no engine start,
+stop or durable state."""
 
 import platform
 import re
@@ -32,8 +33,14 @@ def _bundle_runtime(sha):
             "basis": "target_documentation", "source": f"{sha}:README.md"}
 
 
-def update_effects(plan: dict) -> dict:
-    """One attach-only handshake/status observation for both merge and replacement choices."""
+def update_effects(plan: dict, *, composition: str | None = None, runtime: dict | None = None) -> dict:
+    """One attach-only handshake/status observation for both merge and replacement choices.
+
+    A prepared candidate names its ``composition``, the files its next generation boots: the engine
+    transition is read there, never at a merge commit or the target in its place (none: unknown), and is
+    final. ``runtime`` is the interpreter its preparation selected (``version``, ``sqlite``; unrecorded:
+    unknown), compared with this install's own.
+    """
     from ouroboros.claudexor_daemon import owned_daemon_provisioned, read_owned_gateway
     from ouroboros.claudexor_exit_facts import runtime_facts
     from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
@@ -52,7 +59,7 @@ def update_effects(plan: dict) -> dict:
         observation_error = "The owned engine is not provisioned."
     known = active is not None and all(type(active.get(key)) is int for key in ("model", "non_model"))
     target = str(plan.get("target_sha") or "")
-    merge = str(plan.get("merge_commit") or target)
+    merge = str(plan.get("merge_commit") or target) if composition is None else composition
 
     def transition(sha):
         error = ""
@@ -63,15 +70,35 @@ def update_effects(plan: dict) -> dict:
         return {**engine_pin_transition(pin, serving), "source_sha": sha,
                 "error": error or observation_error}
 
+    installed = {"python": platform.python_version(), "sqlite": sqlite3.sqlite_version, "executable": sys.executable}
+    facts = {"installed": installed, "bundle": _bundle_runtime(target), "changed_by_apply": False}
+    if runtime is not None:
+        selected = {"python": runtime.get("version") or None, "sqlite": runtime.get("sqlite") or None,
+                    "basis": "candidate_preparation"}
+        facts.update(selected=selected, changed_by_apply=None if None in (selected["python"], selected["sqlite"])
+                     else (selected["python"], selected["sqlite"]) != (installed["python"], installed["sqlite"]))
     return {
         "target_sha": target,
         "engine": transition(merge), "replacement_engine": transition(target),
-        "provisional": not bool(plan.get("merge_commit")),
+        "provisional": composition is None and not bool(plan.get("merge_commit")),
         "active_work": {"status": "known" if known else "unknown",
                         "model": active.get("model") if active else None,
                         "non_model": active.get("non_model") if active else None,
                         "total": sum(active.values()) if known else None},
-        "runtime": {"installed": {"python": platform.python_version(), "sqlite": sqlite3.sqlite_version,
-                                  "executable": sys.executable},
-                    "bundle": _bundle_runtime(target), "changed_by_apply": False},
+        "runtime": facts,
     }
+
+
+def candidate_effects(row: dict) -> dict:
+    """``update_effects`` of one prepared candidate's Restart to update (a ``supervisor.update_prepare`` record).
+
+    Its composition is W′ (``layers.new_files``): the tree the switch writes and the restart reads the next
+    engine pin from (``body_adoption.bound_candidate_file``), with local work and a reviewed adaptation, never
+    the channel's target. Its runtime is the interpreter preparation selected (``environment.candidate``: a
+    staged app's measured Python, else this one). ``candidate_id`` binds the effects to that record.
+    """
+    selected = (row.get("environment") or {}).get("candidate")
+    effects = update_effects({"target_sha": (row.get("target") or {}).get("target_sha")},
+                             composition=str((row.get("layers") or {}).get("new_files") or ""),
+                             runtime=selected if isinstance(selected, dict) else {})
+    return {**effects, "candidate_id": str(row.get("candidate_id") or "")}

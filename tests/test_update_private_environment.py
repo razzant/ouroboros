@@ -173,7 +173,8 @@ def test_the_first_private_environment_runs_every_entry_of_its_checkout_after_it
     assert "pip" in _run([scene.fixed / "bin" / "pip", "--version"])  # its scripts name where it now is
 
     body_adoption._archive(scene.data, handoff, "adopted")  # what a confirmed adoption does: the pointer goes
-    assert not body_adoption.helper_dir(scene.data).exists() and not body_adoption.read(scene.data)
+    assert [path.name for path in body_adoption.helper_dir(scene.data).iterdir()] == ["lock"]
+    assert not body_adoption.read(scene.data)
     again = _entry(scene, "server.py")
 
     assert again.returncode == 0, again.stderr

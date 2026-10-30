@@ -98,12 +98,20 @@ def test_bundle_dir_env_is_exported_to_the_server_and_cli():
 
 def test_embedded_python_env_redirects_both_bundle_writes(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
     env = bootstrap_module.embedded_python_env(tmp_path)
     state = tmp_path / "state"
-    assert env["PYTHONPYCACHEPREFIX"] == str(state / "pycache")
+    assert env["PYTHONPYCACHEPREFIX"] == str(state / "pycache.noindex")
     assert env["PYTHONUSERBASE"] == str(state / "python-userbase")
     # An inherited no-user-site would install to the user site then refuse to import it.
     assert "PYTHONNOUSERSITE" not in env
+
+
+def test_a_child_keeps_a_custom_bytecode_prefix_and_leaves_the_legacy_default(tmp_path):
+    custom, legacy = str(tmp_path / "custom-cache"), str(tmp_path / "state" / "pycache")
+    assert bootstrap_module.embedded_python_env(tmp_path, {"PYTHONPYCACHEPREFIX": custom})["PYTHONPYCACHEPREFIX"] == custom
+    child = bootstrap_module.embedded_python_env(tmp_path, {"PYTHONPYCACHEPREFIX": legacy})
+    assert child["PYTHONPYCACHEPREFIX"] == str(tmp_path / "state" / "pycache.noindex")
 
 
 def test_pip_install_target_args_only_for_the_embedded_interpreter(tmp_path):

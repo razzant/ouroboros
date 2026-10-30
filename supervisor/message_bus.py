@@ -1289,7 +1289,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      narration: Optional[bool] = None,
                      require_write: bool = False,
                      ensure_record_boundary: bool = False,
-                     replay_delivery_id: str = "") -> Optional[bool]:
+                     replay_delivery_id: str = "") -> Dict[str, Any] | bool:
     """Send an owner-visible row with one voice and timestamp for history and live.
 
     Narration True means model speech, False host speech; absent legacy rows keep
@@ -1299,6 +1299,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     in the existing outbox and also requires a positive transport receipt. A
     required notice without one has one owner, its producer, which retries or
     records a failed write: it keeps the caller's wait and raises when unwritten.
+    Return the selected destination so delivery receipts and mailbox handoffs
+    retain this send's room even if task placement changes around the send.
     Replay records dispatch only after those writes, before transport; False
     means its outbox debt no longer permits sending. First live sends are unchanged.
     """
@@ -1378,7 +1380,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             from ouroboros.room_appearances import frame_rooms
             meta.update(projection_fields(stored), **frame_rooms(DATA_DIR, stored))
         if _text.strip() in ("", "\u200b"):
-            return
+            return {"chat_id": chat_id}
         # Budget footers belong in dashboard/status flows, not every chat reply.
         full = _text
 
@@ -1399,3 +1401,4 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                     raise MessageTransportError(f"message transport refused: {err}")
         except Exception as exc:
             raise MessageTransportError(str(exc)) from exc
+        return {"chat_id": chat_id}

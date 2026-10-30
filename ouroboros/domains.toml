@@ -65,6 +65,31 @@ D19 = "Frozen contracts (ABI)"
 D20 = "Presence"
 
 [modules]
+"ouroboros/_usage_settlement.py" = "D16"
+"ouroboros/call_peers.py" = "D11"
+"ouroboros/call_protocol.py" = "D19"
+"ouroboros/context_measurement.py" = "D03"
+"ouroboros/context_images.py" = "D03"
+"ouroboros/context_sections.py" = "D03"
+"ouroboros/contracts/live_conversation.py" = "D19"
+"ouroboros/contracts/realtime.py" = "D19"
+"ouroboros/gateway/call_contracts.py" = "D19"
+"ouroboros/gateway/call_ws.py" = "D11"
+"ouroboros/gateway/host_call.py" = "D11"
+"ouroboros/live_connections.py" = "D01"
+"ouroboros/live_conversation.py" = "D01"
+"ouroboros/live_timing.py" = "D01"
+"ouroboros/live_context_view.py" = "D01"
+"ouroboros/live_usage.py" = "D16"
+"ouroboros/presence_call.py" = "D20"
+"ouroboros/presence_events.py" = "D20"
+"ouroboros/pricing_catalog.py" = "D02"
+"ouroboros/realtime_credentials.py" = "D01"
+"ouroboros/realtime_item_echo.py" = "D02"
+"ouroboros/realtime_session.py" = "D02"
+"ouroboros/realtime_setup.py" = "D01"
+"ouroboros/realtime_turn.py" = "D01"
+"ouroboros/section_floor.py" = "D03"
 "ouroboros/loop_completion_schema.py" = "D01"
 "ouroboros/place_reply.py" = "D20"
 "ouroboros/place_arrivals.py" = "D20"
@@ -161,6 +186,7 @@ D20 = "Presence"
 "ouroboros/claudexor_exit_facts.py" = "D07"
 "ouroboros/claudexor_runtime.py" = "D07"
 "ouroboros/claudexor_runtime_retention.py" = "D07"
+"ouroboros/claudexor_node_seed.py" = "D07"  # the daemon's kept copy of the bundled Node
 "ouroboros/engine_pin_policy.py" = "D07"  # one engine pin rule shared by update preflight and restart
 "ouroboros/claudexor_startup_failure.py" = "D07"
 "ouroboros/cli.py" = "D18"
@@ -215,6 +241,7 @@ D20 = "Presence"
 "ouroboros/context_view_facts.py" = "D03"  # named window and largest selected view elements
 "ouroboros/context_renewal.py" = "D03"  # the refusal path's floor: the same task in a fresh view of its record
 "ouroboros/context_health.py" = "D03"
+"ouroboros/context_timing.py" = "D03"  # each host section's wall time on its build's memory-view receipt
 "ouroboros/context_layout.py" = "D03"
 "ouroboros/context_mode_compat.py" = "D03"
 "ouroboros/memory_view.py" = "D03"  # the acting mind's resident memory view: roles, capture, story and live part
@@ -1045,6 +1072,7 @@ allowed = [
   "D02->D12",
   "D02->D16",
   "D02->D18",
+  "D02->D19",
   "D03->D01",
   "D03->D02",
   "D03->D04",
@@ -1187,6 +1215,7 @@ allowed = [
   "D16->D12",
   "D16->D17",
   "D16->D18",
+  "D16->D19",
   "D17->D01",
   "D17->D04",
   "D17->D05",

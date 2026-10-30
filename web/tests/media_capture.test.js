@@ -132,3 +132,40 @@ test('Panic releases the holder at once and stops its tracks; a later capture st
     assert.equal(capture.currentHolder().owner, 'dictation');
     next.release();
 });
+
+test('only an opted-in holder keeps capture while hidden, including pending permission and replacement', async () => {
+    const env = environment(), opened = deferred(), capture = createCaptureLease(env);
+    env.navigator.mediaDevices.getUserMedia = () => opened.promise;
+    const pending = capture.acquire({ owner: 'call', keepWhenHidden: true });
+    env.document.hidden = true;
+    env.document.dispatchEvent(new Event('visibilitychange'));
+    assert.equal(capture.currentHolder()?.owner, 'call');
+    opened.resolve(stream());
+    const lease = await pending;
+    const replacement = stream();
+    env.navigator.mediaDevices.getUserMedia = () => Promise.resolve(replacement);
+    await lease.replace();
+    env.document.dispatchEvent(new Event('visibilitychange'));
+    assert.equal(lease.signal.aborted, false);
+    assert.equal(replacement.track.stops, 0);
+    lease.release();
+    env.navigator.mediaDevices.getUserMedia = () => Promise.resolve(stream());
+    const dictation = await capture.acquire({ owner: 'dictation' });
+    env.document.dispatchEvent(new Event('visibilitychange'));
+    assert.equal(dictation.signal.reason, 'hidden', 'opt-in does not leak to the next holder');
+    assert.equal(capture.currentHolder(), null);
+});
+
+test('background opt-in still releases on pagehide, Panic, device loss and explicit End', async () => {
+    for (const cause of ['pagehide', 'ouro:panic', 'lost', 'end']) {
+        const env = environment(), capture = createCaptureLease(env);
+        const lease = await capture.acquire({ owner: 'call', keepWhenHidden: true });
+        const mic = lease.stream;
+        if (cause === 'lost') mic.track.dispatchEvent(new Event('ended'));
+        else if (cause === 'end') lease.release('ended');
+        else env.dispatchEvent(new Event(cause));
+        assert.equal(lease.signal.aborted, true, cause);
+        assert.equal(mic.track.stops, 1, cause);
+        assert.equal(capture.currentHolder(), null, cause);
+    }
+});

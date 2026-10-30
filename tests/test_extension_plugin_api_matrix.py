@@ -205,8 +205,7 @@ def test_declared_2_0_extension_loads_and_carries_the_generation(tmp_path):
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root, _force_in_process=True)
     assert err is None, err
     entry = extension_loader.get_tool(extension_surface_name("gen2ext", "t1"))
-    # A declared minimum below the host's minor binds the generation the host serves (2.1 is additive).
-    assert entry is not None and entry.get("plugin_api_generation") == PLUGIN_API_VERSION == "2.1"
+    assert entry is not None and entry.get("plugin_api_generation") == PLUGIN_API_VERSION
     with extension_loader._lock:
         bundle = extension_loader._extensions["gen2ext"]
         assert bundle.plugin_api_generation == PLUGIN_API_VERSION

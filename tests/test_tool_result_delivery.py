@@ -577,3 +577,19 @@ def test_chosen_body_survives_a_full_host_prefix_unless_it_alone_exceeds_usable_
         assert trace["tool_calls"][0]["result_source_view"]["cut_reason"] == "chosen_body_exceeds_usable_input"
     else:
         assert not trace["tool_calls"][0].get("result_partial")
+
+
+@pytest.mark.parametrize('reader', [False, True])
+@pytest.mark.parametrize('tool', ['chat_history', 'journal_read', 'tree_read', 'recent_tasks', 'query_code', 'query_data', 'run_shell'])
+def test_range_recovery_respects_pageable_tool_and_loaded_reader(tool, reader):
+    from ouroboros.tool_result_delivery import render_result_view
+    text, view = render_result_view('complete source ' * 2000, head_chars=30, tail_chars=30,
+        tool_name=tool, source_ref={'path': 'exact/result.txt', 'read': {'tool': 'read_file'}}, reader_available=reader)
+    assert view and 'exact/result.txt' in text
+    if tool != 'run_shell':
+        assert "this tool's declared parameters" in text
+        assert 'Do not rerun' not in text
+    else:
+        assert 'Do not rerun' in text
+    assert ('Read the exact source above' in text) is reader
+    assert ('read_omitted' in view) is reader

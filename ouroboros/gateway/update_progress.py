@@ -272,7 +272,7 @@ def _executor_outcome(body: dict, code: int, error: Exception | None, mutating: 
     return "failed"
 
 
-def _finish(response, error: Exception | None) -> None:
+def _finish(response, error: Exception | None, *, concluded: bool = True) -> None:
     try:
         body = json.loads(response.body) if response is not None else {}
         code = getattr(response, "status_code", 500)
@@ -283,7 +283,7 @@ def _finish(response, error: Exception | None) -> None:
         with _lock:
             if not _current.get("active") or _current.get("owner_thread") != threading.get_ident():
                 return
-            outcome = _executor_outcome(body, code, error, bool(_current.get("mutating")))
+            outcome = _executor_outcome(body, code, error, bool(_current.get("mutating"))) if concluded else ""
             _current.update(
                 active=False, result=result, error=failure, outcome=outcome,
                 restart_required=bool(body.get("restart_required") or result == "restart_required"),
@@ -297,6 +297,17 @@ def _finish(response, error: Exception | None) -> None:
         _notify()
     except Exception:
         log.debug("Could not finish update progress", exc_info=True)
+
+
+def retain_stopped_activation(response, *, concluded: bool = True, stopped: bool = True) -> None:
+    """A Restart to update that ended with its writers stopped and no restart requested: one attempt, begun and ended
+    here under the update lock, so every client keeps its error and Restart now (an ordinary one keeps none: its boot
+    reports it). ``concluded`` False: its transition is still open, so only the next boot says what became of it.
+    ``stopped`` False: its writers stay refused, but no teardown stopped running work (``work_stop`` none)."""
+    begin()
+    if stopped:
+        advance("stopping_workers")
+    _finish(response, None, concluded=concluded)
 
 
 def _conclude(seen: dict, result: dict, bootstrap_ok: bool) -> None:

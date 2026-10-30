@@ -42,7 +42,7 @@ def test_reclaim_low_water_divisor_is_one_constant_read_at_call_time(monkeypatch
     the later reply facts are APPENDED measurement fields (older readers stay positional-safe)."""
     from ouroboros import context_fit
 
-    assert "RECLAIM_LOW_WATER_DIVISOR" in _src("ouroboros/context_fit.py")
+    assert "RECLAIM_LOW_WATER_DIVISOR" in inspect.getsource(context_fit.reclaim_low_water_margin)
     assert "/ 8" not in inspect.getsource(context_fit.measure_main_fit)
     assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-12:] == [
         "low_water_margin_tokens", "raw_input_tokens", "reply_allowance_tokens", "anchor_input_tokens",
@@ -104,7 +104,8 @@ def test_call_sites_import_the_ssot_names():
     ):
         assert not hasattr(cb, name)
         assert name not in loop_src
-    assert "OWNER_LOW_TARGET_TOKENS" in _src("ouroboros/context_fit.py")
+    from ouroboros.context_fit import measure_main_fit
+    assert "OWNER_LOW_TARGET_TOKENS" in inspect.getsource(measure_main_fit)
 
     # The request reads no chat tail: the open conversation is the memory view's, and the
     # readers of the frozen consolidation cursor's tail are gone with it.

@@ -50,9 +50,9 @@ from ouroboros.delegate_start_instructions import (
     UNPROVEN_BOUNDARY_INSTRUCTION as _UNPROVEN_BOUNDARY_INSTRUCTION,
     access_instruction,
     append_coordination_context,
-    apply_execution_binding,
     directory_copy_binding_instruction,
     execution_binding_fingerprint,
+    execution_binding_text,
 )
 from ouroboros.subagent_runtime import (  # noqa: F401 - shared primitive re-export
     delegate_start_entry as _delegate_start_entry,
@@ -119,7 +119,7 @@ from ouroboros.delegate_shared import (  # noqa: F401
 # (same objects) because sibling code and the tests address it on THIS surface.
 # `_fail` is NOT re-imported from it — the one shared refusal author is
 # `delegate_shared._fail`, which delegate_integration itself imports.
-from ouroboros.delegate_continuation import NO_CONTINUATION, start_binding
+from ouroboros.delegate_continuation import NO_CONTINUATION, start_binding, with_run_binding
 from ouroboros.tools.delegate_integration import (  # noqa: F401
     _CAPTURE_DELEGATED_SNAPSHOT,
     _capture_block,
@@ -532,13 +532,12 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 if readonly_root:
                     root = readonly_root
                     instructions += input_instruction
-            preparation = ceiling_authority if authority.mode == "plan" else authority
+            preparation, run_binding = (ceiling_authority if authority.mode == "plan" else authority), ""
             if preparation.access in SESSION_ACCESS_PROFILES or continuation.snapshot:
                 target_root = record_auth["target_root"]
                 authority_source = record_auth["source"]
                 if workspace == "in_place":
-                    snapshot, snap_error, resource_ref, binding = in_place_start(continuation.snapshot, target_root)
-                    instructions += binding
+                    snapshot, snap_error, resource_ref, run_binding = in_place_start(continuation.snapshot, target_root)
                 elif continuation.snapshot:
                     snapshot, snap_error = continuation.snapshot, None
                 elif authority_source == "skill_payload":
@@ -567,13 +566,14 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             scope_root = (readonly_root or target_root) if execution_root or directory_options or (snapshot and authority.mode == "plan") else root
             service = session_service_directories(ctx, gateway, route, authority, snapshot=snapshot, payload=authority_source == "skill_payload", execution_root=execution_root or root)
             if snapshot is not None:
-                binding_fingerprint = execution_binding_fingerprint(
-                    execution_root or root, target_root)
-                instructions = apply_execution_binding(instructions, execution_root or root, target_root, binding_fingerprint,
-                                                       evidence_root="" if authority_source == "skill_payload" else None, granted_scratch=service.scratch)
+                binding_fingerprint = execution_binding_fingerprint(execution_root or root, target_root)
+                run_binding = execution_binding_text(execution_root or root, target_root, binding_fingerprint,
+                                                     evidence_root="" if authority_source == "skill_payload" else None, granted_scratch=service.scratch)
             elif directory_options and directory_options.get("isolation") == "envelope":
                 binding_fingerprint = execution_binding_fingerprint("", target_root, "directory_copy")
-                instructions += directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
+                run_binding = directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
+            instructions += run_binding  # and the same text in a continuation's prompt, which a resumed session reads (#2513)
+            continuation = with_run_binding(continuation, authority, run_binding, execution_root or scope_root)
             project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(
                 gateway, scope_root, execution_root, authority.access, minted=bool(readonly_root) or registered_checkout(scope_root))
             if directory_options or is_in_place_run({"resource_ref": resource_ref}):

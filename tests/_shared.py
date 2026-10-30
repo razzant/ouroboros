@@ -403,3 +403,18 @@ def write_legacy_capability_rows(root, *, effort_ceilings=None, effort_floors=No
             data["rejected_params"][key] = {"params": sorted(params), "observed_at": observed_at,
                                             "reason": "provider_rejected"}
         assert ce._save(root, data)
+
+
+def current_python_env(env_root) -> None:
+    """Leave what ``isolated_deps._ensure_python_env`` leaves for THIS interpreter, without venv or pip:
+    a ``pyvenv.cfg`` naming the running base and an interpreter entry. Fakes of the package installer call
+    it, so the live reader corroborates their record (``isolated_deps.python_env_binding``)."""
+    import sys
+
+    venv = pathlib.Path(env_root) / "python"
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.touch()
+    base = os.path.dirname(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
+    version = ".".join(map(str, sys.version_info[:3]))
+    (venv / "pyvenv.cfg").write_text(f"home = {base}\nversion = {version}\n", encoding="utf-8")

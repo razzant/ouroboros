@@ -27,7 +27,7 @@ from ouroboros.tools.review_checklist import (  # noqa: F401 -- intentional publ
     load_checklist_layers,
     load_checklist_section,
 )
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact as _truncate_review_artifact, utc_now_iso  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
+from ouroboros.utils import truncate_review_artifact as _truncate_review_artifact, utc_now_iso
 
 if TYPE_CHECKING:
     # Avoid runtime registry import; this module stays tool-module independent.
@@ -488,19 +488,14 @@ def build_blocking_findings_json_section(
     if not open_obligations and not blocking_history:
         return ""
 
-    def _sanitize_text(value: str, limit: int = 0) -> str:
-        """Redact secrets; ignore legacy ``limit`` to avoid silent truncation."""
-        text, _ = redact_prompt_secrets(str(value or ""))
-        return text
-
     payload = {"open_obligations": [
         {
             "obligation_id": getattr(ob, "obligation_id", ""),
             "item": getattr(ob, "item", ""),
             "severity": getattr(ob, "severity", ""),
-            "reason": _sanitize_text(getattr(ob, "reason", "")),
+            "reason": str(getattr(ob, "reason", "") or ""),
             "source_attempt_ts": getattr(ob, "source_attempt_ts", ""),
-            "source_attempt_msg": _sanitize_text(getattr(ob, "source_attempt_msg", ""), limit=200),
+            "source_attempt_msg": str(getattr(ob, "source_attempt_msg", "") or ""),
         }
         for ob in open_obligations
     ], "recent_blocking_attempts": []}
@@ -508,14 +503,14 @@ def build_blocking_findings_json_section(
     # Include all blocking attempts and all critical findings.
     for attempt in reversed(list(blocking_history or [])):
         critical_findings = [
-            {key: _sanitize_text(value) if isinstance(value, str) else value for key, value in finding.items()}
+            dict(finding)
             for finding in list(getattr(attempt, "critical_findings", []) or [])
             if isinstance(finding, dict)
         ]
         payload["recent_blocking_attempts"].append({
             "ts": getattr(attempt, "ts", ""),
             "tool_name": getattr(attempt, "tool_name", ""),
-            "commit_message": _sanitize_text(getattr(attempt, "commit_message", ""), limit=200),
+            "commit_message": str(getattr(attempt, "commit_message", "") or ""),
             "block_reason": getattr(attempt, "block_reason", ""),
             "critical_findings": critical_findings,
         })
@@ -795,9 +790,7 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     _ANTI_THRASHING_RULE_VERDICT,
     _CONVERGENCE_RULE_TEXT,
     _HISTORY_VERIFICATION_ONLY_RULE,
-    _JSON_SECRET_RE,
     _OBLIGATION_SUFFIX_RE,
-    _SECRET_LINE_RE,
     _make_fence,
     anti_pattern_lock_guard,
     author_questions_block,
@@ -813,7 +806,6 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     normalize_reviewer_item,
     normalize_reviewer_items,
     normalize_reviewer_obligation_id,
-    redact_prompt_secrets,
     review_preamble,
     single_line,
     strip_obligation_suffix,

@@ -164,14 +164,13 @@ def _paths(raw: bytes) -> List[str]:
 def snapshot(repo: Any, branch_dev: str) -> Dict[str, Any]:
     """H, I and W of the serving checkout, plus every reason they cannot be carried.
 
-    Reads only: the real index is copied once, byte for byte, and never refreshed or
-    written. Every index fact comes from that one copy, whose stat data lets ``add -A``
-    hash only what changed (a listing carries none, so it rehashed the whole tree on
-    every call); a split index's shared part is read from the repository where Git
-    keeps it, and the copy is written as a whole index of its own (``core.splitIndex``
-    off), so nothing is written beside the real one. The copy lives outside the work
-    tree and is deleted. ``refusals`` lists typed reasons with up to five paths each;
-    an empty list means the layers are complete.
+    Reads only: the real index is copied once, byte for byte with its own time, and never refreshed or written.
+    Every index fact comes from that one copy, whose stat data lets ``add -A`` hash only what changed (a listing
+    carries none, so it rehashed the whole tree on every call) and whose time keeps Git checking by content an entry
+    stamped in that second (racily clean: a copy stamped later trusts a same-size edit made then). A split index's
+    shared part is read from the repository where Git keeps it, and the copy is written whole (``core.splitIndex``
+    off), so nothing is written beside the real one. The copy lives outside the work tree and is deleted.
+    ``refusals`` lists typed reasons with up to five paths each; an empty list means the layers are complete.
     """
     repo = pathlib.Path(repo)
     head = _out(repo, "rev-parse", "--verify", "HEAD^{commit}")
@@ -192,7 +191,9 @@ def snapshot(repo: Any, branch_dev: str) -> Dict[str, Any]:
             return _run(repo, "-c", "core.splitIndex=false", *args, env=env, **kwargs)
 
         try:
-            shutil.copyfile(real_index, index)  # one read of a file Git replaces whole: one coherent index
+            with open(real_index, "rb") as source:  # one read of a file Git replaces whole: one coherent index
+                index.write_bytes(source.read())  # and the time of that same file, mtime for both stamps
+                os.utime(index, ns=(os.fstat(source.fileno()).st_mtime_ns,) * 2)
         except FileNotFoundError:
             copy("read-tree", "--empty")  # a repository that never wrote an index
         real = copy("ls-files", "-s", "-z").stdout
@@ -1132,8 +1133,7 @@ def discard(row: Dict[str, Any]) -> Dict[str, Any]:
     """The owner's discard of exactly ``row``'s candidate, read again under ``lifecycle()``.
 
     Its resolver is cancelled first; the record settles; the GC retires checkout,
-    scratch and generation environment once nothing works in them.
-    """
+    scratch and generation environment once nothing works in them."""
     from ouroboros import body_adoption
     from supervisor import git_ops as g
 
@@ -1147,7 +1147,8 @@ def discard(row: Dict[str, Any]) -> Dict[str, Any]:
                 "armed", "switching", "switched", "stuck"):
             raise PrepareRefused("UPDATE_ACTIVATION_PENDING", "this candidate is being activated")
         stopped = _stop_resolver(live)
-        body_adoption.abandon(g.DRIVE_ROOT, "candidate_discarded", candidate_id=str(live.get("candidate_id") or ""))
+        if body_adoption.close_update(g.DRIVE_ROOT, "candidate_discarded", str(live.get("candidate_id") or "")):
+            raise PrepareRefused("UPDATE_ACTIVATION_PENDING", "this candidate is being activated")  # armed meanwhile
         return _settle(live, "discarded", reason="owner_discarded", **({"resolver_stop": stopped} if stopped else {}))
 
 
@@ -1157,11 +1158,21 @@ def record_activation(data_dir: Any, result: Dict[str, Any]) -> None:
     A concluded outcome is also retained as the panel's Last attempt (``ACTIVATION_REL``): an
     activated record settles, and the GC then retires it with its checkout. ``unconfirmed`` (this
     start did not attest the switched tree; the handoff stays switched) is an observation, not an
-    outcome: the record keeps activating, with what was observed beside its adoption id.
+    outcome: the record keeps activating, with what was observed beside its adoption id. A record
+    names its latest attempt before that attempt's handoff exists (``body_adoption.authorize_update``)
+    and keeps the name through its end, aborted or settled: a result of another handoff (an earlier
+    one, settled late) changes nothing of it or of the Last attempt. A record or a result that names
+    none takes the result as before.
     """
     with _lifecycle:
         row = find(str(result.get("candidate_id") or ""), data_dir)
         if row is None or row.get("state") in SETTLED:
+            return
+        named, settled = (str(value or "") for value in ((row.get("activation") or {}).get("adoption_id"),
+                                                         result.get("adoption_id")))
+        if named and settled and named != settled:
+            log.info("update activation %s left %s as it is: that record is attempt %s's", settled,
+                     row.get("candidate_id"), named)
             return
         outcome = str(result.get("outcome") or "")
         state = {"adopted": "activated", "returning": "activating", "unconfirmed": "activating"}.get(outcome, "failed")
@@ -1172,8 +1183,8 @@ def record_activation(data_dir: Any, result: Dict[str, Any]) -> None:
             # Nothing was switched or exchanged: the candidate is offered again while what it was prepared on holds.
             moved = _prepared_moved(row)
             state, reason = ("stale", moved) if moved else ("ready", reason)
-        activation = {key: result.get(key) for key in ("outcome", "note", "reasons", "decision", "sha", "previous",
-                                                       "why") if key in result}
+        activation = {key: result.get(key) for key in ("adoption_id", "outcome", "note", "reasons", "decision", "sha",
+                                                       "previous", "why") if key in result}
         switched = result.get("environment") if isinstance(result.get("environment"), dict) else {}
         if outcome == "start_failed" and switched.get("state") == "selected" and switched.get("previous"):
             # The previous generation's own packages stay for a Restore while the Last attempt names them.

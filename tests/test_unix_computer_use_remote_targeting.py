@@ -1,4 +1,4 @@
-"""unix_computer_use 0.5.3 on the remote backends: OSWorld guests and Macs over SSH (see test_unix_computer_use_targeting.py).
+"""unix_computer_use on the remote backends: OSWorld guests and Macs over SSH (see test_unix_computer_use_targeting.py).
 
 The same receipt contract as the local path, pinned at the transport boundary (``urlopen`` toward a guest, ``ssh``): a target
 is resolved from the remote's own inventory and activated by window id or pid, the guest program is executed here against a
@@ -39,13 +39,19 @@ class Guest:
     """``urlopen`` toward an OSWorld guest; ``answer(command)`` -> (returncode, output) per /execute call."""
 
     def __init__(self, answer):
-        self.answer, self.commands = answer, []
+        self.answer, self.commands, self.validations = answer, [], []
 
     def __call__(self, request, timeout=None):
         command = json.loads(request.data.decode("utf-8"))["command"]
-        self.commands.append(command)
-        returncode, output = self.answer(command[-1], len(self.commands))
-        body = {"status": "success", "output": output, "error": "", "returncode": returncode}
+        from tests.test_unix_computer_use_safety_contract import guest_key_validation
+        validation = guest_key_validation(command[-1])
+        if validation:
+            self.validations.append(command)
+            body = validation["result"]
+        else:
+            self.commands.append(command)
+            returncode, output = self.answer(command[-1], len(self.commands))
+            body = {"status": "success", "output": output, "error": "", "returncode": returncode}
 
         class Response:
             status = 200
@@ -516,12 +522,17 @@ def test_osworld_a_lost_answer_after_a_paste_is_not_retyped_and_negative_points_
     monkeypatch.setattr(module, "_platform", lambda: "macos")  # the host's own space never decides for a guest
     assert receipt(api.tools["click"](x=-5, y=20, raw=True))["ok"] is False and guest.commands == []
     # A stored transform from another display or backend that maps a point outside the guest is refused the same way.
-    api.tools["click"].__self__._save_transform({"sx": 1.0, "sy": 1.0, "ox": -1920, "oy": 0, "ts": 1, "platform": "macos"})
-    mapped = receipt(api.tools["click"](x=100, y=100))
+    impl = api.tools["click"].__self__
+    geometry = {"x": 0, "y": 0, "w": 1920, "h": 1080}
+    monkeypatch.setattr(impl, "_display_geometry", lambda _tf, **_kw: geometry)
+    impl._save_transform({"sx": 1.0, "sy": 1.0, "ox": -1920, "oy": 0, "ts": 1, "platform": "macos",
+                          "observation_id": "other-display", "display_geometry": geometry, "image_w": 1920, "image_h": 1080,
+                          "connection_identity": impl._connection_identity(), "backend": impl._active_backend_name()})
+    mapped = receipt(api.tools["click"](x=100, y=100, observation_id="other-display"))
     assert mapped["ok"] is False and "stored screenshot transform" in mapped["error"] and guest.commands == [], mapped
     for tool, args in (("move", {"x": 100, "y": 100}), ("left_click_drag", {"start_x": 100, "start_y": 100, "end_x": 200, "end_y": 200}),
                        ("mouse_down", {"x": 100, "y": 100}), ("mouse_up", {"x": 100, "y": 100})):
-        out = receipt(api.tools[tool](**args))
+        out = receipt(api.tools[tool](**args, observation_id="other-display"))
         assert out["ok"] is False and "stored screenshot transform" in out["error"] and guest.commands == [], (tool, out)
     # Untargeted: a lost answer after the clipboard program is final here too (the base retyped); a lost read carries no dispatch fact.
     plain = receipt(api.tools["type_text"](text="<b>x</b>"))

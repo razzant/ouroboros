@@ -23,6 +23,7 @@ from ouroboros.skill_dependencies import skill_deps_not_ready
 from ouroboros.skill_install_record import read_install_record
 from ouroboros.skill_loader import SkillReviewState, find_skill, save_enabled, save_review_state
 from ouroboros.skill_review import SkillReviewOutcome
+from tests._shared import current_python_env
 from tests.test_marketplace_api import (
     _BodyRequest,
     _patch_clawhub_install_pipeline,
@@ -90,10 +91,11 @@ def registry(tmp_path, monkeypatch):
         return SkillReviewOutcome(skill_name=name, status=status, content_hash=loaded.content_hash,
                                   findings=findings, error="reviewer unavailable" if status == "pending" else "")
 
-    def packages(*args, **kwargs):
+    def packages(_packages, env_root, *args, **kwargs):
         state.events.append("packages")
         if state.fail_packages:
             raise RuntimeError("package download failed")
+        current_python_env(env_root)
         return []
 
     monkeypatch.setattr("ouroboros.skill_review.review_skill", review)

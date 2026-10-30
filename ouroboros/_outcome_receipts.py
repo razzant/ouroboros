@@ -521,8 +521,8 @@ def disclosed_list_projection(
 
     The bound stays — reviewer packets are budgeted — but it may never be SILENT. Every
     projection emits ``<key>`` (the carried items, each string bounded through the SSOT
-    ``utils.truncate_review_artifact`` or the caller's redacting wrapper of it, so a
-    clipped string carries its own omission note) AND ``<key>_omitted``, the EXACT number
+    ``utils.truncate_review_artifact``, so a clipped string carries its own omission
+    note) AND ``<key>_omitted``, the EXACT number
     of items left out (0 when nothing was, stated rather than left to inference). A
     hand-rolled ``[:N]`` on one of these surfaces is the anti-pattern this replaces:
     it destroys evidence and leaves no trace that evidence was destroyed.
@@ -563,9 +563,8 @@ def _lifecycle_row(
     """One ``artifact_lifecycle`` entry with its path DISCLOSED-bounded (the structural
     existence/surface flags are kept whole; a non-dict row is bounded as text).
 
-    ``bound`` is the caller's string bound — the SSOT truncator by default, and the
-    REDACTING ``review_evidence._accept_redact_cap`` wherever the row reaches an
-    external reviewer, since a lifecycle path is raw host filesystem surface."""
+    ``bound`` is the caller's string bound — the SSOT truncator by default, and
+    ``review_evidence._accept_cap`` wherever the row reaches a reviewer."""
     if not isinstance(item, dict):
         return bound(str(item), cap)
     if "path" not in item:
@@ -591,9 +590,8 @@ def receipt_identity_projection(
     carried, whichever one ``receipt_identity`` selected as primary.
 
     Bounding is DISCLOSED, never silent (BIBLE P1). Long strings go through the
-    caller's ``bound`` — the SSOT ``truncate_review_artifact`` by default, and the
-    redacting ``_accept_redact_cap`` (which wraps the same helper) on the reviewer
-    path, because a receipt's command text is raw host stdout. The path LIST is
+    caller's ``bound`` — the SSOT ``truncate_review_artifact`` by default, and
+    ``_accept_cap`` (which wraps the same helper) on the reviewer path. The path LIST is
     additionally capped in length, so it always reports ``paths_omitted`` and, when
     a path set exists, ``paths_identity_sha256`` — the hash of the FULL normalized
     set that ``_reconciles`` compares. The bounded list is therefore checkable
@@ -603,11 +601,8 @@ def receipt_identity_projection(
     identity = receipt_canonical_identity(receipt)
     return {
         # AGENT-SUPPLIED text, exactly like the `check` beside it — so it goes through
-        # the caller's `bound` on the SAME cap, never inserted raw (round 3): the
-        # reviewer path's `bound` is the REDACTING `_accept_redact_cap`, and a raw
-        # `criterion_id` would have been the one identity component reaching external
-        # reviewers unredacted, and unbounded enough to overflow a review packet's
-        # immutable core. Every OTHER field here is either bounded through `bound` too
+        # the caller's `bound` on the SAME cap, never inserted raw (round 3): an
+        # unbounded `criterion_id` could overflow a review packet's immutable core. Every OTHER field here is either bounded through `bound` too
         # (`check`, `paths`) or host-minted and closed (`reconciliation_identity` is one
         # of four fixed kind strings, `expected_whitespace_normalized` a bool,
         # `paths_omitted` an int, `paths_identity_sha256` a hex digest).

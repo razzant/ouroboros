@@ -5,6 +5,10 @@ headline with its round and snapshot, the findings grouped by reviewer (an advis
 "not counted"), the non-responsive seats, and the retry coaching a failed round earns. Parsing
 and the verdict are the shared review mechanism's (``triad_review.parse_seat_answers``,
 ``review_ledger.reduce_verdict``, ``tools/review_skill.outcome_status``).
+
+The block quotes the reviewers' findings as recorded: the tool returns it to its author whole,
+and only the owner's chat-card detail (``skill_review_history``) passes it through the
+diagnostic redaction.
 """
 
 from __future__ import annotations
@@ -21,7 +25,6 @@ from ouroboros.tools.review_helpers import (
     build_self_verification_template,
     format_prompt_code_block,
 )
-from ouroboros.utils import sanitize_tool_result_for_log
 
 
 def render_skill_review_block(
@@ -182,7 +185,7 @@ def render_skill_review_block(
         )
         if retry_coaching:
             lines.append(retry_coaching.lstrip())
-    return sanitize_tool_result_for_log("\n".join(lines))
+    return "\n".join(lines)
 
 
 __all__ = ["render_skill_review_block"]

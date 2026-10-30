@@ -102,7 +102,7 @@ def test_smaller_route_addresses_memory_only_when_the_compact_request_exceeds_it
     snapshot = mv.snapshot_from_json(core.memory_view_json)
     whole_memory = mf.view_tokens(mv.render_story(snapshot)) + mf.view_tokens(mv.render_room(snapshot))
     assert whole_memory > floor["physical_allowance_tokens"]
-    assert narrow.initial_mode == "nano" and floor["steps"]["F5"] == 1
+    assert narrow.initial_mode == "nano" and floor["steps"]["F5l"] == 1
     # The start's Max room outlives the narrowing, in the view fact and in what a task trace keeps of it.
     assert shown.memory_facts["max_room"] == plan.max_projection.memory_facts["max_room"]
     assert mf.trace_facts(shown.memory_facts)["max_room"]["cause"] == "held"
@@ -123,8 +123,8 @@ def test_start_uses_one_floor_walk_and_calibrates_before_book_choice(tmp_path, m
         calls.append(1)
         return walk(*args, **kwargs)
     monkeypatch.setattr(mf, "fit_memory_view", measured)
-    assert build(360_000).initial_mode == "max"
+    assert build(330_000).initial_mode == "max"
     assert len(calls) == 1
     monkeypatch.setattr("ouroboros.context_fit._route_calibration_ratio", lambda *_a, **_kw: 4 / 2.7)
-    assert build(360_000).initial_mode == "low"
+    assert build(330_000).initial_mode == "low"
     assert len(calls) == 2

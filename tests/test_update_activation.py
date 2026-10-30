@@ -22,7 +22,7 @@ import pytest
 
 from ouroboros import body_adoption, body_switch
 from supervisor import update_adaptation, update_prepare
-from tests.body_candidate_support import REPO, git, isolate, make_serving, run_entry
+from tests.body_candidate_support import REPO, git, isolate, make_serving, run_entry, stage_then_edit_in_one_second
 
 pytestmark = pytest.mark.serial  # real cold-entry processes
 
@@ -670,18 +670,20 @@ def test_environments_an_open_handoff_names_outlive_any_pass_and_go_once_it_clos
 
 def test_a_source_only_activation_authorizes_where_the_macos_app_installer_cannot_import(scene):
     """Windows has no ``fcntl``, which the macOS app installer imports at its top. Authorizing a source-only
-    Update runs after the writer fence; it must never need that module, so here it runs in an interpreter
-    where ``import fcntl`` fails as it does on Windows, against the real checkout and record."""
+    Update runs after the writer fence; it must never need that installer, so here it runs in an interpreter
+    where importing it fails as it does on Windows, against the real checkout and record. The helper's lock it
+    holds meanwhile is the platform's own (``body_switch._locked``: ``msvcrt`` there, ``fcntl`` here)."""
     scene.official({"ouroboros/mod_a.py": "GEN = 'GEN_CAND'\n"})
     scene.local_work(commit=False)
     row = scene.prepare()
     assert row["state"] == "ready" and row["native"]["status"] == "none"
     script = textwrap.dedent("""
         import json, sys
-        sys.modules["fcntl"] = None  # as on Windows: ``import fcntl`` raises ModuleNotFoundError
+        sys.modules["ouroboros.app_install"] = None  # as on Windows, where its own ``import fcntl`` fails
         from ouroboros import body_adoption
         handoff = body_adoption.authorize_update(sys.argv[1], json.loads(sys.argv[2]))
-        print(json.dumps({"phase": handoff["phase"], "installer_imported": "ouroboros.app_install" in sys.modules}))
+        installed = sys.modules.get("ouroboros.app_install") is not None
+        print(json.dumps({"phase": handoff["phase"], "installer_imported": installed}))
     """)
 
     done = subprocess.run([sys.executable, "-c", script, str(scene.data), json.dumps(row)], cwd=str(REPO),
@@ -933,6 +935,9 @@ def test_an_edit_anywhere_after_the_switch_is_later_work_never_a_return(scene):
     decision = scene.handoff()["return"]
     assert (decision["outcome"], decision["reasons"]) == ("unknown", ["later_edits:ouroboros/mod_a.py"])
     assert (scene.serving / "web" / "style.css").read_text() == STYLE_NEW and "AFTER_SWITCH" in mod_a.read_text()
+    if not stage_then_edit_in_one_second(scene.serving, "ouroboros/mod_a.py", original, "GEN = 'GEN_NEW'\n"):
+        pytest.skip("LABELLED CONTROLLED TIMING: the stage and a same-size edit never fit one second here")
+    assert body_switch.qualify_return(str(scene.serving), handoff) == ("unknown", ["later_edits:ouroboros/mod_a.py"])
 
 
 def test_a_stylesheet_return_keeps_every_layer_the_owner_had(scene):

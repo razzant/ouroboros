@@ -72,8 +72,12 @@ before it runs.
 When a private snapshot exists, the host appends a separate typed execution
 binding after the immutable inherited work order: the snapshot is the root of the
 run's work product and the stable project root is a read-only identity until
-explicit integration. Legacy engines that expose only the snapshot as `scope.root`
-receive the same binding using that root. The binding, the `workspace_write`
+explicit integration. Legacy engines exposing only the snapshot as `scope.root` get
+the same binding. A resumed session may keep earlier instructions, so each access
+line scopes run facts (access; edit, evidence, scratch, copy-local places; a copy's
+read-only target) to one run and finds the current binding by identity, not position:
+this turn's host facts, at the harness's starting directory; quoted ones are history.
+Each ordinary continuation's prompt restates its access and binding (else its directory). The binding, the `workspace_write`
 access line and the unproven-boundary sentence state one write rule, because
 verification needs writes no copy may hold: disposable process state (test
 scratch, package-manager temporaries) goes outside every Git working tree, the

@@ -568,14 +568,14 @@ def test_threshold_refresh_reads_the_ledger_now_never_a_cached_snapshot(tmp_path
 
 def test_state_phase_budget_pausing_reads_the_durable_row(tmp_path, monkeypatch):
     from ouroboros import budget_pause
-    from ouroboros.gateway import state as gw_state
+    from ouroboros.work_stop import row_pausing
 
     ctx, _limit, _pause_row = _pause(tmp_path, monkeypatch, task_id="phase-1")
     budget_pause.end_dispatch_fence("phase-1")
     row = {"_attempt": 1, "budget_drive_root": str(tmp_path)}
-    assert gw_state._managed_task_budget_pausing(tmp_path, row, "phase-1") is True
-    assert gw_state._managed_task_budget_pausing(tmp_path, {"_attempt": 2}, "phase-1") is False
-    assert gw_state._managed_task_budget_pausing(tmp_path, {"_attempt": 1}, "absent") is False
+    assert row_pausing(tmp_path, row, "phase-1") is True
+    assert row_pausing(tmp_path, {"_attempt": 2}, "phase-1") is False
+    assert row_pausing(tmp_path, {"_attempt": 1}, "absent") is False
 
 
 def test_resume_child_tool_only_targets_own_children(monkeypatch):

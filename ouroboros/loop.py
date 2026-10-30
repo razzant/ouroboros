@@ -95,12 +95,15 @@ def _handle_text_response(
     llm_trace: Dict[str, Any],
     accumulated_usage: Dict[str, Any],
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    """Handle LLM response without tool calls (final response)."""
-    safe_content = sanitize_tool_result_for_log(content or "")
-    if safe_content.strip():
-        llm_trace["reasoning_notes"].append(safe_content.strip())
+    """Handle LLM response without tool calls (final response).
+
+    The answer is delivered as written; only its trace note, which feeds the stored
+    trace summary, is redacted like the round narration (``_emit_round_progress``)."""
+    content = content or ""
+    if content.strip():
+        llm_trace["reasoning_notes"].append(sanitize_tool_result_for_log(content).strip())
         accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
-    return safe_content, accumulated_usage, llm_trace
+    return content, accumulated_usage, llm_trace
 
 
 def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_tools=False, assistant_message=None,

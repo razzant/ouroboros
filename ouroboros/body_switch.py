@@ -38,7 +38,8 @@ design; a path is later work only when its file or index entry is neither
 recorded side. After the branch moves, an import probe of the new tree runs in
 a child with a scratch data root before any successor touches the real one; a
 failed probe returns files, index and branch at once. A successor server entry
-is recorded before its imports, and a later entry after an unready one asks
+is recorded before its imports (one that cannot make the first record stops there
+and the next start retries), and a later entry after an unready one asks
 ``qualify_return`` whether the previous generation may run on what is there
 now: only ``compatible`` evidence returns it (after an entry, only a switch of
 passive stylesheets over an otherwise unchanged composition, on a root with no
@@ -73,6 +74,7 @@ import tempfile
 import time
 
 HANDOFF_NAME = "handoff.json"
+LOCK_NAME = "lock"
 POINTER_NAME = "ouroboros-body-adoption"
 RESTART_EXIT_CODE = 42
 STUCK_EXIT_CODE = 3
@@ -511,9 +513,11 @@ def _armed_refusal(root, handoff):
 
 
 @contextlib.contextmanager
-def _locked(helper_dir):
-    """One switcher at a time; the kernel releases the lock when the process ends or execs."""
-    fh = open(os.path.join(helper_dir, "lock"), "a+")
+def _locked(helper_dir, wait=True):
+    """One switcher at a time; the kernel releases the lock when the process ends or execs.
+
+    ``wait=False`` never waits: another holder raises ``BlockingIOError`` at once (``body_adoption.arm``)."""
+    fh = open(os.path.join(helper_dir, LOCK_NAME), "a+")
     try:
         if sys.platform == "win32":
             import msvcrt
@@ -523,14 +527,16 @@ def _locked(helper_dir):
                 try:
                     msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
                     break
-                except OSError:
+                except OSError as exc:
+                    if not wait:
+                        raise BlockingIOError(exc.errno, "the helper's lock is held") from exc
                     if time.time() > deadline:
                         raise
                     time.sleep(0.1)
         else:
             import fcntl
 
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
     finally:
         fh.close()
@@ -1015,10 +1021,11 @@ def _composition(root):
     """The checkout's index tree and working-files tree, or ``None`` when either cannot be measured.
 
     Measured as preparation's snapshot measures the layers it records (``update_prepare.snapshot``):
-    a byte copy of the real index (its stat data spares rehashing unchanged files; a split index
-    reads its shared part from the repository and is written whole, ``core.splitIndex`` off) gives
-    the index tree, then ``add -A`` (untracked included, ignored files excluded) gives the files
-    tree. The real index is only copied.
+    a byte copy of the real index with its own time (its stat data spares rehashing unchanged files,
+    and its time keeps an entry stamped in that second checked by content, so a same-size edit then
+    is seen; a split index reads its shared part from the repository and is written whole,
+    ``core.splitIndex`` off) gives the index tree, then ``add -A`` (untracked included, ignored files
+    excluded) gives the files tree. The real index is only copied.
     """
     rc, path = _git(root, "rev-parse", "--git-path", "index", check=False)
     if rc != 0:
@@ -1028,7 +1035,11 @@ def _composition(root):
         trees = []
         steps = [("write-tree",), ("add", "-A", "--", "."), ("write-tree",)]
         try:
-            shutil.copyfile(os.path.join(root, path.decode("utf-8", "surrogateescape").strip()), index)
+            with open(os.path.join(root, path.decode("utf-8", "surrogateescape").strip()), "rb") as source, \
+                    open(index, "wb") as sink:
+                held = os.fstat(source.fileno())  # the bytes and the time of the one file read
+                shutil.copyfileobj(source, sink)
+            os.utime(index, ns=(held.st_atime_ns, held.st_mtime_ns))
         except FileNotFoundError:
             steps.insert(0, ("read-tree", "--empty"))
         except OSError:
@@ -1081,8 +1092,9 @@ def qualify_return(root, handoff):
     """May the previous generation run on what is here NOW? ``(outcome, reasons)``.
 
     The boundary is this helper's own durable entry record (``_update_entry``), written
-    under the lock before an entry of the switched tree imports any body module. Before
-    it nothing of the new tree ran outside the scratch import probe. After it, data
+    under the lock before an entry of the switched tree imports any body module; an entry
+    that cannot make the first one refuses its boot (``main``). Before it nothing of the
+    new tree ran outside the scratch import probe. After it, data
     owners may have written, so the outcome is ``unknown`` (recovery, data and local
     work kept) unless the switch moved passive stylesheets only (``_passive_presentation``):
     then the successor ran byte-identical code, so every record it wrote has a form the
@@ -1398,6 +1410,8 @@ def main(serving_root):
         with _locked(helper_dir):
             handoff = read_handoff(helper_dir)
             if handoff.get("phase") == "switched":
+                # What the record proves now: the attempt below changes this copy before it writes.
+                entered = any(entry.get("kind") != "app" for entry in handoff.get("entries") or ())
                 try:
                     handover = _update_entry(root, helper_dir, handoff)
                 except _Stuck as exc:
@@ -1409,7 +1423,12 @@ def main(serving_root):
                         record(helper_dir, handoff, "stuck", "return interrupted: %s: %s" % (type(exc).__name__, exc))
                         _refuse_boot(root, helper_dir, "the update's return was interrupted (%s: %s)" % (
                             type(exc).__name__, exc))
-                    # Unrecorded, this entry can never ground a later automatic return: the safe side.
+                    if not entered:
+                        # Every return rests on this record (``qualify_return``, ``_app_not_exchanged``): imports with
+                        # no entry on disk could write data that later reads as "nothing of the new tree ran".
+                        _refuse_boot(root, helper_dir, "the update's entry could not be recorded (%s: %s), so nothing "
+                                     "of it was imported; the next start retries it" % (type(exc).__name__, exc))
+                    # An entry already on record holds that boundary; this one adds nothing a return reads.
                     sys.stderr.write("[body_switch] update entry not recorded: %s: %s\n" % (type(exc).__name__, exc))
             phase = handoff.get("phase")
         if handover:

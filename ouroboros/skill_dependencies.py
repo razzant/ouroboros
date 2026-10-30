@@ -173,6 +173,20 @@ def skill_deps_not_ready(drive_root: pathlib.Path, loaded: Any, *, strict: bool 
         return "", ""
 
 
+def unusable_python_env(drive_root: pathlib.Path, loaded: Any) -> str:
+    """The binding (``moved``, ``absent``, ...) when ``loaded`` declares Python packages that apply on this host
+    and its env python cannot run them on this interpreter, else ``""``: such a skill never runs on another
+    interpreter (``skill_exec`` and the process-tool resolver refuse); a skill whose Python packages are all
+    for other platforms, or that has none, is unaffected (the installer skips the former, ``spec_applies_here``)."""
+    from ouroboros.marketplace.isolated_deps import python_env_binding, spec_applies_here
+
+    if not any(str(spec.get("kind") or "").strip().lower() in {"pip", "pipx", "uv"} and spec_applies_here(spec)
+               for spec in auto_install_specs_for_skill(drive_root, loaded) if isinstance(spec, dict)):
+        return ""
+    binding = python_env_binding(loaded.skill_dir)
+    return "" if binding == "current" else binding
+
+
 # One owner sentence per typed dependency code (the toast and the card prefix the skill name).
 _DEPENDENCY_SENTENCES = {
     "deps_missing": "Its packages are not installed.",
@@ -198,17 +212,23 @@ def ensure_skill_dependencies(drive_root: pathlib.Path, loaded: Any, *, progress
     ``not_required`` (no auto specs), ``installed`` (already recorded for these specs, or
     installed now), ``not_admitted`` (the gate does not admit the bytes: nothing written),
     ``failed`` (the installer's text in ``detail``; ``deps.json`` keeps it, the verdict is
-    untouched, the next call retries). Idempotent; never takes the lifecycle lane.
+    untouched, the next call retries). An environment left on another host's Python
+    (``python_env`` of the reader) is re-pointed without pip when only its base moved and
+    rebuilt by the installer for another major.minor. Idempotent; never takes the lifecycle lane.
     """
     try:
         from ouroboros.marketplace.install_specs import install_specs_hash
-        from ouroboros.marketplace.isolated_deps import install_isolated_dependencies, read_deps_state
+        from ouroboros.marketplace.isolated_deps import install_isolated_dependencies, read_deps_state, rebind_python_env
 
         auto_specs = auto_install_specs_for_skill(drive_root, loaded)
         if not auto_specs:
             return "not_required", ""
+
+        def recorded(state: Dict[str, Any]) -> bool:
+            return str(state.get("status") or "") == "installed" and state.get("specs_hash") == install_specs_hash(auto_specs)
+
         state = read_deps_state(drive_root, loaded.name, loaded.skill_dir)
-        if str(state.get("status") or "") == "installed" and state.get("specs_hash") == install_specs_hash(auto_specs):
+        if recorded(state):
             if read_deps_state(drive_root, loaded.name).get("status") != "installed":
                 # A runtime record corroborated the live environment; finish its interrupted publication.
                 from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME
@@ -218,6 +238,10 @@ def ensure_skill_dependencies(drive_root: pathlib.Path, loaded: Any, *, progress
             return "installed", ""
         if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
             return "not_admitted", ""
+        if state.get("python_env") == "moved":
+            rebind_python_env(loaded.skill_dir)
+            if recorded(read_deps_state(drive_root, loaded.name, loaded.skill_dir)):
+                return "installed", ""
         if progress is not None:
             progress("Installing packages…")
         install_isolated_dependencies(drive_root, loaded.name, loaded.skill_dir, auto_specs)

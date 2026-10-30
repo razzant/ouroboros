@@ -265,7 +265,9 @@ def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_by_th
     floor = rebound.projection("low").memory_facts["floor"]
     assert mode == "low" and event["view_kept"] is False and messages[0] == rebound.projection("low").system_message()
     assert all(floor["steps"].get(step, 0) >= count for step, count in old["steps"].items())  # nothing unfolds
-    assert sum(floor["steps"].values()) > sum(old["steps"].values())
+    # The first host view pays this one-token shortfall before any additional memory step.
+    assert rebound.projection("low").memory_facts["host_sections_addressed"]
+    assert floor["steps"] == old["steps"]
     assert floor["by_budget"] == old["by_budget"] and floor["budget_allowance_tokens"] is None  # no target refold
     assert floor["allowance_tokens"] == floor["physical_allowance_tokens"]  # no working margin reapplied
     assert messages[1:] == _long_tail(low)[1:]  # the actual tail is never touched
@@ -295,7 +297,8 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     assert mode == "low" and event["view_kept"] is same_route
     # An accepted input above the stated total replaces it as an input bound; the reply stays beside it.
     assert rebound.window_tokens == (accepted + 65_536 if same_route else tight)
-    assert (rebound.projection("low").memory_facts["floor"]["steps"] == old["steps"]) is same_route
+    assert rebound.projection("low").memory_facts["floor"]["steps"] == old["steps"]
+    assert bool(rebound.projection("low").memory_facts.get("host_sections_addressed")) is not same_route
 
 
 @pytest.mark.parametrize("owner,ran,mode", [
@@ -719,7 +722,8 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     assert built.projection("max").memory_facts["floor"]["steps"] == {}
     assert _coarsen_memory_view(ctx, fit) is True  # still a strict narrowing: at least one element
     first = ctx.context_fit_plan.projection("max")
-    assert first.memory_facts["floor"]["steps"] and first.estimated_tokens < built.projection("max").estimated_tokens
+    assert first.memory_facts["host_sections_addressed"] and first.memory_facts["floor"]["steps"] == {}
+    assert first.estimated_tokens < built.projection("max").estimated_tokens
     assert ctx.messages[0] == first.system_message() and ctx.tools._ctx.context_fit_plan is ctx.context_fit_plan
     assert [e["checkpoint_kind"] for e in events] == ["context_memory_coarsened"]
     # A measured deficit is saved in full, from the level the refused view showed: nothing it addressed comes back.
@@ -797,7 +801,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     sent_fact = mf.trace_facts(tools._ctx.context_fit_plan.projection("low").memory_facts)
     assert trace[VIEW_TRACE_KEY] == tools._ctx.memory_view_facts == sent_fact
     assert sent_fact["floor"]["mode"] == "low" and sent_fact["floor"]["steps"].keys() >= {"F1", "F1b"}
-    assert shortage_from_trace(trace).kind == "open_rows"  # the conversation yields before authored pages
+    assert shortage_from_trace(trace).kind == "open_rows"  # open conversation now survives beyond the late note cuts
     # A later fitting route keeps this historical note and every address without reasserting a new shortage.
     after = tools._ctx.context_fit_plan
     rebound = after.reproject_for_route(window_tokens=window * 2, known_window=True, ratio=1.0,

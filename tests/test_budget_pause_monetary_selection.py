@@ -380,12 +380,19 @@ def test_a_selected_child_that_pauses_again_needs_a_new_resume(tmp_path, monkeyp
 # --- a cold sleep beneath the latch: consumption retires the sleep clock, not the selection --
 
 def _cold_sleep_park(monkeypatch, limit_ctx, **selected):
-    """The member's own cold sleep at its round boundary (``enter_cold_sleep``, scope task)."""
+    """The member's own cold sleep at its round boundary (``enter_cold_sleep``, scope task). Arming already
+    showed a selected sender the latch holds (``dependency_held``): this park is the deliberate repeat."""
+    import json
+
     from ouroboros import budget_pause, model_sleep
+    from ouroboros.task_status import load_effective_task_result
 
     ctx = limit_ctx.tools._ctx
     monkeypatch.setattr(model_sleep, "cold_blockers", lambda _ctx, **_kw: [])
     ctx._model_sleep = {"sleep_id": "s1", "mode": "cold", **model_sleep.selectors(ctx, **selected)}
+    shown = model_sleep.unshown_holds(ctx, {task_id: load_effective_task_result(ctx.budget_drive_root, task_id)
+                                            for task_id in ctx._model_sleep["tasks"] + ctx._model_sleep["senders"]})
+    model_sleep.acknowledge_hold_delivery(ctx, json.dumps({"held": shown}))
     with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
         budget_pause.enter_cold_sleep(limit_ctx)
     budget_pause.end_dispatch_fence(str(ctx.task_id))

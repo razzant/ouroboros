@@ -29,7 +29,7 @@ from ouroboros import maintenance_jobs, store
 PLACE_REMOVERS: Dict[str, tuple] = {
     "model_calls": ("evidence_packing",),
     "engine": ("engine",),
-    "task_results": ("evidence_packing", "record_compression"),
+    "task_results": ("evidence_packing", "record_compression", "runtime_retirement"),
     "archives": ("evidence_packing",),
     "work_folders": ("custody_trash",),
     "app_state": ("runtime_retirement", "record_compression", "custody_trash"),

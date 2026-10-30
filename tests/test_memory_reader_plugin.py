@@ -150,7 +150,7 @@ def test_both_execution_modes_answer_identically(tmp_path, monkeypatch):
 def test_a_2_0_payload_keeps_loading_and_serving_beside_2_1(tmp_path, monkeypatch):
     repo_root, drive_root = _load(tmp_path, "older_widget", LEGACY, 'plugin_api: "2.0"\n', isolated=False)
     monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: str(repo_root))
-    assert _dispatch(drive_root, "older_widget", "hello", {}) == (200, {"generation": "2.1"})
+    assert _dispatch(drive_root, "older_widget", "hello", {}) == (200, {"generation": "2.3"})
 
 
 def test_a_read_after_unload_began_is_refused(tmp_path):

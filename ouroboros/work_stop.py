@@ -1,9 +1,15 @@
-"""Current stops and cause-free Q9 selections: pure record construction.
+"""Current stops and cause-free Q9 selections: pure record construction, plus the one
+reading of a queue row's current control that the census and the mind's task readers share.
 
 The queue owns publication; exact grants keep their existing single-use CAS.
 A selection survives consumption, but carries no reason from the released stop.
 Technical refusals and writer waits are classified separately from decisions.
 """
+
+import hashlib
+import json
+import pathlib
+from typing import Any
 
 SELECTION_KEY = "_resume_selection"
 SELECTION_BINDING = (
@@ -195,6 +201,211 @@ def activity_stop_view(row: dict, raw: dict | None = None) -> dict:
         elif cause == "restart" and not task.get("_budget_pause_hold"):
             task["_budget_pause_hold"] = {"reason": "owner_restart_hold"}
     return stop_presentation(task, fences)
+
+
+# --- One queue row's current control: the census and the mind's readers read it alike -------------
+
+def owner_fence_state(drive_root: Any, row: dict, task_id: str) -> str:
+    """The member's owner-Pause fence state (``requested``/``paused``/``unknown``/``""``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.owner_pause import member_fence
+
+    try:
+        return str(member_fence(SimpleNamespace(
+            task_id=task_id, root_task_id=str(row.get("root_task_id") or task_id),
+            budget_drive_root=str(row.get("budget_drive_root") or drive_root))).get("state") or "")
+    except Exception:
+        return "unknown"
+
+
+def row_pausing(drive_root: Any, row: dict, task_id: str) -> bool | None:
+    """A task writing its exact budget pause (#1196): the durable ``budget_pause`` row is the only truth of
+    that window; None means unreadable."""
+    try:
+        from ouroboros.budget_pause import STATE_PAUSING, budget_pause_row
+
+        pause = budget_pause_row(pathlib.Path(row.get("budget_drive_root") or drive_root), task_id)
+        if (pause and pause.get("state") == STATE_PAUSING
+                and int(pause.get("task_attempt") or 0) == int(row.get("_attempt") or 1)):
+            return True
+        # The owner paused this task's tree: it is settling toward its boundary (its own sent work
+        # stopping), not working (ouroboros/owner_pause.py).
+        state = owner_fence_state(drive_root, row, task_id)
+        return None if state == "unknown" else state == "requested"
+    except Exception:
+        return None
+
+
+def interrupted_owner_resume(drive_root: Any, row: dict, task_id: str) -> bool | None:
+    """A parked member whose owner Resume was consumed, then interrupted (#1716): not its owner's own
+    Pause. ``None``: a fact it needs is unreadable, so the row is unknown, never quietly absent."""
+    from ouroboros.owner_pause import interrupted_member_resume
+
+    recovery, root_id = row.get("_working_recovery"), str(row.get("root_task_id") or task_id)
+    if not isinstance(recovery, dict) or root_id == task_id:
+        return False
+    try:  # the attempt whose saved work resumes, exactly as the held selection reads it
+        attempt = int(recovery.get("from_attempt") or 0)
+    except (TypeError, ValueError):
+        return None
+    return interrupted_member_resume(pathlib.Path(row.get("budget_drive_root") or drive_root), root_id, task_id,
+                                     attempt=attempt)
+
+
+def parked_stop_view(drive_root: Any, row: dict, task_id: str, fence: dict, *, owner_resumed: bool = False) -> dict:
+    """``stop_presentation`` of a parked row over its member fence, its tree's latch and its durable point."""
+    from types import SimpleNamespace
+
+    from ouroboros.budget_pause import budget_pause_row
+    from ouroboros.owner_pause import member_fence
+
+    root = pathlib.Path(row.get("budget_drive_root") or drive_root)
+    root_id = str(row.get("root_task_id") or task_id)
+    owner = {} if owner_resumed else member_fence(SimpleNamespace(
+        task_id=task_id, root_task_id=root_id, budget_drive_root=root))
+    task = {**row, "id": task_id, "budget_pause": budget_pause_row(root, task_id)}
+    return stop_presentation(task, {"owner": owner, "budget": {root_id: fence}})
+
+
+def queue_control(drive_root: Any, row: dict, fences: dict, *, running: bool = False) -> dict:
+    """One queue row's current control: ``phase`` and, when a stop holds it, its ``view``.
+
+    ``phase`` is ``queued`` (no stop: it dispatches when admitted), ``running``, ``budget_paused`` or
+    ``budget_pausing`` (``view`` is the row's ``stop_presentation``), or ``unknown`` when a fact the
+    reading needs cannot be read. The parked fact gates the view, so a durable point whose grant was
+    already selected (``resume_granted``) never asks for another Resume. ``fences`` maps each root to
+    its budget/owner latch as the caller observed the queue. Reads hot control facts (and a retried
+    root's lineage), never task history.
+    """
+    task_id = str(row.get("id") or "")
+    root_id = str(row.get("root_task_id") or task_id)
+    pausing = row_pausing(drive_root, row, task_id)
+    interrupted = False
+    if pausing is not False:
+        phase = "unknown" if pausing is None else "budget_pausing"
+    elif running:  # its stack parked warm under a settled Pause, or it runs
+        phase = "budget_paused" if owner_fence_state(drive_root, row, task_id) == "paused" else "running"
+    else:
+        from supervisor.queue_transitions import budget_pause_fact
+
+        # #322 (P1): a budget-paused member must not masquerade as "queued": nothing will dispatch
+        # it until an explicit resume.
+        phase = "budget_paused" if budget_pause_fact(row, fences) else "queued"
+    if not running and phase in {"budget_paused", "budget_pausing"}:
+        # An interrupted owner Resume leaves the member parked; only that existing Resume continues it.
+        interrupted = interrupted_owner_resume(drive_root, row, task_id)
+        phase = "unknown" if interrupted is None else "budget_paused" if interrupted else phase
+    view = (parked_stop_view(drive_root, row, task_id, {} if interrupted else fences.get(root_id) or {},
+                             owner_resumed=interrupted is True)
+            if phase in {"budget_paused", "budget_pausing"} else {})
+    return {"phase": phase, "view": view, "owner_resumed": interrupted is True}
+
+
+# What makes a stop the same stop: its own records, never a time, an amount or a result.
+_IDENTITY_KEYS = ("cause", "scope", "ui_code", "reason", "release", "fence_id", "pause_id", "pause_generation",
+                  "grant_id", "root_grant_id", "root_resume_generation")
+
+
+def _tree_basis(drive_root: Any, task: dict) -> dict | None:
+    """The tree root's resume basis (``events_budget.resume_basis``), or None when it cannot be read."""
+    from ouroboros.budget_pause import budget_pause_row
+    from ouroboros.cancel_intents import _validated_single_cancel_target
+    from ouroboros.owner_pause import read_fence
+    from supervisor.events_budget import resume_basis
+
+    root_id = str(task.get("root_task_id") or task.get("id") or "")
+    root = pathlib.Path(task.get("budget_drive_root") or drive_root)
+    try:
+        actor = _validated_single_cancel_target(root, root_id)
+        return resume_basis(actor, budget_pause_row(root, actor), read_fence(root, root_id))
+    except Exception:
+        return None
+
+
+def _stop_identity(task: dict, stop: dict, tree: dict | None) -> str:
+    """Changes with the attempt, the stop's records and the tree root's resume basis: a root resumed after a
+    newer money Pause or owner Pause asks again for each child it selects (``hold_root_resume_descendants``).
+    An unreadable basis is one stable ``unreadable`` token, said beside the stop (``resume_basis``): a
+    deliberate wait on it stays, and the real basis, once read again, is new."""
+    def facts(record: Any) -> dict:
+        record = record if isinstance(record, dict) else {}
+        return {key: record[key] for key in _IDENTITY_KEYS if record.get(key) not in (None, "")}
+
+    shape = {"task": str(task.get("id") or ""), "attempt": int(task.get("_attempt") or 1),
+             "tree": tree if tree is not None else "unreadable", **facts(stop), "member": facts(stop.get("member_stop"))}
+    return hashlib.sha256(json.dumps(shape, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
+    """``current_stop`` beside a queued or parked task's status, read as the census reads its row.
+
+    ``{}`` while nothing but capacity or admission stands before it, while it runs, or while it only waits
+    (a sleep, earlier writers settling: waits are not stops). Otherwise ``state`` is ``held`` (a stop keeps
+    it from running), ``pausing`` (a stop settles it while it still runs) or ``unknown`` (a fact the reading
+    needs is unreadable: neither held nor runnable). ``release`` says who may release it: ``mind`` (a
+    Resume request, which still checks money, Stop, time and the root's grant), ``owner`` or ``none``. The
+    request door belongs to the reader (``stop_for_reader``). A stop read from a stale queue snapshot says
+    so (``queue_freshness``) and offers no door: the row may already have changed. When the root's resume
+    basis cannot be read, the stop stands as read and says so (``resume_basis: unreadable``): its identity
+    then cannot tell a newer root Pause from the one already shown, until the basis reads again.
+    """
+    for lane in ("running", "pending"):
+        outer = next((row for row in snapshot.get(lane) or () if isinstance(row, dict)
+                      and str(row.get("id") or row.get("task_id") or "") == task_id), None)
+        if outer is not None:
+            break
+    else:
+        return {}
+    running = lane == "running"
+    task = {**(outer.get("task") if isinstance(outer.get("task"), dict) else {}), "id": task_id}
+    if running:
+        task["_attempt"] = int(outer.get("attempt") or task.get("_attempt") or 1)
+    fences = {str(fence.get("root_task_id") or ""): fence for fence in snapshot.get("budget_root_fences") or ()
+              if isinstance(fence, dict)}
+    try:
+        control = queue_control(drive_root, task, fences, running=running)
+    except Exception:
+        control = {"phase": "unknown", "view": {}}
+    if control["phase"] == "unknown":
+        shape = json.dumps({"task": task_id, "attempt": int(task.get("_attempt") or 1), "unknown": True})
+        return {"state": "unknown", "reason": "control_unreadable",
+                "identity": hashlib.sha256(shape.encode("utf-8")).hexdigest()[:16]}
+    view = control["view"]
+    if control["phase"] not in {"budget_paused", "budget_pausing"} or view.get("waiting"):
+        return {}
+    from ouroboros.task_status import queue_snapshot_observation
+    from supervisor.owner_pause_control import warm_paused_member
+
+    stop, reason = view.get("stop") or {}, view.get("reason") or {}
+    live = running and control["phase"] == "budget_pausing" and not warm_paused_member(outer)
+    tree = _tree_basis(drive_root, task)
+    return {"state": "pausing" if live else "held",
+            "cause": stop.get("cause") or ("refusal" if view.get("refusal") else "unknown"),
+            "scope": stop.get("scope") or "member", "code": reason.get("code"), "text": reason.get("text"),
+            "release": "owner" if view.get("release") == "owner" else "mind" if view.get("resumable") else "none",
+            **{key: reason[key] for key in ("since", "by") if reason.get(key)},
+            **({} if queue_snapshot_observation(snapshot)["fresh"] else {"queue_freshness": "stale"}),
+            **({} if tree is not None else {"resume_basis": "unreadable"}),
+            "identity": _stop_identity(task, stop, tree)}
+
+
+def door_holders(task: dict) -> set:
+    """Who may request a member stop's release (``resume_child_task``): the task's root or direct parent (Q9)."""
+    task_id = str(task.get("task_id") or task.get("id") or "")
+    return {str(task.get(key) or "") for key in ("root_task_id", "parent_task_id")} - {"", task_id}
+
+
+def stop_for_reader(stop: dict, task: dict, reader_id: str) -> dict:
+    """``current_stop`` as one reader may act on it: a held member stop the mind may release names its
+    request door, ``resume_child_task``, for its ``door_holders`` only. The door is a request: the supervisor
+    grants or refuses it through the owner's Resume seam."""
+    if not isinstance(stop, dict) or not stop:
+        return {}
+    if (stop.get("state") == "held" and stop.get("scope") == "member" and stop.get("release") == "mind"
+            and not stop.get("queue_freshness") and str(reader_id or "") in door_holders(task)):
+        return {**stop, "door": "resume_child_task"}
+    return dict(stop)
 
 
 def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:

@@ -131,8 +131,10 @@ export function providerTestStatusText(result = {}) {
     return reason ? `Not ready — ${reason}` : 'Not ready';
 }
 
-export function providerTestNetworkErrorStatus() {
-    return 'Not ready';
+/** A failed request reads "Not ready"; only the server's typed refusal adds its own controlled reason. */
+export function providerTestNetworkErrorStatus(error) {
+    const body = error?.status === 400 && error?.body;
+    return body?.code === 'masked_key_endpoint_changed' ? providerTestStatusText(body) : 'Not ready';
 }
 
 export function providerTestResultIsCurrent({
@@ -372,8 +374,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         try {
             const data = await test(sent);
             if (current()) setInlineStatus(status, providerTestStatusText(data), data?.ok ? 'ok' : 'danger');
-        } catch {
-            if (current()) setInlineStatus(status, providerTestNetworkErrorStatus(), 'danger');
+        } catch (error) {
+            if (current()) setInlineStatus(status, providerTestNetworkErrorStatus(error), 'danger');
         } finally {
             inFlight.delete(key);
             setButtonBusy(button, false);

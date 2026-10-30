@@ -51,3 +51,10 @@ def test_cold_schema_selection_uses_existing_mode_reader(monkeypatch):
     assert schema_selection_tools_for_context(SimpleNamespace(active_context_mode="")) == {
         "list_available_tools", "enable_tools", "compact_context",
     }
+
+
+def test_discovery_keeps_the_ordinary_catalog_without_a_call_only_builder():
+    from ouroboros.tools import tool_discovery
+
+    assert {entry.name for entry in tool_discovery.get_tools()} == {"list_available_tools", "enable_tools"}
+    assert not hasattr(tool_discovery, "call_catalog_facts")

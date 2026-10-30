@@ -3594,6 +3594,7 @@ export function createChatInstance({
         refreshHistory: readReceipt.refresh,
         revealQuestion,
         revealSource: replies.reveal,
+        drawsSource: replies.draws,
         cancelHistoryPaint: readReceipt.cancel,
         // app.js fans its already-existing /api/state refresh to every open
         // thread; panels gain convergence without acquiring their own poll.

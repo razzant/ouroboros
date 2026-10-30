@@ -198,4 +198,3 @@ def test_the_view_menu_gets_the_size_items_once_and_each_runs_the_pages_own_step
         action._call()
     assert Page.scripts == [f"window.ouroInterfaceSize && window.ouroInterfaceSize.{name}()"
                             for name in ("reset", "zoomIn", "zoomOut")]
-

@@ -18,14 +18,16 @@ a tool call. Chosen read units and explicitly restored sources stay whole. The r
 tool unit since the newest note with its typed facts, shown or never shown. Unasked tool units, replies the notes
 already cover, host state the host sends afresh (facts, clock, roster and skill snapshots,
 bound and unchanged), superseded review copies and earlier address records leave the view;
-one host record names the checkpoint that holds them exactly. A renewal that would remove no
-tool unit or covered reply, or a seed not smaller than the refused request, is
-never sent: the round then ends in the named refusal.
+one host record names the checkpoint that holds them exactly. Owner 29.10 Q1=A:
+if that seed still exceeds the physical window, oldest whole rows of any kind may
+leave by exact address; core, assignment, notes, newest owner turn and current tail
+stay. An irreducible view, or a candidate that does not shrink, still refuses.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from types import SimpleNamespace
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -137,7 +139,6 @@ def renewal_seed(messages: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
 
 def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
     """Publish the renewal seed for a round that ended in a size refusal; False when renewal cannot help."""
-    from ouroboros.artifacts import store_actor_source_bytes
     from ouroboros.context_fit import estimate_context_prompt_tokens
     from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
     from ouroboros.loop_model_call import CONTEXT_REFUSAL_ROUND_KEY
@@ -151,38 +152,180 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
         return False
     messages = limit_ctx.messages
     before = len(messages)
-    seed, left = renewal_seed(messages)
-    if not (left["tool_rows"] or left["covered_replies"] or left["restored_sources"]):
-        return _cannot_help(limit_ctx)  # only host rows would leave: a renewal cannot make this conversation fit
-    raw = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    try:
-        source = store_actor_source_bytes(limit_ctx.drive_root or limit_ctx.drive_logs.parent, limit_ctx.task_id,
-                                          category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(),
-                                          data=raw, extension="json")
-    except (OSError, ValueError):
-        return False  # no exact source, no renewal: every address must resolve (BIBLE P1)
-    index = units_since_note(messages, getattr(getattr(tools, "_ctx", None), "_last_context_observation", None))
-    seed.append(bound_host_row(RENEWAL_RECORD_NAME, (
-        "[Host record: working view renewed during context-size recovery. Same task; "
-        "nothing summarized; no model called.] Kept, in order: the assignment, every delivered message and "
-        "outward dialogue, my notes, my replies since my newest note and the current review decisions. "
-        f"Left the view: {left['tool_rows']} tool rows, {left['covered_replies']} replies before my newest note, "
-        f"{left['host_rows']} host rows, {left['restored_sources']} sources I restored. The exact transcript "
-        f"of {before} rows: {json.dumps(source, ensure_ascii=False, sort_keys=True)}."
-        + (f"\nTool units since my newest note (they left the view; each stays exact there):\n{index}" if index
-           else "")
-        )))
+    root = limit_ctx.drive_root or limit_ctx.drive_logs.parent
     schemas = getattr(limit_ctx, "tool_schemas", None)
-    if estimate_context_prompt_tokens(seed, schemas) >= estimate_context_prompt_tokens(messages, schemas):
-        return _cannot_help(limit_ctx)  # never send a candidate that is not smaller than the refused one
+    density = usage.get("_context_measurement_density") or 1.0
+    def measure(rows):
+        return math.ceil(estimate_context_prompt_tokens(rows, schemas) * density)
+    seed, record = renewal_view(messages, observation=getattr(tools._ctx, "_last_context_observation", None),
+                                drive_root=root, task_id=limit_ctx.task_id, measure=measure)
+    capacity = usage.get("_context_capacity_total_tokens")
+    reserve = usage.get("_context_response_reserve_tokens") or 0
+    if capacity is not None and measure(seed) + reserve > capacity:
+        seed, cut = physical_window_cut(seed, drive_root=root, task_id=limit_ctx.task_id,
+                                        measure=measure, usable=capacity - reserve)
+        if cut:
+            record = {**(record or {}), "physical_cut": cut}
+    if measure(seed) >= measure(messages):
+        return _cannot_help(limit_ctx)
+    if not record:
+        return _cannot_help(limit_ctx)
     _publish_reclaimed_transcript(SimpleNamespace(messages=messages, task_id=limit_ctx.task_id, tools=tools), seed,
                                   by="renewal")
     from ouroboros.loop import _emit_checkpoint_event
 
     _emit_checkpoint_event(limit_ctx.event_queue, limit_ctx.task_id, limit_ctx.drive_logs, {
         "checkpoint_kind": "context_view_renewed", "round": limit_ctx.round_idx, "owner_visible": True,
-        "source": source, "rows_before": before, "rows_after": len(seed), **left})
+        "rows_before": before, "rows_after": len(seed), **record})
     return True
+
+
+def renewal_view(messages, *, observation, drive_root, task_id, measure):
+    """Pure selection plus exact custody; both drivers price their own final envelope.
+
+    No round flags, dispatch, publication or trace pruning belongs here.
+    """
+    from ouroboros.artifacts import actor_source_reference, store_actor_source_bytes
+    seed, left = renewal_seed(messages)
+    if not (left["tool_rows"] or left["covered_replies"] or left["restored_sources"]):
+        return messages, None
+    raw = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    args = dict(category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(), data=raw, extension="json")
+    source = actor_source_reference(**args)
+    index = units_since_note(messages, observation)
+    seed.append(bound_host_row(RENEWAL_RECORD_NAME, (
+        "[Host record: working view renewed during context-size recovery. Same task; "
+        "nothing summarized; no model called.] Kept, in order: the assignment, every delivered message and "
+        "outward dialogue, my notes, my replies since my newest note and the current review decisions. "
+        f"Left the view: {left['tool_rows']} tool rows, {left['covered_replies']} replies before my newest note, "
+        f"{left['host_rows']} host rows, {left['restored_sources']} sources I restored. The exact transcript "
+        f"of {len(messages)} rows: {json.dumps(source, ensure_ascii=False, sort_keys=True)}."
+        + (f"\nTool units since my newest note (they left the view; each stays exact there):\n{index}" if index else ""))))
+    if measure(seed) >= measure(messages):
+        return messages, None
+    try:
+        store_actor_source_bytes(drive_root, task_id, **args)
+    except OSError:
+        return messages, None
+    return seed, {"source": source, **left}
+
+
+def _current_feedback_positions(messages):
+    # The current index keeps decisions whole. Delivery notices from superseded
+    # rounds are ordinary rows; retain the newest notice for each review family.
+    latest, unknown = {}, set()
+    for i, row in enumerate(messages):
+        feedback = row.get('review_feedback')
+        if not feedback:
+            continue
+        if not isinstance(feedback, list) or not all(isinstance(item, dict) for item in feedback):
+            unknown.add(i)
+            continue
+        for item in feedback:
+            latest[(item.get('surface', ''), item.get('task_id', ''))] = i
+    return unknown | set(latest.values())
+
+
+def _cut_units(messages):
+    """Oldest eligible atomic units; protection is independent of dialogue kind."""
+    from ouroboros import context_compaction as cc
+    from ouroboros.context_budget import OWNER_WORDS_KIND, host_row_intact
+    from ouroboros.context_source_view import chosen_read_units
+    from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME, PREDECESSOR_NOTES_NAME
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, obsolete_review_index_positions
+    first = next((i for i, row in enumerate(messages) if row.get('role') == 'user'), -1)
+    latest = max((i for i, row in enumerate(messages) if i > first
+                  and row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND), default=len(messages) - 1)
+    while latest > first + 1 and messages[latest - 1].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND:
+        latest -= 1
+    obsolete = set(obsolete_review_index_positions(messages))
+    feedback = _current_feedback_positions(messages)
+    protected = {i for i, row in enumerate(messages) if i <= first or i >= latest or row.get('role') == 'system'
+        or _is_note(row) or _restored_address(row)
+        or row.get(HOST_CONTEXT_KIND_KEY) in {PREDECESSOR_NOTES_NAME, LATE_ANSWER_NOTES_NAME}
+        or i in feedback or (row.get(REVIEW_CONTEXT_INDEX_KEY) and i not in obsolete)
+        or row.get(HOST_CONTEXT_KIND_KEY) == 'context_physical_cut'}
+    prior = {i for i, row in enumerate(messages) if first < i < latest
+             and row.get(HOST_CONTEXT_KIND_KEY) == 'context_physical_cut' and host_row_intact(row)}
+    units = cc.context_units(list(messages), scope='tool')
+    chosen = chosen_read_units(messages, units)
+    spans = {unit.start: unit for unit in units}
+    groups, i = [], first + 1
+    while i < latest:
+        unit = spans.get(i)
+        group = tuple(range(i, unit.end + 1)) if unit else (i,)
+        if not protected.intersection(group) and not (unit and unit.unit_id in chosen):
+            groups.append(group)
+        i = group[-1] + 1
+    return groups, prior
+
+
+def _position_runs(positions):
+    runs = []
+    for position in positions:
+        if runs and position == runs[-1][1] + 1:
+            runs[-1][1] = position
+        else:
+            runs.append([position, position])
+    return ', '.join(str(a) if a == b else f'{a}-{b}' for a, b in runs)
+
+
+def physical_window_cut(messages, *, drive_root, task_id, measure, usable):
+    """Cut the oldest whole units under physical pressure, never protected judgment.
+
+    Search prefixes in order, bisecting only intervals with unchanged images.
+    Batched image floors can raise the price when an image leaves. An expensive
+    last prefix proves nothing about an earlier interval. Publish one exact cut.
+    """
+    from ouroboros.artifacts import actor_source_reference, store_actor_source_bytes
+    before = measure(messages)
+    if before <= usable:
+        return messages, None
+    groups, prior = _cut_units(messages)
+    if not groups:
+        return messages, None
+    raw = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')
+    args = dict(category='context_checkpoints', source_id=hashlib.sha256(raw).hexdigest(), data=raw, extension='json')
+    source = actor_source_reference(**args)
+    def candidate(count):
+        positions = [i for group in groups[:count] for i in group]
+        gone = set(positions) | prior
+        address = bound_host_row('context_physical_cut', (
+            "[Host record: this window's physical cut, not a summary or an authored fold.] "
+            f"Oldest whole rows left the working view: zero-based positions {_position_runs(positions)}. "
+            + (f"Earlier physical-cut address records at positions {_position_runs(sorted(prior))} remain exact in that checkpoint. " if prior else '')
+            + "Newest owner turn, assignment, core, notes and current tail stay. "
+            f"Read the exact original rows in this checkpoint JSON array: {json.dumps(source, sort_keys=True)}."))
+        rows = [address if i == positions[0] else row for i, row in enumerate(messages)
+                if i == positions[0] or i not in gone]
+        return rows, positions, measure(rows)
+    from ouroboros.context_images import image_positions
+    image_rows = {i for i, _ in image_positions(messages)}
+    starts = sorted({1, len(groups) + 1, *(n for n, group in enumerate(groups, 1) if image_rows.intersection(group))})
+    best = None
+    for start, end in zip(starts, starts[1:]):
+        low, high = start, end - 1
+        trial = candidate(high)
+        if trial[2] > usable:
+            continue
+        best = trial
+        while low < high:
+            middle = (low + high) // 2
+            trial = candidate(middle)
+            if trial[2] <= usable:
+                high, best = middle, trial
+            else:
+                low = middle + 1
+        break
+    if best is None:
+        return messages, None
+    try:
+        store_actor_source_bytes(drive_root, task_id, **args)
+    except OSError:
+        return messages, None
+    rows, positions, after = best
+    return rows, {'source': source, 'positions': positions, 'previous_cuts': sorted(prior),
+                  'before_tokens': before, 'after_tokens': after}
 
 
 def _cannot_help(limit_ctx: Any) -> bool:

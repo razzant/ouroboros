@@ -88,6 +88,7 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 RECLAIM_LOW_WATER_DIVISOR = 8
 #: An unknown reclaim target: the step takes everything its category can give (the refusal passes).
 WHOLE_CATEGORY = 2**31 - 1
+REFUSAL_PASSES = (("host_copies", "bodies"), ("floor", "books", "unseen_bodies"))
 
 def start_room_levels(role: str, *, direct_chat: bool = False) -> int:
     """Roots (an integrating task that is not a direct chat turn) leave two eighths for their work; a wake
@@ -100,7 +101,8 @@ def start_room_levels(role: str, *, direct_chat: bool = False) -> int:
     return 2 if role == "integrator" and not direct_chat else 1
 
 
-def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) -> Tuple[Optional[int], int]:
+def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int, *,
+                        working_reserve_tokens: Optional[int] = None) -> Tuple[Optional[int], int]:
     """``(owner target, reply reserve)`` of a rendered mode.
 
     A target binds only the mode the owner selected: task-local Low and a mode the
@@ -109,7 +111,8 @@ def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) 
     the memory floor and the mode selection use the same R as the send.
     """
     target = {"low": OWNER_LOW_TARGET_TOKENS, "nano": OWNER_NANO_TARGET_TOKENS}.get(mode) if mode == owner_mode else None
-    return target, min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    reserve = min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    return target, max(reserve, working_reserve_tokens or 0)
 
 
 def _reply_floor(caller_max_tokens: int, nano: bool) -> Tuple[int, int]:
@@ -381,6 +384,9 @@ IMAGE_BLOCK_CHAR_EQUIVALENT = 4_400
 MAX_LIVE_IMAGE_BLOCKS = 5
 # Owner decision 2026-10-21: batch eviction above 10 back to the 5-image floor of 2026-07-29.
 LIVE_IMAGE_BLOCKS_HIGH_WATER = 10
+# Owner 29.10: Nano uses the same batch shape, with a two-image floor.
+NANO_LIVE_IMAGE_BLOCKS = 2
+NANO_LIVE_IMAGE_BLOCKS_HIGH_WATER = 4
 
 # --- Context-section soft budgets (warn-only log lines; no section is cut by them) ---
 # The rendered scratchpad: tier-0, always whole. No count, size or age cap evicts or

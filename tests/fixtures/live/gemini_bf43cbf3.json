@@ -1,0 +1,2617 @@
+{
+  "source": "bf43cbf3, 2026-10-28; structural replay only. All text, identifiers and media replaced. Tick = 20 ms microphone PCM; native event order, sample counts, caption flags, tool arguments and usage preserved.",
+  "end_tick": 4779,
+  "timeline": [
+    {
+      "tick": 0,
+      "event": {
+        "sessionResumptionUpdate": {
+          "newHandle": "recorded-id-0",
+          "resumable": true
+        }
+      }
+    },
+    {
+      "tick": 40,
+      "event": {}
+    },
+    {
+      "tick": 40,
+      "event": {
+        "serverContent": {}
+      }
+    },
+    {
+      "tick": 40,
+      "event": {}
+    },
+    {
+      "tick": 40,
+      "event": {
+        "toolCall": {
+          "functionCalls": [
+            {
+              "name": "attend",
+              "args": {
+                "see": "stream",
+                "look": true,
+                "revisit_after_s": 5
+              },
+              "id": "recorded-id-1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "tick": 40,
+      "event": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "tick": 41,
+      "event": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 58632,
+          "responseTokenCount": 23,
+          "totalTokenCount": 58655,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 57068
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 222
+            }
+          ],
+          "thoughtsTokenCount": 72
+        }
+      }
+    },
+    {
+      "tick": 86,
+      "event": {}
+    },
+    {
+      "tick": 86,
+      "event": {
+        "serverContent": {}
+      }
+    },
+    {
+      "tick": 91,
+      "event": {}
+    },
+    {
+      "tick": 91,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 2
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 91,
+      "event": {}
+    },
+    {
+      "tick": 95,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 95,
+      "event": {}
+    },
+    {
+      "tick": 97,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 97,
+      "event": {}
+    },
+    {
+      "tick": 102,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 102,
+      "event": {}
+    },
+    {
+      "tick": 108,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 108,
+      "event": {}
+    },
+    {
+      "tick": 108,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 108,
+      "event": {}
+    },
+    {
+      "tick": 108,
+      "event": {}
+    },
+    {
+      "tick": 110,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 111,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 111,
+      "event": {}
+    },
+    {
+      "tick": 115,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 115,
+      "event": {}
+    },
+    {
+      "tick": 115,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 116,
+      "event": {}
+    },
+    {
+      "tick": 118,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 118,
+      "event": {}
+    },
+    {
+      "tick": 118,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 118,
+      "event": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "tick": 206,
+      "event": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 58707,
+          "responseTokenCount": 63,
+          "totalTokenCount": 58770,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 57121
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 222
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 63
+            }
+          ],
+          "thoughtsTokenCount": 38
+        }
+      }
+    },
+    {
+      "tick": 350,
+      "event": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "6.800s"
+        }
+      }
+    },
+    {
+      "tick": 511,
+      "video": 1
+    },
+    {
+      "tick": 610,
+      "video": 2
+    },
+    {
+      "tick": 710,
+      "video": 3
+    },
+    {
+      "tick": 811,
+      "video": 4
+    },
+    {
+      "tick": 911,
+      "video": 5
+    },
+    {
+      "tick": 972,
+      "event": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 972,
+      "event": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "19.040s"
+        }
+      }
+    },
+    {
+      "tick": 1010,
+      "event": {}
+    },
+    {
+      "tick": 1011,
+      "event": {}
+    },
+    {
+      "tick": 1011,
+      "event": {
+        "serverContent": {}
+      }
+    },
+    {
+      "tick": 1011,
+      "video": 6
+    },
+    {
+      "tick": 1011,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 14400
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1011,
+      "event": {}
+    },
+    {
+      "tick": 1016,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1022,
+      "event": {}
+    },
+    {
+      "tick": 1028,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1034,
+      "event": {}
+    },
+    {
+      "tick": 1036,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1036,
+      "event": {}
+    },
+    {
+      "tick": 1036,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1036,
+      "event": {}
+    },
+    {
+      "tick": 1036,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1036,
+      "event": {}
+    },
+    {
+      "tick": 1036,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1036,
+      "event": {}
+    },
+    {
+      "tick": 1036,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1036,
+      "event": {}
+    },
+    {
+      "tick": 1036,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1036,
+      "event": {}
+    },
+    {
+      "tick": 1037,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 30720
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1037,
+      "event": {}
+    },
+    {
+      "tick": 1037,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1038,
+      "event": {}
+    },
+    {
+      "tick": 1040,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 26880
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1040,
+      "event": {}
+    },
+    {
+      "tick": 1041,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1045,
+      "event": {}
+    },
+    {
+      "tick": 1047,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 30720
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1048,
+      "event": {}
+    },
+    {
+      "tick": 1052,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1052,
+      "event": {}
+    },
+    {
+      "tick": 1052,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1055,
+      "event": {}
+    },
+    {
+      "tick": 1056,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1056,
+      "event": {}
+    },
+    {
+      "tick": 1057,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1058,
+      "event": {}
+    },
+    {
+      "tick": 1058,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1058,
+      "event": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "tick": 1112,
+      "video": 7
+    },
+    {
+      "tick": 1212,
+      "video": 8
+    },
+    {
+      "tick": 1312,
+      "video": 9
+    },
+    {
+      "tick": 1327,
+      "event": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "26.280s"
+        }
+      }
+    },
+    {
+      "tick": 1327,
+      "event": {
+        "serverContent": {
+          "interrupted": true
+        }
+      }
+    },
+    {
+      "tick": 1328,
+      "event": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 59930,
+          "responseTokenCount": 185,
+          "totalTokenCount": 60115,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 57297
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 599
+            },
+            {
+              "modality": "IMAGE",
+              "tokenCount": 580
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 185
+            }
+          ],
+          "thoughtsTokenCount": 138
+        }
+      }
+    },
+    {
+      "tick": 1413,
+      "video": 10
+    },
+    {
+      "tick": 1513,
+      "video": 11
+    },
+    {
+      "tick": 1614,
+      "video": 12
+    },
+    {
+      "tick": 1674,
+      "event": {}
+    },
+    {
+      "tick": 1674,
+      "event": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1674,
+      "event": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "33.280s"
+        }
+      }
+    },
+    {
+      "tick": 1674,
+      "event": {
+        "serverContent": {}
+      }
+    },
+    {
+      "tick": 1684,
+      "event": {}
+    },
+    {
+      "tick": 1686,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1686,
+      "event": {}
+    },
+    {
+      "tick": 1692,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 13440
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1696,
+      "event": {}
+    },
+    {
+      "tick": 1696,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 24960
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1696,
+      "event": {}
+    },
+    {
+      "tick": 1696,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1696,
+      "event": {}
+    },
+    {
+      "tick": 1697,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 5760
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1697,
+      "event": {}
+    },
+    {
+      "tick": 1697,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1697,
+      "event": {}
+    },
+    {
+      "tick": 1698,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1699,
+      "event": {}
+    },
+    {
+      "tick": 1700,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1700,
+      "event": {}
+    },
+    {
+      "tick": 1700,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1707,
+      "event": {}
+    },
+    {
+      "tick": 1707,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1707,
+      "event": {}
+    },
+    {
+      "tick": 1708,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1708,
+      "event": {}
+    },
+    {
+      "tick": 1708,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1711,
+      "event": {}
+    },
+    {
+      "tick": 1712,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 30720
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1713,
+      "event": {}
+    },
+    {
+      "tick": 1714,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1714,
+      "video": 13
+    },
+    {
+      "tick": 1717,
+      "event": {}
+    },
+    {
+      "tick": 1718,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1719,
+      "event": {}
+    },
+    {
+      "tick": 1720,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1720,
+      "event": {}
+    },
+    {
+      "tick": 1720,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1724,
+      "event": {}
+    },
+    {
+      "tick": 1725,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1727,
+      "event": {}
+    },
+    {
+      "tick": 1728,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1728,
+      "event": {}
+    },
+    {
+      "tick": 1728,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1733,
+      "event": {}
+    },
+    {
+      "tick": 1733,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1734,
+      "event": {}
+    },
+    {
+      "tick": 1734,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1734,
+      "event": {}
+    },
+    {
+      "tick": 1734,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1737,
+      "event": {}
+    },
+    {
+      "tick": 1738,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1740,
+      "event": {}
+    },
+    {
+      "tick": 1741,
+      "event": {}
+    },
+    {
+      "tick": 1741,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1741,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 3840
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1744,
+      "event": {}
+    },
+    {
+      "tick": 1746,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1746,
+      "event": {}
+    },
+    {
+      "tick": 1747,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1748,
+      "event": {}
+    },
+    {
+      "tick": 1749,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1752,
+      "event": {}
+    },
+    {
+      "tick": 1753,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 1753,
+      "event": {}
+    },
+    {
+      "tick": 1754,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1759,
+      "event": {}
+    },
+    {
+      "tick": 1759,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1759,
+      "event": {}
+    },
+    {
+      "tick": 1759,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 1759,
+      "event": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "tick": 1814,
+      "video": 14
+    },
+    {
+      "tick": 1914,
+      "video": 15
+    },
+    {
+      "tick": 2015,
+      "video": 16
+    },
+    {
+      "tick": 2116,
+      "video": 17
+    },
+    {
+      "tick": 2216,
+      "video": 18
+    },
+    {
+      "tick": 2250,
+      "event": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 60485,
+          "responseTokenCount": 289,
+          "totalTokenCount": 60774,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 57393
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 946
+            },
+            {
+              "modality": "IMAGE",
+              "tokenCount": 640
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 289
+            }
+          ],
+          "thoughtsTokenCount": 115
+        }
+      }
+    },
+    {
+      "tick": 2316,
+      "video": 19
+    },
+    {
+      "tick": 2417,
+      "video": 20
+    },
+    {
+      "tick": 2517,
+      "video": 21
+    },
+    {
+      "tick": 2618,
+      "video": 22
+    },
+    {
+      "tick": 2718,
+      "video": 23
+    },
+    {
+      "tick": 2818,
+      "video": 24
+    },
+    {
+      "tick": 2919,
+      "video": 25
+    },
+    {
+      "tick": 3019,
+      "video": 26
+    },
+    {
+      "tick": 3120,
+      "video": 27
+    },
+    {
+      "tick": 3170,
+      "event": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "63.200s"
+        }
+      }
+    },
+    {
+      "tick": 3220,
+      "video": 28
+    },
+    {
+      "tick": 3320,
+      "video": 29
+    },
+    {
+      "tick": 3403,
+      "event": {
+        "serverContent": {
+          "inputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3404,
+      "event": {
+        "voiceActivity": {
+          "type": "ACTIVITY_END",
+          "audioOffset": "67.880s"
+        }
+      }
+    },
+    {
+      "tick": 3418,
+      "event": {}
+    },
+    {
+      "tick": 3418,
+      "event": {
+        "serverContent": {}
+      }
+    },
+    {
+      "tick": 3421,
+      "video": 27
+    },
+    {
+      "tick": 3428,
+      "event": {}
+    },
+    {
+      "tick": 3428,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3429,
+      "event": {}
+    },
+    {
+      "tick": 3431,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3431,
+      "event": {}
+    },
+    {
+      "tick": 3431,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 5760
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3437,
+      "event": {}
+    },
+    {
+      "tick": 3437,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3437,
+      "event": {}
+    },
+    {
+      "tick": 3437,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 17280
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3438,
+      "event": {}
+    },
+    {
+      "tick": 3439,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3441,
+      "event": {}
+    },
+    {
+      "tick": 3442,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3444,
+      "event": {}
+    },
+    {
+      "tick": 3445,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3445,
+      "event": {}
+    },
+    {
+      "tick": 3445,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 7680
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3449,
+      "event": {}
+    },
+    {
+      "tick": 3450,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 21120
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3451,
+      "event": {}
+    },
+    {
+      "tick": 3451,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3451,
+      "event": {}
+    },
+    {
+      "tick": 3452,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 11520
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3457,
+      "event": {}
+    },
+    {
+      "tick": 3458,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 26880
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3458,
+      "event": {}
+    },
+    {
+      "tick": 3458,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3459,
+      "event": {}
+    },
+    {
+      "tick": 3459,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 1920
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3463,
+      "event": {}
+    },
+    {
+      "tick": 3464,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 24960
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3464,
+      "event": {}
+    },
+    {
+      "tick": 3465,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3465,
+      "event": {}
+    },
+    {
+      "tick": 3466,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 3840
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3469,
+      "event": {}
+    },
+    {
+      "tick": 3470,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3471,
+      "event": {}
+    },
+    {
+      "tick": 3472,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3476,
+      "event": {}
+    },
+    {
+      "tick": 3477,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 30720
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "outputTranscription": {
+            "text": "Synthetic transcript. "
+          }
+        }
+      }
+    },
+    {
+      "tick": 3479,
+      "event": {}
+    },
+    {
+      "tick": 3480,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 23040
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3481,
+      "event": {}
+    },
+    {
+      "tick": 3481,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3484,
+      "event": {}
+    },
+    {
+      "tick": 3484,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 19200
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3490,
+      "event": {}
+    },
+    {
+      "tick": 3490,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 15360
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3490,
+      "event": {}
+    },
+    {
+      "tick": 3490,
+      "event": {
+        "serverContent": {
+          "modelTurn": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "audio/pcm;rate=24000",
+                  "_pcm_bytes": 9600
+                }
+              }
+            ],
+            "role": "model"
+          }
+        }
+      }
+    },
+    {
+      "tick": 3490,
+      "event": {
+        "serverContent": {
+          "generationComplete": true
+        }
+      }
+    },
+    {
+      "tick": 3521,
+      "video": 30
+    },
+    {
+      "tick": 3621,
+      "video": 31
+    },
+    {
+      "tick": 3722,
+      "video": 32
+    },
+    {
+      "tick": 3823,
+      "video": 33
+    },
+    {
+      "tick": 3873,
+      "event": {
+        "serverContent": {
+          "turnComplete": true
+        },
+        "usageMetadata": {
+          "promptTokenCount": 62008,
+          "responseTokenCount": 228,
+          "totalTokenCount": 62236,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 57505
+            },
+            {
+              "modality": "AUDIO",
+              "tokenCount": 1339
+            },
+            {
+              "modality": "IMAGE",
+              "tokenCount": 1540
+            }
+          ],
+          "responseTokensDetails": [
+            {
+              "modality": "AUDIO",
+              "tokenCount": 228
+            }
+          ],
+          "thoughtsTokenCount": 171
+        }
+      }
+    },
+    {
+      "tick": 3923,
+      "video": 34
+    },
+    {
+      "tick": 4023,
+      "video": 32
+    },
+    {
+      "tick": 4124,
+      "video": 35
+    },
+    {
+      "tick": 4224,
+      "video": 36
+    },
+    {
+      "tick": 4325,
+      "video": 37
+    },
+    {
+      "tick": 4425,
+      "video": 38
+    },
+    {
+      "tick": 4526,
+      "video": 39
+    },
+    {
+      "tick": 4625,
+      "video": 40
+    },
+    {
+      "tick": 4627,
+      "event": {
+        "voiceActivity": {
+          "type": "ACTIVITY_START",
+          "audioOffset": "92.320s"
+        }
+      }
+    },
+    {
+      "tick": 4726,
+      "video": 41
+    }
+  ]
+}

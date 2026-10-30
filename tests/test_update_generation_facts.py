@@ -160,14 +160,16 @@ def test_record_reaches_panel_api_and_real_context_builder_without_chat(isolated
                           drive_path=lambda path: tmp_path / path)
     before = state_file.read_bytes()
     text = context.build_runtime_section(env, {"id": "reader", "type": "task"})
-    runtime = json.loads(text.split("## Runtime context\n\n", 1)[1])
-    # The mind reads the samples once, as the body fact's last update; the Runtime copy of the
-    # update projection no longer repeats them (the panel keeps its own reader above).
-    assert "after_update" not in runtime["official_update"]
-    assert runtime["vitals"]["last_update"].startswith("applied " + "b" * 12 + ": first request from handler entry before ")
-    assert runtime["vitals"]["last_update"].endswith("; record state/state.json managed_update_attempt")
-    assert " → after 3.0 s; rss 512 → 512 MiB" in runtime["vitals"]["last_update"]
-    assert "cpu" not in runtime["vitals"]["last_update"]  # a share over a sub-second interval is noise, not a fact
+    for rendered in (text, text.operative_view):
+        assert isinstance(rendered, str)
+        runtime, _ = json.JSONDecoder().raw_decode(rendered.split("\n\n", 1)[1])
+        # The mind reads the samples once, as the body fact's last update; the Runtime copy of the
+        # update projection no longer repeats them (the panel keeps its own reader above).
+        assert "after_update" not in runtime["official_update"]
+        assert runtime["vitals"]["last_update"].startswith("applied " + "b" * 12 + ": first request from handler entry before ")
+        assert runtime["vitals"]["last_update"].endswith("; record state/state.json managed_update_attempt")
+        assert " → after 3.0 s; rss 512 → 512 MiB" in runtime["vitals"]["last_update"]
+        assert "cpu" not in runtime["vitals"]["last_update"]  # a share over a sub-second interval is noise, not a fact
     assert state_file.read_bytes() == before  # passive readers never resample/write
 
 

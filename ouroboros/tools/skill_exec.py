@@ -20,7 +20,7 @@ from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_k
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.skill_catalogue import LIST_SKILLS_SCHEMA as _LIST_SCHEMA
 from ouroboros.skill_catalogue import list_skills_payload
-from ouroboros.skill_dependencies import skill_deps_not_ready as _skill_deps_not_ready
+from ouroboros.skill_dependencies import skill_deps_not_ready as _skill_deps_not_ready, unusable_python_env
 from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     compute_content_hash,
@@ -890,8 +890,11 @@ def _handle_review_skill(
 
 def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     deps_status, reason = _skill_deps_not_ready(drive_root, loaded)
-    if not reason:
-        return ""
+    if not reason:  # ready, yet never another interpreter without its packages; a failed check runs nothing
+        python = str(getattr(loaded.manifest, "runtime", "") or "").strip().lower() in {"python", "python3"}
+        unusable = python and unusable_python_env(drive_root, loaded)
+        return (f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} declares Python packages, but their environment does not "
+                f"run on this host's Python ({unusable}); toggle_skill enabled=true re-points or reinstalls it.") if unusable else ""
     return (
         f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} isolated "
         f"dependencies are not ready (status={deps_status!r}). "

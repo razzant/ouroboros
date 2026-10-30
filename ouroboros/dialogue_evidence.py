@@ -228,10 +228,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     }
     header = {"chat_id": chat_id, "label": label, "rows": len(unique), "coverage": source_header_coverage}
     text = "\n".join(json.dumps(row, ensure_ascii=False, default=str) for row in [header, *unique]) + "\n"
-    from ouroboros.tools.review_helpers import redact_prompt_secrets
-
-    text, redacted = redact_prompt_secrets(text)
-    return {**header, "coverage": source_coverage, "captured_at": utc_now_iso(), "rows": [json.loads(line) for line in text.split("\n")[1:-1]], "text": text, "secrets_redacted": redacted,
+    return {**header, "coverage": source_coverage, "captured_at": utc_now_iso(), "rows": [json.loads(line) for line in text.split("\n")[1:-1]], "text": text,
             "sha256": sha256(text.encode()).hexdigest(), "bytes": len(text.encode())}
 
 

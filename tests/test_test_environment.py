@@ -199,6 +199,9 @@ def test_safe_test_retains_its_new_root_and_keeps_the_command_status(tmp_path):
     assert len(retained) == 1, result.stderr
     root = Path(retained[0])
     assert root.parent == tmp_path.resolve() and root.name.startswith("ob-")
+    # Spotlight skips everything below it (fake app bundles among the fixtures), and it stays short:
+    # nested in a session's /tmp/obs-* scratch, a pool listener below it still fits AF_UNIX's 104 bytes.
+    assert root.name.endswith(".noindex") and len(root.name) == len("ob-12345678.noindex")
     assert (root / "home" / "probe").read_text() == "kept"
     # Handed down so each pytest controller claims its own basetemp beneath it.
     assert Path(result.stdout.splitlines()[-1]) == root

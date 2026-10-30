@@ -631,23 +631,34 @@ test('navigation to Updates reads the status and applies nothing, whatever the c
     }
 });
 
-// The real page: its click handler, the real confirm dialog, a status refresh while the dialog is open.
-async function confirmActivation({ refreshTo = null, reply = { status: 'ok', restarting: true } }) {
+// The real page: its click handler, the effects read for the shown candidate (`read`: that reply's status and body),
+// the real confirm dialog, and a status refresh `during` that read or while the dialog is open.
+async function confirmActivation({ refreshTo = null, during = 'dialog', reply = { status: 'ok', restarting: true },
+    read = { status: 200, body: {} } }) {
     const ready = (id, version) => ({ ...STATUS, candidate: candidate({ candidate_id: id, state: 'ready', checks: PASSED,
         target_version: version, actions: ['activate', 'discard_candidate'] }) });
     let current = ready('update_aaaaaaaaaaaa_000001', '7.8.2');
     const posts = [];
     const saved = { fetch: globalThis.fetch, window: globalThis.window, document: globalThis.document };
     const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const shown = [];
+    const refresh = async () => {  // a progress refresh replaces the status
+        current = ready(refreshTo, '7.8.3');
+        shown.forEach((fn) => fn({ detail: { tab: 'updates' } }));
+        for (let i = 0; i < 4; i += 1) await tick();
+    };
     try {
         globalThis.fetch = async (url, init = {}) => {
             if ((init.method || 'GET') === 'POST') posts.push([String(url), JSON.parse(init.body || '{}')]);
+            if (String(url).startsWith('/api/update/preflight')) {
+                if (refreshTo && during === 'read') await refresh();
+                return { ok: read.status < 400, status: read.status, json: async () => read.body };
+            }
             const body = String(url).startsWith('/api/update/status') ? current
                 : String(url).startsWith('/api/update/apply') ? reply
                     : { branch: 'ouroboros', sha: '88acfdbe', commits: [], tags: [] };
             return { ok: true, status: 200, json: async () => body };
         };
-        const shown = [];
         globalThis.window = { addEventListener: (type, fn) => { if (type === 'ouro:dashboard-subtab-shown') shown.push(fn); } };
         globalThis.document = { createElement: (tag) => stubElement(tag), body: stubElement('body'), activeElement: null,
             addEventListener() {}, removeEventListener() {}, getElementById: () => null };
@@ -657,17 +668,15 @@ async function confirmActivation({ refreshTo = null, reply = { status: 'ok', res
         for (let i = 0; i < 4; i += 1) await tick();
         const actions = page.appended[0].querySelector('#updates-actions');
         actions.listeners.click[0]({ target: { closest: () => ({ disabled: false, dataset: { action: 'activate' } }) } });
-        await tick();
-        const dialog = globalThis.document.body.children.at(-1);
-        if (refreshTo) {  // a progress refresh replaces the status while the owner reads the dialog
-            current = ready(refreshTo, '7.8.3');
-            shown.forEach((fn) => fn({ detail: { tab: 'updates' } }));
-            for (let i = 0; i < 4; i += 1) await tick();
-        }
-        dialog.listeners.click[0]({ target: { closest: (selector) => (selector === '[data-confirm-ok]' ? {} : null) } });
+        for (let i = 0; i < 8; i += 1) await tick();
+        const dialog = globalThis.document.body.children.find((node) => node.innerHTML.includes('confirm-dialog'));
+        if (refreshTo && during === 'dialog') await refresh();  // while the owner reads the dialog
+        dialog?.listeners.click[0]({ target: { closest: (selector) => (selector === '[data-confirm-ok]' ? {} : null) } });
         for (let i = 0; i < 6; i += 1) await tick();
         const sent = posts.filter(([url]) => url.startsWith('/api/update/apply'));
         sent.headline = page.appended[0].querySelector('#updates-summary').textContent;
+        sent.reads = posts.filter(([url]) => url.startsWith('/api/update/preflight')).map(([, body]) => body);
+        sent.dialog = dialog ? dialog.innerHTML : null;
         return sent;
     } finally {
         Object.assign(globalThis, saved);
@@ -677,8 +686,37 @@ async function confirmActivation({ refreshTo = null, reply = { status: 'ok', res
 test('Restart to update sends the candidate the dialog described, and never one that replaced it meanwhile', async () => {
     const unchanged = await confirmActivation({});
     assert.deepEqual([...unchanged], [['/api/update/apply', { strategy: 'activate', candidate_id: 'update_aaaaaaaaaaaa_000001' }]]);
+    assert.deepEqual(unchanged.reads, [{ candidate_id: 'update_aaaaaaaaaaaa_000001' }], 'its effects are read first');
     const replaced = await confirmActivation({ refreshTo: 'update_bbbbbbbbbbbb_000002' });
     assert.deepEqual([...replaced], [], 'A was confirmed while B became current: nothing is sent, B is shown again');
+    const reading = await confirmActivation({ refreshTo: 'update_bbbbbbbbbbbb_000002', during: 'read' });
+    assert.deepEqual([reading.dialog, [...reading]], [null, []], 'B came while A’s effects were read: no dialog, nothing sent');
+    const refused = await confirmActivation({ read: { status: 409, body: { error: 'the prepared update changed; check again',
+        reason_code: 'candidate_changed' } } });
+    assert.deepEqual([refused.dialog, [...refused]], [null, []], 'the server names another live candidate');
+});
+
+test('the Restart to update dialog words the effects read for its candidate; an unreadable or foreign read is unknown', async () => {
+    const effects = { candidate_id: 'update_aaaaaaaaaaaa_000001', target_sha: SHA.target, provisional: false,
+        engine: { action: 'replace', direction: 'forward', serving: { version: '4.6.0' }, target: { version: '4.6.10' } },
+        active_work: { status: 'known', model: 2, non_model: 1, total: 3 },
+        runtime: { installed: { python: '3.10.19', sqlite: '3.50.4' }, selected: { python: '3.10.19', sqlite: '3.50.4' },
+            changed_by_apply: false, bundle: { python: '3.10.22', sqlite: '3.53.1' } } };
+    const bound = await confirmActivation({ read: { status: 200, body: { merge_plan: { target_sha: SHA.target }, effects } } });
+    for (const phrase of [/Claudexor: 4\.6\.0 → 4\.6\.10\./, /end all its active runs, including other work/,
+        /2 model call\(s\), 1 other job\(s\)/, /Engine data is forward-only/, /Restart to update keeps the interpreter/]) {
+        assert.match(bound.dialog, phrase);
+    }
+    assert.equal(bound.length, 1);
+    const unreadable = await confirmActivation({ read: { status: 500, body: { error: 'engine status unreadable' } } });
+    const foreign = await confirmActivation({ read: { status: 200, body: { merge_plan: { target_sha: SHA.target },
+        effects: { ...effects, candidate_id: 'update_cccccccccccc_000003' } } } });
+    for (const shown of [unreadable, foreign]) {
+        assert.match(shown.dialog, /Currently active engine work: unknown/);
+        assert.doesNotMatch(shown.dialog, /model call|keeps the interpreter|4\.6\.10/);
+        assert.deepEqual([...shown], [['/api/update/apply', { strategy: 'activate', candidate_id: 'update_aaaaaaaaaaaa_000001' }]],
+            'unknown is disclosed, never a refusal: the owner can still restart');
+    }
 });
 
 test('the restart names the candidate the server activates, from its reply, not the status read before it', async () => {

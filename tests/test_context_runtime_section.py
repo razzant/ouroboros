@@ -19,6 +19,29 @@ from ouroboros.context import build_runtime_section, build_user_content
 from tests._context_shared import _make_health_env
 
 
+@pytest.mark.parametrize("host_fact", [None, {}, {"kind": "other"}, {"kind": "call_open"}])
+@pytest.mark.parametrize("attachment", [False, True])
+def test_call_open_is_labelled_before_attachment_and_presence_rendering(monkeypatch, host_fact, attachment):
+    from copy import deepcopy
+    from ouroboros import context
+
+    text = "  A live call opened.\n"
+    task = {"text": text, "metadata": {"host_fact": host_fact}}
+    original = deepcopy(task)
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,test"}}
+    monkeypatch.setattr(context, "_build_attachment_image_blocks", lambda _task: [image] if attachment else [])
+    seen = []
+    monkeypatch.setattr("ouroboros.presence_context.frame_presence_user_content",
+                        lambda source, content: seen.append((source, content)) or content)
+
+    expected = ("[Host fact: a live call opened; not the owner's words]\n\n" + text
+                if host_fact == {"kind": "call_open"} else text)
+    expected = [{"type": "text", "text": expected}, image] if attachment else expected
+    assert build_user_content(task) == expected
+    assert seen == [(task, expected)]
+    assert task == original  # attribution does not rewrite the source or choose different memory
+
+
 @pytest.mark.parametrize("root_only", [False, True])
 def test_schedule_digest_distinguishes_unreadable_from_empty(tmp_path, root_only):
     from types import SimpleNamespace
@@ -444,6 +467,14 @@ class TestRuntimeEnvSection:
         data = json.loads(section.split("## Runtime context\n\n", 1)[1])
         assert "owner_client" not in data
 
+    def test_the_block_is_compact_json_with_the_same_values(self, tmp_path):
+        """No indentation or separator spaces (20.10.2026): the same values, about a fifth fewer tokens."""
+        from ouroboros.context import build_runtime_section
+
+        section = build_runtime_section(self._make_env(tmp_path), {"id": "t8", "type": "task"})
+        body = section.split("## Runtime context\n\n", 1)[1]
+        assert body == json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
+
 
 def _delegation_data_root(tmp_path, monkeypatch):
     root = tmp_path / "delegation_data_root"
@@ -605,7 +636,8 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
     assert "## Drive state\n" + label in dynamic
     # The chat row is the memory view's (the open conversation): no capture-labelled chat tail.
     assert "## Recent chat" not in dynamic and "] hello" in dynamic.split("## This room (Main)", 1)[1]
-    assert '"context_captured_at": "2027-01-15T12:00:00+00:00"' in dynamic
+    runtime = json.loads(dynamic.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
+    assert runtime["context_captured_at"] == "2027-01-15T12:00:00+00:00"
     headings = [line for line in dynamic.splitlines() if line.startswith(("## Recent ", "## Drive state"))]
     assert headings and all(dynamic.split(heading + "\n", 1)[1].startswith(label) for heading in headings)
     assert "## Runtime context\n" + label not in dynamic  # labels are for the captured snapshots only

@@ -110,6 +110,16 @@ CASES = {
         [_row("sl", "budget_paused", pause_cause="sleep")],
         {"sl": {"_budget_pause": {"reason": "sleep"}}}, {}, {},
     ),
+    # After a root-only Resume the root sleeps warm on the helper it chose, which still awaits its own selection:
+    # the root keeps its word and controls; its line names that helper and who resumes it. No owner's turn.
+    "sleeping_on_paused_helper": (
+        [_row("sw", suggested_name="Repair the release notes"),
+         _row("sw-c", "budget_paused", pause_cause="unknown", can_resume=False, parent_task_id="sw", root_task_id="sw")],
+        {"sw": {**_RUNNING, "owner_wait": {"state": "waiting", "reason": "sleep", "task_attempt": 1,
+                                            "sleep": {"mode": "warm", "tasks": ["sw-c"], "senders": ["sw-c"]}}},
+         "sw-c": {"_budget_pause": {"reason": "owner", "exact_continuation": True}}},
+        {}, {},
+    ),
     "unknown": ([_row("u", "unknown")], {}, {}, {}),
     "ended_with_runs": ([], {}, {"r": {"task_id": "r", "status": "done", "chat_id": 42}}, {"r": ["run-1", "run-2"]}),
     # The parent finished while its helper still works: its episode is not live, its tree's Stop still stands.
@@ -181,7 +191,7 @@ def test_the_web_fixture_is_the_servers_projection():
     ("helper_after_parent", "working"), ("paused_review_finishing", "paused"), ("unconfirmed_run", "unknown"),
     ("paused_unattributed", "paused"), ("pausing_with_queued_helper", "working"), ("two_works_one_pausing", "working"),
     ("working_with_review", "working"), ("paused_stop_unknown", "paused"),
-    ("paused_model_handoff", "paused"),
+    ("paused_model_handoff", "paused"), ("sleeping_on_paused_helper", "waiting"),
 ])
 def test_each_fixture_room_is_the_state_its_name_says(name, activity):
     """The fixture is meaningful, not merely equal: each room is the case the web tests read it as."""

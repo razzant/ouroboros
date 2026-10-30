@@ -1,7 +1,10 @@
 // Preflight observations only: the server's pin rule owns the restart decision.
-export function updateEffectsText(preflight, { replace = false } = {}) {
-    const effects = preflight?.effects?.target_sha === preflight?.merge_plan?.target_sha
-        ? preflight?.effects || {} : {};
+// `candidate`: for Restart to update, the id of the prepared update shown; its effects must name it.
+export function updateEffectsText(preflight, { replace = false, candidate = null } = {}) {
+    const restart = candidate !== null;
+    const bound = restart ? Boolean(candidate) && preflight?.effects?.candidate_id === candidate
+        : preflight?.effects?.target_sha === preflight?.merge_plan?.target_sha;
+    const effects = bound ? preflight?.effects || {} : {};
     const engine = (replace ? effects.replacement_engine : effects.engine) || {};
     const version = (pin) => pin?.version || 'unknown';
     const parts = [`Claudexor: ${version(engine.serving)} → ${version(engine.target)}.`];
@@ -25,6 +28,14 @@ export function updateEffectsText(preflight, { replace = false } = {}) {
     const runtime = effects.runtime || {};
     parts.push(`This install: Python ${runtime.installed?.python || 'unknown'}, SQLite ${runtime.installed?.sqlite || 'unknown'}.`);
     parts.push(`Bundle described by this update: Python ${runtime.bundle?.python || 'unknown'}, SQLite ${runtime.bundle?.sqlite || 'unknown'}.`);
-    parts.push('In-app Update keeps the interpreter and SQLite. Install a newer runtime separately to change them.');
+    // The in-place lanes never change the interpreter; Restart to update says what its preparation selected.
+    const changes = restart ? runtime.changed_by_apply : false;
+    if (changes === true) {
+        parts.push(`Restart to update changes them: the new start runs Python ${runtime.selected?.python || 'unknown'}, SQLite ${runtime.selected?.sqlite || 'unknown'}.`);
+    } else if (changes === false) {
+        parts.push(`${restart ? 'Restart to update' : 'In-app Update'} keeps the interpreter and SQLite. Install a newer runtime separately to change them.`);
+    } else {
+        parts.push('Whether Restart to update changes the interpreter and SQLite is unknown.');
+    }
     return parts.join('\n\n');
 }

@@ -78,17 +78,25 @@ def _bind_worker_repo_root(repo_dir: str, drive_root: str = "") -> None:
 def write_bytecode_to_prefix_only(drive_root: str) -> None:
     """Let this worker cache its bytecode, only into a prefix inside its data dir.
 
-    The launcher points the prefix at ``data/state/pycache``, and with a prefix Python
+    The launcher points the prefix at ``data/state/pycache.noindex``, and with a prefix Python
     writes bytecode only there, never beside a source and so never into a signed bundle
     (WA6, the reason the launcher sets ``PYTHONDONTWRITEBYTECODE``); the next worker then
     loads its import graph instead of recompiling it on every boot. No prefix, or one
     outside the data dir (a developer's, a test harness's), changes nothing, and the
     inherited environment still keeps every other child this process starts from writing.
+    An older launcher's legacy ``state/pycache`` (this prefix, and the one children inherit)
+    moves to the unindexed tree before any write (``unindexed.bytecode_prefix``).
     """
+    import os
     import sys
+
+    from ouroboros.unindexed import bytecode_prefix
 
     if not sys.pycache_prefix:
         return
+    sys.pycache_prefix = bytecode_prefix(drive_root, sys.pycache_prefix)
+    if os.environ.get("PYTHONPYCACHEPREFIX"):
+        os.environ["PYTHONPYCACHEPREFIX"] = bytecode_prefix(drive_root, os.environ["PYTHONPYCACHEPREFIX"])
     try:
         inside = pathlib.Path(sys.pycache_prefix).resolve().is_relative_to(pathlib.Path(drive_root).resolve())
     except (OSError, RuntimeError, ValueError):

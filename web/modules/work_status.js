@@ -104,6 +104,14 @@ const COUNTED_REASONS = {
         : fmt('{count} external runs still working', { count: n, n })),
     external_runs_unconfirmed: (n) => (n === 1 ? tr('work.because.external_runs_unconfirmed', '1 external run may still be running')
         : fmt('{count} external runs may still be running', { count: n, n })),
+    awaited_helpers_mind: (n) => (n === 1
+        ? tr('work.because.awaited_helpers_mind', '1 helper it waits for is paused until Ouroboros resumes it')
+        : fmt('{count} helpers it waits for are paused until Ouroboros resumes them', { count: n, n })),
+    awaited_helpers_owner: (n) => (n === 1
+        ? tr('work.because.awaited_helpers_owner', '1 helper it waits for is paused until you resume it')
+        : fmt('{count} helpers it waits for are paused until you resume them', { count: n, n })),
+    awaited_helpers_paused: (n) => (n === 1 ? tr('work.because.awaited_helpers_paused', '1 helper it waits for is paused')
+        : fmt('{count} helpers it waits for are paused', { count: n, n })),
 };
 
 // Helpers and external runs still working side by side are said in one sentence, so the line never says it twice.

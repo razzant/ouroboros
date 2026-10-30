@@ -475,54 +475,6 @@ def _pending_resume_available(q: Any, task: dict, *, owner_paused: bool) -> bool
     return not root_parked and not live_root_resume_grant(q, root_id, result_root)
 
 
-def _managed_task_budget_pausing(drive_root: Any, row: Dict[str, Any], task_id: str) -> bool | None:
-    """A RUNNING task writing its exact budget pause (#1196): the durable
-    ``budget_pause`` row is the only truth of that window; None means unreadable."""
-    try:
-        from ouroboros.budget_pause import STATE_PAUSING, budget_pause_row
-
-        pause = budget_pause_row(pathlib.Path(row.get("budget_drive_root") or drive_root), task_id)
-        if (pause and pause.get("state") == STATE_PAUSING
-                and int(pause.get("task_attempt") or 0) == int(row.get("_attempt") or 1)):
-            return True
-        # The owner paused this RUNNING root's tree: it is settling toward its
-        # boundary (its own sent work stopping), not working (ouroboros/owner_pause.py).
-        state = _owner_fence_state(drive_root, row, task_id)
-        return None if state == "unknown" else state == "requested"
-    except Exception:
-        return None
-
-
-def _owner_fence_state(drive_root: Any, row: Dict[str, Any], task_id: str) -> str:
-    """The member's owner-Pause fence state (``requested``/``paused``/``unknown``/``""``)."""
-    from types import SimpleNamespace
-
-    from ouroboros.owner_pause import member_fence
-
-    try:
-        return str(member_fence(SimpleNamespace(
-            task_id=task_id, root_task_id=str(row.get("root_task_id") or task_id),
-            budget_drive_root=str(row.get("budget_drive_root") or drive_root))).get("state") or "")
-    except Exception:
-        return "unknown"
-
-
-def _interrupted_owner_resume(drive_root: Any, row: Dict[str, Any], task_id: str) -> Optional[bool]:
-    """A parked member whose owner Resume was consumed, then interrupted (#1716): not its owner's own
-    Pause. ``None``: a fact it needs is unreadable, so the row is unknown, never quietly absent."""
-    from ouroboros.owner_pause import interrupted_member_resume
-
-    recovery, root_id = row.get("_working_recovery"), str(row.get("root_task_id") or task_id)
-    if not isinstance(recovery, dict) or root_id == task_id:
-        return False
-    try:  # the attempt whose saved work resumes, exactly as the held selection reads it
-        attempt = int(recovery.get("from_attempt") or 0)
-    except (TypeError, ValueError):
-        return None
-    return interrupted_member_resume(pathlib.Path(row.get("budget_drive_root") or drive_root), root_id, task_id,
-                                     attempt=attempt)
-
-
 def _finishing_reviews(drive_root: Any, row: Dict[str, Any], task_id: str) -> bool:
     """Whether review work the owner's Pause lets finish still runs, as its census recorded it.
     The census names tasks and model sends alike, so it is never a reviewer count."""
@@ -555,20 +507,6 @@ def _activity_pause_cause(row: dict, fence: dict) -> str:
     return stop_presentation(row, {"budget": {root_id: fence}})["pause_cause"]
 
 
-def _activity_stop_view(drive_root, row, task_id, fence, *, owner_resumed=False):
-    from types import SimpleNamespace
-    from ouroboros.budget_pause import budget_pause_row
-    from ouroboros.owner_pause import member_fence
-    from ouroboros.work_stop import stop_presentation
-
-    root = pathlib.Path(row.get("budget_drive_root") or drive_root)
-    root_id = str(row.get("root_task_id") or task_id)
-    owner = {} if owner_resumed else member_fence(SimpleNamespace(
-        task_id=task_id, root_task_id=root_id, budget_drive_root=root))
-    task = {**row, "id": task_id, "budget_pause": budget_pause_row(root, task_id)}
-    return stop_presentation(task, {"owner": owner, "budget": {root_id: fence}})
-
-
 def _direct_activity_pause_projection(drive_root: Any, row: dict, availability: Any) -> dict:
     """Project a direct actor's saved warm Pause without changing its registry.
 
@@ -576,9 +514,11 @@ def _direct_activity_pause_projection(drive_root: Any, row: dict, availability: 
     existing owner-wait record supplies that fact; the settled root fence then
     supplies Paused and the separate review count, just as for managed tasks.
     """
+    from ouroboros.work_stop import owner_fence_state, parked_stop_view
+
     activity = dict(row)
     task_id = str(row.get("activity_id") or "")
-    state = _owner_fence_state(drive_root, row, task_id)
+    state = owner_fence_state(drive_root, row, task_id)
     if state == "unknown":
         activity["phase"] = "unknown"
         if availability is not None:
@@ -591,7 +531,7 @@ def _direct_activity_pause_projection(drive_root: Any, row: dict, availability: 
         except Exception:
             own = {}
         if own.get("owner_wait_state") == "waiting" and own.get("owner_wait_reason") == "owner_pause":
-            view = _activity_stop_view(drive_root, row, task_id, {})
+            view = parked_stop_view(drive_root, row, task_id, {})
             activity.update(phase="budget_paused", live=False, stop=view["stop"],
                             refusal=view["refusal"], pause_cause=view["pause_cause"])
             if state == "paused" and (finishing := _finishing_reviews(drive_root, row, task_id)):
@@ -697,15 +637,18 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 return False
 
         def _activity(task_id: str, row: Dict[str, Any], phase: str, started_at: float, *, root: bool = True,
-                      can_resume: bool = False, owner_resumed: bool = False, live: bool = False) -> Dict[str, Any]:
+                      can_resume: bool = False, owner_resumed: bool = False, live: bool = False,
+                      view: Optional[dict] = None) -> Dict[str, Any]:
             from ouroboros.project_admission import project_hold_fact
             from ouroboros.task_activity_facts import card_facts
+            from ouroboros.work_stop import parked_stop_view
 
             if phase == "unknown" and availability is not None:
                 availability["complete"] = False
-            view = {}
+            view = view or {}
             if phase in {"budget_paused", "budget_pausing"}:
-                view = _activity_stop_view(drive_root, row, task_id, {} if owner_resumed else fence_rows.get(
+                # A queue row's view comes with its control (``queue_control``); an answered root's is read here.
+                view = view or parked_stop_view(drive_root, row, task_id, {} if owner_resumed else fence_rows.get(
                     str(row.get("root_task_id") or task_id), {}), owner_resumed=owner_resumed)
                 if phase == "budget_pausing" and not live:
                     phase = "budget_paused"
@@ -739,7 +682,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
 
         from types import SimpleNamespace
 
-        from supervisor.queue_transitions import budget_pause_fact
+        from ouroboros.work_stop import owner_fence_state, queue_control
 
         registries = SimpleNamespace(PENDING=pending_rows, BUDGET_ROOT_FENCES=fence_rows, DRIVE_ROOT=drive_root,
                                      RUNNING={task_id: {"task": row} for task_id, row, _started in running_rows})
@@ -754,20 +697,13 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 if owners_only:
                     activities.append(_activity(task_id, row, "queued", _epoch_or_zero(row.get("queued_at")), root=root))
                     continue
-                # #322 (P1): a budget-paused member must not masquerade as
-                # "queued" — nothing will dispatch it until an explicit resume.
-                pausing = _managed_task_budget_pausing(drive_root, row, task_id)
-                phase = ("unknown" if pausing is None else "budget_pausing" if pausing
-                         else "budget_paused" if budget_pause_fact(row, fence_rows) else "queued")
-                # An interrupted owner Resume leaves the member parked; only that existing Resume continues it.
-                interrupted = phase in {"budget_paused", "budget_pausing"} and _interrupted_owner_resume(
-                    drive_root, row, task_id)
-                phase = "unknown" if interrupted is None else "budget_paused" if interrupted else phase
-                resume = interrupted is True or (phase in {"budget_paused", "budget_pausing"} and _pending_resume_available(
+                control = queue_control(drive_root, row, fence_rows)  # the mind's readers read it alike
+                phase, interrupted = control["phase"], control["owner_resumed"]
+                resume = interrupted or (phase in {"budget_paused", "budget_pausing"} and _pending_resume_available(
                     registries, row, owner_paused=(fence_rows.get(str(row.get("root_task_id") or task_id)) or {}).get(
-                        "cause") == "owner_pause" or _owner_fence_state(drive_root, row, task_id) == "paused"))
-                activities.append(_activity(task_id, row, phase, _epoch_or_zero(row.get("queued_at")),
-                                            root=root, can_resume=resume, owner_resumed=interrupted is True))
+                        "cause") == "owner_pause" or owner_fence_state(drive_root, row, task_id) == "paused"))
+                activities.append(_activity(task_id, row, phase, _epoch_or_zero(row.get("queued_at")), root=root,
+                                            can_resume=resume, owner_resumed=interrupted, view=control["view"]))
                 if work_facts is not None:
                     work_facts[task_id] = _raw_work_facts(row)
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
@@ -783,14 +719,12 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                     continue
                 # #1196: a RUNNING root whose durable budget_pause row says
                 # "pausing" is neither working nor paused yet — additive phase.
-                pausing = _managed_task_budget_pausing(drive_root, row, task_id)
-                if pausing is not False:
-                    phase = "unknown" if pausing is None else "budget_pausing"
-                elif _owner_fence_state(drive_root, row, task_id) == "paused":
-                    phase = "budget_paused"  # its stack parked warm under a settled Pause
-                else:
+                control = queue_control(drive_root, row, fence_rows, running=True)
+                phase = control["phase"]
+                if phase == "running":
                     phase = "finalizing" if _managed_task_finalizing(drive_root, task_id) else "working"
-                activities.append(_activity(task_id, row, phase, started_at, root=root, live=not row.get("_owner_pause_warm")))
+                activities.append(_activity(task_id, row, phase, started_at, root=root,
+                                            live=not row.get("_owner_pause_warm"), view=control["view"]))
                 if work_facts is not None:  # whether a settling Pause's member still executes, or waits parked warm
                     warm = {"owner_pause_warm": True} if row.get("_owner_pause_warm") else {}
                     work_facts[task_id] = {**_raw_work_facts(row), "running": not warm, **warm}
@@ -808,7 +742,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 continue  # the logical fence alone is no second actor; genuine late work stays
             # The fence's own census is the truth of "Paused": reviewers already
             # launched finish separately and never keep the tree Pausing.
-            if _owner_fence_state(drive_root, {"root_task_id": root_id}, root_id) == "paused":
+            if owner_fence_state(drive_root, {"root_task_id": root_id}, root_id) == "paused":
                 phase = "budget_paused"
             elif (facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
                   or task_has_live_review_operation(drive_root, root_id, sent_only=True)):

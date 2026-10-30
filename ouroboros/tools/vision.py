@@ -639,7 +639,7 @@ def _emit_usage(ctx: ToolContext, usage: Dict[str, Any], model: str) -> None:
 
 
 def attach_local_image_to_context(ctx: ToolContext, path: str, *, stamp: Any = None,
-                                  observation: Optional[dict] = None) -> Tuple[bool, str]:
+                                  observation: Optional[dict] = None, capture_source: str = "") -> Tuple[bool, str]:
     """Attach a LOCAL image file to the active conversation as a native image block.
 
     The single implementation behind BOTH the agent-called ``view_image`` tool and
@@ -677,6 +677,7 @@ def attach_local_image_to_context(ctx: ToolContext, path: str, *, stamp: Any = N
             "_caption": caption,
             "_source_path": source_path,
             "_source_sha256": payload["source_sha256"],
+            **({"_capture_source": capture_source} if capture_source else {}),
         },
     ], stamp=stamp or ctx)  # a batch eviction of sent images names its origin on the live slot
     return True, (

@@ -452,7 +452,9 @@ flowchart LR
   context, never as approval.
 - **Isolated deps** (pip / npm / uv / node) install into
   `data/skills/<bucket>/<name>/.ouroboros_env/`. Status is recorded
-  in `data/state/skills/<name>/deps.json`.
+  in `data/state/skills/<name>/deps.json`. Its Python venv names the app's interpreter: after
+  the app moves or brings another Python minor, Enable or the next startup re-points or rebuilds
+  it; until then the skill's Python is refused, never swapped for another interpreter.
   In-process extension scopes are non-reentrant: no-dependency handlers of
   DIFFERENT skills share a read lease and overlap, the handlers of ONE skill
   run one at a time (your callbacks stay sequential, as under the old
@@ -846,6 +848,9 @@ calls and runtime behaviours:
 | `ws_handler` | The skill may call `register_ws_handler` and `send_ws_message`. |
 | `route` | The skill may call `register_route`. |
 | `tool` | The skill may call `register_tool`. |
+| `realtime_provider` | The skill may call `register_realtime_provider` (PluginAPI 2.1, in-process only). |
+| `live_conversation` | The skill may register the in-process Live Conversation feature (PluginAPI 2.1); the host retains admission, tools, memory, budget and Stop. |
+| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; Presence admission still requires its binding and `presence` grant. External speech conveys no owner authority. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
@@ -1583,13 +1588,13 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.1, ABI 7.0; a payload declaring "2.0" still loads):
+(PluginAPI 2.3; declarations of 2.0, 2.1 and 2.2 remain supported):
 
 ```yaml
-plugin_api: "2.1"            # major strict; minor = required minimum
+plugin_api: "2.3"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.1"
+#   version: "2.3"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
@@ -1597,6 +1602,78 @@ A payload without the field binds the legacy "1.3" generation by
 construction: an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
+
+`register_realtime_provider(name, *, route, session, catalog)` publishes an in-process
+provider as `<skill>:<name>`, with the `realtime_provider` permission. `RealtimeRoute`
+names its accounting provider, socket endpoint and model prefix. `ProviderCatalog`
+names models, default, voices, vision, honoured settings and credential setting names;
+`RouteFacts` carries the conversation window, accepted-input evidence, working reserve,
+units (`provider` or `estimator`), source and date. Acceptance never raises or invalidates the window.
+An unknown window stays unknown. Credentials use ordinary `get_settings` grants.
+
+`register_live_conversation(name, handler, *, configure, call_tools=(), initial_tools=())` registers the
+in-process feature, requiring `live_conversation`. `configure()` returns `LiveConfig`;
+an empty model selects the catalog default, an unknown model refuses admission.
+The optional `initial_tools` names ordinary schemas needed by the feature's frame;
+they join discovery and feature tools before the first fit, including Nano. The bundled
+Live calls frame loads `send_user_message`, `schedule_subagent` and `get_task_result`
+this way, so its first named action needs no schema-enablement reconnect.
+`call_offer(config)` in `ouroboros.live_conversation` computes availability from enabled,
+loaded provider and its credential grants. Beta defaults off. No connection duration
+or per-call dollar limit exists; responses share the ordinary spending limit.
+
+`handler(host)` receives the `LiveHost` protocol in `contracts/live_conversation.py`. Its additive `prepare_session(options)` defaults to None for older hosts; a supporting host returns a silent successor lease with async `run(consume)`/`close()` and `caught_up` indicating canonical arrivals delivered on adoption. The additive `ContextUpdate.respond` defaults to true; false delivers catch-up history without asking for another answer. Providers opt in with `LiveSession.silent_context_updates=True`; its absent/false default preserves sequential renewal for older implementations. The additive host operation `take_mail_answer()` claims an unanswered durable mailbox delivery after cancellation; its old-host default is false, and returned mailbox rows still request an answer.
+The host owns admission, current canonical history, ordinary context fitting, tools,
+mailbox, accounting and Stop. The feature owns call state, media, captions, language
+choices and session renewal. It calls `session(consume, LiveOptions(...))`; every reopen
+refits current rows and schemas through the ordinary window ladder. Feature instructions
+then owner instructions are included in the fit. Known overflow refuses with a typed
+sentence if the ladder cannot fit it. Provider windows use the route's ordinary density
+(cold 1.0); split text-input usage calibrates selected text only, never media. Estimator
+windows use raw chars/4; Grok usage excludes instructions and never teaches density.
+The sealed wire, including provider language additions, is budgeted before opening. Fresh candidates use the shared source-view remedies, memory floor, seed and exact oldest-whole-row physical cut; a provider must never independently shorten the selected input. Pricing is read-only, includes its passive room fact, and publishes its exact reader only for the selected candidate. Usable response exposure is hashed off the media loop from a snapshot of actually delivered rows; queued data is not exposure.
+The final physical guard honours the route reserve. The first full candidate also tries
+to leave one eighth for work through the ordinary ladder; missing room starts with a
+notice when input plus reserve still fits. Reconnects measure remaining room without
+charging another start. Opened prefixes become ordinary observed views for
+`compact_context`; the driver applies queued authored views through the shared text
+application at its quiet boundary and reconnects with the measured result.
+
+The session factory receives immutable `RealtimeInput`, options and a wire recorder.
+It declares its native output bound or `None`; the host supplies fresh exact-route
+output-limit evidence in `LiveOptions.model_output_bound_tokens`. A provider owns wire
+layout and normalization, and must never cut selected input. It reports each response's
+start, finish, status and usage axes, including interrupted/tool-only responses.
+`connected_seconds` is a cumulative connection watermark, including idle and closing
+time. For optional delivery evidence, shared `JsonSession.hold_context` and `hold_tool_call` record rows only after delivery, and `capture_response_context(response_id)` snapshots what that response held before queued updates are released. Older/external providers without these hooks keep exposure unknown; setup or queued results never prove exposure.
+The factory's `observe("usage", raw)` reports JSON
+`{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
+its final sample before returning. Samples and responses share one watermark. The host
+settles growth after Stop/budget exhaustion without admitting work or inventing responses;
+response IDs dedupe across the call, including resumed connections. Reservations
+survive reconnects; final call teardown abandons responses without a receipt.
+`billable_audio_seconds` remains evidence.
+The host uses the retained exact LiteLLM quote. Unpriced
+usage remains unknown; settlement never silently fetches a newer tariff. Catalog warmup precedes the audio loop.
+
+Call tools join ordinary schemas; collisions refuse admission. Their async
+`handler(host, arguments)` runs on the serialized tool lane with pre/post-effect
+checkpoints and ordinary history rows. `tool_batch` returns a list-compatible
+`ToolBatch`; forward its `silent` ids in `ToolOutputs.silent`. `observe_context(row)`
+records a labelled peer observation without private host access. Final captions are
+durable immediately; whole-turn checkpoints are coalesced. The server's host-attributed
+`call:<call_id>:open` fact answers the owner's admitted action; the feature sends
+`Respond(host.opening)` once per call, including across reconnections.
+
+`renewal_due()` uses held input and observed growth against the route reserve/window.
+Provider-specific audio-drop policy stays in the provider. `renewal_ready` carries
+native input/transcription work; the feature also waits for tools and playback.
+`final_captions()` returns received unfinished words at teardown without new wire work.
+After a failed speculative fit, the additive `LiveHost.delivery_fits(rows, schemas)` checks pending delivery against serving room (older hosts default false, declining an unproven fallback). The feature retains its last successfully delivered catalog, initially `selected.tools_json`; a session need not expose a private `tools` member. `LiveHost.fitted_frame_rows()` defaults to an empty tuple and supplies only fitted pixel rows for duplicate suppression when implemented. The call applies the owner-mode image floor only at fresh projection, retaining canonical pixels. Authored receipts price the existing connection without a fresh room fact.
+Automatic feature/provider reload refuses with `live_call_active` and retries later.
+Owner disable cancels the call; host teardown joins its sockets and started tools. Page contributions use `provides: conversation`,
+`runtime: client`, `render.kind: host` under the ordinary `page_module` grant.
+Companion framing and call doors: `CLIENT_CONTRACT.md`, “Live Conversation”.
 
 ```python
 def register(api):

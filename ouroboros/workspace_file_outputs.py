@@ -190,6 +190,30 @@ def verify_file_outputs(rows, target):
     return all(_matches(_side(_path(target, row["path"])), row["after"], exact_mode=True) for row in rows)
 
 
+def file_output_states(rows, target):
+    """Each file result's state now against its exact captured postimage (bytes, kind, mode).
+
+    ``unchanged``, ``changed`` (another kind now included: a directory, FIFO, socket or device),
+    ``removed`` (captured present, now absent), ``recreated`` (captured absent, now present) or
+    ``unknown`` when the path cannot be read; never a postimage taken from the live tree.
+    """
+    states = {}
+    for row in rows:
+        path = None
+        try:
+            path = _path(target, row["path"])
+            current = _side(path)
+        except ValueError:  # not a path in the target (unknown), or no file or symlink now (a type change)
+            states[row["path"]] = ("unknown" if path is None else "recreated" if row["after"] is None else "changed")
+            continue
+        except OSError:
+            states[row["path"]] = "unknown"
+            continue
+        states[row["path"]] = ("unchanged" if _matches(current, row["after"], exact_mode=True) else
+                               "recreated" if row["after"] is None else "removed" if current is None else "changed")
+    return states
+
+
 class PreparedFileOutputs:
     """Temporary verified bytes and exact preimages, owned by the caller's Git lock."""
     def __init__(self, rows, target, temporary, baseline_sha, file_baseline=None):

@@ -16,7 +16,7 @@ import pytest
 from ouroboros import desktop_autostart as startup
 from ouroboros.launcher_bootstrap import automatic_launch_allowed, parse_launch_options
 
-SHIPPED_UNIT = (Path(__file__).resolve().parents[1] / "packaging/systemd/ouroboros.service").read_text(encoding="utf-8")
+SHIPPED_UNIT = (Path(__file__).resolve().parents[1] / "packaging/systemd/ouroboros.service.in").read_text(encoding="utf-8")
 # The unit exactly as the 7.2.0 through 7.5.1 deb/rpm packages installed it; a managed update never replaces it.
 HISTORICAL_UNIT = """[Unit]
 Description=Ouroboros agent runtime
@@ -185,6 +185,17 @@ def test_appimage_entry_starts_a_fresh_sign_in_session_in_the_same_mode(host, tm
     assert startup.autostart_status()["state"] == "on"  # read back as this copy's own entry
 
 
+def test_a_copy_started_from_another_appimage_apps_terminal_registers_itself(host, tmp_path, monkeypatch):
+    """The AppImage runtime exports APPIMAGE/APPDIR to every descendant: a pair whose AppDir does not hold this
+    bundle belongs to another app and names nothing here."""
+    package, _ = host
+    exe = package("linux")
+    (tmp_path / "Editor.AppImage").touch()
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "Editor.AppImage"))
+    monkeypatch.setenv("APPDIR", str(tmp_path / ".mount_Editor"))
+    assert startup.launcher_target() == (exe, "")
+
+
 def test_linux_native_uses_shipped_unit_and_replaces_xdg_registration(host, tmp_path):
     package, os_state = host
     package("linux", native=True)
@@ -349,3 +360,53 @@ def test_a_sign_in_start_keeps_a_saved_pause(tmp_path, monkeypatch):
 def test_native_unit_uses_automatic_intent():
     """The unit new deb/rpm packages ship; the adapter enables it only once installed."""
     assert "ExecStart=/opt/ouroboros/Ouroboros --launch-intent automatic" in SHIPPED_UNIT
+
+
+def test_a_launchagent_whose_copy_is_gone_follows_this_one_without_enabling_anything(host, tmp_path):
+    """The app moved or was replaced: the owner's sign-in choice re-points; an OS switch-off and a live copy stay."""
+    package, os_state = host
+    exe = package("darwin")
+    path = tmp_path / "Library/LaunchAgents/com.ouroboros.agent.plist"
+    assert startup.follow_moved_app() is False and not path.exists(), "nothing registered: nothing is created"
+    other = tmp_path / "Desktop/Ouroboros.app/Contents/MacOS/Ouroboros"
+    other.parent.mkdir(parents=True)
+    other.touch()
+    path.parent.mkdir(parents=True)
+    path.write_bytes(plistlib.dumps({"Label": startup.LABEL, "ProgramArguments": [str(other), *startup.AUTOMATIC_ARGS],
+                                     "RunAtLoad": True}))
+    os_state.override = "disabled"
+    assert startup.follow_moved_app() is False and startup.autostart_status() == {"state": "other_copy"}
+    other.unlink()  # that copy went to the Trash
+    foreign = {"Label": startup.LABEL, "ProgramArguments": [str(other), "--hand-written"], "RunAtLoad": True}
+    path.write_bytes(plistlib.dumps(foreign))
+    assert startup.follow_moved_app() is False and plistlib.loads(path.read_bytes()) == foreign, "not this app's shape"
+    path.write_bytes(plistlib.dumps({"Label": startup.LABEL, "ProgramArguments": [str(other), *startup.AUTOMATIC_ARGS],
+                                     "RunAtLoad": True}))
+    assert startup.follow_moved_app() is True
+    entry = plistlib.loads(path.read_bytes())
+    assert entry == {"Label": startup.LABEL, "ProgramArguments": [str(exe), *startup.AUTOMATIC_ARGS], "RunAtLoad": True}
+    assert not [argv for argv in os_state.calls if argv[1] == "enable"], "never launchctl enable"
+    assert startup.autostart_status() == {"state": "disabled_by_os"}, "the owner's OS switch-off stays"
+    assert startup.follow_moved_app() is False
+
+
+def test_an_xdg_entry_whose_appimage_is_gone_follows_the_new_file_and_keeps_its_switch(host, tmp_path, monkeypatch):
+    package, os_state = host
+    exe = package("linux", appimage=True)
+    monkeypatch.setenv("APPIMAGE_EXTRACT_AND_RUN", "1")  # this copy runs FUSE-less; the rewritten entry must too
+    path = tmp_path / ".config/autostart/ouroboros.desktop"
+    path.parent.mkdir(parents=True)
+    old = tmp_path / "Ouroboros-7.8.0 (old).AppImage"
+    path.write_text(f'[Desktop Entry]\nType=Application\nName=Ouroboros\nExec="{old}" --launch-intent automatic\n'
+                    "Terminal=false\nX-GNOME-Autostart-enabled=false\n", encoding="utf-8")
+    old.touch()
+    assert startup.follow_moved_app() is False, "a copy that still exists stays other_copy"
+    old.unlink()
+    shaped = path.read_text(encoding="utf-8")
+    path.write_text(shaped.replace(" --launch-intent automatic", " --minimized"), encoding="utf-8")
+    assert startup.follow_moved_app() is False and "--minimized" in path.read_text(encoding="utf-8"), "a hand-written Exec"
+    path.write_text(shaped, encoding="utf-8")
+    assert startup.follow_moved_app() is True
+    assert _exec_argv(path) == [str(exe), "--appimage-extract-and-run", "--launch-intent", "automatic"]
+    assert "X-GNOME-Autostart-enabled=false" in path.read_text(encoding="utf-8")
+    assert startup.autostart_status() == {"state": "disabled_by_os"} and os_state.calls == []

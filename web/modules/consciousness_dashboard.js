@@ -17,6 +17,7 @@ import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './c
 import { costPresentationDetail } from './chat_activity.js';
 import { openPlaceSheet } from './place_sheet.js';
 import { connectPlaceButtonHtml, openConnectPlace } from './place_connect.js';
+import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 
 const SEP = ' · ';
 const REFRESH_MS = 20000;
@@ -130,7 +131,7 @@ export function wakeRowHtml(wake, { open = false } = {}) {
         <div class="consciousness-wake-note ui-rich-content" data-i18n-authored>${escapeHtml(wake.note)}</div>` : '';
     const costDetail = costPresentationDetail(wake.cost.cost_presentation);
     // Main cards open in Main; a focus opens its captured conversation in the place sheet.
-    const door = wake.chatId === 1 && wake.taskId ? `<button type="button" class="consciousness-inline-link ui-hit-area" data-cx-open-task="${escapeHtml(wake.taskId)}" data-chat-id="${wake.chatId}">${escapeHtml(tr('consciousness.open_main', 'Open in Main'))} ↗</button>`
+    const door = wake.chatId === 1 && wake.taskId ? taskReferenceHtml(wake.taskId)
         : wake.cause === 'focus' && wake.chatId ? `<button type="button" class="consciousness-inline-link ui-hit-area" data-cx-open-room="${wake.chatId}">${escapeHtml(tr('consciousness.open_room', 'Open the conversation'))} ↗</button>` : '';
     const line = wake.summary ? `<p class="consciousness-wake-summary" data-i18n-authored>${escapeHtml(wake.summary)}</p>`
         : wake.note ? `<p class="consciousness-wake-lead" data-i18n-authored>${escapeHtml(noteLeadText(wake.note))}</p>`
@@ -334,11 +335,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         } else { releaseNotes(event.target); opened.delete(id); paint(); }
     };
     const onClick = async (event) => {
-        const door = event.target.closest('[data-cx-open-task]');
-        if (door) {
-            window.dispatchEvent(new CustomEvent('ouro:open-task', { detail: { task_id: door.dataset.cxOpenTask, chat_id: Number(door.dataset.chatId) } }));
-            return;
-        }
+        if (openTaskReference(event)) return;
         const roomDoor = event.target.closest('[data-cx-open-room]');
         if (roomDoor) {
             if (roomDoor.dataset.pending) return;  // one press at a time while Places are re-read

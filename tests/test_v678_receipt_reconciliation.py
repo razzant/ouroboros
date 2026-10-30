@@ -249,12 +249,11 @@ def test_every_bounded_list_on_a_changed_review_surface_discloses_its_omissions(
 # disclosed URL bound was applied BEFORE the dedup it invalidated.
 
 
-def test_agent_supplied_criterion_id_is_bounded_and_redacted_exactly_like_check():
-    """Round-3 SECURITY: `criterion_id` comes from the agent's own `verify_and_record`
-    call, so inserting it RAW into the shared identity projection routed it around the
-    caller's `bound` — on the acceptance path the REDACTING `_accept_redact_cap` — and
-    let unbounded agent text reach external reviewers unredacted (and overflow the
-    pack's immutable core). It must be treated byte-for-byte like its `check` sibling."""
+def test_agent_supplied_criterion_id_is_bounded_exactly_like_check():
+    """Round 3: `criterion_id` comes from the agent's own `verify_and_record` call, so
+    inserting it RAW into the shared identity projection routed it around the caller's
+    `bound` (on the acceptance path `_accept_cap`) and could overflow the pack's
+    immutable core. It must be treated byte-for-byte like its `check` sibling."""
     from ouroboros._outcome_receipts import receipt_identity_projection
     from ouroboros.review_evidence import _accept_verification_summary
     from ouroboros.utils import truncate_review_artifact
@@ -267,16 +266,16 @@ def test_agent_supplied_criterion_id_is_bounded_and_redacted_exactly_like_check(
     assert "OMISSION NOTE" in proj["criterion_id"]
     assert len(proj["criterion_id"]) < len(oversized)
 
-    # The reviewer path: the caller's redacting `bound` must reach it too. A secret
-    # pasted into the id is masked exactly as it is in the check text beside it.
-    secret = "sk-ant-" + "a" * 40
+    # The reviewer path carries the recorded text: a key-shaped token in the id or the
+    # check reaches the reviewer exactly as the agent recorded it (owner, 2026-10-29).
+    token = "sk-ant-" + "a" * 40
     summary = _accept_verification_summary([
-        {"status": "fail", "criterion_id": f"crit {secret}", "check": f"pytest {secret}"},
+        {"status": "fail", "criterion_id": f"crit {token}", "check": f"API_KEY={token} pytest"},
     ])
     identity = summary["latest_identity"]
-    assert secret not in json.dumps(summary)
-    assert "***REDACTED***" in identity["criterion_id"]
-    assert "***REDACTED***" in identity["check"]
+    assert identity["criterion_id"] == f"crit {token}"
+    assert identity["check"] == f"API_KEY={token} pytest"
+    assert "REDACTED" not in json.dumps(summary)
 
     # An oversized id on the reviewer path is bounded at the acceptance cap, not carried.
     big = _accept_verification_summary([{"status": "fail", "criterion_id": oversized}])
@@ -488,12 +487,12 @@ def test_missing_after_paths_are_deduplicated_before_they_are_rendered():
     ])
     assert repeated["artifacts_missing_after"] == ["out/x.bin"]
     assert repeated["artifacts_missing_after_omitted"] == 0
-    # Redaction still reaches these paths (they are raw host command surface).
-    secret = "sk-ant-" + "a" * 40
-    redacted = _accept_verification_summary([
-        {"status": "pass", "artifacts_missing_after": [f"out/{secret}.bin"]},
+    # The paths are carried as recorded, never pattern-rewritten.
+    token = "sk-ant-" + "a" * 40
+    carried_as_recorded = _accept_verification_summary([
+        {"status": "pass", "artifacts_missing_after": [f"out/{token}.bin"]},
     ])
-    assert secret not in json.dumps(redacted)
+    assert carried_as_recorded["artifacts_missing_after"] == [f"out/{token}.bin"]
 
 
 def test_canonical_identity_is_the_only_derivation_in_the_receipt_module():

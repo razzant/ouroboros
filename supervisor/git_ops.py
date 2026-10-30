@@ -588,6 +588,7 @@ from supervisor.git_ops_reset import (  # noqa: E402,F401
     _preserve_branch_for_official_reset,
     _ref_points_at_ref,
     _run_git_resilient,
+    advance_recovery_point,
     checkout_and_reset,
     import_test,
     preserve_local_ref_branch,

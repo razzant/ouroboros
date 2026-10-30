@@ -3,8 +3,9 @@
 The calibration, thoroughness, severity and anti-thrashing text every review
 surface injects verbatim, the history/obligation/rebuttal sections rendered from
 prior rounds, and the prompt-text plumbing they all need: collision-proof code
-fences, obligation excerpts, and secret redaction before any text reaches a
-prompt. Reads nothing from the repository — callers hand it records and strings.
+fences and obligation excerpts. Reviewer findings and obligation reasons reach the
+prompt as written; nothing here rewrites their content by pattern. Reads nothing
+from the repository — callers hand it records and strings.
 Extracted from ouroboros/tools/review_helpers.py (v7 D06 split, re-cut on the
 v7next tip); review_helpers.py re-exports every name.
 """
@@ -13,30 +14,6 @@ from __future__ import annotations
 
 import json
 import re
-
-
-def _rh():
-    """The parent review-helpers module, read at call time.
-
-    The helpers' members stay monkeypatch-addressable at their historical
-    ``ouroboros.tools.review_helpers`` bindings (tests rebind them there), so
-    this leaf resolves every such cross-reference through the module at each
-    call instead of freezing whatever object a from-import saw at import time.
-    """
-    from ouroboros.tools import review_helpers
-
-    return review_helpers
-
-
-_SECRET_LINE_RE = re.compile(
-    r'(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API[_-]?KEY|AUTHORIZATION)[A-Z0-9_]*\s*[:=]\s*)(.+)$'
-)
-
-
-_JSON_SECRET_RE = re.compile(
-    r'(?i)("?(?:token|api[_-]?key|authorization|secret|password|passwd|passphrase)"?\s*:\s*)"([^"\n\r]{4,})"'
-)
-
 
 CRITICAL_FINDING_CALIBRATION = """\
 ## Critical severity threshold — READ BEFORE MARKING ANY FINDING CRITICAL
@@ -273,7 +250,7 @@ def build_obligations_block(open_obligations: list | None) -> str:
             "obligation_id": getattr(ob, "obligation_id", "?"),
             "item": getattr(ob, "item", "?"),
             "severity": getattr(ob, "severity", ""),
-            "reason": redact_prompt_secrets(str(getattr(ob, "reason", "")))[0],
+            "reason": str(getattr(ob, "reason", "")),
         }
         for ob in open_obligations
     ]
@@ -416,14 +393,9 @@ def build_rebuttal_section(review_rebuttal: str) -> str:
 
 
 def format_obligation_excerpt(reason: str, max_chars: int = 120) -> str:
-    """Sanitize an obligation reason excerpt with explicit omission text."""
-    # Redact before whitespace collapse so line-anchored secret patterns still match.
-    try:
-        redacted, _ = redact_prompt_secrets(str(reason or ""))
-    except Exception:
-        redacted = str(reason or "")  # redact is best-effort; never crash the review pipeline
+    """One-line obligation reason excerpt with explicit omission text."""
     # Collapse whitespace to prevent multi-line prompt injection.
-    sanitized = re.sub(r"\s+", " ", redacted).strip()
+    sanitized = re.sub(r"\s+", " ", str(reason or "")).strip()
     if len(sanitized) > max_chars:
         return (
             sanitized[:max_chars]
@@ -431,17 +403,6 @@ def format_obligation_excerpt(reason: str, max_chars: int = 120) -> str:
             " (full reason preserved in durable state)"
         )
     return sanitized
-
-
-def redact_prompt_secrets(text: str) -> tuple[str, bool]:
-    """Redact secret-like values before prompt injection."""
-    if not isinstance(text, str) or not text:
-        return text, False
-
-    redacted = _rh().sanitize_tool_result_for_log(text)
-    redacted = _SECRET_LINE_RE.sub(r"\1***REDACTED***", redacted)
-    redacted = _JSON_SECRET_RE.sub(r'\1"***REDACTED***"', redacted)
-    return redacted, redacted != text
 
 
 def _make_fence(content: str) -> str:

@@ -251,7 +251,7 @@ def cache_key_for_model(model: str) -> str:
 
 
 def _request(target: dict, messages: list, tools: list | None, parameters: dict) -> dict:
-    from ouroboros.llm_messages import _MessageShapingMixin, project_declared_system_prefix
+    from ouroboros.llm_messages import _MessageShapingMixin, project_declared_system_prefix, HOST_ONLY_MESSAGE_KEYS
 
     target["requested_reasoning_effort"] = parameters.get("reasoning_effort")
     for name in ("response_format", "allow_server_web_search", "bypass_response_cache"):
@@ -284,7 +284,7 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
         content = message.get("content")
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict):
-                for name in ("_caption", "_source_path", "_source_sha256", "_review_image_id", "_original_image_url", "_context_capsule", "cache_control"):
+                for name in HOST_ONLY_MESSAGE_KEYS:
                     block.pop(name, None)
         if message.get("role") == "tool" and isinstance(content, list) and content and all(
             isinstance(block, dict) and block.get("type") == "text" for block in content

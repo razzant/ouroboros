@@ -7,7 +7,7 @@ of repeating the generation checks (2-20 s per boot in production on 13-14 Oct).
 process still writes its own ``worker_boot`` row.
 
 A worker also caches its bytecode, but only into a prefix inside its data dir (the
-launcher's ``state/pycache``): never beside a source, so never into a signed bundle (WA6),
+launcher's ``state/pycache.noindex``): never beside a source, so never into a signed bundle (WA6),
 and never into a prefix someone else set up (a developer's, this test harness's).
 """
 from __future__ import annotations
@@ -113,7 +113,7 @@ def test_a_worker_writes_bytecode_only_into_a_prefix_inside_its_data_dir(tmp_pat
     later imports are cached there; a prefix elsewhere (a developer's, this harness's) or none
     writes nothing anywhere."""
     data = tmp_path / "data"
-    pycache = {"data_dir": data / "state" / "pycache", "elsewhere": tmp_path / "pycache"}.get(prefix)
+    pycache = {"data_dir": data / "state" / "pycache.noindex", "elsewhere": tmp_path / "pycache"}.get(prefix)
     module = REPO / "ouroboros" / "preflight_receipts.py"
     beside = sorted((module.parent / "__pycache__").glob("preflight_receipts.*.pyc"))
     # An empty value is "no prefix" to Python (the test harness refills an absent one).
@@ -128,6 +128,23 @@ def test_a_worker_writes_bytecode_only_into_a_prefix_inside_its_data_dir(tmp_pat
     assert done.stdout.strip() == ("0" if prefix == "data_dir" else "1")
     cached = sorted(tmp_path.rglob("preflight_receipts.*.pyc"))
     assert bool(cached) is (prefix == "data_dir")
-    assert all(path.is_relative_to(data / "state" / "pycache") for path in cached)
+    assert all(path.is_relative_to(data / "state" / "pycache.noindex") for path in cached)
     assert sorted((module.parent / "__pycache__").glob("preflight_receipts.*.pyc")) == beside, \
         "nothing is ever written beside the source"
+
+
+def test_a_worker_handed_an_older_launchers_prefix_moves_it_before_writing(tmp_path):
+    """A worker under a legacy ``state/pycache`` (its own and the one its children inherit) writes only unindexed."""
+    data = tmp_path / "data"
+    legacy, new = data / "state" / "pycache", data / "state" / "pycache.noindex"
+    legacy.mkdir(parents=True)
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(REPO), "PYTHONPYCACHEPREFIX": str(legacy)}
+    probe = ("import os, sys; import supervisor.worker_process as w; "
+             f"w.write_bytecode_to_prefix_only({str(data)!r}); "
+             "print(sys.pycache_prefix); print(os.environ['PYTHONPYCACHEPREFIX']); import ouroboros.preflight_receipts")
+    done = subprocess.run([sys.executable, "-B", "-c", probe], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines()[-2:] == [str(new), str(new)], "the old worker wrote into the legacy tree"
+    cached = sorted(tmp_path.rglob("preflight_receipts.*.pyc"))
+    assert cached and all(path.is_relative_to(new) for path in cached) and not legacy.exists()

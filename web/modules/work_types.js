@@ -20,7 +20,7 @@
 /**
  * @typedef {Object} WorkTail
  * @property {string} kind  // helper | run | review | model
- * @property {string} state  // live | unknown
+ * @property {string} state  // live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
  * @property {string} code
  * @property {string} text  // its English sentence, said beside the work's word, never as it
  * @property {number=} count

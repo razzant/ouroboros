@@ -90,7 +90,6 @@ def capture_commit_review_evidence(ctx: Any) -> dict:
     """
     from ouroboros.artifacts import materialize_tool_args_source, materialize_tool_result_source, persist_exact_text_source
     from ouroboros.loop_messages import _visible_round_text
-    from ouroboros.observability import redact_projection
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tool_capabilities import STATEFUL_BROWSER_TOOLS
 
@@ -152,7 +151,8 @@ def capture_commit_review_evidence(ctx: Any) -> dict:
             gap = {"tool_call_id": call.get("tool_call_id"), "status": "source_unavailable", "reason": str(exc)}
             row["following_response_gap"] = gap
             gaps.append(gap)
-        texts.append(json.dumps(redact_projection(row).value, ensure_ascii=False, indent=2, default=str))
+        # Rows carry the trace's records as stored; this view adds no mask of its own.
+        texts.append(json.dumps(row, ensure_ascii=False, indent=2, default=str))
     text = "\n\n".join(texts)
     canonical = canonical_data_root(ctx)
     exact, source_ref, issue = persist_exact_text_source(canonical, ctx.task_id, source_id="commit_review", text=text)
@@ -448,7 +448,7 @@ from ouroboros.review_evidence_sections import (  # noqa: E402, F401 -- intentio
     _accept_effective_claims,
     _accept_owner_directives,
     _accept_receipt_exhibits,
-    _accept_redact_cap,
+    _accept_cap,
     _accept_task_contract,
     _accept_verification_summary,
     _owner_content_projection,

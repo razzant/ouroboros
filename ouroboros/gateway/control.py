@@ -420,22 +420,43 @@ async def api_update_check(_request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
-def _respawn_workers_after_failed_update() -> None:
-    """Revive workers when an update aborts after they were stopped (no restart follows)."""
+def _respawn_workers_after_failed_update() -> bool:
+    """Revive workers when an update aborts after they were stopped (no restart follows): True once writers are
+    readmitted on a started pool. A generation whose stop or Panic began starts nothing: its exit keeps what stopped."""
     try:
+        from ouroboros.body_switch import installation_panic
+        from ouroboros.tools.shell_process import admission_refusal
+        from supervisor.git_ops import DRIVE_ROOT
+        from supervisor.restart_retention import panic_recorded
         from supervisor.workers import ensure_worker_pool_started, open_repo_writer_admission_after_update_abort
 
+        if admission_refusal() or panic_recorded(DRIVE_ROOT) or installation_panic(DRIVE_ROOT):
+            return False
         if open_repo_writer_admission_after_update_abort():
-            ensure_worker_pool_started(allow_disabled_restart=True)
+            return ensure_worker_pool_started(allow_disabled_restart=True)
     except Exception:
         log.warning("update_apply: failed to respawn workers after aborted update", exc_info=True)
+    return False
 
 
-async def api_update_preflight(_request: Request) -> JSONResponse:
+async def api_update_preflight(request: Request) -> JSONResponse:
     """Plan the managed update as a REAL 3-way merge (P2). Does NOT touch the live
     worktree/branch/index (it fetches + merges in an isolated temp worktree), so the UI
-    can present the right staged choice (auto / assisted / manual)."""
+    can present the right staged choice (auto / assisted / manual). A ``candidate_id``
+    plans nothing: that prepared candidate's effects (``update_activation.candidate_preflight``)."""
+    from ouroboros.gateway.contracts import UpdatePreflightRequest
+    from ouroboros.gateway.schema import validate_ingress
+
+    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = body if isinstance(body, dict) else {}  # the legacy body is empty and was never read
+    schema_errors = validate_ingress(body, UpdatePreflightRequest)
+    if schema_errors:
+        return json_error(f"invalid request body: {schema_errors[0]}", 400, schema_errors=schema_errors[:8])
     try:
+        if body.get("candidate_id"):
+            from ouroboros.gateway.update_activation import candidate_preflight
+
+            return await asyncio.to_thread(candidate_preflight, body["candidate_id"])
         from supervisor.update_merge import plan_managed_update_merge
         from ouroboros.update_impact import update_effects
 
@@ -496,12 +517,17 @@ async def api_update_description(request: Request) -> JSONResponse:
 def _admit_description_task(task_id: str, text: str, metadata: Dict[str, Any]) -> str:
     """Admit the owner's description request as an ordinary root task in the owner chat;
     returns ``""`` or the refusal reason. Nothing else is started or stopped. Typed as a root
-    like every host-started one, so a host retry stays this request's own attempt."""
+    like every host-started one, so a host retry stays this request's own attempt. The press
+    is the web panel's: while the binding is known empty (no owner message yet) the task is
+    Main's, where the panel's door opens it; a bound or unreadable binding is used as read."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from supervisor.queue import enqueue_with_admission_receipt, persist_queue_snapshot
-    from supervisor.state import load_state
+    from supervisor.state import control_value, load_state
 
+    st = load_state()
+    unbound = control_value(st, "owner_chat_id") == (True, None)
     admitted = enqueue_with_admission_receipt({
-        "id": task_id, "type": "task", "chat_id": int(load_state().get("owner_chat_id") or 0),
+        "id": task_id, "type": "task", "chat_id": WEB_UI_CHAT_ID if unbound else int(st.get("owner_chat_id") or 0),
         "root_task_id": task_id, "delegation_role": "root",
         "text": text, "metadata": metadata, "_require_worker_pool": True, "_require_unique_task_id": True,
     })
@@ -663,8 +689,12 @@ def _stop_repo_writers(reason: str) -> list[str]:
 
 
 def _fence_failure(blockers: list[str], stash_note: str = "") -> JSONResponse:
+    from supervisor.workers import repo_writer_admission_closed
+
     active_only = bool(blockers) and all(str(item).startswith("active:") for item in blockers)
-    restart_required = not active_only
+    # What the fence left, not which step refused: writers it keeps refused need the restart; a refusal that
+    # reopened them before any teardown (active work, a restart handoff it could not prepare) stopped nothing.
+    restart_required = bool(repo_writer_admission_closed())
     if active_only:
         names = ", ".join(str(item)[len("active:"):] for item in blockers)
         error = (
@@ -672,10 +702,15 @@ def _fence_failure(blockers: list[str], stash_note: str = "") -> JSONResponse:
             "No work was stopped and the repository was not changed; wait for it to finish, "
             "pause it, or restart Ouroboros to clear the blocker."
         )
-    else:
+    elif restart_required:
         error = (
             "Could not prove every repository writer stopped. The repository was not "
             "changed, but runtime shutdown may be incomplete."
+        )
+    else:
+        error = (
+            "Running work could not be handed over to the restart. No work was stopped and the "
+            "repository was not changed."
         )
     return JSONResponse(
         {

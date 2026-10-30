@@ -12,6 +12,8 @@ authorizes nothing. The mind names the exact commit on ``request_restart``; this
   that the old generation's subprocess readers are gone: the worker pool's exit census (each worker process handle
   confirmed dead), the owned-work stop's completed outcome and no live child process handle. It probes nothing
   itself. Exit or exec then ends the in-process readers. Panic and the owner's Restart never arm and never wait.
+  It holds the helper's lock, as every retirement of the record does (``_archive``) and every creation of one
+  (``_new_helper``), whose folder and lock file outlive each handoff: one outcome, never a pointer to a missing helper.
 * The switch itself is ``body_switch``, run by the package-init hook of the next cold entry before any other body
   module is imported.
 * ``finalize_on_boot`` records ``adopted`` only for a generation that is actually ready and that verified, before its
@@ -32,6 +34,7 @@ is never rolled back. An Update names no task, and its every outcome goes to its
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import pathlib
@@ -53,6 +56,7 @@ _REQUIRED_FILES = ("server.py", _HOOK_FILE, "ouroboros/body_switch.py")
 _DEPENDENCY_FILES = ("requirements-runtime.lock", "requirements.txt")
 _ENGINE_PIN_FILE = "ouroboros/claudexor_runtime_pin.json"
 _PENDING = ("authorized", "armed", "switching", "switched", "stuck")
+_HELPERS = ("switch.py", "installation_stop.py", "app_install.py")  # what a creation copies beside its record
 _NOT_ARMED = "not armed: "  # the exit tail's own record of the stop owners' blockers
 UPDATE_REASON = "managed_update_activation"
 # The new tree's import surface, probed after the switch with a scratch data root
@@ -230,10 +234,6 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
         qualification = adoption_test_evidence(data_dir, candidate, cand, ctx=ctx, local=local)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         raise AdoptionRefused("ADOPTION_TESTS_REQUIRED", str(exc)) from exc
-    directory = helper_dir(data_dir)
-    if directory.exists():
-        _archive(data_dir, current, f"replaced:{current.get('phase')}" if current else "stale_helper")
-    directory.mkdir(parents=True, exist_ok=True)
     handoff = {
         "schema": 1, "id": uuid.uuid4().hex[:12], "phase": "authorized", "repo_dir": str(serving.resolve()),
         "data_dir": str(pathlib.Path(data_dir).resolve()), "branch": branch, "old": old, "cand": cand,
@@ -244,12 +244,14 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
         "unreviewed_commits": unreviewed, "attempts": 0, "events": [],
         "tests": qualification,
     }
-    # The helper is captured from the body that is running, never from the candidate.
-    shutil.copyfile(pathlib.Path(body_switch.__file__), directory / "switch.py")
-    from ouroboros import installation_stop
-    shutil.copyfile(pathlib.Path(installation_stop.__file__), directory / "installation_stop.py")
-    _refs(serving, f"update {PIN_PREFIX}{handoff['id']} {cand}")
-    body_switch.record(str(directory), handoff, "authorized", f"restart reason: {reason}")
+    directory = helper_dir(data_dir)
+    with _new_helper(data_dir, current):
+        # The helper is captured from the body that is running, never from the candidate.
+        shutil.copyfile(pathlib.Path(body_switch.__file__), directory / "switch.py")
+        from ouroboros import installation_stop
+        shutil.copyfile(pathlib.Path(installation_stop.__file__), directory / "installation_stop.py")
+        _refs(serving, f"update {PIN_PREFIX}{handoff['id']} {cand}")
+        body_switch.record(str(directory), handoff, "authorized", f"restart reason: {reason}")
     _log(data_dir, "body_adoption_authorized", handoff, branch=branch, paths=len(rows))
     return handoff
 
@@ -331,6 +333,8 @@ def authorize_update(data_dir: Any, candidate: Dict[str, Any], *, reason: str = 
     layers. The caller stopped the writers and re-read the base fingerprint; this re-verifies HEAD and branch and that
     every switch path still holds its recorded old file and index sides, so a late edit is never overwritten. The old
     generation does not write the tree here; the pins come first, so after this server's stop began nothing changes.
+    The candidate's record names this attempt once what it replaces is gone and before its handoff exists, so no end of
+    this process leaves a handoff its record does not name, or a name beside an earlier handoff still live.
     """
     serving = pathlib.Path(str(candidate.get("repo_dir") or ""))
     layers = dict(candidate.get("layers") or {})
@@ -399,45 +403,50 @@ def authorize_update(data_dir: Any, candidate: Dict[str, Any], *, reason: str = 
     native = _native_record(staged, serving.resolve(), pathlib.Path(data_dir).resolve()) if staged else None
     _refs(serving, f"update {PIN_PREFIX}{adoption_id} {cand}",
           *(f"update {PIN_PREFIX}{adoption_id}-{name} {layers[layer]}" for name, layer in _LAYER_PINS.items()))
-    directory = helper_dir(data_dir)
-    if directory.exists():
-        _archive(data_dir, current, f"replaced:{current.get('phase')}" if current else "stale_helper")
-    directory.mkdir(parents=True, exist_ok=True)
-    from ouroboros.runtime_venv import interpreter
+    try:
+        from ouroboros.runtime_venv import interpreter
 
-    # The new tree's import probe runs on the interpreter that will run it: the new app's, when one comes, or the
-    # --runtime-venv's own path, which the new app keeps. Before the exchange that path still names the previous
-    # app's Python, so the switch runs it on the environment's staged_python (body_switch._probe_command).
-    venv = str((native or {}).get("runtime_venv") or "")
-    python = (interpreter(venv) if venv else staged.get("python")) if staged else (
-        None if getattr(sys, "frozen", False) else sys.executable)
-    if environment and environment["kind"] == "private":  # a bare interpreter runs the new tree in its own packages
-        python = interpreter(environment["current"])
-    probe = [python, "-c", UPDATE_PROBE_IMPORTS + "; print('probe_ok')"] if python else None
-    handoff = {
-        "schema": 2, "kind": "update", "id": adoption_id, "phase": "authorized",
-        "repo_dir": str(serving.resolve()), "data_dir": str(pathlib.Path(data_dir).resolve()), "branch": branch,
-        "old": old, "cand": cand, "candidate_id": candidate.get("candidate_id"),
-        "candidate_branch": candidate.get("branch"), "candidate_path": str(candidate.get("path") or ""),
-        "task_id": "", "reason": str(reason or ""), "created_tag": "", "switch": rows, "layers": layers,
-        "deps_command": None, "probe_command": probe, "environment": environment, "native": native,
-        "authorized_at": utc_now_iso(), "unreviewed_commits": [], "attempts": 0, "events": [], "entries": [],
-        "tests": dict(candidate.get("checks") or {}), "target": dict(candidate.get("target") or {}),
-        "qualification": {"runtime": body_switch.runtime_identity(), "dependencies_same": dependencies_same,
-                          "engine_pin_same": not _side_changed(rows, (_ENGINE_PIN_FILE,)),
-                          # What a return after an entry needs (body_switch.qualify_return): the root the
-                          # gateway serves stylesheets from, and whether this root held an owned engine at all.
-                          "web_root": _served_web_root(serving),
-                          "owned_engine": body_switch.owned_engine(str(pathlib.Path(data_dir).resolve()))},
-    }
-    shutil.copyfile(pathlib.Path(body_switch.__file__), directory / "switch.py")
-    from ouroboros import installation_stop
-    shutil.copyfile(pathlib.Path(installation_stop.__file__), directory / "installation_stop.py")
-    if native:  # the installer the new app's signed entry runs: macOS only (it needs ``fcntl``), so read only here
-        from ouroboros import app_install
+        # The new tree's import probe runs on the interpreter that will run it: the new app's, when one comes, or the
+        # --runtime-venv's own path, which the new app keeps. Before the exchange that path still names the previous
+        # app's Python, so the switch runs it on the environment's staged_python (body_switch._probe_command).
+        venv = str((native or {}).get("runtime_venv") or "")
+        python = (interpreter(venv) if venv else staged.get("python")) if staged else (
+            None if getattr(sys, "frozen", False) else sys.executable)
+        if environment and environment["kind"] == "private":  # a bare interpreter runs the new tree in its own packages
+            python = interpreter(environment["current"])
+        probe = [python, "-c", UPDATE_PROBE_IMPORTS + "; print('probe_ok')"] if python else None
+        handoff = {
+            "schema": 2, "kind": "update", "id": adoption_id, "phase": "authorized",
+            "repo_dir": str(serving.resolve()), "data_dir": str(pathlib.Path(data_dir).resolve()), "branch": branch,
+            "old": old, "cand": cand, "candidate_id": candidate.get("candidate_id"),
+            "candidate_branch": candidate.get("branch"), "candidate_path": str(candidate.get("path") or ""),
+            "task_id": "", "reason": str(reason or ""), "created_tag": "", "switch": rows, "layers": layers,
+            "deps_command": None, "probe_command": probe, "environment": environment, "native": native,
+            "authorized_at": utc_now_iso(), "unreviewed_commits": [], "attempts": 0, "events": [], "entries": [],
+            "tests": dict(candidate.get("checks") or {}), "target": dict(candidate.get("target") or {}),
+            "qualification": {"runtime": body_switch.runtime_identity(), "dependencies_same": dependencies_same,
+                              "engine_pin_same": not _side_changed(rows, (_ENGINE_PIN_FILE,)),
+                              # What a return after an entry needs (body_switch.qualify_return): the root the
+                              # gateway serves stylesheets from, and whether this root held an owned engine at all.
+                              "web_root": _served_web_root(serving),
+                              "owned_engine": body_switch.owned_engine(str(pathlib.Path(data_dir).resolve()))},
+        }
+        directory = helper_dir(data_dir)
+        with _new_helper(data_dir, current):
+            shutil.copyfile(pathlib.Path(body_switch.__file__), directory / "switch.py")
+            from ouroboros import installation_stop
+            shutil.copyfile(pathlib.Path(installation_stop.__file__), directory / "installation_stop.py")
+            if native:  # the installer the new app's signed entry runs: macOS only (it needs ``fcntl``): read only here
+                from ouroboros import app_install
 
-        shutil.copyfile(pathlib.Path(app_install.__file__), directory / "app_install.py")
-    body_switch.record(str(directory), handoff, "authorized", f"restart reason: {reason}")
+                shutil.copyfile(pathlib.Path(app_install.__file__), directory / "app_install.py")
+            from supervisor import update_prepare
+
+            update_prepare.mark(candidate, data_dir=data_dir, activation={"adoption_id": adoption_id})
+            body_switch.record(str(directory), handoff, "authorized", f"restart reason: {reason}")
+    except Exception:
+        _release_pins(serving, {"id": adoption_id, "kind": "update"})  # no record names them: nothing else would
+        raise
     _log(data_dir, "body_adoption_authorized", handoff, branch=branch, paths=len(rows), adoption_kind="update")
     return handoff
 
@@ -633,22 +642,63 @@ def authorize_for_task(data_dir: Any, task_id: str, commit_sha: str, reason: str
     return False
 
 
-def _archive(data_dir: Any, handoff: Dict[str, Any], outcome: str) -> None:
-    """Retire the helper directory: pointer and pin removed, the record kept under ``logs/``."""
+@contextlib.contextmanager
+def _new_helper(data_dir: Any, current: Dict[str, Any]):
+    """A new handoff's creation in the helper's folder, under its lock until the caller has written its helpers and
+    its record: no retirement and no other creation acts in between. The lock file comes before any record (a full disk
+    cannot then stop its retirement), and the folder and that file outlive every handoff (``_retire``). What ``current``
+    named is retired first, unless it was armed since then: that record is never overwritten."""
+    directory = helper_dir(data_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    with body_switch._locked(str(directory)):
+        if current:
+            _retire(data_dir, current, f"replaced:{current.get('phase')}")
+        armed = read(data_dir)
+        if armed.get("phase") in _PENDING:
+            raise AdoptionRefused("ADOPTION_PENDING",
+                                  f"adoption {armed.get('id')} was armed meanwhile; let it settle first.")
+        yield
+
+
+def _release_pins(repo: Any, handoff: Dict[str, Any]) -> None:
+    try:  # once this server's stop began the pins stay (they only keep objects); the record closes all the same
+        _refs(repo, *(f"delete {PIN_PREFIX}{handoff['id']}{suffix}" for suffix in (
+            "", *(f"-{name}" for name in _LAYER_PINS if handoff.get("kind") == "update"))))
+    except Exception:
+        log.warning("body adoption pins were kept", exc_info=True)
+
+
+def _archive(data_dir: Any, handoff: Dict[str, Any], outcome: str) -> bool:
+    """Retire the record the caller read: pointer and pin removed, the record kept under ``logs/``.
+
+    Under the helper's lock, which ``arm`` holds while it decides and publishes and every creation while it writes
+    (``_new_helper``): one armed since then stays, and nothing of a later handoff is touched. A lock that cannot be
+    taken removes nothing and raises. Returns whether that record is closed (``_retire``).
+    """
+    with body_switch._locked(str(helper_dir(data_dir))):
+        return _retire(data_dir, handoff, outcome)
+
+
+def _retire(data_dir: Any, handoff: Dict[str, Any], outcome: str) -> bool:
+    """``_archive`` with the helper's lock held. The record and this handoff's helpers go while it is held; the folder,
+    its lock file and anything else in it stay, so no removal outlives the lock to reach a later handoff.
+
+    True: the record the caller read is closed, here or by an earlier retirement (another record, or none, is there
+    now). False: it moved on since (armed, say) or cannot be read, and stays as it is.
+    """
     directory = helper_dir(data_dir)
     repo = pathlib.Path(str(handoff.get("repo_dir") or "")) if handoff else None
     pointer_gone = True
+    live = read(data_dir)
+    if (live.get("id"), live.get("phase")) != (handoff.get("id"), handoff.get("phase")):
+        return live.get("id") != handoff.get("id") if live else not (directory / body_switch.HANDOFF_NAME).exists()
     if repo is not None and repo.is_dir():
         try:
             pathlib.Path(body_switch.pointer_path(str(repo))).unlink(missing_ok=True)
         except Exception:
             pointer_gone = False
             log.warning("body adoption pointer could not be removed", exc_info=True)
-        try:  # once this server's stop began the pins stay (they only keep objects); the record closes all the same
-            _refs(repo, *(f"delete {PIN_PREFIX}{handoff['id']}{suffix}" for suffix in (
-                "", *(f"-{name}" for name in _LAYER_PINS if handoff.get("kind") == "update"))))
-        except Exception:
-            log.warning("body adoption pins were kept", exc_info=True)
+        _release_pins(repo, handoff)
     if handoff:
         _log(data_dir, "body_adoption_closed", handoff, outcome=outcome, phase=handoff.get("phase"),
              events=handoff.get("events"), interpreter_state=handoff.get("interpreter_state"),
@@ -657,17 +707,44 @@ def _archive(data_dir: Any, handoff: Dict[str, Any], outcome: str) -> None:
         # The hook still finds the pointer: it must read a CLOSED record, never a missing helper
         # (which stops every boot).
         body_switch.record(str(directory), handoff, "closed", outcome)
-        return
-    shutil.rmtree(directory, ignore_errors=True)
+        return True
+    (directory / body_switch.HANDOFF_NAME).unlink(missing_ok=True)
+    for name in _HELPERS:  # inert without the record; one that cannot go is overwritten by the next creation
+        with contextlib.suppress(OSError):
+            (directory / name).unlink(missing_ok=True)
+    return True
 
 
 def abandon(data_dir: Any, reason: str, *, task_id: str = "", candidate_id: str = "") -> None:
-    """Close an unarmed handoff, scoped to the caller's identity when supplied."""
+    """Close an unarmed handoff, scoped to the caller's identity when supplied. One that cannot be closed now stays for
+    the next boot; ``close_update`` says what the record holds."""
     handoff = read(data_dir)
     if (handoff.get("phase") == "authorized"
             and (not task_id or handoff.get("task_id") == task_id)
             and (not candidate_id or handoff.get("candidate_id") == candidate_id)):
-        _archive(data_dir, handoff, f"abandoned:{reason}")
+        try:
+            _archive(data_dir, handoff, f"abandoned:{reason}")
+        except OSError:
+            log.warning("Body adoption %s could not be closed", handoff.get("id"), exc_info=True)
+
+
+def close_update(data_dir: Any, reason: str, candidate_id: str) -> str:
+    """Abandon this candidate's unarmed handoff, then read what the record holds: ``""`` once nothing of it can arm or
+    switch; otherwise what still can (its phase, or why the record cannot be read), whatever the abandonment said."""
+    try:
+        abandon(data_dir, reason, candidate_id=candidate_id)
+    except Exception:
+        log.warning("Update handoff of %s could not be closed", candidate_id, exc_info=True)
+    try:
+        handoff = body_switch.read_handoff(str(helper_dir(data_dir)))
+    except FileNotFoundError:
+        return ""
+    except (OSError, ValueError) as exc:
+        return f"unreadable: {type(exc).__name__}: {exc}"
+    if not isinstance(handoff, dict):
+        return "unreadable: not a record"
+    ours = handoff.get("candidate_id") == candidate_id and handoff.get("phase") in _PENDING
+    return str(handoff["phase"]) if ours else ""
 
 
 def bind_restart(safe_restart_fn, data_dir: Any, reason: str):
@@ -711,37 +788,48 @@ def arm(data_dir: Any, *, worker_exits: Any, live_children: Any, owned_stop: Any
     after the exit tail reaped them. ``owned_stop`` is ``stop_owned_work``'s
     outcome. Nothing is probed, waited for or guessed here.
 
+    It decides and publishes under the helper's lock, without waiting for it. With another holder (a retirement of this
+    record, ``_archive``, whatever its Git step takes) nothing is armed: that holder's outcome stands and the next boot
+    settles what is left. So this record is either armed and stays, or goes with no pointer behind it.
+
     Never raises and never waits. Returns the resulting phase ("" when no handoff).
     """
     try:
         handoff = read(data_dir)
         if handoff.get("phase") != "authorized" or not handoff.get("restart_bound"):
             return str(handoff.get("phase") or "")
-        stop = owned_stop if isinstance(owned_stop, dict) else {}
-        census = worker_exits if isinstance(worker_exits, dict) else None
-        blockers = [name for name, blocked in (
-            # The Update's own activation is the owner's restart; it still arms only on the stop evidence below.
-            ("owner_restart", owner_restart and handoff.get("kind") != "update"),
-            ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
-            ("child_processes_alive", bool(live_children)),
-            ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
-            ("panic_stop", body_switch.installation_panic(data_dir)),
-        ) if blocked]
         directory = str(helper_dir(data_dir))
-        if blockers:
-            handoff["restart_bound"] = False
-            body_switch.record(directory, handoff, "authorized", _NOT_ARMED + ", ".join(blockers))
-            _log(data_dir, "body_adoption_not_armed", handoff, blockers=blockers)
-            return "authorized"
-        handoff["readers_evidence"] = {"worker_exits": census, "owned_stop": {
-            key: stop.get(key) for key in ("state", "targets", "confirmed")}}
-        pointer = pathlib.Path(body_switch.pointer_path(str(handoff["repo_dir"])))
-        temp = pointer.with_name(pointer.name + ".tmp")
-        temp.write_text(directory + "\n", encoding="utf-8")
-        os.replace(temp, pointer)
-        body_switch.record(directory, handoff, "armed", "old generation's subprocess readers confirmed stopped")
-        _log(data_dir, "body_adoption_armed", handoff)
-        return "armed"
+        with body_switch._locked(directory, wait=False):
+            handoff = read(data_dir)  # the read that counts: the one no retirement can overtake
+            if handoff.get("phase") != "authorized" or not handoff.get("restart_bound"):
+                return str(handoff.get("phase") or "")
+            stop = owned_stop if isinstance(owned_stop, dict) else {}
+            census = worker_exits if isinstance(worker_exits, dict) else None
+            blockers = [name for name, blocked in (
+                # The Update's own activation is the owner's restart; it still arms only on the stop evidence below.
+                ("owner_restart", owner_restart and handoff.get("kind") != "update"),
+                ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
+                ("child_processes_alive", bool(live_children)),
+                ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
+                ("panic_stop", body_switch.installation_panic(data_dir)),
+            ) if blocked]
+            if blockers:
+                handoff["restart_bound"] = False
+                body_switch.record(directory, handoff, "authorized", _NOT_ARMED + ", ".join(blockers))
+                _log(data_dir, "body_adoption_not_armed", handoff, blockers=blockers)
+                return "authorized"
+            handoff["readers_evidence"] = {"worker_exits": census, "owned_stop": {
+                key: stop.get(key) for key in ("state", "targets", "confirmed")}}
+            pointer = pathlib.Path(body_switch.pointer_path(str(handoff["repo_dir"])))
+            temp = pointer.with_name(pointer.name + ".tmp")
+            temp.write_text(directory + "\n", encoding="utf-8")
+            os.replace(temp, pointer)
+            body_switch.record(directory, handoff, "armed", "old generation's subprocess readers confirmed stopped")
+            _log(data_dir, "body_adoption_armed", handoff)
+            return "armed"
+    except BlockingIOError:
+        _log(data_dir, "body_adoption_not_armed", handoff, blockers=["handoff_busy"])
+        return "authorized"
     except Exception:
         log.critical("Body adoption could not be armed; the next generation boots the unchanged tree",
                      exc_info=True)
@@ -803,8 +891,9 @@ def _update_not_ready(data_dir: Any, repo_dir: Any, handoff: Dict[str, Any], why
     """A successor of an Update that reached its boot but is not ready: return only on compatible evidence."""
     cand, old = str(handoff.get("cand") or "")[:12], str(handoff.get("old") or "")[:12]
     outcome, reasons = body_switch.qualify_return(str(repo_dir), handoff)
-    base = {"kind": "update", "candidate_id": handoff.get("candidate_id"), "sha": handoff.get("cand"),
-            "previous": handoff.get("old"), "reasons": reasons, "why": why, "environment": handoff.get("environment")}
+    base = {"kind": "update", "candidate_id": handoff.get("candidate_id"), "adoption_id": handoff.get("id"),
+            "sha": handoff.get("cand"), "previous": handoff.get("old"), "reasons": reasons, "why": why,
+            "environment": handoff.get("environment")}
     if outcome == "compatible" and request_restart is not None:
         with body_switch._locked(str(helper_dir(data_dir))):
             live = read(data_dir)
@@ -816,7 +905,8 @@ def _update_not_ready(data_dir: Any, repo_dir: Any, handoff: Dict[str, Any], why
                 "note": f"The update to {cand} is not ready ({why}); the previous version {old} is restored at "
                         "this restart because its compatibility with the current data is proven."}
     handoff["return"] = {"outcome": outcome, "trigger": why, "reasons": reasons, "at": utc_now_iso()}
-    _archive(data_dir, handoff, f"start_failed:{outcome}")
+    if not _archive(data_dir, handoff, f"start_failed:{outcome}"):
+        return {}  # it moved on since this boot read it: what holds it now settles it
     return {**base, "outcome": "start_failed",
             "note": f"The update to {cand} is in place, but this start is not ready ({why}). The previous version "
                     f"{old} was not restored automatically ({', '.join(reasons) or outcome}). Data and local changes "
@@ -865,6 +955,9 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
     ``providerless_ready`` (a generation without a provider runs no supervisor and
     no bootstrap) observes its readiness, its recovery's: it stands in for an Update,
     whose own switch probe was the tree's import test, never for a body adoption.
+    An outcome is said only for a handoff its retirement closed (``_archive``): one that
+    moved on since this boot read it (armed by a restart meanwhile, say) settles nothing
+    here and stays for what holds it now and the boot after it.
     """
     handoff = read(data_dir)
     phase = handoff.get("phase")
@@ -872,15 +965,18 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
         return {}
     cand = str(handoff.get("cand") or "")[:12]
     # An Update's every outcome reaches its candidate record, never the owner's chat (``settle_on_boot``).
-    update = {"kind": "update", "candidate_id": handoff.get("candidate_id")} if handoff.get("kind") == "update" else {}
+    update = ({"kind": "update", "candidate_id": handoff.get("candidate_id"), "adoption_id": handoff.get("id")}
+              if handoff.get("kind") == "update" else {})
     if phase == "returned":
         decision = handoff.get("return") or {}
         detail = str(decision.get("detail") or decision.get("trigger") or "it did not start")
-        _archive(data_dir, handoff, f"returned:{decision.get('trigger') or 'unknown'}")
+        if not _archive(data_dir, handoff, f"returned:{decision.get('trigger') or 'unknown'}"):
+            return {}
         # Why it did not start: a requested return carries the unready start's own reason.
         why = str((handoff.get("return_requested") or {}).get("why") or decision.get("trigger") or "")
         return {"outcome": "returned", "kind": "update", "candidate_id": handoff.get("candidate_id"),
-                "sha": handoff.get("old"), "previous": handoff.get("cand"), "decision": decision, "why": why,
+                "adoption_id": handoff.get("id"), "sha": handoff.get("old"), "previous": handoff.get("cand"),
+                "decision": decision, "why": why,
                 "note": f"The update to {cand} did not start ({detail}). The previous version "
                         f"{str(handoff.get('old') or '')[:12]} was written back with its staged and unstaged local "
                         "changes; data was not rolled back."}
@@ -888,14 +984,16 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
         # Only the exit tail's blockers explain it; the other events quote the caller's reason or mark the binding.
         last = str((handoff.get("events") or [{}])[-1].get("detail") or "")
         why = last if last.startswith(_NOT_ARMED) else "the adoption was not armed before this boot"
-        _archive(data_dir, handoff, "abandoned:not_armed")
+        if not _archive(data_dir, handoff, "abandoned:not_armed"):
+            return {}  # armed since this boot read it: that restart switches it and the next boot says so
         note = f"Adoption of {cand} was not applied ({why}). The serving body is unchanged; the candidate is retained."
         return {**update, "outcome": "not_applied", "note": note} if update else _settled(handoff, "not_applied", note)
     if phase == "abandoned":
         last = (handoff.get("events") or [{}])[-1].get("detail") or "unknown"
         interpreter = (" Installed dependencies may already have changed; the boot re-synced them for the "
                        "serving tree." if handoff.get("interpreter_state") else "")
-        _archive(data_dir, handoff, f"abandoned:{last}")
+        if not _archive(data_dir, handoff, f"abandoned:{last}"):
+            return {}
         note = (f"Adoption of {cand} was abandoned before completion ({last}). The serving body is at its previous "
                 f"commit.{interpreter}")
         return {**update, "outcome": "not_applied", "note": note} if update else _settled(handoff, "not_applied", note)
@@ -903,7 +1001,8 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
         return {}
     head = _git(repo_dir, "rev-parse", "HEAD", check=False).stdout.strip()
     if head != handoff.get("cand"):
-        _archive(data_dir, handoff, f"superseded:head={head[:12]}")
+        if not _archive(data_dir, handoff, f"superseded:head={head[:12]}"):
+            return {}
         note = f"Adoption of {cand} landed, then the checkout moved to {head[:12]}."
         return {**update, "outcome": "superseded", "note": note} if update else _settled(handoff, "superseded", note)
     loaded = _loaded_generation(handoff)
@@ -943,7 +1042,8 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
         app = (f" The app is Ouroboros {native.get('version')} now; the previous one stays at {native.get('backup')}."
                if native else "")
         return {"outcome": "adopted", "kind": "update", "sha": head, "previous": handoff.get("old"),
-                "candidate_id": handoff.get("candidate_id"), "tests": dict(handoff.get("tests") or {}),
+                "candidate_id": handoff.get("candidate_id"), "adoption_id": handoff.get("id"),
+                "tests": dict(handoff.get("tests") or {}),
                 "environment": handoff.get("environment"), **({"native": native} if native else {}),
                 "note": f"Update {cand} is running on {handoff.get('branch')} with the local changes it carried; "
                         f"previous commit {str(handoff.get('old') or '')[:12]}." + app

@@ -36,7 +36,7 @@ class WorkTail(TypedDict):
     """What still runs beside or after the current episode, said as a second fact, never as the work's word."""
 
     kind: str  # helper | run | review | model
-    state: str  # live | unknown
+    state: str  # live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
     code: str
     text: str
     count: NotRequired[int]

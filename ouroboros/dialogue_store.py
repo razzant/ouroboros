@@ -1,31 +1,17 @@
 """The dialogue in ``state/dialog.sqlite``: exact chat/progress JSON and one writer seam.
 
-Each row keeps typed stream/chat/task/lineage/direction/kind/client/origin facts beside
-its original JSON body. ``seq`` is its byte offset in the former rotated JSONL chain;
-streams have separate coordinate spaces, so existing history ids, cursors, wake
-boundaries and exports retain their meaning. ``length`` includes the exact physical
-newline, including imported CRLF; ``seq + length`` is the next boundary.
-
-``ordinal`` counts stored objects, ``pos`` counts chat objects outside A2A (the counts task-events
-v1 ``line``, the logs tail ``_line``, ``chat_chain._stream_rows``, the consolidation cursor and
-chronicle ``raw_range`` keep). Both are relative to their import segment or live unit. ``import_ledger`` settles absolute
-bases after the newest-first archive import completes; earlier answers are importing,
-never guessed. Skipped intervals and every legacy (gen, line) alias remain indexed.
-Room revision continues the project's visible_revision at cutover.
-
-``append`` owns one BEGIN IMMEDIATE transaction: row, named inbound dedup, room
-revision/last row/activity and optional dispatch obligation. A partial UNIQUE index
-protects (chat_id, client_message_id). Dispatch is NULL for unnamed/imported rows,
-none for named acceptance without handoff, else pending/dispatched/completed/abandoned.
-``message_ingress`` claims pending once and records handoff completion. Required inbound
-acceptance retains WAIT_SEC; best-effort writes try zero wait and use dialogue_retry.
-Content-addressed retries dedup inside the write transaction and suppress live replay.
-
-Reads union bounded indexed probes for the room's chat/tasks/bound owner inputs;
-Main probes chats no Project owns. Coverage below the import boundary is explicitly
-unknown. The separate file avoids current.sqlite body/import/export waits and uses
-store's typed errors, lazy per-thread handles and header lock tier (PERSIST+FULL or
-gated WAL). ``dialogue_import`` owns cutover, frozen archive import and rollback export.
+Stream/chat/task/lineage/direction/kind/client/origin facts index JSON. ``seq``/``length`` retain original
+byte spans (newline/CRLF included), even after revision: history ids/cursors/wake boundaries stay ordered.
+``ordinal`` counts objects; ``pos`` counts non-A2A chat for task-events/logs/chronicle, relative to import
+segments. Newest-first ``import_ledger`` settles absolute bases; earlier answers say importing. Skips and
+legacy (gen, line) aliases stay indexed; room revisions inherit the project's visible_revision at cutover.
+``append`` atomically writes rows, room revision/last row/activity and named inbound dispatch (UNIQUE
+chat_id/client_message_id). Dispatch: NULL for unnamed/imported, none for named acceptance without handoff,
+else pending/dispatched/completed/abandoned. ``message_ingress`` claims once. Required writers use WAIT_SEC;
+best-effort uses zero wait and content-addressed dialogue_retry, transactionally deduped without live replay.
+Reads union bounded room/task/owner probes; Main excludes Project rooms; below-import coverage is unknown.
+Separate from current.sqlite waits: store errors, thread handles and header lock tier (PERSIST+FULL/gated WAL).
+``dialogue_import`` owns cutover, frozen archives and rollback export; text revisions retain all other facts.
 """
 
 from __future__ import annotations
@@ -106,8 +92,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 
 class Row(NamedTuple):
-    """One stored row: its coordinate, the decoded body, its dispatch fact and its exact physical
-    length (``end`` is the coordinate right after it: its newline included, nothing re-encoded)."""
+    """Coordinate, decoded body, dispatch and allocated span; ``end`` is the next boundary."""
 
     stream: str
     seq: int
@@ -125,8 +110,7 @@ class Row(NamedTuple):
 
 
 class Receipt(NamedTuple):
-    """What ``append`` returns: the row's coordinate, the row as stored, whether an existing row
-    answered (a duplicate named message), the dispatch fact after the transaction and the length."""
+    """Append's coordinate, stored row, duplicate flag, dispatch and allocated span."""
 
     stream: str
     seq: int
@@ -559,6 +543,24 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
     if stream == "progress" and emit_live:
         _stream_live(row)
     return Receipt(stream, seq, row, False, state, length)
+
+
+def revise_text(root: Any, stream: str, seq: int, text: str) -> Dict[str, Any]:
+    """Revise a row's text atomically; retain its allocated span (mapped on export) and all other facts."""
+    with transaction(root, write=True) as conn:
+        existing = conn.execute(f"{_SELECT} WHERE stream=? AND seq=?", (stream, seq)).fetchone()
+        if existing is None:
+            raise ValueError("dialogue row missing for text revision")
+        row = decode(existing["body"])
+        if row.get("text") != text:
+            row["text"] = text
+            conn.execute("UPDATE dialogue SET body=? WHERE stream=? AND seq=?", (encode(row), stream, seq))
+            if stream == "chat":
+                _set_meta(conn, "chat_text_revision", int(_meta(conn, "chat_text_revision") or 0) + 1)
+            columns = facts(row)
+            if columns["chat_id"] is not None:
+                touch_room(conn, columns["chat_id"], None, columns["ts"], 1)
+        return row
 
 
 def _receipt(existing: sqlite3.Row) -> Receipt:

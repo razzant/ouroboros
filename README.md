@@ -70,7 +70,7 @@ brew install --cask razzant/ouroboros/ouroboros
 ### Windows quick start
 
 1. Click [**Download for Windows (.zip)**][download-windows-x64].
-2. Extract the ZIP.
+2. Extract the ZIP to a permanent folder.
 3. Open the extracted `Ouroboros` folder and run `Ouroboros.exe`.
 
 ### Linux quick start
@@ -87,6 +87,16 @@ To run tasks, choose a connected Codex account as the Main model source, configu
 The desktop packages already contain an optional CLI installer. On macOS, after copying the app to Applications, double-click `Install CLI.command` in the mounted DMG; after a Homebrew install, run `/Applications/Ouroboros.app/Contents/Resources/bin/install-ouroboros-cli`. On Linux use `./Ouroboros/bin/install-ouroboros-cli`; on Windows use `Ouroboros\bin\install-ouroboros-cli.cmd`. These installers create a user-local `ouroboros` command without sudo. You do not need Python or uv.
 
 </details>
+
+### Reinstall, move or remove
+
+`~/Ouroboros` (data, memory and the code Ouroboros runs) is the installation; the app is a replaceable host. To replace or move the app, quit Ouroboros, put the new copy in place and open it: your data and code stay, and skill packages and sign-in startup follow the new copy at its next start. A new app changes only the bundled Python, SQLite and Node, never the code in `~/Ouroboros/repo`; in-app Update changes the code. **Settings → About** and the Updates page show both versions, and Ouroboros sees them in its host facts. Quit leaves the Claudexor engine running, by design.
+
+- **macOS:** drag the new `Ouroboros.app` onto Applications and choose Replace, then open it from Applications in Finder: Spotlight can take a while to list a new copy while it indexes. Do not run Ouroboros from the disk image.
+- **Windows:** keep the extracted folder in one permanent place and run it from there, never from inside the ZIP. To update, quit, remove the old folder and extract the new ZIP to the same place.
+- **AppImage:** keep one file at a fixed path and replace it under the same name. **tar.gz:** keep one fixed folder. **deb/rpm:** update with your package manager. **Homebrew:** `brew upgrade` or `brew reinstall` (above).
+- After moving the app, run Install CLI again: the `ouroboros` command points at one copy.
+- Before removing the app, turn off "Start Ouroboros on the host computer when you sign in" and delete the `ouroboros` command (`~/.local/bin/ouroboros`, or `%LOCALAPPDATA%\Ouroboros\bin\ouroboros.cmd` on Windows).
 
 [download-macos-arm64]: https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0.dmg
 [download-windows-x64]: https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0-windows-x64.zip

@@ -1,4 +1,4 @@
-"""unix_computer_use 0.5.3: inputs addressed to an application, place receipts, bounded element reads.
+"""unix_computer_use: inputs addressed to an application, place receipts, bounded element reads.
 
 The 27.10 incident class: the model pressed cmd+tab and an arrow key into whatever was in front and read
 ``observed_effect: true`` (the helper exited 0) as "the slide changed". Every test here fakes only the OS
@@ -412,7 +412,7 @@ def test_screenshot_transform_uses_display_bounds_and_the_target_display(tmp_pat
     assert out["display"]["index"] == 2 and out["display"]["selected_by"] == "app" and out["app"]["pid"] == 200
     assert any(argv[:4] == ["screencapture", "-x", "-D", "2"] for argv in state["calls"])
     assert (out["coord_transform"]["ox"], out["coord_transform"]["oy"]) == (1728, 0)
-    click = receipt(api.tools["click"](x=100, y=50))
+    click = receipt(api.tools["click"](x=100, y=50, observation_id=out["observation_id"]))
     assert click["ok"] is True
     sx = out["coord_transform"]["sx"]
     assert inputs(state)[-1] == ["cliclick", f"c:{round(100 * sx) + 1728},{round(50 * out['coord_transform']['sy'])}"]
@@ -434,24 +434,31 @@ def test_screenshot_with_an_unlocatable_window_says_it_captured_the_main_display
     assert out["display"]["selected_by"] == "fallback" and "accessibility_untrusted" in out["display"]["app_window_unread"]
 
 
-def test_screenshot_falls_back_to_the_old_transform_when_displays_are_unreadable(tmp_path, monkeypatch):
+def test_screenshot_with_unreadable_displays_has_no_mapped_input(tmp_path, monkeypatch):
     module, api, state = mac(tmp_path, monkeypatch, helper=lambda args, st: {"ok": False, "error": "locked"})
     monkeypatch.setattr(module, "_png_dimensions", lambda _p: (800, 600))
     monkeypatch.setattr(module, "_macos_logical_size", lambda: (0, 0))
     out = receipt(api.tools["screenshot"](job_id="fallback"))
-    assert out["ok"] is True and "display" not in out and out["coord_transform"]["approx"] is True
-    # A clean-looking Finder ratio is still approximate: the desktop size is the union of all displays.
+    assert out["ok"] is True and "display" not in out and out["mapped_input_available"] is False
+    assert "observation_id" not in out and "coord_transform" not in out
+    assert out["input_geometry_evidence"] == "unavailable" and out["input_width"] is None
+    assert "locked" in out["coordinate_note"] and "Capture only" in out["coordinate_note"]
+    assert receipt(api.tools["click"](x=10, y=10, observation_id=""))["dispatched"] is False
+    assert inputs(state) == []
+    # A clean-looking Finder ratio still cannot prove which display was captured.
     monkeypatch.setattr(module, "_macos_logical_size", lambda: (400, 300))
     out = receipt(api.tools["screenshot"](job_id="finder"))
-    assert out["coord_transform"]["approx"] is True and out["coord_transform"]["input_w"] == 400
+    assert out["input_width"] == 400 and out["mapped_input_available"] is False
+    assert out["input_geometry_evidence"] == "finder_desktop_union"
+    assert "observation_id" not in out and "coord_transform" not in out
 
 
 # --- registration -------------------------------------------------------------------------------
 
-def test_the_surface_is_24_tools_with_app_on_the_inputs(tmp_path, monkeypatch):
+def test_surface_exposes_targeting_on_input_tools(tmp_path, monkeypatch):
     module, api, state = mac(tmp_path, monkeypatch)
-    assert "activate_app" in api.tools and "clear_active_connection" not in api.tools
-    assert len(api.tools) == 24
+    assert "activate_app" in api.tools and "element_act" in api.tools and "clear_active_connection" not in api.tools
+    assert len(api.tools) == 25
     for tool in ("click", "double_click", "triple_click", "left_click_drag", "mouse_down", "type_text", "key", "hold_key", "scroll"):
         assert api.meta[tool]["schema"]["properties"]["app"] == {"type": "string", "default": ""}, tool
     lead = api.meta["key"]["description"]
@@ -474,6 +481,8 @@ PIDS = {"1": "4242", "2": "5151", "3": "5151"}
 def x11(tmp_path, monkeypatch, *, active="1", xdotool=True, switch_to=None, wmctrl=True):
     """A faked X11 desktop: ``xdotool getactivewindow`` prints the active window id (decimal), wmctrl the rows."""
     module = load_plugin()
+    # This fixture models X11 on hosts that need not have libX11 installed.
+    monkeypatch.setattr(module._ComputerUse, "_x11_keysym", staticmethod(lambda _name: None))
     monkeypatch.setattr(module, "_platform", lambda: "linux")
     monkeypatch.setattr(module, "_session_type", lambda: "x11")
     tools = ({"wmctrl"} if wmctrl else set()) | ({"xdotool"} if xdotool else set())
@@ -680,8 +689,8 @@ def test_a_sequence_whose_first_combo_is_invalid_keeps_the_switch_mark(tmp_path,
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["key"](keys="bogus+right down", app="Keynote"))
     assert out["ok"] is False and "bogus" in out["error"] and out["steps_done"] == 0 and inputs(state) == []
-    assert out["observed_effect"] is True and out["activation_done"] is True, "Keynote came forward before the combo was refused"
-    assert "not sent" in out["error"]
+    assert "observed_effect" not in out and not any("activate" in str(c) for c in state["calls"]), "validation precedes activation"
+    assert out["dispatched"] is False
 
 
 def test_a_failed_paste_helper_still_reports_the_clipboard_write(tmp_path, monkeypatch):
@@ -795,7 +804,7 @@ def test_cliclick_gets_absolute_negative_coordinates_for_a_display_left_of_the_m
     monkeypatch.setattr(module, "_png_dimensions", lambda _p: (3840, 2160))
     shot = receipt(api.tools["screenshot"](job_id="left", app="Keynote"))
     assert shot["display"]["index"] == 2 and (shot["coord_transform"]["ox"], shot["coord_transform"]["oy"]) == (-1920, -200)
-    click = receipt(api.tools["click"](x=100, y=50))
+    click = receipt(api.tools["click"](x=100, y=50, observation_id=shot["observation_id"]))
     assert click["ok"] is True and inputs(state)[-1] == ["cliclick", "c:=-1870,=-175"], "a bare '-' would be a relative move"
     assert receipt(api.tools["click"](x=-10, y=20, raw=True))["ok"] is True and inputs(state)[-1] == ["cliclick", "c:=-10,20"]
     assert receipt(api.tools["move"](x=5, y=5, raw=True))["ok"] is True and inputs(state)[-1] == ["cliclick", "m:5,5"]
@@ -899,7 +908,7 @@ def test_native_reads_say_which_attributes_failed_and_never_render_a_failed_read
 
     vals, failed = native.split_attr_errors(["AXTitle", "AXMinimized", "AXMain"], ["Deck", ("axerror", -25204), ("axerror", -25212)])
     assert vals == ["Deck", None, None] and failed == {"AXMinimized": "CannotComplete"}, "ordinary absence is not a failure"
-    busy = [("axerror", -25204)] * 7
+    busy = [("axerror", -25204)] * len(native._WALK_ATTRS)
 
     def read(el):
         return (0, busy) if el == "b" else (0, ["AXButton", None, el, None, None, (1, 1), (2, 2)])

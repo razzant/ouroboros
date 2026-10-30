@@ -138,8 +138,8 @@ test('summary is authored, note is whole and disclosed, only flagged checks get 
     assert.match(oldHtml, /Safety Supervisor checked run_command/);
     assert.match(namedHtml, /Not checked \(update_memory\)/);
     assert.doesNotMatch(namedHtml, /Safety Supervisor checked update_memory|unmetered|omitted/);
-    assert.match(namedHtml, /data-cx-open-task="w-summary" data-chat-id="1">Open in Main ↗/);
-    assert.doesNotMatch(wakeRowHtml({ ...named, cause: 'focus', chatId: 1099511627777, placeLabel: 'Slack' }), /data-cx-open-task/);
+    assert.match(namedHtml, /data-open-task="w-summary">Open in Main ↗/);
+    assert.doesNotMatch(wakeRowHtml({ ...named, cause: 'focus', chatId: 1099511627777, placeLabel: 'Slack' }), /data-open-task/);
     const focusRow = wakeRowHtml({ ...named, cause: 'focus', chatId: 1099511627777, placeLabel: 'Slack' });
     assert.match(focusRow, /data-cx-open-room="1099511627777"/, 'a focus row opens its captured conversation');
     assert.match(focusRow, /Open the conversation/);

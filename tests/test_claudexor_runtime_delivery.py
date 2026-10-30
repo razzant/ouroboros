@@ -271,7 +271,7 @@ def test_seed_install_uses_bundled_node_and_records_real_source(tmp_path, monkey
     monkeypatch.setattr(
         platform,
         "probe_node_version",
-        lambda candidate: NODE_VERSION if candidate == str(node) else "",
+        lambda candidate: NODE_VERSION if pathlib.Path(candidate).is_file() else "",
     )
     manager = runtime.ClaudexorRuntimeManager(pin)
     probes = []
@@ -283,7 +283,9 @@ def test_seed_install_uses_bundled_node_and_records_real_source(tmp_path, monkey
 
     command = manager.ensure()
     target = runtime.managed_runtime_dir(pin)
-    assert command == [str(node), str(target / pin.entrypoint)]
+    kept = pathlib.Path(command[0])  # the bundle's Node copied in once: the daemon outlives the app
+    assert command == [str(kept), str(target / pin.entrypoint)] and kept.read_bytes() == node.read_bytes()
+    assert kept.parents[2].parent == runtime.managed_runtime_root() / "node"
     assert probes and all(probe_pin == pin for _, probe_pin in probes)
     metadata = json.loads((target / "managed-runtime.json").read_text(encoding="utf-8"))
     assert metadata["archive_source"] == "bundle_seed"

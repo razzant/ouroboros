@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +46,81 @@ def _reconcile_pass(monkeypatch):
     sm._run_periodic_reconcile_sweep([0.0], latch=SimpleNamespace(release=lambda: None))
     from ouroboros.maintenance import run_job
     run_job(sm.DATA_DIR, "runtime_retirement")
+
+
+def _call_queue(root, running=()):
+    from ouroboros.utils import atomic_write_json
+    stamp = {'generation': 'call-test', 'ts': datetime.fromtimestamp(time.time(), timezone.utc).isoformat()}
+    atomic_write_json(root / 'state/queue_snapshot.json', {**stamp, 'running': [{'id': task} for task in running]})
+    atomic_write_json(root / 'state/queue.alive', stamp)
+
+
+@pytest.mark.parametrize('days', [1, 7, 30])
+def test_call_wire_ages_under_shared_retention_only_after_task_is_proven_over(root, monkeypatch, days):
+    from ouroboros import maintenance, maintenance_jobs, maintenance_retirement, task_status
+
+    monkeypatch.setenv('OUROBOROS_GC_RETENTION_DAYS', str(days))
+    now = time.time()
+    journals = {}
+    for task_id, status, age in [('old', 'completed', days + 1), ('young', 'completed', days - .5),
+                                 ('running', 'running', days + 1), ('held', 'completed', days + 1),
+                                 ('unknown', None, days + 1)]:
+        path = root / 'task_results/artifacts' / task_id / 'conversation-wire.jsonl'
+        _aged(path, 'all original wire bytes\n')
+        os.utime(path, (now - age * 86400,) * 2)
+        journals[task_id] = path
+        if status:
+            write_task_result(root, task_id, status)
+    adjacent = _aged(journals['old'].parent / 'caption.jsonl', 'canonical evidence')
+    # Use the real queue-snapshot liveness predicate, including its unknown case.
+    _call_queue(root, ['held'])
+    assert task_status.task_has_live_queue_ownership(root, 'held')
+    assert not task_status.task_has_live_queue_ownership(root, 'old')
+    assert maintenance_jobs.job(root, 'runtime_retirement')['next_due'] <= now
+    assert maintenance.run_job(root, 'runtime_retirement')['state'] == 'done'
+    assert not journals['old'].exists()
+    assert all(path.exists() for name, path in journals.items() if name != 'old')
+    assert adjacent.read_text() == 'canonical evidence'
+    # Once live ownership ends the already-owed pass removes only the aged journal.
+    _call_queue(root)
+    assert maintenance.run_job(root, 'runtime_retirement')['state'] == 'done'
+    assert not journals['held'].exists() and journals['running'].exists()
+    deadline = journals['young'].stat().st_mtime + days * 86400
+    assert maintenance_jobs.job(root, 'runtime_retirement')['next_due'] == deadline
+    with monkeypatch.context() as clock:
+        clock.setattr(maintenance_retirement.time, 'time', lambda: deadline + 1)
+        _call_queue(root)
+        assert maintenance.run_job(root, 'runtime_retirement')['state'] == 'done'
+        assert not journals['young'].exists()
+    assert journals['running'].read_text() == journals['unknown'].read_text() == 'all original wire bytes\n'
+
+
+def test_call_wire_sweep_keeps_unknown_ownership_and_symlinks(root, monkeypatch):
+    from ouroboros import maintenance_retirement, task_status
+
+    journal = _aged(root / 'task_results/artifacts/done/conversation-wire.jsonl', 'whole wire')
+    write_task_result(root, 'done', 'completed')
+    # An absent snapshot cannot prove that the terminal task has no live owner.
+    (root / 'state/queue_snapshot.json').unlink(missing_ok=True)
+    assert task_status.task_has_live_queue_ownership(root, 'done')
+    maintenance_retirement.prune_call_wire_journals(root)
+    assert journal.read_text() == 'whole wire'
+    _call_queue(root)
+    outside = _aged(root / 'elsewhere/conversation-wire.jsonl', 'outside')
+    for task_id in ('linked-dir', 'linked-file'):
+        write_task_result(root, task_id, 'completed')
+    (journal.parent.parent / 'linked-dir').symlink_to(outside.parent, target_is_directory=True)
+    linked_file = journal.parent.parent / 'linked-file/conversation-wire.jsonl'
+    linked_file.parent.mkdir()
+    linked_file.symlink_to(outside)
+    # Even a terminal row cannot authorize deletion with a live lineage process.
+    monkeypatch.setattr('ouroboros.body_candidate.live_lineage_processes', lambda *_: [123])
+    maintenance_retirement.prune_call_wire_journals(root)
+    assert journal.exists()
+    monkeypatch.setattr('ouroboros.body_candidate.live_lineage_processes', lambda *_: [])
+    maintenance_retirement.prune_call_wire_journals(root)
+    assert not journal.exists()
+    assert outside.read_text() == 'outside' and linked_file.is_symlink()
 
 
 def test_the_age_only_retirers_run_again_on_a_later_pass_and_trees_wait_out_a_recovery_gap(root, monkeypatch):

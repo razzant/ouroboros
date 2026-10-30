@@ -1962,6 +1962,136 @@
    "works_complete": true,
    "works_gaps": []
   },
+  "sleeping_on_paused_helper": {
+   "works": [
+    {
+     "work_id": "sw",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "sw",
+      "live": true
+     },
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "sleeping",
+       "text": "Sleeping until it is woken"
+      }
+     ],
+     "tails": [
+      {
+       "code": "awaited_helpers_mind",
+       "text": "1 helper it waits for is paused until Ouroboros resumes it",
+       "count": 1,
+       "ids": [
+        "sw-c"
+       ],
+       "kind": "helper",
+       "state": "held"
+      }
+     ],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "sw",
+       "sw-c"
+      ],
+      "states": {
+       "sw": {
+        "activity": "waiting",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "sleeping",
+          "text": "Sleeping until it is woken"
+         }
+        ],
+        "tails": []
+       },
+       "sw-c": {
+        "activity": "paused",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "mind",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "awaiting_selection",
+          "text": "Waiting for Ouroboros or you to resume it"
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "sw"
+      },
+      {
+       "action": "hurry",
+       "target": "sw"
+      },
+      {
+       "action": "pause",
+       "target": "sw"
+      },
+      {
+       "action": "stop",
+       "target": "sw",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "still",
+     "confirmed": true,
+     "works": [
+      "sw"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 1,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
   "unknown": {
    "works": [
     {
@@ -2742,6 +2872,18 @@
   "external_runs_unconfirmed": {
    "1": "1 external run may still be running",
    "3": "3 external runs may still be running"
+  },
+  "awaited_helpers_mind": {
+   "1": "1 helper it waits for is paused until Ouroboros resumes it",
+   "3": "3 helpers it waits for are paused until Ouroboros resumes them"
+  },
+  "awaited_helpers_owner": {
+   "1": "1 helper it waits for is paused until you resume it",
+   "3": "3 helpers it waits for are paused until you resume them"
+  },
+  "awaited_helpers_paused": {
+   "1": "1 helper it waits for is paused",
+   "3": "3 helpers it waits for are paused"
   },
   "turn_admitted": {
    "": "Setting up the turn"

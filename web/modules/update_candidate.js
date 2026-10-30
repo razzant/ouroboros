@@ -8,6 +8,7 @@
    status around them, never guessed from a version. updates.js::updateVerdict is the one caller and decides which
    verdict wins; this module only words them. */
 
+import { updateEffectsText } from './update_effects.js';
 import { activationOutcomeKey, attemptOutcome, attemptTime } from './update_status.js';
 
 const short = (sha) => String(sha || '').slice(0, 8);
@@ -636,8 +637,9 @@ export function activationAttemptView(data = {}) {
 }
 
 /** The confirmation for each candidate action that needs one: `openConfirmDialog` options, or null. Its quiet
- *  `details` hold the facts the action rests on, from the status and the candidate's record only. */
-export function candidateDialog(id, data = {}) {
+ *  `details` hold the facts the action rests on, from the status and the candidate's record only. Restart to update
+ *  also words the effects of `preflight`, read for this candidate (update_effects.js; unread or another's: unknown). */
+export function candidateDialog(id, data = {}, preflight = null) {
     const { mention: target } = candidateName(data);
     const candidate = object(data.candidate) || {};
     const rowsOf = (pairs) => pairs.filter(([, value]) => value).map(([label, value]) => ({ label, value: String(value) }));
@@ -684,7 +686,8 @@ export function candidateDialog(id, data = {}) {
                     + `with ${native.version || 'the new app'}; the previous app stays beside it. ` : ''}`
                 + 'Running work is interrupted by the restart.\n\nIf it does not start, the previous version comes back '
                 + 'on its own only when it is proven to read the data the new start wrote; otherwise your data and local '
-                + 'changes stay as they are and this panel offers recovery. Data is never rolled back.',
+                + 'changes stay as they are and this panel offers recovery. Data is never rolled back.\n\n'
+                + updateEffectsText(preflight, { candidate: String(candidate.candidate_id || '') }),
             ...(app.length ? { details: { summary: 'Show app details', rows: app } } : {}) };
     }
     if (id === 'apply_without_local_changes') {

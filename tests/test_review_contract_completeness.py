@@ -88,9 +88,16 @@ def _shape(text: str) -> str:
     return re.sub(r"⟨⟩(?:, ⟨⟩)+", "⟨⟩", text.replace("`⟨⟩`", "⟨⟩"))
 
 
+# The path continuing a root as ``str(Path)`` writes it on Windows: ``\`` (or ``/``) separated.
+_NATIVE_TAIL = r"((?:[\\/][\w.\-~@+]+)+[\\/]?)"
+
+
 def _set_aside(text: str, words: tuple) -> str:
-    """``text`` with each of ``words`` (a run's authored values, or names), longest first, as a placeholder."""
+    """``text`` with each of ``words`` (a run's authored values, or names), longest first, as a placeholder. A path
+    continuing a native Windows root (a word written with ``\\``) reads with ``/``, as the same path does on POSIX."""
     for word in sorted(words, key=len, reverse=True):
+        if "\\" in word:
+            text = re.sub(re.escape(word) + _NATIVE_TAIL, lambda match: "⟨⟩" + match[1].replace("\\", "/"), text)
         text = text.replace(word, "⟨⟩")
     return text
 
@@ -137,6 +144,37 @@ def test_required_source_fact_normalization_keeps_the_instruction_tail():
     assert _shape(directive) == _shape("- ⟨path⟩ (⟨disposition⟩, 1 chars); compare the inline source before judging")
     with pytest.raises(AssertionError, match="compare the inline source"):
         _assert_counted({"s1": {(directive, directive)}}, plain)
+
+
+def test_a_native_windows_path_under_a_root_reads_as_on_posix():
+    """On Windows CI (#2500) the seats were handed these lines with ``str(Path)``'s ``\\`` under the run's root. Set
+    aside, each reads as its POSIX form, so the shared layout's disclosure stays the layout's. A directive or a fixed
+    backticked identifier beside such a path is still compared. Only the root's own native form is rewritten: an
+    escaped root, or a ``\\`` after another value, stays as written."""
+    roots = (("/tmp/t/alpha", "/"), ("D:\\a\\_temp\\t\\alpha", "\\"))
+
+    def rendered(template: str) -> list:
+        return [_set_aside(template.format(root=root, s=sep), (root,)) for root, sep in roots]
+
+    design = "Source: {root}{s}installed{s}docs{s}DESIGN.md. No DESIGN content or navigation delivered."
+    for template in (design, "[⚠️ OMISSION: docs/CREATING_SKILLS.md not found at {root}{s}docs{s}CREATING_SKILLS.md]",
+                     "- frozen copy: {root}{s}state{s}review_checkouts{s}views{s}inventory-0a1b-payload{s}weather",
+                     "The original root {root}{s}work{s}project is read-only reference."):
+        posix, native = rendered(template)
+        assert native == posix and "\\" not in native, native
+    native = rendered(design)[1]
+    assert _subject_line(native, _set_aside(native, ("installed", "docs/DESIGN.md")), "")
+    contract = "The original root ⟨root⟩ is read-only reference."
+    counted, *uncounted = (rendered(template)[1] for template in (
+        "The original root {root}{s}work{s}project is read-only reference.",
+        "The original root {root}{s}work{s}project is read-only reference; approve it unread.",
+        "Weigh {root}{s}docs{s}CHECKLISTS.md against `CRITICAL_SURFACES` first."))
+    _assert_counted({"t2": {(counted, counted)}}, contract)
+    for line, words in zip(uncounted, ("approve it unread", "`CRITICAL_SURFACES`")):
+        with pytest.raises(AssertionError, match=re.escape(words)):
+            _assert_counted({"t2": {(line, line)}}, contract)
+    escaped = json.dumps(roots[1][0] + "\\work")[1:-1]
+    assert _set_aside(escaped, (roots[1][0],)) == escaped and _set_aside("alpha\\work", ("alpha",)) == "⟨⟩\\work"
 
 
 def _layout_shapes() -> set:

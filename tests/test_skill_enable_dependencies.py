@@ -26,6 +26,7 @@ from ouroboros.skill_dependencies import dependency_sentence, ensure_skill_depen
 from ouroboros.skill_install_record import write_install_record
 from ouroboros.skill_lifecycle_actions import reconcile_turn_on_when_ready, turn_on_blocker
 from ouroboros.skill_loader import SkillReviewState, find_skill, load_enabled, save_enabled, save_review_state, skill_state_dir
+from tests._shared import current_python_env
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 log = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def drive(tmp_path, monkeypatch):
 def installs(monkeypatch):
     calls: list = []
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: calls.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: calls.append(list(packages)) or current_python_env(env_root) or [])
     return calls
 
 
@@ -120,7 +121,7 @@ def test_a_failed_install_is_a_typed_refusal_that_keeps_the_switch_off_and_the_n
     assert not (skill_state_dir(drive, "demo") / "enabled.json").exists()
     assert json.loads((skill_state_dir(drive, "demo") / "deps.json").read_text(encoding="utf-8"))["status"] == "failed"
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     assert enable(drive, skill)["ok"] is True and installs == [["wheel"]] and load_enabled(drive, "demo") is True
     # A ready environment runs no installer: Enable on an enabled skill is an idempotent repair.
     assert enable(drive, skill)["ok"] is True and installs == [["wheel"]]
@@ -157,7 +158,7 @@ def test_turn_on_when_ready_installs_missing_packages_and_maps_a_refusal_to_what
     assert reconcile_turn_on_when_ready(drive, "demo", repo_path="")["missing"] == ["dependencies"]
     assert load_enabled(drive, "demo") is False
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     assert reconcile_turn_on_when_ready(drive, "demo", repo_path="")["action"] == "enabled"
     assert installs == [["wheel"]] and load_enabled(drive, "demo") is True
     assert turn_on_blocker(drive, "demo") == "already_on"

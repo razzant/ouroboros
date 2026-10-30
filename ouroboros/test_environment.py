@@ -196,7 +196,7 @@ def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create
         "OUROBOROS_SUBAGENT_WORKTREE_ROOT": root / "worktrees",
         "OUROBOROS_DELIVERABLES_ROOT": root / "Deliverables",
         "OUROBOROS_BENCH_RUNS_ROOT": root / "bench_runs",
-        "PYTHONPYCACHEPREFIX": root / "pycache", "PYTHONUSERBASE": root / "userbase",
+        "PYTHONPYCACHEPREFIX": root / "pycache.noindex", "PYTHONUSERBASE": root / "userbase",
         "XDG_CACHE_HOME": root / "cache", "XDG_CONFIG_HOME": root / "config",
         "XDG_DATA_HOME": root / "xdg-data", "XDG_STATE_HOME": root / "xdg-state",
         "APPDATA": root / "config", "LOCALAPPDATA": root / "cache",

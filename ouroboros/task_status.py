@@ -293,6 +293,8 @@ def task_execution_observation(
     Missing inline evidence is unknown, never pooled death. Local observations
     are root-bound. The direct fragment lists addressable turns, not every live
     stack, so absence cannot settle a task. No observation authorizes replay.
+    ``queue_ownership`` is the queue's custody of a row, not admission to run: the
+    effective read adds a PENDING row's ``dispatch`` from its ``current_stop``.
     """
     root = _resolved_root(str(drive_root))
     tid = str(result.get("task_id") or result.get("id") or "")
@@ -1091,8 +1093,11 @@ def effective_task_result(
         if queue_status and queue_status != "unknown":
             merged["status"] = _merge_queue_status(parent_status, queue_status, queue_task)
             from ouroboros.project_admission import project_hold_fact
+            from ouroboros.work_stop import task_current_stop
 
             merged["project_admission_hold"] = project_hold_fact(queue_task)
+            # The census's reading of the same row: a held row stays ``scheduled`` in its queue.
+            merged["current_stop"] = task_current_stop(drive_root, queue_snapshot, task_id)
             for key in (
                 "parent_task_id",
                 "root_task_id",
@@ -1149,6 +1154,10 @@ def effective_task_result(
     # projects the same pending state.
     _apply_cancel_state_projection(pathlib.Path(drive_root), task_id, merged, reads)
     merged["execution_observation"] = task_execution_observation(drive_root, merged, queue_snapshot=queue_snapshot)
+    observed = merged["execution_observation"]
+    if observed.get("reason") == "queue_ownership" and observed.get("status") == STATUS_SCHEDULED:
+        held = (merged.get("current_stop") or {}).get("state")
+        observed["dispatch"] = "unknown" if held == "unknown" else "held" if held else "queued"
     if terminal_projection:
         # This read inferred a terminal; a later persisted terminal is a recorded
         # fact even when its historical status_reconciled_from marker survives.
@@ -1206,7 +1215,7 @@ def wait_for_effective_tasks(
     intent to a real terminal shortly after. The wait stays bounded by
     ``timeout_sec`` either way, and ``live_child_status`` reports a pending
     cancellation honestly (``cancel_pending``) instead of collapsing it to
-    terminal/unknown."""
+    terminal/unknown, and a row its ``current_stop`` holds as ``held``."""
     ids = []
     for item in task_ids:
         try:
@@ -1283,6 +1292,8 @@ def wait_for_effective_tasks(
                 # pending) or unknown. Covers the legacy latch too (the effective
                 # read projects it as cancel_state=pending).
                 _st = "cancel_pending"
+            elif (row.get("current_stop") or {}).get("state") == "held" and eff_status not in SETTLED_STATUSES:
+                _st = "held"  # in the queue, but a current stop keeps it from running
             live[tid] = _st or ("terminal" if eff_status in SETTLED_STATUSES else "unknown")
         out["live_child_status"] = live
     except Exception:
@@ -1503,9 +1514,20 @@ def format_subagent_absorption_message(
             f"\n[NOTE] {omitted} child result(s) omitted for the context budget — "
             "pull them explicitly with get_task_result if you need them."
         )
-    if pending:
-        lines.append("\n[STILL RUNNING — not yet absorbable]")
-        for child in pending:
+    import json
+
+    from ouroboros.work_stop import stop_for_reader
+
+    # A queued status is no permission to run: a child its current stop holds is listed apart, beside that stop
+    # as this parent may act on it (``stop_for_reader``: the request door when it is this parent's to ask for).
+    stops = [stop_for_reader(child.get("current_stop") or {}, child, parent) for child in pending]
+    for held, header in ((False, "[STILL RUNNING — not yet absorbable]"),
+                         (True, "[HELD BY A CURRENT STOP — not yet absorbable: each reaches no terminal state until "
+                                "its stop is released; a door named here is a request the supervisor still checks]")):
+        group = [(child, stop) for child, stop in zip(pending, stops) if (stop.get("state") == "held") is held]
+        if group:
+            lines.append("\n" + header)
+        for child, stop in group:
             cancel_note = (
                 " (cancel pending — supervisor teardown in progress)"
                 if str(child.get("cancel_state") or "") == "pending"
@@ -1513,7 +1535,8 @@ def format_subagent_absorption_message(
             )
             lines.append(
                 f"- {child.get('task_id') or child.get('id')}: {child.get('status')}{cancel_note}, "
-                f"child_result_sha256={_child_result_sha256(child)}"
+                + (f"current_stop={json.dumps(stop, ensure_ascii=False, sort_keys=True)}, " if stop else "")
+                + f"child_result_sha256={_child_result_sha256(child)}"
             )
     if descendants:
         lines.append(

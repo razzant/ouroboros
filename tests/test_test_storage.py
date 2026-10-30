@@ -148,6 +148,23 @@ def test_native_ctxless_green_red_keep_full_source_and_logs(tmp_path, capsys, re
     assert b"dirty input" in (evidence / "source/candidate.diff").read_bytes()
 
 
+def test_source_evidence_keeps_a_same_size_edit_made_in_the_second_its_index_was_written(tmp_path):
+    """Git checks an entry stamped in its index file's own second by content; the private copy keeps that time, so
+    the recorded diff holds a same-size edit made then, and the live index keeps its bytes and its time.
+    LABELLED CONTROLLED TIMING (``stage_then_edit_in_one_second``)."""
+    from ouroboros import test_evidence
+    from tests.body_candidate_support import stage_then_edit_in_one_second
+    committed = "def test_probe():\n    assert 1\n"
+    repo = _repo(tmp_path / "repo", committed)
+    if not stage_then_edit_in_one_second(repo, "tests/test_probe.py", committed, committed.replace("1", "2")):
+        pytest.skip("the stage and the edit never fit one second here: the race was not set")
+    index = repo / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    test_evidence.source_evidence(repo, tmp_path / "evidence")
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+    assert b"+    assert 2\n" in (tmp_path / "evidence" / "candidate.diff").read_bytes()
+
+
 def test_native_timeout_preserves_obtained_output(tmp_path, capsys):
     from ouroboros.preflight_runner import run_hermetic_pytest
     repo = _repo(tmp_path / "repo", "import time\ndef test_hang():\n    print('LAST_TEST_BEFORE_TIMEOUT', flush=True)\n    time.sleep(120)\n")

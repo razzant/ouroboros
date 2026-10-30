@@ -62,7 +62,8 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
     loading fails typed and is rewritten by the next check). The owned daemon is warmed, and an
     OpenRouter install's model catalogue observed unless a process recorded a current one, for
     provisioned homes only (``warm_daemon``): background work off the startup path, so a request
-    reads the catalogue and never waits for it."""
+    reads the catalogue and never waits for it. A sign-in entry naming a copy of the app that is
+    gone is re-pointed at this one (``desktop_autostart.follow_moved_app``, fail-soft)."""
     if local_model and settings.get("LOCAL_MODEL_SOURCE"):
         from ouroboros.local_model_autostart import auto_start_local_model
 
@@ -78,6 +79,9 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
         from ouroboros.llm import LLMClient
 
         threading.Thread(target=LLMClient.prefetch_openrouter_catalog, daemon=True, name="openrouter-catalog").start()
+    from ouroboros.desktop_autostart import follow_moved_app
+
+    follow_moved_app()
 
 
 async def serve_host_service(root: pathlib.Path, boot: Any) -> None:

@@ -82,7 +82,7 @@ def test_ready_full_runtime_beats_npm_less_bundle_for_both_readers(tmp_path, mon
     preserved = runtime.ClaudexorRuntimeManager(replace(pin, node_version="25.0.0"))
     legacy = _legacy(pin, schema=legacy_schema) if legacy_schema else None
     old_bytes = _bytes(legacy[0]) if legacy else None
-    before = str(legacy[1]) if legacy_schema == 2 else str(bundled_node)
+    before = str(legacy[1]) if legacy_schema else str(bundled_node)  # a managed Node-only one outlives the app
     assert manager._resolve_node(pin) == before
     assert preserved._resolve_preserved_node(NODE_VERSION) == str(pathlib.Path(before).resolve())
     assert not manager._managed_npm_cli(bundled_node).exists()

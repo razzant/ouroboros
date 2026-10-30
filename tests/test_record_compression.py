@@ -694,3 +694,19 @@ def test_real_compression_of_terminal_evidence_and_a_finished_seat_home(data, mo
     assert {plane: total["compressed"] for plane, total in row["totals"].items()} == {"evidence": 3, "seats": 2}
     assert all(total["saved_bytes"] > 0 for total in row["totals"].values()) and row["last"]["skipped"] == {}
     assert _run(data) is None
+
+
+def test_a_finished_calls_wire_journal_is_compressed_and_only_that_file(data, recorded):
+    """The owner's 28.10 answer 5B: the call wire journal stays whole under the shared finished-record machinery."""
+    from ouroboros.task_results import write_task_result
+
+    for task_id, status in (("call-done", "completed"), ("call-live", "running")):
+        write_task_result(data, task_id, status)
+    done = data / "task_results" / "artifacts" / "call-done"
+    journal = _write(done / job.WIRE_JOURNAL)
+    deeper = _write(done / "source_handles" / job.WIRE_JOURNAL)  # the name elsewhere in the folder is not the journal
+    (done / "nested" / job.WIRE_JOURNAL).mkdir(parents=True)  # nor is a folder of that name
+    live = _write(data / "task_results" / "artifacts" / "call-live" / job.WIRE_JOURNAL)
+    assert _run(data)["state"] == "done"
+    paths = {path for path, _owned in recorded}
+    assert journal in paths and not paths & {deeper, live}

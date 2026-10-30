@@ -154,7 +154,7 @@ def probe(output):
                         page.locator('[data-wake="w-summary"] summary').click()
                         page.wait_for_function("document.querySelector('[data-wake=\"w-summary\"] .consciousness-wake-note').textContent.includes('New detail on refresh.')")
                         page.locator('[data-wake="214a31b6"] summary').click()
-                        page.locator('[data-wake="214a31b6"] [data-cx-open-task]').click()
+                        page.locator('[data-wake="214a31b6"] [data-open-task]').click()
                         landed_card = page.locator('#main-mount .chat-live-card[data-task-id="214a31b6"].is-quote-target')
                         landed_card.wait_for(state='visible')
                         landing = landed_card.evaluate("""el => {

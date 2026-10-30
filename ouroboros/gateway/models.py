@@ -25,7 +25,6 @@ from ouroboros.provider_connections import (
     connection_configured, connection_display, connection_routes, connection_rows, find_row,
 )
 from ouroboros.provider_models import (
-    ALL_PROVIDER_CREDENTIAL_KEYS,
     ACTIVE_MODEL_SETTING_KEYS,
     BUILTIN_CONNECTION,
     COMPATIBLE_LEGACY_PAIR,
@@ -634,7 +633,6 @@ async def api_openai_compatible_models(request: Request) -> JSONResponse:
         return json_exception(e)
 
 
-_PROVIDER_TEST_OVERRIDE_KEYS = ALL_PROVIDER_CREDENTIAL_KEYS
 _PROVIDER_TEST_KNOWN_IDS: frozenset[str] = frozenset({
     "openrouter", "openai-compatible", *DIRECT_PROVIDER_DEFAULTS,
 })
@@ -724,29 +722,100 @@ def _run_provider_test(provider_id: str, overrides: dict[str, str], connection: 
 
     Test is the owner's explicit request, so a switched-off connection is tested too.
     A named connection's draft fields override its saved row (a row not saved yet is
-    tested from the draft alone); an unchanged secret's placeholder keeps the saved one."""
+    tested from the draft alone); an unchanged secret's placeholder keeps the saved one,
+    on the built-in connection too. A kept secret reaches only its saved endpoint
+    (``_saved_secret_moved``): before discovery and the probe, so nothing is sent."""
     from ouroboros.secret_masking import looks_masked_settings_secret
 
     settings = dict(load_settings())
     saved_rows = connection_rows(settings.get(CONNECTIONS_KEY))
     under_test = (provider_id, connection or BUILTIN_CONNECTION)
     rows = [row for row in saved_rows if (row.get("kind"), row.get("name")) != under_test]
+    secrets = {field if connection else flat: flat for field, flat, secret in PROVIDER_KINDS[provider_id].fields if secret}
+    fresh = {value.strip() for key, value in overrides.items() if key in secrets and value.strip()
+             and not looks_masked_settings_secret(secrets[key], value)}
+    draft = {key: value.strip() for key, value in overrides.items()
+             if not (key in secrets and looks_masked_settings_secret(secrets[key], value))}
+    saved_row = find_row(saved_rows, provider_id, connection) if connection else None
+    saved = {**settings, CONNECTIONS_KEY: [*rows, *([{**saved_row, "enabled": True}] if saved_row else [])]}
     if connection:
-        secrets = {field: flat for field, flat, secret in PROVIDER_KINDS[provider_id].fields if secret}
-        draft = {key: value.strip() for key, value in overrides.items()
-                 if not (key in secrets and looks_masked_settings_secret(secrets[key], value))}
-        row = {**(find_row(saved_rows, provider_id, connection) or {"kind": provider_id, "name": connection}),
-               **draft, "enabled": True}
+        row = {**(saved_row or {"kind": provider_id, "name": connection}), **draft, "enabled": True}
         rows.append(row)
         read = row.get
     else:
-        settings = _builtin_test_settings(provider_id, settings, overrides)
+        settings = _builtin_test_settings(provider_id, settings, draft)
         read = lambda field: settings.get(PROVIDER_KINDS[provider_id].flat_key(field))  # noqa: E731
     problem = next((field for field in ("region", "plan") if choice_error(provider_id, field, read(field))), "")
     if problem:
         return {"error": {"region": "unknown MiniMax region", "plan": "unknown Z.ai plan"}[problem], "_http_status": 400}
     settings[CONNECTIONS_KEY] = rows
+    if moved := _saved_secret_moved(connection_id(provider_id, connection), saved, settings, fresh):
+        return {"error": moved, "code": "masked_key_endpoint_changed", "_http_status": 400}
     return _run_provider_test_with_settings(provider_id, settings, *((connection,) if connection else ()))
+
+
+# Kinds whose endpoint the owner types; the others' endpoints are the vendor's own
+# (a MiniMax region or Z.ai plan picks among its closed set, ``choice_error``).
+_ADDRESSED_KINDS = frozenset(kind for kind, spec in PROVIDER_KINDS.items() if spec.flat_key("base_url"))
+
+
+def _endpoint_identity(base_url: object) -> tuple:
+    """Where requests built on a base URL go. The OpenAI SDK and httpx (the GigaChat library)
+    append each path after one enforced trailing slash and catalog reads strip it, so one
+    trailing slash, case, a default port and dot segments change nothing. They append after
+    a query too, and a catalog path lands inside a fragment, so a URL with either is the
+    same endpoint only when spelled the same."""
+    text = str(base_url or "").strip()
+    try:
+        url = httpx.URL(text)
+    except Exception:
+        return ("verbatim", text)
+    if "?" in text or "#" in text:
+        return ("verbatim", text)
+    path = url.raw_path.decode("ascii", "replace")
+    port = url.port or {"http": 80, "https": 443}.get(url.scheme)
+    return (url.scheme, url.userinfo, url.host, port, path[:-1] if path.endswith("/") else path)
+
+
+def _sent_secrets(target: dict) -> list[str]:
+    """The secrets a target's transport sends: its key, except that the GigaChat library
+    refreshes its token with the authorization key whenever one is set, and only otherwise
+    with ``user`` and ``password`` (``GigaChat._update_token``)."""
+    def text(field: str) -> str:
+        return str(target.get(field) or "").strip()
+
+    if target.get("provider") == "gigachat" and not text("api_key"):
+        return [text("password")] if text("user") and text("password") else []
+    return [text("api_key")] if text("api_key") else []
+
+
+def _saved_secret_moved(source_id: str, saved: dict, draft: dict, fresh: set[str]) -> str:
+    """Why the draft would send a saved secret somewhere it was not saved for, or ''.
+
+    Both sides resolve through the real route (``resolve_target``). A secret typed in
+    this request may go anywhere; a kept one (omitted or masked) that the transport
+    would send goes only to the same scheme, host, port and path with no weaker TLS
+    check. Saving the new address remains the owner's way to move a saved key."""
+    from ouroboros.llm_routing import resolve_target
+
+    if parse_model_route(f"{source_id}::").kind not in _ADDRESSED_KINDS:
+        return ""
+    try:
+        target = resolve_target(f"{source_id}::probe", draft)
+    except Exception:
+        return ""  # nothing can be sent without a target
+    kept = [secret for secret in _sent_secrets(target) if secret not in fresh]
+    if not kept or not str(target.get("base_url") or "").strip():
+        return ""
+    try:
+        before = resolve_target(f"{source_id}::probe", saved)
+    except Exception:
+        before = {}
+    if _endpoint_identity(before.get("base_url")) != _endpoint_identity(target.get("base_url")):
+        return "This server's address changed since its key was saved. Enter its key again to test the new address."
+    if before.get("verify_ssl_certs", True) and not target.get("verify_ssl_certs", True):
+        return "Certificate checking was turned off since this key was saved. Enter its key again to test without it."
+    return ""
 
 
 def _builtin_test_settings(provider_id: str, settings: dict, overrides: dict[str, str]) -> dict:
@@ -803,8 +872,8 @@ async def api_provider_test(request: Request) -> JSONResponse:
         overrides = {}
     if not isinstance(overrides, dict):
         return json_error("overrides must be an object", 400)
-    allowed = ({field for field, _flat, _secret in PROVIDER_KINDS[provider_id].fields} if connection
-               else _PROVIDER_TEST_OVERRIDE_KEYS)
+    # Only the tested connection's own fields: another kind's saved key never rides this probe.
+    allowed = {field if connection else flat for field, flat, _secret in PROVIDER_KINDS[provider_id].fields}
     unknown = sorted(str(key) for key in overrides if str(key) not in allowed)
     if unknown:
         return json_error(f"unsupported override keys: {', '.join(unknown)}", 400)

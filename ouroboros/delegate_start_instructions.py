@@ -119,11 +119,20 @@ def disposable_state_instruction(evidence_root: str, *, investigation: bool = Fa
             "ordinary work product.")
 
 
+# Persisted with every run's instructions, which a resumed vendor session may keep from its
+# first request (#2513): run-specific facts are scoped to their run, and the current one is
+# named by identity (this turn's host facts, the harness's starting directory), never by position.
 _ACCESS_PRECEDENCE = (
     "this line governs native process access, while explicit task constraints "
-    "and the assigned edit target still bind. When a private delegated snapshot "
-    "exists, the later DELEGATED EXECUTION BINDING is the assigned edit target "
-    "and supersedes path fields in the inherited contract."
+    "and the assigned edit target still bind. This access, the concrete edit, evidence, "
+    "scratch and copy-local environment locations, and what a private copy makes read-only "
+    "belong to ONE run: a continued run's own host facts in its current turn restate them "
+    "within the same owner, task, target and access ceiling, and work orders, bindings or "
+    "evidence quoted from an earlier run are history wherever they appear. When a private "
+    "delegated snapshot exists, the current run's DELEGATED EXECUTION BINDING is the assigned "
+    "edit target and supersedes path fields in the inherited contract. A run's root is the "
+    "directory your harness started its current turn in; a path inside an earlier run's copy "
+    "means the same relative path from there."
 )
 
 ACCESS_INSTRUCTIONS = {
@@ -228,8 +237,10 @@ def execution_binding_text(execution_root: str, authority_root: str,
         f"{authority or '(unknown)'} is a read-only identity/reference until the "
         "parent explicitly integrates the captured result. Do not write, patch, "
         "stage, reset, clean, or commit the authority root, another checkout or the operator's "
-        "files. If the harness cannot honor this binding, stop with a typed execution-root "
-        "mismatch instead of falling back to the authority root."
+        "files. Compare only the directory your harness started this run in, physically: another "
+        "spelling of it, such as through a symlink, matches, and a later cd changes nothing. If it is "
+        "not this root, stop with a typed execution-root mismatch instead of falling back to the "
+        "authority root."
     )
 
 
@@ -257,6 +268,12 @@ def in_place_binding_instruction(root: str) -> str:
         "change only what the assignment needs; never reset, clean, stash, check out or commit. Keep test "
         "scratch, environments and caches outside every Git working tree, " + scratch_fact() + "."
     )
+
+
+def no_copy_binding_instruction(workdir: str) -> str:
+    """Name the root of a run no binding renderer covers (read-only, a direct folder): where
+    the engine starts it, ``execution.workspaceRoot`` or else ``scope.root``."""
+    return f"\n\nThis run has no private copy: its working directory is {str(workdir or '').strip() or '(unknown)'}."
 
 
 def apply_execution_binding(instructions: str, execution_root: str,

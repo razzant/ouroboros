@@ -18,6 +18,22 @@ def row(task_id, phase="working", **extra):
 
 # ---- one member ---------------------------------------------------------------------------------------
 
+@pytest.mark.parametrize("is_call", [False, True])
+def test_stopped_call_has_no_resume_release_but_text_still_does(is_call, tmp_path):
+    parked = row("call", "budget_paused", pause_cause="restart", can_resume=True)
+    metadata = {"execution_transport": {"type": "live_conversation"}} if is_call else {}
+    raw = {"metadata": metadata, "_budget_pause_hold": {"reason": "owner_restart_hold"}}
+    facts = wp._member_raw(parked, raw, wp._Observations(tmp_path), "call")
+    state = ws.classify_member(parked, facts)
+    # A stopped call has ended: nobody resumes it. A text task keeps the release the stop view gives it.
+    assert (state["release"] == "none") is is_call
+    if is_call:
+        assert state["turn"] == [] and state.get("resumable") is False
+    actions = {control["action"] for control in ws.controls_for(state, parked)}
+    assert ("resume" in actions) is (not is_call)
+    assert "stop" in actions
+
+
 def test_working_member_names_its_exact_call():
     state = ws.classify_member(row("t", model_activity={"phase": "awaiting_response"}))
     assert (state["activity"], state["call"], state["release"]) == ("working", "sending", "self")
@@ -124,6 +140,45 @@ def test_cold_sleep_waits_and_pausing_is_still_work():
     assert (queued["transition"], queued["live"]) == ("none", False)
     parked = ws.classify_member(row("t", "budget_pausing", pause_cause="owner"), {"parked": ["t"], "running": True})
     assert (parked["transition"], parked["live"]) == ("none", False)
+
+
+def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_resumes_them():
+    def sleeper(*chosen):
+        return ws.classify_member(row("root"), {"running": True, "owner_wait": {
+            "state": "waiting", "reason": "sleep", "task_attempt": 1,
+            "sleep": {"mode": "warm", "tasks": list(chosen), "senders": list(chosen)}}})
+
+    def helper(task_id, raw):
+        return ws.classify_member(row(task_id, "budget_paused", pause_cause="unknown", can_resume=False,
+                                      parent_task_id="root", root_task_id="root"), raw)
+
+    selected = helper("chosen", {"_budget_pause": {"reason": "owner", "exact_continuation": True}})
+    other = helper("other", {"_budget_pause": {"reason": "owner", "exact_continuation": True}})
+    panic = helper("panic", {"hold": {"reason": "panic_hold", "release": "owner"}})
+    root = sleeper("chosen", "panic")
+    work = ws.roll_up_work("root", [root, selected, other, panic], episode={"task_id": "root", "state": root})
+    # The sleep keeps its word, reason, controls and turn; its line names what its saved sleep chose, by release.
+    assert (work["activity"], work["because"][0]["code"], work["turn"], work["mark"]) == (
+        "waiting", "sleeping", [], "still")
+    assert [(tail["code"], tail["ids"], tail["state"], tail["text"]) for tail in work["tails"]] == [
+        ("awaited_helpers_mind", ["chosen"], "held", "1 helper it waits for is paused until Ouroboros resumes it"),
+        ("awaited_helpers_owner", ["panic"], "held", "1 helper it waits for is paused until you resume it")]
+    assert "other" not in str(work["tails"]), "a paused helper the sleep did not choose is not why it waits"
+    controls = ws.controls_for(root, row("root"))
+    assert "resume" not in [entry["action"] for entry in controls], "no Resume door is invented for a helper"
+    # A Continue episode is neither the helper's root nor its parent: it holds no request door, so the line
+    # names no releaser for a helper only a mind could ask to resume (the owner's own release keeps its words).
+    later = ws.classify_member(row("later"), {"running": True, "owner_wait": {
+        "state": "waiting", "reason": "sleep", "task_attempt": 1,
+        "sleep": {"mode": "warm", "tasks": ["chosen", "panic"]}}})
+    work = ws.roll_up_work("root", [later, selected, panic], episode={"task_id": "later", "state": later})
+    assert [(tail["code"], tail["ids"], tail["text"]) for tail in work["tails"]] == [
+        ("awaited_helpers_owner", ["panic"], "1 helper it waits for is paused until you resume it"),
+        ("awaited_helpers_paused", ["chosen"], "1 helper it waits for is paused")]
+    # Without the saved selection (or once the episode ended) the line says no such thing.
+    awake = ws.roll_up_work("root", [sleeper(), selected], episode={"task_id": "root", "state": sleeper()})
+    assert awake["tails"] == []
+    assert ws.roll_up_work("root", [selected], episode={"task_id": "root"})["tails"] == []
 
 
 def test_under_a_settling_pause_only_running_helpers_are_said_still_working():

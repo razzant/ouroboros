@@ -109,6 +109,7 @@ def test_plain_boots_and_an_unarmed_authorization_adopt_nothing(scene):
     assert scene.boot().returncode == 0  # candidate exists, nothing authorized
     scene.authorize()
     assert scene.phase() == "authorized" and not scene.pointer().exists()
+    assert (body_adoption.helper_dir(scene.data) / body_switch.LOCK_NAME).is_file()  # made before any record
     first = scene.boot()
     assert first.returncode == 0, first.stderr
     assert [r["a"] for r in scene.reports()] == ["GEN_OLD", "GEN_OLD"]
@@ -156,7 +157,7 @@ def test_direct_server_entry_switches_before_body_imports_and_keeps_argv(scene):
                                              native_smoke=lambda: {"ok": True})
     assert adopted["outcome"] == "adopted" and adopted["sha"] == scene.cand
     assert scene.phase() == "" and not scene.pointer().exists()
-    assert not body_adoption.helper_dir(scene.data).exists()
+    assert [path.name for path in body_adoption.helper_dir(scene.data).iterdir()] == ["lock"]  # kept for the next
     assert git(scene.serving, "for-each-ref", body_adoption.PIN_PREFIX) == ""
     closed = [json.loads(line) for line in (scene.data / "logs/supervisor.jsonl").read_text().splitlines()]
     assert closed[-1]["type"] == "body_adoption_closed" and closed[-1]["outcome"] == "adopted"

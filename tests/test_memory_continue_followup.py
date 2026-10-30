@@ -281,7 +281,7 @@ def test_owner_continue_sends_selected_corrected_account_and_retains_old_source_
     assert _journal(root) == journal and successor.task_id == task["id"]
 
 
-def test_physical_floor_addresses_large_pending_correction_without_claiming_incorporation(tmp_path):
+def test_physical_floor_keeps_account_and_pending_correction_without_claiming_incorporation(tmp_path):
     _, _, _, page, other, _ = _rooms(tmp_path)
     account_text = "I had treated the rehearsal as delivery, while the garden result had independent evidence."
     account = _write(tmp_path, kind="account", text=account_text, sources=[page, other])["node_id"]
@@ -297,12 +297,12 @@ def test_physical_floor_addresses_large_pending_correction_without_claiming_inco
     assert facts["floor"]["pointer_records"] == []
     short, room, facts = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
         window_tokens=4096, known_window=True, output_reserve=512, ratio=1.0, non_memory_tokens=0)
-    assert account in facts["floor"]["pointer_records"] and facts["floor"]["steps"]["F5"]
-    assert account_text not in short and "Final exception Ω." not in short
-    assert f"account {account}; memory_read(node_id='{account}')" in short
-    assert "### Physical floor" in room and "only by address" in room
+    assert account not in facts["floor"]["pointer_records"]
+    assert account_text in short and "Final exception Ω." in short
+    assert memory_floor.minimal_view_tokens(snapshot) > 4096 - 512
+    assert "### Physical floor" in room and "reduced forms" in room
     assert "2026-09-03 00:00 → 2026-09-03 00:03" in short
-    assert "incorporated" not in short and "not in this account" not in short
+    assert "incorporated" not in short and "not in this account" in short
     exact, _ = _read_all(tmp_path, account)
     assert f"revision {page} used; later corrections not in this account: {fix}" in exact
     exact_correction, windows = _read_all(tmp_path, fix)

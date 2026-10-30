@@ -246,7 +246,8 @@ def test_failed_canonical_append_never_mints_a_phantom_revision(room, monkeypatc
         assert block["delivery"]["state"] == "owed" and not block.get("published_at")
     else:
         result = send()
-        assert (result is None if kind == "text" else result == (True, "ok")), result
+        # The text sender answers with the room it selected (an additive return, PR #2150); media senders keep (True, "ok").
+        assert (result == {"chat_id": room.chat_id} if kind == "text" else result == (True, "ok")), result
         assert len(room.frames) > before_frames, "existing best-effort live delivery stays available"
     assert chat_rows(room.root) == initial
     assert room.revision() == 1, "the missing canonical row cannot be acknowledged as a new revision"

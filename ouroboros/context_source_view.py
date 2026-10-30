@@ -205,7 +205,7 @@ def _exposed_units(messages: list, units: Sequence[_AtomicUnit], observation: Ma
 
 
 def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> str:
-    """Typed facts of one unit from its protocol rows and trace references, never a retelling."""
+    """Typed facts and exact source reader from the producer's bound record, never a retelling."""
     rows = compaction._view_source_messages(messages[unit.start:unit.end + 1])
     lines = [f"Unit {unit.unit_id}: tool, {unit.context_size_tokens} tokens estimated"]
     results = {str(row.get("tool_call_id") or ""): row for row in rows if str(row.get("role") or "") == "tool"}
@@ -224,9 +224,8 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> str
             detail += f"; outcome binding unknown ({record['reason']})"
         else:
             detail += f"; invocation {record['invocation']['invocation_id']}"
-        for label, key in (("trace", "trace_ref"), ("source", "source_ref")):
-            if record.get(key):
-                detail += f"; {label} {compaction._canonical_json(record[key])}"
+        if record.get("source_ref"):
+            detail += f"; source {compaction._canonical_json(record['source_ref'])}"
         lines.append(f"- {function.get('name') or '?'} {shown} -> result {result_chars} chars{detail}")
     return "\n".join(lines)
 
@@ -266,6 +265,7 @@ def emergency_address_view(
     drive_root: pathlib.Path,
     task_id: str,
     usable_input: Optional[int] = None,
+    replacing_host_kinds: Sequence[str] = (),
 ) -> Tuple[list, ContextReclaimReceipt]:
     """Model-free pass after the provider's typed refusal of this very request.
 
@@ -276,6 +276,8 @@ def emergency_address_view(
     ``chosen_bodies`` alone reaches such a just-chosen body that fits by itself. Exact
     body units remain restorable; no view claims understanding. ``measure_candidate``
     measures the complete final request, including the seal and fresh host facts.
+    ``replacing_host_kinds`` names snapshots the caller's final envelope supplies
+    afresh; their last old occurrence is superseded too, while intact.
     """
     label = _EMERGENCY_LABELS[rung]
     if cause == "output_exhaustion":
@@ -291,6 +293,10 @@ def emergency_address_view(
     fitting = chosen_read_units(messages, units, usable_input=usable_input, density=density)
     protected |= set() if rung == "chosen_bodies" else fitting
     obsolete = _obsolete_host_rows(messages) if rung == "host_copies" else set()
+    if rung == "host_copies" and replacing_host_kinds:
+        from ouroboros.context_budget import host_row_intact
+        obsolete.update(i for i, row in enumerate(messages)
+                        if row.get(HOST_CONTEXT_KIND_KEY) in replacing_host_kinds and host_row_intact(row))
     first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
     obsolete = {i for i in obsolete if i != first_user and not messages[i].get("function_call")
                 and compaction._plain_text(messages[i].get("content")) is not None}
@@ -382,3 +388,20 @@ def emergency_address_view(
         checkpoint_ref=checkpoint_ref, capsule_refs=capsule_refs,
         source_refs=compaction._unique_refs([*source_refs, checkpoint_ref]),
     )
+
+
+def fresh_room_rows(messages, *, drive_root, task_id, persist=False):
+    """Price a fixed-width reader; retain exact bytes only for the published selection."""
+    from ouroboros.artifacts import actor_source_reference, store_actor_source_bytes
+    data = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8') if persist else b''
+    args = dict(category='context_checkpoints', source_id='room-' + hashlib.sha256(data).hexdigest()[:16],
+                data=data, extension='json')
+    try:
+        ref = (store_actor_source_bytes(pathlib.Path(drive_root), str(task_id or 'context'), **args) if persist
+               else actor_source_reference(**args))
+    except OSError:
+        log.warning('Room facts kept: exact prior view could not be retained', exc_info=True)
+        return messages, ''
+    rows = [row for row in messages if not (host_row_intact(row)
+            and row.get(HOST_CONTEXT_KIND_KEY) == 'ouroboros_context_facts')]
+    return rows, f" Exact view before this refresh: read_file(root='artifact_store', path={json.dumps(ref['path'])})."

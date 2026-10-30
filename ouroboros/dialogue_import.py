@@ -33,8 +33,9 @@ rises to the project's ``projects.json`` ``visible_revision`` when that is highe
 marker a client holds keeps seeing new arrivals.
 
 ``export_for_older_body(root)`` appends every row the files do not hold yet (``seq >= files_seq``)
-back to ``logs/<stream>.jsonl`` in the exact line format, so an older body reads a chain whose
-coordinates are the store's; ``store_switch`` calls it before a root is handed to such a body.
+back to ``logs/<stream>.jsonl`` in the exact line format. Its coordinate map preserves store
+identity when revised bodies change physical spans; ``store_switch`` calls it before a root
+is handed to such a body.
 """
 
 from __future__ import annotations
@@ -208,7 +209,8 @@ def cutover(root: Any, *, initialize_journal: bool = False) -> Dict[str, Any]:
                 # A live file rotated into the archive (by this run, or by one a stop interrupted after the
                 # rename: the live file is now shorter than the batch's offset) holds no export batch any more.
                 batch = ds._meta(conn, f"export_batch:{stream}")
-                if batch and (report[stream].get("rotated") or _live_size(root, stream) < int(batch.get("offset") or 0)):
+                if batch and (report[stream]["added"] or report[stream].get("rotated")
+                              or _live_size(root, stream) < int(batch.get("offset") or 0)):
                     conn.execute("DELETE FROM meta WHERE key=?", (f"export_batch:{stream}",))
     report["first"] = first
     return report
@@ -319,7 +321,9 @@ def _plan(root: pathlib.Path, stream: str, plan: List[Dict[str, Any]]) -> Dict[s
     body appended WITHOUT the rollback export, or one whose name sorts before imported segments (a
     clock set back, a copy from a backup) -- is placed after ``next_seq`` instead: its rows are
     never lost, at the price of their chain offsets. A segment that starts with the very row the
-    store holds at its place (the rollback export's lines, continued by an older body) keeps it."""
+    store holds at its place (the rollback export's lines, continued by an older body) keeps it.
+    An export map overrides that heuristic when any physical span differs: reserve a fresh
+    range for new rows, but import the mapped lines at their original canonical coordinates."""
     total = sum(segment["size"] for segment in plan)
     added = mismatched = shifted = 0
     with ds.transaction(root, write=True) as conn:
@@ -327,18 +331,40 @@ def _plan(root: pathlib.Path, stream: str, plan: List[Dict[str, Any]]) -> Dict[s
         next_seq, files_seq = int(marks["next_seq"]), int(marks["files_seq"])
         known = {record["name"]: dict(record) for record in conn.execute(
             "SELECT * FROM import_ledger WHERE stream=?", (stream,))}
+        export = ds._meta(conn, f"export:{stream}") or {}
+        coordinates = export.get("coordinates", [])
         end, planned = total, []
         for segment in plan:
             kept = known.get(segment["name"])
             if kept is None:
                 base = segment["base"]
-                if base < next_seq and not _continues_store(root, conn, stream, segment):
+                # Rotation may sort this file before older archives (a clock set back).
+                # Its generation and file-relative offsets survive that rename.
+                generation = ""
+                if coordinates:
+                    with open(root / "archive" / segment["name"], "rb") as handle:
+                        generation = _gen(handle.readline())
+                mapped = ([[base + offset - export["file_base"], *entry] for offset, *entry in coordinates
+                           if offset - export["file_base"] < segment["size"]]
+                          if coordinates and (generation == export.get("generation")
+                                              or base == export.get("file_base")) else [])
+                changed = any(offset != seq or length != physical for offset, seq, length, physical, _digest in mapped)
+                if base < next_seq and (changed or not _continues_store(root, conn, stream, segment)):
                     base, shifted = next_seq, shifted + 1  # its place is taken: there its rows would be lost
                 next_seq = max(next_seq, base + segment["size"])
                 end = max(end, base + segment["size"])
-                planned.append(conn.execute(
-                    "INSERT INTO import_ledger (stream, name, base, size, mtime_ns, state) VALUES (?,?,?,?,?,'pending')",
-                    (stream, segment["name"], base, segment["size"], segment["mtime_ns"])).lastrowid)
+                cursor = conn.execute("INSERT INTO import_ledger (stream, name, base, size, mtime_ns, state) VALUES (?,?,?,?,?,'pending')",
+                                      (stream, segment["name"], base, segment["size"], segment["mtime_ns"]))
+                planned.append(cursor.lastrowid)
+                if mapped:
+                    # Keep physical offsets separate from canonical coordinates, including when
+                    # a changed span made us reserve a fresh range for the older body's new rows.
+                    ds._set_meta(conn, f"import_coordinates:{cursor.lastrowid}", [
+                        [offset - segment["base"], *entry] for offset, *entry in mapped])
+                    # A torn line is skipped just as before; later exports start after its
+                    # allocated span, not after a now-unrelated physical byte offset.
+                    files_seq = max(files_seq, max(entry[1] + entry[2] for entry in mapped))
+                    coordinates = []
                 added += 1
             elif kept["size"] != segment["size"] and kept["state"] != "mismatch":
                 # A frozen segment whose bytes changed: its rows may not be the ledger's. A segment another
@@ -346,6 +372,10 @@ def _plan(root: pathlib.Path, stream: str, plan: List[Dict[str, Any]]) -> Dict[s
                 # recorded: its rows keep their recorded coordinates and an import stays done.
                 conn.execute("UPDATE import_ledger SET state='mismatch' WHERE stream=? AND name=?", (stream, segment["name"]))
                 mismatched += 1
+        if added and export.get("coordinates"):
+            # All live files were rotated before planning. Entries past their actual end
+            # belong to an unwritten/torn batch, not to a future file at that offset.
+            ds._set_meta(conn, f"export:{stream}", {**export, "coordinates": []})
         if planned and stream == "chat":  # this body derives them as it imports; an older body would not
             ds._set_meta(conn, ds.APPEARANCES_AWAITING, sorted({*(ds._meta(conn, ds.APPEARANCES_AWAITING) or []), *planned}))
             # Planned segments are tracked by awaiting, including on first cutover. Cross only a
@@ -422,6 +452,7 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
     with ds.transaction(root, write=False) as conn:
         ledger = conn.execute("SELECT * FROM import_ledger WHERE stream=? AND name=?", (stream, name)).fetchone()
         marks = conn.execute("SELECT cutover_seq, live FROM streams WHERE stream=?", (stream,)).fetchone()
+        coordinates = ds._meta(conn, f"import_coordinates:{ledger['id']}") if ledger is not None else None
     if ledger is None or ledger["state"] != "pending":
         return {"status": "skipped", "state": None if ledger is None else ledger["state"]}
     data = (root / "archive" / name).read_bytes()
@@ -436,7 +467,24 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
     parsed, addresses, skipped = [], [], []
     touched: Dict[int, Tuple[Optional[int], str]] = {}
     objects = stream_rows = 0
+    mapped = {entry[0]: entry for entry in coordinates or []}
+    exported = set()
+    verified = []
     for line in segment_rows(data, int(ledger["base"])):
+        offset = line.seq - int(ledger["base"])
+        entry = mapped.get(offset)
+        if entry is not None:
+            _offset, seq, length, physical, digest = entry
+            raw = data[offset:offset + line.length]
+            # A short write can leave a complete final object without only its LF.
+            # Restore that byte for verification, never for an interior or malformed line.
+            if (line.row is not None and line.length + 1 == physical
+                    and offset + line.length == len(data) and not raw.endswith(b"\n")):
+                raw += b"\n"
+            if line.row is not None and len(raw) == physical and hashlib.sha256(raw).hexdigest() == digest:
+                line = line._replace(seq=seq, length=length)
+                exported.add(seq)
+                verified.append(entry)
         if line.row is None:
             if line.kind != "blank":
                 skipped.append((stream, line.seq, line.length, line.kind))
@@ -461,12 +509,14 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
             rows = [ds.row_values(stream, line.seq, line.length, int(ledger["id"]), ordinal, pos, columns, line.body)
                     for line, columns, ordinal, pos, _counted in parsed]
         else:
-            rows = _live_rows(conn, stream, int(marks["live"]), int(ledger["base"]), int(ledger["size"]), parsed)
+            rows = _live_rows(conn, stream, int(marks["live"]), int(ledger["base"]), int(ledger["size"]), parsed, exported)
         conn.executemany(ds._INSERT.format(" OR IGNORE"), rows)
         if addresses:
             conn.executemany("INSERT OR IGNORE INTO legacy_addresses (gen, line, seq) VALUES (?,?,?)", addresses)
         if skipped:
             conn.executemany("INSERT OR IGNORE INTO skipped (stream, seq, length, kind) VALUES (?,?,?,?)", skipped)
+        if coordinates is not None:
+            ds._set_meta(conn, f"import_coordinates:{ledger['id']}", verified)
         if shown is not None:
             record_imported(conn, shown, int(ledger["base"]), int(ledger["base"]) + int(ledger["size"]), int(ledger["id"]))
         for chat_id, (last_seq, last_ts) in touched.items():
@@ -481,12 +531,14 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
     return {"status": "done", "rows": objects, "bad": len(skipped)}
 
 
-def _live_rows(conn: Any, stream: str, live: int, base: int, size: int, parsed: List[Tuple[Any, ...]]) -> List[Tuple[Any, ...]]:
+def _live_rows(conn: Any, stream: str, live: int, base: int, size: int, parsed: List[Tuple[Any, ...]],
+               exported: set[int]) -> List[Tuple[Any, ...]]:
     """The rows of a segment that joined after the cutover, counted in the live unit: a row the
     rollback export placed (already stored at its coordinate) keeps its counts; every other
     takes the next ones, in chain order."""
     present = {record["seq"] for record in conn.execute("SELECT seq FROM dialogue WHERE stream=? AND seq>=? AND seq<?",
                                                         (stream, base, base + size))}
+    present.update(exported)
     marks = conn.execute("SELECT next_ordinal, next_pos FROM streams WHERE stream=?", (stream,)).fetchone()
     ordinal, pos = int(marks["next_ordinal"]), int(marks["next_pos"])
     rows = []
@@ -532,6 +584,15 @@ def _segment_bases(conn: Any, stream: str, unit: int, base: int, size: int) -> N
                          (stream, base, base + size)).fetchone()
     counted = conn.execute("SELECT pos FROM dialogue WHERE stream=? AND seq>=? AND seq<? AND pos IS NOT NULL ORDER BY seq LIMIT 1",
                            (stream, base, base + size)).fetchone()
+    coordinates = ds._meta(conn, f"import_coordinates:{unit}") or []
+    if coordinates:
+        mapped = conn.execute("SELECT min(ordinal) AS ordinal, min(pos) AS pos FROM dialogue WHERE stream=? "
+                              "AND seq IN (SELECT value FROM json_each(?))",
+                              (stream, json.dumps([entry[1] for entry in coordinates]))).fetchone()
+        if mapped["ordinal"] is not None and (first is None or mapped["ordinal"] < first["ordinal"]):
+            first = mapped
+        if mapped["pos"] is not None and (counted is None or mapped["pos"] < counted["pos"]):
+            counted = mapped
     conn.execute("UPDATE import_ledger SET ordinal_base=?, pos_base=? WHERE id=?",
                  (None if first is None else int(live["ordinal_base"]) + int(first["ordinal"]),
                   None if counted is None else int(live["pos_base"]) + int(counted["pos"]), unit))
@@ -681,7 +742,11 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
     (where it starts in the file, its bytes' hash, the coordinate it reaches) before its first byte
     is written, so an export interrupted after the append and before ``files_seq`` moved finishes
     that batch instead of appending it twice: the bytes already in the file must be the batch's
-    beginning, and only the rest is appended."""
+    beginning, and only the rest is appended. The same transaction records each exported line's
+    [physical chain offset, canonical seq, allocated length, physical length, SHA-256] in
+    ``export:<stream>.coordinates``, with the file's base and generation to survive rotation.
+    Planning transfers that map to the segment's ledger meta;
+    revised JSON can change byte lengths without changing any existing row's identity."""
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
     key = f"export_batch:{stream}"
@@ -695,7 +760,7 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
         upper = int(begun["to"]) if begun else int(marks["next_seq"])
         # The rows the files do not hold: appended after ``files_seq`` and not inside an imported segment.
         records = conn.execute(
-            "SELECT seq, body FROM dialogue WHERE stream=? AND seq>=? AND seq<? AND NOT EXISTS (SELECT 1 FROM import_ledger "
+            "SELECT seq, length, body FROM dialogue WHERE stream=? AND seq>=? AND seq<? AND NOT EXISTS (SELECT 1 FROM import_ledger "
             "WHERE import_ledger.stream=dialogue.stream AND state='done' AND base<=seq AND seq<base+size) ORDER BY seq",
             (stream, marks["files_seq"], upper)).fetchall()
     data = b"".join(record["body"].encode("utf-8") + b"\n" for record in records)
@@ -719,9 +784,24 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
                     raise ds.StoreError(f"dialogue export: {live} changed under an interrupted export; nothing appended")
                 remainder = data[len(written):]
             else:
+                file_base = sum(segment["size"] for segment in segment_plan(root, stream))
+                offset = file_base + size
+                if size:
+                    with open(live, "rb") as handle:
+                        generation = _gen(handle.readline())
+                else:
+                    generation = _gen(data)
+                coordinates = []
+                for record in records:
+                    raw = record["body"].encode("utf-8") + b"\n"
+                    coordinates.append([offset, record["seq"], record["length"], len(raw), hashlib.sha256(raw).hexdigest()])
+                    offset += len(raw)
                 with ds.transaction(root, write=True) as conn:
                     ds._set_meta(conn, key, {"offset": size, "length": len(data), "sha256": digest, "to": upper,
                                              "from": int(marks["files_seq"])})
+                    export = ds._meta(conn, f"export:{stream}") or {}
+                    ds._set_meta(conn, f"export:{stream}", {**export, "file_base": file_base, "generation": generation,
+                        "coordinates": [*export.get("coordinates", []), *coordinates]})
                 remainder = data
             if remainder:
                 # Byte-exact: a Windows descriptor is text mode without O_BINARY and would write each
@@ -742,7 +822,8 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
     with ds.transaction(root, write=True) as conn:
         conn.execute("UPDATE streams SET files_seq=? WHERE stream=?", (upper, stream))
         conn.execute("DELETE FROM meta WHERE key=?", (key,))
-        ds._set_meta(conn, f"export:{stream}", {"at": utc_now_iso(), "from": marks["files_seq"], "to": upper,
+        export = ds._meta(conn, f"export:{stream}") or {}
+        ds._set_meta(conn, f"export:{stream}", {**export, "at": utc_now_iso(), "from": marks["files_seq"], "to": upper,
                                                 "rows": len(records)})
     report = {"rows": len(records), "from": marks["files_seq"], "to": upper, "bytes": len(data)}
     if begun and upper < int(marks["next_seq"]):  # the finished batch first, then the rows after it

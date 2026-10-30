@@ -448,6 +448,15 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     image_data = incoming.get("image_data")
     task_constraint = incoming.get("task_constraint")
     task_metadata = incoming.get("task_metadata")
+    # A process-local value minted by the authenticated call door, after
+    # canonical message acceptance. JSON/API metadata cannot construct it.
+    task_metadata = dict(task_metadata or {})
+    realtime_turn = task_metadata.pop("_realtime_turn", None)
+    if realtime_turn is not None:
+        from ouroboros.live_conversation import LiveConversationTurn
+
+        if not isinstance(realtime_turn, LiveConversationTurn):
+            raise ValueError("invalid call authority")
     from ouroboros.contracts.task_constraint import normalize_task_constraint
 
     normalized_constraint = normalize_task_constraint(task_constraint)
@@ -569,7 +578,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     # ONE read of the addressable roots for this message: the room's reader, Main's
     # manifest and the decision metadata all see the same projection.
     roots = addressable_roots(ctx)
-    if (project_id and not late) or thread_of:
+    # A live call's admitted turn keeps the room it was opened in; it never re-routes.
+    if realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
             ctx,
             chat_id,
@@ -624,6 +634,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             image_data,
             task_constraint=task_constraint,
             task_metadata=task_metadata,
+            **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
         )
 
     threading.Thread(target=_run_direct, daemon=True).start()

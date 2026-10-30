@@ -20,6 +20,12 @@ test('provider test status uses only the controlled compact vocabulary', () => {
         providerTestNetworkErrorStatus(new Error('raw internal HTTP body')),
         'Not ready',
     );
+    const refusal = (status, body) => Object.assign(new Error(body.error), { status, body });
+    const moved = { error: 'Enter its key again to test the new address.', code: 'masked_key_endpoint_changed' };
+    assert.equal(providerTestNetworkErrorStatus(refusal(400, moved)),
+        'Not ready — Enter its key again to test the new address.');
+    assert.equal(providerTestNetworkErrorStatus(refusal(400, { error: 'raw upstream text' })), 'Not ready');
+    assert.equal(providerTestNetworkErrorStatus(refusal(502, moved)), 'Not ready');
 });
 
 test('provider test responses apply only to the exact draft generation', () => {

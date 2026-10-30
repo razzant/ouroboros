@@ -15,6 +15,7 @@ import { bridgeContributedActions } from './modules/message_actions.js';
 import { startHostModules } from './modules/host_modules.js';
 import { getHolds, reportFoundHolds } from './modules/holds.js';
 import { startVoice } from './modules/voice_controls.js';
+import { projectRoomOptions, startConversations } from './modules/conversation_controls.js';
 import { createNotificationActivation, getNotifier } from './modules/notifications.js';
 import { showToast } from './modules/toast.js';
 import { noteReadAhead, onReadAheadChange, readAheadFor, unreadCount } from './modules/read_ahead.js';
@@ -560,6 +561,7 @@ contributions.attach({ ws });
 const visibleDraft = draftPort(() => projectInstances.get(navState.activeProjectId) || mainChat);
 bridgeContributedActions({ store: contributions, draft: visibleDraft });
 startVoice({ hosts: startHostModules({ store: contributions, draft: visibleDraft }) });
+startConversations({ hosts: startHostModules(), openSettings: openSettingsTab, roomOptions: projectRoomOptions({ rows: () => lastProjectRows, nav: navState, state, title: projectPanelTitle, freshProjectRow, openProjectPanel, showPage, destroyProjectInstance }) });
 // The starts the previous page did not outlive are named in the chat that owns each item (holds.js, POST /api/ui/holds).
 reportFoundHolds(getHolds(), (payload) => apiClient.reportUiHolds(payload));
 
@@ -717,20 +719,24 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
 async function revealQuotedSource(address, chatId, isCurrent) {
     const navigation = projectNavigationGeneration;
     const current = () => navigation === projectNavigationGeneration && isCurrent();
-    let project = null;
+    let project = null, page = null;
     if (chatId !== 1) {
         const data = await fetchJson(`/api/projects?chat_id=${encodeURIComponent(chatId)}`);
         if (!current()) return null;
         project = data?.projects?.length === 1 ? data.projects[0] : null;
         if (!project || project.lifecycle !== 'active' || Number(project.chat_id) !== chatId) return { state: 'unavailable' };
     }
-    const page = await apiClient.chatHistory({ chatId, around: address });
-    if (!current()) return null;
-    if (page?.anchor?.state !== 'found') return page?.anchor || { state: 'unknown' };
-    const matches = address.startsWith('task:') ? chatId === 1 && page.anchor.task_id === address.slice(5)
-        : page.anchor.row_address === address && page.anchor.chat_id === chatId;
-    if (!matches) return { state: 'unknown' };
-    if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent } });
+    // A work card Main already draws is its destination without a read: it stands before its task's first
+    // message gives around-history a row to find.
+    if (chatId !== 1 || !address.startsWith('task:') || !mainChat.drawsSource(address)) {
+        page = await apiClient.chatHistory({ chatId, around: address });
+        if (!current()) return null;
+        if (page?.anchor?.state !== 'found') return page?.anchor || { state: 'unknown' };
+        const matches = address.startsWith('task:') ? chatId === 1 && page.anchor.task_id === address.slice(5)
+            : page.anchor.row_address === address && page.anchor.chat_id === chatId;
+        if (!matches) return { state: 'unknown' };
+        if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent } });
+    }
     closeProjectPanel({ reveal: true });
     const showing = projectNavigationGeneration;
     return mainChat.revealSource(address, () => showing === projectNavigationGeneration, page);

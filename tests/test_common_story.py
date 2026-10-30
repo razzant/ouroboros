@@ -478,12 +478,13 @@ def test_every_role_reads_the_same_account_and_its_own_detail(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
     _rooms(plain)
-    assert "My accounts across rooms" not in _story(plain) and "told through" not in _story(plain)
+    assert "### My account across rooms" not in _story(plain) and "told through" not in _story(plain)
+    assert "My accounts across rooms:" not in _story(plain)  # no account-count line
 
 
 # --- G. the floor ----------------------------------------------------------------------------------
 
-def test_the_floor_takes_an_account_like_a_page_and_keeps_what_it_tells_named(tmp_path):
+def test_the_floor_keeps_selected_accounts_whole_and_addresses_only_pages(tmp_path):
     rooms, alpha, beta, a1, b1, h1 = _rooms(tmp_path)
     store = ChronicleStore(tmp_path)
     g = store.publish_account(room_id="1", text=G_TEXT, sources=[a1, b1], author=shared.MIND).record["id"]
@@ -491,7 +492,7 @@ def test_the_floor_takes_an_account_like_a_page_and_keeps_what_it_tells_named(tm
     snapshot = _snapshot(tmp_path)
     elements = mf.floor_elements(snapshot)
     f5 = [ident for step, ident, *_rest in elements if step == "F5"]
-    assert g in f5 and a1 not in f5 and set(f5) <= {g, b1, h1}  # a told record is already an address: not degradable
+    assert g not in f5 and a1 not in f5 and b1 in f5 and set(f5) <= {b1, h1}  # a told record is already an address: not degradable
     f3 = {ident: whole for step, ident, whole, _short in elements if step == "F3"}
     assert alpha in f3 and "Alpha began." in f3[alpha] and "Alpha worked." in f3[alpha]  # an untold room, both records
     assert "1" not in f3  # Main's one untold record is shorter than its room line: not degradable
@@ -500,20 +501,19 @@ def test_the_floor_takes_an_account_like_a_page_and_keeps_what_it_tells_named(tm
     full = mv.render_story(snapshot)
     represented = "2 story records told through this account (including nested selections); 2026-09-02 00:00 → 2026-09-03 00:03 (includes block periods)"
     assert "Main was quiet." not in full and represented in full
-    level = mv.FloorLevel((("F5", (g,)),))
+    # Even an old selected F5 address cannot collapse the protected account.
+    assert mv.render_story(snapshot, mv.FloorLevel((("F5", (g,)),))) == full
+    level = mv.FloorLevel((("F5", (b1,)),))
     short = mv.render_story(snapshot, level)
-    assert G_TEXT not in short and "### My older pages, parts and accounts, by address" not in short
-    label, period, _kind = _block(full, g).split("\n")[1][4:].split(" · ")  # "### <label> · <period> · account <id>"
-    pointer = f"- {label}; {period}; account {g}; memory_read(node_id='{g}')"
-    assert period == "2026-09-03 00:00 → 2026-09-03 00:03"
-    prefix = full[:full.index(_block(full, g))]  # the addressed entry changes in place; earlier bytes stay
-    assert short.startswith(prefix) and short[len(prefix):].startswith("\n" + pointer)
-    assert represented in short  # the horizon holds even when the account itself is addressed
+    assert G_TEXT in short and _block(short, g) == _block(full, g)
+    assert "Main started and the owner asked me to go on." not in short
+    assert f"page; memory_read(node_id='{b1}')" in short
+    assert represented in short  # exact composition stays alongside the whole account
     exact = _memory_read(_ctx(tmp_path), node_id=g)
     assert f"replaces 2: {a1}, legacy-b01-r1;" in exact
     assert mv.snapshot_from_json(mv.snapshot_json(snapshot)) == snapshot
     note = mf.floor_note(level, window_tokens=100_000, mode="max")
-    assert "1 pages, parts or accounts of my story" in note
+    assert "1 pages or parts of my story" in note
 
 
 # --- H. rebuild and replay ---------------------------------------------------------------------------

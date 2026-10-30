@@ -1278,9 +1278,16 @@ def _root_resume_state(q: Any, root_task_id: str, result_root: pathlib.Path, *,
                        if row.get('budget_drive_root')), result_root)
     pause = budget_pause_row(pathlib.Path(root_drive), actor)
     owner = read_fence(pathlib.Path(root_drive), root_task_id)
+    return {'task': current, 'pause': pause, 'owner_fence': owner,
+            'latch': q.BUDGET_ROOT_FENCES.get(root_task_id), 'basis': resume_basis(actor, pause, owner)}
+
+
+def resume_basis(actor: str, pause: Dict[str, Any], owner: Dict[str, Any]) -> Dict[str, Any]:
+    """The root's control identities a child selection binds to: its actor, money pause and owner fence
+    generations and grants. ``work_stop`` reads the same basis into each held child's stop identity."""
     grant = pause.get('grant') or {}
     warm = owner.get('resume_grant') or {}
-    basis = {
+    return {
         'actor_id': actor,
         'budget': {
             'pause_id': str(pause.get('pause_id') or ''),
@@ -1298,8 +1305,6 @@ def _root_resume_state(q: Any, root_task_id: str, result_root: pathlib.Path, *,
             'revoked': bool(warm.get('revoked_at')),
         },
     }
-    return {'task': current, 'pause': pause, 'owner_fence': owner,
-            'latch': q.BUDGET_ROOT_FENCES.get(root_task_id), 'basis': basis}
 
 
 def _root_resume_grants(state: Dict[str, Any]) -> tuple:

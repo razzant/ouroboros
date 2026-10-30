@@ -280,13 +280,14 @@ def _add_evidence_facts(payload: Dict[str, Any], summary: Mapping[str, Any]) -> 
 def render_result_view(
     data: Mapping[str, Any], *, task_id: str, view: str, known_result_sha256: Any,
     child_result_sha256: str, outcome_summary: str, capability_delta: Mapping[str, Any],
-    effort: Mapping[str, str], presence_scope: str = "",
+    effort: Mapping[str, str], presence_scope: str = "", current_stop: Mapping[str, Any] | None = None,
 ) -> str:
     """Render a short view without projecting the stored envelope itself.
 
     ``known_result_sha256`` is the child-result identity in every view.  Summary
     and evidence are always rebuilt because cost/custody/retry/authority facts
-    can change while the authored answer stays byte-identical.
+    can change while the authored answer stays byte-identical; every view keeps
+    the reader's ``current_stop`` beside its status.
     """
     from ouroboros.outcomes import normalize_outcome_axes
     from ouroboros.task_finalization import terminal_host_notice_text
@@ -303,6 +304,7 @@ def render_result_view(
         "child_result_sha256": child_result_sha256,
         "terminal_origin": str(data.get("terminal_origin") or "unknown"),
         "outcome_axes": normalize_outcome_axes(dict(data)),
+        **({"current_stop": dict(current_stop)} if current_stop else {}),
     }
     notice = terminal_host_notice_text(dict(data))
     if notice:

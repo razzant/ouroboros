@@ -1,4 +1,4 @@
-"""Bytecode mirrors under ``state/pycache`` retire when their source directory is gone.
+"""Bytecode mirrors under ``state/pycache.noindex`` retire when their source directory is gone.
 
 Under ``PYTHONPYCACHEPREFIX`` CPython writes ``<prefix>/<source directory>/<name>.<tag>.pyc`` (the
 drive stripped on Windows), so the mirror names its source: the ``bytecode`` step of the
@@ -23,7 +23,7 @@ from ouroboros import maintenance_jobs, maintenance_retirement as retirement
 @pytest.fixture
 def data(tmp_path, monkeypatch):
     root = tmp_path / "data"
-    (root / "state" / "pycache").mkdir(parents=True)
+    (root / "state" / "pycache.noindex").mkdir(parents=True)
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     return root
 
@@ -31,7 +31,7 @@ def data(tmp_path, monkeypatch):
 def _compiled(data, source_file: pathlib.Path) -> pathlib.Path:
     """Where CPython itself puts SOURCE_FILE's bytecode under this data root's prefix."""
     saved = sys.pycache_prefix
-    sys.pycache_prefix = str(data / "state" / "pycache")
+    sys.pycache_prefix = str(data / "state" / "pycache.noindex")
     try:
         cached = pathlib.Path(importlib.util.cache_from_source(str(source_file)))
     finally:
@@ -107,8 +107,27 @@ def test_the_budget_leaves_the_rest_owed_and_the_next_run_finishes(data, tmp_pat
     assert any(path.exists() for path in pyc)
     second = retirement.prune_stale_bytecode(data)
     assert not any(path.exists() for path in pyc) and "next_due" not in second
-    assert not (data / "state" / "pycache" / str(tmp_path / "gone").lstrip(os.sep)).exists()
+    assert not (data / "state" / "pycache.noindex" / str(tmp_path / "gone").lstrip(os.sep)).exists()
 
+
+
+def test_a_legacy_tree_an_older_body_wrote_again_goes_whole_within_the_budget(data, tmp_path, monkeypatch):
+    [source] = _tree(tmp_path / "live", "pkg/a.py")
+    live = _compiled(data, source)
+    legacy = data / "state" / "pycache" / "Applications" / "Ouroboros.app"
+    legacy.mkdir(parents=True)
+    for n in range(6):
+        (legacy / f"m{n}.cpython-310.pyc").write_bytes(b"\x00")
+    monkeypatch.setattr(sys, "pycache_prefix", str(data / "state" / "pycache.noindex"))
+    first = retirement.prune_stale_bytecode(data, budget=4)
+    assert first["unlinked"] == 4 and first["next_due"] is not None and legacy.exists(), "the budget holds"
+    second = retirement.prune_stale_bytecode(data)
+    assert not (data / "state" / "pycache").exists() and second["removed"] == 1, "the old pruner never looked there"
+    assert live.exists(), "the current prefix keeps every live mirror"
+    legacy.mkdir(parents=True)
+    (legacy / "own.cpython-310.pyc").write_bytes(b"\x00")
+    monkeypatch.setattr(sys, "pycache_prefix", str(data / "state" / "pycache"))  # an older launcher's process
+    assert retirement.prune_stale_bytecode(data)["unlinked"] == 0 and (legacy / "own.cpython-310.pyc").exists()
 
 def test_a_worker_writing_into_a_live_mirror_loses_nothing(data, tmp_path):
     [source] = _tree(tmp_path / "live", "pkg/a.py")
@@ -151,7 +170,7 @@ def test_userbase_and_links_are_never_touched(data, tmp_path):
     assert userbase.read_text(encoding="utf-8") == "real dependency\n"
     assert (outside / "keep.pyc").exists() and (pyc.parent / "link").is_symlink(), "a link is never followed or removed"
     assert not pyc.exists() and report["removed"] == 0 and report["errors"] == 0, "the folder holding the link stays"
-    prefix = data / "state" / "pycache"
+    prefix = data / "state" / "pycache.noindex"
     prefix.rename(prefix.with_name("real-pycache"))
     os.symlink(prefix.with_name("real-pycache"), prefix, target_is_directory=True)
     assert retirement.prune_stale_bytecode(data)["unlinked"] == 0, "a linked prefix is not walked"
@@ -163,7 +182,7 @@ def test_windows_mirrors_are_stale_only_when_missing_on_every_drive(data, tmp_pa
     for drive in drives:
         drive.mkdir()
     (drives[1] / "proj" / "pkg").mkdir(parents=True)
-    mirror = data / "state" / "pycache" / "proj" / "pkg"
+    mirror = data / "state" / "pycache.noindex" / "proj" / "pkg"
     mirror.mkdir(parents=True)
     (mirror / "a.cpython-310.pyc").write_bytes(b"\x00")
     assert retirement.prune_stale_bytecode(data, sources=drives)["removed"] == 0, "one drive has it: kept"
@@ -207,7 +226,7 @@ def test_a_drive_refusing_its_root_is_still_a_place_a_source_can_be(data, tmp_pa
     for drive in drives:
         drive.mkdir()
     (drives[1] / "project").mkdir()
-    mirror = data / "state" / "pycache" / "project"
+    mirror = data / "state" / "pycache.noindex" / "project"
     mirror.mkdir()
     (mirror / "m.cpython-310.pyc").write_bytes(b"\x00")
     monkeypatch.setattr(retirement, "sys", SimpleNamespace(platform="win32"))

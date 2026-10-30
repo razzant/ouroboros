@@ -82,11 +82,10 @@ safety, budget, transport and evidence expiry. A missing channel is a capability
 host-attested owner-origin root a Main voice; no chat number, Main's included, is owner
 proof.
 
-`prompts/SYSTEM.md` is tier-0 for every Main and task profile in both context modes and
-competes with the task for context. It carries identity and tone, the decision loop,
+`prompts/SYSTEM.md` is tier-0 for every Main and task profile in every context mode. It carries identity and tone, the decision loop,
 cross-tool policy, prohibitions and safety invariants stated once, and the memory
-contract's resident rule: active summaries stay in the index, archived sources remain
-addressable and explicitly listable (ARCHITECTURE §6 "Durable memory and project focus").
+contract: whole indexes keep active summaries; outlines keep every active address/title
+and people's summaries. Archives remain readable/listable (ARCHITECTURE §6 "Durable memory and project focus").
 A missing carrier stays a visible gap.
 It never carries how a tool works: parameters, recipes, typed outcomes and "when to
 choose it" belong to the `get_tools()` schemas selected for the acting profile, so

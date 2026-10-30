@@ -26,10 +26,13 @@ from ouroboros import loop_tool_execution as execution
 from ouroboros.extension_surface_names import extension_surface_name
 from ouroboros.tools import extension_dispatch
 from ouroboros.tools import review_result as rr
+from skills.unix_computer_use import macos_native as native
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests._tool_result_delivery_shared import measured_fit
 from tests.test_result_review import CRITICAL, _floor_ctx, _seam
 from tests.test_unix_computer_use_effects import API, TIMEOUT, Guest, Transport, fail_at, load_plugin
+from tests.test_unix_computer_use_element_act import LONG_BEFORE, LONG_LABEL, LONG_TEXT, NORMALIZED, FakeAX, long_field
+from tests.test_unix_computer_use_targeting import KEYNOTE, app_dict
 
 WARNING = ("⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\nReason: fixture\n"
            "The command was allowed, but consider whether this is the right approach.")
@@ -85,6 +88,7 @@ class Desktop:
         monkeypatch.setattr(self.module, "_platform", lambda: platform)
         monkeypatch.setattr(self.module, "_session_type", lambda: session)
         monkeypatch.setattr(self.module, "_which", lambda name: f"/usr/bin/{name}" if name in tools else "")
+        monkeypatch.setattr(self.module._ComputerUse, "_x11_keysym", staticmethod(lambda _name: None))
         api = API(tmp_path / f"skill-state-{label}")
         self.module.register(api)
         self.handlers = api.tools
@@ -281,6 +285,45 @@ def test_a_partial_view_still_reads_the_complete_receipt(tmp_path, monkeypatch):
     assert [json.loads(effect["receipt"])["cmd"] for effect in effects] == [
         ["cliclick", f"t:{text}"], ["cliclick", f"t:{text}!"]]
     assert "host_notes" not in effects[0] and effects[1]["host_notes"] == [WARNING]
+
+
+def test_an_element_act_receipt_keeps_its_complete_label_and_values_in_the_retained_source(tmp_path, monkeypatch):
+    """The helper's own ASCII line (``macos_native.main``) is the producer's payload; the host's retained producer source
+    is what the result review reads, whole, while the model's view of the same call is only a head and a tail."""
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    desktop = mac(ctx, tmp_path, monkeypatch)
+    nodes = long_field()
+    ax = FakeAX(nodes, windows=["win"], focused="win", on_set=lambda el, v: nodes[el].__setitem__("value", v + NORMALIZED))
+    real, lines = native.op_act, []
+
+    def helper(_self, op, *args, timeout=20):
+        if op == "resolve":
+            return {"ok": True, "candidates": [app_dict(KEYNOTE)]}
+        assert op == "act"
+        monkeypatch.setattr(native, "op_act", lambda pid, do, sel, n, ms: real(
+            pid, do, sel, n, ms, ax=ax, front=lambda: app_dict(KEYNOTE), settle=lambda _s: None))
+        try:
+            with mock.patch("builtins.print", lambda text: lines.append(text)):
+                native.main(["act", *[str(a) for a in args]])
+        finally:
+            monkeypatch.setattr(native, "op_act", real)
+        return json.loads(lines[-1])
+
+    monkeypatch.setattr(desktop.module._ComputerUse, "_native", helper)
+    row = desktop.call("element_act", fit=measured_fit(window=2_000, reserve=500), app="Keynote", do="set_value",
+                       select={"role": "TextField", "label": LONG_LABEL}, text=LONG_TEXT)
+    assert row["result_partial"] is True and row["result_source_ref"], "the model saw a head+tail view"
+    assert lines[-1].isascii() and ax.sets == [("field", LONG_TEXT)] and ax.balanced()
+
+    effects = rr.produced_material(ctx)["effects"]
+    assert [effect["tool"] for effect in effects] == [extension_surface_name("unix_computer_use", "element_act")]
+    receipt = json.loads(effects[0]["receipt"])
+    assert receipt["observed_effect"] is True and receipt["action_outcome"] == "completed" and receipt["verified"] is False
+    assert {"label": receipt["element"]["label"], "label_after": receipt["element_after"]["label"],
+            "before": receipt["element"]["value"], "after": receipt["element_after"]["value"]} == {
+        "label": LONG_LABEL, "label_after": LONG_LABEL, "before": LONG_BEFORE, "after": LONG_TEXT + NORMALIZED}
+    assert "value_len" not in receipt["element"] and "value_len" not in receipt["element_after"]
+    assert effects[0]["receipt"] in rr.answer_text(reply="Typed.", produced=rr.produced_material(ctx), verification="")
 
 
 @pytest.mark.parametrize("damage", ["not_retained", "corrupt", "deleted"])

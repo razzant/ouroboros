@@ -54,7 +54,7 @@
         <p class="download-platform">Windows x64</p>
         <h2>Windows</h2>
         <a data-release-download="windows-x64" class="btn btn-primary" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0-windows-x64.zip">Download for Windows (.zip)</a>
-        <p>Extract the ZIP, open the <code>Ouroboros</code> folder, and run <code>Ouroboros.exe</code>.</p>
+        <p>Extract the ZIP to a permanent folder, open the <code>Ouroboros</code> folder, and run <code>Ouroboros.exe</code>.</p>
       </article>
       <article id="linux">
         <p class="download-platform">Linux x86_64</p>
@@ -96,6 +96,16 @@ brew install --cask razzant/ouroboros/ouroboros
 
     <h2>Optional CLI included with the app</h2>
     <p>The desktop downloads already contain an optional CLI installer. On macOS, after copying the app to Applications, double-click <code>Install CLI.command</code> in the mounted DMG; after a Homebrew install, run the last command under <a href="#homebrew">Homebrew on macOS</a>. On Linux use <code>./Ouroboros/bin/install-ouroboros-cli</code>; on Windows use <code>Ouroboros\bin\install-ouroboros-cli.cmd</code>. The installer creates a user-local <code>ouroboros</code> command without sudo.</p>
+
+    <h2 id="reinstall">Reinstall, move or remove</h2>
+    <p><code>~/Ouroboros</code> (data, memory and the code Ouroboros runs) is the installation; the app is a replaceable host. To replace or move the app, quit Ouroboros, put the new copy in place and open it: your data and code stay, and skill packages and sign-in startup follow the new copy at its next start. A new app changes only the bundled Python, SQLite and Node, never the code in <code>~/Ouroboros/repo</code>; in-app Update changes the code. <strong>Settings → About</strong> and the Updates page show both versions, and Ouroboros sees them in its host facts. Quit leaves the Claudexor engine running, by design.</p>
+    <ul>
+      <li><strong>macOS:</strong> drag the new <code>Ouroboros.app</code> onto Applications and choose Replace, then open it from Applications in Finder: Spotlight can take a while to list a new copy while it indexes. Do not run Ouroboros from the disk image.</li>
+      <li><strong>Windows:</strong> keep the extracted folder in one permanent place and run it from there, never from inside the ZIP. To update, quit, remove the old folder and extract the new ZIP to the same place.</li>
+      <li><strong>AppImage:</strong> keep one file at a fixed path and replace it under the same name. <strong>tar.gz:</strong> keep one fixed folder. <strong>deb/rpm:</strong> update with your package manager. <strong>Homebrew:</strong> <code>brew upgrade</code> or <code>brew reinstall</code> (above).</li>
+      <li>After moving the app, run Install CLI again: the <code>ouroboros</code> command points at one copy.</li>
+      <li>Before removing the app, turn off “Start Ouroboros on the host computer when you sign in” and delete the <code>ouroboros</code> command (<code>~/.local/bin/ouroboros</code>, or <code>%LOCALAPPDATA%\Ouroboros\bin\ouroboros.cmd</code> on Windows).</li>
+    </ul>
 
     <h2>Advanced: packaged Linux setup</h2>
     <p>Install the downloaded Debian package with <code>sudo apt install ./ouroboros_*_amd64.deb</code>, or an RPM with <code>sudo dnf install ./ouroboros-*.x86_64.rpm</code>. Native packages install to <code>/opt/ouroboros</code>, put <code>ouroboros</code> on <code>PATH</code>, and add a desktop entry plus an opt-in systemd user unit. They never enable or start that service during installation.</p>

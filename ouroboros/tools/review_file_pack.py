@@ -4,8 +4,9 @@ Owns what counts as sensitive, binary, oversized or vendored, the porcelain and
 name-status parsers that name the changed paths, the tracked-path listing the
 repository index walks, and the post-change pack of the touched files the commit
 triad packet carries — with the disclosed exclusion classes (span-only release
-carriers, prefix-duplicated governance docs). Content is redacted and fenced by
-the prompt-text owner before it is returned. Extracted from
+carriers, prefix-duplicated governance docs). A file the pack includes keeps its
+exact text, fenced by the prompt-text owner; sensitive names, binaries and
+oversized files are omitted whole and named, never rewritten. Extracted from
 ouroboros/tools/review_helpers.py (v7 D06 split, re-cut on the v7next tip);
 review_helpers.py re-exports every name. ``format_prompt_code_block`` is read
 inside f-strings, which the call-time handle cannot carry — it stays
@@ -332,9 +333,7 @@ def build_touched_file_pack(
 
         ext = fp.suffix.lstrip(".")
         lang = ext if ext else ""
-        redacted_content, redacted = _rh().redact_prompt_secrets(content)
-        note = "*(secret-like content redacted)*\n" if redacted else ""
-        parts.append(f"### {rel}\n{note}{format_prompt_code_block(redacted_content, lang)}\n")
+        parts.append(f"### {rel}\n{format_prompt_code_block(content, lang)}\n")
 
     return "\n".join(parts), omitted
 
@@ -529,7 +528,10 @@ def iter_repo_pack_entries(
     max_file_bytes: int = _MAX_FULL_REPO_FILE_BYTES,
     include_oversized_placeholder: bool = False,
 ) -> tuple[list[tuple[str, str, str, str]], list[str]]:
-    """Return reviewable tracked-file entries and omissions for repo packs."""
+    """Return reviewable tracked-file entries and omissions for repo packs.
+
+    Each entry is ``(rel, exact_text, language, note)``; ``note`` stays in the
+    public shape and is empty: included text is never rewritten."""
     exclude_paths = exclude_paths or set()
     tracked = tracked_paths if tracked_paths is not None else list_git_tracked_paths(repo_dir)
 
@@ -599,10 +601,8 @@ def iter_repo_pack_entries(
             _rh().logger.warning("Could not read repo file: %s", rel, exc_info=True)
             continue
 
-        content, redacted = _rh().redact_prompt_secrets(content)
         ext = fp.suffix.lstrip(".")
         lang = ext if ext else ""
-        note = "*(secret-like content redacted)*\n" if redacted else ""
-        entries.append((rel, content, lang, note))
+        entries.append((rel, content, lang, ""))
 
     return entries, omitted

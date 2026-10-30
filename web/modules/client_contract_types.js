@@ -12,6 +12,19 @@
  * @property {string=} post_commit_failed
  */
 /**
+ * @typedef {Object} ChatInbound
+ * @property {string=} reply_to
+ * @property {"chat"} type
+ * @property {string} content
+ * @property {string=} sender_session_id
+ * @property {string=} client_message_id
+ * @property {boolean=} force_plan
+ * @property {Array<Object>=} attachments  // [{filename, display_name, mime}] — image uploads become native blocks (v6.26.0)
+ * @property {number=} chat_id     // multi-project thread routing (v6.32.0); main chat = 1
+ * @property {string=} project_id  // per-project memory scope (v6.32.0)
+ * @property {Object=} client_surface  // raw sending-surface observables measured at send time (pywebview/ua/viewport/matchMedia/captured_at; optional IANA timezone)
+ */
+/**
  * @typedef {Object} CommandInbound
  * @property {Object=} client_surface
  * @property {"command"} type
@@ -254,6 +267,7 @@
  * @property {string[]} interface_paths
  * @property {ContractHttpEntry[]} http
  * @property {ContractWs} ws
+ * @property {CallSocketContract=} call_socket
  * @property {Object.<string,Object>} schemas
  */
 
@@ -1001,6 +1015,146 @@
  * @property {string} card_id
  * @property {boolean} pinned
  * @property {string=} pinned_at
+ */
+
+/**
+ * @typedef {Object} CallOpenRequest
+ * @property {number} chat_id
+ * @property {string} client_message_id
+ * @property {string=} feature
+ */
+/**
+ * @typedef {Object} CallOpenResponse
+ * @property {string} call_id
+ * @property {string} ws_path
+ * @property {boolean} vision
+ * @property {boolean=} joined
+ */
+/**
+ * @typedef {Object} CallRefusal
+ * @property {false} ok
+ * @property {string} code
+ * @property {string} error
+ */
+/**
+ * @typedef {Object} ConversationFinishedOutbound
+ * @property {"conversation_finished"} type
+ * @property {number} chat_id
+ * @property {string} call_id
+ * @property {string} task_id
+ * @property {string} reason
+ */
+/**
+ * Separate media socket; control schemas are in GET /api/contract.schemas.
+ * @typedef {Object} CallSocketContract
+ * @property {string} path
+ * @property {string} host_open_path
+ * @property {string} host_peer_path
+ * @property {string} host_auth
+ * @property {number} protocol
+ * @property {string} audio_header
+ * @property {number} audio_header_bytes
+ * @property {number} max_audio_payload_bytes
+ * @property {number} max_video_payload_bytes
+ * @property {number} max_control_bytes
+ * @property {Object.<string,string>} peer_messages
+ * @property {Object.<string,string>} server_messages
+ */
+/**
+ * @typedef {Object} HostCallOpenRequest
+ * @property {'meeting'} role
+ * @property {string=} call_id
+ * @property {string=} binding_id
+ * @property {Object=} event
+ * @property {string=} label
+ * @property {boolean=} mic
+ * @property {boolean=} speaker
+ * @property {boolean=} video
+ */
+/**
+ * @typedef {Object} HostCallOpenResponse
+ * @property {string} call_id
+ * @property {string} peer_path
+ */
+/**
+ * @typedef {Object} CallHello
+ * @property {'hello'} type
+ * @property {1} protocol
+ * @property {'owner'|'meeting'} role
+ * @property {boolean} mic
+ * @property {boolean} speaker
+ * @property {boolean=} video
+ * @property {number} rate
+ * @property {string=} label
+ */
+/**
+ * @typedef {Object} CallMute
+ * @property {'mute'} type
+ * @property {boolean} muted
+ */
+/**
+ * @typedef {Object} CallPlayed
+ * @property {'played'} type
+ * @property {string} item_id
+ * @property {number} played_ms
+ */
+/**
+ * @typedef {Object} CallContext
+ * @property {'context'} type
+ * @property {string} text
+ * @property {string} source
+ */
+/**
+ * @typedef {Object} CallParticipant
+ * @property {'participant'} type
+ * @property {string} label
+ * @property {boolean} speaking
+ */
+/**
+ * @typedef {Object} CallShare
+ * @property {'share'} type
+ * @property {boolean} sharing
+ * @property {'screen'|'camera'} kind
+ */
+/**
+ * @typedef {Object} CallBye
+ * @property {'bye'} type
+ * @property {string=} reason
+ */
+/**
+ * @typedef {Object} CallState
+ * @property {'state'} type
+ * @property {'preparing'|'connecting'|'live'|'reconnecting'|'closing'|'closed'} state
+ * @property {string} reason
+ * @property {string=} engine
+ * @property {string=} phase
+ * @property {string=} detail
+ * @property {'settings'|'retry'=} action
+ */
+/**
+ * @typedef {Object} CallActivity
+ * @property {'activity'} type
+ * @property {'working'|'idle'} activity
+ * @property {string} label
+ */
+/**
+ * @typedef {Object} CallTurn
+ * @property {'turn'} type
+ * @property {'awaiting'|'answering'|'idle'} turn
+ */
+/**
+ * @typedef {Object} CallCaption
+ * @property {'caption'} type
+ * @property {'owner'|'ouroboros'} speaker
+ * @property {string} text
+ * @property {boolean} final
+ * @property {string} item_id
+ * @property {boolean=} replace
+ */
+/**
+ * @typedef {Object} CallFlush
+ * @property {'flush'} type
+ * @property {number} epoch
  */
 
 /**

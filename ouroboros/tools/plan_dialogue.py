@@ -102,8 +102,32 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
             "own_dialogue": own, "related_rooms": pointers, **({"owner_words": words} if words else {})}
 
 
+def _recorded_masking(root: pathlib.Path, task_id: str, wave: dict, digest: str, coverage: Any) -> dict:
+    """The masking fact an earlier-schema wave recorded for its room snapshot. The retired engine
+    kept it in the exact wave (``evidence_manifest_full.own_dialogue.secrets_redacted``), never in
+    the snapshot bytes; it is carried only as recorded. A wave record this reader cannot read
+    leaves the snapshot, verified by its own ref, readable: whether those bytes were masked is
+    then unknown, so no flag is claimed and the coverage names the lost record as a gap."""
+    from ouroboros.tools.plan_review_artifacts import read_wave
+
+    manifest = wave.get("evidence_manifest_full")
+    if not isinstance(manifest, dict) and isinstance(wave.get("wave_artifact"), dict) and wave["wave_artifact"]:
+        try:
+            manifest = read_wave(root, task_id, wave["wave_artifact"]).get("evidence_manifest_full")
+        except (OSError, ValueError) as exc:
+            gap = {"kind": f"masking_record_unavailable:{type(exc).__name__}"}
+            return {"coverage": {**(coverage if isinstance(coverage, dict) else {}), "masking": {"gaps": [gap]}}}
+    own = manifest.get("own_dialogue") if isinstance(manifest, dict) else None
+    recorded = isinstance(own, dict) and own.get("secrets_redacted") is True and own.get("sha256") in (None, digest)
+    return {"secrets_redacted": True} if recorded else {}
+
+
 def plan_chat_reader(root: pathlib.Path, task_id: str):
-    """Resolve snapshot-qualified chat ranges only through recorded task custody."""
+    """Resolve snapshot-qualified chat ranges only through recorded task custody.
+
+    An earlier-schema wave's snapshot keeps the masking flag that wave recorded, or a named
+    coverage gap when that wave record is unreadable. An ask's carrier records none, so a
+    snapshot an ask captured while room capture still masked may hold masks it never named."""
     from ouroboros.artifacts import read_actor_source_bytes
 
     def read(locator: str):
@@ -132,8 +156,10 @@ def plan_chat_reader(root: pathlib.Path, task_id: str):
         for wave in reversed(state.get("waves") or []):
             ref = wave.get("dialogue_source_ref") or {}
             if ref.get("sha256") == digest and wave.get("dialogue_chat_id") == chat_id:
-                raw = read_actor_source_bytes(root, task_id, ref)
-                return {"text": raw.decode("utf-8"), "coverage": json.loads(raw.split(b"\n", 1)[0]).get("coverage", {})}
+                raw = read_actor_source_bytes(root, task_id, ref)  # the snapshot's own failures refuse
+                coverage = json.loads(raw.split(b"\n", 1)[0]).get("coverage", {})
+                return {"text": raw.decode("utf-8"), "coverage": coverage,
+                        **_recorded_masking(root, task_id, wave, digest, coverage)}
         return None
     return read
 
@@ -258,7 +284,7 @@ def dialogue_view(own: dict, keep: int | None = None) -> tuple[str, str, dict]:
     snapshot_section = (
         "## OWN ROOM SNAPSHOT (this ask)\n\n" + header + "\n\n"
         f"Captured {own.get('captured_at') or 'time unavailable'}. "
-        f"Not inline: {progress} progress rows and {len(others) - progress} host rows{cut}. The complete redacted "
+        f"Not inline: {progress} progress rows and {len(others) - progress} host rows{cut}. The complete "
         f"snapshot `{locator}` ({facts['snapshot_lines']} lines) is in task custody: a session reads "
         f"`{own.get('file') or '(not persisted for this dry run)'}`; a native episode reads "
         f"read_file(root='artifact_store', path='{(own.get('source_ref') or {}).get('path') or ''}'); a participant "

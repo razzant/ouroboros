@@ -35,12 +35,16 @@ class UpdateMergePlan(TypedDict, total=False):
 
 
 class UpdatePreflightRequest(TypedDict, total=False):
-    """POST /api/update/preflight has an intentionally empty JSON body."""
+    """POST /api/update/preflight: the empty body plans the in-place merge; ``candidate_id`` plans nothing and
+    reads the effects of that prepared candidate's Restart to update (409 ``candidate_changed`` for another)."""
+    candidate_id: str
 
 
 class UpdatePreflightResponse(TypedDict):
-    merge_plan: UpdateMergePlan
-    effects: NotRequired[Dict[str, Any]]  # target-bound engine transition, active_work and interpreter facts
+    merge_plan: UpdateMergePlan  # with candidate_id: the range that candidate was prepared for
+    # Engine transition, active_work and interpreter facts, bound to merge_plan's target or to `candidate_id`
+    # (its composition's pin and the runtime its preparation selected).
+    effects: NotRequired[Dict[str, Any]]
     letter: NotRequired[Optional[Dict[str, Any]]]  # prose of exactly these pins; absent or null means unknown
     qualification: NotRequired[Optional[Dict[str, Any]]]  # declared/observed checks of exactly these pins
 

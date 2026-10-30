@@ -167,9 +167,10 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
     from ouroboros.delegate_supervision import observed_run_activity
     from ouroboros.sleep_custody import accepted_receipt
     from ouroboros.gateway.state import _answer_stored, _chat_activities_snapshot_safe, _direct_turns_snapshot_safe
-    from ouroboros.gateway.state import _owner_fence_state, _task_activity_facts
+    from ouroboros.gateway.state import _task_activity_facts
     from ouroboros.review_pause import local_panel_seats, panel_activity
     from ouroboros.task_status import SETTLED_STATUSES
+    from ouroboros.work_stop import owner_fence_state
     from supervisor.log_addressing import resolve_project_chat
     from supervisor.message_bus import notification_chat_route, try_get_bridge
 
@@ -220,7 +221,7 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
                 or _answer_stored((row.get("root_phase_checkpoint") or {}).get("post_task_synthesis"))):
             return True
         # A retained sleep describes dependencies, never permission to ignore a later control.
-        owner_fence = _owner_fence_state(drive_root, row, task_id)
+        owner_fence = owner_fence_state(drive_root, row, task_id)
         if owner_fence == "unknown":
             return None
         if owner_fence in {"requested", "paused"}:

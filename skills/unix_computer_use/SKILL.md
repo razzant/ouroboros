@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
-description: Local and remote desktop observation/input tools with coordinate normalization, application targeting and honest place receipts (local macOS/Linux by default; optional OSWorld HTTP and SSH Mac backends).
-version: 0.5.3
+description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
+version: 0.6.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -22,7 +22,7 @@ tools:
     effect: read
 when_to_use: The user asks Ouroboros to inspect a desktop, take a screenshot, act in a named application (click/type/press keys there), drag, or operate a local/explicitly configured remote GUI under human or benchmark supervision.
 model_experience:
-  what_model_sees: Two dozen desktop tools (screenshot, click/type/key/scroll input with an optional app= target, activate_app, window_list with the frontmost app, ax_tree as bounded text, capabilities with the grants the local process holds, connection registry) join the tool list; each screenshot auto-attaches a WXGA-bounded image to the conversation in the same round, and every input receipt says whether its helper ran and who was in front when it was dispatched (where a reader answered), on every backend.
+  what_model_sees: Desktop tools include bounded AX reads, local macOS element_act press/set_value without activation or pointer input, explicit foreground input, screenshot observation IDs, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback and front observations.
   token_effect: The tool schemas add a moderate fixed cost to every round while the skill is enabled; each screenshot adds one image attachment (the dominant per-use cost), each input receipt about a hundred tokens of place facts, and an ax_tree read grows with the nodes it returns (bounded by max_nodes).
 ---
 
@@ -49,14 +49,18 @@ Tools:
   and `use_local` manage the local/remote connection registry in skill state.
 - `screenshot` captures the main display (or, on macOS with `app=`, the display
   holding that application's front window), downscales the image to fit WXGA
-  (1280x800, configurable) and persists the exact image-to-input coordinate
-  transform, including the display's origin. `display.selected_by` says how the
+  (1280x800, configurable). When geometry and persistence succeed, it returns
+  `mapped_input_available: true` with a saved image-to-input transform and observation ID.
+  Otherwise the image remains usable for viewing, but `mapped_input_available: false`
+  means no `coord_transform` or `observation_id` is supplied. SSH macOS uses the
+  primary display capture and its matching CoreGraphics bounds; it does not map a
+  single-screen image against the Finder desktop union. `display.selected_by` says how the
   display was chosen: `default`, `app`, or `fallback` when the named window
   could not be located (`app_window_unread` says why) and the main display was
   captured instead; the result then carries no `app`. Linux and the remotes
   capture their one screen and ignore `app=` (the result says so). Pass
-  coordinates read off the returned image directly to the input tools — they
-  are remapped automatically. The result carries the typed `auto_attach_image`
+  coordinates read off the returned image together with its `observation_id`
+  to the input tools; mapping is bound to that captured observation. The result carries the typed `auto_attach_image`
   field, so the host attaches the image to the conversation in the same round;
   an engine that cannot take images receives the path instead (host behaviour),
   so the text facts in every other tool are the way to check without a picture.
@@ -75,9 +79,43 @@ Tools:
   scripting commands (`scriptable`); `app=` filters, `limit` caps the rows.
 - `ax_tree` reads one window as text through the Accessibility API, bounded:
   the frontmost application's window, or `app=`'s without bringing it forward.
+- `element_act` performs local macOS `press` or text `set_value` through the
+  control's own Accessibility interface. It never activates, focuses, injects
+  global input, writes the clipboard or falls back to pointer/keyboard input.
+  The application itself may still raise a window: foreground observations
+  are evidence, not a universal non-interference guarantee.
 - `remote_exec` runs a shell command on the active remote backend only; it
   refuses on local backend. Use ordinary Ouroboros shell/file tools for local
   work.
+
+## Choosing a control path
+
+Prefer an application's own scripting commands when they express the task. For
+background UI work, use `element_act(app=..., do="press"|"set_value",
+select={identifier, role, label, nth}, window=..., text=...)`: name only the
+selector fields needed, from a fresh `ax_tree`/`window_list`. `window` is a
+window ID or exact title; `identifier` is AXIdentifier, `label` the full exact
+title/description, and `nth` is one-based among current matching controls.
+Tree IDs and coordinate marks are not reusable element handles. The helper
+resolves, revalidates, acts and reads back in one process; each call pays helper
+startup and a bounded walk. Ambiguous or incomplete selection refuses.
+
+The receipt separates `dispatched`, `action_outcome` and `element_after` from
+`front_before`/`front_after`. A completed AX call is not proof of the goal;
+verify the application's result. `CannotComplete`, a missing helper answer or
+a timeout can follow an effect: re-observe, never blindly replay. A failed
+readback does not erase an already completed action. Unsupported controls
+require a deliberate choice of another method, never a hidden foreground fallback.
+
+For foreground work, announce the handoff before activation. After the one-shot
+`activate_app`, use targeted inputs with `raise_policy="never"`: switching to
+another app then makes the next call refuse instead of taking the front back.
+Wait for the owner's return and obtain a fresh observation before continuing.
+Omitted policy remains `allow` for existing explicitly requested foreground
+work. Untargeted input is global and belongs to the same announced handoff,
+not background collaboration. Existing task Pause/Stop prevents later tool
+starts; it cannot retract an admitted OS action. Front checks are not an
+exclusive desktop lease, nor a guarantee against a switch during dispatch.
 
 Acting in a named application (`app=`):
 
@@ -95,8 +133,9 @@ Acting in a named application (`app=`):
   several classes, as LibreOffice's Writer and Calc do), every window of the
   process for `pid:`; "in front" means the active window is one of them. The
   tool resolves the name against the running list without launching anything,
-  brings the application forward when it is not already in front, reads who is
-  in front again, and only then sends the input. Two matches are
+  with `raise_policy="allow"` brings it forward if needed, then verifies the
+  front before input. `never` refuses instead of activating and attempts no
+  switch (`target_lost`, or `front_unread` when the front is unread). Two matches are
   a refusal that lists the candidates; an application that is not running is
   a refusal that lists the running applications; one that did not come to the
   front (macOS 14+ may refuse activation from a background process) is a
@@ -106,8 +145,9 @@ Acting in a named application (`app=`):
   first keeps its own, `activation_done`). An empty `app` (what a voice model
   sends for an unused optional field) means "untargeted": the input goes to
   whatever is in front, as before.
-- A `key` sequence (`'down down return'`) brings the target forward once and,
-  before every later step, reads the front again: when the named application
+- A `key` sequence (`'down down return'`) validates every step before input or
+  activation, applies the raise policy once, and rechecks the front before
+  every later step: when the named application
   (or window) has left the front (a `cmd+tab` in the sequence, the owner
   switching away, a sibling window of the same process coming forward for a
   title-named target, a window of the class that was not listed with a
@@ -142,9 +182,13 @@ Acting in a named application (`app=`):
 
 Coordinate contract:
 
-- Input tools accept coordinates in the LAST screenshot's image space and
-  remap them through the stored transform (scale and display origin);
-  `raw=true` bypasses remapping.
+- Mapped input requires the screenshot's `observation_id` and coordinates in
+  its image space. A missing, expired or mismatched mapping refuses before
+  activation/input; there is no implicit raw-coordinate fallback. The binding
+  covers the connection, resolved destination, backend and observed geometry,
+  not unchanged page content: obtain a fresh observation after UI changes.
+  `raw=true` explicitly selects measured native input coordinates and bypasses
+  remapping. A coordinate-free `mouse_up` remains usable to release a hold.
 - macOS input consumes LOGICAL points while screenshots are physical pixels;
   the stored transform folds the Retina scale in, computed from the captured
   display's own CoreGraphics bounds (a second display no longer stretches the
@@ -154,10 +198,10 @@ Coordinate contract:
   an X11/Wayland desktop and an OSWorld guest, which have no screen space left
   of or above their origin, refuse them before any call, also when a stored
   transform maps a point there: a screenshot of another display or backend,
-  so take a screenshot of this desktop first). Without those bounds the Finder
-  desktop size is used (the union of all displays) and the transform is always
-  flagged `approx`; an SSH Mac's transform is always `approx` for the same
-  reason.
+  so take a screenshot of this desktop first). Missing exact display bounds
+  yield a capture-only result, not a guessed Finder-union mapping. SSH Mac
+  capture and mapping use the same primary display; unavailable geometry also
+  means capture-only. Raw coordinates require independently verified native points.
 
 Input receipts (the same contract on every backend):
 
@@ -278,13 +322,17 @@ Backend matrix (honest limitations):
   (`cmd`, `cmd+shift`, ...): cliclick `kd:`/`ku:` accept only modifiers and
   `kp:` cannot hold — non-modifier holds report an honest error. In `key`
   combos the base key is tapped while modifiers are held (`cmd+s` = hold cmd,
-  tap s). `type_text` with `via=paste` writes the clipboard (`pbcopy`) and
+  tap s). On a local or SSH Mac and on X11 a letter's case under a modifier adds
+  no Shift (`cmd+S` = `cmd+s`; Shift is named: `cmd+shift+s`), and a bare `A` is a
+  capital. `type_text` with `via=paste` writes the clipboard (`pbcopy`) and
   pastes with `cmd+v`, after the target was verified in front (a refusal leaves
   the clipboard alone; the receipt says whether the clipboard was replaced,
   also when the paste chord after it failed); use it for
   long or non-ASCII text, which `cliclick t:` types slowly. `via` accepts
   `type` or `paste`; anything else is refused.
-- Linux X11: `xdotool` (input and the active window), `gnome-screenshot`/`scrot`
+- Linux X11: key/hold validation also requires loadable `libX11` (discovered by
+  `ctypes.util.find_library`); missing validation refuses without sending a prefix.
+  `xdotool` (input and the active window), `gnome-screenshot`/`scrot`
   (capture), `wmctrl` (window rows and `app=` activation through
   `wmctrl -i -a`, verified with `xdotool getactivewindow` matched to the rows,
   so no `getwindowclassname` is needed), ImageMagick (downscaling). Targeting
@@ -344,7 +392,8 @@ Backend matrix (honest limitations):
   the in-VM clipboard (`pyperclip` + `ctrl+v`, ASCII `typewrite` fallback) so
   Unicode is not silently dropped; every action's `ok` reflects the guest
   process `returncode`/`status` (HTTP 200 alone is not success); `key`
-  `backspace` presses BackSpace and `fwd-delete` presses forward Delete;
+  `backspace` presses BackSpace and `fwd-delete` presses forward Delete, and a
+  letter reaches pyautogui as written (`ctrl+C` = `hotkey('ctrl', 'C')`);
   screenshots are capped at 20 MB and PNG-validated before use.
 - Remote SSH macOS: `screenshot` uses remote `screencapture` + `scp`; input uses
   `cliclick` on the Mac, wrapped so the same ssh call reads the frontmost

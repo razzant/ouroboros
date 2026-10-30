@@ -734,7 +734,7 @@ class OwnedClaudexorDaemon:
         from ouroboros.process_custody import spawn_supervised
         from ouroboros.platform_layer import subprocess_new_group_kwargs
 
-        log.info("Spawning owned claudexord under %s from %s", config_dir, runtime.get("source") or "external")
+        log.info("Spawning owned claudexord under %s from %s on %s", config_dir, runtime.get("source") or "external", command[0])
         _write_ownership_marker()
         with self._lock:
             self._check_start_generation(generation)

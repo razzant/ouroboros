@@ -204,6 +204,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
            if hasattr(ctx, "_actor_loaded_tool_names") else {}),
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
         "sleep_interaction_seen": dict(getattr(ctx, "_sleep_interaction_seen", None) or {}),
+        "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
+        "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
+        "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
         "held_owner_messages": dict(getattr(ctx, "_held_owner_messages", None) or {}),
         "open_relays": dict(getattr(ctx, "_open_relays", None) or {}),
         # Own routing acts still unconfirmed: a resumed turn reports their outcomes too.
@@ -1010,10 +1013,12 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
     review_callback = getattr(ctx, "review_wait_callback", None)
     if not callable(callback) and not callable(review_callback):
         raise RuntimeError("required owner wait has no worker continuation owner")
-    checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage, round_idx, tool_schemas, seen,
-                                       review_binding=review_binding)
     from ouroboros import model_sleep
 
+    if not review_binding and model_sleep.withdraw_for_new_holds(ctx, messages) and not ctx._owner_wait_requested:
+        return  # a stop begun since arming reaches the mind before the park; the same request then sleeps
+    checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage, round_idx, tool_schemas, seen,
+                                       review_binding=review_binding)
     if not callable(callback):
         outcome = review_callback(ctx, checkpoint, messages)
         append_wake_notice(ctx, checkpoint, outcome, messages)
@@ -1121,6 +1126,12 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     seen.update(state["seen"])
     ctx._loop_mailbox_seen_ids = seen
     ctx._sleep_interaction_seen = dict(state.get("sleep_interaction_seen") or {})
+    # A legacy state without this map shows each current hold once more before its wait arms.
+    ctx._held_dependencies_seen = dict(state.get("held_dependencies_seen") or {})
+    # Each record's place: an older source read whole later never replaces a newer one (``model_sleep._record_holds``).
+    ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
+    # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
+    ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
     ctx._owner_directives = state["owner_directives"]
     ctx._held_owner_messages = dict(state.get("held_owner_messages") or {})
     ctx._open_relays = dict(state.get("open_relays") or {})

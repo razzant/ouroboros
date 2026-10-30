@@ -1361,6 +1361,7 @@ class MCPManager:
         return {"refreshed": {key: self.refresh_server(key) for key in ids}}
 
     def refresh_all_background(self, *, reason: str = "settings") -> None:
+        """``refresh_all`` on a daemon thread, one at a time; with nothing to list, none starts."""
         with self._lock:
             if not self._enabled or not any(rt.config.enabled for rt in self._servers.values()):
                 return

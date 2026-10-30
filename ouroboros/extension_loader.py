@@ -115,12 +115,14 @@ from ouroboros.extension_registry_state import (
     _load_failures,
     _lock,
     _record_companion_name,  # noqa: F401
-    _routes,
-    _settings_sections,
+    _routes,  # noqa: F401 — facade re-export (extraction contract)
+    SURFACE_KINDS,
+    realtime_load_refusal,
+    _settings_sections,  # noqa: F401 — facade re-export (extraction contract)
     _tools,
-    _ui_tabs,
+    _ui_tabs,  # noqa: F401 — facade re-export (extraction contract)
     _unloading,
-    _ws_handlers,
+    _ws_handlers,  # noqa: F401 — facade re-export (extraction contract)
     extension_generation_digest,  # noqa: F401 — ABI-9 dispatch-provenance API
     get_tool_stamped as _registry_get_tool_stamped,
 )
@@ -375,6 +377,20 @@ def reconcile_extension(
             _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
             _finalize_extension_reconcile(state, drive_root, skill_name, reason="reconcile_load_error", health_stamp=health_stamp)
             return state
+        if was_live and subject is not None:
+            with _lock:
+                bundle = _extensions.get(skill_name)
+            if bundle and bundle.runtime_identity:
+                was_live = bundle.runtime_identity == extension_import_identity(subject)
+            if was_live and bundle and bundle.catalog_identity is not None:
+                from ouroboros.extension_process_runner import extension_catalog_identity
+                was_live = bundle.catalog_identity == extension_catalog_identity(subject, drive_root, settings_reader)
+        if (state.get("reason") != "disabled" and not (was_live and state.get("desired_live"))
+                and (refusal := realtime_load_refusal(skill_name))):
+            # Keep the old publication; reconcile retries after the call (not a load failure).
+            state.update(reason=refusal, action="extension_reload_pending")
+            _finalize_extension_reconcile(state, drive_root, skill_name, reason=refusal, health_stamp=health_stamp)
+            return state
         if state.get("reason") == "missing" or state.get("reason") == "not_extension":
             if loaded_present:
                 unload_extension(skill_name)
@@ -393,14 +409,6 @@ def reconcile_extension(
             _finalize_extension_reconcile(state, drive_root, skill_name, reason="desired_disabled", health_stamp=health_stamp)
             return state
 
-        if was_live and subject is not None:
-            with _lock:
-                bundle = _extensions.get(skill_name)
-            if bundle and bundle.runtime_identity:
-                was_live = bundle.runtime_identity == extension_import_identity(subject)
-            if was_live and bundle and bundle.catalog_identity is not None:
-                from ouroboros.extension_process_runner import extension_catalog_identity
-                was_live = bundle.catalog_identity == extension_catalog_identity(subject, drive_root, settings_reader)
         if was_live:
             state["action"] = "extension_already_live"
             if is_server_process():
@@ -596,6 +604,13 @@ def load_extension(
     """
     if drive_root is None:
         raise TypeError("load_extension requires explicit drive_root")
+    with _lifecycle_lock_for(skill.name):  # a live call's skill refuses an automatic reload
+        return realtime_load_refusal(skill.name) or _load_extension_locked(
+            skill, settings_reader, drive_root=drive_root, skills=skills, repo_path=repo_path,
+            _force_in_process=_force_in_process)
+
+
+def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_path, _force_in_process):
     if not skill.manifest.is_extension():
         return f"skill {skill.name!r} is not type=extension"
     if skill.load_error:
@@ -870,16 +885,9 @@ def _unload_extension_locked(skill_name: str) -> None:
             companion_names = list(bundle.companion_names) if bundle else []
             supervised_futures = list(bundle.supervised_futures) if bundle else []
             if bundle:
-                for key in bundle.tools:
-                    _tools.pop(key, None)
-                for key in bundle.routes:
-                    _routes.pop(key, None)
-                for key in bundle.ws_handlers:
-                    _ws_handlers.pop(key, None)
-                for key in bundle.ui_tabs:
-                    _ui_tabs.pop(key, None)
-                for key in bundle.settings_sections:
-                    _settings_sections.pop(key, None)
+                for kind, live, _label in SURFACE_KINDS:
+                    for key in getattr(bundle, kind):
+                        live.pop(key, None)
         for future in supervised_futures:
             try:
                 future.cancel()
@@ -894,8 +902,7 @@ def _unload_extension_locked(skill_name: str) -> None:
         for callback in callbacks:
             _run_unload_callback(skill_name, callback)
         prefix = _module_key(skill_name)
-        # Copy keys before mutating sys.modules.
-        for mod_name in list(sys.modules.keys()):
+        for mod_name in list(sys.modules):
             if mod_name == prefix or mod_name.startswith(prefix + "."):
                 sys.modules.pop(mod_name, None)
         if import_root is not None:
@@ -925,6 +932,9 @@ def reload_all(
     results: Dict[str, Any] = {}
     for gone in (loaded_names | cached_names) - skill_names:
         try:
+            if refusal := realtime_load_refusal(gone):
+                results[gone] = refusal
+                continue
             unload_extension(gone)
             _sweep_stale_extension_imports(drive_root, gone)
         except Exception as exc:

@@ -163,6 +163,7 @@ def handle_chat_direct(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    realtime_turn: Any = None,
 ) -> None:
     # The turn's own thread begins its execution at its first statement, so a turn that
     # stops before admission decides it still says where it stands (server_liveness);
@@ -182,6 +183,7 @@ def handle_chat_direct(
             _handle_chat_direct_locked(
                 chat_id, text, image_data,
                 task_constraint=task_constraint, task_metadata=task_metadata,
+                **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
             )
     finally:
         registry.end_execution(execution)
@@ -193,11 +195,13 @@ def _handle_chat_direct_locked(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    realtime_turn: Any = None,
 ) -> None:
     # The registered agent owns the strict money read, including its storage wait and controls.
     _run_chat_task(
         None, chat_id, text, image_data,
         task_constraint=task_constraint, task_metadata=task_metadata,
+        **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
     )
 
 
@@ -267,6 +271,7 @@ def _run_chat_task(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    realtime_turn: Any = None,
 ) -> None:
     """Build the direct-chat task and run it on the given agent, draining events.
 
@@ -275,6 +280,7 @@ def _run_chat_task(
     admitted = _admit_chat_task(
         agent, chat_id, text, image_data,
         task_constraint=task_constraint, task_metadata=task_metadata,
+        **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
     )
     if admitted is not None:
         _execute_chat_task(admitted)
@@ -287,6 +293,7 @@ def _admit_chat_task(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    realtime_turn: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Build and REGISTER one direct turn; ``None`` when it was refused.
 
@@ -345,13 +352,23 @@ def _admit_chat_task(
     admitted: Dict[str, Any] = {
         "task": task, "agent": agent, "activity": activity, "registry": registry,
         "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": kind,
-        "task_metadata": task_metadata, "execution": activity.execution if activity else None,
+        "task_metadata": task_metadata, "realtime_turn": realtime_turn,
+        "execution": activity.execution if activity else None,
     }
     try:
         if agent is None and not deferred:
             agent = _pool()._get_chat_agent()
             activity.actor = agent
             admitted["agent"] = agent
+        if realtime_turn is not None:
+            from ouroboros.live_conversation import LiveConversationTurn
+
+            if not isinstance(realtime_turn, LiveConversationTurn):
+                raise ValueError("call requires a host-admitted request")
+            if agent is not None:
+                agent._realtime_turn = realtime_turn
+            task["model"] = realtime_turn.model
+            task["use_local_model"] = False
         from ouroboros.consciousness_authority import apply_consciousness_authority
         from ouroboros.contracts.task_contract import attach_task_contract
 
@@ -632,7 +649,8 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
         ok = True
     except Exception as e:
         from supervisor.direct_pause import recover_direct_pause
-        ok = recover_direct_pause(task, e)
+        if _close_failed_call(admitted, e) is None:
+            ok = recover_direct_pause(task, e)
         if not ok:
             _report_direct_chat_error(admitted, e)
     finally:
@@ -640,11 +658,75 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
     return ok
 
 
+def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
+    """Notify the admitted call independently of result-store recovery."""
+    if admitted.get("realtime_turn") is not None:
+        from ouroboros.call_peers import close_hub
+        from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.contracts.realtime import RealtimeSetupError
+        from ouroboros.live_conversation import LiveConversationTurn
+        from ouroboros.realtime_setup import CONTEXT_CAPACITY_DETAIL
+        from ouroboros.store import StoreBusy
+
+        turn = admitted["realtime_turn"]
+        if isinstance(turn, LiveConversationTurn):
+            # The live run normally closes its hub. Preparation can fail before it owns that duty.
+            # Close before logging too: a busy store must not strand the admitted call.
+            if isinstance(e, MinimumViewUnfit):
+                with turn._lock:
+                    already_closed, turn._closed = turn._closed, True
+                close_hub(turn.spec.call_id, "context_capacity", detail=CONTEXT_CAPACITY_DETAIL)
+                if not already_closed:
+                    turn.publish({"type": "conversation_finished", "chat_id": turn.spec.chat_id,
+                                  "call_id": turn.spec.call_id, "task_id": admitted["task"]["id"],
+                                  "reason": "context_capacity"})
+                return RealtimeSetupError("context_capacity", CONTEXT_CAPACITY_DETAIL)
+            busy = isinstance(e, StoreBusy) or isinstance(e.__cause__, StoreBusy)
+            close_hub(turn.spec.call_id, "store_busy" if busy else "call_start_failed",
+                      detail=("The local store is busy. Please try the call again." if busy else
+                              "The call could not start. Please try again."))
+
+
+def _report_call_context_refusal(admitted, unfit, refusal) -> None:
+    """Finish an admitted call whose ordinary context build failed before the host existed."""
+    from dataclasses import asdict
+    from ouroboros.agent_task_pipeline import emit_task_results
+
+    task, agent, turn = admitted["task"], admitted["agent"], admitted["realtime_turn"]
+    measurement = {key: getattr(unfit, key) for key in (
+        "fixed_input_tokens", "memory_view_tokens", "estimated_input_tokens", "raw_input_tokens",
+        "measurement_density", "response_reserve_tokens", "work_room_tokens", "work_room_deficit_tokens")}
+    measurement.update(capacity_total_tokens=unfit.window_tokens, capacity_deficit_tokens=unfit.deficit_tokens)
+    event = {"type": "call.fit_refused", "ts": utc_now_iso(), "task_id": task["id"],
+             "call_id": turn.spec.call_id, "reason": refusal.code, "stage": "task_preparation",
+             "fit": {"measurement": measurement}, "physical": unfit.physical,
+             "deficit_tokens": unfit.deficit_tokens, "route_facts": asdict(turn.catalog_model.facts),
+             "units": turn.catalog_model.facts.basis}
+    append_jsonl(agent.env.drive_root / "logs" / "events.jsonl", event)
+    events = []
+    event_queue = _TurnEventQueue(_pool().get_event_q(), task["id"], admitted["chat_id"],
+                                initiator=str((admitted.get("task_metadata") or {}).get("initiator") or ""))
+    emit_task_results(
+        agent.env, agent.memory, agent.llm, events, task, str(refusal),
+        {"terminal_origin": "host_notice", "execution_status": "infra_failed", "reason_code": refusal.code},
+        {"reasoning_notes": [], "tool_calls": [], "fit_refusal": event},
+        getattr(agent, "_task_started_ts", time.time()), agent.env.drive_root / "logs",
+        ctx=getattr(agent.tools, "_ctx", None), event_queue=event_queue)
+    for event in events:
+        _pool().get_event_q().put(stamp_finalization_enqueue(event_queue.stamp(event)))
+    if admitted.get("activity") is not None:
+        admitted["activity"].reply_handed_off = True
+
+
 def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> None:
     """Record a direct-turn failure and conclude the turn in the chat."""
     import traceback
     task, chat_id, kind = admitted["task"], admitted["chat_id"], admitted["kind"]
     client_msg_id, task_metadata = admitted["client_msg_id"], admitted.get("task_metadata")
+    refusal = _close_failed_call(admitted, e)
+    if refusal is not None:
+        _report_call_context_refusal(admitted, e, refusal)
+        return
     stopped = (getattr(e, "before_task_start", False)
                and getattr(e, "control_reason", "") in {"cancelled", "finalize_requested"})
     exhausted = getattr(e, "before_task_start", False) and getattr(e, "control_reason", "") == "budget_exhausted"

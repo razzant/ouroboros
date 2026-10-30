@@ -14,7 +14,7 @@ import pytest
 
 from ouroboros import subagent_worktrees
 from supervisor import update_prepare
-from tests.body_candidate_support import git
+from tests.body_candidate_support import git, stage_then_edit_in_one_second
 from tests.test_update_activation import STAGED, UNSTAGED, Scene
 
 pytestmark = pytest.mark.serial
@@ -858,6 +858,33 @@ def test_the_snapshot_reads_one_copy_of_the_real_index_and_writes_nothing_beside
     assert git(scene.serving, "show", f"{snap['index_tree']}:docs/note3.txt") == "note 3"
     assert git(scene.serving, "show", f"{snap['files_tree']}:docs/note3.txt") == "edited after staging"
     assert git(scene.serving, "show", f"{snap['files_tree']}:local-scratch.txt") == "mine, untracked"
+
+
+@pytest.mark.parametrize("split", [False, True], ids=["whole_index", "split_index"])
+def test_a_same_size_edit_in_the_second_its_index_was_written_reaches_the_files_layer(scene, split):
+    """Git checks an entry stamped in its index file's own second by content (racily clean), so it sees a same-size
+    edit made then. The copy keeps the real index's time, so W carries that edit as Git does and I keeps what was
+    staged; the real index keeps its bytes and its time. A copy stamped with its own, later time trusted the stale
+    stat data and lost the edit from W. LABELLED CONTROLLED TIMING (``stage_then_edit_in_one_second``): the stage
+    and the edit share one second, and the snapshot starts after it."""
+    if split:
+        git(scene.serving, "config", "core.splitIndex", "true")
+        git(scene.serving, "update-index", "--split-index")
+    if not stage_then_edit_in_one_second(scene.serving, "ouroboros/mod_a.py", "GEN = 'GEN_OLD'\n", "GEN = 'GEN_NEW'\n"):
+        pytest.skip("the stage and the edit never fit one second here: the race was not set")
+    git_dir = pathlib.Path(git(scene.serving, "rev-parse", "--absolute-git-dir"))
+    index, shared = git_dir / "index", sorted(git_dir.glob("sharedindex.*"))
+    assert bool(shared) == split
+    before = (index.read_bytes(), index.stat().st_mtime_ns, {path.name: path.read_bytes() for path in shared})
+
+    snap = update_prepare.snapshot(scene.serving, "ouroboros")
+
+    assert (index.read_bytes(), index.stat().st_mtime_ns, {path.name: path.read_bytes() for path in shared}) == before
+    assert snap["refusals"] == [] and snap["dirty"] is True
+    assert git(scene.serving, "show", f"{snap['files_tree']}:ouroboros/mod_a.py") == "GEN = 'GEN_NEW'"
+    assert git(scene.serving, "show", f"{snap['index_tree']}:ouroboros/mod_a.py") == "GEN = 'GEN_OLD'"
+    assert (snap["index_tree"], snap["files_tree"]) == _listing_snapshot(scene.serving)  # every file hashed
+    assert git(scene.serving, "diff", "--name-only", env={"GIT_OPTIONAL_LOCKS": "0"}) == "ouroboros/mod_a.py"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a POSIX shell stands in for an older Git")

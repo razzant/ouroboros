@@ -153,6 +153,13 @@ def test_a_source_the_mind_restored_stays_whole_across_renewal(tmp_path):
             assert not any(row.get("tool_call_id") == "unasked" for row in seed)
             from ouroboros.context_renewal import restored_sources
             assert restored_sources(seed) == [{key: ref[key] for key in ("checkpoint_ref", "unit_id", "raw_sha256")}]
+            from ouroboros.context_renewal import physical_window_cut
+            from ouroboros.context_fit import estimate_context_prompt_tokens
+            expanded = [*rows[:2], {"role":"assistant", "content":"old whole reply "*10000}, *rows[2:]]
+            cut, record = physical_window_cut(expanded, drive_root=tmp_path, task_id="renewal",
+                measure=estimate_context_prompt_tokens, usable=estimate_context_prompt_tokens(rows)+1500)
+            assert record and restored[0] in cut
+
 
 
 def test_a_second_renewal_keeps_the_first_renewals_index_until_a_newer_note(tmp_path):

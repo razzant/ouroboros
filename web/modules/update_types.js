@@ -26,12 +26,13 @@
 
 /**
  * @typedef {Object} UpdatePreflightRequest
+ * @property {string=} candidate_id The prepared candidate whose Restart to update effects are read; nothing is planned.
  */
 
 /**
  * @typedef {Object} UpdatePreflightResponse
  * @property {UpdateMergePlan} merge_plan
- * @property {Object=} effects
+ * @property {Object=} effects Bound to merge_plan's target, or to its `candidate_id` for a prepared candidate.
  * @property {?Object=} letter
  * @property {?Object=} qualification
  */

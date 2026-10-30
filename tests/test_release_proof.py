@@ -484,11 +484,11 @@ def test_linux_packages_ship_the_systemd_user_unit():
     """
     builder = (REPO / "scripts" / "build_linux_packages.sh").read_text(encoding="utf-8")
     smoke = (REPO / "scripts" / "smoke_linux_packages.sh").read_text(encoding="utf-8")
-    unit = (REPO / "packaging" / "systemd" / "ouroboros.service").read_text(encoding="utf-8")
+    unit = (REPO / "packaging" / "systemd" / "ouroboros.service.in").read_text(encoding="utf-8")
 
     # deb stage
     assert (
-        'install -m 644 packaging/systemd/ouroboros.service'
+        'install -m 644 packaging/systemd/ouroboros.service.in'
     ) in builder
     assert '"$ROOT/usr/lib/systemd/user"' in builder
     # rpm stage

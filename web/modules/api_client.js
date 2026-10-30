@@ -8,6 +8,20 @@ export async function apiFetch(url, init = {}) {
     return fetch(url, init);
 }
 
+/** Owner admission uses the ordinary authenticated gateway and canonical ingress. */
+export function openLiveConversation(payload) {
+    return fetchJson('/api/call/open', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+        { rejectOkFalse: true });
+}
+
+export function liveConversationSocket(path) {
+    if (!/^\/ws\/call\/[a-f0-9]+$/.test(path)) throw new Error('Invalid call address');
+    const url = new URL(path, window.location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new WebSocket(url.href);
+}
+
 /** How long one `/api/state` read may take, request and body together: an engineering tolerance, not a target. */
 export const STATE_READ_LIFETIME_MS = 60_000;
 
@@ -639,8 +653,10 @@ export const apiClient = {
     updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
     updateCheck: () => jsonPost('/api/update/check', {}),
-    /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
-    updatePreflight: () => jsonPost('/api/update/preflight', {}),
+    /** The in-place plan, or with `candidateId` what that prepared candidate's Restart to update does (no plan).
+     *  @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
+    updatePreflight: (candidateId = '') => jsonPost('/api/update/preflight',
+        candidateId ? { candidate_id: String(candidateId) } : {}),
     /**
      * The owner's Write/Rewrite: one ordinary Main task describes this exact range.
      * @param {'write'|'rewrite'} mode

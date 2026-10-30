@@ -19,9 +19,9 @@ set "PYTHONPATH=%ROOT%"
 set "OUROBOROS_PACKAGED_BUNDLE_ROOT=%ROOT%"
 set "PYTHONDONTWRITEBYTECODE=1"
 if defined LOCALAPPDATA (
-    set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\Ouroboros\pycache"
+    set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\Ouroboros\pycache.noindex"
 ) else (
-    set "PYTHONPYCACHEPREFIX=%USERPROFILE%\Ouroboros\pycache"
+    set "PYTHONPYCACHEPREFIX=%USERPROFILE%\Ouroboros\pycache.noindex"
 )
 if defined PYTHONPYCACHEPREFIX if not exist "%PYTHONPYCACHEPREFIX%" mkdir "%PYTHONPYCACHEPREFIX%" >nul 2>nul
 "%PY%" -m ouroboros.packaged_cli %*

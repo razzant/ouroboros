@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import shutil
+import sys
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -111,6 +112,27 @@ def _tools_found() -> list[str]:
     return tools
 
 
+def _host_line(repo_dir: str) -> str:
+    """Which copy of the app runs which body version, re-derived at every start: the app is a replaceable host.
+    The body's commit rides the runtime section; here it would rewrite this cached block after every commit."""
+    from ouroboros.platform_layer import BUNDLE_DIR_ENV, app_location_labels
+
+    try:
+        version = (Path(repo_dir) / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        version = "unknown"
+    body = f"body {version}"
+    bundle_text, app = os.environ.get(BUNDLE_DIR_ENV, "").strip(), os.environ.get("OUROBOROS_APP_VERSION", "").strip()
+    bundle = Path(bundle_text)
+    if not (bundle_text and app and (bundle / "repo_bundle_manifest.json").is_file()):
+        return f"source runtime (Python {platform.python_version()} at {sys.executable}); {body}"
+    from ouroboros.desktop_autostart import app_copy, own_appimage
+
+    where = Path(own_appimage(bundle) or app_copy(bundle))
+    measured = ", ".join(app_location_labels(where))  # facts, never a guess from the folder's name
+    return f"App {app} at {where}{f' ({measured})' if measured else ''} (bundled Python {platform.python_version()}); {body}"
+
+
 def measured_block(repo_dir: str = "", data_dir: str = "") -> str:
     """The host's fenced block: system facts, a probe of common binaries and the roots in use.
 
@@ -121,6 +143,7 @@ def measured_block(repo_dir: str = "", data_dir: str = "") -> str:
     return f"""{MEASURED_START}
 ## System (measured at startup, {stamp})
 - **OS**: {platform.system()} {platform.release()} ({platform.machine()})
+- **Host**: {_host_line(repo_dir)}
 - **CPU**: {get_cpu_info()}
 - **RAM**: {get_system_memory()}
 - **User**: {user}

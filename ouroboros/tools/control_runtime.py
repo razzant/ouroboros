@@ -503,6 +503,10 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=("⚠️ No active chat — cannot send proactive message.")))
     if not text or not text.strip():
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ Empty message.")))
+    if reply_to_relay == "" and not getattr(ctx, "_open_relays", None):
+        # Engines that fill every optional field send "" for a return they do not mean
+        # (Grok, 27.10 stand call); with nothing open to return to, it is an ordinary send.
+        reply_to_relay = None
     # Models may fill optional keys: an empty value is the omitted default.
     target = str(destination or "").strip().lower() or "current"
     if target not in ("current", "main"):

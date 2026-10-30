@@ -1,0 +1,931 @@
+/* Live calls: Talk in the Send capsule, the live capsule in the text row's place (the chip) and its
+   big view, the sheet when Talk cannot work, the call's card, the shell's "In call" mark, and the
+   visual (the wave in the glass) last, as one block another visual replaces. Surfaces, shadows, tones, radii, type and motion are
+   the design bible's tokens (DESIGN.md "Airy dopamine", ui.css "One control, three tones"); the
+   call adds only what is its own: the two voices' light, the one light in the interface that
+   answers sound, on the capsule and never the room. The capsule writes its state on the composer
+   (`.chat-input-wrap[data-call…]`), the light writes `--call-mic` and `--call-out` there. */
+
+:root {
+    --call-amber-rgb: 245, 158, 11;
+    --call-touch-target: 44px;
+    --call-words-leading: 1.2;
+}
+
+:root[data-theme="light"] {
+    /* Amber that a light page can carry as a line (5:1 on white). */
+    --call-amber-rgb: 180, 83, 9;
+}
+
+/* ---- Talk ---------------------------------------------------------------------------------- */
+
+/* Talk and Send keep one width, measured from Talk, so typing the first letter moves nothing. */
+.chat-send-inline[data-call-entry] {
+    min-width: var(--call-entry-width, 0px);
+    justify-content: center;
+}
+
+.chat-send-inline[data-call-entry="talk"] {
+    gap: 6px;
+}
+
+/* ---- The live capsule ------------------------------------------------------------------------ */
+
+.chat-input-wrap[data-call] {
+    isolation: isolate;
+}
+
+.chat-input-wrap[data-call] .chat-text-row {
+    position: relative;
+    container: call-row / inline-size;
+    /* The composer surface lives on .chat-field; the call glass needs the same fixed corner. */
+    border-radius: var(--radius-sheet);
+}
+
+/* Focus inside the sheet is a button's own ring, not the text field's: the composer keeps floating. */
+.chat-input-wrap[data-call="sheet"] .chat-text-row:focus-within {
+    border-color: transparent;
+    background: var(--surface-float);
+    box-shadow: var(--elev-float);
+}
+
+.chat-input-wrap[data-call-view="voice"] .chat-text-row > :not(.call-capsule):not(.call-glass),
+.chat-input-wrap[data-call-view="big"] .chat-text-row > :not(.call-capsule):not(.call-glass),
+.chat-input-wrap[data-call-view="sheet"] .chat-text-row > :not(.call-capsule):not(.call-glass) {
+    display: none;
+}
+
+/* The capsule keeps the row's footprint: as tall as the field's one line (style.css #chat-input: the
+   section size at line-height 1.45 with 5 px above and below), so a call starting or the keyboard
+   view opening never changes the composer's height. */
+.call-capsule {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: max(var(--composer-control-height), calc(var(--type-section) * 1.45 + 10px));
+}
+
+.call-capsule[hidden],
+.call-capsule [hidden] {
+    display: none;
+}
+
+.call-visual {
+    position: relative;
+    display: flex;
+    flex: none;
+}
+
+/* Keyboard: the field returns before the call's controls, the wave dimmed behind it. End and the
+   way back to voice never leave the row. A narrow row gives the field Mute's and Show's room (Mute is
+   one press away in the voice view, and the wave still shows the call is live), the narrowest also
+   the attachment button's. */
+.chat-input-wrap[data-call-view="keyboard"] .call-capsule {
+    display: contents;
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .call-words,
+.chat-input-wrap[data-call-view="keyboard"] .call-size {
+    display: none;
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .call-buttons {
+    order: 1;
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .call-keyboard {
+    color: var(--text-primary);
+}
+
+.call-words {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1 1 auto;
+    min-width: 0;
+    line-height: var(--call-words-leading);
+}
+
+/* A live call's words: the state and its time on one line, what is happening under them. They take
+   only their own width, so the wave has the rest of the capsule. */
+.chat-input-wrap:is([data-call-view="voice"], [data-call-view="big"]) .call-words {
+    display: grid;
+    flex: 0 1 auto;
+    grid-template-columns: minmax(0, max-content) auto minmax(0, 1fr);
+    align-content: center;
+}
+
+.call-state { grid-area: 1 / 1; }
+.call-time { grid-area: 1 / 2; }
+.call-sub { grid-area: 2 / 1 / 3 / 4; }
+.call-small { grid-area: 3 / 1 / 4 / 4; }
+
+.call-time {
+    font-size: var(--type-body);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-meta);
+    white-space: nowrap;
+}
+
+.call-time::before {
+    content: '·';
+    margin: 0 0.4em;
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-time {
+    display: none;
+}
+
+.call-state {
+    font-size: var(--type-body);
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.call-sub,
+.call-small {
+    font-size: var(--type-meta);
+    color: var(--text-meta);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.call-small.call-vision-note {
+    font-family: inherit;
+    white-space: normal;
+}
+
+.call-small {
+    color: var(--text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chat-input-wrap[data-call-tone="error"] .call-state {
+    color: var(--status-warn-fg);
+}
+
+.call-buttons {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: none;
+    margin-left: auto;
+}
+
+/* The call's controls are the bible's capsules: standing on the rest shadow in one of three tones, a state
+   changes their colour, never their height. Mute and Keyboard are neutral, Mute switched on takes the crimson
+   tone; End is the red tone; a sheet's next step is the primary action's crimson tone, Close neutral. */
+.call-btn {
+    position: relative;
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--composer-control-height);
+    min-width: var(--composer-control-height);
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: var(--surface-capsule);
+    box-shadow: var(--elev-rest);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--composer-control-font-size);
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.call-btn:hover {
+    background: var(--surface-capsule-hover);
+}
+
+.call-btn:disabled {
+    box-shadow: none;
+    cursor: default;
+}
+
+.call-btn:active,
+.call-mark-end:active {
+    filter: var(--press);
+}
+
+.call-btn:focus-visible,
+.call-mark-open:focus-visible,
+.call-mark-end:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
+}
+
+.call-mute[aria-pressed="true"],
+.call-show[aria-pressed="true"],
+.call-action {
+    background: var(--tone-crimson);
+    color: var(--tone-crimson-ink);
+}
+
+.call-mute[aria-pressed="true"]:hover,
+.call-show[aria-pressed="true"]:hover,
+.call-action:hover {
+    background: var(--tone-crimson-hover);
+}
+
+.call-keyboard,
+.call-show,
+.call-size {
+    width: var(--composer-control-height);
+    padding: 0;
+    color: var(--text-meta);
+}
+
+/* Expand and Minimise are one neutral capsule: an icon in the chip, the icon and "Minimise" in the big view. */
+.call-size {
+    gap: 6px;
+}
+
+.call-size .call-size-shrink,
+.call-size .call-size-word {
+    display: none;
+}
+
+.call-show[aria-expanded="true"] {
+    background: var(--surface-capsule-hover);
+}
+
+/* Show's menu: each source with its icon; one that cannot work here says why in its own line. */
+.call-show-menu [role="menuitem"] {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.call-show-menu [role="menuitem"] > svg {
+    flex: none;
+    color: var(--text-meta);
+}
+
+.call-show-words {
+    display: grid;
+}
+
+.call-show-words small {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+}
+
+.chat-input-wrap[data-call-sharing="screen"] .call-sub::before,
+.chat-input-wrap[data-call-sharing="camera"] .call-sub::before {
+    content: '●';
+    color: var(--tone-crimson-ink);
+    margin-right: var(--space-1);
+}
+
+.call-end {
+    padding: 0 var(--space-4);
+    background: var(--tone-red);
+    color: var(--status-error-fg);
+}
+
+.call-end:hover {
+    background: var(--tone-red-hover);
+}
+
+/* A finger gets a 44 px target; the capsule keeps its 32 px controls and its footprint. */
+@media (pointer: coarse) {
+    .call-btn::after,
+    .call-mark-open::after,
+    .call-mark-end::after {
+        content: '';
+        position: absolute;
+        inset: calc((var(--composer-control-height) - var(--call-touch-target)) / 2);
+    }
+
+    .call-mark-open,
+    .call-mark-end {
+        position: relative;
+    }
+}
+
+/* A phone-wide capsule narrows End; Keyboard stays, the only way to type during a call. The state
+   line ellipsizes, so its words never push a control out. */
+@container call-row (max-width: 360px) {
+    .call-end {
+        padding: 0 var(--space-3);
+    }
+
+    .chat-input-wrap[data-call-view="keyboard"] .chat-plus-btn {
+        display: none;
+    }
+}
+
+/* A phone's chip has room for the state word; the time waits in the big view. */
+@container call-row (max-width: 420px) {
+    .chat-input-wrap[data-call-view="voice"] .call-time {
+        display: none;
+    }
+}
+
+/* A phone's chip has no room after the words: they keep two lines, the state word above and, below it,
+   either what is happening or the wave (call_aura.js draws it there while a voice speaks or the line has
+   nothing to say), so the wave never crosses a letter and nothing moves when it comes and goes. */
+@container call-row (max-width: 480px) {
+    .chat-input-wrap[data-call-view="voice"] .call-visual {
+        --call-wave-place: line;
+    }
+
+    .chat-input-wrap[data-call-view="voice"] .call-words {
+        grid-template-rows: auto calc(var(--type-meta) * var(--call-words-leading));
+    }
+
+    .chat-input-wrap[data-call-view="voice"][data-call-line="wave"] .call-sub {
+        opacity: 0;
+    }
+}
+
+.call-sub {
+    transition: opacity 0.18s ease;
+}
+
+@container call-row (max-width: 520px) {
+    .chat-input-wrap[data-call-view="keyboard"] .call-mute,
+    .chat-input-wrap[data-call-view="keyboard"] .call-show {
+        display: none;
+    }
+}
+
+/* ---- The big view: the same capsule grown upward into a tall glass panel --------------------- */
+
+/* The row leaves the composer's flow for the passage and the big view; the spacer keeps the
+   composer's height, so the room never moves. On a wide window the panel stands where the composer
+   is and the room stays readable above it; on a phone it takes the screen. */
+.call-spacer {
+    order: 2;
+    flex: none;
+    width: 100%;
+}
+
+.chat-input-wrap[data-call] .chat-text-row.call-lifted {
+    position: fixed;
+    z-index: 60;
+    margin: 0;
+    padding: 0;
+    border-radius: var(--call-panel-radius, var(--pill-radius));
+    transition: left 0.64s var(--call-ease), top 0.64s var(--call-ease), width 0.64s var(--call-ease),
+        height 0.64s var(--call-ease), border-radius 0.64s var(--call-ease);
+}
+
+/* While the glass moves, its words and controls wait; the wave stretches with it. */
+.call-capsule > :not(.call-visual) {
+    transition: opacity 0.22s ease;
+}
+
+.chat-input-wrap[data-call-move="1"] .call-capsule > :not(.call-visual) {
+    opacity: 0;
+    transition-duration: 0.12s;
+}
+
+.chat-input-wrap[data-call-view="big"] .chat-text-row {
+    --composer-control-height: 40px;
+}
+
+.chat-input-wrap[data-call-view="big"] .call-capsule {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 0 var(--space-3);
+    align-items: start;
+    padding: var(--space-4);
+    min-height: 0;
+}
+
+/* A phone's big view is the whole screen: its words and Minimise stay clear of the status bar and the notch.
+   The shell's stacked layout says when that is, not a width of this sheet's own. */
+:where(html[data-layout="stack"]) .chat-input-wrap[data-call-view="big"] .call-capsule {
+    padding-top: calc(var(--space-4) + env(safe-area-inset-top, 0px));
+    padding-left: calc(var(--space-4) + env(safe-area-inset-left, 0px));
+    padding-right: calc(var(--space-4) + env(safe-area-inset-right, 0px));
+}
+
+.chat-input-wrap[data-call-view="big"] .call-words {
+    grid-area: 1 / 1;
+    padding: var(--space-2) 0 0 var(--space-2);
+    row-gap: 2px;
+}
+
+.chat-input-wrap[data-call-view="big"] .call-state {
+    font-size: var(--type-page);
+    font-weight: 600;
+    line-height: 1.15;
+}
+
+.chat-input-wrap[data-call-view="big"] .call-time {
+    align-self: end;
+    font-size: var(--type-section);
+    padding-bottom: 2px;
+}
+
+.chat-input-wrap[data-call-view="big"] .call-sub {
+    font-size: var(--type-body);
+}
+
+.chat-input-wrap[data-call-view="big"] .call-size {
+    grid-area: 1 / 2;
+    width: auto;
+    padding: 0 var(--space-4) 0 var(--space-3);
+    color: var(--text-primary);
+}
+
+.chat-input-wrap[data-call-view="big"] .call-size .call-size-grow {
+    display: none;
+}
+
+.chat-input-wrap[data-call-view="big"] .call-size .call-size-shrink,
+.chat-input-wrap[data-call-view="big"] .call-size .call-size-word {
+    display: inline;
+}
+
+/* Mute · Show · Keyboard · End at the foot of the panel, within a thumb's reach on a phone. */
+.chat-input-wrap[data-call-view="big"] .call-buttons {
+    grid-area: 3 / 1 / 4 / 3;
+    justify-content: center;
+    margin: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.chat-input-wrap[data-call-view="big"] .call-mute {
+    padding: 0 var(--space-4);
+}
+
+/* ---- The sheet: how a call ended, or why Talk cannot work here ------------------------------ */
+
+/* It carries a sentence, so it is a card with the object radius; a failed call's card takes the amber tint. */
+.chat-input-wrap[data-call-view="sheet"] .chat-text-row {
+    border-radius: var(--radius-object);
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-capsule {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-words {
+    flex: 1 1 12rem;
+    padding: var(--space-1) 0 var(--space-1) var(--space-2);
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-state,
+.chat-input-wrap[data-call-view="sheet"] .call-sub {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.chat-input-wrap[data-call-view="sheet"] .call-buttons {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-left: auto;
+}
+
+/* A problem's sheet keeps the call's still amber line; a fact or a surface note needs no visual. */
+.chat-input-wrap[data-call-view="sheet"]:not([data-call-tone="error"]) .call-visual {
+    display: none;
+}
+
+.chat-input-wrap[data-call-tone="error"] .chat-text-row {
+    background: linear-gradient(var(--tone-amber), var(--tone-amber)), var(--surface-float);
+}
+
+/* ---- The call's card: one call is one card of the room, like a work's card ------------------ */
+
+/* The call's own rows stay mounted for the room (replies, history, Copy) and read in its card. */
+.call-folded {
+    display: none !important;
+}
+
+.call-card {
+    align-self: flex-start;
+    width: min(100%, 760px);
+    max-width: max(80%, min(100%, 620px));
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--accent-12);
+    background: var(--accent-04);
+    box-shadow: var(--live-card-shadow);
+    overflow: hidden;
+    container-type: inline-size;
+}
+
+.call-card-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.call-card-head:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
+}
+
+.call-card-title {
+    font-weight: 600;
+}
+
+.call-card-facts {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+}
+
+.call-card[data-call-card="live"] .call-entry-mark {
+    color: rgb(var(--call-ouro-rgb));
+}
+
+.call-card[data-call-open="0"] .call-card-lines,
+.call-card[data-call-card="silent"] .call-card-lines {
+    display: none;
+}
+
+.call-card[data-call-card="silent"] .call-card-head {
+    cursor: default;
+}
+
+.call-card-head {
+    flex-wrap: wrap;
+}
+
+.call-card-engine {
+    flex-basis: 100%;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+}
+
+.call-card-lines {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: 0 var(--space-4) var(--space-3);
+    overflow-wrap: anywhere;
+}
+
+.call-line {
+    display: grid;
+    grid-template-columns: 6.5rem minmax(0, 1fr);
+    gap: var(--space-2);
+    line-height: 1.45;
+}
+
+.call-line-who {
+    font-size: var(--type-meta);
+    font-weight: 600;
+    line-height: 1.45rem;
+}
+
+.call-line.owner .call-line-who {
+    color: rgb(var(--call-owner-rgb));
+}
+
+.call-line.ouroboros .call-line-who {
+    color: rgb(var(--call-ouro-rgb));
+}
+
+.call-line.notice {
+    grid-template-columns: minmax(0, 1fr);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+}
+
+.call-line.call-caption[data-call-caption="streaming"] .call-line-text::after {
+    content: '▍';
+    margin-left: 2px;
+    opacity: 0.45;
+}
+
+@container (max-width: 420px) {
+    .call-line {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0;
+    }
+}
+
+/* ---- The shell's "In call" mark ---------------------------------------------------------------- */
+
+/* It floats over moving content, so it is the float surface on the float shadow, glass in the dark room. */
+.call-mark {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + var(--space-2));
+    left: 50%;
+    z-index: 75; /* above the phone navigation drawer (70), so End stays reachable while it is open */
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    max-width: calc(100vw - 2 * var(--space-4));
+    padding: var(--space-1);
+    border-radius: var(--pill-radius);
+    background: var(--surface-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
+    box-shadow: var(--elev-float);
+    transform: translateX(-50%);
+}
+
+.call-mark[hidden],
+.call-mark [hidden] {
+    display: none;
+}
+
+.call-mark-label {
+    white-space: nowrap;
+}
+
+/* The way back to the room is a quiet control: no body, a fill only under the pointer. */
+.call-mark-open {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    height: var(--chrome-control-h);
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-body);
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.call-mark-open:hover {
+    background: var(--tone-quiet-hover);
+}
+
+.call-mark .call-entry-mark {
+    color: var(--tone-crimson-ink);
+}
+
+.call-mark-room {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+}
+
+.call-mark-room::before {
+    content: '·';
+    margin-right: var(--space-2);
+    color: var(--text-meta);
+}
+
+.call-mark-time {
+    font-size: var(--type-meta);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-meta);
+}
+
+.call-mark-end {
+    flex: none;
+    height: var(--chrome-control-h);
+    padding: 0 var(--space-4);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: var(--tone-red);
+    box-shadow: var(--elev-rest);
+    color: var(--status-error-fg);
+    font: inherit;
+    font-size: var(--composer-control-font-size);
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.call-mark-end:hover {
+    background: var(--tone-red-hover);
+}
+
+/* Where the navigation column is on screen, the mark sits at its foot, over no page's header:
+   "In call" and the time on one line, the room below it. */
+:where(html[data-layout="docked"]) .call-mark {
+    top: auto;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + var(--space-5) + var(--space-3));
+    left: var(--space-3);
+    width: calc(var(--sidebar-width) - 2 * var(--space-3));
+    padding: var(--space-1);
+    border-radius: var(--radius-object);
+    transform: none;
+}
+
+:where(html[data-layout="docked"]) .call-mark-open {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "sign label time" "sign room room";
+    align-items: center;
+    column-gap: var(--space-2);
+    height: auto;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-inner);
+    text-align: left;
+}
+
+:where(html[data-layout="docked"]) .call-mark-open .call-entry-mark { grid-area: sign; }
+:where(html[data-layout="docked"]) .call-mark-label { grid-area: label; }
+:where(html[data-layout="docked"]) .call-mark-time { grid-area: time; }
+
+:where(html[data-layout="docked"]) .call-mark-room {
+    grid-area: room;
+    font-size: var(--type-meta);
+    font-weight: 500;
+    color: var(--text-meta);
+}
+
+:where(html[data-layout="docked"]) .call-mark-room::before {
+    content: none;
+}
+
+
+/* ==== The visual: the wave in the glass ========================================================= */
+
+:root {
+    /* The call's glass: the float surface made solid, so the panel never shows the room through it. */
+    --call-glass: var(--surface-float);
+    /* The two voices, luminous in the dark room: the owner's blue and Ouroboros's crimson. */
+    --call-owner-rgb: 106, 166, 255;
+    --call-ouro-rgb: 240, 86, 106;
+    /* How strongly one voice tints the glass at full level; the wave's ink is always stronger. */
+    --call-tint-owner-max: 0.26;
+    --call-tint-ouroboros-max: 0.26;
+    /* The strands at rest (the room's ink) and the soft band a speaking strand carries, read once per theme. */
+    --call-wave-rest: 0.42;
+    --call-wave-band: 0.16;
+    --call-ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+:root[data-theme="light"] {
+    --call-glass: var(--surface-float);
+    --call-owner-rgb: 47, 107, 214;
+    --call-ouro-rgb: 201, 53, 69;
+    --call-tint-owner-max: 0.11;
+    --call-tint-ouroboros-max: 0.09;
+    --call-wave-rest: 0.5;
+    --call-wave-band: 0.12;
+}
+
+/* The glass: while a call is live the row stops painting itself and this layer is its surface, so
+   the outline can breathe a few pixels with the voice (--call-breath) without moving the layout: the
+   breath is a spread of the glass's own colour (and of its tint), so it never widens a box or scrolls. */
+.chat-input-wrap[data-call="live"] .chat-text-row,
+.chat-input-wrap[data-call="live"] .chat-text-row:focus-within {
+    isolation: isolate;
+    border-color: transparent;
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+}
+
+.call-glass {
+    display: none;
+}
+
+.chat-input-wrap[data-call="live"] .call-glass {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    border-radius: inherit;
+    background: var(--call-glass);
+    box-shadow: 0 0 0 calc(var(--call-breath, 0) * 1px) var(--call-glass), var(--elev-float);
+    pointer-events: none;
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .chat-text-row:focus-within .call-glass {
+    box-shadow: 0 0 0 calc(var(--call-breath, 0) * 1px) var(--call-glass), var(--elev-float),
+        0 0 0 3px var(--focus-accent-ring);
+}
+
+.call-glass-tint {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+}
+
+.call-glass-owner {
+    background: rgb(var(--call-owner-rgb));
+    box-shadow: 0 0 0 calc(var(--call-breath, 0) * 1px) rgb(var(--call-owner-rgb));
+    opacity: calc(var(--call-tint-owner, 0) * var(--call-tint-owner-max));
+}
+
+.call-glass-ouroboros {
+    background: rgb(var(--call-ouro-rgb));
+    box-shadow: 0 0 0 calc(var(--call-breath, 0) * 1px) rgb(var(--call-ouro-rgb));
+    opacity: calc(var(--call-tint-ouroboros, 0) * var(--call-tint-ouroboros-max));
+}
+
+/* The wave: one canvas across the glass, behind the words. */
+.chat-input-wrap[data-call="live"] .call-visual {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    display: block;
+    pointer-events: none;
+}
+
+.call-wave {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+/* In the chip the canvas is the whole glass (the row), not only the capsule inside the row's padding,
+   so a full voice swings without touching an edge; the keyboard view's canvas already is the row. */
+.chat-input-wrap[data-call-view="voice"] .call-visual {
+    inset: calc(-1 * var(--space-2));
+}
+
+.chat-input-wrap[data-call-view="keyboard"] .call-wave {
+    opacity: 0.2;
+}
+
+/* A failed call's sheet keeps the wave's one still amber strand at its start. */
+.chat-input-wrap[data-call-view="sheet"] .call-visual {
+    width: 48px;
+    height: 24px;
+    margin-left: var(--space-1);
+}
+
+/* Live work: the room's three moving dots stand where the strands drew in. */
+.call-work {
+    display: none;
+}
+
+.chat-input-wrap[data-call="live"] .call-visual[data-work="1"] .call-work {
+    display: inline-flex;
+    position: absolute;
+    left: var(--call-work-x, 50%);
+    top: var(--call-work-y, 50%);
+    gap: 4px;
+    transform: translate(-50%, -50%);
+}
+
+.call-work span {
+    width: 5px;
+    height: 5px;
+    background: rgb(var(--call-ouro-rgb));
+}
+
+.chat-input-wrap[data-call-view="big"] .call-work {
+    gap: 7px;
+}
+
+.chat-input-wrap[data-call-view="big"] .call-work span {
+    width: 8px;
+    height: 8px;
+}
+
+/* Talk's sign, the card's and the shell mark's: the wave's three strands, still. */
+.call-entry-mark {
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    height: 14px;
+}
+
+.call-entry-mark svg {
+    display: block;
+}
+
+/* Reduced motion: the passage is an instant switch, the dots stand still; the visual draws a still
+   wave whose colour and the words say the rest. */
+@media (prefers-reduced-motion: reduce) {
+    .chat-input-wrap[data-call] .chat-text-row.call-lifted,
+    .call-capsule > :not(.call-visual),
+    .call-sub {
+        transition: none;
+    }
+
+    .call-work span {
+        animation: none;
+    }
+}
+
+/* Talk A: dictation is unavailable for the whole call, including keyboard mode.
+   Visibility never rewrites or clears the composer's draft. */
+.chat-input-wrap[data-call-active="true"] [data-composer-voice] { display: none !important; }

@@ -32,7 +32,10 @@ unread result, the patch disposition, another actor, route or configuration, a
 changed or partially verified work order. The facts reach the parent in the
 started payload and the continuing child in its PROMPT
 (``continuation_prompt``) — never in ``instructions``, which a resumed vendor
-session may keep from its first request.
+session may keep from its first request. For the same reason every ordinary
+continuation's prompt restates THIS run's access and workspace binding once it
+is provisioned (``with_run_binding``, #2513); the persisted access line scopes
+such facts to one run.
 
 Same tree: while the predecessor's private execution snapshot is undisposed,
 the successor runs IN it (same path, same baseline, no new snapshot) and its
@@ -103,6 +106,7 @@ class ContinuationStart(NamedTuple):
     request: Dict[str, Any] = {}     # wire keys: ``continueFrom`` (+ ``continueCarrier``)
     custody: Dict[str, Any] = {}     # START_REQUESTED/STARTED: lineage + same-tree capture identity
     snapshot: Optional[AdoptedSnapshot] = None
+    note: str = ""                   # the caller's text, for the prompt once the run is bound
 
 
 NO_CONTINUATION = ContinuationStart()
@@ -348,11 +352,12 @@ def _adopted_snapshot(entry: Any, authority: Any) -> Tuple[Optional[AdoptedSnaps
                            tuple(record.get("excluded_untracked") or ()), not checkout_whole(record)), "", ""
 
 
-def continuation_prompt(facts: Dict[str, Any], caller_text: str) -> str:
+def continuation_prompt(facts: Dict[str, Any], caller_text: str, run_binding: str = "") -> str:
     """The continuing child's prompt: carrier-neutral host facts, then the caller's text.
 
     The engine puts its own notice (which carrier, what stopped) in front; this
-    block states only what the host knows about the tree and the old result.
+    block states only what the host knows about the tree and the old result, and
+    ``run_binding`` this run's access and workspace (``with_run_binding``).
     """
     rid, workspace = facts.get("continuation_of"), str(facts.get("workspace") or "")
     disposition = str(facts.get("prior_patch_disposition") or "")
@@ -390,8 +395,29 @@ def continuation_prompt(facts: Dict[str, Any], caller_text: str) -> str:
         *(_ADVICE[code] for code in facts.get("advice") or () if code in _ADVICE),
     ]
     text = "\n".join(lines)
+    if run_binding:
+        text += "\n\nTHIS RUN'S ACCESS AND WORKSPACE (current host facts of this turn):" + run_binding
     note = str(caller_text or "").strip()
     return f"{text}\n\n{note}" if note else text
+
+
+def with_run_binding(start: ContinuationStart, authority: Any, binding: str, workdir: str) -> ContinuationStart:
+    """Restate THIS run's access and workspace in an ordinary continuation's prompt (#2513).
+
+    The engine's ``auto`` carrier may resume a native session that keeps an earlier
+    request's instructions, whose binding named another run's root, scratch and access
+    (a fresh snapshot, a lowering, in place after a copy). Every ordinary continuation,
+    not only a changed root, so carries the exact text its own instructions got from the
+    same renderers after provisioning, or, where none applies, the directory it starts
+    in. A plan-thread turn (no ``workspace`` fact) keeps its own contract.
+    """
+    from ouroboros.delegate_start_instructions import access_instruction, no_copy_binding_instruction
+
+    if "workspace" not in start.facts:
+        return start
+    current = (access_instruction(authority.access, investigation=authority.investigation)
+               + (binding or no_copy_binding_instruction(workdir)))
+    return start._replace(prompt=continuation_prompt(start.facts, start.note, current))
 
 
 def engine_continues(gateway: Any) -> bool:
@@ -477,7 +503,7 @@ def start_binding(ctx: Any, drive: Any, token: str, *, gateway: Any, actor: Dict
     return ContinuationStart(
         facts=facts, prompt=continuation_prompt(facts, caller),
         request=request,
-        custody=record, snapshot=adopted), None
+        custody=record, snapshot=adopted, note=caller), None
 
 
 def replayed_custody(record: Dict[str, Any]) -> ContinuationStart:
@@ -633,4 +659,5 @@ __all__ = [
     "snapshot_handover",
     "start_binding",
     "terminal_continuity",
+    "with_run_binding",
 ]

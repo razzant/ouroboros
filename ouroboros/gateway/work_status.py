@@ -24,6 +24,7 @@ declared (the owner's press, Ouroboros's own sentence), the app stopping, the
 spending limit, a technical problem; a Pause that declared nobody names nobody.
 ``waiting`` continues when what it waits for happens: helpers of an earlier
 attempt finishing, a model becoming available, the owner's sign-in or answer.
+A sleep whose chosen helper a stop holds does not: a ``held`` tail says so.
 ``turn`` names what waits for the owner; ``release`` says who can move it.
 
 No I/O, no clocks, no thresholds: the server adapter (``work_projection``) and
@@ -37,7 +38,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 ACTIVITY_ORDER = ("working", "queued", "waiting", "paused", "unknown")
 TRANSITIONS = ("none", "finalizing", "pausing")
 
-from ouroboros.work_stop import STOP_TEXT, activity_stop_view
+from ouroboros.work_stop import STOP_TEXT, activity_stop_view, door_holders
 
 # One owner sentence per reason code (the TASK_CAUSE_PHRASES discipline): keyed on the code
 # only, a code with no sentence stays raw, and the raw code stays typed beside it.
@@ -57,6 +58,12 @@ REASON_TEXT = {
     "queued": "Waiting for a free worker",
     "review_work_finishing": "Review work finishing",
     "external_runs_unconfirmed": ("1 external run may still be running", "{count} external runs may still be running"),
+    # A sleeping episode's chosen helpers a stop holds, by who releases them (classify_member's release).
+    "awaited_helpers_mind": ("1 helper it waits for is paused until Ouroboros resumes it",
+                             "{count} helpers it waits for are paused until Ouroboros resumes them"),
+    "awaited_helpers_owner": ("1 helper it waits for is paused until you resume it",
+                              "{count} helpers it waits for are paused until you resume them"),
+    "awaited_helpers_paused": ("1 helper it waits for is paused", "{count} helpers it waits for are paused"),
     # A preparing direct turn's start step (census ``turn_phase``, supervisor.active_activity.TURN_PHASES).
     "turn_admitted": "Setting up the turn",
     "turn_started": "Starting the turn",
@@ -113,6 +120,13 @@ def _current_waits(row: Mapping[str, Any]) -> List[tuple]:
             if isinstance(wait, dict) and wait.get("state") == "waiting" and wait.get("task_attempt") == attempt]
 
 
+def _waits_on(sleep: Any) -> List[str]:
+    """What a saved sleep selected (a warm one on its owner wait, a cold one on its exact pause): the work says
+    when a chosen helper cannot finish by itself."""
+    sleep = sleep if isinstance(sleep, Mapping) else {}
+    return [str(task) for task in dict.fromkeys([*(sleep.get("tasks") or ()), *(sleep.get("senders") or ())]) if task]
+
+
 def _call(row: Mapping[str, Any]) -> str:
     """The exact-call word a working member is in (the cards' modelActivityPresentation); a direct turn
     whose own call start precedes its census phase's move says the word that move gives, never more."""
@@ -154,6 +168,11 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         state["reasons"].append(view["reason"])
         state["resumable"] = view["resumable"]
         state["activity"] = "waiting" if view["waiting"] else "paused"
+        if view["waiting"] and isinstance(raw.get("_budget_pause"), Mapping):
+            state["waits_on"] = _waits_on(raw["_budget_pause"].get("sleep"))
+        # Which episodes may ask for its release (internal: ``awaited_tails`` names no releaser for another).
+        state["door_holders"] = sorted(door_holders({"id": task_id, **{key: row.get(key) or raw.get(key)
+                                                                      for key in ("root_task_id", "parent_task_id")}}))
         state["release"] = ("owner" if view["release"] == "owner" else "mind" if view["resumable"]
                             else "self" if view["waiting"] else "none")
         if phase == "budget_pausing" and not view["waiting"] and raw.get("running", row.get("live")) \
@@ -163,6 +182,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         state["model_handoffs"] = list(raw.get("model_handoffs") or ())
         if _owner_actions({**row, "stop": view["stop"], "refusal": view["refusal"]})[1]:
             state["turn"].append({"kind": "action", "task_id": task_id, "code": view["reason"]["code"]})
+        if raw.get("execution_transport") is not None:  # a stopped call has ended; it never resumes
+            state.update(release="none", turn=[], resumable=False)
         return state
     wait = _owner_wait(row)
     if wait == "owner_wait":
@@ -183,6 +204,7 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
             and isinstance(waiting.get("sleep"), dict) and waiting["sleep"].get("mode") == "warm":
         state["activity"] = "waiting"
         state["reasons"].append(reason("sleeping"))
+        state["waits_on"] = _waits_on(waiting["sleep"])
         return state
     waits = _current_waits(row)
     if waits:
@@ -355,6 +377,29 @@ def work_tails(helper_ids: List[str], runs: Iterable[Mapping[str, Any]], *, revi
     return tails
 
 
+def awaited_tails(current: Optional[Mapping[str, Any]], helpers: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The helpers a sleeping episode chose to wait for (its saved selection, never every paused member) that a
+    stop holds: they finish only after their own Resume, so the sleep does not end by itself. One ``held`` tail
+    per classified release, named only when it is true here: Ouroboros for a mind release only when this
+    episode holds the helper's request door (its root or parent), else no releaser at all (a Continue's
+    predecessor's helper). The episode keeps its word, its controls and its turn."""
+    chosen, episode = set((current or {}).get("waits_on") or ()), str((current or {}).get("task_id") or "")
+    paused = [member for member in helpers if member["task_id"] in chosen and member["activity"] == "paused"]
+
+    def release(member: Mapping[str, Any]) -> str:
+        if member["release"] == "mind":
+            return "mind" if episode in (member.get("door_holders") or ()) else "none"
+        return "owner" if member["release"] == "owner" else "none"
+
+    tails = []
+    for named, code in (("mind", "awaited_helpers_mind"), ("owner", "awaited_helpers_owner"),
+                        ("none", "awaited_helpers_paused")):
+        ids = [member["task_id"] for member in paused if release(member) == named]
+        if ids:
+            tails.append(_tail("helper", code, ids, state="held"))
+    return tails
+
+
 def model_tails(blockers: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     attempts = sorted({str(b["attempt_id"]) for b in blockers if b.get("kind") == "model_handoff"
                        and not b.get("review_owned") and b.get("attempt_id")})
@@ -412,7 +457,7 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     else:
         # Only runs nobody can confirm remain: the work stays listed (its Stop reaches them), its word unconfirmed.
         reasons, activity, transition, call, release = [], "unknown", "none", "", "none"
-    tails = work_tails(helper_ids, runs, reviewing=reviewing, named=named)
+    tails = work_tails(helper_ids, runs, reviewing=reviewing, named=named) + awaited_tails(current, helpers)
     tails += model_tails(b for member in members for b in member.get("model_handoffs") or ())
     episode_live = bool(current is not None and current.get("live"))
     live = episode_live or bool(working_helpers or live_runs or reviewing)

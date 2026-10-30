@@ -123,10 +123,8 @@ DEFAULT_PORT = int(os.environ.get("OUROBOROS_SERVER_PORT", "8765"))
 PORT_FILE = resolve_port_file(DATA_DIR, hosting_data_dir=DATA_DIR)
 
 sys.path.insert(0, str(REPO_DIR))
-if not os.environ.get("OUROBOROS_AGENT_PYTHON"):
-    _agent_python = sys.executable
-    if isinstance(_agent_python, str) and _agent_python:
-        os.environ["OUROBOROS_AGENT_PYTHON"] = _agent_python
+if isinstance(sys.executable, str) and sys.executable:  # this host's interpreter, never an inherited (moved-app) one
+    os.environ["OUROBOROS_AGENT_PYTHON"] = sys.executable
 
 # Logging is configured in main(), not at import: a spawn/forkserver worker re-imports
 # this module as ``__mp_main__`` and configures itself in ``worker_main``
@@ -945,7 +943,7 @@ def _boot_managed_update_tasks() -> None:
     """Finalize a pending update, restart after rollback, then refresh its feed."""
     try:
         from ouroboros.gateway.update_progress import observe_boot
-        from supervisor.git_ops import compute_managed_update_status
+        from supervisor.git_ops import advance_recovery_point, compute_managed_update_status
         from supervisor.update_merge import active_update_tx, finalize_managed_update_on_boot
 
         ready = _wait_for_supervisor_update_finalize()
@@ -979,6 +977,7 @@ def _boot_managed_update_tasks() -> None:
             close_repo_writer_admission("managed_update:rollback_restart")
             _request_restart_exit()
             return
+        advance_recovery_point(ready and _bootstrap_ok is True and result.get("rolled_back") is not True)
         update_status = compute_managed_update_status(fetch=True)
         try:
             from ouroboros.update_letter import refresh_after_check, runtime_status

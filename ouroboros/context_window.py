@@ -7,7 +7,7 @@ The observations share the capability JSON store; old stores need no migration.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class WindowLimit:
     kind: str  # input | total | output
     source: str
     observed_at: str = ""
+    acceptance_can_raise: bool = True
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,9 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
         kind = str(getattr(evidence, "window_kind", "total") or "total")
         limits[kind] = WindowLimit(int(evidence.window_tokens), kind,
                                   str(getattr(evidence, "source", None) or getattr(evidence, "evidence_source", "metadata")),
-                                  str(getattr(evidence, "ts", "")))
+                                  str(getattr(evidence, "ts", "")),
+                                  (getattr(evidence, "route_facts", {}) or {}).get("acceptance_can_raise",
+                                      not bool(getattr(evidence, "route_facts", {}))))
     declared = tuple(limits.values())
     server = getattr(evidence, "server_window", {})
     contradiction = WindowLimit(**server) if server else captured.contradicted_by if captured else None
@@ -157,8 +160,9 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
         contradiction = None
     # Only a disproved stated limit yields to an accepted INPUT. An acceptance
     # below a stated total proves no reply room; without a statement capacity stays unknown.
-    if any(accepted > limit.tokens for limit in limits.values()):
-        limits = {"input": WindowLimit(accepted, "input", "accepted", accepted_at)}
+    if any(limit.acceptance_can_raise and accepted > limit.tokens for limit in limits.values()):
+        limits = {kind: limit for kind, limit in limits.items() if not limit.acceptance_can_raise}
+        limits["input"] = WindowLimit(accepted, "input", "accepted", accepted_at)
     for index in range(len(rows) - 1, -1, -1):
         row = rows[index]
         if row.get("refused"):
@@ -216,3 +220,14 @@ def observed_plan(plan, usage):
     record = getattr(plan, "window_record", None)
     return replace(plan, route_fp=fp, window_record=replace(record, route_fp=fp) if record else None,
                    model_route=dict(observed), window_witness_bound=True)
+
+
+def route_window_kwargs(evidence: Any) -> Dict[str, Any]:
+    """The plan fields a declared route window carries (a call's RouteFacts): its working reserve and its units."""
+    facts = getattr(evidence, "route_facts", {}) or {}
+    return {"working_reserve_tokens": facts.get("working_reserve_tokens"), "window_basis": str(facts.get("basis") or "")}
+
+
+def estimator_ratio(evidence: Any, ratio: float) -> float:
+    """An estimator-based window is fitted on raw estimates (density 1); a provider window keeps the measured density."""
+    return 1.0 if route_window_kwargs(evidence)["window_basis"] == "estimator" else ratio

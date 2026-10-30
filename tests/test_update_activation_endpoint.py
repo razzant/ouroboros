@@ -40,7 +40,8 @@ def scene(tmp_path, monkeypatch):
     scene.fence = []
     monkeypatch.setattr(control, "_index_lock_precondition", lambda: None)
     monkeypatch.setattr(control, "_quiesce_repo_writers", lambda reason: scene.fence.append(("stop", reason)) or [])
-    monkeypatch.setattr(control, "_respawn_workers_after_failed_update", lambda: scene.fence.append(("reopen", "")))
+    monkeypatch.setattr(control, "_respawn_workers_after_failed_update",
+                        lambda: scene.fence.append(("reopen", "")) or True)
     monkeypatch.setattr(checks, "workspace_checks", lambda _row: {"ok": True, "stub": True})
     scene.official({"ouroboros/mod_a.py": "GEN = 'GEN_CAND'\n"})
     scene.local_work(commit=False)
@@ -396,7 +397,8 @@ def lock_scene(tmp_path, monkeypatch):
     scene.fence = []
     monkeypatch.setattr(control, "_index_lock_precondition", lambda: None)
     monkeypatch.setattr(control, "_quiesce_repo_writers", lambda reason: scene.fence.append(("stop", reason)) or [])
-    monkeypatch.setattr(control, "_respawn_workers_after_failed_update", lambda: scene.fence.append(("reopen", "")))
+    monkeypatch.setattr(control, "_respawn_workers_after_failed_update",
+                        lambda: scene.fence.append(("reopen", "")) or True)
     monkeypatch.setattr(checks, "workspace_checks", lambda _row: {"ok": True, "stub": True})
     venv = tmp_path / "venv"
     (venv / "lib").mkdir(parents=True)

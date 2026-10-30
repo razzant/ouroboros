@@ -35,7 +35,8 @@ from ouroboros.utils import utc_now_iso
 
 _REQUEST_ID_MAX = 128
 _FIELDS = frozenset({"request_id", "actor", "reason"})
-_CONFLICTS = frozenset({"not_a_root_task", "cancel_pending", "task_terminal", "root_result_missing"})
+_CONFLICTS = frozenset({"not_a_root_task", "cancel_pending", "task_terminal", "root_result_missing",
+                        "realtime_pause_unsupported"})
 
 
 async def api_task_pause(request: Request) -> JSONResponse:

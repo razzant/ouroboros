@@ -1168,6 +1168,7 @@ def handle_tool_calls(
     *,
     fit_candidate: Optional[FitCandidate] = None,
     tool_schemas: Optional[list] = None,
+    project_results: Optional[Callable] = None,
 ) -> int:
     """Execute tool calls, append results, and return error count.
 
@@ -1284,7 +1285,7 @@ def handle_tool_calls(
             executor.shutdown(wait=batch_raised, cancel_futures=True)
 
     errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
-                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas)
+                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
     if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
         tools._ctx._skill_finalization_injected = False
     return errors
@@ -1351,7 +1352,13 @@ def _maybe_auto_attach_image(
         observation = {"status": "unavailable"}
         from ouroboros.tools.vision import attach_local_image_to_context
 
-        ok, note = attach_local_image_to_context(ctx, path, stamp=getattr(tools, "_ctx", None), observation=observation)
+        # The producer's typed capture target, never the output filename or pixels.
+        target = parsed.get("auto_attach_source")
+        if target is None and isinstance(parsed.get("display"), dict):
+            target = parsed["display"].get("index")
+        source = json.dumps([exec_result["fn_name"], target], sort_keys=True) if target not in (None, "") else ""
+        ok, note = attach_local_image_to_context(ctx, path, stamp=getattr(tools, "_ctx", None),
+                                               observation=observation, **({"capture_source": source} if source else {}))
         observation["status"] = "attached" if ok else "unavailable"
         if not ok:
             observation["reason"] = note
@@ -1390,6 +1397,7 @@ def process_tool_results(
     *,
     fit_candidate: Optional[FitCandidate] = None,
     tool_schemas: Optional[list] = None,
+    project_results: Optional[Callable] = None,
 ) -> int:
     """Append tool results to messages/trace and return error count.
 
@@ -1428,7 +1436,7 @@ def process_tool_results(
     history_count = len(messages)
     image_observations = [_maybe_auto_attach_image(row, tools, staged_messages=image_history) for row in results]
     image_messages = image_history[history_count:]
-    views = _deliver_tool_results(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
+    views = (project_results or _deliver_tool_results)(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
                                   [*review_updates, *dialogue_updates, *image_messages])
     messages[:] = image_history[:history_count]
 
@@ -1463,6 +1471,12 @@ def process_tool_results(
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery
             acknowledge_question_delivery(ctx, truncated_result)  # exposure needs the complete ready view
+        if ctx is not None and published.get("held_dependency_notice") and not (is_error or result_partial):
+            from ouroboros.model_sleep import acknowledge_hold_delivery
+            acknowledge_hold_delivery(ctx, truncated_result)  # likewise for a held dependency
+        elif ctx is not None and not is_error and (published.get("held_dependency_notice") or published.get("read_view")):
+            from ouroboros.model_sleep import credit_hold_source
+            credit_hold_source(ctx, exec_result, view)  # a shortened one: shown once its exact source was, whole
         if ctx is not None and published.get("review_delivery") and not result_partial:
             from ouroboros.review_waiting import acknowledge_delivery
             acknowledge_delivery(ctx, published["review_delivery"])
@@ -1528,6 +1542,8 @@ def process_tool_results(
             if pending.get(key) == value:
                 pending.pop(key)
         ctx._pending_review_context = pending
+        if getattr(ctx, "_held_dependencies_pending", None):
+            ctx._held_dependencies_pending = []  # the batch reached the transcript: undelivered holds re-read
     # Auto-attach AFTER the round's complete tool-message block, never between two
     # tool messages answering the same assistant turn: the user(image) injection
     # then preserves tool-result contiguity BY CONSTRUCTION instead of relying on

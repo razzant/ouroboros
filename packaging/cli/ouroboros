@@ -43,7 +43,7 @@ if [ ! -x "$PY" ]; then
     PY="$BUNDLE_ROOT/python-standalone/bin/python"
 fi
 
-PYTHON_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ouroboros/pycache"
+PYTHON_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ouroboros/pycache.noindex"
 PYTHONPYCACHEPREFIX="$PYTHON_CACHE_ROOT"
 mkdir -p "$PYTHONPYCACHEPREFIX" 2>/dev/null || true
 

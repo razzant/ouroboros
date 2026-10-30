@@ -337,8 +337,10 @@ def _capture_declared_context_core(
     from ouroboros.memory_view import _owner_words_block  # the shared child's block, byte for byte
     from ouroboros.subagent_work_order import declared_inputs_carry_owner_words, input_source_selection_receipt
     from ouroboros.subagent_metrics import fact_line
+    from ouroboros.section_floor import HostSection, capture_sections, labelled_section
     from ouroboros.subagent_runtime import (
         current_model_visible_subagent_catalog, review_facts_block, review_records_block, subagent_supervision_fact_line,
+        subagent_catalog_section,
     )
 
     canonical_root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
@@ -352,13 +354,14 @@ def _capture_declared_context_core(
         runtime_builder(env, task, ctx=ctx, captured_at=sources["captured_at"],
                         supplementary_messages_out=supplementary_messages),
     ]
-    parts.extend(snapshot_labelled(section, sources["captured_at"]) for section in
+    parts.extend(labelled_section(section, lambda text: snapshot_labelled(text, sources["captured_at"]))
+                 if isinstance(section, HostSection) else snapshot_labelled(section, sources["captured_at"]) for section in
                  process_memory.recent_activity_sections(str(task["id"]), own_drive=None if same_drive else memory))
     catalog_text, catalog = "", None
     try:
         catalog = current_model_visible_subagent_catalog()
         if catalog:
-            catalog_text = "## Available subagents\n\n" + json.dumps(catalog, ensure_ascii=False, indent=1)
+            catalog_text = subagent_catalog_section(catalog)
     except Exception:
         log.debug("Failed to build Available subagents catalog", exc_info=True)
     review_text, review_activity = "", []
@@ -372,12 +375,15 @@ def _capture_declared_context_core(
         )))
     except Exception:
         log.warning("Failed to build the Review block", exc_info=True)
+    standing_rules = owner_rules_section()
     return _ContextCore(
         base_prompt=sources["base_prompt"], bible_md=sources["bible_md"],
         architecture_md=sources["architecture_md"], development_md=sources["development_md"],
         # The owner's standing rules are governance like SYSTEM.md, not a selectable case input.
-        semi_stable_text="\n\n".join(part for part in (catalog_text, review_text, owner_rules_section()) if part),
+        semi_stable_text="\n\n".join(part for part in (catalog_text, review_text, standing_rules) if part),
+        semi_stable_sections=capture_sections((part for part in (catalog_text, review_text, standing_rules) if part), prefix='stable'),
         dynamic_text="\n\n".join(parts),
+        dynamic_sections=capture_sections(parts, prefix='dynamic'),
         user_content_json=json.dumps(user_builder(task), ensure_ascii=False, sort_keys=True),
         docs_need_development=_task_requires_self_body_docs(task),
         reference_books=tuple(sources["books"]), reference_book_errors=tuple(sources["book_errors"]),

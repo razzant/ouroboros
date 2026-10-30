@@ -111,6 +111,7 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
             report["frames"][f"accounts-{theme}"] = _frame(page, evidence, f"after-accounts-{theme}")
         page.click('#next-btn')
         page.wait_for_selector('[data-model-role="main"]')
+        expect(page.locator('[data-model-role="heavy"], #s-model-heavy')).to_have_count(0)
         # Names are derived by the shared editor; read the exact saved values, never invent a second slugger.
         choices = page.locator('[data-model-role="main"] [data-model-role-source] option').evaluate_all(
             "nodes => nodes.map(n => n.value).filter(v => v.startsWith('api:openai-compatible@'))")
@@ -204,6 +205,7 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
         page.wait_for_url(ui['url'] + '/', wait_until='domcontentloaded')
         page.click('[data-nav-page="settings"]')
         page.click('[data-settings-tab="models"]')
+        expect(page.locator('[data-model-role="heavy"], #s-model-heavy')).to_have_count(0)
         for role, source in zip(('main', 'light'), sources):
             expect(page.locator(f'[data-model-role="{role}"] [data-model-role-source]')).to_have_value('api:' + source)
             expect(page.locator(f'[data-model-role="{role}"] [data-model-role-model]')).to_have_value('same-model')
@@ -265,6 +267,10 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
             with page.expect_response('**/api/providers/test') as tested:
                 row.locator('[data-connection-test]').click()
             assert tested.value.status == 200 and tested.value.json()['ok'], tested.value.text()
+            assert tested.value.request.post_data_json == {
+                'provider_id': 'openai-compatible', 'connection': row.get_attribute('data-name'), 'overrides': {},
+            }
+            expect(row.locator('[data-connection-test-status]')).to_have_text('Works')
         assert any(call.get('model') == 'same-model' for call in alpha_calls)
         assert any(call.get('model') == 'same-model' for call in beta_calls)
         assert all(call['authorization'] is None for call in alpha_calls)

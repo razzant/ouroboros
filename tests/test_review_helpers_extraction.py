@@ -32,8 +32,6 @@ REPO = pathlib.Path(__file__).parents[1]
 _LEAVES = (review_prompt_text, review_file_pack, review_checklist)
 
 _MOVED_OWNERS = {
-    "_JSON_SECRET_RE": review_prompt_text,
-    "_SECRET_LINE_RE": review_prompt_text,
     "CRITICAL_FINDING_CALIBRATION": review_prompt_text,
     "REVIEW_PREAMBLE": review_prompt_text,
     "REVIEW_THOROUGHNESS_BLOCK": review_prompt_text,
@@ -67,7 +65,6 @@ _MOVED_OWNERS = {
     "normalize_reviewer_item": review_prompt_text,
     "normalize_reviewer_items": review_prompt_text,
     "normalize_reviewer_obligation_id": review_prompt_text,
-    "redact_prompt_secrets": review_prompt_text,
     "single_line": review_prompt_text,
     "strip_obligation_suffix": review_prompt_text,
     "BINARY_EXTENSIONS": review_file_pack,

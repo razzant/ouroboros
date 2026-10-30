@@ -663,6 +663,17 @@ export function formatDualVersion(data) {
 
 const versionField = (value) => (typeof value === 'string' ? value.trim() : '');
 let versionRead = 0;
+let appVersionRead = '';
+const appVersionWatchers = new Set();
+
+/** The app version the newest landed health read reported (`loadVersion`); '' while none did. */
+export const lastAppVersion = () => appVersionRead;
+
+/** Call `watcher` when a landed health read changes `lastAppVersion()`; returns its disposer. */
+export function watchAppVersion(watcher) {
+    appVersionWatchers.add(watcher);
+    return () => appVersionWatchers.delete(watcher);
+}
 
 /**
  * The sidebar's runtime version and About's app/runtime pair, from one `/api/health` read. app.js
@@ -677,6 +688,10 @@ export async function loadVersion() {
     const runtime = versionField(data?.runtime_version) || versionField(data?.version);
     if (read !== versionRead || !runtime) return;
     const versions = { runtime_version: runtime, app_version: versionField(data.app_version) };
+    if (appVersionRead !== versions.app_version) {  // the Updates page's App chip
+        appVersionRead = versions.app_version;
+        appVersionWatchers.forEach((watcher) => watcher());
+    }
     const nav = document.getElementById('nav-version');
     if (nav) nav.textContent = `v${runtime}`;
     const about = document.getElementById('about-version');

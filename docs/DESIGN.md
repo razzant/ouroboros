@@ -1000,6 +1000,9 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
   place that is not such a reference (`Load older messages`, `Open widgets`).
   Tabs, toggles, menus and the navigation list keep their own roles; a status
   chip states a fact and is not a destination.
+- A **Main task** is opened by its door, `Open in Main ↗`: words inside the sentence that names the
+  task (`.consciousness-inline-link`). `task_reference.js` builds it and alone raises `ouro:open-task`;
+  its landing is §5 "Dashboard › Consciousness".
 - An intent that will be drawn in a second place gets its door first (siblings:
   `docs/inventories/UI_CONTROL_TEXT_INVENTORY.md`).
 
@@ -1393,8 +1396,12 @@ running, such as the review a Pause lets finish, a run nobody can confirm); a wo
 beside it, and the sidebar's name says both. An outcome stays beside `Finalizing…`; `Paused` stays until Resume, its
 line saying who or what paused it (the owner's press with its time, Ouroboros in its
 own sentence, nobody when a press declared no one);
-`Waiting` says what it waits for and goes on by itself when that happens;
-helpers an earlier attempt left running read as `Working`, with their count; an
+`Waiting` says what it waits for and goes on by itself when that happens,
+unless a helper its sleep chose is paused: the line then says so and who resumes
+that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
+or `until you resume it` after Panic; a Continue's earlier helper is just
+`paused`), with no new control or turn; helpers an earlier attempt left running
+read as `Working`, with their count; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its own focus line, what Ouroboros says it is doing (stage ·
 done · left, written by it through `update_focus`), quieter and at most two
@@ -1943,7 +1950,7 @@ Open accounting keeps “so far”; it is no final total.
 The allowance's “Some calls have no price” and “next check at” promise no admission.
 Visible and accessible words agree.
 
-“Open in Main ↗” locates the card by task/chat through around-history; a focus door
+“Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
 opens its captured conversation in the sheet, Back returns. An unowned room disables
 the door with a reason. Refresh keeps open nodes, disclosure, focus, selection and
 position until closure. Host words use `tr`/`fmt`; summaries, notes and names use
@@ -2022,6 +2029,36 @@ reply at a time, Stop on the one being read; the page's Panic and leaving it
 stop it. With no engine chosen it uses one on this device. The row menu's Read aloud
 voice… lists Automatic (a voice on this device) and every voice, "On
 this device" only when the browser marks it local, otherwise "Online voice".
+
+Live Conversation keeps the glass wave, phone controls and collapsed transcript.
+Talk occupies empty Send only when Calls (beta) is enabled and the server confirms
+the selected engine is loaded and its credential grants are current. Text or a
+file restores equal-width Send; empty Enter never calls. The dictation mic hides
+during the call and returns with the draft intact. The glass keeps the composer's
+fixed corner as it becomes a card; End remains visible in phone and keyboard
+views. A model without vision hides Show and says, “This voice engine does not
+accept images.” A hidden room's mark names the room and reopens it.
+
+Calls (beta) settings default to Gemini, with calls off independently of keys.
+Engine, model and voice choices come from loaded catalogs; an unavailable choice
+is named, never replaced silently. Pause, interruptions, thinking and search
+appear only where the selected model honours them, otherwise its catalog note
+explains why. Instructions apply to the next call. The selected catalog names
+where audio goes and its memory window per session, including the source and
+whether it has been measured. Microphone, speaker, camera and echo/noise/gain
+choices stay on this client and reach an active call immediately. Local device
+tests release capture on leaving Settings and never take it from a live call.
+
+Calls retain microphone, playback and socket when the room or document is hidden,
+where the platform allows; dictation still stops on hide. End, Stop, Panic,
+pagehide, device loss, unload and a successful Calls-off read end them. Failed
+configuration reads keep the last good value; mount, focus, visible return and
+successful Settings saves refresh it. There is no call time cap or separate
+per-call reserve; the ordinary shared spending limit applies. The feature's
+instructions keep the ordinary identity, memory and tools. It greets once per
+call, never on reconnect. `set_call_languages` records recognition languages for
+the owner or Presence binding and applies them at the next quiet renewal;
+`end_call` is silent and ends only after the goodbye has played.
 
 ### Conversation activity block
 

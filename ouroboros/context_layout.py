@@ -23,15 +23,21 @@ from ouroboros.reference_books import ReferenceBook, compose_book, load_referenc
 # data so a drift-guard test can assert no future change demotes it. The marks I
 # keep in view never become addresses (``memory_floor`` has no step for them);
 # conversations are the memory view's, whose physical floor alone degrades them.
+# The shared-understanding overview rides whole too: the owner chose on 20.10.2026
+# that the window never shortens it (its headings are no substitute for it).
 TIER0_ALWAYS_FULL = frozenset({
     "system",
     "bible",
     "identity",
     "scratchpad",
-    "knowledge_index",
     "memory_marks",
+    "shared_understanding",
 })
 
+
+# Resident where present; only the physical window may choose its outline.
+INDEX_STEPS = ("project_knowledge_index", "knowledge_index")
+TIER0_WHOLE_OR_OUTLINE = frozenset(INDEX_STEPS)
 
 def _read_doc(env: Any, rel_path: str) -> str:
     try:
@@ -194,6 +200,26 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
     ).text
 
 
+def book_map_section(book: ReferenceBook, section_id: str) -> str:
+    """A compact book view as a host section: its operative view names each chapter and its physical path.
+
+    The navigation map itself is already the on-demand form of the book; under a physically
+    small window its chapter list stays and the map is one retained read away. A legacy
+    single-file revision has no chapters, so its map is its only view.
+    """
+    from ouroboros.section_floor import HostSection  # section_floor reads TIER0_ALWAYS_FULL from here
+
+    navigation = book_navigation(book)
+    if book.legacy or not book.chapters:
+        return navigation
+    title = book.entrypoint.headings[0].title if book.entrypoint.headings else book.book_id
+    chapters = [f"- {chapter.headings[0].title if chapter.headings else chapter.source_path}: "
+                f"`{chapter.source_path}`" for chapter in book.chapters]
+    return HostSection(section_id, navigation, "\n".join([
+        f"## {title} (chapters)", "", *chapters, "",
+        'Each chapter reads with `read_file(root="system_repo", path=...)` at its physical path.']))
+
+
 def architecture_context_section(
     env: Any,
     *,
@@ -212,7 +238,7 @@ def architecture_context_section(
         # navigable overview and a full mode asks for the composition. Both
         # answers are defined for a legacy revision too.
         if context_mode in {"low", "nano"}:
-            return book_navigation(book)
+            return book_map_section(book, "architecture_map")
         if text is None:
             text = compose_book(book)
     if text is None:
@@ -269,7 +295,8 @@ def reference_doc_sections(
     if development_book is not None and development_text is None:
         dev_text = compose_book(development_book)
     if dev_text.strip():
-        chapters = (book_navigation(development_book) if development_book is not None
+        # The chapter map is a host section (its chapter list the operative view) wherever a book exists.
+        chapters = (book_map_section(development_book, "development_map") if development_book is not None
                     else generate_doc_nav_map(dev_text, title="DEVELOPMENT.md", rel_path="docs/DEVELOPMENT.md"))
         if context_mode in {"low", "nano"}:
             parts.append(chapters)

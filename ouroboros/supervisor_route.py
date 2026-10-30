@@ -15,6 +15,32 @@ from typing import Any
 _INHERIT = object()
 
 
+def cognitive_parent_context(ctx: Any = None, task: Any = None) -> Any:
+    """A live conversation's supervisor follows the room's ordinary cognitive role.
+
+    The transport model is the speaking parent's route, not a cognition choice.
+    Use the same role resolver as an ordinary turn; explicit supervisor rows are
+    selected separately. Text turns retain their actual send binding unchanged.
+    """
+    from types import SimpleNamespace
+    from ouroboros.route_choice import following, following_route, opening_role
+
+    task = task if isinstance(task, dict) else {}
+    metadata = (task.get("task_metadata") or task.get("metadata")
+                or getattr(ctx, "task_metadata", None) or {})
+    if (metadata.get("execution_transport") or {}).get("kind") != "live_conversation":
+        return ctx
+    parent = SimpleNamespace(task_metadata=metadata)
+    role = opening_role(parent)
+    model, local = following_route(role)
+    return SimpleNamespace(task_metadata={key: value for key, value in metadata.items()
+                                         if key not in {"model", "use_local_model", "execution_transport"}},
+        active_model=model, active_use_local=local,
+        active_effort=getattr(ctx, "active_effort", "") or metadata.get("reasoning_effort", ""),
+        context_fit_plan=SimpleNamespace(model_role=role), route_choice=following(role),
+        model_wait_context=getattr(ctx, "model_wait_context", None))  # the owner's wait-card replacement carries over
+
+
 def validate_cognitive_route(raw: Any) -> dict:
     """Copy historical bindings unchanged; validate the complete v2 carrier."""
     from ouroboros.model_slots import normalize_processing_preference
@@ -111,6 +137,7 @@ def _inherited_cognition(ctx: Any, settings: dict) -> dict:
     from ouroboros.provider_models import provider_for_model
     from ouroboros.route_choice import follows
 
+    ctx = cognitive_parent_context(ctx)
     metadata = getattr(ctx, "task_metadata", None) or {}
     plan = getattr(ctx, "context_fit_plan", None)
     waiter = getattr(ctx, "model_wait_context", None)

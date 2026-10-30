@@ -606,6 +606,26 @@ def task_artifact_dir_path(drive_root: Union[pathlib.Path, str], task_id: str, *
     return task_artifacts_dir(pathlib.Path(drive_root), validate_task_id(task_id), create=create)
 
 
+def actor_source_reference(*, category: str, source_id: str, data: bytes, extension: str) -> Dict[str, Any]:
+    """Price an exact actor-source address without creating a directory or writing bytes."""
+    normalized_category = str(category or "").strip()
+    if normalized_category not in _SOURCE_HANDLE_CATEGORIES:
+        raise ValueError(f"unsupported source-handle category: {normalized_category}")
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source_id or "source")).strip("._")
+    safe_id = safe_id[:160] or "source"
+    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
+    digest = sha256(data).hexdigest()
+    relative = pathlib.PurePosixPath(
+        _SOURCE_HANDLES_SUBDIR,
+        normalized_category,
+        f"{safe_id}-{digest}.{safe_extension}",
+    )
+    read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
+    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": len(data),
+            "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
+
+
+
 def store_actor_source_bytes(
     drive_root: Union[pathlib.Path, str],
     task_id: str,
@@ -617,19 +637,9 @@ def store_actor_source_bytes(
 ) -> Dict[str, Any]:
     """Persist exact bytes inside this task's existing actor-readable artifact root."""
 
-    normalized_category = str(category or "").strip()
-    if normalized_category not in _SOURCE_HANDLE_CATEGORIES:
-        raise ValueError(f"unsupported source-handle category: {normalized_category}")
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source_id or "source")).strip("._")
-    safe_id = safe_id[:160] or "source"
-    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
-    digest = sha256(data).hexdigest()
+    ref = actor_source_reference(category=category, source_id=source_id, data=data, extension=extension)
+    relative = pathlib.PurePosixPath(ref["path"])
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
-    relative = pathlib.PurePosixPath(
-        _SOURCE_HANDLES_SUBDIR,
-        normalized_category,
-        f"{safe_id}-{digest}.{safe_extension}",
-    )
     target = artifact_dir.joinpath(*relative.parts)
     # WRITE-ONCE. The name carries the digest, so an existing file (loose or a pack member) with
     # these bytes IS this handle: rewriting would republish identical content while racing another
@@ -642,9 +652,7 @@ def store_actor_source_bytes(
     if not already_stored:
         fence_publication()  # a closed publication generation writes no new source
         write_bytes_atomic(target, bytes(data))
-    read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
-    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": len(data),
-            "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
+    return ref
 
 
 def read_actor_source_bytes(

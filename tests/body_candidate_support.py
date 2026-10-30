@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import time
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -75,6 +77,29 @@ def git(repo, *args, check=True, env=None):
     if check and proc.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr}")
     return proc.stdout.rstrip("\n")
+
+
+def stage_then_edit_in_one_second(repo, rel, staged, edited, attempts=3) -> bool:
+    """LABELLED CONTROLLED TIMING (racy Git): ``staged`` is written to ``rel`` and staged, so Git writes the real
+    index, then the same-size ``edited`` is written, all inside one wall-clock second; the call returns once the clock
+    is past that second. Git itself still compares that entry by content, as it is stamped in its index file's own
+    second, while a copy of the index stamped later would trust its stat data. Each attempt starts at the beginning of
+    a second and is checked against Git's recorded entry; ``False`` when none fit one second (a loaded machine)."""
+    assert len(staged.encode()) == len(edited.encode()), "a size change is never a stat match"
+    path = pathlib.Path(repo) / rel
+    index = pathlib.Path(repo) / git(repo, "rev-parse", "--git-path", "index")
+    for _attempt in range(attempts):
+        time.sleep(1.02 - time.time() % 1)
+        path.write_text(staged)
+        git(repo, "add", "--", rel)
+        path.write_text(edited)
+        recorded = git(repo, "ls-files", "--debug", "--", rel, env={"GIT_OPTIONAL_LOCKS": "0"})
+        entry = tuple(int(re.search(rf"{key}: (\d+):", recorded).group(1)) for key in ("ctime", "mtime"))
+        second = path.stat().st_mtime_ns // 10**9
+        if entry == (path.stat().st_ctime_ns // 10**9, second) and index.stat().st_mtime_ns // 10**9 == second:
+            time.sleep(max(0.0, second + 1.02 - time.time()))
+            return True
+    return False
 
 
 def make_serving(root: pathlib.Path) -> pathlib.Path:

@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping, Sequence
 from ouroboros.artifacts import stage_task_attachments, resolve_attachment_manifest
 from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.presence_admission import PresenceAdmission
+from ouroboros.presence_events import PresenceTurnError, PresenceTurnEvent, presence_turn_event as presence_turn_event
 from ouroboros.presence_authority import presence_ceiling_payload
 from ouroboros.conversation_lease import PresenceTurnGate, PresenceTurnLease
 from ouroboros.task_results import (
@@ -34,50 +35,6 @@ from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 from ouroboros.store import StoreError
 
 log = logging.getLogger(__name__)
-
-
-class PresenceTurnError(ValueError):
-    def __init__(
-        self,
-        code: str,
-        field: str,
-        *,
-        attachment_manifest: Sequence[Mapping[str, Any]] = (),
-        turn_ref: str = "",
-        work_ref: str = "",
-        disposition: str = "",
-        delivery_reporting_version: int = 0,
-    ) -> None:
-        self.code = str(code or "presence_turn_failed")
-        self.field = str(field or "presence_turn")
-        self.turn_ref = str(turn_ref or "")
-        self.work_ref = str(work_ref or "")
-        self.disposition = disposition
-        self.delivery_reporting_version = delivery_reporting_version
-        self.attachment_manifest = [
-            dict(row) for row in attachment_manifest if isinstance(row, Mapping)
-        ]
-        super().__init__(f"{self.code}: {self.field}")
-
-
-@dataclass(frozen=True)
-class PresenceTurnEvent:
-    source_event_id: str
-    provider: str
-    account_id: str
-    conversation_id: str
-    thread_id: str
-    conversation_key: str
-    actor: Mapping[str, Any]
-    conversation: Mapping[str, Any]
-    message: Mapping[str, Any]
-    text: str
-    delivery_reporting_version: int = 0
-    # Negotiated separately from receipts and never part of the event identity
-    # (``presence_continuation``): 1 lets the transport take the initial envelope early.
-    continuation_version: int = 0
-    facts: tuple[str, ...] | None = None
-    identity: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -296,6 +253,11 @@ async def admit_configured_gate(drive_root: Path, conversation_key: str, *, wait
 def _stable_numeric_id(prefix: str, value: str) -> int:
     digest = hashlib.sha256(f"{prefix}\0{value}".encode("utf-8")).digest()
     return (1 << 40) + (int.from_bytes(digest[:6], "big") & ((1 << 40) - 1))
+
+
+def presence_chat_id(conversation_key: str) -> int:
+    """The unchanged ordinary Presence history identity, shared by call ingress."""
+    return _stable_numeric_id("presence-conversation", conversation_key)
 
 
 def presence_turn_task_id(binding_id: str, source_event_id: str) -> str:
@@ -817,6 +779,8 @@ def _log_dialogue(
     event: PresenceTurnEvent,
     task: Mapping[str, Any],
     task_id: str,
+    speaker: Mapping[str, Any] | None = None,
+    client_message_id: str = "",
     ts: str = "",
     historical_import: Mapping[str, Any] | None = None,
 ) -> Any:
@@ -842,10 +806,10 @@ def _log_dialogue(
         "text": text,
         "format": "markdown" if direction == "out" else "",
         "source": f"presence:{event.provider}",
-        **({"sender_label": str(event.actor.get("display_name") or event.actor.get("username") or ""),
-            "sender_session_id": str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")}
+        **({"sender_label": str((speaker or event.actor).get("display_name") or event.actor.get("username") or ""),
+            "sender_session_id": str((speaker or event.actor).get("platform_actor_id") or event.actor.get("id") or "")}
            if direction == "in" else {}),
-        "client_message_id": event.source_event_id,
+        "client_message_id": client_message_id or event.source_event_id,
         "presence_event_identity": presence_event_identity(str(task["metadata"]["presence"]["binding_id"]), event),
         "transport": {
             "provider": event.provider,
@@ -853,7 +817,7 @@ def _log_dialogue(
             "conversation_id": event.conversation_id,
             "thread_id": event.thread_id,
             "conversation_key": event.conversation_key,
-            "actor": dict(event.actor),
+            "actor": dict(speaker or event.actor),
             "conversation": dict(event.conversation),
             "message": dict(event.message),
             **({"delivery": {"state": "authored"}} if direction == "out" else {}),
@@ -877,15 +841,16 @@ def _log_dialogue(
             SimpleNamespace(drive_root=drive_root, task_id=task_id), "presence-event",
             json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"), "json")
     from ouroboros import dialogue_store
-    # The inbound row is a named acceptance (a re-run rejoins the row it landed) and required: it waits for
-    # the store, and a turn whose row cannot be written fails before the model runs (the transport retries).
-    if direction != "in":
+    # Inbound acceptance and both live-call captions require storage before acknowledging the row.
+    # Ordinary text replies keep the best-effort retry buffer.
+    live = (task.get("metadata", {}).get("execution_transport") or {}).get("kind") == "live_conversation"
+    if direction != "in" and not live:
         dialogue_store.append_quietly(drive_root, "chat", row)  # the reply: best effort, retry buffer
         return None
     try:
         return dialogue_store.append(drive_root, "chat", row)
     except (StoreError, OSError, ValueError) as exc:
-        log.warning("Presence inbound row not stored in %s", drive_root, exc_info=True)
+        log.warning("Presence %s row not stored in %s", direction, drive_root, exc_info=True)
         raise PresenceTurnError("chat_log_unwritable", "chat") from exc
 
 
@@ -935,7 +900,7 @@ def _build_task(
     from ouroboros.config import runtime_setting
 
     task_id = physical_task_id or _task_id(admission, event)
-    chat_id = _stable_numeric_id("presence-conversation", event.conversation_key)
+    chat_id = presence_chat_id(event.conversation_key)
     actor_id = _stable_numeric_id(
         "presence-actor",
         f"{event.provider}:{event.account_id}:{event.actor.get('platform_actor_id') or event.actor.get('id') or ''}",
@@ -1086,6 +1051,7 @@ def run_presence_turn(
     agent_factory: Callable[..., Any] | None = None,
     gate: PresenceTurnGate | None = None,
     admitted: PresenceTurnLease | None = None,
+    live_turn: Any = None,
 ) -> PresenceTurnResult:
     """Run one bounded turn; adapters retain durable provider custody.
 
@@ -1173,6 +1139,12 @@ def run_presence_turn(
             retained_manifest=next((resolve_attachment_manifest(drive_root, task_id, r) for r in prior_rows
                                     if r.get("direction") == "in"), None),
         )
+        if live_turn is not None:
+            from ouroboros.live_conversation import LiveConversationTurn
+            if not isinstance(live_turn, LiveConversationTurn) or live_turn.spec.presence_binding_id != admission.binding_id:
+                raise PresenceTurnError("presence_call_identity", "binding_id")
+            task["metadata"]["execution_transport"] = live_turn.request
+            task["model"], task["use_local_model"] = live_turn.model, False
         if event.continuation_version == 2:  # this turn's outputs name their reply anchor; never in the root carrier
             task["metadata"]["presence_continuation_version"] = event.continuation_version
         chat_id = int(task["chat_id"])
@@ -1212,6 +1184,8 @@ def run_presence_turn(
             drive_root=str(drive_root),
             event_queue=event_queue,
         )
+        if live_turn is not None:
+            agent._realtime_turn = live_turn
         from ouroboros.presence_continuation import bind_review_wait
 
         bind_review_wait(agent, lease=lease, event=event, task_id=task_id, identity=identity,

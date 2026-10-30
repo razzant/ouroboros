@@ -335,6 +335,19 @@ class PresenceTurnGate:
             return None
         return resources
 
+    def try_acquire(self, conversation_key: str) -> PresenceTurnLease | None:
+        """One admission attempt for a live peer door; no waiting worker."""
+        key, _lock = self._conversation(conversation_key)
+        steps = self._acquisition(key)
+        try:
+            try:
+                next(steps)
+            except StopIteration as done:
+                return PresenceTurnLease(key, done.value, self)
+            return None
+        finally:
+            steps.close()
+
     def acquire(self, conversation_key: str) -> PresenceTurnLease:
         key, _lock = self._conversation(conversation_key)
         return PresenceTurnLease(key, self.acquire_resources(key), self)

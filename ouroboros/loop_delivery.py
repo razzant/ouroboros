@@ -30,7 +30,6 @@ from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
 from ouroboros.task_finalization import set_terminal_host_notice
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.task_carrier import execution_kind
 
 
@@ -408,10 +407,9 @@ def _replace_delivery_candidate(
     control: str,
     model_text: Optional[str] = None,
 ) -> DeliveryCandidate:
-    full_text = sanitize_tool_result_for_log(full_text)
-    model_text = sanitize_tool_result_for_log(
-        full_text if model_text is None else model_text
-    )
+    # The answer's own bytes: its sha256 is the identity selection, result review
+    # and delivery name. Redaction belongs to derived log and UI projections.
+    model_text = full_text if model_text is None else model_text
     previous_candidate = getattr(tools._ctx, "_delivery_candidate", None)
     from ouroboros.loop_messages import acknowledge_acceptance_observation, owner_source_sha256
 

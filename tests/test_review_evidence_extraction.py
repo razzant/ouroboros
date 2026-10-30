@@ -23,7 +23,7 @@ _MOVED_NAMES = (
     # left with the task-acceptance machine; these section helpers outlived it (the result review
     # and the verification summary still read them through the historical facade).
     "_ACCEPT_NOTES_CAP",
-    "_accept_redact_cap",
+    "_accept_cap",
     "_accept_task_contract",
     "_accept_verification_summary",
     "_accept_receipt_exhibits",

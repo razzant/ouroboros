@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from ouroboros.model_sleep import in_slot_wait
+from ouroboros.model_sleep import HOLD_NOTE, IN_SLOT_HOLD_NOTE, hold_notice, in_slot_wait, unshown_holds
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
 from ouroboros.task_results import (
@@ -31,6 +31,7 @@ from ouroboros.task_status import (
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import truncate_review_artifact
+from ouroboros.work_stop import stop_for_reader, task_current_stop
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 
@@ -67,7 +68,7 @@ def disclosable_effort_fact(data: Dict[str, Any]) -> Dict[str, str]:
             "source": str(fact["source"] or "")}
 
 
-def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None) -> str:
+def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None, reader: str = "") -> str:
     from ouroboros.delegate_output import project_task_output_readers
 
     data = project_task_output_readers(data)
@@ -77,6 +78,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
     }
     if isinstance(data.get("execution_observation"), dict):
         summary["execution_observation"] = dict(data["execution_observation"])
+    if stop := stop_for_reader(data.get("current_stop") or {}, data, reader):
+        summary["current_stop"] = stop  # what holds it now, beside the historical axes
     if isinstance(data.get("swarm_receipt"), dict):
         summary["swarm_receipt"] = data["swarm_receipt"]
     # R5: current custody beside historical axes, on full get_task_result/wait_task
@@ -464,7 +467,8 @@ def _get_task_result(
         )
     except Exception:
         receipts = []
-    outcome_summary = _subtask_outcome_summary(data, receipts=receipts)
+    reader = str(getattr(ctx, "task_id", "") or "")
+    outcome_summary = _subtask_outcome_summary(data, receipts=receipts, reader=reader)
     from ouroboros.tools.join_ledger import _child_result_sha256
 
     child_result_sha256 = _child_result_sha256(data)
@@ -482,6 +486,7 @@ def _get_task_result(
             outcome_summary=outcome_summary,
             capability_delta=disclosable_capability_delta(data),
             effort=disclosable_effort_fact(data), presence_scope=str(presence_scope or ""),
+            current_stop=stop_for_reader(data.get("current_stop") or {}, data, reader),
         )
 
     unchanged = _unchanged_result_reference(str(task_id), child_result_sha256, known_result_sha256)
@@ -541,7 +546,8 @@ def _get_task_result(
 def _wait_attention_poll(
     ctx: ToolContext, after_ts: str, task_ids: List[str],
 ) -> Callable[..., Any]:
-    """on_poll hook: break a sliced wait for the actor's mailbox or a child attention beacon
+    """on_poll hook: break a sliced wait for the actor's mailbox, a waited task held by a current stop
+    this actor has not seen (``model_sleep.unshown_holds``), or a child attention beacon
     (blocker/question/interface_contract/review_requested/delegation_constraint).
 
     The cursor is context-local and per child: a beacon written before this
@@ -591,6 +597,9 @@ def _wait_attention_poll(
             mailbox_peek,
         ):
             return {"reason": "owner_mailbox_pending", "delivery": "pending_loop_drain"}
+        # A waited task a stop holds, at an identity this actor has not seen: shown once, then waited on.
+        if held := unshown_holds(ctx, {tid: _results.get(tid) for tid in task_ids}):
+            return {"reason": "dependency_held", "held": held}
         if not rid:
             return None
         try:
@@ -689,6 +698,8 @@ def _wait_early_return_note(early) -> str:
         return ""
     if early.get("reason") == "owner_mailbox_pending":
         return "The ordinary loop will deliver and acknowledge the unread message. This does not stop the child."
+    if early.get("reason") == "dependency_held":
+        return HOLD_NOTE
     return "A child attention beacon interrupted this wait. Inspect early_return; the children keep running."
 
 
@@ -737,9 +748,14 @@ def _wait_for_task(
             on_poll=_wait_attention_poll(ctx, "", [tid]), poll_interval_sec=2.0,
         )
     early = waited.get("early_return")
+    hold_meta, withdrawn = _held_return(ctx, early)
     if early and early.get("reason") == "owner_mailbox_pending":
         header = "Task wait interrupted by an unread message for this task"
         extra = "\n\n" + _wait_early_return_note(early)
+    elif hold_meta:
+        header = "Task wait returned to show a held dependency"
+        extra = (f"\n\n[HELD_DEPENDENCY]\n{json.dumps(early['held'], ensure_ascii=False, indent=2)}\n"
+                 f"[/HELD_DEPENDENCY]\n{_wait_early_return_note(early)}{withdrawn}")
     elif early:
         header = "Task wait interrupted by a child attention beacon"
         extra = f"\n\n[CHILD_BEACONS]\n{json.dumps(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
@@ -749,12 +765,16 @@ def _wait_for_task(
     # B2 advisory (never a gate): if ANY other child of THIS parent is still in flight
     # while we block on this one, point at wait_tasks(any_terminal) so the agent absorbs
     # whichever finishes first instead of blocking serially on one id at a time.
-    other_live = _count_live_sibling_children(ctx, status_drive_root, exclude_task_id=tid)
-    if other_live >= 1:
+    held: List[str] = []
+    other_live = _count_live_sibling_children(ctx, status_drive_root, exclude_task_id=tid, held=held)
+    if other_live - len(held) >= 1:
         extra += (
-            f"\n\n[ADVISORY] {other_live} other child(ren) still running/scheduled — consider "
+            f"\n\n[ADVISORY] {other_live - len(held)} other child(ren) still running/scheduled — consider "
             "wait_tasks(any_terminal) to absorb whichever finishes first instead of waiting one at a time."
         )
+    if held:
+        extra += (f"\n\n[ADVISORY] {len(held)} other child(ren) held by a current stop ({', '.join(held)}): "
+                  "none reaches a terminal state until its stop is released; get_task_result shows its current_stop.")
     horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
     if horizon_note:
         extra += f"\n\n{horizon_note}"
@@ -764,17 +784,17 @@ def _wait_for_task(
     tasks = waited.get("tasks") if isinstance(waited.get("tasks"), dict) else {}
     result = _unsettled_wait_body(
         status_drive_root, tid, tasks.get(tid),
-        known_result_sha256 if selected_view in {"", "full"} else "",
+        known_result_sha256 if selected_view in {"", "full"} else "", reader=str(getattr(ctx, "task_id", "") or ""),
     )
     if not result:
         kwargs = {"view": selected_view} if selected_view else {}
         if known_result_sha256:
             kwargs["known_result_sha256"] = known_result_sha256
         result = _get_task_result(ctx, tid, **kwargs)
-    return f"{header} after {waited.get('elapsed_sec', 0):.1f}s.{extra}\n\n{result}"
+    return _with_held(ctx, f"{header} after {waited.get('elapsed_sec', 0):.1f}s.{extra}\n\n{result}", hold_meta)
 
 
-def _unsettled_wait_body(drive_root: Path, tid: str, data: Any, known_result_sha256: str) -> str:
+def _unsettled_wait_body(drive_root: Path, tid: str, data: Any, known_result_sha256: str, *, reader: str = "") -> str:
     """The compact body of a wait_task that returned BEFORE the child settled
     (timeout, mailbox interrupt, attention beacon), or ``""`` when the full
     single-child handoff is due: a settled child, an unknown or admission-pending
@@ -793,6 +813,7 @@ def _unsettled_wait_body(drive_root: Path, tid: str, data: Any, known_result_sha
     if known_result_sha256 and known_result_sha256 != sha:
         return ""
     projection = _compact_child_projection(tid, data, known_result_sha256 or None)
+    _reader_stop(projection, data, reader)
     projection["delegated_runs"] = _delegated_run_facts(drive_root, projection["task_id"])
     return (
         f"Task {tid} [{status}]\nchild_result_sha256={sha}\n\n[CHILD_PROJECTION]\n"
@@ -949,6 +970,11 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
             status="error", code="TOOL_ARG_ERROR",
             text="⚠️ TOOL_ARG_ERROR (await_messages): timeout_sec must be an integer number of seconds.",
         ))
+    if held := unshown_holds(ctx, {}):  # only what an earlier call of this batch returned: no read, no wait
+        meta, withdrawn = hold_notice(ctx, held)
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", meta=meta, text=json.dumps(
+            {"reason": "dependency_held", "elapsed_sec": 0.0, "held": held, "note": IN_SLOT_HOLD_NOTE + withdrawn},
+            ensure_ascii=False)))
     from ouroboros.config import get_per_call_timeout_ceiling_sec
 
     window, bound = _wait_window(ctx, requested, clamp=int(get_per_call_timeout_ceiling_sec()),
@@ -1000,8 +1026,11 @@ def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}",
             meta={"operation_outcome": "completed_no_effect"}))
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK",
-        text=json.dumps(outcome, ensure_ascii=False), meta={"sleep_question_notice": bool(outcome.get("questions"))}))
+    held, withdrawn = hold_notice(ctx, outcome["held"]) if outcome.get("held") else ({}, "")
+    if withdrawn:
+        outcome["note"] += withdrawn
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=json.dumps(outcome, ensure_ascii=False),
+                                                meta={"sleep_question_notice": bool(outcome.get("questions")), **held}))
 
 
 def await_messages_entry() -> ToolEntry:
@@ -1036,7 +1065,9 @@ def await_messages_entry() -> ToolEntry:
             "still need warm sleep. A new question from any ordinary run you own also wakes you, even "
             "if not selected; reviewer runs stay with their panel. Question sources are delivered, not answered. "
             "Retaining an external writer retains its project lane. A source that is "
-            "already ready answers at once. Sleep does not count as execution time; an explicit deadline "
+            "already ready answers at once; so does a selected task or sender held by a current stop you have "
+            "not yet been shown (dependency_held, with its current_stop): the same request then sleeps. "
+            "Sleep does not count as execution time; an explicit deadline "
             "still applies. A settled task is not a successful one: read its result when you wake."
         ),
         "parameters": {"type": "object", "properties": {
@@ -1060,12 +1091,15 @@ def await_messages_entry() -> ToolEntry:
     }, _await_messages, timeout_sec=get_per_call_timeout_ceiling_sec() + 60)
 
 
-def _count_live_sibling_children(ctx: ToolContext, status_drive_root: Path, *, exclude_task_id: str) -> int:
+def _count_live_sibling_children(ctx: ToolContext, status_drive_root: Path, *, exclude_task_id: str,
+                                 held: List[str] | None = None) -> int:
     """Count this parent's children still running/scheduled/requested (excluding the one
     just waited on). Advisory only — a failure returns 0 so it never breaks wait_task.
 
     Select indexed, stored row facts in any role, without decoding task bodies.
     The typed parent identity applies even when its body is padded or unreadable.
+    ``held`` receives those a current stop holds (``work_stop.task_current_stop``: the
+    queue snapshot and control facts).
     """
     parent_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not parent_id:
@@ -1078,9 +1112,16 @@ def _count_live_sibling_children(ctx: ToolContext, status_drive_root: Path, *, e
         )
         from ouroboros.task_store import task_facts
 
-        return len(task_facts(
+        rows = task_facts(
             status_drive_root, where="parent_task_id=? AND task_id<>? AND status IN (?,?,?)",
-            params=(parent_id, exclude_task_id, STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED)))
+            params=(parent_id, exclude_task_id, STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED))
+        if held is not None and rows:
+            from ouroboros.task_status import _load_queue_snapshot
+
+            snapshot = _load_queue_snapshot(status_drive_root)
+            held.extend(tid for tid in sorted(rows) if task_current_stop(
+                status_drive_root, snapshot, tid).get("state") == "held")
+        return len(rows)
     except Exception:
         return 0
 
@@ -1171,6 +1212,7 @@ def _children_roster_projection(
         if not isinstance(row, dict):
             continue
         _cost = cost_projection(row)
+        stop = stop_for_reader(row.get("current_stop") or {}, row, my_id)
         roster.append({
             "task_id": str(row.get("task_id") or row.get("id") or ""),
             "status": row.get("status"),
@@ -1179,6 +1221,7 @@ def _children_roster_projection(
             "outcome_axes": normalize_outcome_axes(row),
             **({"execution_observation": dict(row["execution_observation"])}
                if isinstance(row.get("execution_observation"), dict) else {}),
+            **({"current_stop": stop} if stop else {}),
         })
     return disclosed_list_projection(
         roster, key="children_roster", limit=max(1, int(limit)), item=lambda entry: entry,
@@ -1207,6 +1250,8 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
     }
     if isinstance(data.get("execution_observation"), dict):
         projected["execution_observation"] = dict(data["execution_observation"])
+    if isinstance(data.get("current_stop"), dict) and data["current_stop"]:
+        projected["current_stop"] = dict(data["current_stop"])  # a current fact: it outlives result suppression
     # The result hash binds this limitation too; keep its host authorship
     # separate from the unchanged model answer, including an empty answer.
     from ouroboros.task_finalization import terminal_host_notice_text
@@ -1274,6 +1319,24 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
         projected.pop("trace_summary", None)
         projected.update(unchanged)
     return projected
+
+
+def _reader_stop(projected: Dict[str, Any], data: Any, reader: str) -> None:
+    """The projection's ``current_stop`` as this reader may act on it (``work_stop.stop_for_reader``)."""
+    if projected.get("current_stop") and isinstance(data, dict):
+        projected["current_stop"] = stop_for_reader(projected["current_stop"], data, reader)
+
+
+def _held_return(ctx: ToolContext, early: Any) -> tuple:
+    """A task wait that returned to show a held dependency: the identities its delivery records and the words for
+    a sleep of this batch it withdrew (``model_sleep.hold_notice``); ``({}, "")`` for any other return."""
+    if not isinstance(early, dict) or early.get("reason") != "dependency_held":
+        return {}, ""
+    return hold_notice(ctx, early["held"])
+
+
+def _with_held(ctx: ToolContext, text: str, meta: Dict[str, Any]) -> str:
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta=meta)) if meta else text
 
 
 def _wait_for_tasks(
@@ -1419,6 +1482,7 @@ def _wait_for_tasks(
             known = (known_result_sha256_by_task.get(str(tid))
                      if isinstance(known_result_sha256_by_task, dict) else None)
             public_tasks[str(tid)] = _compact_child_projection(str(tid), data, known)
+            _reader_stop(public_tasks[str(tid)], data, str(getattr(ctx, "task_id", "") or ""))
         waited["tasks"] = public_tasks
         waited["tasks_note"] = (
             "Compact per-child projection. The full result envelope (trace_refs, "
@@ -1457,9 +1521,10 @@ def _wait_for_tasks(
             }
     if bound != "requested":
         waited["window_sec"], waited["window_bound"] = float(timeout), bound
+    hold_meta, withdrawn = _held_return(ctx, waited.get("early_return"))
     if note := _wait_early_return_note(waited.get("early_return")):
-        waited["early_return_note"] = note
+        waited["early_return_note"] = note + withdrawn
     horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
     if horizon_note:
         waited["cache_horizon_note"] = horizon_note
-    return json.dumps(waited, ensure_ascii=False, indent=2)
+    return _with_held(ctx, json.dumps(waited, ensure_ascii=False, indent=2), hold_meta)

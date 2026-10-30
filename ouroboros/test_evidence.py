@@ -98,7 +98,12 @@ def source_evidence(repo, destination) -> dict:
         live_index = repo / os.fsdecode(git("rev-parse", "--git-path", "index").strip())
         env["GIT_INDEX_FILE"] = str(Path(private) / "index")
         if live_index.is_file():
-            shutil.copyfile(live_index, env["GIT_INDEX_FILE"])
+            # With the index's own time: Git checks an entry stamped in that second by content,
+            # so the diff never trusts a same-size edit made then as unchanged.
+            with open(live_index, "rb") as source, open(env["GIT_INDEX_FILE"], "wb") as sink:
+                held = os.fstat(source.fileno())
+                shutil.copyfileobj(source, sink)
+            os.utime(env["GIT_INDEX_FILE"], ns=(held.st_atime_ns, held.st_mtime_ns))
         return _source_record(repo, destination, git)
 
 

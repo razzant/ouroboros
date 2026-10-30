@@ -7,9 +7,10 @@ app's signed source entry (``Contents/MacOS/ouroboros-shell``, Python with ``-I`
 activating restart is requested. No published app needs a new flag: the old app quits through its
 own Quit, the new one opens through LaunchServices as a launch of this installation.
 
-Every step is journalled in the activation's own record (``handoff.json``: ``native.state`` and
-``native.steps``, through the captured helper's ``native_journal``), and Panic, read before each
-step and inside each wait, ends it with nothing more done:
+From its arming on, every step is journalled in the activation's own record (``handoff.json``:
+``native.state`` and ``native.steps``, through the captured helper's ``native_journal``; before it
+this process leaves that record and its lock to ``arm``, which never waits), and Panic, read before
+each step and inside each wait, ends it with nothing more done:
 
 1. ``custody``: it acts only once it runs detached from the activating server's process tree
    (``--detach`` forks it away and the spawner reads its pid; macOS reparents it to launchd) and
@@ -116,7 +117,7 @@ class _Installer:
         self.helper = os.path.join(self.data_dir, "state", "body_adoption")
         self.open_tool, self.osascript, self.wait_sec, self.arm_wait_sec = open_tool, osascript, wait_sec, arm_wait_sec
         self.switch = runpy.run_path(os.path.join(self.helper, "switch.py"))  # the captured helper beside this file
-        # Read once: an archived record removes the helper folder, and Panic must still be read after that.
+        # Read once: an archived record removes the helpers beside it, and Panic must still be read after that.
         self.panic_reader = runpy.run_path(os.path.join(self.helper, "installation_stop.py"))["installation_panic"]
         self.native, self.repo, self.pid_lock, self.holding = {}, "", None, False
 
@@ -235,13 +236,14 @@ class _Installer:
             return "refused", "not_armed", "the activation was closed before it armed; nothing was changed"
         if custody != "done":
             return "refused", "custody_unconfirmed", "this process is not the recorded, detached installer"
-        self.journal("in_custody", ppid=os.getppid())
+        self.note("custody", ppid=os.getppid())
         # 2. arm
         armed = self.wait_until(lambda: self.phase() not in ("authorized", "unreadable"), self.arm_wait_sec)
         if armed == "panic":
             return "stopped", "panic", "Panic is recorded while waiting for the activation; nothing ran"
         if self.phase() != "armed":
             return "refused", "not_armed", "the activation is %s, never armed; nothing was changed" % self.phase()
+        self.journal("in_custody", ppid=os.getppid())
         # 3. quit and wait: its server holds its exit until this Quit reaches it through the launcher pipe
         if self.panic():
             return "stopped", "panic", "Panic is recorded before the quit; nothing ran"

@@ -1,8 +1,8 @@
 """The chat rows after the legacy frontier keep their facts beside the chronicle (``memory_inventory._tail``).
 
 Every reader decoded, hashed and projected every row after the frontier on every call (about 22,000 rows
-for each Main view on the owner's install). A row's address, metadata and position never change, so the
-chronicle index keeps them (``tail_rows``): a reader reads live only the rows appended since and stores
+for each Main view on the owner's install). The chronicle index keeps row addresses, metadata and
+positions (``tail_rows``), invalidating them on a text revision; a reader otherwise reads only new rows and stores
 them, and the maintenance job fills the history once, so no turn pays it. Membership and seals stay
 applied at read. Each test holds the stored answer equal to the rows read live.
 """

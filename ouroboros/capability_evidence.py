@@ -37,7 +37,7 @@ import pathlib
 import re
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
@@ -148,30 +148,14 @@ class CapabilityEvidence:
     account_fingerprint: str = ""
     provenance: str = ""
     response_limit: Dict[str, Any] = field(default_factory=dict)
+    route_facts: Dict[str, Any] = field(default_factory=dict)
+
     window_kind: str = "total"  # metadata may explicitly state an input-only limit
     retired_ack: Dict[str, Any] = field(default_factory=dict)
     server_window: Dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> Dict[str, Any]:
-        return {
-            "window_tokens": int(self.window_tokens or 0),
-            "status": self.status,
-            "source": self.source,
-            "route_fp": self.route_fp,
-            "model": self.model,
-            "provider": self.provider,
-            "ts": self.ts,
-            "detail": self.detail,
-            "stale": bool(self.stale),
-            "source_id": self.source_id,
-            "credential_profile_id": self.credential_profile_id,
-            "account_fingerprint": self.account_fingerprint,
-            "provenance": self.provenance,
-            "response_limit": self.response_limit,
-            "window_kind": self.window_kind,
-            "retired_ack": self.retired_ack,
-            "server_window": self.server_window,
-        }
+        return {**asdict(self), "window_tokens": int(self.window_tokens or 0), "stale": bool(self.stale)}
 
 
 def is_known(evidence: Any, *, require_fresh: bool = False) -> bool:
@@ -758,6 +742,22 @@ def revoke_owner_ack(drive_root: Any, route_fp: str) -> bool:
 
 # --- Probing (opportunistic, cached) ------------------------------------------
 
+def record_route_facts(drive_root, *, provider, model, base_url, facts):
+    """Publish the selected catalog's dated conversation bound, independent of acceptance.
+
+    A catalog can withdraw a window by declaring it unknown. Its labelled facts
+    stay beside the ordinary capability record; accepted input never raises W.
+    """
+    fp = route_fingerprint(provider=provider, model=model, base_url=base_url)
+    evidence = CapabilityEvidence(
+        window_tokens=facts.conversation_window_tokens or 0,
+        status=STATUS_CONFIRMED if facts.conversation_window_tokens is not None else STATUS_UNPROBEABLE,
+        source="route_catalog", route_fp=fp, model=model, provider=provider,
+        ts=utc_now_iso(), detail=facts.source, route_facts=asdict(facts))
+    _store_evidence(drive_root, "probes", fp, evidence.to_json())
+    return evidence
+
+
 def _cached_evidence(record: Dict[str, Any], fp: str, model: str, provider: str,
                      *, stale: bool = False, detail: str = "") -> CapabilityEvidence:
     """Keep account provenance attached on every cached/stale projection."""
@@ -771,6 +771,9 @@ def _cached_evidence(record: Dict[str, Any], fp: str, model: str, provider: str,
         credential_profile_id=str(record.get("credential_profile_id") or ""),
         account_fingerprint=str(record.get("account_fingerprint") or ""),
         provenance=str(record.get("provenance") or ""),
+        route_facts=dict(record.get("route_facts") or {}),
+
+
         window_kind=str(record.get("window_kind") or "total"),
     )
 

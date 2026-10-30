@@ -133,3 +133,11 @@ def test_a_fabricated_row_is_caught_and_a_real_retirer_resolves():
     assert resolves("ouroboros.review_checking.CheckingAreaUnavailable")
     assert not resolves("ouroboros.no_such_module.prune")
     assert lifetime("[record] chat history") == ("record", None)
+
+
+def test_exact_cut_and_room_reader_have_size_and_retention_rows():
+    text = DOC.read_text()
+    for token in ('<digest>-<sha256>.json` (physical cut', 'room-<digest>-<sha256>.json'):
+        row = next(line for line in text.splitlines() if token in line)
+        assert '[record]' in row and 'pack' in row and 'MB' in row
+        assert 'no independent remover' in row

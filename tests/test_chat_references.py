@@ -158,3 +158,15 @@ def test_an_outgoing_rows_own_name_travels_beside_the_owner_correlation(tmp_path
     frame = next(echo for echo in echoes if echo.get("content") == "Restarting")
     assert frame["client_message_id"] == "owner-cmid" and frame["row_address"]
     assert "row_client_message_id" not in frame, "the owner's correlation never becomes the reply's own name"
+
+
+def test_a_call_opening_row_names_itself_on_its_live_echo():
+    """The call-open row is ingress the host wrote: its live echo must carry its own name, or the chat cannot fold
+    it into the call card and the owner sees the opening as a System bubble beside every call (27.10)."""
+    from ouroboros.chat_references import projection_fields
+    opening = {"direction": "in", "role": "system", "system_type": "call_open", "chat_id": 1, "ts": "t",
+               "client_message_id": "call:c1:open", "host_fact": {"kind": "call_open", "call_id": "c1"}, "text": "Cue"}
+    assert projection_fields(opening)["row_client_message_id"] == "call:c1:open"
+    owner = {**opening, "role": "user", "system_type": ""}
+    owner.pop("host_fact")
+    assert "row_client_message_id" not in projection_fields(owner), "the owner's own row keeps its id alone"

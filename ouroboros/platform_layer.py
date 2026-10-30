@@ -27,18 +27,14 @@ IS_LINUX = sys.platform.startswith("linux")
 
 PATH_SEP = ";" if IS_WINDOWS else ":"
 SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
-_SUBPROCESS_NO_WINDOW = (
-    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
-)
+_SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
 _PATH_BOOTSTRAPPED = False
 
 # POSIX signal numbers -> names, the same on every platform. ``signal.Signals``
 # knows only the host's own signals, so a child that died of SIGKILL would be
 # named "SIG9" wherever the reader lacks that signal (Windows).
-_POSIX_SIGNAL_NAMES = {
-    1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 6: "SIGABRT", 9: "SIGKILL",
-    11: "SIGSEGV", 13: "SIGPIPE", 14: "SIGALRM", 15: "SIGTERM",
-}
+_POSIX_SIGNAL_NAMES = {1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 6: "SIGABRT", 9: "SIGKILL",
+                       11: "SIGSEGV", 13: "SIGPIPE", 14: "SIGALRM", 15: "SIGTERM"}
 
 
 def posix_signal_name(signum: int) -> str:
@@ -56,11 +52,7 @@ def posix_signal_name(signum: int) -> str:
 def executable_name_candidates(name: str) -> List[str]:
     """Platform spellings for an executable stored in a known directory."""
     base = str(name or "").strip()
-    if not base:
-        return []
-    if IS_WINDOWS:
-        return [f"{base}.cmd", f"{base}.exe", f"{base}.bat", base]
-    return [base]
+    return ([f"{base}.cmd", f"{base}.exe", f"{base}.bat", base] if IS_WINDOWS else [base]) if base else []
 
 
 def local_zoneinfo():
@@ -488,11 +480,19 @@ def open_path_external(path: pathlib.Path) -> None:
         subprocess.Popen(["xdg-open", str(target)], env=host_environment())
 
 
+def app_location_labels(path) -> list:
+    """What is measured about where an app copy runs: ``translocated`` (an ``AppTranslocation`` path component),
+    ``read-only mount`` (``statvfs`` sets ``ST_RDONLY``; a path that cannot be measured gets no label)."""
+    labels = ["translocated"] if any("AppTranslocation" in pathlib.Path(p).parts for p in (path, os.path.realpath(path))) else []
+    try:
+        return labels + (["read-only mount"] if os.statvfs(path).f_flag & os.ST_RDONLY else [])
+    except (OSError, AttributeError):  # Windows has no statvfs
+        return labels
+
+
 def is_unstable_macos_app_path(path: pathlib.Path) -> bool:
-    """Return whether a macOS app path is likely a DMG/AppTranslocation mount."""
-    raw = str(path).replace("\\", "/")
-    resolved = str(path.resolve()).replace("\\", "/")
-    return any("AppTranslocation" in p or p.startswith("/Volumes/") for p in (raw, resolved))
+    """Whether an app copy is translocated or on a read-only mount (a disk image); a writable volume is not."""
+    return bool(app_location_labels(path))
 
 
 def ensure_windows_user_path(path: pathlib.Path) -> None:

@@ -86,8 +86,8 @@ def test_heavy_card_is_gone_but_provider_test_contract_and_controls_remain() -> 
     assert "slot.note" in _read(MODULES / "model_roles.js")
     # Every API key row carries its Test; the probe runs against that row's draft only.
     connections = _read(MODULES / "settings_connections.js")
-    assert "data-provider-test" in ui
-    assert "data-connection-test" in ui
+    # Button presence belongs to the rendered page, regardless of which module
+    # owns its markup: web/tests/provider_test.test.js exercises every key row.
     assert "apiClient.providerTest(body)" in connections
     assert "{ provider_id: card.kind, connection: names(card.kind).get(row), overrides }" in connections
     assert "providerTestResultIsCurrent" in connections

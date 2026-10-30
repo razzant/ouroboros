@@ -20,6 +20,7 @@ import { showToast } from './toast.js';
 import { bindComposerPlus } from './composer_plus.js';
 import { bindComposerChips } from './composer_chips.js';
 import { bindVoiceControls } from './voice_controls.js';
+import { bindConversationControls } from './conversation_controls.js';
 import { draftPlace, flySent } from './send_flight.js';
 
 const CHAT_DRAFT_KEY = 'ouro_chat_draft';
@@ -415,6 +416,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         setDraft(text) {
             input.value = String(text ?? '');
             onInput();
+            input.dispatchEvent?.(new Event('change', { bubbles: true }));
         },
         /** Insert words at the caret, replacing a selection, and leave the caret after them in the focused field. */
         insertAtCursor(text) {
@@ -425,6 +427,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             input.focus({ preventScroll: true });
             input.setSelectionRange(start + words.length, start + words.length);
             onInput();
+            input.dispatchEvent?.(new Event('change', { bubbles: true }));
         },
         // After a send, once the feed shows it: the emptied field's height and the room's dock.
         resize: resizeChatInput,
@@ -457,6 +460,6 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         },
     };
     const contributed = [bindComposerPlus({ composer }), bindComposerChips({ composer, menu: createPlusMenu }),
-        bindVoiceControls({ composer })];
+        bindVoiceControls({ composer }), bindConversationControls({ composer, page, chatId, ws })];
     return composer;
 }

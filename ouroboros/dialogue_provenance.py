@@ -456,6 +456,8 @@ _HOST_FACT_FIELDS = (("status", "status"), ("outcome", "outcome"), ("phase", "ou
 
 
 def _direction(row: Mapping[str, Any]) -> str:
+    if row.get("role") == "system":
+        return "system"
     value = _text(row.get("direction")).lower()
     return "out" if value == "outgoing" else value
 
@@ -513,6 +515,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     ``pos`` such a row raises ``TypeError``. Without an epoch (the chain was
     empty at activation, or the chronicle is not active) ``pos`` is not needed.
     """
+    if _mapping(row.get("host_fact")).get("kind") == "call_open":
+        return {"kind": "host", "label": "host", "type": "call_open"}
     if row.get("type") == "quiz_answer" or (row.get("type") == "quiz_closed"
             and (row.get("quiz") or {}).get("closed_actor") == "owner"):
         return {"kind": "human", "label": "Owner", "via": "quiz"}

@@ -8,8 +8,9 @@ launcher.py spawns server.py (Starlette+uvicorn) — HTTP + WebSocket on configu
 web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules not listed here (§3)
   ui.css — the shared palette/control stylesheet of the SPA, onboarding and author pages (§3 Navigation)
   modules/ — browser modules (§3)
-    media_capture.js — One page audio lease, device replacement and lifecycle release
+    media_capture.js — Shared page audio/visual leases, device replacement and lifecycle release
     speech_providers.js, voice_recorder.js, dictation.js — The page's speech hub and strict selection, bounded Opus/AAC/WAV recording, cancellable transcription and draft-insertion decisions
+    conversation_controls.js — Mounts the granted Live Conversation contribution at the composer (§13)
     voice_controls.js, dictation_chooser.js, read_aloud.js — The composer's dictation mic, "+" → Add dictation…, Read aloud on replies (DESIGN "Voice controls")
     ui_primitives.js — safe-field, escaping and tone/status helpers (§3 Navigation)
     i18n.js, settings_language.js, ui_i18n_types.js — interface language: a DOM overlay over rendered chrome from the translation memory, translated at the producer; chat prose, logs, code and owner names are never walked (§3 Settings)
@@ -24,7 +25,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     composer.js, composer_subagents.js, capsule_fit.js, swarm_presentation.js — the composer: "+" menu, slots, Send, Subagents; Swarm's label and receipt (§3)
     chat_cards.js, card_components.js, card_frames.js — living cards in the feed and kept on Widgets; the sandboxed app frame (CLIENT_CONTRACT §5)
     contributions.js, composer_plus.js, composer_chips.js, host_modules.js, holds.js — the contributions store and verbs; skills' "+" items and capsule-row chips; trusted page modules; the start ledger (CLIENT_CONTRACT §11; DESIGN "Skills in the page")
-    project_reference.js — the one Project pointer control and the only raiser of `ouro:open-project` (DESIGN "References and actions")
+    project_reference.js, task_reference.js — the one Project and Main task doors (DESIGN "References and actions")
     project_activity.js, work_status.js, work_types.js, status_mark.js — Project marks and room words from the server's `rooms`/`works`; their typedefs (§3 Liveness census)
     room_work.js, project_read_state.js, chat_header.js, consciousness_status.js — a room's bar: work list (no execution authority), consciousness chip and Shade, Panic, Main's Restart/budget; read receipt (§3 Project rooms)
     model_wait.js — model waits and owner actions in chat cards (§6 Quota and auth waits)
@@ -39,6 +40,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     acceptance_incident_presentation.js — a stored task-acceptance incident, read-only; no reviewer authority (§6 Result review)
     widgets.js, widget_render.js, widget_module.js, widget_assets.js, widget_frame.js, widget_card.js, widget_reorder.js, widget_list.js, widget_size.js, widget_chart.js, widget_job.js, masonry.js — Widgets page leaves: host and card registry, the declarative renderer, framed mounts, card chrome, list-request policy, helpers and masonry (§3)
 skills/browser_speech/, skills/device_voice/, skills/templates/ — built-ins (`skills/builtin.json`): speech engines (ui/stt.js, ui/tts.js) and the "+" starters
+skills/live_conversation/, skills/gemini_live/, skills/grok_realtime/, skills/openai_realtime/ — Live Conversation feature and separate native providers (§13)
 supervisor/ — background thread inside server.py (§5)
   active_activity.py — process-local direct actors/start phases/call observations for `/api/state`; private reply expectation/handoff facts, no queue rows (§3 Direct turns and the activity block)
   message_bus.py — local message bus for the Web UI and transport skills; re-exports the ingress names
@@ -164,6 +166,7 @@ ouroboros/ — agent core and shared runtime (§6)
   physical_attempt_context.py — frozen context-fit facts, including the memory view kind, carried by one physical model attempt (§6 Context fitting)
   _usage_rows.py, _usage_money.py, _usage_response.py, usage_ledger.py — the reducer, Decimal cash, the usage normalizer, row rules and the money lock (§6 Usage ledger substrate vs. accounting policy)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)
+  _usage_settlement.py — usage/price evidence projected outside the ledger transaction (§6 Budget tracking)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (USAGE_STORE.md)
   store.py, store_capture.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py, dialogue_store.py, dialogue_retry.py, dialogue_import.py, dialogue_positions.py — shared SQLite core (USAGE_STORE.md): `state/current.sqlite` (atomic `meta.commit_seq`; boot import/reconcile §2, export before storeless switches §9), `state/dialog.sqlite` (chat/progress rows by chain coordinate, ordinals, import intervals; one `append` seam; cutover, archive import, rollback export; PERSISTENCE.md)
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
@@ -212,11 +215,13 @@ ouroboros/ — agent core and shared runtime (§6)
   room_membership.py, room_appearances.py — canonical stored-row membership and its derived appearance index (§3)
   owner_words.py — the owner's words that caused a work tree, rendered verbatim for children, sessions and reviewers
   project_lease.py — one-writer-per-project lease in `assign_tasks`; same-project swarms exempt (§6 Project registry and lease)
-  context.py — Main context assembly and the Available-subagents catalog (§6)
+  context.py, context_timing.py — Main context, timing, subagent catalog (§6)
   context_input_selection.py — declared-source composition and first/latest usable author-input exhibits, distinct from current criteria (§6 Selected first-input sources)
   main_context_authority.py — Main's authority view and helpers' idempotent predecessor briefs (§6)
   client_surface.py — bounded client-surface normalizer; identity excludes viewport/narrow_layout (§4 WebSocket protocol)
-  context_fit.py, context_budget.py — immutable Max/Low/Nano views, typed reclaim deficit, transcript cache seal, no routing/retry authority; budget vocabulary and typed reclaim SSOT, `estimate_message_chars` (§6 Context fitting)
+  context_fit.py — immutable Max/Low/Nano views, typed reclaim deficit, transcript cache seal; no routing/retry authority (§6 Context fitting)
+  context_measurement.py — sealed-request facts, deficits and reply allowance in route units (§6 Context fitting)
+  context_budget.py — budget vocabulary and typed reclaim SSOT; `estimate_message_chars` (§6 Context fitting)
   context_mode_compat.py — reads normalize, boot persists `OUROBOROS_CONTEXT_MODE`/`OUROBOROS_CONTEXT_MODE_AUTO_LOW` together (§7 Default settings)
   memory_view.py, memory_view_legacy.py, memory_view_account.py, memory_room_activity.py, memory_waiting.py — story/rooms, liveness and waiting acts; memory_reader.py — extensions' `read_memory` (§6)
   memory_floor.py — physical memory-view floor (overflow becomes address lines, people's words last; §6 Context fitting)
@@ -333,6 +338,13 @@ ouroboros/ — agent core and shared runtime (§6)
   extension_isolated_deps.py — non-reentrant reader/writer leases for `sys.path`; the dependency RLock serializes importer-cache sweeps, not plugin execution
   extension_health.py — Durable process-qualified per-skill health at `data/state/skills/<name>/health.json`; server observation is authoritative, worker observation a handoff-qualified view
   extension_plugin_api.py, extension_registry_state.py, extension_liveness.py, extension_child_catalog.py, extension_import_staging.py, extension_surface_names.py — the extension runtime's leaves: the `PluginAPI`, live-surface registries, liveness, child-catalog validation, staged import trees, surface naming
+  live_conversation.py — Ordinary actor host port: common context, tools, history, money and Stop (§13)
+  live_timing.py — Renewal boundaries assembled into the existing call timing journal (§13)
+  realtime_session.py — Joined native socket teardown and JSON transport mechanics
+  realtime_item_echo.py — Shared item acknowledgement comparison: image parts by type, other payloads exact
+  call_peers.py, call_protocol.py — Media peers, PCM mixing and the companion codec (§12)
+  presence_call.py, presence_events.py — Presence call admission and shared event identity (§12)
+  realtime_turn.py, realtime_setup.py, realtime_credentials.py — call route evidence, host-selected provider input and the one credential capture a session prepares and opens with (§13)
   skill_token.py — Opaque Host Service token minting/validation (§12)
   skill_sources.py, skill_source_git.py, skill_source_catalog.py, skill_source_install.py, skill_starter.py — Sources, git caches, catalogs, install lifecycle, starter (§13)
   marketplace/ — ClawHub and install substrate (§13)
@@ -378,7 +390,9 @@ ouroboros/ — agent core and shared runtime (§6)
     skill_payload_policy.py — Payload path resolution/confinement/sidecar detection
     skill_manifest.py — Unified skill manifest parser (`VALID_SKILL_TYPES`: instruction|script|extension)
     schema_versions.py — Opt-in `_schema_version` stamping helpers (§11.2)
-    record_contract.py, plugin_api.py — Record passport: the local ledger rows external observers may rely on; PluginAPI, ExtensionRegistrationError and the closed vocabularies `FORBIDDEN_SKILL_SETTINGS`, `VALID_EXTENSION_PERMISSIONS`, `VALID_EXTENSION_ROUTE_METHODS` (§11.1)
+    record_contract.py — Record passport: the local ledger rows external observers may rely on (§11.1)
+    live_conversation.py — Native session events, media and host-selected input (§13)
+    plugin_api.py — PluginAPI, ExtensionRegistrationError and the closed vocabularies `FORBIDDEN_SKILL_SETTINGS`, `VALID_EXTENSION_PERMISSIONS`, `VALID_EXTENSION_ROUTE_METHODS` (§11.1)
   gateways/ — Thin outbound transport adapters; no business logic
     claudexor_images.py — requestKind=image upload and whole-result ACK (docs/IMAGE_GENERATION.md)
     image_api.py — Image API routes/credentials; one send, bounded results, cost evidence
@@ -387,7 +401,7 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor_run_events.py, claudexor_observation.py — Catalog-negotiated, bounded run-journal SSE frames and durable seq cursors, no polling owner; the run observation adapter (§6 Delegated subagents)
     claudexor_routing.py — Catalog-negotiated passive read of the engine's account/model marks (§3 Agent accounts)
     claudexor_route_health.py — Catalog-negotiated passive read of the engine's per-route failure shares (§9)
-  claudexor_runtime.py, claudexor_runtime_retention.py — Reviewed next-spawn pin in `data/state/cx`: seed/download, verify/probe, atomic promote; no mutable current; override `OUROBOROS_CLAUDEXOR_BIN` (§6); copies neither pinned nor serving retire (§5)
+  claudexor_runtime.py, claudexor_runtime_retention.py, claudexor_node_seed.py — Reviewed next-spawn pin in `data/state/cx`: seed/fetch, verify/probe, atomic promote; no mutable current; override `OUROBOROS_CLAUDEXOR_BIN` (§6); unpinned non-serving copies retire (§5)
   claudexor_exit_facts.py — Bounded saved exits; live memory/loop/store/admission facts, dated capacity snapshots, route-health rows and the newest one's file, without lifecycle policy (§9)
   claudexor_daemon.py, claudexor_harness_install.py — Owned `data/claudexor`: lazy start, authenticated attach, `stop_outcome`, failed-start latch; vendor-CLI repair by the pinned installer (§9)
   claudexor_startup_failure.py — Stdlib `ExitFact`; `failed_without_control` drives spawn latch; diagnostic-only log labels and latch record (§9)
@@ -400,6 +414,7 @@ ouroboros/ — agent core and shared runtime (§6)
     schema.py — Executable gateway contract: JSON Schema derived from the TypedDicts, validating ingress; `contract_document`: `GET /api/contract`
     router.py — Starlette route collector for /api/* and /ws (§4)
     ws.py — WS manager, extension WS dispatch off the ASGI loop, broadcast (§4 WebSocket protocol)
+    call_ws.py, host_call.py, call_contracts.py — Owner/companion call admission, shared peer parser and media contract (§12)
     state.py — /api/health, /api/contract and /api/state
     reply_preparation.py — awaited replies active now, projected from existing live owners to destination chats; no store, scheduler or public census fields (§6)
     tasks.py — Headless task create/list/get/cancel/events; cancel accepts `stop_policy` (`finalize_then_cancel` → supervisor/owner_stop.py) (CLI / Headless Boundary below)
@@ -574,7 +589,7 @@ Workspace tasks default to `memory_mode=forked`; `shared` is refused for an exte
 
 `--detach` returns after durable admission; `--no-stream` polls to completion. `ouroboros run` exits 0 only for a completed lifecycle with a clean execution axis, no failed or degraded objective and a finished artifact bundle (`_is_terminal_success`), so shell automation cannot read "the model answered" as "the deliverable exists"; `--patch`/`--patch-out` are stricter and trust `workspace_patch.json`, which distinguishes an omitted, no-op and failed patch (§6 Headless finalization and workspace patch capture). An explicitly partial cost gets a bounded finality wait (`_await_cost_finality`) before its partial flags stay visible. Schedules enqueue ordinary tasks (no second scheduler, §5); skill `scheduled_tasks` only suggest (`skill_schedule_suggestions.py`). A blank timezone means the DST-aware system zone (fixed offset only when that zone is unrecoverable); the schedule digest rides task and consciousness context.
 
-The packaged CLI wrapper/installer reuses the embedded interpreter, not a second PyInstaller runtime: `packaged_cli` finds the seed, bootstraps the repo of the configured tuple and runs `ouroboros.cli` in it; explicit URLs win. Packaged `server` is refused: it would bypass launcher-owned bootstrap, identity, restart and cleanup. Loopback-only `run --start` opens the app unless its data root's own server is ready. Release builds carry Node and ripgrep. Skill-side Node resolves bundled-first (`node_runtime.select_skill_node_runtime()`), the generic process launch PATH-first (`process_interpreters.resolve_process_node`: a healthy PATH node stays byte-identical in argv and child env; the bundled runtime substitutes only when PATH is missing or probe-dead, attests the prepend, never inside a non-local executor backend). `search_code` pre-enumerates policy-approved files before invoking ripgrep; a faster binary widens no search authority. Every bundled consumer searches `bundled_resource_bases()` in one order (`OUROBOROS_BUNDLE_DIR`, frozen root, interpreter-ancestor roots, source checkout): server and CLI children run from the managed repo, never an in-bundle module path; the ancestor step lets an older launcher start a newer checkout. The embedded interpreter never writes into the signed application (codesign seal): `embedded_python_env()` redirects bytecode to `data/state/pycache` and user installs to `data/state/python-userbase` (`pip_install_target_args()` adds `--user` only there); the userbase outranks bundle site-packages and is never pruned, so recovery is deleting it and relaunching.
+The packaged CLI wrapper/installer reuses the embedded interpreter, not a second PyInstaller runtime: `packaged_cli` finds the seed, bootstraps the repo of the configured tuple and runs `ouroboros.cli` in it; explicit URLs win. Packaged `server` is refused: it would bypass launcher-owned bootstrap, identity, restart and cleanup. Loopback-only `run --start` opens the app unless its data root's own server is ready. Release builds carry Node and ripgrep. Skill-side Node resolves bundled-first (`node_runtime.select_skill_node_runtime()`), the generic process launch PATH-first (`process_interpreters.resolve_process_node`: a healthy PATH node stays byte-identical in argv and child env; the bundled runtime substitutes only when PATH is missing or probe-dead, attests the prepend, never inside a non-local executor backend). `search_code` enumerates policy-approved files before invoking ripgrep; a faster binary widens no search authority. Every bundled consumer searches `bundled_resource_bases()` in one order (`OUROBOROS_BUNDLE_DIR`, frozen root, interpreter-ancestor roots, source checkout): server and CLI children run from the managed repo, never an in-bundle module path; the ancestor step lets an older launcher start a newer checkout. The embedded interpreter never writes into the signed application (codesign seal): `embedded_python_env()` puts bytecode in `data/state/pycache.noindex` and user installs in `data/state/python-userbase` (`pip_install_target_args()` adds `--user` only there); the userbase outranks bundle site-packages, never pruned (recovery: delete it, relaunch).
 
 Workspace binding changes the contextual repo, never the system repo for BIBLE, prompts and review governance. `/api/tasks` and project-room promotion share `workspace_admission.validate_workspace_root()`. Ordinary folders support file/process work; Git operations need a Git worktree. Binding changes file, process and VCS defaults plus memory, lease, preflight and finalization, removes no top-level tool and keeps the Architecture context in Max mode. The workspace executor is a process-routing boundary, not a sandbox: `executor_ref` is host-owned, `network=none` holds only when the backend implements it; executor processes enter durable custody. Preflight writes the `workspace_preflight.json` artifact with a bounded summary in metadata; `tools_on_path`/`tools_missing_from_path` report `shutil.which` PATH presence, not executability, frozen in durable task metadata; a collection failure is a disclosed error summary, never a fictitious artifact.
 

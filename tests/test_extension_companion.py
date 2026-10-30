@@ -641,7 +641,7 @@ def test_stale_recovery_with_env_from_settings_has_zero_filesystem_effects(
     )
     # An isolated-dep site dir so the spawn env must carry PYTHONPATH
     # (.ouroboros_env is outside the content hash by construction).
-    site_dir = loaded.skill_dir / ".ouroboros_env" / "python" / "lib" / "python3.12" / "site-packages"
+    site_dir = loaded.skill_dir / ".ouroboros_env" / "python" / "lib" / "python{}.{}".format(*sys.version_info[:2]) / "site-packages"
     site_dir.mkdir(parents=True)
     # EXT_DEMO_VALUE present in settings = custom secret; grant it.
     from ouroboros.skill_loader import save_skill_grants

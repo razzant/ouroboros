@@ -88,13 +88,17 @@ def test_cross_room_paused_target_keeps_mail_without_resuming_and_dedupes_genera
     assert relays[0]["relay"]["text"] == row["text"]
 
 
-def test_empty_return_is_ambiguous_but_omitted_route_remains_ordinary(tmp_path):
+def test_empty_return_with_nothing_open_is_ordinary_and_stays_ambiguous_among_several(tmp_path):
+    """Grok filled reply_to_relay="" on an ordinary send from a call (27.10) and the owner's message was
+    refused twice. With no open relay the empty selector means nothing; among several it is ambiguous."""
     from ouroboros.tools.control_runtime import _send_user_message
     ctx = context(tmp_path)
+    assert _send_user_message(ctx, "reply", reply_to_relay="").startswith("OK:")
+    assert ctx.pending_events[0]["chat_id"] == 1 and ctx.pending_events[0]["system_type"] == "proactive_message"
+    relay = {"relay_id": "r", "source": {"chat_id": 1, "address": "h"}}
+    ctx._open_relays = {"r": relay, "s": {**relay, "relay_id": "s"}}
     assert "RELAY_RETURN_UNRESOLVED" in _send_user_message(ctx, "reply", reply_to_relay="")
-    assert not ctx.pending_events
-    _send_user_message(ctx, "ordinary")
-    assert ctx.pending_events[0]["chat_id"] == 1
+    assert len(ctx.pending_events) == 1
 
 
 def test_return_survives_teller_end_and_refuses_ambiguous_or_hidden_sender(tmp_path):

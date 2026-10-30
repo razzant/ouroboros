@@ -523,7 +523,9 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
     if window is None:
         return None  # unknown capacity leaves the first full request admissible
     reserve = physical.response_reserve_tokens or context_mode_limits(
-        physical.rendered_mode, "", request.max_completion_tokens)[1]
+        physical.rendered_mode, "", request.max_completion_tokens,
+        working_reserve_tokens=request.working_reserve_tokens)[1]
+    reserve = max(reserve, request.working_reserve_tokens or 0)
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))

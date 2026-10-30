@@ -67,6 +67,20 @@ def test_every_client_envelope_has_a_field_identical_browser_twin():
     assert "import('./client_contract_types.js').ServedUiState" in index
 
 
+def test_contract_exposes_calls_without_diagnostic_probe_frames():
+    from ouroboros.gateway.contracts import ChatInbound
+
+    retired = {"realtime_execute", "realtime_prepared", "realtime_authorized",
+               "realtime_refused", "realtime_finished"}
+    assert not retired.intersection(endpoint_index.WS_SHAPES)
+    assert "execution_transport" not in typing.get_type_hints(ChatInbound)
+    document = (REPO / "docs" / "CLIENT_CONTRACT.md").read_text(encoding="utf-8")
+    assert not any(frame in document for frame in retired)
+    assert "POST /api/call/open" in endpoint_index.HTTP_SHAPES
+    assert "conversation_finished" in endpoint_index.WS_SHAPES
+    assert not validate_ingress({"type": "chat", "content": "Hello"}, ChatInbound)
+
+
 def test_shapes_bind_only_indexed_routes_with_valid_bodies_that_resolve():
     assert set(endpoint_index.HTTP_SHAPES) <= set(HTTP_ENDPOINTS)
     for token, shape in _all_shapes().items():

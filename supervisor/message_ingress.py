@@ -244,6 +244,13 @@ def _chat_record(
         # Speech rows persist only the compact identity required to route a
         # child final after progress retention/rotation has removed its cards.
         meta = dict(message_meta or {})
+        if meta.get("role") == "system":
+            record["role"] = "system"
+            record["system_type"] = str(meta.get("system_type") or "")
+        if isinstance(meta.get("host_fact"), dict) and meta["host_fact"].get("kind") == "call_open":
+            record["host_fact"] = dict(meta["host_fact"])
+        if isinstance(meta.get("execution_transport"), dict):
+            record["execution_transport"] = dict(meta["execution_transport"])
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
             meta["reply_to"] = origin_reply(root, task_id)
@@ -413,11 +420,20 @@ def accepted_chat_message(drive_root, chat_id: int, client_message_id: str) -> O
     return None if found is None else dict(found.row)
 
 
-def rejoin_or_refuse(row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None) -> None:
+def rejoin_or_refuse(row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None,
+                    *, execution_transport: Optional[dict] = None) -> None:
     """A redelivered frame may rejoin the accepted row only as the same message of the same source
     (text, ordered attachment content and the Reply it points at)."""
     if row.get("source") != source:
         raise ValueError("client_message_id is already bound to another source")
+    if row.get("execution_transport") != execution_transport:
+        from ouroboros.contracts.realtime import RealtimeSetupError
+
+        raise RealtimeSetupError("transport_identity", "client_message_id already names another execution transport")
+    if execution_transport is not None and not accepted_here(row):
+        from ouroboros.contracts.realtime import RealtimeSetupError
+
+        raise RealtimeSetupError("realtime_restart_required", "this call's accepting process ended; start a new call")
     if (not same_message(row, logged, refs)
             or (row.get("reply_to") or {}).get("address", "") != (reply or {}).get("address", "")):
         raise ValueError("client_message_id was already used for a different message")
@@ -471,7 +487,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                     client_message_id=message_id, sender_label=str(message.get("sender_label") or ""),
                     transport=message.get("transport"), drive_root=root,
                     message_meta={"attachments": refs, "text_placeholder": placeholder, "reply_to": reply,
-                                  **({"late_answer": late_answer} if late_answer else {})},
+                                  **({"late_answer": late_answer} if late_answer else {}),
+                                  "execution_transport": (message.get("task_metadata") or {}).get("execution_transport")},
                     dispatch=obligation(name, text, message))
             finally:
                 # Once the write is attempted, failure may have left the canonical row: transfer input
@@ -483,7 +500,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             hand_over(root, chat_id, message_id, name)
         else:
             # The row an earlier delivery landed (or the race lost by a hair): rejoin it, or take its owed dispatch.
-            rejoin_or_refuse(row, source, logged, refs, reply)
+            rejoin_or_refuse(row, source, logged, refs, reply,
+                            execution_transport=(message.get("task_metadata") or {}).get("execution_transport"))
             saved_answer = late_answer_ref(row.get("late_answer"))
             if saved_answer:
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "late_answer": saved_answer}
@@ -647,6 +665,8 @@ def handle_web_message(
     ts = utc_now_iso()
     message_id = client_message_id or f"web-{uuid.uuid4().hex}"
     metadata = dict(task_metadata or {})
+    host_fact = metadata.get("host_fact") or {}  # host call admission; browser ingress constructs its own metadata
+    call_open = isinstance(host_fact, dict) and host_fact.get("kind") == "call_open"
     reply = ingress_reply(bus.DATA_DIR, metadata)
     if reply:  # the obligation of a fresh acceptance replays the same reference
         metadata["reply_reference"] = reply
@@ -655,7 +675,7 @@ def handle_web_message(
     from ouroboros.chat_uploads import attachment_placeholder
 
     log_text = clean_text or str(image_caption or "").strip() or attachment_placeholder(image_base64, metadata)
-    placeholder = not clean_text  # a web caption is the gateway's own ``[user attachment: …]`` label
+    placeholder = call_open or not clean_text  # host facts and attachment labels are not owner words
     # The canonical row precedes echo/dispatch: neither WS nor Queue survives restart.
     # The row, its receipt and the dispatch obligation are ONE store transaction; the
     # returned witness lets dequeue validation avoid any chat read.
@@ -675,7 +695,10 @@ def handle_web_message(
                 thread_id, 1, log_text, ts=ts, source="web",
                 sender_session_id=sender_session_id, client_message_id=message_id,
                 client_surface=(metadata.get("client_surface") if isinstance(metadata.get("client_surface"), dict) else None),
-                message_meta={"attachments": attachments, "text_placeholder": placeholder, "reply_to": reply},
+                message_meta={"attachments": attachments, "text_placeholder": placeholder, "reply_to": reply,
+                              "execution_transport": metadata.get("execution_transport"),
+                              **({"role": "system", "system_type": "call_open", "host_fact": dict(host_fact)}
+                                 if call_open else {})},
                 dispatch=obligation(name, clean_text, message))
             row, fresh = receipt.row, not receipt.duplicate
         if fresh:
@@ -685,7 +708,8 @@ def handle_web_message(
             # attachment content and the same Reply rejoin it (no second row); anything else under
             # that id is refused, claiming none of its uploads. A rejoin dispatches only by taking
             # the row's still-owed dispatch (once); a dispatch that began is never replayed.
-            rejoin_or_refuse(row, "web", log_text, stored_refs(metadata.get("chat_attachments")), reply)
+            rejoin_or_refuse(row, "web", log_text, stored_refs(metadata.get("chat_attachments")), reply,
+                            execution_transport=metadata.get("execution_transport"))
             ts, attachments = str(row.get("ts") or ts), row.get("attachments")
             log_text, placeholder = str(row.get("text") or log_text), row.get("text_placeholder") is True
             if handed := dialogue_store.claim_dispatch(bus.DATA_DIR, thread_id, message_id, process=current_custody_session_id()):
@@ -711,7 +735,7 @@ def handle_web_message(
             # The echo is the accepted row as history replays it (text, time, views, placeholder
             # mark); a rejoin re-echoes it, so every tab keys it as the same saved bubble.
             echo = {
-                "type": "chat", "role": "user", "content": log_text,
+                "type": "chat", "role": row.get("role") or "user", "content": log_text,
                 "ts": ts, "source": "web", "chat_id": thread_id, "attachments": attachment_views(attachments),
                 "sender_session_id": sender_session_id, "client_message_id": message_id,
                 "ingress_accepted": True,  # Canonical row exists; execution is not promised.
@@ -720,6 +744,8 @@ def handle_web_message(
                 echo["subagents_mode"] = "swarm"
             if placeholder:
                 echo["text_placeholder"] = True
+            if row.get("system_type"):
+                echo["system_type"] = row["system_type"]
             # Positive call-entry evidence, never the acceptance stamp alone; a deferred dispatch is still pending.
             echo.update(delivery_facts(row, thread_id))
             echo.update(projection_fields(row), **frame_rooms(bus.DATA_DIR, row))  # a Reply a Project also shows

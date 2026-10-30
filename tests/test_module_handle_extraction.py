@@ -232,7 +232,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_clear_bootstrap_pin_marker", "_clear_update_intent",
         "_collect_repo_sync_state", "_compute_ref_ahead_count",
         "_create_rescue_snapshot", "_git_dir", "_guard_live_repo_destructive_git",
-        "_has_remote", "_maybe_repair_git_index", "_pin_to_bundle_sha_on_bootstrap",
+        "_has_remote", "_is_launcher_managed_repo", "_maybe_repair_git_index", "_pin_to_bundle_sha_on_bootstrap",
         "_preserve_branch_for_official_reset", "_read_managed_repo_meta",
         "_read_update_intent", "_ref_points_at_ref", "_rescue_untracked_incomplete",
         "_run_git_resilient", "_update_source", "append_jsonl", "git_capture",
@@ -424,16 +424,13 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "truncate_review_artifact",
     })),
     "ouroboros/tools/review_file_pack.py": ("ouroboros/tools/review_helpers.py", "_rh", frozenset({
-        "logger", "redact_prompt_secrets",
+        "logger",
     })),
     "ouroboros/tools/review_multi_model.py": ("ouroboros/tools/review.py", "_rev", frozenset({
         "LLMClient", "REVIEW_JSON_ARRAY_CONTRACT", "TYPED_FAILURE_FACT_KEYS", "_REPO_ROOT",
         "_cfg", "_parse_model_response", "_review_operation_fields",
         "_owner_deadline_at", "_review_query_error_payload", "load_governance_doc",
         "review_drive_root", "slot_id_for_row",
-    })),
-    "ouroboros/tools/review_prompt_text.py": ("ouroboros/tools/review_helpers.py", "_rh", frozenset({
-        "sanitize_tool_result_for_log",
     })),
     "ouroboros/loop_round_limits.py": ("ouroboros/loop.py", "_loop", frozenset({
         "DeliveryCandidate", "_append_or_merge_user_content",

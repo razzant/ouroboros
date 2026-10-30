@@ -124,7 +124,9 @@ def test_round_progress_redacts_secret_shaped_model_text_before_trace_and_emit()
     assert emit.meta == [{"narration": True}]
 
 
-def test_final_text_response_redacts_before_delivery_and_trace():
+def test_final_text_response_is_delivered_as_written_and_only_its_trace_note_is_redacted():
+    """The answer is the author's semantic reply (owner, 29.10): delivered whole. Its trace note
+    feeds the stored trace summary, a derived projection, and stays redacted."""
     from ouroboros.loop import _handle_text_response
 
     candidate = "sk-" + "B2" * 20
@@ -133,12 +135,12 @@ def test_final_text_response_redacts_before_delivery_and_trace():
 
     delivered, _, updated = _handle_text_response(content, trace, {})
 
-    assert candidate not in delivered
+    assert delivered == content
     assert candidate not in updated["reasoning_notes"][0]
-    assert "***REDACTED***" in delivered
+    assert "***REDACTED***" in updated["reasoning_notes"][0]
 
 
-def test_round_and_final_prose_redact_all_observability_secret_classes():
+def test_round_progress_and_trace_notes_redact_all_observability_secret_classes():
     from ouroboros.loop import _emit_round_progress, _handle_text_response
 
     candidates = [
@@ -158,7 +160,7 @@ def test_round_and_final_prose_redact_all_observability_secret_classes():
 
         assert candidate not in progress[0]
         assert candidate not in trace["reasoning_notes"][0]
-        assert candidate not in delivered
+        assert delivered == content
         assert candidate not in final_trace["reasoning_notes"][0]
 
     ordinary = "Edited tool.py and completed a fresh review."
@@ -172,25 +174,39 @@ def test_round_and_final_prose_redact_all_observability_secret_classes():
     assert final_trace["reasoning_notes"] == [ordinary]
 
 
-def test_skill_review_projection_redacts_reviewer_secret_prose():
+def test_skill_review_block_quotes_reviewer_prose_and_the_owner_card_redacts_it(tmp_path):
+    """The block the tool returns quotes the reviewer whole; the chat card's detail of a
+    history row, an owner projection, stays redacted."""
+    import json
+
     from ouroboros.skill_review import SkillReviewOutcome, render_skill_review_block
+    from ouroboros.skill_review_history import review_history_detail, review_history_path
 
     candidate = "sk-" + "C3" * 20
+    finding = {
+        "item": "secret_handling",
+        "verdict": "FAIL",
+        "severity": "critical",
+        "reason": f"Remove {candidate} from the payload.",
+        "model": "fake/reviewer",
+    }
     outcome = SkillReviewOutcome(
         skill_name="redacted-review",
         status="blockers",
         content_hash="a" * 64,
         reviewer_models=["fake/reviewer"],
-        findings=[{
-            "item": "secret_handling",
-            "verdict": "FAIL",
-            "severity": "critical",
-            "reason": f"Remove {candidate} from the payload.",
-            "model": "fake/reviewer",
-        }],
+        findings=[finding],
     )
 
-    markdown = render_skill_review_block(outcome)
+    assert f"secret_handling: Remove {candidate} from the payload." in render_skill_review_block(outcome)
 
-    assert candidate not in markdown
-    assert "***REDACTED***" in markdown
+    path = review_history_path(tmp_path, "redacted-review")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "job_id": "job-1", "status": "blockers", "content_hash": "a" * 64,
+        "raw_actor_records": [{"model_id": "fake/reviewer", "status": "responded", "parsed_items": [finding]}],
+    }) + "\n", encoding="utf-8")
+    card = review_history_detail(tmp_path, "redacted-review", "job-1")["markdown"]
+
+    assert "secret_handling" in card and candidate not in card
+    assert "***REDACTED***" in card

@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { attemptTime } from '../modules/update_status.js';
 import { updateLetterView, updateVerdict } from '../modules/updates.js';
 
 const SOURCE = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8')
@@ -179,6 +180,27 @@ test('a running request disables Write and says which task is writing; the old t
 });
 
 
+test('a running request says when the owner asked, a fixed time, and names its current task', () => {
+    // The owner's press is the one recorded instant: no elapsed counter, nothing that ticks.
+    const requested_at = '2026-10-29T22:03:25.827937+00:00';
+    const asked = attemptTime(requested_at);
+    assert.match(asked, /\d{2}:\d{2}/);
+    const request = { task_id: 'd3adb33f', current_task_id: 'c0ffee42', mode: 'rewrite', key: REQUEST_KEY,
+        requested_at, status: 'running', saved: false };
+    const view = updateLetterView({ ...AVAILABLE, letter: letter({ request }) }, '');
+    assert.equal(view.request.taskId, 'c0ffee42', 'a Continue or host retry is the task the card follows');
+    assert.equal(view.request.requestedAt, requested_at);
+    assert.equal(view.note, `Ouroboros is writing the description you asked for on ${asked} (task c0ffee42). `
+        + 'The current text stays until the new one is saved.');
+    const empty = updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '', checked_key: REQUEST_KEY, request } }, '');
+    assert.equal(empty.note, `Ouroboros is writing the description you asked for on ${asked} (task c0ffee42).`);
+    // An unreadable time says nothing about when rather than something false.
+    const unreadable = updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '', checked_key: REQUEST_KEY,
+        request: { ...request, requested_at: 'not a time' } } }, '');
+    assert.equal(unreadable.note, 'Ouroboros is writing the description (task c0ffee42).');
+});
+
+
 test('an ended request that saved nothing says so once; a saved one says nothing; nothing repeats', () => {
     const ended = (status, saved = false) => updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '',
         checked_key: REQUEST_KEY, request: { task_id: 'd3adb33f', mode: 'write', key: REQUEST_KEY, status, saved } } }, '');
@@ -332,6 +354,10 @@ test('the description section keeps Check and Write as two compact actions outsi
     assert.match(card, /aria-label="Check for updates"/);
     assert.match(card, /class="btn btn-default btn-sm updates-letter-write" id="updates-letter-write"/);
     assert.equal((card.match(/<button/g) || []).length, 2);
+    // The note's words are the live region; the door to the running task's card sits beside it, outside it.
+    assert.match(card, /<div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"><\/span> <span id="updates-letter-task"><\/span><\/div>/);
+    // Which notes draw it and where a press lands: tests/test_update_description_browser.py, through app.js.
+    assert.doesNotMatch(SOURCE, /ouro:open-task/, 'the one door module raises it');
     // Check never authors; Write is the owner's explicit request to the one endpoint.
     const check = SOURCE.slice(SOURCE.indexOf("letterRefresh.addEventListener('click'"), SOURCE.indexOf("letterWrite.addEventListener('click'"));
     assert.match(check, /loadStatus\(\{ fetchRemote: true, preservePhase: true \}\)/);

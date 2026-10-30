@@ -58,6 +58,7 @@ class _CompactionRoundContext:
     emit_progress: Callable[[str], None]
     tool_schemas: Optional[List[Dict[str, Any]]] = None
     fit_candidate: Optional[Callable[[list, list], Dict[str, Any]]] = None
+    extra_tool_schemas: Tuple[Dict[str, Any], ...] = ()  # host-admitted feature schemas, under the same selection
 
 
 def _stamp_owner_delivery(
@@ -401,13 +402,19 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         ctx.emit_progress("Context view kept unchanged: active schema snapshot is unavailable.")
         return messages
     proposal = pending or {}
+    registry = ctx.tools
+    extra_tool_schemas = getattr(ctx, 'extra_tool_schemas', ())
+    if extra_tool_schemas:
+        from types import SimpleNamespace
+        registry = SimpleNamespace(schemas=lambda: [*ctx.tools.schemas(), *extra_tool_schemas],
+            policy_hidden_reason=getattr(ctx.tools, 'policy_hidden_reason', lambda name: None))
     review_pointer, review_capsule, review_transfers, expected_selection = None, None, [], None
     names = proposal.get("schema_names")
     if names is not None:
-        requested = request_tool_schema_selection(tool_ctx, ctx.tools, names,
+        requested = request_tool_schema_selection(tool_ctx, registry, names,
                                                   context_mode=mode, current_schemas=current_tools)
         selected_names = requested.selection.chosen if mode == "nano" else None
-    schemas = (list(select_tool_schemas(ctx.tools.schemas(), context_mode=mode, schema_names=selected_names).schemas)
+    schemas = (list(select_tool_schemas(registry.schemas(), context_mode=mode, schema_names=selected_names).schemas)
                if selected_names is not None else list(current_tools))
     fit_candidate = ctx.fit_candidate
     if fit_candidate is None:
@@ -492,11 +499,16 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         from ouroboros.memory_floor import owner_note_capsule
         try:
             note = owner_note_capsule(memory_plan, addresses, proposal.get("working_note", ""), request,
-                drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, task_id=ctx.task_id)
+                drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, task_id=ctx.task_id, mode=mode)
             candidate = memory_plan.reproject_transcript(candidate, mode) + ([note] if note else [])
             receipt.update(status="applied", memory_view=memory_price)
         except ValueError as exc:
             candidate, receipt = messages, {"status": "selection_failed", "reason": str(exc)}
+    # A manifest row a call carries stays true; a text turn names its tools in the connections map.
+    if receipt["status"] == "applied" and any(row.get('_host_context_kind') == 'tool_manifest' for row in candidate):
+        from ouroboros.tools.tool_discovery import update_resident_notice
+        candidate = copy.deepcopy(candidate)
+        update_resident_notice(ctx.tools, schemas, candidate)
     if receipt["status"] != "no_op":
         from ouroboros.artifacts import store_actor_source_bytes
         import hashlib

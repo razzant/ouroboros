@@ -212,6 +212,21 @@ test('the owner\'s own Stop press on a work\'s card says itself on the row at on
     assert.equal(workRowView(work('paused_by_owner'), { stopping: 'immediate' }).word, 'Paused');
 });
 
+test('a sleep whose chosen helper still awaits its own Resume says so beside Waiting, with no new door or turn', () => {
+    const state = stateOf('sleeping_on_paused_helper');
+    const row = workRowView(state.works[0]);
+    assert.deepEqual(row, { word: 'Waiting', tone: 'held', mark: 'still', owner: false, outcome: '', focus: '',
+        secondary: 'Sleeping until it is woken · 1 helper it waits for is paused until Ouroboros resumes it' });
+    // The sleeping root keeps exactly its own controls; the helper's Resume stays Ouroboros's selection.
+    const grouped = workControls(state.works[0]);
+    assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw' });
+    assert.deepEqual([roomStatusView(state).owner, roomStatusView(state).amber], [false, '']);
+    // A translation keeps the count; the helper's own Activity sentence is unchanged.
+    assert.equal(reasonText({ code: 'awaited_helpers_mind', count: 3, text: 'x' }),
+        '3 helpers it waits for are paused until Ouroboros resumes them');
+    assert.equal(memberState(state, 'sw-c').because[0].code, 'awaiting_selection');
+});
+
 test('a reusable slot gets no control by its id; a real target keeps its own', () => {
     const slot = { controls: [{ action: 'stop', target: 'active' }, { action: 'pause', target: 'active' },
         { action: 'stop', target: 't-1' }] };

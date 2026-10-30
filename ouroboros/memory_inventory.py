@@ -68,7 +68,7 @@ _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
-                "result_ref", "presence", "presence_provenance", "historical_import", "source_order", "terminal_origin")
+                "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin")
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 _REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved")
 # Bumped when ``row_meta`` gains a fact membership reads: a stored prefix of another version is
@@ -178,11 +178,16 @@ def terminal_status(row: Mapping[str, Any]) -> Optional[str]:
 
 
 def _tail_source(root: Any, frontier: Mapping[str, Any]) -> Dict[str, Any]:
-    """What the stored tail projects: the dialogue store (its file identity) after the legacy frontier."""
+    """The dialogue file after the frontier, with its text-revision generation.
+
+    Appends preserve the prefix; a corrected earlier row changes its content address
+    without moving the tail anchor, so the stored facts must be projected again.
+    """
     from ouroboros import dialogue_store as ds
     from ouroboros.store import file_identity
 
-    return {"store": list(file_identity(ds.path(root)) or ()), "frontier": int(frontier["pos"]), "meta": _META_VERSION}
+    return {"store": list(file_identity(ds.path(root)) or ()), "frontier": int(frontier["pos"]),
+            "text_revision": int(ds.meta(root, "chat_text_revision") or 0), "meta": _META_VERSION}
 
 
 def _projected(entries: Iterable[Any]) -> List[List[Any]]:
@@ -818,7 +823,7 @@ class ShortageFact:
 
 
 _ROW_STEPS = frozenset({"F2", "F7"})  # my replies, this room's people: the steps that ask the mind
-_NARRATIVE_STEPS = frozenset({"F4", "F5"})  # this room's retold page, my old pages and parts
+_NARRATIVE_STEPS = frozenset({"F4", "F5l", "F5"})  # this room's retold page, story labels and pointers
 
 
 def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
@@ -826,7 +831,7 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
 
     ``open_rows``: the floor showed my replies or this room's people only by address (F2,
     F7) and names the newest addressed row of this room. ``narrative``: it showed old
-    narrative only by pointer (F4, F5), names those records, and the window alone took
+    narrative by label or pointer (F4, F5l, F5), names those records, and the window alone took
     them (``by_budget == 0``; an owner-selected mode target is no shortage of the window).
     Fact lines (F1), quiet rooms (F1b), retold pointers (F3) and other rooms' people (F6)
     alone, a foreign shape or no fact: ``None``.

@@ -70,6 +70,22 @@ test('an explicit quote landing replaces the old-width anchor before reflow; lat
     assert.equal(feed.scrollTop, 408, 'a later resize preserves the reader’s gesture, not the quote landing');
 });
 
+test('a drawn row is a destination app needs no read for; a portal or a row not drawn is not', t => {
+    const env = installDomDouble();
+    t.after(() => env.restore());
+    const feed = env.el('div'), input = env.el('textarea');
+    env.doc.body.append(feed, input);
+    const card = env.el('div', { dataset: { rowAddress: 'task:c0ffee42' } });
+    const portal = env.el('div', { dataset: { rowAddress: 'task:d3adb33f', portal: '1' } });
+    const drawn = new Map([[card.dataset.rowAddress, card], [portal.dataset.rowAddress, portal]]);
+    const replies = createChatReplies({ feed, input, reading: () => ({}),
+        history: () => ({ exact: (address) => drawn.get(address) || null }) });
+    t.after(() => replies.destroy());
+    assert.equal(replies.draws('task:c0ffee42'), true);
+    assert.equal(replies.draws('task:d3adb33f'), false, 'its work lives in another room, which the read names');
+    assert.equal(replies.draws('task:0badf00d'), false);
+});
+
 test('a reveal that moves nothing hands a following reader the live edge back; a gesture, newer reveal or exit decides instead', async t => {
     const env = installDomDouble(), frames = [], prior = globalThis.requestAnimationFrame;
     globalThis.requestAnimationFrame = callback => frames.push(callback);

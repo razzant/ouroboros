@@ -159,6 +159,7 @@ def render_result_view(
     text: str, *, head_chars: int, tail_chars: int, tool_name: str = "",
     source_ref: Optional[Mapping[str, Any]] = None, facts: Optional[Mapping[str, Any]] = None,
     delivery: Optional[Mapping[str, Any]] = None,
+    reader_available: bool = True,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Head+tail view of ``text`` with exact ranges, or ``text`` itself.
 
@@ -178,6 +179,8 @@ def render_result_view(
     omitted = [head, total - tail]
     shown = [[lo, hi] for lo, hi in ([0, head], [total - tail, total]) if lo < hi]
     ref = dict(source_ref) if isinstance(source_ref, Mapping) and source_ref else {}
+    if not reader_available:
+        ref.pop("read", None)
     view: Dict[str, Any] = {
         "complete_chars": total,
         "complete_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -189,7 +192,7 @@ def render_result_view(
     if delivery is not None:
         # Host allocation facts never become producer stdout or producer status.
         view["delivery"] = {**delivery, "source_status": "ready" if ref else "source_unavailable"}
-    if ref:
+    if ref and reader_available:
         view["read_omitted"] = {
             "tool": "read_file", "root": str(ref.get("root") or "artifact_store"), "path": ref.get("path"),
             "start_line": 1, "max_lines": max(1, len(text.splitlines())),
@@ -202,7 +205,10 @@ def render_result_view(
     lines = [RESULT_VIEW_MARKER + json.dumps(view, ensure_ascii=False, sort_keys=True, separators=(",", ":"))]
     if ref:
         lines.append(FULL_SOURCE_MARKER + json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        lines.append(RECOVER_PAGEABLE if tool_name in PAGEABLE_TOOL_RESULTS else RECOVER_OTHER)
+        lines.append((RECOVER_PAGEABLE if tool_name in PAGEABLE_TOOL_RESULTS else RECOVER_OTHER)
+                     if reader_available else "The exact source is retained, but no reader is loaded in this connection. "
+                     + ("Another range is available using this tool's declared parameters."
+                        if tool_name in PAGEABLE_TOOL_RESULTS else "Do not rerun this tool to recover omitted output."))
     else:
         lines.extend([FULL_SOURCE_UNAVAILABLE, SOURCE_UNAVAILABLE_NOTE])
     delivered = text[:head] + marker + text[total - tail:] + "\n" + "\n".join(lines)

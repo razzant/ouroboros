@@ -188,6 +188,74 @@ def range_qualification(material: dict, repo_url: str) -> dict:
             "github": post_merge_checks(commits, repo_url)}
 
 
+def compact_qualification(value):
+    """A context form of qualification receipts, never a new qualification verdict.
+
+    Count declared/observed outcomes separately; unknown evidence and new fields
+    stay verbatim, bound to their commit. Exact receipts live in the host capture.
+    """
+    import copy
+    from collections import Counter
+
+    if not isinstance(value, dict):
+        return value
+    result = copy.deepcopy(value)
+    commits = result.get('commits')
+    if isinstance(commits, list):
+        checks, reviews, post_merge, whole = Counter(), Counter(), Counter(), []
+        for commit in commits:
+            receipt = commit.get('receipt') if isinstance(commit, dict) else None
+            if (not isinstance(receipt, dict) or set(commit) - {'sha', 'subject', 'date', 'receipt', 'body_read'}
+                    or set(receipt) - {'schema', 'checks', 'review', 'post_merge'} or receipt.get('schema') != 1
+                    or not isinstance(receipt.get('checks'), list) or not isinstance(receipt.get('review'), dict)
+                    or not isinstance(receipt.get('post_merge'), dict)
+                    or commit.get('body_read') is False):
+                whole.append(commit)
+                continue
+            unknown = {}
+            for check in receipt.get('checks') or ():
+                if (not isinstance(check, dict) or set(check) - {'name', 'status', 'source', 'detail'}
+                        or check.get('status') not in ('passed', 'failed', 'not_run')
+                        or check.get('source') != 'author_declared'):
+                    unknown.setdefault('checks', []).append(check)
+                else:
+                    checks[(check.get('name', ''), check['status'], check['source'])] += 1
+            review = receipt.get('review') or {}
+            if (set(review) - {'observed', 'declared'} or any(review.get(k) not in ('PASS', 'FAIL')
+                                                           for k in ('observed', 'declared'))):
+                unknown['review'] = review
+            else:
+                reviews[(review['observed'], review['declared'])] += 1
+            post = receipt.get('post_merge') or {}
+            if set(post) - {'status', 'detail'} or post.get('status') not in ('passed', 'failed', 'not_run'):
+                unknown['post_merge'] = post
+            else:
+                post_merge[post['status']] += 1
+            if unknown:
+                whole.append({'sha': commit.get('sha'), 'receipt': unknown})
+        result['commits'] = {'count': len(commits),
+            'checks': [{'name': name, 'status': status, 'source': source, 'count': count}
+                       for (name, status, source), count in sorted(checks.items())],
+            'reviews': [{'observed': observed, 'declared': declared, 'count': count}
+                        for (observed, declared), count in sorted(reviews.items())],
+            'post_merge': dict(post_merge), 'unabridged': whole,
+            'fact': 'Declarations are not observed PASS; missing or unconfirmed evidence remains unknown.',
+            'details': 'retained full runtime section: official_update.letter.qualification'}
+    github = result.get('github')
+    if isinstance(github, dict) and isinstance(github.get('runs'), list):
+        counts, whole = Counter(), []
+        for run in github['runs']:
+            if (not isinstance(run, dict) or set(run) - {'sha', 'status', 'conclusion', 'url', 'run_id', 'attempt'}
+                    or run.get('status') != 'completed'
+                    or run.get('conclusion') not in ('success', 'failure', 'cancelled', 'skipped', 'timed_out')):
+                whole.append(run)
+            else:
+                counts[run['conclusion']] += 1
+        github['runs'] = {'count': len(github['runs']), 'completed': dict(counts), 'unabridged': whole,
+                          'details': 'retained full runtime section: official_update.letter.qualification.github.runs'}
+    return result
+
+
 def refresh_qualification(authored: dict, repo_url: str, *, previous: dict | None = None) -> tuple[dict, bool]:
     """Refresh facts without making an outage erase observations; prose never follows them.
 

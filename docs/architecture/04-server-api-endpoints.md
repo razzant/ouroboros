@@ -140,6 +140,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/tasks/{task_id}/pause` | (§6 Owner Pause of a whole tree) |
 | POST | `/api/tasks/{task_id}/continue` | (§6 Owner Continue after a technical interruption) |
 | POST | `/api/tasks/{task_id}/resume` | |
+| POST | `/api/call/open` | admits a live call as an ordinary room turn when Calls (beta) is on (§13 Live Conversation) |
 | POST | `/api/decisions` | |
 | GET | `/api/cards/{card_id}` | a living card's current body and presses |
 | GET | `/api/cards/{card_id}/app` | app HTML as `text/plain`, `nosniff`, `no-store` |
@@ -187,10 +188,13 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/mcp/test` | Draft probe, unpublished |
 | POST | `/api/mcp/import/preview` | |
 | WS | `/ws` | |
+| WS | `/ws/call/{call_id}` | one admitted call's audio and frames (`call_protocol.py`) |
 | STATIC | `/static/*` | |
 | STATIC | `/onboarding/static/*` | |
 | STATIC | `/auth/*` | selected public login assets |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/identity` | |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/call/open` | Presence call admission (§12) |
+| WS | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/call/{call_id}/peer` | granted meeting peer (§12) |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/tools/schemas` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/allocate-internal` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/inject` | |
@@ -214,7 +218,7 @@ Update-status, log-tail and schedule-list reads run off the event loop.
 
 ### WebSocket protocol
 
-`/ws` delivers live browser events; the queue, task, Project, review, skill, settings, cost and update owners persist the truth a reconnecting client rebuilds through REST and history. `gateway/ws.py` admits JSON objects, owned extension namespaces and `command` text and `chat` text/attachments. Chat acceptance (row → queue → echo) runs off the ASGI loop through `gateway._helpers.run_sync_to_completion`. Each socket chains its chats in receive order without awaiting them, so Panic and Restart stay responsive behind a held chat (§5 Bridge intake and commands); disconnect waits for received chats to settle (`settle_to_completion`). Authentication above governs admission; public sockets never carry Host Service or owned-daemon tokens.
+`/ws` delivers live browser events; the queue, task, Project, review, skill, settings, cost and update owners persist the truth a reconnecting client rebuilds through REST and history. `gateway/ws.py` admits JSON objects, owned extension namespaces, `command` text, `chat` text/attachments. Chat acceptance (row → queue → echo) runs off the ASGI loop through `gateway._helpers.run_sync_to_completion`. Each socket chains its chats in receive order without awaiting them, so Panic and Restart stay responsive behind a held chat (§5 Bridge intake and commands); disconnect waits for received chats to settle (`settle_to_completion`). Authentication above governs admission; public sockets never carry Host Service or owned-daemon tokens.
 
 The browser opens one socket for the whole SPA. Feature modules subscribe, and the complete Project chat-id set is fetched, before the first open, so an early Project frame cannot pass for Main traffic. Every decoded frame reaches the generic `message` event and then its type-specific event, so Widgets consume reviewed namespaced events.
 

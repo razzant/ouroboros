@@ -1,7 +1,7 @@
 /** One page-wide capture owner, shared by dictation and future live sessions.
  * acquire() calls getUserMedia before returning to the gesture handler. A client
  * recognizer uses capture:false: it opens its own microphone under the same lease.
- * Camera and screen kinds are reserved; they currently return no_api.
+ * Audio and visual capture have separate holders, shared by every consumer.
  */
 export function isLoopback(host = '') {
     const name = host.toLowerCase().replace(/^\[|\]$/g, '');
@@ -12,10 +12,10 @@ export function isLoopback(host = '') {
 }
 
 export function captureAvailability(env = globalThis, { kind = 'audio', capture = true } = {}) {
-    if (kind !== 'audio') return { ok: false, code: 'no_api' };
+    if (!['audio', 'camera', 'screen'].includes(kind)) return { ok: false, code: 'no_api' };
     if (!env.isSecureContext && !isLoopback(env.location?.hostname))
         return { ok: false, code: 'insecure_origin' };
-    if (capture && typeof env.navigator?.mediaDevices?.getUserMedia !== 'function')
+    if (capture && typeof env.navigator?.mediaDevices?.[kind === 'screen' ? 'getDisplayMedia' : 'getUserMedia'] !== 'function')
         return { ok: false, code: 'no_api' };
     return { ok: true };
 }
@@ -49,13 +49,13 @@ export function createCaptureLease(env = globalThis) {
         listeners.push(() => target?.removeEventListener?.(event, fn));
     }
     function releaseAll(reason = 'cancelled') { holder?.release(reason); }
-    function watchPage() {
+    function watchPage(keepWhenHidden) {
         listen(env, 'pagehide', () => releaseAll('hidden'));
         listen(env.document, 'visibilitychange', () => {
-            if (env.document.hidden) releaseAll('hidden');
+            if (env.document.hidden && !keepWhenHidden) releaseAll('hidden');
         });
     }
-    function acquire({ kind = 'audio', owner, label = '', constraints = {}, capture = true } = {}) {
+    function acquire({ kind = 'audio', owner, label = '', constraints = {}, capture = true, keepWhenHidden = false } = {}) {
         if (holder) return { code: 'in_use', label: holder.label, owner: holder.owner };
         const available = captureAvailability(env, { kind, capture });
         if (!available.ok) return { code: available.code };
@@ -81,7 +81,7 @@ export function createCaptureLease(env = globalThis) {
             },
         };
         holder = handle;
-        watchPage();
+        watchPage(keepWhenHidden);
         function adopt(stream, ticket, fellBack) {
             if (holder !== handle || ticket !== request) {
                 stopTracks(stream);
@@ -106,13 +106,16 @@ export function createCaptureLease(env = globalThis) {
             const media = env.navigator.mediaDevices;
             // This call, including replace(), stays before the first await.
             let pending;
-            try { pending = media.getUserMedia({ audio, video: false }); }
+            const requestMedia = value => kind === 'screen'
+                ? media.getDisplayMedia({ video: value, audio: false })
+                : media.getUserMedia(kind === 'audio' ? { audio: value, video: false } : { video: value, audio: false });
+            try { pending = requestMedia(audio); }
             catch (error) { pending = Promise.reject(error); }
             return Promise.resolve(pending).then(stream => adopt(stream, ticket, false), async error => {
                 if (holder !== handle || ticket !== request) return { code: 'lost' };
                 if (audio.deviceId && ['OverconstrainedError', 'NotFoundError'].includes(error?.name)) {
                     const { deviceId: _removed, ...defaults } = audio;
-                    try { return adopt(await media.getUserMedia({ audio: defaults, video: false }), ticket, true); }
+                    try { return adopt(await requestMedia(defaults), ticket, true); }
                     catch (fallbackError) { return { code: mediaFailure(fallbackError) }; }
                 }
                 return { code: mediaFailure(error) };
@@ -133,7 +136,8 @@ export function createCaptureLease(env = globalThis) {
 }
 
 const pageCapture = createCaptureLease();
-export const acquire = options => pageCapture.acquire(options);
+const visualCapture = createCaptureLease();
+export const acquire = options => (['camera', 'screen'].includes(options?.kind) ? visualCapture : pageCapture).acquire(options);
 export const currentHolder = () => pageCapture.currentHolder();
 // Panic already releases every holder; room teardown calls its own handle.release().
-export const releaseAll = reason => pageCapture.releaseAll(reason);
+export const releaseAll = reason => { pageCapture.releaseAll(reason); visualCapture.releaseAll(reason); };

@@ -3,7 +3,7 @@
 Managed updates rewrite the live tree under owner authority; persist target, writer/local-work custody and resolver/recovery authority before mutation for replay.
 
 - Separate the local work branch from the official feed (`ouroboros/update_channels.py`; ARCHITECTURE §8).
-- Prepare beside the serving tree, switch pre-import: separate layers, own packages per new lock/app, no unproven app swap; Restart keeps local work; returns need `body_switch.qualify_return`, no data rollback (`tests/test_update_*`).
+- Prepare beside the serving tree, switch pre-import: separate layers, own packages per new lock/app, no unproven app swap; Restart keeps local work; returns need `qualify_return`, no data rollback (`test_update_*`).
 - Preflight reads saved prose/qualification for its exact pins (missing checks and accepted FAILs disclosed, no veto: `tests/test_update_qualification.py`); apply binds base and target. Smart, replace and Restore check the effective index lock before work stops; lock/read failures return not-applied, untouched. Apply closes writers, drains direct turns, stops workers/services, re-plans; reopen after verified abort/rollback or healthy restart. Evolution cleanup shares lock/admission.
 - Destructive apply, replace, rollback and materialization refuse turns; in `assisted_resolution`/`committing_assisted`, Main answers but other tasks' repo tools stay refused (`worker_chat_lane.conversation_admitted_during_update`); steer through `tell_task`.
 - Stash dirty work outside merge history, then restore. Never automatically drop an update stash, even on success: `rescue-local-*` pins it for Git cleanup. Only Git conflicts invoke the reviewed resolver; filenames create no policy.

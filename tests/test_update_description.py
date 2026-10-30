@@ -85,7 +85,8 @@ def test_the_writer_is_one_tool_outside_core_children_and_observe():
     entries = [entry for entry in get_tools() if entry.name == "record_update_description"]
     assert len(entries) == 1
     schema = entries[0].schema["parameters"]
-    assert set(schema["required"]) == {"text", "base_sha", "target_sha", "expected_revision"}
+    assert set(schema["required"]) == {"base_sha", "target_sha", "expected_revision"}
+    assert {"text", "text_file"} <= set(schema["properties"]) and schema["properties"]["text_file"]["required"] == ["path"]
     assert "record_update_description" in OBSERVE_WORLD_MUTATION_TOOLS
     assert "record_update_description" in ca.disabled_tools_for("observe")
     assert "record_update_description" not in ca.disabled_tools_for("act")
@@ -154,6 +155,97 @@ def test_a_stale_author_cannot_erase_a_newer_description_and_the_replaced_one_re
     replaced = _ok(_save(second, "a rewrite that read revision 1", expected=1))
     assert replaced["revision"] == 2 and replaced["replaced"]["text"] == "the wake's text"
     assert replaced["replaced"]["author"]["task_id"] == "wake-7"
+
+
+def test_a_file_the_writer_wrote_is_saved_as_its_text_trimmed_like_text(tmp_path):
+    """Already-written prose is saved from its file instead of being emitted again: written by the real
+    write_file into the task's own drive and addressed as write_file named it, or by the absolute path
+    the receipt gives back. The bytes arrive as written (CRLF, a tab, non-ASCII, inner blank lines)
+    under the same strip, range, revision and authorship as text=; the receipt names what was read."""
+    import hashlib
+
+    drive = tmp_path / "data"
+    _offer(drive)
+    reg = _registry(tmp_path / "repo", drive, task_id="request-task")
+    wrote = reg.execute_result("write_file", {"root": "task_drive", "path": "letter.md", "content": "a draft"})
+    assert wrote.status == "ok" and "task_drive:letter.md" in wrote.text, wrote.text
+    draft = drive / "task_drives" / "request-task" / "letter.md"
+    raw = "\n\n## Что изменится\r\n\r\n- Первое\t«кавычки» ✓\r\n\r\n\r\n- Второе\n\n".encode("utf-8")
+    draft.write_bytes(raw)
+    receipt = _ok(reg.execute_result("record_update_description", {
+        "text_file": {"root": "task_drive", "path": "letter.md"}, "base_sha": BASE, "target_sha": TARGET,
+        "expected_revision": 0}))
+    record = ul.read_record(drive)
+    assert record["text"] == raw.decode("utf-8").strip() and "\r\n\r\n\r\n- Второе" in record["text"]
+    assert record["revision"] == receipt["revision"] == 1 and record["author"]["task_id"] == "request-task"
+    assert receipt["text_file"] == {"root": "task_drive", "path": str(draft.resolve()), "bytes": len(raw),
+                                    "sha256": hashlib.sha256(raw).hexdigest()}
+    assert draft.read_bytes() == raw, "the source file is read, never moved or rewritten"
+    again = _ok(reg.execute_result("record_update_description", {
+        "text_file": {"path": receipt["text_file"]["path"]}, "base_sha": BASE, "target_sha": TARGET,
+        "expected_revision": 1}))
+    assert again["text_file"]["root"] == "task_drive" and again["replaced"]["text"] == record["text"]
+    assert ul.read_record(drive)["revision"] == 2
+
+
+def test_text_file_is_refused_where_read_file_is_and_never_beside_text(tmp_path):
+    drive = tmp_path / "data"
+    _offer(drive)
+    before = ul.record_path(drive).read_bytes()
+    reg = _registry(tmp_path / "repo", drive)
+    store = drive / "projects" / "p1"
+    store.mkdir(parents=True)
+    (store / "facts.md").write_text("another room's facts", encoding="utf-8")
+    address = {"root": "runtime_data", "path": "projects/p1/facts.md"}
+    assert "ACCESS_DENIED" in reg.execute_result("read_file", address).text
+    refused = reg.execute_result("record_update_description", {
+        "text_file": address, "base_sha": BASE, "target_sha": TARGET, "expected_revision": 0})
+    assert refused.status == "blocked" and "ACCESS_DENIED" in refused.text and "nothing was saved" in refused.text
+    scratch = drive / "task_drives" / "turn-1"
+    scratch.mkdir(parents=True)
+    (scratch / "latin1.md").write_bytes("caf\xe9".encode("latin-1"))
+    (scratch / "blank.md").write_text(" \n\n", encoding="utf-8")
+    (scratch / "real.md").write_text("the file's text", encoding="utf-8")
+    for args, words in (({"text": "inline", "text_file": {"root": "task_drive", "path": "real.md"}}, "not both"),
+                        ({"text_file": {"root": "task_drive", "path": "absent.md"}}, "absent.md"),
+                        ({"text_file": {"root": "task_drive", "path": "latin1.md"}}, "not UTF-8"),
+                        ({"text_file": {"root": "task_drive", "path": "blank.md"}}, "text is empty"),
+                        ({"text_file": {"root": "nowhere", "path": "real.md"}}, "nowhere")):
+        result = reg.execute_result("record_update_description", {
+            **args, "base_sha": BASE, "target_sha": TARGET, "expected_revision": 0})
+        assert result.status == "error" and words in result.text, (args, result.text)
+    assert ul.record_path(drive).read_bytes() == before
+
+
+def test_text_file_takes_each_spelling_read_file_takes_in_a_bound_body_candidate(tmp_path):
+    """A bound candidate keeps the serving spelling of a body path (``serving/x``, the absolute serving
+    path) naming the candidate's own file. text_file is read through read_file's dispatch normalization,
+    so every spelling read_file reads saves that same file, and a file read_file cannot read stays unread."""
+    drive, serving, candidate = (tmp_path / name for name in ("data", "serving", "candidate"))
+    serving.mkdir()
+    candidate.mkdir()
+    _offer(drive)
+    reg = ToolRegistry(repo_dir=candidate, drive_root=drive)
+    reg.set_context(ToolContext(repo_dir=candidate, system_repo_dir=candidate, serving_repo_dir=serving, drive_root=drive,
+                                task_id="request-task", task_metadata={
+                                    "body_candidate": {"path": str(candidate), "repo_dir": str(serving)}}))
+    letter = candidate / "letter.md"
+    spellings = ("letter.md", "serving/letter.md", str(serving / "letter.md"), str(letter))
+    for revision, path in enumerate(spellings):
+        letter.write_text(f"The candidate's description, read as {path}\n", encoding="utf-8")
+        address = {"root": "active_workspace", "path": path}
+        assert reg.execute_result("read_file", address).status == "ok", path
+        receipt = _ok(reg.execute_result("record_update_description", {
+            "text_file": address, "base_sha": BASE, "target_sha": TARGET, "expected_revision": revision}))
+        assert receipt["text_file"]["path"] == str(letter.resolve()), path
+        assert ul.read_record(drive)["text"] == f"The candidate's description, read as {path}"
+    (serving / "only-serving.md").write_text("the serving checkout's own file", encoding="utf-8")
+    address = {"root": "active_workspace", "path": str(serving / "only-serving.md")}
+    assert "NOT_FOUND" in reg.execute_result("read_file", address).text, "the serving spelling names the candidate's file"
+    unread = reg.execute_result("record_update_description", {
+        "text_file": address, "base_sha": BASE, "target_sha": TARGET, "expected_revision": len(spellings)})
+    assert unread.status == "error" and "nothing was saved" in unread.text, unread.text
+    assert ul.read_record(drive)["revision"] == len(spellings)
 
 
 def test_only_ranges_someone_offered_can_be_named(tmp_path):
@@ -275,7 +367,7 @@ def test_write_admits_one_ordinary_main_task_and_records_the_request(door, tmp_p
     assert task["metadata"]["update_description"]["key"] == _key()
     assert task["metadata"]["update_description"]["revision_at_request"] == 0
     for part in (f"{BASE}..{TARGET}", 'kind="update_material"', "record_update_description",
-                 "expected_revision=0", 'vcs_read(root="system_repo"', "max_bytes=4321)",
+                 "expected_revision=0", "text_file=", 'vcs_read(root="system_repo"', "max_bytes=4321)",
                  "No check facts for this range are recorded."):
         assert part in task["text"], part
     for template in ("120 words", "ONE short paragraph", "Name the commits or PRs", "no headings"):
@@ -298,6 +390,25 @@ def test_write_admits_one_ordinary_main_task_and_records_the_request(door, tmp_p
     later = _request(door, mode="rewrite")
     assert later.status_code == 200 and later.json()["task_id"] != task_id and len(door.pending) == 2
     assert door.pending[1]["metadata"]["update_description"]["revision_at_request"] == 1
+
+
+@pytest.mark.parametrize(("binding", "chat"), [("known_empty", 1), ("web", 1), ("external", 77), ("unconfirmed", 0)])
+def test_write_is_main_work_until_an_owner_message_binds_a_chat(door, binding, chat):
+    """Write before any owner message (the binding known empty) is Main's work, where the panel's door
+    opens it. A bound chat keeps it (a transport's own chat too); a binding the state cannot vouch for
+    is used as read, never taken for empty, so that work stays in the hidden partition as before."""
+    from supervisor import state
+
+    def bind(live):
+        live["owner_chat_id"] = {"known_empty": None, "web": 1, "external": 77, "unconfirmed": None}[binding]
+        if binding == "unconfirmed":
+            state.mark_unconfirmed(live, "owner_chat_id")
+
+    state.update_state(bind)
+    _offer(door.root)
+    assert _request(door).status_code == 200
+    [task] = door.pending
+    assert task["chat_id"] == chat
 
 
 def test_a_refused_admission_and_a_range_nobody_offered_record_nothing(door):

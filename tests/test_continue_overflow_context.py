@@ -127,17 +127,15 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag
     assert len({request["model"] for request in inputs}) == 1
     assert inputs[1]["reasoning_effort"] == inputs[2]["reasoning_effort"]
     refused_read = next(m for m in inputs[1]["messages"] if m.get("tool_call_id") == "read-evidence")
-    # Nothing shown is addressable, so the second pass runs whole. Max turns its books into navigation, a change
-    # the one retry answers with the chosen read whole (owner 2A); Low has nothing else to give this unmeasured
-    # refusal, so the never-answered read alone takes the disclosed late rescue.
-    assert any(m.get("tool_call_id") == "read-evidence" for m in inputs[2]["messages"]) is (mode == "max")
-    assert (refused_read in inputs[2]["messages"]) is (mode == "max")
-    records = [m for m in registry._ctx.messages if _capsule_metadata(m)[1]]
-    assert bool(records) is (mode == "low")
+    # Books (Max) or retained host sections (Low) pay before the just-chosen read.
+    assert refused_read in inputs[2]["messages"]
+    assert not [m for m in registry._ctx.messages if _capsule_metadata(m)[1]]
     if mode == "low":
-        capsule = _capsule_metadata(records[0])[1]
-        assert capsule["retention"] == "source_view"
-        checkpoint = json.loads(read_actor_source_bytes(env.drive_root, task["id"], capsule["checkpoint_ref"]))
-        assert refused_read in checkpoint["messages"], "the refused request's body stays exactly retrievable"
-        assert checkpoint["messages"] == inputs[1]["messages"]  # Low has no floor below it: the refused request itself
+        receipts = registry._ctx.context_fit_plan.low_projection.memory_facts["host_sections_addressed"]
+        assert receipts
+        refused_system = "\n\n".join(block["text"] for m in inputs[1]["messages"]
+                                     if m["role"] == "system" for block in m["content"])
+        for receipt in receipts:
+            whole = read_actor_source_bytes(env.drive_root, task["id"], receipt["source_ref"]).decode()
+            assert whole in refused_system
     assert load_task_result(env.drive_root, "pred-1") == before, "recovery never rewrites predecessor authority"

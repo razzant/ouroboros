@@ -363,6 +363,9 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # D1 per-target mutation custody: the existing INTEGRATE_ family reports a
     # busy target as a substrate refusal; no historical answer is fabricated.
     "INTEGRATE_DELEGATED_TARGET_BUSY": (True, "integration_blocked"),
+    # integrate_subagent_patch decision='accept' on a non-shared result: refused before any
+    # effect, an INTEGRATE_ refusal like its family; the retired pair never saw the decision.
+    "INTEGRATE_ACCEPT_UNSUPPORTED": (True, "integration_blocked"),
     # Q: the bare warning is legacy ok; the native error keeps a sent write unknown and says do not resend.
     "GH_WRITE_UNKNOWN": (False, "ok"),
     "native:TOOL_ERROR:GH_WRITE_UNKNOWN": (True, "error"),

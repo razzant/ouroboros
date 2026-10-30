@@ -92,6 +92,8 @@ def fail_at(*indexes, outcome=1):
 def desktop(tmp_path, monkeypatch, platform, session="native", tools=(), answer=None):
     """The registered handlers of a local desktop: the platform, its installed tools and its process boundary."""
     module = load_plugin()
+    # Name lookup is an OS boundary, like this fixture's simulated xdotool process.
+    monkeypatch.setattr(module._ComputerUse, "_x11_keysym", staticmethod(lambda _name: None))
     transport = Transport(answer)
     monkeypatch.setattr(module, "_platform", lambda: platform)
     monkeypatch.setattr(module, "_session_type", lambda: session)
@@ -201,8 +203,8 @@ def test_a_mac_key_sequence_keeps_the_mark_of_the_steps_that_ran(tmp_path, monke
     transport.answer = fail_at()
     transport.calls.clear()
     result = receipt(tools["key"](keys="cmd+a bogusmod+x"))
-    assert result["ok"] is False and marked(result) and "bogusmod" in result["error"], result
-    assert transport.calls == [["cliclick", "kd:cmd", "t:a", "ku:cmd"]], "the refused step ran nothing"
+    assert result["ok"] is False and not marked(result) and "bogusmod" in result["error"], result
+    assert transport.calls == [], "prevalidation refuses the whole sequence before its first input"
 
 
 # --- local Linux: X11 (xdotool) and Wayland (ydotool) ----------------------------------------------
@@ -319,7 +321,7 @@ def test_an_empty_sequence_is_no_effect(tmp_path, monkeypatch):
     module = load_plugin()
     monkeypatch.setattr(module.subprocess, "run", Transport())
     impl = module._ComputerUse(API(tmp_path / "state"))
-    for text in (impl._exec_sequence([]), impl._hold_then_release([], [], 50)):
+    for text in (impl._exec_sequence([]), impl._hold_then_release([], [], 50, ctx={})):
         assert receipt(text)["ok"] is True and not marked(receipt(text)), text
 
 
@@ -419,10 +421,16 @@ class Guest:
     """``urlopen`` toward an OSWorld guest: each /execute answers with the next returncode (the last repeats)."""
 
     def __init__(self, codes):
-        self.codes, self.commands = list(codes), []
+        self.codes, self.commands, self.validations = list(codes), [], []
 
     def __call__(self, request, timeout=None):
-        self.commands.append(json.loads(request.data.decode("utf-8"))["command"][-1])
+        from tests.test_unix_computer_use_safety_contract import guest_key_validation
+        command = json.loads(request.data.decode("utf-8"))["command"][-1]
+        validation = guest_key_validation(command)
+        if validation:
+            self.validations.append(command)
+            return Response(json.dumps(validation["result"]).encode("utf-8"))
+        self.commands.append(command)
         code = self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
         answer = {"status": "success", "output": "", "error": "" if code == 0 else "guest failed", "returncode": code}
         return Response(json.dumps(answer).encode("utf-8"))

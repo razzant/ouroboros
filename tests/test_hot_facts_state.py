@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 import pytest
 
-from ouroboros import budget_pause, owner_pause, store, store_hot_facts as hot, task_store
+from ouroboros import budget_pause, owner_pause, store, store_hot_facts as hot, task_store, work_stop
 from ouroboros.gateway import state
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_hot_facts import _old_task, _task
@@ -164,8 +164,8 @@ def test_phase_controls_preserve_attempt_and_warm_pause_predicates(tmp_path, mon
     _seed(tmp_path, 0)
     with hot.snapshot([(tmp_path, "pausing"), (tmp_path, "direct")]):
         monkeypatch.setattr(store.Txn, "body_text", lambda *_: pytest.fail("control read a body"))
-        assert state._managed_task_budget_pausing(tmp_path, {"_attempt": 2}, "pausing") is True
-        assert state._managed_task_budget_pausing(tmp_path, {"_attempt": 1}, "pausing") is False
+        assert work_stop.row_pausing(tmp_path, {"_attempt": 2}, "pausing") is True
+        assert work_stop.row_pausing(tmp_path, {"_attempt": 1}, "pausing") is False
         assert state._direct_activity_pause_projection(tmp_path, {"activity_id": "direct", "phase": "working"}, {})["phase"] == "budget_paused"
 
 

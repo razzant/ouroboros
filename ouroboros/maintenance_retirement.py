@@ -17,7 +17,9 @@ import sys
 import uuid
 
 from ouroboros import maintenance_jobs, store
+from ouroboros.record_compression import WIRE_JOURNAL
 from ouroboros.retention import get_gc_retention_days, time
+from ouroboros.unindexed import BYTECODE, LEGACY_BYTECODE
 
 log = logging.getLogger(__name__)
 JOB = "runtime_retirement"
@@ -63,7 +65,8 @@ def task_written(txn, task_id, columns):
     if txn.root is None or columns.get("status") not in SETTLED_STATUSES:
         return
     names = (f"task_trees/{task_id}", f"services/{task_id}",
-             f"state/delegate_recovery/{task_id}.json", f"state/delegate_supervision/{task_id}.json")
+             f"state/delegate_recovery/{task_id}.json", f"state/delegate_supervision/{task_id}.json",
+             f"task_results/artifacts/{task_id}/{WIRE_JOURNAL}")
     deadlines = []
     for name in names:
         try:
@@ -97,7 +100,7 @@ def run(root, should_stop):
     steps = [("delegate_state", sweep_settled_delegate_state),
              ("skill_state", sweep_uninstalled_skill_state), ("code_intel", prune_stale_code_intel_roots),
              ("failed_reconcile", prune_failed_reconcile_markers), ("agent_media", prune_agent_media_uploads),
-             ("bytecode", prune_stale_bytecode)]
+             ("call_wire", prune_call_wire_journals), ("bytecode", prune_stale_bytecode)]
     # Read the durable gate again immediately before source retirement. A fresh child
     # must never substitute its empty memory for the server's recovery result.
     with store.open_store(root, write=False) as txn:
@@ -188,25 +191,87 @@ def prune_agent_media_uploads(
     return report
 
 
+def prune_call_wire_journals(root, retention_days=None, *, now=None) -> dict:
+    """Keep a call's whole wire until shared GC age AND proof that its task has no live owner.
+
+    Terminal writes schedule the journal's mtime deadline; startup/repair discover older files.
+    Compression preserves that mtime. An aged terminal task with uncertain ownership stays owed;
+    running/unrecorded tasks await their terminal write. No other task artifact is removed here.
+    """
+    from ouroboros.retention import age_cutoff, keep_until
+    from ouroboros.subagent_worktrees import _task_proven_over
+    from ouroboros.task_status import SETTLED_STATUSES, task_has_live_queue_ownership
+
+    root = pathlib.Path(root)
+    days = get_gc_retention_days() if retention_days is None else retention_days
+    cutoff = age_cutoff(days, now)
+    report = {"removed": 0, "kept": 0, "skipped": 0, "errors": 0}
+    base = root / "task_results" / "artifacts"
+    try:
+        if any(not stat.S_ISDIR(path.lstat().st_mode) for path in (base.parent, base)):
+            return report  # never follow a linked artifact family
+        with os.scandir(base) as listing:
+            folders = sorted((entry for entry in listing if _plain_directory(entry)), key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return report
+    except OSError:
+        report["errors"] += 1
+        return report
+    for folder in folders:
+        path = pathlib.Path(folder.path) / WIRE_JOURNAL
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                report["skipped"] += 1
+                continue
+            with store.open_store(root, write=False) as txn:
+                settled = txn.row(folder.name, "status") in SETTLED_STATUSES
+            if not settled or info.st_mtime >= cutoff or not _task_proven_over(
+                    folder.name, root, lambda task: task_has_live_queue_ownership(root, task)):
+                report["kept"] += 1
+                if settled:
+                    keep_until(report, info.st_mtime, days)
+                continue
+            # A write/replacement while ownership was read invalidates this candidate.
+            if path.lstat() != info:
+                report["kept"] += 1
+                keep_until(report, path.lstat().st_mtime, days)
+                continue
+            path.unlink()
+            report["removed"] += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            report["errors"] += 1
+    return report
+
+
 def prune_stale_bytecode(root, *, budget=None, sources=None) -> dict:
-    """Retire bytecode mirrors whose source directory is gone (``state/pycache``, the
+    """Retire bytecode mirrors whose source directory is gone (``state/pycache.noindex``, the
     ``PYTHONPYCACHEPREFIX`` pool workers write; ``state/python-userbase`` holds real installs and
     is never read here). Under a prefix CPython writes ``<prefix>/<source directory without its
     root>/<name>.<tag>.pyc`` (``importlib`` ``cache_from_source``), so a mirror directory names its
     source: ``"/" + relative`` on POSIX; on Windows the drive is stripped, so a mirror is stale only
     when that path is missing on every drive present now (``_source_roots``). Top-down: a stale
     mirror goes whole and is never descended; an unreadable source (access denied, a drive not
-    answering) keeps its mirror; links are neither followed nor removed. At most ``budget`` unlinks
-    a run, the rest owed through ``next_due``. A pure cache: a wrong removal costs a recompile."""
-    prefix = pathlib.Path(root) / "state" / "pycache"
+    answering) keeps its mirror; links are neither followed nor removed. The legacy ``state/pycache``
+    an older body or host writes again goes whole first, unless it is this process's own prefix.
+    At most ``budget`` unlinks a run, the rest owed through ``next_due``. A pure cache: a wrong
+    removal costs a recompile."""
+    prefix, legacy = pathlib.Path(root) / "state" / BYTECODE, pathlib.Path(root) / "state" / LEGACY_BYTECODE
     report = {"removed": 0, "unlinked": 0, "unknown": 0, "errors": 0}
-    try:
-        if not stat.S_ISDIR(os.lstat(prefix).st_mode):  # a link is not our prefix
+    left = [BYTECODE_UNLINKS_PER_RUN if budget is None else int(budget)]
+    own = getattr(sys, "pycache_prefix", None) or ""
+    own = os.path.normcase(os.path.abspath(own)) if own else ""
+    if _plain_tree(legacy) and os.path.normcase(os.path.abspath(legacy)) != own:
+        removed = _remove_mirror(legacy, left, report)
+        if removed is None:
+            report["next_due"] = time.time()
             return report
-    except OSError:
+        report["removed"] += removed
+    if not _plain_tree(prefix):
         return report
     roots = _source_roots() if sources is None else [os.fspath(path) for path in sources]
-    left = [BYTECODE_UNLINKS_PER_RUN if budget is None else int(budget)]
 
     def source(parts) -> str:
         """``present``, ``gone`` or ``unknown`` over every root; any root that has it keeps it."""
@@ -247,6 +312,14 @@ def prune_stale_bytecode(root, *, budget=None, sources=None) -> dict:
     if not walk(prefix, ()):
         report["next_due"] = time.time()  # owed: the next run of the job continues the walk
     return report
+
+
+def _plain_tree(path) -> bool:
+    """A real directory: a link is not our prefix."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _link(entry) -> bool:

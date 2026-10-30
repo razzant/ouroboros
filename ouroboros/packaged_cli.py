@@ -39,6 +39,7 @@ from ouroboros.platform_layer import (
     embedded_python_candidates,
     git_install_hint,
 )
+from ouroboros.unindexed import bytecode_prefix
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -107,8 +108,8 @@ def _set_global_bytecode_suppression(data_dir: pathlib.Path) -> None:
     Parity with ``_inner_cli_env``'s ``embedded_python_env`` call so the CLI entry
     process and any naive ``os.environ.copy()`` child inherit the suppression. A
     signed+notarized macOS .app must never write ``__pycache__/*.pyc`` into its own
-    bundle at runtime — that breaks the codesign seal. Reuses the same
-    data_dir/state/pycache convention; ``setdefault`` keeps explicit overrides.
+    bundle at runtime — that breaks the codesign seal. Reuses the data dir's
+    ``unindexed.bytecode_prefix``, which keeps an explicit override.
 
     The module top already set ``sys.dont_write_bytecode`` (the only thing that
     stops THIS process's own imports); we re-assert it and add the cache-prefix env
@@ -116,12 +117,7 @@ def _set_global_bytecode_suppression(data_dir: pathlib.Path) -> None:
     """
     sys.dont_write_bytecode = True
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-    pycache_dir = pathlib.Path(data_dir) / "state" / "pycache"
-    try:
-        pycache_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    os.environ.setdefault("PYTHONPYCACHEPREFIX", str(pycache_dir))
+    os.environ["PYTHONPYCACHEPREFIX"] = bytecode_prefix(data_dir, os.environ.get("PYTHONPYCACHEPREFIX", ""))
 
 
 def resolve_packaged_runtime() -> PackagedRuntime:
@@ -449,14 +445,10 @@ def _launch_desktop_app(runtime: PackagedRuntime) -> None:
         # running with other roots must not be activated instead. No global launchd variable is set.
         carried = [arg for key, value in _app_env(runtime).items() for arg in ("--env", f"{key}={value}")]
         subprocess.Popen(["open", "-n", *carried, str(app)])
-    elif IS_WINDOWS:
-        subprocess.Popen([str(app)], cwd=str(app.parent))
-    else:
-        relaunch_env = _linux_appimage_relaunch_env(app)
-        if relaunch_env is None:
-            subprocess.Popen([str(app)], cwd=str(app.parent))
-        else:
-            subprocess.Popen([str(app)], cwd=str(app.parent), env=relaunch_env)
+    else:  # never with the CLI shim's bytecode prefix: outside the data dir it leaves every worker boot recompiling
+        launch_env = (None if IS_WINDOWS else _linux_appimage_relaunch_env(app)) or os.environ
+        subprocess.Popen([str(app)], cwd=str(app.parent),
+                         env={key: value for key, value in launch_env.items() if key.upper() != "PYTHONPYCACHEPREFIX"})
 
 
 def _linux_appimage_relaunch_env(app: pathlib.Path) -> dict[str, str] | None:
@@ -488,9 +480,11 @@ def _desktop_app_path(bundle_root: pathlib.Path) -> pathlib.Path | None:
         # binary would let the CLI exit and release the payload underneath the
         # detached desktop process. Relaunch the stable AppImage path instead so
         # its own runtime owns the payload for the launcher's whole lifetime.
-        appimage = pathlib.Path(os.environ.get("APPIMAGE", "").strip())
-        if appimage.is_file():
-            return appimage
+        from ouroboros.desktop_autostart import own_appimage
+
+        appimage = own_appimage(bundle_root)  # not one inherited from another AppImage app's terminal
+        if appimage and pathlib.Path(appimage).is_file():
+            return pathlib.Path(appimage)
     for parent in (bundle_root, *bundle_root.parents):
         if IS_MACOS and parent.suffix == ".app":
             return parent

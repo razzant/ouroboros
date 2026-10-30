@@ -118,44 +118,9 @@ def transcript_growth_signature(messages: List[Dict[str, Any]]) -> Tuple[int, in
     return (len(messages), len(str(messages[-1].get("content") or "")) if messages else 0)
 
 
-def _evict_stale_image_blocks(messages: List[Dict[str, Any]], *, incoming: int = 0) -> None:
-    """Above the high-water mark, keep the newest MAX_LIVE_IMAGE_BLOCKS images.
-
-    Single counter across ALL image sources (owner uploads, browser
-    screenshots, transport injections). Evicted blocks become a text
-    placeholder carrying the caption and re-view path: the dialogue HORIZON
-    survives while the heavy payload drops (P1 — granularity varies, history
-    never silently vanishes). ``incoming`` reserves room for imminent blocks.
-    True when blocks were evicted: the caller names that change of sent history.
-    """
-    from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS, LIVE_IMAGE_BLOCKS_HIGH_WATER
-
-    image_refs: List[tuple] = []  # (message_idx, block_idx)
-    for m_idx, msg in enumerate(messages):
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for b_idx, block in enumerate(content):
-            if isinstance(block, dict) and str(block.get("type") or "") in ("image_url", "image"):
-                image_refs.append((m_idx, b_idx))
-    total = len(image_refs) + max(0, int(incoming))
-    if total <= LIVE_IMAGE_BLOCKS_HIGH_WATER:
-        return False
-    for m_idx, b_idx in image_refs[:total - MAX_LIVE_IMAGE_BLOCKS]:
-        content = messages[m_idx]["content"]
-        block = content[b_idx]
-        caption = str(block.get("_caption") or "").strip()
-        source_path = str(block.get("_source_path") or "").strip()
-        placeholder = "[image evicted"
-        if caption:
-            placeholder += f": {caption}"
-        if source_path:
-            # view_image re-views the local file natively. VLM tools are vision/local-media
-            # tools, not _WEB_TOOLS; benchmark isolation withholds them by name.
-            placeholder += f"; re-view: view_image path={source_path}"
-        placeholder += "]"
-        content[b_idx] = {"type": "text", "text": placeholder}
-    return True
+def _evict_stale_image_blocks(messages, *, incoming=0, owner_mode="max"):
+    from ouroboros.context_images import evict_stale_image_blocks
+    return evict_stale_image_blocks(messages, incoming=incoming, owner_mode=owner_mode)
 
 
 def _append_or_merge_user_content(
@@ -174,7 +139,8 @@ def _append_or_merge_user_content(
 
     if isinstance(content, list) and any(
             isinstance(b, dict) and b.get("type") in ("image_url", "image") for b in content):
-        if _evict_stale_image_blocks([*messages, {"content": content}]) and (stamp or slot) is not None:
+        owner_mode = getattr(getattr(stamp or slot, "context_fit_plan", None), "preferred_mode", "max")
+        if _evict_stale_image_blocks([*messages, {"content": content}], owner_mode=owner_mode) and (stamp or slot) is not None:
             sanction_rewrite(stamp or slot, "image_eviction")
     if kind or not (messages and messages[-1].get("role") == "user"
                     and unsent_in_previous_send(slot, messages[-1])

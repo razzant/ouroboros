@@ -111,9 +111,10 @@ def is_skill_cache_path(path: pathlib.Path, root: pathlib.Path) -> bool:
 
 
 def _isolated_python_site_dirs(skill_dir: pathlib.Path) -> List[pathlib.Path]:
+    """The environment's packages for THIS interpreter: an older Python's ``lib/pythonX.Y`` is not importable here."""
     env_root = pathlib.Path(skill_dir) / ".ouroboros_env" / "python"
     candidates = [
-        *env_root.glob("lib/python*/site-packages"),
+        env_root / "lib" / "python{}.{}".format(*sys.version_info[:2]) / "site-packages",
         env_root / "Lib" / "site-packages",
     ]
     out: List[pathlib.Path] = []

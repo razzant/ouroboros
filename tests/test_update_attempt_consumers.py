@@ -346,6 +346,33 @@ def test_real_executor_drain_refusal_stops_nobody_and_schedules_nothing(
     assert drains == [True] and stops == [] and scene.events["restarts"] == []
 
 
+def test_real_executor_restart_handoff_refusal_stops_nobody_and_asks_no_restart(
+    replace_scene, retained_attempt, monkeypatch
+):
+    """A waiting task's restart handoff could not be prepared: the fence reopened the writers before any teardown,
+    so this lane's retained attempt is the same ordinary refusal, never a stopped installation needing Restart."""
+    from ouroboros import owner_wait
+    from ouroboros.gateway import control
+    from ouroboros.tools import services
+    from supervisor import workers
+
+    scene, stops = replace_scene, []
+    monkeypatch.setattr(control, "_quiesce_repo_writers", control._stop_repo_writers)
+    monkeypatch.setattr(workers, "drain_repo_writers", lambda: [])
+    monkeypatch.setattr(owner_wait, "prepare_owner_wait_handoffs",
+                        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("owner wait source bytes are unreadable")))
+    monkeypatch.setattr(workers, "kill_workers_for_update", lambda **_kw: stops.append("workers") or [])
+    monkeypatch.setattr(services, "kill_all_services", lambda *_a, **_kw: stops.append("services") or [])
+
+    code, body = scene.apply(scene.target)
+
+    assert (code, body["reason"], body["restart_required"]) == (409, "update_writer_fence_blocked", False), body
+    saved = retained_attempt.saved()
+    assert (saved["outcome"], saved["work_stop"], saved["restart_required"]) == ("not_applied", "none", False)
+    assert saved["blockers"] == ["owner_wait_handoff:OSError: owner wait source bytes are unreadable"]
+    assert workers.repo_writer_admission_closed() == "" and stops == [] and scene.events["restarts"] == []
+
+
 
 
 @pytest.mark.parametrize("with_stash", [False, True])

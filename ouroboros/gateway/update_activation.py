@@ -13,16 +13,20 @@ existing fence, holds the local model runtime's install (the server's own packag
 candidate replaces the serving packages, reads the base and the environment again (a moved one makes the
 candidate stale and reopens the writers), authorizes the pre-import switch (``body_adoption.authorize_update``),
 starts the app installer when the Update brings a new official app (``update_native.hand_over``)
-and requests the restart that alone may arm it. ``discard_candidate`` settles the record;
+and requests the restart that alone may arm it. Whatever ends it short of that restart settles what it may have left
+before the writers return (``_abort_activation``). ``discard_candidate`` settles the record;
 the worktree GC then retires its checkout and scratch. Nothing here edits the serving
 tree; the legacy ``auto_merge``/``assisted``/``replace`` lanes stay in ``control.py``.
 ``carried_list_download`` serves the live candidate's complete list of carried work on
-``GET /api/files/download?carried_list=<candidate id>``, the link ``candidate_view`` names.
+``GET /api/files/download?carried_list=<candidate id>``, the link ``candidate_view`` names, and
+``candidate_preflight`` answers ``POST /api/update/preflight`` naming a candidate: the effects of its
+Restart to update, which the panel reads before the owner confirms.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import stat
@@ -87,6 +91,26 @@ def _changed(why: str, details: dict | None = None) -> JSONResponse:
                          **({"details": details} if details else {})}, status_code=409)
 
 
+def candidate_preflight(candidate_id: str) -> JSONResponse:
+    """``POST /api/update/preflight`` naming ``candidate_id``: what that candidate's Restart to update does, read now.
+
+    Nothing is fetched or planned: ``merge_plan`` is the range it was prepared for and ``effects``
+    (``update_impact.candidate_effects``) its composition's engine transition, the engine's active work and
+    the runtime its preparation selected. Another live candidate, or none, answers 409 ``candidate_changed``
+    before anything is observed."""
+    from ouroboros.gateway._helpers import json_error
+    from ouroboros.update_impact import candidate_effects
+    from supervisor import update_prepare
+
+    row = update_prepare.current()
+    if row is None or row.get("candidate_id") != candidate_id:
+        return json_error("the prepared update changed; check again", status=409, reason_code="candidate_changed")
+    target = row.get("target") or {}
+    plan = {"base_sha": str(row.get("base_sha") or ""), "target_sha": str(target.get("target_sha") or ""),
+            "target_ref": str(target.get("target_ref") or ""), "update_channel": str(target.get("channel") or "")}
+    return JSONResponse({"merge_plan": plan, "effects": candidate_effects(row)})
+
+
 def candidate_view(latest_sha: str = "") -> dict:
     """The candidate as clients read it (``update_prepare.projection``), with the complete list of the work it
     carries as ``list_url``: the download of that list by this candidate's id (``carried_list_download``), never
@@ -137,6 +161,78 @@ async def carried_list_download(request: Request) -> Response:
     return _file_response(listing, filename=listing.name)
 
 
+class _ActivationRefused(Exception):
+    """A step after authorization cannot go on: an expected end of ``_abort_activation``, in its own words."""
+
+    def __init__(self, text: str, http_status: int = 409, **fields) -> None:
+        super().__init__(text)
+        self.text, self.http_status, self.fields = text, http_status, fields
+
+
+def _writers_back(body: dict, status: int = 409) -> JSONResponse:
+    """``body`` as the answer of a Restart to update that stopped the writers and leaves nothing armed: they return
+    through the saved-work owner first. Where they cannot, the answer says so and every client keeps it until a
+    restart (``update_progress.retain_stopped_activation``), as chat keeps refusing writers until then."""
+    from ouroboros.gateway import control
+
+    if control._respawn_workers_after_failed_update():
+        return JSONResponse(body, status_code=status)
+    response = JSONResponse({**body, "error": f"{body['error']}; running work stays stopped until Ouroboros restarts",
+                             "restart_required": True}, status_code=status)
+    update_progress.retain_stopped_activation(response)
+    return response
+
+
+def _abort_activation(candidate_id: str, failure: Exception, *,
+                      restart_uncertain: bool = False) -> tuple[JSONResponse, bool]:
+    """Any other end of a Restart to update after its fence and before its restart: a failed step (an activation
+    snapshot at its deadline, a helper copy the disk refused) or an installer or restart that cannot go on.
+
+    Writers return only once this activation can no longer act. Under ``lifecycle()``, a record it already marked goes
+    back to ``ready``, then its handoff closes and is read back: its record is all an installer already started acts
+    on (``app_install``: only ``armed``), and all an exit tail arms; that close and ``arm`` hold the helper's lock, so
+    the first is the one outcome. Whatever cannot be put back stays as it is for the next boot, which settles a handoff
+    and its record together, and so does everything once a restart may be accepted (``restart_uncertain``: its exit
+    tail owns this handoff): writers stay stopped until that restart, which either switches to this update or leaves it
+    not applied. Returns the answer and whether a transition is still open.
+    """
+    from ouroboros import body_adoption
+    from supervisor import update_prepare
+    from supervisor.git_ops import DRIVE_ROOT
+
+    if isinstance(failure, _ActivationRefused):
+        what, status, fields = failure.text, failure.http_status, failure.fields
+    elif isinstance(failure, update_prepare.PrepareRefused):  # this server's stop refused its next Git step, say
+        what, status, fields = failure.text, 409, {"reason": failure.code}
+    else:
+        log.error("update activation failed after its writer fence", exc_info=failure)
+        what, status = f"the activation failed: {type(failure).__name__}: {failure}", 500
+        fields = {"reason": "activation_failed"}
+    if restart_uncertain:
+        still_open = "its restart may already have been accepted"
+    else:
+        with update_prepare.lifecycle():
+            try:
+                live = update_prepare.find(candidate_id)
+                if live is not None and live.get("state") == "activating":
+                    # Ready again, still naming this attempt: an earlier handoff's late boot result is not its own.
+                    named = (live.get("activation") or {}).get("adoption_id")
+                    update_prepare.mark(live, state="ready", activation={"adoption_id": named} if named else {})
+                phase = body_adoption.close_update(DRIVE_ROOT, fields["reason"], candidate_id)
+            except Exception as again:
+                log.warning("update activation record could not be settled", exc_info=True)
+                phase = f"{type(again).__name__}: {again}"
+        still_open = f"it could not be closed ({phase})" if phase else ""
+    if not still_open:
+        body = {"error": f"{what}; nothing was switched", **fields, "outcome": "not_applied"}
+        return _writers_back(body, status), False
+    response = JSONResponse({"error": f"{what}; {still_open}, so running work stays stopped and the next restart "
+                                      "either switches to this update or leaves it not applied",
+                             "reason": "activation_unresolved", "restart_required": True}, status_code=500)
+    update_progress.retain_stopped_activation(response, concluded=False)
+    return response, True
+
+
 def _activate_fenced(request: Request, candidate_id: str) -> JSONResponse:
     from ouroboros import body_adoption
     from ouroboros.gateway import control
@@ -158,21 +254,31 @@ def _activate_fenced(request: Request, candidate_id: str) -> JSONResponse:
         lock = acquire_update_lock()
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc), "outcome": "not_applied"}, status_code=409)
-    installs, restarting = None, False
+    installs, fenced, signalling, restarting = None, False, False, False
     try:
         if active_update_tx():
             return JSONResponse({"error": "a legacy managed update is in progress", "outcome": "not_applied"},
                                 status_code=409)
+        fenced = True
         blockers = control._quiesce_repo_writers("activation")
         if blockers:
-            return control._fence_failure(blockers)
+            refused = control._fence_failure(blockers)
+            if json.loads(refused.body)["restart_required"]:
+                # The fence keeps the writers refused: never respawned into what it could not prove, and every client
+                # keeps the restart. Running work stopped only if the pool went down for an update; a refusal that
+                # reopened the writers before any teardown stays this request's answer.
+                from supervisor.workers import worker_pool_admission_state
+
+                stopped = worker_pool_admission_state().get("disabled_reason") == "managed_update"
+                update_progress.retain_stopped_activation(refused, stopped=stopped)
+            return refused
         # The fence may have waited: a discard or a new preparation meanwhile changed what is current.
         # Everything from this re-read until the record says activating holds the lifecycle lock.
         with update_prepare.lifecycle():
             row = update_prepare.current()
             if row is None or row.get("candidate_id") != candidate_id or row.get("state") != "ready":
-                control._respawn_workers_after_failed_update()
-                return _changed("the prepared update changed while the writers stopped; nothing was switched")
+                return _writers_back({"error": "the prepared update changed while the writers stopped; nothing was "
+                                               "switched", "reason": "candidate_changed", "outcome": "not_applied"})
             if (row.get("environment") or {}).get("generation"):
                 # The fence stopped the task writers; the server's own package writer is the local model runtime's
                 # install: held from the package check below until the restart switches them, or refused.
@@ -182,21 +288,19 @@ def _activate_fenced(request: Request, candidate_id: str) -> JSONResponse:
                 busy = installs.hold_runtime_install("an update is being activated; install it after the restart")
                 if busy:
                     installs = None
-                    control._respawn_workers_after_failed_update()
-                    return JSONResponse({"error": f"{busy}; restart to update once it finished",
-                                         "reason": "packages_busy", "outcome": "not_applied"}, status_code=409)
+                    return _writers_back({"error": f"{busy}; restart to update once it finished",
+                                          "reason": "packages_busy", "outcome": "not_applied"})
             why = update_prepare.activation_check(row)
             if why:
-                control._respawn_workers_after_failed_update()
-                return JSONResponse({"error": why, "reason": why.split(":", 1)[0], "outcome": "not_applied",
-                                     "candidate": candidate_view()}, status_code=409)
+                return _writers_back({"error": why, "reason": why.split(":", 1)[0], "outcome": "not_applied",
+                                      "candidate": candidate_view()})
             try:
                 handoff = body_adoption.authorize_update(DRIVE_ROOT, row)
             except body_adoption.AdoptionRefused as exc:
-                control._respawn_workers_after_failed_update()
-                return JSONResponse({"error": exc.text, "reason": exc.code, "outcome": "not_applied"},
-                                    status_code=409)
-            body_adoption.bind_update_restart(DRIVE_ROOT)
+                return _writers_back({"error": exc.text, "reason": exc.code, "outcome": "not_applied"})
+            if not body_adoption.bind_update_restart(DRIVE_ROOT):
+                raise _ActivationRefused("the activation could not be bound to its restart",
+                                         reason="restart_binding_failed")
             native = row.get("native") or {}
             if native.get("status") == "staged":
                 # The installer runs, detached and in custody, BEFORE the restart is requested: it acts only
@@ -208,26 +312,28 @@ def _activate_fenced(request: Request, candidate_id: str) -> JSONResponse:
                 if started["ok"]:
                     started = update_native.hand_over(started, data_dir=DRIVE_ROOT, adoption_id=handoff["id"])
                 if not started["ok"]:
-                    body_adoption.abandon(DRIVE_ROOT, "native_hand_over_failed", candidate_id=candidate_id)
-                    control._respawn_workers_after_failed_update()
-                    return JSONResponse({"error": f"the new app could not be installed: {started['reason']}",
-                                         "reason": "native_hand_over_failed", "outcome": "not_applied"},
-                                        status_code=409)
+                    raise _ActivationRefused(f"the new app could not be installed: {started['reason']}",
+                                             reason="native_hand_over_failed")
             update_prepare.mark(row, state="activating", activation={"adoption_id": handoff["id"]})
-        if not control._request_restart(request):
-            with update_prepare.lifecycle():
-                # An installer already started finds its record gone and ends with nothing changed.
-                body_adoption.abandon(DRIVE_ROOT, "restart_unavailable", candidate_id=candidate_id)
-                live = update_prepare.find(candidate_id)
-                if live is not None and live.get("state") == "activating":
-                    update_prepare.mark(live, state="ready", activation={})
-            control._respawn_workers_after_failed_update()
-            return JSONResponse({"error": "the restart could not be requested; nothing was switched",
-                                 "status": "restart_required", "outcome": "not_applied"}, status_code=500)
+        signalling = True  # a callback that raises may have signalled first
+        requested = control._request_restart(request)
+        signalling = False
+        if not requested:
+            raise _ActivationRefused("the restart could not be requested", 500, reason="restart_unavailable",
+                                     status="restart_required")
         restarting = True  # the hold stays: the restart switches the packages
         update_progress.notify_changed()  # other clients and the indicator: this candidate is activating now
         return JSONResponse({"status": "ok", "restarting": True, "strategy": "activate",
                              "candidate": candidate_view()})
+    except Exception as exc:
+        if restarting or not fenced:  # that restart owns what follows; before the fence nothing stopped
+            raise
+        from ouroboros.server_process import _restart_requested
+
+        # Still open: its restart may switch the packages, so the hold stays.
+        response, restarting = _abort_activation(candidate_id, exc,
+                                                 restart_uncertain=signalling or _restart_requested.is_set())
+        return response
     finally:
         if installs is not None and not restarting:
             installs.release_runtime_install()

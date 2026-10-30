@@ -22,7 +22,9 @@ def projection_fields(row: dict) -> dict:
     fields = {key: row[key] for key in ("reply_to", "relay", "room_revisions") if isinstance(row.get(key), dict)}
     if row.get("reply_to_relay"):
         fields["reply_to_relay"] = row["reply_to_relay"]
-    if row.get("direction") != "in" and not row.get("is_progress") and row.get("client_message_id"):
+    # A host-fact ingress row (a call's opening) is the host's own row named by that id, as history keys it.
+    if (row.get("direction") != "in" or isinstance(row.get("host_fact"), dict)) and not row.get("is_progress") \
+            and row.get("client_message_id"):
         fields["row_client_message_id"] = str(row["client_message_id"])
     fields["row_address"] = format_address(row_address(row))
     return fields

@@ -257,6 +257,7 @@ class GatewayContractResponse(TypedDict):
     interface_paths: List[str]  # the replaceable main interface ("/" and "/static")
     http: List[ContractHttpEntry]
     ws: ContractWs
+    call_socket: NotRequired[Dict[str, Any]]  # separate PCM/media protocol, see CallSocketContract
     schemas: Dict[str, Dict[str, Any]]
 
 

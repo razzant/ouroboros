@@ -78,3 +78,45 @@ def context_present(env, task):
     """Capture at head construction, including queued heads with older ingress metadata."""
     root = task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or env.drive_root
     return live_works_present(root, exclude=str(task.get("id") or ""))
+
+
+def compact_other_live_work(rows):
+    """Count known foreign work; keep unknowns, holds and control facts whole.
+
+    These are not the addressable independent roots. Their exact titles, rooms and
+    run IDs remain in the retained runtime capture, before this form can be shown.
+    """
+    from collections import Counter
+
+    if not isinstance(rows, list):
+        return rows
+    statuses, tails, exceptions = Counter(), Counter(), []
+    running = waiting = 0
+    fields = {'work_id', 'title', 'room', 'root_status', 'helpers_running', 'helpers_waiting', 'tails'}
+    tail_fields = {'kind', 'state', 'code', 'text', 'count', 'ids'}
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) - fields or not row.get('work_id')
+                or row.get('root_status') not in ('completed', 'failed', 'cancelled', 'running')
+                or not isinstance(row.get('tails', []), list)
+                or any(not isinstance(row.get(key, 0), int) for key in ('helpers_running', 'helpers_waiting'))):
+            exceptions.append(row)
+            continue
+        statuses[row['root_status']] += 1
+        running += row.get('helpers_running', 0)
+        waiting += row.get('helpers_waiting', 0)
+        unknown = []
+        for tail in row.get('tails') or ():
+            if (not isinstance(tail, dict) or set(tail) - tail_fields or tail.get('state') != 'live'
+                    or tail.get('kind') not in ('helper', 'run', 'review')
+                    or not isinstance(tail.get('count', 1), int)
+                    or tail.get('code') not in ('delegated_running', 'helpers_running', 'review_work_finishing')):
+                unknown.append(tail)
+            else:
+                tails[tail['code']] += tail.get('count', 1)
+        if unknown:
+            exceptions.append({'work_id': row['work_id'], 'root_status': row['root_status'], 'tails': unknown})
+    return {'count': len(rows), 'counted_root_statuses': dict(statuses),
+            'counted_helpers_running': running, 'counted_helpers_waiting': waiting,
+            'confirmed_tails': dict(tails), 'unabridged': exceptions,
+            'fact': 'Other live work is outside the independent-root roster; an ended root does not confirm its tails ended.',
+            'details': 'retained full runtime section: live_works_present.other_live_work'}

@@ -112,8 +112,8 @@ def test_a_native_participants_reply_object_is_read_whole_without_extraction(har
 
 
 def test_an_ask_delivers_the_full_dialogue_to_a_packet_participant(harness):  # noqa: F811
-    """The complete planning dialogue (no display cap) reaches a packet participant, secrets
-    redacted and a relayed peer named by its provenance (the acceptance packet's own ledger of
+    """The complete planning dialogue (no display cap) reaches a packet participant as the room
+    wrote it and a relayed peer named by its provenance (the acceptance packet's own ledger of
     the owner's directives left with the task-acceptance machine)."""
     from ouroboros.owner_mailbox import write_task_message
 
@@ -132,5 +132,5 @@ def test_an_ask_delivers_the_full_dialogue_to_a_packet_participant(harness):  # 
                      if m.get("role") == "user")
     assert "## OWNER REQUIREMENTS AND DECISIONS" not in packet
     assert "Option A is faster but less flexible. " + "detail " * 6000 in packet
-    assert "sk-abcdefghijklmnopqrstuvwxyz1234" not in packet
+    assert "Build the deck; key sk-abcdefghijklmnopqrstuvwxyz1234" in packet
     assert "from task sibling-7, relayed by ancestor parent-9" in packet

@@ -12,8 +12,9 @@ from tests.test_subscription_setup_browser import subscription_ui as subscriptio
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
-@pytest.mark.parametrize("viewport", [(980, 780), (390, 844), (1360, 900)])
-def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscription_ui, viewport, tmp_path):
+@pytest.mark.parametrize("viewport", [(980, 780), (900, 900), (390, 844), (1360, 900)])
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscription_ui, viewport, theme, tmp_path):
     from playwright.sync_api import expect
 
     ui, page = subscription_ui, subscription_ui["page"]
@@ -25,9 +26,42 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
     page.route("**/api/openai-compatible/models", lambda route: route.fulfill(
         status=response["status"], json=response["body"]))
     page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
+    page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    evidence = diagnostic_directory(tmp_path / "frames", "discovery-feedback")
+    compact = viewport[0] <= 900 or viewport[1] <= 820
+    columns = 1 if viewport[0] <= 760 else 2
+    measurements = {}
+
+    def measure_grid(name, selector):
+        grid = page.locator(selector).first
+        expect(grid).to_be_visible()
+        facts = grid.evaluate("""el => ({
+            columns: getComputedStyle(el).gridTemplateColumns.split(/\\s+/).length,
+            width: el.clientWidth, scrollWidth: el.scrollWidth,
+            titleSize: getComputedStyle(document.querySelector('.step-title')).fontSize,
+            bodyWidth: document.body.clientWidth, bodyScrollWidth: document.body.scrollWidth,
+        })""")
+        measurements[name] = facts
+        assert facts["columns"] == columns, facts
+        assert facts["scrollWidth"] <= facts["width"] + 1, facts
+        assert facts["bodyScrollWidth"] <= facts["bodyWidth"] + 1, facts
+        assert facts["titleSize"] == "24px", facts
+
+    # Accounts' ordinary fields stay paired on a short desktop and stack on a
+    # phone. Compactness comes from hiding help, never from shrinking text.
+    api_access = page.locator('[data-collapse="api-access"]')
+    if not api_access.evaluate("el => el.open"):
+        api_access.locator("summary").first.click()
+    measure_grid("accounts", ".field-grid")
+    note = page.locator('.field-grid .field-note').first
+    expect(note).to_be_hidden() if compact else expect(note).to_be_visible()
+    footer = page.locator('.footer-copy')
+    expect(footer).to_be_hidden() if compact else expect(footer).to_be_visible()
+    label = page.locator('.field-grid label').first
+    expect(label).to_have_css("font-size", "12px")
+    page.screenshot(path=str(evidence / f"{viewport[0]}x{viewport[1]}-accounts.png"), animations="disabled")
     page.click("#next-btn")
     status = page.locator("#compatible-load-status")
-    evidence = diagnostic_directory(tmp_path / "frames", "discovery-feedback")
     for name, code, body, text in (
         ("error", 400, response["body"], "Enter its key again"),
         ("empty", 200, {"models": []}, "No models listed"),
@@ -38,6 +72,18 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         expect(status).to_contain_text(text)
         page.screenshot(path=str(evidence / f"{viewport[0]}x{viewport[1]}-{name}.png"), animations="disabled")
         expect(status).to_be_visible()
+        expect(status).to_have_css("font-size", "12px")
+
+    page.click("#next-btn")
+    # The Review choices are two columns; the separate Access grid deliberately
+    # has its own count, so it is not part of this two-column contract.
+    measure_grid("review", ".wizard-choice-grid")
+    page.click("#next-btn")
+    budget = page.locator('[data-collapse="api-budget"]')
+    if not budget.evaluate("el => el.open"):
+        budget.locator("summary").click()
+    measure_grid("budget", ".grid.two")
+    (evidence / "layout.json").write_text(json.dumps(measurements, indent=2))
 
 
 def test_connection_discovery_survives_general_refresh_without_replacing_other_sources(subscription_ui, tmp_path):

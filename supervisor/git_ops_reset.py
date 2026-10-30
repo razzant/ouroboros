@@ -15,6 +15,7 @@ saw at import time.
 from __future__ import annotations
 
 import datetime
+import functools
 import logging
 import os
 import pathlib
@@ -676,14 +677,19 @@ def import_test() -> Dict[str, Any]:
         return {"ok": True, "skipped": "frozen"}
 
     before = _bootstrap_snapshot()
-    if before and before == _bootstrap_receipt():
+    if before and before == _bootstrap_receipt():  # this exact clean snapshot passed an earlier boot's smoke: record it
+        _SMOKED["head"] = before["head"] if before["branch"] == _go().BRANCH_DEV and _go()._is_launcher_managed_repo() else ""
         return {"ok": True, "skipped": "unchanged_bootstrap"}
     _forget_bootstrap_receipt()
+    _SMOKED.clear()
+    head = _clean_dev_head()  # read before the smoke: a commit landing during it is not what passed
     r = subprocess.run(
         [sys.executable, "-c", "import ouroboros, ouroboros.agent; print('import_ok')"],
         cwd=str(_go().REPO_DIR),
         capture_output=True, text=True,
     )
+    if r.returncode == 0 and head == _clean_dev_head():
+        _SMOKED["head"] = head
     if r.returncode != 0:
         _forget_dependency_fingerprint()  # a broken environment is re-synced next time, never skipped
     elif before and before == _bootstrap_snapshot():
@@ -694,6 +700,33 @@ def import_test() -> Dict[str, Any]:
             log.warning("Bootstrap receipt not recorded; the next boot verifies again", exc_info=True)
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,
             "returncode": r.returncode}
+
+
+_SMOKED: Dict[str, str] = {}  # this process's passing smoke of a clean, launcher-managed dev checkout
+
+
+def _clean_dev_head() -> str:
+    """HEAD of a clean, launcher-managed dev checkout, else ``""``: what a passing smoke proves for
+    ``advance_recovery_point`` (an update being finalized, its receipt kept off, counts)."""
+    out = [_go().git_capture(["git", *args]) for args in (["rev-parse", "--abbrev-ref", "HEAD"], ["status", "--porcelain"],
+                                                         ["rev-parse", "HEAD"])]
+    clean = not any(rc for rc, _o, _e in out) and out[0][1].strip() == _go().BRANCH_DEV and not out[1][1].strip()
+    return out[2][1].strip() if clean and _go()._is_launcher_managed_repo() else ""
+
+
+def advance_recovery_point(ready: bool) -> str:
+    """After a ready boot, ``update-ref`` the local recovery branch (never pushed; Save recovery point moves it at
+    once) to the commit this process's smoke proved, never live HEAD; returns it, ``""`` when nothing moved."""
+    head, ref = _SMOKED.get("head", ""), f"refs/heads/{_go().BRANCH_STABLE}"
+    if not ready or not head or _go().git_capture(["git", "rev-parse", "--verify", "--quiet", ref])[1].strip() == head:
+        return ""
+    rc, _out, err = _go().git_capture(["git", "update-ref", ref, head])
+    if rc != 0:
+        log.warning("Recovery point not advanced to %s: %s", head[:12], err)
+        return ""
+    _go().append_jsonl(_go().current_drive_root() / "logs" / "supervisor.jsonl",
+                       {"ts": _go().utc_now_iso(), "type": "recovery_point_advanced", "ref": ref, "to": head})
+    return head
 
 
 def _forget_dependency_fingerprint() -> None:
@@ -888,18 +921,66 @@ def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True) ->
 
 
 def _dependency_fingerprint(req_path, cmd):
-    """Actual requirement bytes, install target/environment and interpreter."""
+    """Actual requirement bytes, install target/environment and interpreter. A packaged host
+    (``OUROBOROS_BUNDLE_DIR`` with its bundle manifest) counts by content: paths inside the bundle are relative
+    to it in every field and its identity (``_packaged_host``, app version, ``sys.version``) is hashed, so the
+    same app moved, remounted or re-extracted keeps its receipt while another app or Python re-syncs; paths
+    outside it (the userbase, a container's venv), flags and the requirements digest stay as they are."""
     import hashlib
     import json
     import site
     import sysconfig
     source = req_path.read_bytes() if req_path.exists() else b"openai>=1.0.0\nrequests"
-    facts = {"requirements_sha256": hashlib.sha256(source).hexdigest(), "command": cmd,
-             "interpreter": [sys.executable, sys.version, sys.prefix, sys.base_prefix],
-             "target": [site.getuserbase(), sysconfig.get_path("purelib")],
-             "environment": {key: os.environ.get(key, "") for key in
+    purelib = sysconfig.get_path("purelib")
+    bundle = os.environ.get("OUROBOROS_BUNDLE_DIR", "").strip()
+    host = _packaged_host(bundle, purelib) if bundle else {}
+
+    def at(value):
+        relative = _inside_bundle(value, bundle) if host else None
+        return value if relative is None else "<bundle>/" + relative
+
+    facts = {"requirements_sha256": hashlib.sha256(source).hexdigest(), "command": [at(part) for part in cmd],
+             "interpreter": [at(sys.executable), sys.version, at(sys.prefix), at(sys.base_prefix)],
+             "target": [at(site.getuserbase()), at(purelib)],
+             "environment": {key: at(os.environ.get(key, "")) for key in
                              ("PYTHONUSERBASE", "PIP_TARGET", "PIP_PREFIX", "PIP_USER", "PIP_CONFIG_FILE", "VIRTUAL_ENV")}}
+    if host:
+        facts["host"] = {**host, "app_version": os.environ.get("OUROBOROS_APP_VERSION", "")}
     return hashlib.sha256(json.dumps(facts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _inside_bundle(value, bundle):
+    """``value``'s path relative to the bundle root when it is an absolute path inside it (lexically or
+    resolved), else ``None``: flags, external destinations and other volumes stay as they are."""
+    if not isinstance(value, str) or not os.path.isabs(value):
+        return None
+    for root, text in ((bundle, value), (os.path.realpath(bundle), os.path.realpath(value))):
+        try:
+            relative = os.path.relpath(os.path.abspath(text), os.path.abspath(root))
+        except ValueError:  # another Windows drive
+            continue
+        if relative != os.pardir and not relative.startswith(os.pardir + os.sep):
+            return relative.replace(os.sep, "/")
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _packaged_host(bundle, purelib):
+    """The packaged host's identity, read once per process (``{}`` without a bundle manifest); distributions come from
+    the bundle's own purelib folder names (``name-version.dist-info``), never a venv the sync itself writes."""
+    import platform
+    from ouroboros.utils import read_json_dict
+    manifest = read_json_dict(pathlib.Path(bundle) / "repo_bundle_manifest.json") or {}
+    if not manifest:
+        return {}
+    try:
+        names = ([entry.rsplit(".", 1)[0] for entry in os.listdir(purelib) if entry.endswith((".dist-info", ".egg-info"))]
+                 if _inside_bundle(purelib, bundle) is not None else [])
+    except OSError:
+        names = []
+    return {"cache_tag": sys.implementation.cache_tag, "machine": platform.machine(),
+            "source_sha": manifest.get("source_sha", ""), "bundle_sha256": manifest.get("bundle_sha256", ""),
+            "distributions": sorted("==".join(name.rsplit("-", 1)) for name in names)}
 
 
 def _bootstrap_receipt_path() -> pathlib.Path:

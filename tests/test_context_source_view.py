@@ -132,7 +132,8 @@ def test_reused_call_id_and_identical_text_keep_both_visible_outcomes(tmp_path):
     for row, invocation, exit_code, is_error in zip(records, ("failed-attempt", "successful-attempt"), (17, 0), (True, False)):
         text = _visible(row)
         assert f'"exit_code":{exit_code}' in text and f'"is_error":{json.dumps(is_error)}' in text
-        assert f"invocation {invocation}" in text and f"trace/{invocation}.json" in text and f"source/{invocation}.txt" in text
+        assert f"invocation {invocation}" in text and f"source/{invocation}.txt" in text
+        assert f"trace/{invocation}.json" not in text  # the exact checkpoint retains the bulky diagnostic receipt
         assert "outcome binding unknown" not in text and "CONSEQUENTIAL-TAIL" not in text
         assert "WRONG-global-most-recent" not in json.dumps(row)
     _assert_exact_restore(tmp_path, messages, request, receipt)

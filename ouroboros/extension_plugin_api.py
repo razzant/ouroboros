@@ -57,6 +57,8 @@ from ouroboros.extension_registry_state import (
     _lock,
     _record_companion_name,
     _routes,
+    _realtime_providers,
+    _conversation_features,
     _settings_sections,
     _tools,
     _ui_tabs,
@@ -267,7 +269,8 @@ class PluginAPIImpl:
             )
 
     def _require_open_locked(self) -> None:
-        if self._registration_closed or self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+        if (self._registration_closed or self._runtime_closing or self._runtime_closed
+                or self._skill in _unloading):
             raise ExtensionRegistrationError(
                 f"skill {self._skill!r} cannot register after unload has started"
             )
@@ -356,6 +359,52 @@ class PluginAPIImpl:
         staged_registry[key] = value
 
     # --- registration ---
+
+    def register_realtime_provider(self, name: str, *, route: Any, session: Callable[..., Any], catalog: Any) -> None:
+        from ouroboros.contracts.realtime import ProviderCatalog, RealtimeRoute
+
+        _reject_extension_child_side_effect("register_realtime_provider")
+        self._require("realtime_provider")
+        short = _assert_tool_name(name)
+        if not isinstance(route, RealtimeRoute):
+            raise ExtensionRegistrationError("realtime provider route must be a contracts.realtime.RealtimeRoute")
+        if not callable(session):
+            raise ExtensionRegistrationError("session must construct a live provider session")
+        if not isinstance(catalog, ProviderCatalog):
+            raise ExtensionRegistrationError("realtime provider catalog must be a contracts.realtime.ProviderCatalog")
+        key = f"{self._skill}:{short}"
+        with _lock:
+            self._stage_surface_locked(_realtime_providers, self._staged.realtime_providers, key, {
+                "skill": self._skill, "route": route, "session": session, "catalog": catalog,
+                "_credential_api": self,
+            }, "realtime provider")
+
+    def register_live_conversation(self, name: str, handler: Callable[..., Any], *,
+                                   configure: Callable[[], Any], call_tools: Sequence[Any] = (),
+                                   initial_tools: Sequence[str] = ()) -> None:
+        """An in-process conversation feature; ordinary admission grants its host port."""
+        from ouroboros.contracts.live_conversation import CallTool
+
+        _reject_extension_child_side_effect("register_live_conversation")
+        self._require("live_conversation")
+        short = _assert_tool_name(name)
+        if not inspect.iscoroutinefunction(handler) or not callable(configure):
+            raise ExtensionRegistrationError("conversation requires an async handler and configuration reader")
+        tools = tuple(call_tools)
+        if isinstance(initial_tools, str):
+            raise ExtensionRegistrationError("initial_tools must be a sequence of ordinary tool names")
+        initial = tuple(dict.fromkeys(_assert_tool_name(name) for name in initial_tools))
+        for tool in tools:
+            if not isinstance(tool, CallTool) or not inspect.iscoroutinefunction(tool.handler):
+                raise ExtensionRegistrationError("call tools must be contracts.live_conversation.CallTool with async handlers")
+            _assert_tool_name(tool.name)
+        if len({tool.name for tool in tools}) != len(tools):
+            raise ExtensionRegistrationError("call tool names must be unique")
+        with _lock:
+            self._stage_surface_locked(_conversation_features, self._staged.conversation_features,
+                f"{self._skill}:{short}", {"skill": self._skill,
+                "handler": self._wrap_runtime_handler(handler), "configure": configure,
+                "call_tools": tools, "initial_tools": initial}, "conversation feature")
 
     def register_tool(
         self,
@@ -940,6 +989,8 @@ class PluginAPIImpl:
         log.log(level_no, "[ext %s] %s %s", self._skill, message, fields or "")
 
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
+        from ouroboros.realtime_credentials import session_settings
+
         with self._api_lock:
             with _lock:
                 if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
@@ -947,7 +998,7 @@ class PluginAPIImpl:
             if "read_settings" not in self._permissions:
                 # Missing permission fails closed without leaking key presence.
                 return {}
-            settings = self._current_settings()
+            settings = session_settings(self, self._current_settings())
             with _lock:
                 if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
                     return {}

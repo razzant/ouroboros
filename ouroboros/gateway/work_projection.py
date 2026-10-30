@@ -191,6 +191,7 @@ def _member_raw(row: Mapping[str, Any], raw: Mapping[str, Any], obs: _Observatio
     pause = raw.get("_budget_pause") if isinstance(raw.get("_budget_pause"), dict) else {}
     facts: Dict[str, Any] = {"hold": hold, "paused_at": pause.get("paused_at") or pause.get("requested_at"),
                              "running": bool(raw.get("running", row.get("live"))), **dict(raw)}
+    facts["execution_transport"] = (raw.get("metadata") or {}).get("execution_transport")
     if row.get("phase") in {"budget_pausing", "budget_paused"} and (raw.get("owner_pause_warm") or row.get("kind") == "direct_chat"):
         # Parked warm under a Pause still settling: the review it already sent still runs beside it.
         facts["sent_review"] = obs.sent_review(str(row.get("activity_id") or ""))

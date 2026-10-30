@@ -4562,6 +4562,8 @@ textarea.chat-input {
     /* Grows with its text or placeholder to this one cap, then scrolls;
        chat_input_sizing.js picks content sizing, else writes the measured height. */
     height: var(--chat-input-height, auto);
+    /* Text wraps, so the composer never scrolls sideways; a sub-pixel width must not draw a bar. */
+    overflow-x: hidden;
     min-height: 32px;
     max-height: var(--message-field-max-height);
     line-height: 1.45;

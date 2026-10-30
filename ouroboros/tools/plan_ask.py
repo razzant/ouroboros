@@ -252,9 +252,7 @@ def _task_objective(ctx: Any) -> str:
     objective = str(contract.get("objective") or contract.get("description") or "")
     context = str(contract.get("context") or "").strip()
     if context:
-        from ouroboros.observability import redact_projection
-
-        objective += f"\n\nContract context: {redact_projection(context).value}"
+        objective += f"\n\nContract context: {context}"
     return objective
 
 

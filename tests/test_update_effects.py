@@ -156,3 +156,114 @@ def test_preflight_carries_its_exact_range_description_and_survives_its_failure(
     assert response.status_code == 200 and body["merge_plan"] == plan
     assert body["letter"] is None and body["qualification"] is None, "unknown, never a refusal or a stale range"
 
+
+def _pin(version, build):
+    """A valid pin, one field per line, its version and build apart: a version edit and a rebuild merge cleanly."""
+    pin = json.loads((pathlib.Path(__file__).resolve().parents[1] / "ouroboros/claudexor_runtime_pin.json").read_text(encoding="utf-8"))
+    release = {key: value for key, value in pin["release"].items() if key != "build_sha"}
+    pin["release"] = {**release, "version": version, "build_sha": build}
+    return json.dumps(pin, indent=2) + "\n"
+
+
+class _Body:
+    """A request whose JSON body is ``body``."""
+
+    def __init__(self, body):
+        self.body = body
+
+    async def json(self):
+        return self.body
+
+
+@pytest.mark.serial  # real preparation in a linked worktree and a real authorization of its switch
+@pytest.mark.parametrize("edited", ["4.6.10", "4.6.1"], ids=["another_size", "same_size_in_the_index_second"])
+def test_restart_to_update_discloses_the_pin_its_restart_selects(tmp_path, monkeypatch, edited):
+    """The composition, neither the official target nor the owner's edit alone: the target rebuilds 4.6.0 and the
+    owner's uncommitted edit pins ``edited``, so W′ pins it of the new build. The candidate's effects read it there,
+    and the real restart, authorized and bound as Restart to update binds it, selects the same pin and stop. 4.6.10
+    is another size, never a stat match; 4.6.1 keeps the committed pin's size and is staged, then edited, inside the
+    second Git wrote the index (LABELLED CONTROLLED TIMING, ``stage_then_edit_in_one_second``): Git itself checks it
+    by content, and so do preparation and the base its activation compares."""
+    from ouroboros import body_adoption
+    from supervisor import update_prepare
+    from tests.body_candidate_support import git, stage_then_edit_in_one_second
+    from tests.test_update_activation import Scene
+
+    scene = Scene(tmp_path, monkeypatch)
+    pin = scene.serving / "ouroboros" / "claudexor_runtime_pin.json"
+    pin.write_text(_pin("4.6.0", "b" * 40), encoding="utf-8")
+    git(scene.serving, "add", "-A")
+    git(scene.serving, "commit", "-q", "-m", "engine pin")
+    scene.official({"ouroboros/claudexor_runtime_pin.json": _pin("4.6.0", "a" * 40)})
+    if len(edited) != len("4.6.0"):
+        pin.write_text(_pin(edited, "b" * 40), encoding="utf-8")
+    elif not stage_then_edit_in_one_second(scene.serving, "ouroboros/claudexor_runtime_pin.json",
+                                           _pin("4.6.0", "b" * 40), _pin(edited, "b" * 40)):
+        pytest.skip("the stage and the edit never fit one second here: the race was not set")
+    row = scene.prepare()
+    assert row["state"] == "ready", row.get("reason")
+    based = git(scene.serving, "show", f"{row['base']['files_tree']}:ouroboros/claudexor_runtime_pin.json")
+    assert json.loads(based)["release"]["version"] == edited, "the activation's base holds the owner's files"
+    assert update_prepare.activation_check(row) == "", "the unchanged checkout reads as the base it was prepared on"
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: Gateway(("4.6.0", "a" * 40)))
+    monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda **kw: pytest.fail("preflight cannot start an engine"))
+    monkeypatch.setattr(update_merge, "plan_managed_update_merge", lambda **kw: pytest.fail("a candidate is not planned again"))
+
+    response = asyncio.run(control.api_update_preflight(_Body({"candidate_id": row["candidate_id"]})))
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    effects = body["effects"]
+    assert body["merge_plan"] == {"base_sha": row["base_sha"], "target_sha": scene.target, "target_ref": "official",
+                                  "update_channel": "development"}
+    assert effects["candidate_id"] == row["candidate_id"] and effects["target_sha"] == scene.target
+    assert effects["engine"]["source_sha"] == row["layers"]["new_files"]
+    assert effects["engine"]["target"] == {"version": edited, "build_sha": "a" * 40}
+    assert [effects["engine"][key] for key in ("action", "direction")] == ["replace", "forward"]
+    assert effects["replacement_engine"]["action"] == "keep", "the official target alone would keep this engine"
+    assert effects["provisional"] is False and effects["active_work"]["total"] == 5
+    assert effects["runtime"]["selected"]["python"] == row["environment"]["candidate"]["version"]
+    assert effects["runtime"]["changed_by_apply"] is False, "no new app: this interpreter runs the new start"
+    # The real restart of that candidate reads the switched file of W′, so it stops the serving engine.
+    body_adoption.authorize_update(scene.data, row)
+    assert body_adoption.bind_update_restart(scene.data)
+    monkeypatch.setattr(server_restart, "DATA_DIR", scene.data)
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+    stops = []
+    monkeypatch.setattr(server_restart, "_stop_owned_daemon", lambda label: stops.append(label))
+    assert server_restart._next_generation_pin().version == edited
+    server_restart._stop_owned_daemon_for_new_pin()
+    assert stops == ["Planned restart"]
+
+
+def test_a_candidate_read_names_its_candidate_before_anything_is_observed(scene, monkeypatch):
+    from supervisor import update_prepare
+
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: pytest.fail("nothing is observed for another one"))
+    for live in (None, {"candidate_id": "update_b", "state": "ready"}):
+        monkeypatch.setattr(update_prepare, "current", lambda live=live: live)
+        response = asyncio.run(control.api_update_preflight(_Body({"candidate_id": "update_a"})))
+        assert response.status_code == 409 and json.loads(response.body)["reason_code"] == "candidate_changed"
+    assert asyncio.run(control.api_update_preflight(_Body({"candidate_id": 7}))).status_code == 400
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: Gateway(("4.6.0", "a" * 40)))
+    legacy = asyncio.run(control.api_update_preflight(_Body({})))
+    assert legacy.status_code == 200 and json.loads(legacy.body)["merge_plan"] == scene[1], "an empty body plans"
+
+
+def test_a_candidate_without_its_composition_or_runtime_stays_unknown(scene, monkeypatch):
+    """Never the target's pin for a missing composition, never this interpreter for an unrecorded selection."""
+    _repo, plan, _stops = scene
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: Gateway(("4.5.0", "b" * 40)))
+    bare = update_impact.candidate_effects({"candidate_id": "update_a", "target": {"target_sha": plan["target_sha"]}})
+    assert bare["engine"]["action"] == "unknown" and bare["engine"]["source_sha"] == ""
+    assert bare["replacement_engine"]["action"] == "replace", "the target's pin was readable and is not used"
+    assert bare["runtime"]["selected"] == {"python": None, "sqlite": None, "basis": "candidate_preparation"}
+    assert bare["runtime"]["changed_by_apply"] is None and bare["candidate_id"] == "update_a"
+    tree = git_ops.git_capture(["git", "rev-parse", f"{plan['target_sha']}^{{tree}}"])[1]
+    row = {"candidate_id": "update_a", "target": {"target_sha": plan["target_sha"]}, "layers": {"new_files": tree}}
+    for selected, changes in (({"version": "3.99.1", "sqlite": "9.9.9"}, True),
+                              ({"version": platform.python_version(), "sqlite": sqlite3.sqlite_version}, False)):
+        effects = update_impact.candidate_effects({**row, "environment": {"candidate": selected}})
+        assert effects["engine"]["action"] == "replace" and effects["engine"]["source_sha"] == tree
+        assert effects["runtime"]["changed_by_apply"] is changes
+        assert effects["runtime"]["selected"]["python"] == selected["version"]

@@ -655,10 +655,10 @@ def test_started_writable_thread_collects_when_engine_cannot_start_new_threads(
 
 
 @pytest.mark.parametrize("access", ["readonly", "full"])
-def test_writable_plan_seat_packet_keeps_the_redacted_source_rule(author, tmp_path, thread_gateway, access):  # noqa: F811
+def test_writable_plan_seat_packet_keeps_the_snapshot_source_rule(author, tmp_path, thread_gateway, access):  # noqa: F811
     """Technical access widens what a seat may run in its copy, never what it may read.
 
-    The actual thread turn of a plan seat carries the plan runtime's redacted-snapshot
+    The actual thread turn of a plan seat carries the plan runtime's shared-snapshot
     task text; a writable seat's checking-copy instructions restate that rule instead of
     a bare 'retrieve the evidence yourself', while a read-only seat keeps its legacy
     read-only role. Whether a live harness can resolve each named source from its copy
@@ -676,7 +676,7 @@ def test_writable_plan_seat_packet_keeps_the_redacted_source_rule(author, tmp_pa
     )
     assert result.actors[0]["usage"]["review_thread_id"] == "thread-1"
     [(_thread, turn, _key)] = thread_gateway.turn_requests
-    assert "do NOT re-read the raw evidence locators" in turn["prompt"]
+    assert "the same bytes every reviewer sees" in turn["prompt"]
     assert "owner said [REDACTED]" in turn["prompt"]
     if access == "readonly":
         assert turn["instructions"].startswith("You are a delegated read-only REVIEWER session.")

@@ -637,7 +637,7 @@ def read_module_sources(skill_dir: pathlib.Path | None, *entries: str) -> Dict[s
 
 # Contribution catalog: the projection publishes icons so clients share this vocabulary.
 CONTRIBUTION_PLACEMENTS = ("composer.plus", "composer.chips", "message.action")
-CONTRIBUTION_PROVIDERS = ("stt", "tts", "place")
+CONTRIBUTION_PROVIDERS = ("stt", "tts", "conversation", "place")
 CONTRIBUTION_RUNTIMES = ("server", "client")
 CONTRIBUTION_DESTINATIONS = ("device", "host")  # or vendor:<nonblank name>
 CONTRIBUTION_VERBS = ("draft.insert", "skill.request", "open.tab", "notice")

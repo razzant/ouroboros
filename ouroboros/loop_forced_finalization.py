@@ -31,7 +31,6 @@ from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_RE
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, set_terminal_host_notice
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, PhysicalAttemptPreconditionFailed
-from ouroboros.utils import sanitize_tool_result_for_log
 
 
 from typing import TYPE_CHECKING
@@ -1009,7 +1008,7 @@ def _publish_model_forced_candidate(
     if tools is None:
         return None
     current = _loop()._current_delivery_candidate(ctx, llm_trace)
-    if current is not None and current.full_text == sanitize_tool_result_for_log(full_text):
+    if current is not None and current.full_text == full_text:
         return _loop()._degrade_retained_delivery_candidate(
             ctx, llm_trace, current, control=f"forced_preserve:{reason_code}",
             reason_code=degraded_reason or reason_code,
@@ -1196,7 +1195,9 @@ def _forced_fallback_result(
             )
             return candidate.full_text, ctx.accumulated_usage, llm_trace
 
-    composed = sanitize_tool_result_for_log(fallback_text)
+    # Model bytes stay exact; a host notice quoting a provider sanitized that quote where
+    # it was composed (``loop_transport``).
+    composed = fallback_text
     candidate = _publish_model_forced_candidate(
         ctx, llm_trace, composed, reason_code,
     )

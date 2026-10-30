@@ -105,6 +105,9 @@ SUBROOT_ALIASES = {
     "__extension_imports/*/skill": "state/skills/*/__extension_imports/*/skill",
     "__extension_imports/*/skill/*": "state/skills/*/__extension_imports/*/skill/*",
     ".extension-*.lock": "state/skills/*/.extension-*.lock",
+    # The import lock is beside skill_state_dir, so deleting that skill's state
+    # cannot make a concurrent acquirer lock another inode.
+    ".*-extension-imports.lock": "state/skills/.*-extension-imports.lock",
 }
 
 # The same human promise for a parameter whose NAME is the audited root, read
@@ -843,6 +846,13 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # the switch helper (body adoption row).
 # 409 -> 414: the place seam (one path the inherited pin missed) plus focus, the gate directory and its
 # author-census member family, documented in section 2.
+# 414 -> 417 (live calls):
+# Live calls retain conversation-wire.jsonl and the sibling extension-imports lock.
+# The unused realtime-wire and realtime-prepared probe writers are retired by the host lane.
+# The host's exact-route tariff cache adds state/pricing/litellm.json.
+# PERSISTENCE names its overwrite lifetime; reconcile markers already exist on base.
+
+
 # 414 -> 415: ``state/sent_history_changes.json``, the running code's record of sent-history changes
 # (``ouroboros/transcript_prefix.py``, its own section-2 row).
 # The skill-review fold (tool-reuse-20261020) removed the root-task projection (+ its gaps file), the
@@ -872,19 +882,24 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (the records row), and the seat homes the owner's Storage -> Free lists
 # (``review_checking_prune.finished_seat_homes``, the seats row).
 # 425 -> 426: ``state/openrouter_models.json``, the OpenRouter catalogue every process adopts.
+# 426 -> 429 (live calls): live wire evidence, the extension import lock and the live tariff cache.
+# 429 -> 430: ``state/delegate_document_imports/*.lock``, one selected document's import decision.
+# 430 -> 431: ``observability/calls/*/*``, the target's per-call evidence (408d9a84d), counted on merge.
 # 427 -> 429: ``observability/calls/*/*``, scanned on the target before this pin moved, and
 # ``state/claudexor_route_health.json``, the engine's newest per-route failure shares (its section-2 row).
 # 429 -> 430: adds ``state/update_material.json`` and ``state/update_letter.lock``;
 # the scan no longer yields the legacy ``state/usage_attempts.lock`` spelling.
 # 430 -> 431: checkout-specific preflight heads, registered in the review-ledger row.
-# 431 -> 432: ``state/body_adoption/app_install.py``, the app installer an Update's activation captures
+# 431 -> 436 (upstream a0f09616): the 433 paths of its own target (``state/private_copies/*``, the record
+# directory's members as ``subagent_worktrees._records`` lists them since #2502, among them) plus the three
+# call wire/import-lock/tariff paths.
+# 436 -> 437: ``state/body_adoption/app_install.py``, the app installer an Update's activation captures
 # outside the checkout beside the switch helper (the body_adoption row).
-# 432 -> 433: ``state/update_activation.json``, the Update's own retained Last attempt, moved out of the supervisor's
+# 437 -> 438: ``state/update_activation.json``, the Update's own retained Last attempt, moved out of the supervisor's
 # state.json that a providerless generation never initializes.
-# 433 -> 434: ``state/private_copies/*``, the record directory's members as ``subagent_worktrees._records`` lists them
-# (``os.listdir`` since #2502, b7ef0dd5d). That release's own scan is 432 against its pin of 431, so this step is
-# upstream's, not the Update's; the records row (``state/private_copies/<folder>-<sha12>.json``) already covers it.
-EXPECTED_SCAN_PATHS = 434
+# 438 -> 440: ``state/body_adoption/handoff.json`` and ``state/body_adoption/*`` (its ``lock``), which authorization now
+# makes before any record and a retirement removes in order under that lock (both in the body_adoption row).
+EXPECTED_SCAN_PATHS = 440
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1400,3 +1415,11 @@ def test_dynamic_source_handle_arguments_do_not_certify_named_rows(tmp_path):
         encoding="utf-8",
     )
     assert scan_data_paths(tmp_path) == frozenset()
+
+
+def test_live_call_evidence_replaces_unused_probe_artifacts():
+    paths = scan_data_paths()
+    assert "state/skills/.*-extension-imports.lock" in paths
+    assert ".*-extension-imports.lock" not in paths
+    assert "task_results/artifacts/*/conversation-wire.jsonl" in paths
+    assert not any("/realtime-wire.jsonl" in path or "/realtime-prepared-" in path for path in paths)

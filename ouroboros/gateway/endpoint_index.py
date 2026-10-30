@@ -16,6 +16,8 @@ from __future__ import annotations
 from typing import NamedTuple
 
 HTTP_ENDPOINTS: tuple[str, ...] = (
+    "POST /api/call/open",
+    "WS /ws/call/{call_id}",
     "GET /api/health",
     "GET /api/contract",
     "GET /api/state",
@@ -229,6 +231,7 @@ _INSTALL_REFUSAL = "404,409,429,502:SkillCatalogInstallResponse"
 _ENGINE = "relays the bundled Claudexor engine"
 
 HTTP_SHAPES: dict[str, Shape] = {
+    "POST /api/call/open": Shape("200:CallOpenResponse 409:CallRefusal", "CallOpenRequest"),
     "GET /api/health": Shape("200:HealthResponse"),
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse", query="bindings_since"),
@@ -464,7 +467,9 @@ HTTP_SHAPES: dict[str, Shape] = {
                                     note="no network; running_sha is the executing core"),
     "POST /api/update/check": Shape("200:UpdateStatusResponse 500:ErrorResponse",
                                     note="reads no body; fetches and records range facts, never prose; broadcasts update_progress_changed"),
-    "POST /api/update/preflight": Shape("200:UpdatePreflightResponse 500:ErrorResponse", "UpdatePreflightRequest"),
+    "POST /api/update/preflight": Shape(
+        "200:UpdatePreflightResponse 400,409,500:ErrorResponse", "UpdatePreflightRequest",
+        note="candidate_id: that prepared candidate's Restart to update effects, no fetch or plan; 409 candidate_changed"),
     "POST /api/update/description": Shape(
         "200:UpdateDescriptionResponse 400,409,503:UpdateDescriptionErrorResponse 500:ErrorResponse",
         "UpdateDescriptionRequest",
@@ -573,6 +578,7 @@ INTERFACE_PATHS: tuple[str, ...] = ("/", "/static")
 WS_SHAPES: dict[str, tuple[str, str]] = {
     "chat": ("ChatInbound", "ChatOutbound"),
     "command": ("CommandInbound", ""),
+    "conversation_finished": ("", "ConversationFinishedOutbound"),
     "panic_accepted": ("", "PanicAcceptedOutbound"),
     "photo": ("", "PhotoOutbound"),
     "video": ("", "VideoOutbound"),

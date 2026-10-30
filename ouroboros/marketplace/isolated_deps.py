@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,7 @@ _INSTALLER_STDERR_TAIL_BYTES = 12_000
 # PYTHONDONTWRITEBYTECODE/PYTHONPYCACHEPREFIX (WA6): preserve bytecode suppression
 # into the curated installer env so embedded `python -m venv` / `pip install` never
 # write stdlib *.pyc back into a signed+notarized macOS .app bundle (which would
-# break the codesign seal). Caches land in data/state/pycache via the inherited prefix.
+# break the codesign seal). Caches land in data/state/pycache.noindex via the inherited prefix.
 _SAFE_ENV_KEYS = {
     "PATH", "SYSTEMROOT", "LANG", "LC_ALL", "LC_CTYPE",
     "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX",
@@ -55,6 +56,53 @@ def python_runtime_binary(skill_dir: pathlib.Path) -> pathlib.Path | None:
     bin_dir = isolated_env_dir(skill_dir) / "python" / ("Scripts" if os.name == "nt" else "bin")
     candidate = bin_dir / ("python.exe" if os.name == "nt" else "python")
     return candidate if candidate.is_file() else None
+
+
+def python_env_binding(skill_dir: pathlib.Path) -> str:
+    """How the skill's Python environment stands to the running interpreter; a pure read.
+
+    ``absent``; ``current``; ``moved``: the same major.minor recorded under another base
+    (``pyvenv.cfg`` ``home``, which ``venv`` writes from ``sys._base_executable``) or with a
+    dead interpreter entry, as after the app moved, remounted or re-extracted;
+    ``other_python``: a readable other major.minor; ``unreadable``: no home and version.
+    The entry's own target is not compared: a Windows launcher or a ``--copies`` binary is a copy."""
+    venv = isolated_env_dir(skill_dir) / "python"
+    try:
+        if not venv.is_dir():
+            return "absent"
+        lines = (venv / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+        cfg = {key.strip().lower(): value.strip() for key, sep, value in (line.partition("=") for line in lines) if sep}
+        version, home = cfg.get("version") or cfg.get("version_info") or "", cfg.get("home", "")
+        if not version or not home:
+            return "unreadable"
+        if version.split(".")[:2] != [str(part) for part in sys.version_info[:2]]:
+            return "other_python"
+        base = os.path.dirname(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
+        live = python_runtime_binary(skill_dir) is not None
+    except (OSError, UnicodeError):
+        return "unreadable"
+    same = os.path.normcase(os.path.realpath(home)) == os.path.normcase(os.path.realpath(base))
+    return "current" if live and same else "moved"
+
+
+def rebind_python_env(skill_dir: pathlib.Path, timeout_sec: int = _DEFAULT_TIMEOUT_SEC) -> None:
+    """Point a ``moved`` environment at the running interpreter, keeping its packages (no pip, no network).
+
+    ``venv --upgrade`` keeps an interpreter entry that exists, even a dangling link, so the
+    environment's own entries (links, copied binaries, Windows launchers) go first; one run
+    of its lexical python then proves it starts as this environment (its ``sys.prefix``)."""
+    venv = isolated_env_dir(skill_dir) / "python"
+    bin_dir = venv / ("Scripts" if os.name == "nt" else "bin")
+    for entry in (bin_dir.iterdir() if bin_dir.is_dir() else ()):
+        if re.fullmatch(r"pythonw?(?:_d)?(?:3(?:\.\d+)?)?(?:\.exe)?", entry.name, re.IGNORECASE) and not entry.is_dir():
+            entry.unlink()
+    env = _installer_env(venv.parent, ecosystem="python")
+    probe = "import os, sys; sys.exit(os.path.normcase(os.path.realpath(sys.prefix)) != os.path.normcase(os.path.realpath(sys.argv[1])))"
+    for cmd in ([sys.executable, "-m", "venv", "--upgrade", "--without-pip", str(venv)],
+                [str(bin_dir / ("python.exe" if os.name == "nt" else "python")), "-c", probe, str(venv)]):
+        result = _run(cmd, cwd=venv.parent, env=env, timeout_sec=timeout_sec)
+        if result["returncode"] != 0:
+            raise RuntimeError("python environment rebind failed" + (f": {result['stderr_tail']}" if result.get("stderr_tail") else ""))
 
 
 def augment_env_for_skill_deps(env: Dict[str, str], skill_dir: pathlib.Path) -> Dict[str, str]:
@@ -172,6 +220,13 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
 
 def _ensure_python_env(env_root: pathlib.Path, timeout_sec: int) -> pathlib.Path:
     venv_dir = env_root / "python"
+    binding = python_env_binding(env_root.parent)
+    if binding == "unreadable":  # a failed read is no other Python: its packages stay
+        raise RuntimeError(f"python environment {venv_dir} has no readable pyvenv.cfg; remove it to rebuild")
+    if binding == "moved":
+        rebind_python_env(env_root.parent, timeout_sec)
+    elif binding == "other_python":  # its packages cannot load here; the reviewed specs reinstall below
+        shutil.rmtree(venv_dir)
     if not venv_dir.exists():
         result = _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=env_root, env=_installer_env(env_root, ecosystem="python"), timeout_sec=timeout_sec)
         if result["returncode"] != 0:
@@ -375,6 +430,13 @@ def _reviewed_install_binding(drive_root: pathlib.Path, skill_name: str, skill_d
     return loaded.content_hash
 
 
+def spec_applies_here(spec: Dict[str, Any]) -> bool:
+    """An install spec applies on this host unless its ``platforms`` names neither ``sys.platform`` nor
+    ``<sys.platform>-<machine>``; the installer records an inapplicable one as ``not_applicable``."""
+    platforms = spec.get("platforms") or []
+    return not platforms or bool({sys.platform, f"{sys.platform}-{platform.machine().lower()}"}.intersection(platforms))
+
+
 def install_isolated_dependencies(
     drive_root: pathlib.Path,
     skill_name: str,
@@ -418,12 +480,10 @@ def install_isolated_dependencies(
         pending_python.clear()
 
     try:
-        platform_names = {sys.platform, f"{sys.platform}-{platform.machine().lower()}"}
         for spec in specs:
-            platforms = spec.get("platforms") or []
-            if platforms and not platform_names.intersection(platforms):
-                installed.append({"kind": spec["kind"], "package": spec.get("package", ""),
-                                  "installed": False, "status": "not_applicable", "platforms": platforms})
+            if not spec_applies_here(spec):
+                installed.append({"kind": spec["kind"], "package": spec.get("package", ""), "installed": False,
+                                  "status": "not_applicable", "platforms": spec.get("platforms") or []})
                 continue
             kind = str(spec.get("kind") or "").lower()
             if kind in {"pip", "pipx", "uv"}:
@@ -494,7 +554,7 @@ def read_deps_state(
             state_hash = str(state.get("specs_hash") or "")
             fingerprint_hash = str(fingerprint.get("specs_hash") or "")
             if state_hash and state_hash == fingerprint_hash:
-                return fingerprint
+                return _on_this_python(fingerprint, skill_dir)
         return state
     state_hash = str(state.get("specs_hash") or "")
     fingerprint_hash = str(fingerprint.get("specs_hash") or "")
@@ -521,4 +581,18 @@ def read_deps_state(
                                       code_prefix="skill_output", label="installed output")
             except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
                 return {**state, "status": "stale", "error": f"installed output unavailable: {exc}"}
-    return state
+    return _on_this_python(state, skill_dir)
+
+
+def _on_this_python(state: Dict[str, Any], skill_dir: pathlib.Path) -> Dict[str, Any]:
+    """``state``, or ``stale`` with its ``python_env`` binding when the Python packages it records
+    live in an environment that does not run on this interpreter (``ensure_skill_dependencies`` repairs)."""
+    rows = state.get("installed")
+    if not (isinstance(rows, list) and any(isinstance(row, dict) and row.get("installed") is True
+                                           and row.get("kind") in {"pip", "pipx", "uv"} for row in rows)):
+        return state
+    binding = python_env_binding(skill_dir)
+    if binding == "current":
+        return state
+    return {**state, "status": "stale", "python_env": binding,
+            "error": f"isolated Python environment does not run on this host's Python ({binding})"}

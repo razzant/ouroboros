@@ -1,7 +1,7 @@
 """Shared evidence sections: the task contract and its effective claims, the
 host-attested verification receipts, and the owner's verbatim corpus.
 
-Each section redacts before publication and discloses omissions. Readers: result
+Each section carries its sources' own text and discloses omissions. Readers: result
 review (``tools.review_result``), delivery criteria (``loop_delivery``), owner
 words, post-task synthesis and plan facts; ``review_evidence`` re-exports them.
 The retired task-acceptance packet's budget and content revision stay below only
@@ -37,14 +37,9 @@ def _ev():
 _ACCEPT_NOTES_CAP = 8000               # commit-review exhibit preview bound
 
 
-def _accept_redact_cap(value: Any, limit: int | None, suffix: str = "") -> str:
-    from ouroboros.observability import redact_projection
-
-    if isinstance(value, str):
-        red = redact_projection(value).value
-    else:
-        # Structural masking first, then token redaction after serialization.
-        red = redact_projection(json.dumps(redact_projection(value).value, ensure_ascii=False, default=str)).value
+def _accept_cap(value: Any, limit: int | None, suffix: str = "") -> str:
+    """The receipt's own text (serialized when structured), bounded with a disclosed cut."""
+    red = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     if limit is None:
         return red
     if not suffix:
@@ -56,7 +51,7 @@ def _accept_redact_cap(value: Any, limit: int | None, suffix: str = "") -> str:
 def _accept_task_contract(ctx: Any) -> Dict[str, Any]:
     """Return the full normalized task contract, never a hand-maintained allowlist.
 
-    Explicit contract fields win over nested metadata; redaction happens at the call site."""
+    Explicit contract fields win over nested metadata."""
     contract = getattr(ctx, "task_contract", {})
     meta = getattr(ctx, "task_metadata", {})
     out: Dict[str, Any] = {}
@@ -99,16 +94,15 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
     _masked = unreconciled_masked(valid)
     _masked_pass = _masked[-1] if _masked else None
     # v6.78.0: the SHARED identity projection (SSOT with the fixed ledger receipt row),
-    # rendered through the redacting `_accept_redact_cap` because a receipt's `check`
-    # and observed paths are raw host command surface.
+    # bounded through `_accept_cap` (disclosed truncation; the text itself is unrewritten).
     def _identity(receipt: Dict[str, Any]) -> Dict[str, Any]:
-        return receipt_identity_projection(receipt, bound=_accept_redact_cap, check_cap=400)
+        return receipt_identity_projection(receipt, bound=_accept_cap, check_cap=400)
 
     _reds = unreconciled_failed(valid)
     _red = _reds[-1] if _reds else None
     _latest_identity = _identity(latest)
     # Canonicalize the RAW set first, render and bound it second — always that order.
-    # Redaction and truncation are lossy, so de-duplicating the RENDERED strings (as
+    # Truncation is lossy, so de-duplicating the RENDERED strings (as
     # this did) collapsed distinct long paths sharing a rendered prefix while
     # `artifacts_missing_after_omitted` still reported 0. Same rule, same helper, as the
     # receipt path sets and `fold_retrieval_usage`'s raw-keyed URL dedup.
@@ -154,9 +148,8 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
         # criterion_id, check text, and the observed-path SET that IS the identity of the
         # command-less artifact-observation class (for which `latest_check` is empty), plus
         # the disclosed omitted count / full-set hash whenever the path list is bounded.
-        # The receipt `check`/`summary`/paths are raw host command stdout/stderr — redact (NOT
-        # just truncate) before they reach the reviewer prompt (review #1, HIGH-1: this was the
-        # one packet block bypassing redaction). `_accept_redact_cap` redacts + DISCLOSED-truncates.
+        # The receipt `check`/`summary`/paths reach the reviewer as recorded, DISCLOSED-truncated
+        # by `_accept_cap`.
         "latest_identity": _latest_identity,
         "latest_check": _latest_identity["check"],
         "latest_returncode": latest.get("returncode"),
@@ -167,24 +160,23 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
         # (check process lifetime), `latest_signal` (POSIX signal name of a
         # killed check — a 9ms SIGKILL is not an ordinary red), and
         # `latest_resolved_runtime` (the substituted physical executable;
-        # absent = the recorded check argv ran as written). The path is raw
-        # host surface, so it goes through the redacting bound.
+        # absent = the recorded check argv ran as written), bounded like the rest.
         **({"latest_duration_ms": latest.get("duration_ms")} if latest.get("duration_ms") is not None else {}),
         **({"latest_signal": str(latest.get("signal") or "")} if latest.get("signal") else {}),
-        **({"latest_resolved_runtime": _accept_redact_cap(str(latest.get("resolved_runtime") or ""), 300)} if latest.get("resolved_runtime") else {}),
+        **({"latest_resolved_runtime": _accept_cap(str(latest.get("resolved_runtime") or ""), 300)} if latest.get("resolved_runtime") else {}),
         "latest_expected_match": str(latest.get("expected_match") or ""),
-        "latest_summary": _accept_redact_cap(str(latest.get("summary") or ""), 2000),
+        "latest_summary": _accept_cap(str(latest.get("summary") or ""), 2000),
         # C: aggregate the after-only artifact-lifecycle flag across ALL receipts (a deleted
         # deliverable is interesting even if a later receipt passed clean). Flag-only — the
         # status stays pass; the LLM reviewer judges whether attesting a now-missing artifact
-        # is acceptable (Bible P5). Paths redacted before reaching the reviewer prompt.
+        # is acceptable (Bible P5).
         "artifacts_missing_after_any": any(bool(r.get("artifacts_missing_after")) for r in valid),
         # Same P1 rule as the identity paths, through the SAME shared helper: the bound
-        # stays, the SILENCE does not. Redaction/truncation happen HERE, after the set
+        # stays, the SILENCE does not. Truncation happens HERE, after the set
         # was canonicalized, so what is counted is what is carried.
         **disclosed_list_projection(
             _missing_after, key="artifacts_missing_after", limit=IDENTITY_PATH_LIMIT,
-            bound=_accept_redact_cap, item_cap=200,
+            bound=_accept_cap, item_cap=200,
         ),
         # v6.52.2: a PASS whose check can MASK the real exit code (`... | tail`, `|| true`) is
         # WEAK grounding — surface it so the reviewer does not credit a possibly-laundered green.
@@ -199,7 +191,7 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
             }),
             key="check_exit_masking_reasons",
             limit=10,
-            bound=_accept_redact_cap,
+            bound=_accept_cap,
         ),
         # v6.54.4 criterion provenance: how many checks verified a criterion the
         # AGENT synthesized vs one the task states. An agent_defined-only summary
@@ -209,7 +201,7 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
             "agent_defined": sum(1 for r in valid if str(r.get("criterion_source") or "") == "agent_defined"),
         },
         "latest_criterion_source": str(latest.get("criterion_source") or ""),
-        "latest_criterion_basis": _accept_redact_cap(str(latest.get("criterion_basis") or ""), 400),
+        "latest_criterion_basis": _accept_cap(str(latest.get("criterion_basis") or ""), 400),
     }
 
 
@@ -226,7 +218,7 @@ def _accept_receipt_exhibits(receipts: list) -> list:
         "contract_kind": str(r.get("contract_kind") or ""),
         "criterion_source": str(r.get("criterion_source") or ""),
         "provenance": "host_attested",
-        **receipt_identity_projection(r, bound=_accept_redact_cap, check_cap=200),
+        **receipt_identity_projection(r, bound=_accept_cap, check_cap=200),
     } for idx, r in enumerate(x for x in (receipts or []) if isinstance(x, dict))]
 
 

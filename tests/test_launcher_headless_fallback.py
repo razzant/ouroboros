@@ -74,7 +74,7 @@ def test_native_boot_preserves_panic_but_owner_can_start(
     monkeypatch.setattr(launcher, "bootstrap_repo", bootstrap)
     if intent == "systemd":
         unit = (Path(__file__).resolve().parents[1] / "packaging" / "systemd"
-                / "ouroboros.service").read_text(encoding="utf-8")
+                / "ouroboros.service.in").read_text(encoding="utf-8")
         command = next(line.removeprefix("ExecStart=") for line in unit.splitlines()
                        if line.startswith("ExecStart="))
         argv = shlex.split(command)[1:]

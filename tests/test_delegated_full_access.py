@@ -329,7 +329,7 @@ def test_retry_preserves_recorded_binding_evidence(full_run, monkeypatch, histor
     with monkeypatch.context() as prior:
         if historical:
             prior.setattr(delegate, "execution_binding_fingerprint", lambda *args: "")
-            prior.setattr(delegate, "apply_execution_binding", lambda instructions, *args, **kwargs: instructions)
+            prior.setattr(delegate, "execution_binding_text", lambda *args, **kwargs: "")
         initial = delegate_payload(delegate._delegate_start(ctx, "Exact original assignment."))
     invocation = initial["pending_invocation_id"]
     drive = custody.custody_root(ctx)

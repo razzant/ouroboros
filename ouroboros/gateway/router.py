@@ -180,12 +180,14 @@ def collect_routes(
     from ouroboros.gateway.settings_secrets import api_settings_secret
     from ouroboros.gateway.places_api import places_routes
     from ouroboros.gateway.ws import ws_endpoint
+    from ouroboros.gateway.call_ws import call_routes
     settings_handlers = settings_handlers or {}
     settings_get = settings_handlers.get("api_settings_get", api_settings_get)
     settings_post = settings_handlers.get("api_settings_post", api_settings_post)
     onboarding = settings_handlers.get("api_onboarding", api_onboarding)
 
     routes: list[BaseRoute] = [
+        *call_routes(),
         Route("/api/health", endpoint=api_health),
         Route("/api/contract", endpoint=api_contract, methods=["GET"]),
         Route("/api/state", endpoint=api_state),

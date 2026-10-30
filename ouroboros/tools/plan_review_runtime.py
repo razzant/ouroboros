@@ -59,15 +59,14 @@ def _session_task_text(system_prompt: str, user_content: str, session_root: str)
     return (
         "RETRIEVING REVIEWER (agent session): you review "
         f"{session_root or 'the active workspace'} (read-only, or from your own private checking folder "
-        "when your seat holds write access; its checking instructions say what it holds). The evidence below is the host's REDACTED "
-        "snapshot — the same bytes every reviewer sees — so do NOT re-read the raw evidence "
-        "locators (a session reading originals would leak what the api route redacts, 4e133c8a); "
-        "the ONE exception is the governance pack — its named sources are public "
+        "when your seat holds write access; its checking instructions say what it holds). The evidence below is the host's "
+        "snapshot — the same bytes every reviewer sees, each item naming its source sha256; a locator you "
+        "read yourself may hold later bytes than your peers reviewed. The governance pack's named sources are public "
         "repository documents you MAY read raw, and MUST read in full when the pack marks them "
         "MANDATORY FULL READS (a self-modification plan), even if the agent also declared them as "
         "evidence. Retrieve any OTHER repository context with your own tools.\n\n"
-        + "The own-room source handle is the canonical redacted dialogue. Read omitted ranges "
-        "from that artifact only; raw chat/mailbox logs do not replace the redacted source.\n\n"
+        + "The own-room source handle is the canonical dialogue. Read omitted ranges "
+        "from that artifact only; raw chat/mailbox logs do not replace that snapshot.\n\n"
         + system_prompt + "\n\n" + user_content
     )
 

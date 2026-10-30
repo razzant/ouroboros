@@ -90,7 +90,8 @@ def initial_tool_schemas(
     """Return full Low/Max or selected Nano schemas from the current registry.
 
     Visibility is selected by the registry context: ordinary top-level tasks
-    expose all available first-party built-ins plus live extension/MCP schemas;
+    expose all available first-party built-ins plus live extension schemas and the
+    MCP schemas listed so far (the read never waits for an MCP listing);
     delegated-child, repair, credential, resource, and contract
     filters narrow independently. A parent suggestion is an initial Nano view,
     not an allowlist; the actor can request any other permitted schema later.

@@ -31,6 +31,7 @@ NODE_BIN = (
     else "node"
 )
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
+OTHER = "Ouroboros 7.9.0 is already running from /Users/me/Desktop/Ouroboros.app. Quit it, then open this copy."
 
 
 class Hook:
@@ -829,17 +830,20 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
     assert window.localization == {"global.ok": "OK", "global.cancel": "Cancel"}, "labels restored"
 
 
-@pytest.mark.parametrize("intent,answered,expected", [
-    ("automatic", True, []),  # a sign-in start of a second copy stays quiet
-    ("owner", True, ["activate"]),  # a manual one shows the running window
-    ("owner", False, ["activate", "notice window"]),  # nobody answered: the old notice
+@pytest.mark.parametrize("intent,answered,other,expected", [
+    ("automatic", True, OTHER, []),  # a sign-in start of a second copy stays quiet, another copy too
+    ("owner", True, "", ["activate"]),  # a manual one shows the running window
+    ("owner", False, "", ["activate", "notice window"]),  # nobody answered: the old notice
+    ("owner", True, OTHER, ["notice window: " + OTHER, "activate"]),  # another copy: its line, then the running one
+    ("owner", False, OTHER, ["notice window: " + OTHER, "activate"]),  # never a second notice window
 ])
-def test_second_launch_shows_the_running_window_only_when_manual(monkeypatch, caplog, intent, answered, expected):
+def test_second_launch_shows_the_running_window_only_when_manual(monkeypatch, caplog, intent, answered, other, expected):
     import launcher
 
     calls = []
     fake_webview = types.ModuleType("webview")
-    fake_webview.create_window = lambda *args, **kwargs: calls.append("notice window")
+    fake_webview.create_window = lambda *args, **kwargs: calls.append(
+        "notice window" + (f": {OTHER}" if OTHER in kwargs.get("html", "") else ""))
     fake_webview.start = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "webview", fake_webview)
     monkeypatch.setattr(launcher, "IS_WINDOWS", False)
@@ -849,6 +853,7 @@ def test_second_launch_shows_the_running_window_only_when_manual(monkeypatch, ca
     monkeypatch.setattr(launcher, "acquire_pid_lock", lambda: False)
     monkeypatch.setattr(launcher, "activate_running_instance",
                         lambda lock: calls.append("activate") or answered)
+    monkeypatch.setattr(launcher, "other_copy_line", lambda *_args: other)
     launcher.main(["--launch-intent", intent])
     assert calls == expected
     assert "Another instance already running." in caplog.text

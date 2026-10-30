@@ -1,10 +1,11 @@
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { escapeHtmlAttr as escapeHtml, lastAppVersion, watchAppVersion } from './utils.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
 import { UPDATE_STAGE_LABELS, afterUpdateRows, attemptTime, bindPreflightDescription, preflightDescription, preflightEvidenceRows, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
+import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { activationAttemptView, candidateDialog, candidateName, candidateVerdict, candidateWarning, paintCandidateFacts,
     paintVerdictActions, prepareHint } from './update_candidate.js';
 
@@ -114,17 +115,18 @@ export function applyFailureText(err) {
 // humanizeCheckedAt reads Date.now for the "checked N ago" age). The button is always a real next action; facts
 // travel as status line, hint, and chips (ARCHITECTURE §3: unavailable,
 // divergent, dirty, unsafe, failed-check, rollback, and restart-required
-// states stay visible — they are just not buttons). With a `candidate`
-// projection the update is prepared beside the running app first
-// (update_candidate.js words it); `secondary` lists the quieter actions.
-export function updateVerdict(data = {}, phase = '') {
+// states stay visible — they are just not buttons). `appVersion` is the app (host) version About shows: the
+// headline names the code an update changes, the App chip the app that a new download changes. With a
+// `candidate` projection the update is prepared beside the running app first (update_candidate.js words it);
+// `secondary` lists the quieter actions.
+export function updateVerdict(data = {}, phase = '', appVersion = '') {
     if (phase === 'requesting') {  // an action's request is in flight: the same verdict, its controls held
-        const settled = updateVerdict(data, '');
+        const settled = updateVerdict(data, '', appVersion);
         const held = (item) => item && { ...item, disabled: true };
         return { ...settled, action: held(settled.action), secondary: (settled.secondary || []).map(held) };
     }
     const checkedAgo = humanizeCheckedAt(data.checked_at);
-    const chips = [];
+    const chips = appVersion ? [{ label: 'App', value: appVersion }] : [];
     if (data.official_repo_url) chips.push({ label: 'Official repo', value: repoSlug(data.official_repo_url) });
     if (data.target_ref) chips.push({ label: 'Target', value: data.target_ref });
     if (data.update_channel) chips.push({ label: 'Channel', value: data.update_channel, link: 'settings-advanced' });
@@ -368,7 +370,8 @@ function requestView(letter) {
     if (!request?.task_id) return null;
     const status = String(request.status || 'unknown');
     return { taskId: String(request.current_task_id || request.task_id), mode: String(request.mode || ''), key: request.key || {},
-        status, saved: request.saved === true, live: LIVE_REQUEST_STATUSES.has(status) };
+        requestedAt: String(request.requested_at || ''), status, saved: request.saved === true,
+        live: LIVE_REQUEST_STATUSES.has(status) };
 }
 
 // What a finished request that saved nothing leaves to say; a saved one says nothing.
@@ -432,10 +435,12 @@ export function updateLetterView(data = {}, phase = '') {
     } : null;
     let note = '';
     if (request?.live) {
-        // Once its own save landed, the shown text is no longer the one waiting to be replaced.
+        // Once its own save landed, the shown text is no longer the one waiting to be replaced. The time
+        // is the owner's press, a fixed fact: the task's own card (the note's door) shows what it does.
+        const asked = attemptTime(request.requestedAt);
         note = request.saved ? `Ouroboros saved the description; its task (${request.taskId}) is still running.`
-            : `Ouroboros is writing the description (task ${request.taskId}).${markdown
-                ? ' The current text stays until the new one is saved.' : ''}`;
+            : `Ouroboros is writing the description${asked ? ` you asked for on ${asked}` : ''} (task ${request.taskId}).${
+                markdown ? ' The current text stays until the new one is saved.' : ''}`;
     } else if (failure) {
         const when = attemptTime(failure.failedAt);
         note = `Refresh failed${when ? ` on ${when}` : ''}. ${markdown
@@ -557,6 +562,12 @@ export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadSt
     };
 }
 
+// The App chip follows the health read About uses: one that lands after a status rendered re-renders the panel;
+// a panel still loading keeps its loading line until its own status render. Returns the disposer.
+export function bindAppVersionRender({ getStatus, render }) {
+    return watchAppVersion(() => { if (getStatus()) render(); });
+}
+
 export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const page = document.createElement('div');
     page.id = 'page-updates';
@@ -616,7 +627,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                                 aria-describedby="updates-letter-resources" hidden></button>
                         </div>
                     </div>
-                    <div class="updates-letter-note" id="updates-letter-note" role="status" aria-live="polite" hidden></div>
+                    <div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"></span> <span id="updates-letter-task"></span></div>
                     <div class="updates-letter-body ui-rich-content" id="updates-letter-body"></div>
                     <details class="updates-letter-details" id="updates-letter-details">
                         <summary>Details</summary>
@@ -678,6 +689,8 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const letterCovers = page.querySelector('#updates-letter-covers');
     const letterWrite = page.querySelector('#updates-letter-write');
     const letterNote = page.querySelector('#updates-letter-note');
+    const letterNoteLine = page.querySelector('#updates-letter-note-line');
+    const letterTask = page.querySelector('#updates-letter-task');
     const letterBody = page.querySelector('#updates-letter-body');
     const letterRefresh = page.querySelector('#updates-letter-refresh');
     const letterRefreshLabel = page.querySelector('#updates-letter-refresh-label');
@@ -689,6 +702,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     let letterRequestError = null;
     let letterDisposer = null;
     let letterKey = null;
+    let letterDoor = '';
     let latestStatus = null;
     let phase = 'loading';
     let restartReconcileInFlight = false;
@@ -784,7 +798,14 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             : letterRequestError ? `Could not request a description: ${letterRequestError.text}`
                 : letterRefreshError ? 'Could not check for updates. The description is unchanged.' : view.note;
         letterNote.textContent = note;
-        letterNote.hidden = !note;
+        letterNoteLine.hidden = !note;
+        // A running request's own note opens its task's card in Main; rewritten only when the task changes,
+        // so a passive refresh keeps focus on it.
+        const door = note === view.note && view.request?.live ? taskReferenceHtml(view.request.taskId) : '';
+        if (door !== letterDoor) {
+            letterTask.innerHTML = door;
+            letterDoor = door;
+        }
         const letter = latestStatus?.letter || {};
         const author = letter.author?.task_id ? ` in task ${letter.author.task_id}${letter.author.model
             ? ` (${letter.author.model})` : ''}${letter.author.requested ? ', at your request' : ''}` : '';
@@ -824,6 +845,8 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         });
         stripLetterControls();
     }
+
+    letterTask.addEventListener('click', openTaskReference);
 
     // Check is the ordinary fetching check: it records range facts and never
     // writes prose, so an unchanged description stays exactly as it was.
@@ -919,7 +942,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     }
 
     function render() {
-        const verdict = updateVerdict(latestStatus || {}, phase);
+        const verdict = updateVerdict(latestStatus || {}, phase, lastAppVersion());
         dot.dataset.tone = verdict.tone;
         summary.textContent = verdict.headline;
         const hintText = [verdict.hint, ...(verdict.warnings || []).map((w) => `Warning: ${w}`)]
@@ -1247,17 +1270,33 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     }
 
+    // What Restart to update does to this candidate's engine, its work and the runtime, read for it now (its
+    // controls held): the reply, 'changed' when the server names another candidate, null when unreadable (unknown).
+    async function activationEffects(candidateId) {
+        setPhase('requesting');
+        try {
+            return await apiClient.updatePreflight(candidateId);
+        } catch (err) {
+            return err?.body?.reason_code === 'candidate_changed' ? 'changed' : null;
+        } finally {
+            if (phase === 'requesting') setPhase('');
+        }
+    }
+
     // The Update prepared beside the running app: prepare (with or without the local changes), discard, and
     // Restart to update (activate). Only an explicit press of one of the verdict's buttons reaches here.
     async function runCandidateAction(strategy) {
-        // The candidate the dialog describes is the one the request names: a refresh while the owner reads it
-        // must not substitute another (A confirmed, B activated); a changed candidate is shown again instead.
+        // The candidate the dialog describes is the one the request names: a refresh while its effects are read or
+        // the owner reads it must not substitute another (A confirmed, B activated); a changed one is shown again.
         const shown = latestStatus || {};
         const candidateId = strategy === 'prepare' ? '' : String(shown?.candidate?.candidate_id || '');
-        const confirm = candidateDialog(strategy, shown);
+        const changed = (read) => read === 'changed'
+            || (Boolean(candidateId) && String(latestStatus?.candidate?.candidate_id || '') !== candidateId);
+        const read = strategy === 'activate' ? await activationEffects(candidateId) : null;
+        const confirm = changed(read) ? null : candidateDialog(strategy, shown, read);
         if (confirm && !(await openConfirmDialog(confirm))) return;
-        if (candidateId && String(latestStatus?.candidate?.candidate_id || '') !== candidateId) {
-            showToast('The prepared update changed while this was open; nothing was sent. Review it again.', 'error');
+        if (changed(read)) {
+            showToast('The prepared update changed; nothing was sent. Review it again.', 'error');
             await loadStatus({ preservePhase: false });
             return;
         }
@@ -1328,7 +1367,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         const confirmedPromote = await openConfirmDialog({
             title: 'Save recovery point',
-            body: 'Move this installation\'s local recovery branch (ouroboros-stable) to the current checkout?\n\nIt does not publish anything and does not change the official QA feed of any install.',
+            body: 'Move this installation\'s local recovery branch (ouroboros-stable) to the current checkout now?\n\nEach successful start of a clean, launcher-managed working branch moves it, so a point saved here lasts until then (earlier versions stay under Restore). It does not publish anything and does not change the official QA feed of any install.',
             confirmLabel: 'Save recovery point',
         });
         if (!confirmedPromote) return;
@@ -1354,6 +1393,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         loadStatus,
         getRequestTaskId: () => requestView(latestStatus?.letter)?.taskId || '',
     });
+    bindAppVersionRender({ getStatus: () => latestStatus, render });  // same lifetime as the panel
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;
         loadStatus({ fetchRemote: false });

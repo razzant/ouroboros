@@ -77,7 +77,6 @@ def task_tool_metrics(llm_trace: dict) -> dict:
 def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -> dict:
     """Freeze the existing owner corpus and check receipts before actor cleanup."""
     from ouroboros._outcome_receipts import verification_receipt_ledger_row
-    from ouroboros.observability import redact_projection
     from ouroboros.review_evidence_sections import (
         _accept_owner_directives, _accept_verification_summary,
     )
@@ -116,7 +115,7 @@ def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -
         log.warning("Task verification input unavailable for synthesis: %s", task_id, exc_info=True)
     # Copy once into the normal durable completion package. Prompt workers must
     # neither retain mutable actor objects nor re-read a later task's messages.
-    return json.loads(json.dumps(redact_projection(result).value, ensure_ascii=False, default=str))
+    return json.loads(json.dumps(result, ensure_ascii=False, default=str))
 
 
 

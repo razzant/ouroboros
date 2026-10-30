@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ouroboros.desktop_media import host_environment
+from ouroboros.unindexed import bytecode_prefix
 
 
 BUNDLE_REPO_NAME = "repo.bundle"
@@ -335,15 +336,12 @@ def embedded_python_env(data_dir: pathlib.Path, base: dict[str, str] | None = No
     # their explicit GUI base and must retain it for GI and WebKit helpers.
     env = dict((host_environment() if sys.platform == "linux" else os.environ) if base is None else base)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    state_dir = pathlib.Path(data_dir) / "state"
-    pycache_dir = state_dir / "pycache"
-    user_base = state_dir / "python-userbase"
-    for directory in (pycache_dir, user_base):
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-    env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
+    user_base = pathlib.Path(data_dir) / "state" / "python-userbase"
+    try:
+        user_base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    env["PYTHONPYCACHEPREFIX"] = bytecode_prefix(data_dir, env.get("PYTHONPYCACHEPREFIX", ""))  # a custom one stays
     env["PYTHONUSERBASE"] = str(user_base)
     env.pop("PYTHONNOUSERSITE", None)
     return env

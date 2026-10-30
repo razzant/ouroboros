@@ -9,6 +9,7 @@ the live queue and the buffered return.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import pathlib
@@ -225,6 +226,7 @@ def _register_delivered(ctx: Any, delivery_id: str, emitted: "Dict[str, Any] | N
     try:
         from supervisor.terminal_delivery import register_delivery, record_cancel_receipt_delivery
 
+        _relay_room_result(ctx.DRIVE_ROOT, delivery_id, emitted)
         if emitted and emitted.get("system_type") == "cancel_receipt":
             record_cancel_receipt_delivery(ctx.DRIVE_ROOT, str(emitted.get("task_id") or ""),
                                            delivery_id, emitted["chat_id"], strict=True)
@@ -236,6 +238,45 @@ def _register_delivered(ctx: Any, delivery_id: str, emitted: "Dict[str, Any] | N
     except Exception:
         log.debug("durable delivery registration failed", exc_info=True)
         return False
+
+
+def _relay_room_result(root: Any, delivery_id: str, emitted: "Dict[str, Any] | None") -> None:
+    """A delivered terminal answer is context for the room's other live direct turns.
+
+    Run before acknowledging delivery: a refused mailbox write keeps the sent
+    outbox row owed, so replay retries this handoff without sending chat twice.
+    """
+    from ouroboros.owner_mailbox import mailbox_drain_ended, mailbox_holds, write_task_message
+    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.terminal_delivery import TERMINAL_MESSAGE_ID
+    from supervisor.workers import direct_chat_turn
+
+    match = TERMINAL_MESSAGE_ID.fullmatch(delivery_id)
+    if not emitted or emitted.get("is_progress") or match is None:
+        return
+    source = str(emitted.get("task_id") or "")
+    if match.group("task") != source or not emitted.get("text"):
+        return
+    chat_id, root = int(emitted["chat_id"]), pathlib.Path(root)
+    for activity in get_direct_activity_registry().actors():
+        recipient = activity.activity_id
+        if activity.chat_id != chat_id or recipient == source:
+            continue
+        # The actor closes message admission under this same lock. Recheck its
+        # identity and room there so a completed/reused actor receives nothing.
+        lock = getattr(activity.actor, "_owner_message_admission_lock", None)
+        with lock if lock is not None else contextlib.nullcontext():
+            turn = direct_chat_turn(recipient)
+            if turn is None or turn["chat_id"] != chat_id or mailbox_drain_ended(root, recipient):
+                continue
+            msg_id = f"room-result:{delivery_id}:{recipient}"
+            if mailbox_holds(root, recipient, msg_id):
+                continue
+            # Every terminal family rides (final, cancel, cascade): a turn waiting on a stopped task
+            # must learn that too, so the label names the ending, not a "final result".
+            if not write_task_message(root, f"Task {source} in this room has ended; its terminal message:\n{emitted['text']}",
+                                      recipient, source_task_id=source, provenance="system", msg_id=msg_id):
+                raise RuntimeError(f"Result mailbox delivery deferred for {recipient}")
 
 
 def _handoff_delivered_review(ctx: Any, task_id: str, delivery_id: str) -> None:
@@ -524,7 +565,7 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
             progress_meta = dict(progress_meta or {})
             progress_meta["delivery_id"] = delivery_id
         with timed_phase("sender", timing=evt.get("_finalization_timing") or {}):
-            sent = ctx.send_with_budget(
+            send_facts = ctx.send_with_budget(
                 chat_id,
                 str(evt.get("text") or ""),
                 log_text=(str(log_text) if isinstance(log_text, str) else None),
@@ -540,18 +581,24 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
                 **({"replay_delivery_id": delivery_id}
                    if delivery_id and evt.get("_delivery_replay") and not publication_token else {}),
             )
-            if sent is False:
+            if send_facts is False:
                 return False  # replay was no longer owed/allowed; no send or receipt
         # Register only after send; a failed first copy must not suppress retry.
         if delivery_id:
+            # The send seam owns the final room lookup. Retain its selection,
+            # never a new binding read after transport (placement can race both).
+            # Legacy send-only adapters return None and keep the passed address.
+            if isinstance(send_facts, dict):
+                chat_id = int(send_facts["chat_id"])
             emitted = {
                 "text": str(evt.get("text") or ""), "chat_id": chat_id, "task_id": task_id, "format": fmt,
+                "is_progress": is_progress,
                 "sent_at": utc_now_iso(),
                 "role": str(evt.get("role") or ""), "system_type": system_type,
                 "terminal_origin": str(evt.get("terminal_origin") or ""),
                 "terminal_projection_token": publication_token,
                 "routing": {"basis": "terminal_sender_bound_project", "intended_chat_id": int(evt["chat_id"]),
-                            "routed_chat_id": chat_id} if bound_chat == chat_id else None}
+                            "routed_chat_id": chat_id} if bound_chat == chat_id or chat_id != int(evt["chat_id"]) else None}
             _DELIVERED_MESSAGE_IDS.append((memory_id, {k: v for k, v in emitted.items() if k != "text"}))
             # Retain the physical-send fact before slower capture/ack. A failed registry
             # write is covered by the existing bounded in-process dedupe until replay.

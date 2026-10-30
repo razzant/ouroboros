@@ -100,7 +100,9 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     bare = _write(ctx, "lessons/bare", "No summary here.")
     assert "it has no summary" in bare and "(no summary)" in bare
     overview = _write(ctx, "overview", "What holds now.", summary="s")
-    assert "loaded whole in every context that loads knowledge" in overview
+    # The receipt names the integrating contexts that hold the overview whole and the helpers that read it
+    # on demand (BIBLE P1, the subject of continuity).
+    assert "loaded whole in every integrating context" in overview and "helpers read on demand" in overview
     archived = tools._knowledge_write(ctx, topic="lessons/bare", mode="archive", reason="moved into a test",
                                       expected_revision=_revision(ctx, "lessons/bare"))
     assert "not in the active knowledge index" in archived

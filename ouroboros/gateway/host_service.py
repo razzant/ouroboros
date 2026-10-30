@@ -1302,9 +1302,11 @@ def create_host_service_app(
 ) -> Starlette:
     # host_notify imports this module's helpers; mounted here, imported lazily.
     from ouroboros.gateway.host_notify import _api_notify
+    from ouroboros.gateway.host_call import host_call_routes
 
     app = Starlette(
         routes=[
+            *host_call_routes(),
             Route("/identity", _api_identity, methods=["GET"]),
             Route("/tools/schemas", _api_tool_schemas, methods=["GET"]),
             Route("/chat/allocate-internal", _api_allocate_internal, methods=["POST"]),

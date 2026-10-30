@@ -70,8 +70,47 @@ def test_packaged_cli_linux_relaunches_outer_appimage(tmp_path, monkeypatch):
     monkeypatch.setattr(packaged_cli, "IS_MACOS", False)
     monkeypatch.setattr(packaged_cli, "IS_WINDOWS", False)
     monkeypatch.setenv("APPIMAGE", str(appimage))
+    monkeypatch.setenv("APPDIR", str(tmp_path / "mount"))  # the runtime's mount holds this bundle
 
     assert packaged_cli._desktop_app_path(bundle_root) == appimage
+
+
+def test_run_start_never_opens_another_appimage_apps_file(tmp_path, monkeypatch):
+    """From another AppImage app's terminal APPIMAGE/APPDIR are that app's: this tar.gz copy opens itself."""
+    from ouroboros import packaged_cli
+
+    root = tmp_path / "Ouroboros"
+    (root / "_internal").mkdir(parents=True)
+    (root / "Ouroboros").write_bytes(b"app")
+    (tmp_path / "Editor.AppImage").write_bytes(b"another app")
+    monkeypatch.setattr(packaged_cli, "IS_MACOS", False)
+    monkeypatch.setattr(packaged_cli, "IS_WINDOWS", False)
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "Editor.AppImage"))
+    monkeypatch.setenv("APPDIR", str(tmp_path / ".mount_Editor"))
+    assert packaged_cli._desktop_app_path(root / "_internal") == root / "Ouroboros"
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_run_start_launches_the_app_without_the_cli_bytecode_prefix(tmp_path, monkeypatch, windows):
+    """The CLI shim's prefix lies outside the data dir; the app derives its own, so its workers write bytecode."""
+    from ouroboros import packaged_cli
+
+    root = tmp_path / "Ouroboros"
+    (root / "_internal").mkdir(parents=True)
+    (root / ("Ouroboros.exe" if windows else "Ouroboros")).write_bytes(b"app")
+    runtime = packaged_cli.PackagedRuntime(
+        bundle_root=root / "_internal", embedded_python=tmp_path / "python", app_root=tmp_path / "home/Ouroboros",
+        repo_dir=tmp_path / "home/Ouroboros/repo", data_dir=tmp_path / "home/Ouroboros/data", app_version="7.9.0")
+    launched = {}
+    monkeypatch.setattr(packaged_cli, "IS_MACOS", False)
+    monkeypatch.setattr(packaged_cli, "IS_WINDOWS", windows)
+    for name in ("APPIMAGE", "APPDIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "cli-cache"))
+    monkeypatch.setattr(packaged_cli.subprocess, "Popen", lambda args, **kwargs: launched.update(args=args, kwargs=kwargs))
+    packaged_cli._launch_desktop_app(runtime)
+    assert launched["args"] == [str(root / ("Ouroboros.exe" if windows else "Ouroboros"))]
+    assert "PYTHONPYCACHEPREFIX" not in launched["kwargs"].get("env", {"PYTHONPYCACHEPREFIX": "inherited"})
 
 
 def test_packaged_cli_linux_extract_relaunch_uses_private_temp_base(tmp_path, monkeypatch):
@@ -94,6 +133,7 @@ def test_packaged_cli_linux_extract_relaunch_uses_private_temp_base(tmp_path, mo
     monkeypatch.setattr(packaged_cli, "IS_MACOS", False)
     monkeypatch.setattr(packaged_cli, "IS_WINDOWS", False)
     monkeypatch.setenv("APPIMAGE", str(appimage))
+    monkeypatch.setenv("APPDIR", str(tmp_path / "mount"))
     monkeypatch.setenv("APPIMAGE_EXTRACT_AND_RUN", "1")
     monkeypatch.setenv("TMPDIR", str(original_tmp))
     monkeypatch.setattr(packaged_cli.tempfile, "mkdtemp", lambda **_kwargs: str(private_tmp))
@@ -185,7 +225,7 @@ def test_packaged_cli_normal_linux_relaunch_keeps_process_environment(tmp_path, 
     packaged_cli._launch_desktop_app(runtime)
 
     assert launched["args"] == [str(appimage)]
-    assert "env" not in launched["kwargs"]
+    assert launched["kwargs"]["env"] == {k: v for k, v in os.environ.items() if k != "PYTHONPYCACHEPREFIX"}
 
 
 def test_packaged_cli_does_not_treat_prompt_start_text_as_option(tmp_path, monkeypatch):
@@ -255,6 +295,7 @@ def test_packaged_cli_inner_env_ignores_inherited_repo_and_data(tmp_path, monkey
     monkeypatch.setenv("OUROBOROS_REPO_DIR", "/bad/repo")
     monkeypatch.setenv("OUROBOROS_DATA_DIR", "/bad/data")
     monkeypatch.setenv("OUROBOROS_URL", "http://127.0.0.1:9000")
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)  # no custom prefix: the data root's own
 
     env = _inner_cli_env(runtime)
 
@@ -263,7 +304,7 @@ def test_packaged_cli_inner_env_ignores_inherited_repo_and_data(tmp_path, monkey
     assert env["OUROBOROS_DATA_DIR"] == str(runtime.data_dir)
     assert env["OUROBOROS_URL"] == "http://127.0.0.1:9000"
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
-    assert env["PYTHONPYCACHEPREFIX"] == str(runtime.data_dir / "state" / "pycache")
+    assert env["PYTHONPYCACHEPREFIX"] == str(runtime.data_dir / "state" / "pycache.noindex")
 
 
 def test_installer_plan_chooses_user_local_path_dir(tmp_path, monkeypatch):
@@ -480,14 +521,89 @@ def test_installer_refuses_unrelated_existing_command(tmp_path):
         plan_posix_install(root, target_dir=target_dir)
 
 
-def test_installer_rejects_macos_dmg_or_translocation_paths():
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink install")
+def test_installer_replaces_its_own_dead_link_and_still_refuses_a_live_other_copy(tmp_path):
+    """After the app moved, the earlier command is a dead link: running Install CLI again replaces it."""
+    from ouroboros.packaged_cli import PackagedCLIError
+    from ouroboros.packaged_cli_install import install_posix, plan_posix_install
+
+    root = _make_bundle_root(tmp_path)
+    target_dir = tmp_path / "bin"
+    target_dir.mkdir()
+    (target_dir / "ouroboros").symlink_to(tmp_path / "Desktop" / "Ouroboros.app" / "Contents" / "Resources" / "bin" / "ouroboros")
+    plan = plan_posix_install(root, target_dir=target_dir)
+    assert plan.action == "replace", "the old installer refused its own dead link without --force"
+    install_posix(plan)
+    assert (target_dir / "ouroboros").resolve() == (root / "bin" / "ouroboros").resolve()
+    other = _make_bundle_root(tmp_path, tmp_path / "Other")
+    (target_dir / "ouroboros").unlink()
+    (target_dir / "ouroboros").symlink_to(other / "bin" / "ouroboros")
+    with pytest.raises(PackagedCLIError, match="refusing to overwrite"):
+        plan_posix_install(root, target_dir=target_dir)
+    assert plan_posix_install(root, target_dir=target_dir, force=True).action == "replace"
+    (target_dir / "ouroboros").unlink()
+    (target_dir / "ouroboros").symlink_to(tmp_path / "temporarily-offline" / "owner-command")  # someone else's
+    with pytest.raises(PackagedCLIError, match="refusing to overwrite"):
+        plan_posix_install(root, target_dir=target_dir)
+    assert plan_posix_install(root, target_dir=target_dir, force=True).action == "replace"
+
+
+def test_installer_replaces_its_own_cmd_whose_app_is_gone(tmp_path):
+    from ouroboros.packaged_cli import PackagedCLIError
+    from ouroboros.packaged_cli_install import _windows_shim_text, plan_windows_install
+
+    root = _make_bundle_root(tmp_path)
+    (root / "bin" / "ouroboros.cmd").write_text("@echo off\r\n", encoding="utf-8")
+    target_dir = tmp_path / "bin"
+    target_dir.mkdir()
+    shim = target_dir / "ouroboros.cmd"
+    shim.write_text(_windows_shim_text(tmp_path / "Old" / "bin" / "ouroboros.cmd"), encoding="utf-8")
+    assert plan_windows_install(root, target_dir=target_dir).action == "replace"
+    live = _make_bundle_root(tmp_path, tmp_path / "Live")
+    (live / "bin" / "ouroboros.cmd").write_text("@echo off\r\n", encoding="utf-8")
+    shim.write_text(_windows_shim_text(live / "bin" / "ouroboros.cmd"), encoding="utf-8")
+    with pytest.raises(PackagedCLIError, match="refusing to overwrite"):
+        plan_windows_install(root, target_dir=target_dir)
+    shim.write_text('@echo off\r\ncall "C:\\gone\\tool.cmd" %*\r\n', encoding="utf-8")  # someone else's, unmarked
+    with pytest.raises(PackagedCLIError, match="refusing to overwrite"):
+        plan_windows_install(root, target_dir=target_dir)
+
+
+def test_installer_under_an_appimage_points_at_its_cli_instead_of_linking_into_the_mount(tmp_path, monkeypatch):
+    """Only this app's own AppImage: its runtime exports APPIMAGE/APPDIR to every descendant, so a tar.gz or deb
+    install run from another AppImage app's terminal inherits that app's pair and installs as without it."""
+    from ouroboros.packaged_cli import PackagedCLIError
+    from ouroboros.packaged_cli_install import plan_posix_install
+
+    root = _make_bundle_root(tmp_path)
+    (tmp_path / "bin").mkdir()
+    monkeypatch.setenv("APPIMAGE", "/home/me/Ouroboros.AppImage")
+    monkeypatch.setenv("APPDIR", str(root))  # the bundle lies in this AppImage's mount
+    with pytest.raises(PackagedCLIError, match='use "/home/me/Ouroboros.AppImage" --cli'):
+        plan_posix_install(root, target_dir=tmp_path / "bin")
+    monkeypatch.setenv("APPIMAGE", "/home/me/Editor.AppImage")
+    monkeypatch.setenv("APPDIR", str(tmp_path / ".mount_Editor"))  # another app's, inherited from its terminal
+    assert plan_posix_install(root, target_dir=tmp_path / "bin").action == "create"
+    monkeypatch.delenv("APPIMAGE")
+    assert plan_posix_install(root, target_dir=tmp_path / "bin").action == "create"
+
+def test_installer_rejects_macos_dmg_or_translocation_paths(tmp_path, monkeypatch):
+    """Measured, not guessed from a folder name: a read-only mount or a translocated copy is refused,
+    an ordinary writable disk under /Volumes is accepted (the old rule refused every /Volumes path)."""
+    import types
+
     from ouroboros.packaged_cli import PackagedCLIError
     from ouroboros.packaged_cli_install import reject_unstable_macos_path
 
     with pytest.raises(PackagedCLIError, match="refusing to install CLI from a DMG"):
-        reject_unstable_macos_path(pathlib.Path("/Volumes/Ouroboros/Ouroboros.app/Contents/Resources"))
-    with pytest.raises(PackagedCLIError, match="refusing to install CLI from a DMG"):
         reject_unstable_macos_path(pathlib.Path("/private/var/AppTranslocation/Ouroboros.app/Contents/Resources"))
+    volume = pathlib.Path("/Volumes/Disk/Ouroboros.app/Contents/Resources")
+    monkeypatch.setattr(os, "statvfs", lambda _path: types.SimpleNamespace(f_flag=0), raising=False)
+    reject_unstable_macos_path(volume)
+    monkeypatch.setattr(os, "statvfs", lambda _path: types.SimpleNamespace(f_flag=getattr(os, "ST_RDONLY", 1)), raising=False)
+    with pytest.raises(PackagedCLIError, match="refusing to install CLI from a DMG"):
+        reject_unstable_macos_path(volume)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell wrapper test")
@@ -527,7 +643,7 @@ def test_posix_wrapper_ignores_poisoned_env_and_finds_internal_root(tmp_path, mo
     assert lines[0] == str(internal)
     assert lines[1] == "-m ouroboros.packaged_cli status"
     assert lines[2] == "1"
-    assert lines[3] == str(tmp_path / "cache" / "ouroboros" / "pycache")
+    assert lines[3] == str(tmp_path / "cache" / "ouroboros" / "pycache.noindex")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell wrapper test")

@@ -304,6 +304,55 @@ def test_measured_block_falls_back_to_username(monkeypatch):
     assert "- **User**: winuser" in wprof.measured_block("/r", "/d")
 
 
+
+def test_the_measured_block_names_the_app_copy_and_the_body_it_runs(tmp_path, monkeypatch):
+    """The app is a replaceable host: a moved, translocated or newer app shows at the next start. The line names
+    the body's version only: its commit rides the runtime section, and a commit must not rewrite this cached block."""
+    import platform
+    import subprocess
+    import sys
+
+    for name, value in (("_tools_found", lambda: []), ("get_cpu_info", lambda: "c"), ("get_system_memory", lambda: "m")):
+        monkeypatch.setattr(wprof, name, value)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "VERSION").write_text("7.9.0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"],
+                   cwd=repo, check=True)
+    body, python = "body 7.9.0", platform.python_version()
+
+    def host(block):
+        return next(line for line in block.splitlines() if line.startswith("- **Host**: "))
+
+    for name in ("OUROBOROS_BUNDLE_DIR", "APPIMAGE", "APPDIR"):
+        monkeypatch.delenv(name, raising=False)
+    assert host(wprof.measured_block(str(repo), "/d")) == f"- **Host**: source runtime (Python {python} at {sys.executable}); {body}"
+    import os
+    import types
+
+    real_statvfs = getattr(os, "statvfs", None)
+    for app, read_only, label in ((tmp_path / "Volumes" / "Disk" / "Ouroboros.app", False, ""),  # a writable volume
+                                  (tmp_path / "AppTranslocation" / "X" / "d" / "Ouroboros.app", False, " (translocated)"),
+                                  (tmp_path / "Volumes" / "Ouroboros 1" / "Ouroboros.app", True, " (read-only mount)")):
+        bundle = app / "Contents" / "Frameworks"
+        bundle.mkdir(parents=True)
+        (bundle / "repo_bundle_manifest.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_BUNDLE_DIR", str(bundle))
+        monkeypatch.setenv("OUROBOROS_APP_VERSION", "7.10.0")
+        flag = getattr(os, "ST_RDONLY", 1) if read_only else 0
+        monkeypatch.setattr(os, "statvfs", (lambda _path, flag=flag: types.SimpleNamespace(f_flag=flag)) if real_statvfs
+                            else (lambda _path: (_ for _ in ()).throw(OSError("unmeasured"))), raising=False)
+        expected = label if real_statvfs or not read_only else ""  # an unmeasured mount gets no label
+        assert host(wprof.measured_block(str(repo), "/d")) == (
+            f"- **Host**: App 7.10.0 at {app}{expected} (bundled Python {python}); {body}")
+    appimage = tmp_path / "Ouroboros.AppImage"
+    monkeypatch.setenv("APPIMAGE", str(appimage))
+    monkeypatch.setenv("APPDIR", str(tmp_path / ".mount_Editor"))  # another AppImage app's, from its terminal
+    assert host(wprof.measured_block(str(repo), "/d")).startswith(f"- **Host**: App 7.10.0 at {app}")
+    monkeypatch.setenv("APPDIR", str(app))  # this app's own mount
+    assert host(wprof.measured_block(str(repo), "/d")).startswith(f"- **Host**: App 7.10.0 at {appimage}")
+
 def test_startup_verification_refreshes_the_measured_block_in_place(tmp_path, monkeypatch):
     from ouroboros import agent_startup_checks as checks_module
 
