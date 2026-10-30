@@ -73,10 +73,12 @@ def _scope_gap(repo, commit, scope, local) -> str:
     return ""
 
 
-def receipt_for_commit(data_dir, repo, commit, local=None, gaps=None) -> dict:
+def receipt_for_commit(data_dir, repo, commit, local=None, gaps=None, skipped=None) -> dict:
     """A coherent durable receipt of exactly ``commit``, or ``{}``: a complete full run, else
     (only for a ``local`` adoption) a selected one whose scope qualifies it; ``gaps``
-    collects why the selected records found do not."""
+    collects why the selected records found do not. ``skipped`` collects why each other
+    record of exactly ``commit`` cannot stand for its full run (another tree, an incomplete
+    record, a selected run); it never changes which record qualifies."""
     from ouroboros.preflight_receipts import RECEIPT_SCHEMA, RECEIPTS_DIR, SELECTED_SCHEMA, _record_problem
 
     tree = _commit_tree(repo, commit)
@@ -90,13 +92,21 @@ def receipt_for_commit(data_dir, repo, commit, local=None, gaps=None) -> dict:
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
             identity = document["identity"]
-            if (identity["head"] != commit or not identity["tree"] == identity["index_tree"] == tree
-                    or _record_problem(document, identity, node_ran)):
+            if identity["head"] != commit:
+                continue
+            why = ("its run carried other bytes than the commit's tree"
+                   if not identity["tree"] == identity["index_tree"] == tree
+                   else _record_problem(document, identity, node_ran))
+            if why:
+                if skipped is not None:
+                    skipped.append(f"{path.stem[:12]}: {why}")
                 continue
             found = {"source": "receipt", "key": path.stem, "head": commit, "tree": tree,
                      "created_at": document["created_at"], "phase": document["phase"]}
             if identity["schema"] == RECEIPT_SCHEMA:
                 return {"tier": "full", **found}
+            if skipped is not None and identity["schema"] == SELECTED_SCHEMA:
+                skipped.append(f"{path.stem[:12]}: a selected run, never a full one")
             if identity["schema"] == SELECTED_SCHEMA and local is not None and not selected:
                 gap = _scope_gap(repo, commit, identity["scope"], local)
                 if not gap:

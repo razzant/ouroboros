@@ -710,6 +710,7 @@
  * @property {Object[]=} official_tags
  * @property {UpdateTransactionState} update_tx
  * @property {UpdateProgress} update_progress
+ * @property {Object=} candidate - The prepared Update beside the serving checkout: state, pins, actions.
  * @property {?import('./api_types.js').UpdateLetter=} letter
  * @property {?Object=} after_update - Retained before/after process samples; missing observations stay null.
  * @property {boolean=} managed

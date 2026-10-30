@@ -149,8 +149,7 @@ def _select(selector: str, data_dir: Optional[Any] = None) -> Optional[Dict[str,
 
 def _event(data_dir: Optional[Any], kind: str, **fields: Any) -> None:
     try:
-        append_jsonl(_wt._data_dir(data_dir) / "logs" / "events.jsonl",
-                     {"ts": utc_now_iso(), "type": kind, **fields})
+        append_jsonl(_wt._data_dir(data_dir) / "logs" / "events.jsonl", {"ts": utc_now_iso(), "type": kind, **fields})
     except Exception:
         log.debug("body candidate event append failed", exc_info=True)
 
@@ -219,7 +218,7 @@ def _populate(row: Dict[str, Any], data_dir: Optional[Any] = None) -> Dict[str, 
 def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> Dict[str, Any]:
     """Read-modify-write of one candidate record under that record's lock."""
     def apply(entry: Dict[str, Any]) -> Dict[str, Any]:
-        if entry.get("kind") != KIND:
+        if entry.get("kind") not in (KIND, "update_candidate"):  # an Update's resolver records its reviewed commit
             raise CandidateRefused("CANDIDATE_MISSING", "the candidate's record is gone; nothing was changed.")
         if entry.get("retiring"):
             raise CandidateRefused("CANDIDATE_MISSING", "the candidate is being retired; nothing was changed.")
@@ -410,16 +409,37 @@ def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any]) -
 
 
 def restore(ctx: Any) -> Dict[str, Any]:
-    """Rebind the candidate this lineage already owns (retry, Resume, new worker)."""
+    """Rebind this lineage's candidate (retry, Resume, new worker), or an Update resolver's workspace.
+
+    An Update resolver is bound to its own candidate's checkout in every state; when that
+    checkout is gone it is bound to the recorded path anyway, where its tools fail, so its
+    objective never runs against the serving repository.
+    """
     try:
         if str(_metadata(ctx).get("delegation_role") or "").lower() == "subagent":
             return {}
         row = find(owner_id(ctx))
         if row and pathlib.Path(str(row.get("path") or "")).is_dir():
             return bind(ctx, _populate(row))
+        if _metadata(ctx).get("update_candidate_resolver"):
+            from supervisor.update_adaptation import resolver_binding
+
+            resolver = resolver_binding(_metadata(ctx))
+            intent = _metadata(ctx).get("resource_intent") or {}
+            path = str((resolver or {}).get("path") or intent.get("root") or "")
+            if resolver and pathlib.Path(path).is_dir():
+                return bind(ctx, resolver)
+            ctx.repo_dir = ctx.system_repo_dir = pathlib.Path(path or _NO_UPDATE_CHECKOUT)
+            return {"unavailable": path}
     except Exception:
         log.warning("body candidate binding could not be restored", exc_info=True)
+        if _metadata(ctx).get("update_candidate_resolver"):
+            ctx.repo_dir = ctx.system_repo_dir = pathlib.Path(_NO_UPDATE_CHECKOUT)
+            return {"unavailable": ""}
     return {}
+
+
+_NO_UPDATE_CHECKOUT = "/nonexistent-update-candidate"  # an unbindable resolver's root: its tools fail
 
 
 def _refusal_before_prepare(ctx: Any) -> Optional[CandidateRefused]:
@@ -604,19 +624,9 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
         return None
     try:
         from ouroboros.settings_integrity import runtime_environ
-        from ouroboros.test_environment import SCRATCH_MARKER, declare_scratch, isolated_environment
+        from ouroboros.test_environment import isolated_environment
 
-        env_root = candidate.with_name(candidate.name + ".env")
-        try:
-            env_root.mkdir(parents=True)
-        except FileExistsError:
-            # A new process invalidates a prior quiescent observation. An older,
-            # undeclared environment keeps its unknown provenance.
-            if (env_root / SCRATCH_MARKER).is_file() and not (env_root / SCRATCH_MARKER).is_symlink():
-                (env_root / SCRATCH_MARKER).touch()
-        else:
-            declare_scratch(env_root, "body-process")
-        return isolated_environment(env_root, candidate,
+        return isolated_environment(scratch_root(candidate), candidate,
                                     source=runtime_environ() if source is None else source)
     except Exception as exc:
         log.warning("candidate process environment unavailable", exc_info=True)
@@ -625,6 +635,28 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
             f"the isolated environment for body candidate {bound.get('candidate_id')} could not be prepared "
             f"({type(exc).__name__}: {exc}); a process inside the candidate is not started with the serving "
             "environment") from exc
+
+
+def scratch_root(candidate: Any) -> pathlib.Path:
+    """The candidate's sibling ``.env`` scratch, declared reproducible when this producer creates it.
+
+    Every process environment beside a candidate (its author's, an Update's checks)
+    lives here, so the GC's retirement (``discard_scratch``) can tell it from data.
+    """
+    from ouroboros.test_environment import SCRATCH_MARKER, declare_scratch
+
+    candidate = pathlib.Path(candidate)
+    env_root = candidate.with_name(candidate.name + ".env")
+    try:
+        env_root.mkdir(parents=True)
+    except FileExistsError:
+        # A new process invalidates a prior quiescent observation. An older,
+        # undeclared environment keeps its unknown provenance.
+        if (env_root / SCRATCH_MARKER).is_file() and not (env_root / SCRATCH_MARKER).is_symlink():
+            (env_root / SCRATCH_MARKER).touch()
+    else:
+        declare_scratch(env_root, "body-process")
+    return env_root
 
 
 def executor_environment(ctx: Any, cwd: Any, *, executor, map_path) -> Optional[Dict[str, str]]:

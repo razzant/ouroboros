@@ -577,6 +577,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "artifact_identity_changed": (False, "gateway/task_archive.py: a mutable file's bytes no longer match its recorded identity; HTTP 409, not a task terminal"),
     "artifact_name_ambiguous": (False, "gateway/tasks.py: ambiguous nested basename; HTTP refusal, not a task terminal"),
     "artifact_relpath_invalid": (False, "gateway/tasks.py: invalid exact artifact selector; HTTP refusal, not a task terminal"),
+    "candidate_changed": (False, "gateway/update_activation.py: the carried-work list names another update candidate than the live one; HTTP 409, not a task terminal"),
+    "list_unavailable": (False, "gateway/update_activation.py: the live update candidate keeps no carried-work list; HTTP 404, not a task terminal"),
     "invalid_action_nonce": (False, "task_cancel rejects malformed action identity; no task transition"),
     "stop_action_conflict": (False, "task_cancel refuses conflicting action replay; no task transition"),
     "teardown_unconfirmed": (False, "gateway/tasks.py: an HTTP 202 Stop acknowledgement; the recorded intent is still being finished, never a task outcome"),

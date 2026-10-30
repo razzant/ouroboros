@@ -92,12 +92,15 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
         from supervisor.git_ops import list_official_update_tags
 
         official_tags = list_official_update_tags()
+    from ouroboros.gateway.update_activation import candidate_view
+
     return {
         "current_version": get_version(),
         "latest_version": latest_version,
         "official_tags": official_tags,
         "update_tx": update_tx,
         "update_progress": update_progress.snapshot(tx),
+        "candidate": candidate_view(latest_sha=str(latest_sha)),
         "letter": letter,
         **status,
     }
@@ -511,7 +514,8 @@ def _admit_description_task(task_id: str, text: str, metadata: Dict[str, Any]) -
 
 
 _KNOWN_UPDATE_PLAN_KINDS = frozenset({"clean", "conflicting"})
-_UPDATE_STRATEGIES = frozenset({"auto_merge", "assisted", "manual", "replace"})
+_UPDATE_STRATEGIES = frozenset({"auto_merge", "assisted", "manual", "replace", "prepare", "activate",
+                                 "discard_candidate", "apply_without_local_changes"})
 
 
 def _plan_is_clean(plan: dict) -> bool:
@@ -1440,6 +1444,10 @@ async def api_update_apply(request: Request) -> JSONResponse:
     strategy = str(body.get("strategy") or "").strip().lower()
     if strategy not in _UPDATE_STRATEGIES:
         return json_error(f"unsupported update strategy: {strategy or 'missing'}", 400)
+    from ouroboros.gateway import update_activation
+
+    if strategy in update_activation.STRATEGIES:  # the unified Update beside the serving checkout
+        return await update_activation.apply(request, strategy, body)
     expected_base_sha = str(body.get("expected_base_sha") or "").strip()
     expected_target_sha = str(body.get("expected_target_sha") or "").strip()
     if strategy == "manual":

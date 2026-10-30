@@ -213,20 +213,73 @@ def install_builtin_skill(
             "auto_granted_keys": list(granted.granted_keys), "auto_granted_permissions": list(granted.granted_permissions)}
 
 
-def _changed_since_install(drive_root: pathlib.Path, name: str, target: pathlib.Path) -> Optional[bool]:
-    """Whether the installed copy differs from its recorded base digest; ``None`` when no
-    base or evidence of edits is recorded (the launcher's version re-seed still applies).
-    A stale native-seed review proves edits even when the original release is unknown. Unreadable bytes
-    count as changed: nothing proves them unmodified."""
+def _a_release_of(seed_root: pathlib.Path, name: str, version: str, digest: str) -> bool:
+    """Whether ``digest`` is this built-in's committed payload at ``version`` in the bundle's own Git history.
+
+    Every commit whose manifest carries that version counts (a payload can change at an
+    equal version); a shallow, absent or unreadable history proves nothing (``False``).
+    """
+    import io
+    import subprocess
+    import tarfile
+    import tempfile
+
+    from ouroboros.git_observation import host_git_env
+    from ouroboros.skill_loader import compute_content_hash
+
+    def git(*args, cwd, text=True):
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=text, timeout=120,
+                              env=host_git_env())
+
+    try:
+        top = pathlib.Path(git("rev-parse", "--show-toplevel", cwd=seed_root).stdout.strip())
+        rel = (pathlib.Path(seed_root) / name).resolve().relative_to(top.resolve()).as_posix()
+        for commit in git("log", "--format=%H", "--", rel, cwd=top).stdout.split():
+            with tempfile.TemporaryDirectory(prefix="ouroboros-builtin-release-") as scratch:
+                manifest = pathlib.Path(scratch) / "manifest"
+                manifest.mkdir()
+                for entry in _MANIFEST_NAMES:  # the version first, from the manifest alone
+                    shown = git("show", f"{commit}:{rel}/{entry}", cwd=top, text=False)
+                    if shown.returncode == 0:
+                        (manifest / entry).write_bytes(shown.stdout)
+                if _version(manifest) != version:
+                    continue
+                archive = git("archive", "--format=tar", commit, rel, cwd=top, text=False)
+                if archive.returncode != 0:
+                    continue
+                with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+                    tar.extractall(scratch)  # our own repository's archive of one skill folder
+                if compute_content_hash(pathlib.Path(scratch) / rel) == digest:
+                    return True
+    except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError):
+        return False
+    return False
+
+
+def _changed_since_install(drive_root: pathlib.Path, name: str, target: pathlib.Path,
+                           seed_root: Optional[pathlib.Path] = None) -> bool:
+    """Whether the installed copy differs from the release it came from.
+
+    The recorded base digest decides; a stale native-seed review proves edits even when
+    the original release is unknown. Without a base (a legacy copy with no or an unknown
+    record) the bundle's own history supplies the payload of the copy's recorded version;
+    when it cannot, the copy counts as changed and is kept, because nothing proves it is
+    the shipped one. Unreadable bytes count as changed as well.
+    """
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import compute_content_hash
 
     record = read_install_record(drive_root, name) or {}
     base = str(record.get("base_digest") or "")
-    if not base:
-        return True if record.get("modified") else None
     try:
-        return compute_content_hash(target) != base
+        if base:
+            return compute_content_hash(target) != base
+        if record.get("modified"):
+            return True
+        # The copy's own manifest names its release; a converted record may carry the bundled one instead.
+        version = _version(target) or str((record.get("release") or {}).get("version") or "")
+        return not _a_release_of(pathlib.Path(seed_root or bundled_skills_dir()), name, version,
+                                 compute_content_hash(target))
     except Exception:
         return True
 
@@ -260,7 +313,7 @@ def reseed_changed_builtins(drive_root: pathlib.Path, *, seed_dir: Optional[path
         if seed_version == target_version:
             _warn_equal_version_drift(seed, target, seed_version, logger)
             continue
-        if _changed_since_install(pathlib.Path(drive_root), seed.name, target):
+        if _changed_since_install(pathlib.Path(drive_root), seed.name, target, seed_root):
             logger.warning("Built-in skill %s has local changes (installed=%s, bundled=%s); kept — "
                            "the owner chooses on update", seed.name, target_version, seed_version)
             continue
@@ -316,7 +369,7 @@ def release_removed_builtins(drive_root: pathlib.Path, *, seed_dir: Optional[pat
         if not entry.is_dir() or entry.name.startswith(".") or not marker.is_file() or (seed_root / entry.name).is_dir():
             continue
         try:
-            if _changed_since_install(pathlib.Path(drive_root), entry.name, entry) is False:
+            if _changed_since_install(pathlib.Path(drive_root), entry.name, entry, seed_root) is False:
                 if not retire:
                     complete = False
                     continue

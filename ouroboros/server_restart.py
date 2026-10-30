@@ -203,7 +203,7 @@ def _perform_owner_restart(ctx: Any, reply=None) -> tuple[bool, str]:
     ok, restart_msg = _safe_restart_serialized(
         ctx.safe_restart,
         reason="owner_restart",
-        unsynced_policy="rescue_and_reset",
+        unsynced_policy="keep",  # the owner's composition survives Restart: no rescue, reset or clean
     )
     if not ok:
         return False, restart_msg

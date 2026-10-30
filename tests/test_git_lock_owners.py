@@ -210,7 +210,8 @@ def managed_boot(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("holder", ["crashed", "live"])
-def test_bootstrap_returns_a_refused_checkout_and_keeps_the_lock(managed_boot, holder):
+def test_a_kept_bootstrap_never_takes_a_held_index_lock(managed_boot, holder):
+    """The cold boot keeps the composition (``keep``): no tree step, so a held lock refuses nothing."""
     boot = managed_boot
     head = _git(boot.repo, "rev-parse", "HEAD")
     with contextlib.ExitStack() as stack:
@@ -220,14 +221,16 @@ def test_bootstrap_returns_a_refused_checkout_and_keeps_the_lock(managed_boot, h
 
         ok, message = boot.server._bootstrap_supervisor_repo({}, git_ops)
 
-        assert ok is False and lock.exists()
-        assert "git reset --hard HEAD" in message and "index.lock" in message
-        assert "no checkout step had changed the working tree" in message  # Git refused the FIRST step
+        assert ok is True, message
+        assert lock.exists()
         assert writer is None or writer.finish() == 0
     assert _git(boot.repo, "rev-parse", "HEAD") == head
     assert holder == "crashed" or "first.txt" in _git(boot.repo, "ls-files").split()
-    [row] = _rows(boot.data, "checkout_step_failed")
-    assert row["reason"] == "bootstrap" and row["returncode"] != 0 and "index.lock" in row["stderr"]
+    assert not _rows(boot.data, "checkout_step_failed")
+
+
+def _failing_import(monkeypatch):
+    monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": False, "returncode": 1, "stderr": "ImportError: boom"})
 
 
 @pytest.mark.parametrize("boot_kind", ["managed_updates_disabled", "local_dev"])
@@ -244,17 +247,18 @@ def test_a_held_lock_does_not_fail_a_bootstrap_that_writes_no_index(managed_boot
     assert lock.exists()
 
 
-def test_owner_restart_reports_a_refused_checkout_and_does_not_exit(managed_boot, monkeypatch):
+def test_owner_restart_reports_a_refused_restart_and_does_not_exit(managed_boot, monkeypatch):
     from ouroboros import server_restart
 
     def must_not_run(*_a, **_kw):
-        raise AssertionError("a refused checkout must not proceed to the restart")
+        raise AssertionError("a refused restart must not proceed to stopping work or exiting")
 
     monkeypatch.setattr(server_restart, "_stop_owned_work", must_not_run)
     monkeypatch.setattr(server_restart, "_request_restart_exit", must_not_run)
+    _failing_import(monkeypatch)  # keep never resets; a tree that does not import refuses the restart
     with _live_writer(managed_boot.repo) as writer:
         ok, message = server_restart._perform_owner_restart(SimpleNamespace(safe_restart=git_ops.safe_restart))
-        assert ok is False and "index.lock" in message
+        assert ok is False and "Import test failed" in message
         assert writer.finish() == 0, writer.stderr
     assert "first.txt" in _git(managed_boot.repo, "ls-files").split()
 
@@ -580,24 +584,19 @@ def test_a_failed_bootstrap_is_told_once_in_the_owner_chat_and_a_deliberate_defe
     sent = []
     monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": owner_chat})
     monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
-    lock = _orphan_lock(managed_boot.repo)
+    _failing_import(monkeypatch)  # the kept tree does not import: a failed bootstrap, never a reset
 
     ok, message = managed_boot.server._bootstrap_supervisor_repo({}, git_ops)
 
     assert ok is False and len(sent) == 1
     chat, text, kw = sent[0]
     assert (chat, kw) == (owner_chat, {"role": "system", "system_type": "startup_notice"})
-    # One owner line: the step, Git's own first line and what is known of the tree. Git's whole
-    # output stays in the returned (and logged) message and the checkout_step_failed row.
-    headline, full = message.split("\n")
+    headline = message.split("\n")[0]
     assert text == f"Startup bootstrap failed: {headline}"  # no decorative glyph to strip at render
-    assert "index.lock" in headline and "no checkout step had changed the working tree" in headline
-    assert full.startswith("Git: fatal: Unable to create")
-    [row] = _rows(managed_boot.data, "checkout_step_failed")
-    assert full == f"Git: {row['stderr']}"
+    assert "Import test failed" in headline and "last commit was not started" in headline
 
     sent.clear()
-    lock.unlink()
+    monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": True})
     monkeypatch.setattr(evolution_lifecycle, "disable_evolution_projection", lambda: None)
     monkeypatch.setattr(evolution_lifecycle, "pause_evolution_campaign", lambda *_a: None)
     head = _git(managed_boot.repo, "rev-parse", "HEAD")
@@ -642,8 +641,9 @@ def test_landed_update_keeps_its_own_boot_authority_after_refused_bootstrap(mana
     boot = managed_boot
     head = _git(boot.repo, "rev-parse", "HEAD")
     lock = _orphan_lock(boot.repo)
+    _failing_import(monkeypatch)
     ok, message = boot.server._bootstrap_supervisor_repo({}, git_ops)
-    assert ok is False and "index.lock" in message
+    assert ok is False and "Import test failed" in message
     monkeypatch.setattr(boot.server, "_bootstrap_ok", ok)
     monkeypatch.setattr(boot.server, "_wait_for_supervisor_update_finalize", lambda: True)
     monkeypatch.setattr(git_ops, "compute_managed_update_status", lambda **kw: {})
@@ -658,7 +658,7 @@ def test_landed_update_keeps_its_own_boot_authority_after_refused_bootstrap(mana
     boot.server._boot_managed_update_tasks()
 
     assert update_merge.read_update_tx_strict()[0] == "absent"
-    assert adoption == [{"supervisor_ready": False}]
+    assert [call["supervisor_ready"] for call in adoption] == [False]
     assert lock.read_bytes() == b"left by a crashed process\n"
     assert not _rows(boot.data, "managed_update_rolled_back")
     assert not _rows(boot.data, "managed_update_rollback_after_failed_boot")

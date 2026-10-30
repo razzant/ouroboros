@@ -905,6 +905,7 @@ class UpdateStatusResponse(TypedDict, total=False):
     official_tags: List[Dict[str, Any]]  # check only: {tag, sha, source}
     update_tx: Required[UpdateTransactionState]
     update_progress: Required[UpdateProgress]
+    candidate: Dict[str, Any]  # the prepared Update beside the serving checkout: state, pins, actions
     letter: Optional[UpdateLetter]
     after_update: Optional[Dict[str, Any]]
     managed: bool

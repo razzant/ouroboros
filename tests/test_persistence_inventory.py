@@ -877,7 +877,14 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 429 -> 430: adds ``state/update_material.json`` and ``state/update_letter.lock``;
 # the scan no longer yields the legacy ``state/usage_attempts.lock`` spelling.
 # 430 -> 431: checkout-specific preflight heads, registered in the review-ledger row.
-EXPECTED_SCAN_PATHS = 431
+# 431 -> 432: ``state/body_adoption/app_install.py``, the app installer an Update's activation captures
+# outside the checkout beside the switch helper (the body_adoption row).
+# 432 -> 433: ``state/update_activation.json``, the Update's own retained Last attempt, moved out of the supervisor's
+# state.json that a providerless generation never initializes.
+# 433 -> 434: ``state/private_copies/*``, the record directory's members as ``subagent_worktrees._records`` lists them
+# (``os.listdir`` since #2502, b7ef0dd5d). That release's own scan is 432 against its pin of 431, so this step is
+# upstream's, not the Update's; the records row (``state/private_copies/<folder>-<sha12>.json``) already covers it.
+EXPECTED_SCAN_PATHS = 434
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

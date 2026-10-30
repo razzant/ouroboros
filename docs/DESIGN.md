@@ -215,8 +215,9 @@ mounted charts and diagrams without rebuilding views or losing drafts. A chart t
 draws (widgets, living cards) gives its series four default colours in one order,
 deeper in Light (#474); Markdown charts and iframe interiors keep their author's
 colours. Keeping the choice through a desktop quit needs an app (launcher) from
-7.2.0, whose WebView storage persists; in-app updates replace the core, never that
-app, so Settings → Appearance names an older app by its version and says its choices
+7.2.0, whose WebView storage persists; in-app updates replace the core, and that
+app only when a release declares the need and the installed app is the official build,
+so Settings → Appearance names an older app by its version and says its choices
 reset at restart. Only a full quit and relaunch proves survival, never a server
 restart. Mechanism and deployment limits: ARCHITECTURE §3 “Navigation and shared UI
 contracts”.
@@ -616,7 +617,7 @@ runtime; known queued, active or finalizing work keeps its own factual label. A
 durably accepted incoming message likewise proves acceptance, not that its task
 has begun or a model has read it.
 
-The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close.
+The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). A prepared Update speaks the same way: its stage, `Update ready` (`App update ready`) or `Update needs you` while that is its current fact, without a close, then its activation's or its preparation's failure. It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close.
 
 Status, owner action, and urgent notification are separate product concepts:
 

@@ -5,6 +5,8 @@ import { apiClient, apiFetch } from './api_client.js';
 import { UPDATE_STAGE_LABELS, afterUpdateRows, attemptTime, bindPreflightDescription, preflightDescription, preflightEvidenceRows, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
+import { activationAttemptView, candidateDialog, candidateName, candidateVerdict, candidateWarning, paintCandidateFacts,
+    paintVerdictActions, prepareHint } from './update_candidate.js';
 
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
@@ -42,8 +44,8 @@ function extraWarnings(data) {
 
 const LOCAL_CHANGES = { absent: 'none', present: 'present', unknown: 'unknown' };
 
-// Why an available update is a caution: content of the checkout's own, an
-// unknown comparison, or uncommitted work (stashed and restored around the update).
+// Why an available update is a caution on the in-place path a status without `candidate` still offers: content of
+// the checkout's own, an unknown comparison, or uncommitted work (a stash that a conflict keeps).
 function unsafeUpdateHint(data) {
     const parts = [];
     if (data.local_changes === 'present') {
@@ -51,9 +53,11 @@ function unsafeUpdateHint(data) {
     } else if (data.local_changes !== 'absent') {
         parts.push('Could not compare this checkout with the official line; applying merges any local changes.');
     }
-    if (data.dirty) parts.push('Uncommitted changes are stashed and restored around the update.');
+    if (data.dirty) parts.push(STASH_WORDS);
     return parts.join(' ');
 }
+const STASH_WORDS = 'Uncommitted changes go into a Git stash for the update and are applied again after the restart '
+    + '(staged ones come back unstaged); if they conflict, they stay in that stash.';
 
 function statusReadFailed(data) {
     return Array.isArray(data?.warnings)
@@ -110,8 +114,15 @@ export function applyFailureText(err) {
 // humanizeCheckedAt reads Date.now for the "checked N ago" age). The button is always a real next action; facts
 // travel as status line, hint, and chips (ARCHITECTURE §3: unavailable,
 // divergent, dirty, unsafe, failed-check, rollback, and restart-required
-// states stay visible — they are just not buttons).
+// states stay visible — they are just not buttons). With a `candidate`
+// projection the update is prepared beside the running app first
+// (update_candidate.js words it); `secondary` lists the quieter actions.
 export function updateVerdict(data = {}, phase = '') {
+    if (phase === 'requesting') {  // an action's request is in flight: the same verdict, its controls held
+        const settled = updateVerdict(data, '');
+        const held = (item) => item && { ...item, disabled: true };
+        return { ...settled, action: held(settled.action), secondary: (settled.secondary || []).map(held) };
+    }
     const checkedAgo = humanizeCheckedAt(data.checked_at);
     const chips = [];
     if (data.official_repo_url) chips.push({ label: 'Official repo', value: repoSlug(data.official_repo_url) });
@@ -129,8 +140,8 @@ export function updateVerdict(data = {}, phase = '') {
     }
     if (data.dirty_count) chips.push({ label: 'Uncommitted', value: `${data.dirty_count} file(s)` });
 
-    const warnings = extraWarnings(data);
-    const base = { chips, warnings, checkedAgo };
+    const warnings = [...extraWarnings(data), candidateWarning(data)].filter(Boolean);
+    const base = { chips, warnings, checkedAgo, secondary: [] };
     if (data.update_tx?.active && data.update_tx.local_work_recovery) {
         return { ...base, state: 'resolving', tone: 'warn',
             headline: 'Local changes still need recovery confirmation.',
@@ -154,7 +165,9 @@ export function updateVerdict(data = {}, phase = '') {
     if (phase === 'checking') return { ...base, state: 'checking', tone: 'neutral', headline: 'Checking the official channel…', hint: '', action: { id: 'check', label: 'Checking…', disabled: true } };
     if (phase === 'preflighting') return { ...base, state: 'preflighting', tone: 'neutral', headline: 'Preparing the update…', hint: '', action: { id: 'update', label: 'Preparing…', disabled: true } };
     if (phase === 'updating') return { ...base, state: 'updating', tone: 'neutral', headline: 'Applying the update…', hint: '', action: { id: 'update', label: 'Updating…', disabled: true } };
-    if (phase === 'restarting') return { ...base, state: 'restarting', tone: 'ok', headline: 'Restarting the server…', hint: 'This page updates itself when the server is back.', action: { id: 'restart', label: 'Restarting…', disabled: true } };
+    const switching = data.candidate?.state === 'activating' ? candidateName(data).mention : '';
+    if (phase === 'activating') return { ...base, state: 'activating', tone: 'neutral', headline: `Preparing the restart into ${candidateName(data).mention || 'the update'}…`, hint: 'Running work stops first. Nothing in this installation changes until the restart.', action: null };
+    if (phase === 'restarting') return { ...base, state: 'restarting', tone: 'ok', headline: switching ? `Restarting into ${switching}…` : 'Restarting the server…', hint: 'This page updates itself when the server is back.', action: { id: 'restart', label: 'Restarting…', disabled: true } };
     if (phase === 'restart_required') return { ...base, state: 'restart_required', tone: 'warn', headline: 'The update needs a restart that could not be requested automatically.', hint: 'Restart Ouroboros to finish.', action: { id: 'restart', label: 'Restart now' } };
     // Distinct from restart_required (the update is applied, or recorded for the restart exit when
     // its target lacks the store, and only its restart is missing): here the operation did NOT
@@ -227,6 +240,9 @@ export function updateVerdict(data = {}, phase = '') {
             action: null,
         };
     }
+    // The update prepared beside the running app, and a start that failed, outrank the channel's news.
+    const prepared = candidateVerdict(data, base);
+    if (prepared) return prepared;
     const requiresCheck = !data.from_cache && Array.isArray(data.warnings) && data.warnings.includes('official_status_requires_check');
     if (requiresCheck && !data.checked_at) {
         return {
@@ -254,6 +270,16 @@ export function updateVerdict(data = {}, phase = '') {
         const latestSha = data.latest_short_sha || '?';
         const unsafe = !data.safe_to_apply;
         if (data.latest_message) chips.push({ label: 'Latest', value: data.latest_message });
+        if (data.candidate && typeof data.candidate === 'object') {
+            // Prepared in its own copy with the local work carried: nothing changes until Restart to update.
+            const offered = Array.isArray(data.candidate.actions) && data.candidate.actions.includes('prepare');
+            return {
+                ...base, state: 'available', tone: 'ok',
+                headline: `Update available: ${currentVersion} (${currentSha}) -> ${latestVersion} (${latestSha})`,
+                hint: prepareHint(data),
+                action: offered ? { id: 'prepare', label: 'Prepare update' } : { id: 'check', label: 'Check again' },
+            };
+        }
         return {
             ...base,
             state: unsafe ? 'available_unsafe' : 'available',
@@ -447,6 +473,11 @@ function letterContentKey(view) {
     return view.markdown;
 }
 
+// A request the panel awaits: a status refresh refines its words but never ends it.
+const IN_FLIGHT = ['preflighting', 'updating', 'requesting', 'activating'];
+// While an action's request, Restart to update or a return is under way, no other version may be restored.
+const SWITCHING = ['requesting', 'activating', 'candidate_activating', 'candidate_returning'];
+
 // Mirrors the two boot-recovery phases admitted by server.py's serialized
 // restart path. A later backend phase remains safe: the UI falls through to
 // its durable verdict instead of inventing another transient hold.
@@ -485,7 +516,7 @@ export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadSt
             restartReconnected = true;
             reconcileRestart({ afterBootNotice: false });
         } else {
-            loadStatus({ fetchRemote: false, preservePhase: ['preflighting', 'updating'].includes(getPhase()) });
+            loadStatus({ fetchRemote: false, preservePhase: IN_FLIGHT.includes(getPhase()) });
         }
     });
     listen('update_progress_changed', () => {
@@ -539,6 +570,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                     <span class="updates-headline" id="updates-summary">Loading update status...</span>
                 </div>
                 <div class="updates-hint" id="updates-hint" hidden></div>
+                <section class="updates-attempt" id="updates-candidate" aria-label="This update" hidden>
+                    <details class="updates-attempt-details" id="updates-candidate-details">
+                        <summary id="updates-candidate-title">This update</summary>
+                        <dl class="updates-attempt-facts" id="updates-candidate-facts"></dl>
+                    </details>
+                </section>
                 <section class="updates-attempt" id="updates-attempt" aria-labelledby="updates-attempt-headline" hidden>
                     <div class="updates-status">
                         <span class="updates-status-dot" id="updates-attempt-dot" data-tone="neutral"></span>
@@ -560,7 +597,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 <div class="updates-meta" id="updates-meta"></div>
                 <div class="settings-action-row updates-action-row">
                     <span class="updates-action-note" id="updates-action-note"></span>
-                    <button class="btn btn-primary" id="btn-update-primary" hidden></button>
+                    <div class="settings-toolbar" id="updates-actions">
+                        <button type="button" class="btn btn-primary" id="btn-update-primary" hidden></button>
+                    </div>
                 </div>
                 <section class="updates-letter" id="updates-letter" aria-labelledby="updates-letter-label" hidden>
                     <div class="updates-letter-head">
@@ -618,6 +657,8 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const attemptText = page.querySelector('#updates-attempt-text');
     const attemptFacts = page.querySelector('#updates-attempt-facts');
     const attemptRestore = page.querySelector('#updates-attempt-restore');
+    const attemptDetails = page.querySelector('#updates-attempt-details');
+    const attemptMemo = { id: '' };
     const attemptRaw = page.querySelector('#updates-attempt-raw');
     const attemptRawLabel = page.querySelector('#updates-attempt-raw-label');
     const attemptRawText = page.querySelector('#updates-attempt-raw-text');
@@ -626,6 +667,11 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const current = page.querySelector('#updates-current');
     const commitsDiv = page.querySelector('#updates-commits');
     const officialTagsDiv = page.querySelector('#updates-official-tags');
+    const actionsBar = page.querySelector('#updates-actions');
+    const recoveryDetails = page.querySelector('.updates-recovery');
+    const candidateNodes = { section: page.querySelector('#updates-candidate'), title: page.querySelector('#updates-candidate-title'),
+        details: page.querySelector('#updates-candidate-details'), list: page.querySelector('#updates-candidate-facts') };
+    const candidateMemo = { html: '', state: '' };
     const letterSection = page.querySelector('#updates-letter');
     const letterLabel = page.querySelector('#updates-letter-label');
     const letterMeta = page.querySelector('#updates-letter-meta');
@@ -660,9 +706,14 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     // One row of the Last attempt list: a group heading spans both columns; an exact stamp sits under its value.
     function factRowHtml(row) {
         if (row.head) return `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`;
+        // Paths, an import error: the exact text, wrapped in the code face (the raw record's recipe).
+        if (row.code) return `<dt>${escapeHtml(row.label)}</dt><dd><pre class="updates-raw-text">${escapeHtml(row.value)}</pre></dd>`;
         const exact = row.exact
             ? `<time class="updates-fact-raw" datetime="${escapeHtml(row.exact)}">${escapeHtml(row.exact)}</time>` : '';
-        return `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}${exact}</dd>`;
+        // A file the value names, downloaded as the Files page downloads (the desktop shell saves it to Downloads).
+        const link = row.link ? ` <a class="md-link" href="${escapeHtml(row.link.href)}" download="${
+            escapeHtml(row.link.name)}">${escapeHtml(row.link.text)}</a>` : '';
+        return `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}${link}${exact}</dd>`;
     }
 
     // The letter body hosts rendered markdown, so its enhancement owns real
@@ -821,10 +872,15 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         await loadStatus({ fetchRemote: false, preservePhase: true });
     });
 
-    // The retained last attempt (#1818), apart from the primary action and kept until the next attempt.
-    // While this server's attempt runs or awaits its restart, the headline above already names it.
+    // The retained last attempt (#1818), apart from the primary action and kept until the next attempt: this
+    // executor's, or the prepared Update's last Restart to update (`candidate.last_activation`), whichever concluded
+    // later. While an attempt runs or awaits its restart, the headline above already names it.
     function renderAttempt(verdict) {
-        const view = updateAttemptView(latestStatus?.update_progress);
+        const executor = updateAttemptView(latestStatus?.update_progress);
+        const activation = activationAttemptView(latestStatus || {});
+        const time = (item) => Date.parse(item?.when || '') || 0;
+        const view = executor && !executor.terminal ? executor
+            : [activation, executor].filter(Boolean).sort((a, b) => time(b) - time(a))[0] || null;
         const above = !view?.terminal && ['updating', 'restarting', 'restart_required'].includes(verdict.state);
         attemptSection.hidden = !view || (above && !view.text);
         if (attemptSection.hidden) return;
@@ -839,19 +895,27 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         attemptText.hidden = !view.text;
         // The retained samples (after_update) join the rows only of the attempt they name, so they appear with this
         // section, which stays hidden while an update runs (owner 25.10: A). A record of another operation is never
-        // read as this attempt's: it keeps only its exact text below, labelled so.
-        const observed = latestStatus?.after_update || null;
+        // read as this attempt's: it keeps only its exact text below, labelled so. An activation keeps its own record.
+        const observed = view.raw === undefined ? latestStatus?.after_update || null : null;
         const own = Boolean(observed) && String(observed.operation_id || '') === view.id;
         attemptFacts.innerHTML = [...view.details, ...(own ? afterUpdateRows(observed) : [])].map(factRowHtml).join('');
-        attemptRaw.hidden = !observed;
-        attemptRawLabel.textContent = own ? 'Raw record' : 'Raw record (not matched to this attempt)';
+        const raw = view.raw ?? (observed ? JSON.stringify(observed, null, 2) : '');
+        attemptRaw.hidden = !raw;
+        attemptRawLabel.textContent = view.raw !== undefined || own ? 'Raw record' : 'Raw record (not matched to this attempt)';
         // Rewritten only when the record changes, so a refresh keeps the owner's selection in it.
-        const raw = observed ? JSON.stringify(observed, null, 2) : '';
         if (attemptRawText.textContent !== raw) attemptRawText.textContent = raw;
-        attemptRestore.hidden = !view.restoreTarget;
+        if (view.open !== undefined && attemptMemo.id !== view.id) {  // a failure opens once; the owner's choice stays
+            attemptMemo.id = view.id;
+            attemptDetails.open = view.open;
+        }
+        // The verdict's own Restore of the same commit is the one button for it.
+        attemptRestore.hidden = !view.restoreTarget
+            || (verdict.action?.id === 'restore' && verdict.action.target === view.restoreTarget);
         attemptRestore.dataset.target = view.restoreTarget || '';
+        attemptRestore.dataset.name = view.restoreName || '';
         attemptRestore.disabled = replaceInFlight || Boolean(latestStatus?.update_tx?.active)
-            || ['preflighting', 'updating', 'restarting'].includes(phase);
+            || ['preflighting', 'updating', 'restarting', ...SWITCHING].includes(phase)
+            || SWITCHING.includes(verdict.state);
     }
 
     function render() {
@@ -865,23 +929,16 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         meta.innerHTML = (verdict.chips || []).map(chipHtml).join('');
         actionNote.textContent = verdict.checkedAgo || '';
         const actionRow = actionNote.parentElement;
-        actionRow.hidden = !verdict.action && !verdict.checkedAgo;
-        if (verdict.action) {
-            primaryBtn.hidden = false;
-            primaryBtn.disabled = Boolean(verdict.action.disabled);
-            primaryBtn.textContent = verdict.action.label;
-            primaryBtn.dataset.action = verdict.action.id;
-        } else {
-            primaryBtn.hidden = true;
-            primaryBtn.dataset.action = '';
-        }
+        actionRow.hidden = !verdict.action && !verdict.secondary?.length && !verdict.checkedAgo;
+        paintVerdictActions(actionsBar, primaryBtn, verdict);
         // Replace gating fails CLOSED: a status read that failed (synthesized
         // status_error) proves nothing about the durable transaction, so the
         // recovery action stays disabled until a successful re-read.
         replaceBtn.disabled = replaceInFlight || statusReadFailed(latestStatus) || [
             'loading', 'checking', 'updating', 'preflighting', 'restarting',
             'restart_required', 'restart_needed', 'resolving', 'unmanaged',
-        ].includes(verdict.state);
+        ].includes(verdict.state) || SWITCHING.includes(verdict.state) || SWITCHING.includes(phase);
+        paintCandidateFacts(candidateNodes, verdict, factRowHtml, candidateMemo);
         renderAttempt(verdict);
         renderLetter();
     }
@@ -936,7 +993,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
 
     let statusRefreshPromise = null;
     let statusRefreshNext = null;
-    function loadStatus({ fetchRemote = false, preservePhase = !fetchRemote && ['preflighting', 'updating'].includes(phase) } = {}) {
+    function loadStatus({ fetchRemote = false, preservePhase = !fetchRemote && IN_FLIGHT.includes(phase) } = {}) {
         statusRefreshNext = {
             fetchRemote: fetchRemote || Boolean(statusRefreshNext?.fetchRemote),
             preservePhase: preservePhase && (statusRefreshNext?.preservePhase ?? true),
@@ -960,7 +1017,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                         ? bindPreflightDescription(data, { merge_plan: latestStatus.preflight_range, letter: latestStatus.letter }) : data;
                     // Keep an outstanding apply/restart await. Server progress refines
                     // its label; a fresh page starts with no old local phase.
-                    if (!options.preservePhase || !['updating', 'restarting', 'preflighting'].includes(phase)) {
+                    if (!options.preservePhase || ![...IN_FLIGHT, 'restarting'].includes(phase)) {
                         setPhase(restartNeeded && !data?.update_tx?.active ? 'restart_needed' : '');
                     } else render();
                 } catch (err) {
@@ -1046,10 +1103,11 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     }
 
-    async function rollback(target) {
+    // `name`: the version a record names for this commit ("7.8.1 (88acfdbe)"); the request still sends the exact target.
+    async function rollback(target, name = '') {
         const confirmed = await openConfirmDialog({
-            title: 'Restore version',
-            body: `Restore ${target} locally?\n\nRunning work will be interrupted, a rescue snapshot will be saved, and the server will restart. Nothing will be pushed. Engine data cannot be downgraded.`,
+            title: name ? `Restore ${name}?` : 'Restore version',
+            body: `Restore ${name ? `${name}, commit ${target},` : target} locally?\n\nRunning work will be interrupted, a rescue snapshot will be saved, and the server will restart. Nothing will be pushed. Engine data cannot be downgraded.`,
             confirmLabel: 'Restore',
             danger: true,
         });
@@ -1104,7 +1162,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 content: description ? { label: "What's new", mount: (el) => mountDescription(el, description) } : null,
                 body: (description ? '' : 'No description is available for this exact preflight range.\n\n') + (assisted
                     ? `${conflictCount} conflict(s) need resolution. Ouroboros will resolve the merge as a reviewed task (model spend applies); progress lands in chat, and the server restarts after the reviewed commit.`
-                    : `Git applies this update directly (${plan.local_dirty_count || 0} uncommitted file(s) are stashed and restored). The server restarts when it lands.`)
+                    : `Git applies this update in this checkout.${plan.local_dirty_count ? ` ${plan.local_dirty_count} uncommitted file(s): ${STASH_WORDS}` : ''} The server restarts when it lands.`)
                     + '\n\n' + updateEffectsText(preflight),
                 details: { summary: 'Checks for this range', rows: preflightEvidenceRows(preflight) },
                 confirmLabel: assisted ? 'Start reviewed resolution' : 'Update now',
@@ -1189,6 +1247,39 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     }
 
+    // The Update prepared beside the running app: prepare (with or without the local changes), discard, and
+    // Restart to update (activate). Only an explicit press of one of the verdict's buttons reaches here.
+    async function runCandidateAction(strategy) {
+        // The candidate the dialog describes is the one the request names: a refresh while the owner reads it
+        // must not substitute another (A confirmed, B activated); a changed candidate is shown again instead.
+        const shown = latestStatus || {};
+        const candidateId = strategy === 'prepare' ? '' : String(shown?.candidate?.candidate_id || '');
+        const confirm = candidateDialog(strategy, shown);
+        if (confirm && !(await openConfirmDialog(confirm))) return;
+        if (candidateId && String(latestStatus?.candidate?.candidate_id || '') !== candidateId) {
+            showToast('The prepared update changed while this was open; nothing was sent. Review it again.', 'error');
+            await loadStatus({ preservePhase: false });
+            return;
+        }
+        setPhase(strategy === 'activate' ? 'activating' : 'requesting');
+        try {
+            const data = await apiClient.updateCandidate(strategy, candidateId);
+            if (strategy === 'activate' && data?.restarting) {
+                // The reply's candidate is the one now activating: the restart names it, whatever the channel says.
+                if (String(data.candidate?.candidate_id || '') === candidateId) {
+                    latestStatus = { ...latestStatus, candidate: data.candidate };
+                }
+                enterRestarting();
+                return;
+            }
+            if (data?.status === 'discarded') showToast('The prepared update was discarded.', 'success');
+        } catch (err) {
+            const verb = strategy === 'activate' ? 'Restart to update did not start' : 'The request did not complete';
+            showToast(`${verb}: ${applyFailureText(err)}`, 'error');
+        }
+        await loadStatus({ preservePhase: false });
+    }
+
     async function restartNow() {
         primaryBtn.disabled = true;
         try {
@@ -1206,8 +1297,10 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     }
 
-    primaryBtn.addEventListener('click', () => {
-        const action = primaryBtn.dataset.action;
+    actionsBar.addEventListener('click', (event) => {
+        const button = event.target.closest?.('button[data-action]');
+        if (!button || button.disabled) return;
+        const action = button.dataset.action;
         if (action === 'check') {
             loadStatus({ fetchRemote: true });
             loadVersions();
@@ -1215,10 +1308,18 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             applyUpdate();
         } else if (action === 'restart') {
             restartNow();
+        } else if (action === 'restore') {
+            rollback(button.dataset.target, button.dataset.name);
+        } else if (action === 'recovery') {  // the Restore list, opened where it is
+            recoveryDetails.open = true;
+            recoveryDetails.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+            recoveryDetails.querySelector('summary')?.focus?.({ preventScroll: true });
+        } else if (['prepare', 'apply_without_local_changes', 'discard_candidate', 'activate'].includes(action)) {
+            runCandidateAction(action);
         }
     });
     replaceBtn.addEventListener('click', replaceWithOfficial);
-    attemptRestore.addEventListener('click', () => rollback(attemptRestore.dataset.target));
+    attemptRestore.addEventListener('click', () => rollback(attemptRestore.dataset.target, attemptRestore.dataset.name));
     meta.addEventListener('click', (event) => {
         if (event.target.closest?.('[data-open-settings-advanced]')) {
             openSettingsTab?.('advanced');
@@ -1227,7 +1328,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         const confirmedPromote = await openConfirmDialog({
             title: 'Save recovery point',
-            body: 'Move this installation\'s local recovery branch (ouroboros-stable) to the current checkout?\n\nThis is the fallback the runtime boots when the working branch breaks. It does not publish anything and does not change the official QA feed of any install.',
+            body: 'Move this installation\'s local recovery branch (ouroboros-stable) to the current checkout?\n\nIt does not publish anything and does not change the official QA feed of any install.',
             confirmLabel: 'Save recovery point',
         });
         if (!confirmedPromote) return;

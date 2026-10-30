@@ -375,6 +375,12 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     drive_root = tmp_path / "data"
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
+    from ouroboros import skill_builtin
+    from ouroboros.skill_loader import compute_content_hash
+
+    digest = compute_content_hash(installed)  # an unmodified recorded install (a bare legacy copy is kept)
+    skill_builtin._write_record(drive_root, "telegram", version="1.2.0", digest=digest, base_digest=digest,
+                                turn_on_when_ready=False, installed_by="ouroboros")
     assert _reseed(seed_dir, drive_root) == 1
     assert "version: 1.3.9" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_quiz.py", "lib/telegram_state.py"):
@@ -509,7 +515,9 @@ def test_first_start_preserves_proven_edits_and_reseeds_unchanged_launcher_copy(
         assert skill.review.gate_for(skill.content_hash)["blocking_reason"] == "trusted_source"
 
 
-def test_conversion_without_seed_review_keeps_launcher_version_reseed(env, monkeypatch):
+def test_legacy_builtin_without_base_is_not_reseeded(env, monkeypatch):
+    """No review and no recorded base: nothing proves the copy is the shipped one, so the
+    version re-seed keeps it (and the owner's edit) instead of overwriting it."""
     from ouroboros import skill_builtin
 
     seed_dir, drive = env
@@ -517,5 +525,31 @@ def test_conversion_without_seed_review_keeps_launcher_version_reseed(env, monke
     installed, _ = _legacy_native_seed(drive, seed_dir, edit_after=True)
     (drive / "state" / "skills" / "weather" / "review.json").unlink()
     _write_skill(seed_dir, "weather", "2.0.0")
-    assert skill_builtin.ensure_builtin_skills(drive) == 1
-    assert "version: 2.0.0" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert skill_builtin.ensure_builtin_skills(drive) == 0
+    assert "version: 1.0.0" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert (installed / "extra.txt").read_text(encoding="utf-8") == "owner edit\n"
+
+
+@pytest.mark.parametrize("edited", [False, True])
+def test_a_legacy_copy_is_reseeded_only_when_its_committed_release_proves_it_unchanged(env, monkeypatch, edited):
+    import subprocess
+
+    from ouroboros import skill_builtin
+
+    seed_dir, drive = env
+    monkeypatch.setattr(skill_builtin, "bundled_skills_dir", lambda: seed_dir)
+    installed, _ = _legacy_native_seed(drive, seed_dir, edit_after=edited)
+    (drive / "state" / "skills" / "weather" / "review.json").unlink()
+    repo = seed_dir.parent
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True,
+                       env={**__import__("os").environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    git("init", "-q")
+    git("add", "repo_skills")
+    git("commit", "-q", "-m", "release 1.0.0 of weather")  # the bundle's own history carries the old release
+    _write_skill(seed_dir, "weather", "2.0.0")
+    assert skill_builtin.ensure_builtin_skills(drive) == (0 if edited else 1)
+    assert f"version: {'1.0.0' if edited else '2.0.0'}" in (installed / "SKILL.md").read_text(encoding="utf-8")

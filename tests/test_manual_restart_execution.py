@@ -122,7 +122,7 @@ def test_restart_checks_out_first_then_stops_owned_work_in_order(owners, restart
         "checkout", "cancel", "cancel", "cancel", "kill", "reconcile", "daemon_stop",
     ]
     checkout, *cancels, kill, reconcile, _ = owners.calls
-    assert checkout[1] == {"reason": "owner_restart", "unsynced_policy": "rescue_and_reset"}
+    assert checkout[1] == {"reason": "owner_restart", "unsynced_policy": "keep"}
     assert [c[1] for c in cancels] == ["task-a", "direct-1", "synthesis-1"]
     assert all(c[2]["source"] == "owner_restart" and c[2]["requested_stop_policy"] == "immediate"
                and c[2]["allow_settled_target"] is True for c in cancels)

@@ -62,6 +62,7 @@ _KIND_DELEGATED_EXEC = "delegated_exec"
 # Own-body authoring candidates (``body_candidate.py``): retention is decided by
 # unique work and last use, never by age alone, and never by a child task's id.
 _KIND_BODY_CANDIDATE = "body_candidate"
+_KIND_UPDATE_CANDIDATE = "update_candidate"  # installation-owned (update_prepare.py): goes once settled, never by age
 _BASELINE_REF_PREFIX = "refs/ouroboros/delegated/"
 _RESULT_REF_PREFIX = "refs/ouroboros/delegated-result/"
 
@@ -110,7 +111,6 @@ def _safe_name(task_id: Any) -> str:
     # truncation keep a short hash of the full slug so two long names with the same prefix
     # do not silently collide.
     if len(safe) > 64:
-        import hashlib
         digest = hashlib.sha256(safe.encode("utf-8")).hexdigest()[:8]
         safe = f"{safe[:55]}_{digest}"
     return safe
@@ -1336,8 +1336,6 @@ def provision_payload_snapshot(
         baseline_sha = _git(wt_path, "rev-parse", "HEAD", env=env).stdout.strip()
         baseline_tree = _git(wt_path, "rev-parse", "HEAD^{tree}", env=env).stdout.strip()
         manifest_raw = _git(wt_path, "ls-tree", "-r", "-z", baseline_tree, env=env).stdout
-        import hashlib
-
         manifest_digest = hashlib.sha256(
             manifest_raw.encode("utf-8", errors="surrogateescape")).hexdigest()
         if payload_content_hash(target) != source_hash:
@@ -1482,7 +1480,7 @@ def remove_worktree(
     want_path = str(Path(path).resolve()) if path else ""
     match: Optional[Dict[str, Any]] = None
     for entry in _records(data_dir, op="remove_worktree"):
-        if entry.get("kind") in (_KIND_DELEGATED_EXEC, _KIND_BODY_CANDIDATE):
+        if entry.get("kind") in (_KIND_DELEGATED_EXEC, _KIND_BODY_CANDIDATE, _KIND_UPDATE_CANDIDATE):
             continue
         if (task_id and entry.get("task_id") == str(task_id)) or (want_path and entry.get("path") == want_path):
             match = entry
@@ -1523,21 +1521,19 @@ def _retire_worktree(match: Dict[str, Any], root: Path, data_dir: Any, branch: s
 
 def prune_orphans(
     *,
-    worktree_root: Optional[Any] = None,
-    data_dir: Optional[Any] = None,
+    worktree_root: Optional[Any] = None, data_dir: Optional[Any] = None,
     retention_days: Optional[int] = None,
     live: Optional[Any] = None,
     only: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Reconcile worktrees on the custody cadence and the owner's free action.
 
-    A plain copy missing or past retention goes only with proof its task is over: its record is
-    terminal, ``live(task_id)`` (the supervisor's liveness probe: True live, False proven
-    not live, None unknown) answers False, and no lineage process lives. Without a probe,
-    or with an unknown answer, age alone deletes nothing. ``only`` restricts the pass to
-    those task ids (the free action's previewed rows), leaving every other copy untouched.
-    Each decision is rechecked under that copy's record lock; a checkout that survives
-    removal keeps its first failure stamp and pin; a new process or directory identity retries it.
+    A plain copy missing or past retention goes only with proof its task is over: its record is terminal,
+    ``live(task_id)`` (the supervisor's liveness probe: True live, False proven not live, None unknown) answers
+    False, and no lineage process lives. Without a probe, or with an unknown answer, age alone deletes nothing.
+    ``only`` restricts the pass to those task ids (the free action's previewed rows), leaving every other copy
+    untouched. Each decision is rechecked under that copy's record lock; a checkout that survives removal keeps its
+    first failure stamp and pin; a new process or directory identity retries it.
     """
     retention = retention_days if retention_days is not None else get_gc_retention_days()
     cutoff = age_cutoff(retention)
@@ -1547,10 +1543,11 @@ def prune_orphans(
     selected = [entry for entry in entries if entry.get("kind") != _KIND_DELEGATED_EXEC
                 and (chosen is None or str(entry.get("task_id") or "") in chosen)
                 and not worktree_removal.unchanged(entry)]
+    from supervisor import update_prepare
+    update_prepare.reclaim_environments(data_dir, rows=entries)  # strays no record of this listing names
     if not selected:
         return {"removed": 0, "kept": len(entries)}
-    # Candidate evidence is gathered without any lock; each copy's decision is then
-    # rechecked, and a retiring candidate marked, under that copy's own lock.
+    # Candidate evidence is gathered lock-free; each decision is rechecked (a retiring one marked) under its lock.
     from ouroboros import body_candidate
     verdicts = {
         str(entry.get("path") or ""): body_candidate.retention_verdict(
@@ -1559,16 +1556,16 @@ def prune_orphans(
         for entry in selected if entry.get("kind") == _KIND_BODY_CANDIDATE}
     removed = 0
     for preview in selected:
-        path = str(preview.get("path") or "")
-        branch = str(preview.get("branch") or "")
+        path, branch = str(preview.get("path") or ""), str(preview.get("branch") or "")
         try:
             with _record_lock(path, data_dir, op="prune", task_id=str(preview.get("task_id") or "")):
                 entry = _record_at(path, data_dir, op="prune_orphans")
                 if entry != preview:
                     continue
-                if entry.get("kind") == _KIND_BODY_CANDIDATE:
-                    verdict = verdicts[path]
-                    if not verdict["remove"] or not body_candidate.verdict_holds(entry, verdict, data_dir=data_dir):
+                if entry.get("kind") in (_KIND_BODY_CANDIDATE, _KIND_UPDATE_CANDIDATE):
+                    verdict = verdicts.get(path) or update_prepare.retention_verdict(entry, data_dir, live=live)
+                    if not verdict["remove"] or (path in verdicts and not body_candidate.verdict_holds(
+                            entry, verdict, data_dir=data_dir)):
                         continue
                     if not entry.get("retiring"):
                         entry = {**entry, "retiring": True}
@@ -1582,7 +1579,9 @@ def prune_orphans(
                         continue
         except (WorktreeOpsLockBusy, SubagentWorktreeRegistryCorrupt):
             continue  # busy or unreadable: the next pass decides
-        removed += bool(_retire_worktree(entry, root, data_dir, branch))
+        if _retire_worktree(entry, root, data_dir, branch):
+            removed += 1
+            update_prepare.release_environment(entry, data_dir)  # an update candidate's users settled with it
     return {"removed": removed, "kept": len(_records(data_dir, op="prune_orphans"))}
 
 

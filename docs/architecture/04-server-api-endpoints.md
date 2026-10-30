@@ -8,7 +8,7 @@ Browser/CLI routes: `gateway/router.py`; Host Service: §12. Tests check this ta
 
 Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11). `gateway/host_service.py::create_host_service_app` builds the separate token-authenticated loopback Host Service, not a public owner API (§12).
 
-`/api/files/*` resolves paths inside the configured root. In-root symlinks work; outside links may be listed (`is_symlink: true`), never read, written, downloaded, deleted or traversed. Chat downloads (`?upload=<id>`) instead use `chat_uploads.open_upload` inside `data/uploads`, independently of the Files root.
+`/api/files/*` resolves paths inside the configured root. In-root symlinks work; outside links may be listed (`is_symlink: true`), never read, written, downloaded, deleted or traversed. Downloads of a chat attachment (`?upload=<id>`, `chat_uploads.open_upload` in `data/uploads`) or the live Update's carried list (`?carried_list=<candidate id>`) need no Files root.
 
 | Method | Path | Note |
 |---|---|---|
@@ -63,7 +63,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/files/list` | |
 | GET | `/api/files/read` | |
 | GET | `/api/files/content` | |
-| GET | `/api/files/download` | `upload`: a chat attachment, separate authority (above) |
+| GET | `/api/files/download` | |
 | POST | `/api/files/upload` | |
 | POST | `/api/files/mkdir` | |
 | POST | `/api/files/write` | |

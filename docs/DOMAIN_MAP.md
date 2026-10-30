@@ -17,8 +17,8 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D07 | Delegation, subagents & Claudexor | 97 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 73 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
-| D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 108 | 0 |
+| D10 | Git, update & release machinery | 46 | 0 |
+| D11 | Gateway, server & Web UI | 109 | 0 |
 | D12 | Settings & configuration | 27 | 0 |
 | D13 | Safety, guards & runtime mode | 11 | 0 |
 | D14 | Skills & extensions | 70 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 37 | 0 |
 | D19 | Frozen contracts (ABI) | 12 | 0 |
 | D20 | Presence | 20 | 0 |
-| **total** | | **928** | **0** |
+| **total** | | **935** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -718,11 +718,13 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 ### D10 — Git, update & release machinery
 
+- `ouroboros/app_install.py`
 - `ouroboros/body_adoption.py`
 - `ouroboros/body_switch.py`
 - `ouroboros/evolution_history.py`
 - `ouroboros/github_pr_identity.py`
 - `ouroboros/merge_receipts.py`
+- `ouroboros/native_package.py`
 - `ouroboros/repo_remotes.py`
 - `ouroboros/size_ratchet_manifest.py`
 - `ouroboros/store_switch.py`
@@ -751,11 +753,15 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/git_ops_rescue.py`
 - `supervisor/git_ops_reset.py`
 - `supervisor/git_ops_updates.py`
+- `supervisor/update_adaptation.py`
 - `supervisor/update_candidate.py`
 - `supervisor/update_carriers.py`
+- `supervisor/update_checks.py`
 - `supervisor/update_merge.py`
 - `supervisor/update_merge_plan.py`
 - `supervisor/update_merge_policy.py`
+- `supervisor/update_native.py`
+- `supervisor/update_prepare.py`
 - `supervisor/update_recovery.py`
 - `supervisor/update_source.py`
 
@@ -837,6 +843,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/ui_i18n.py`
 - `ouroboros/gateway/ui_i18n_contracts.py`
 - `ouroboros/gateway/ui_preferences.py`
+- `ouroboros/gateway/update_activation.py`
 - `ouroboros/gateway/update_contracts.py`
 - `ouroboros/gateway/update_progress.py`
 - `ouroboros/gateway/widget_assets.py`

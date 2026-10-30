@@ -28,7 +28,7 @@ STATES = {
     "unknown": ({"local_changes": "unknown", "local_changes_base": "", "local_changes_reason": "several_bases",
                  "safe_to_apply": False}, "unknown", "Could not compare this checkout"),
     "dirty": ({"ahead": 0, "local_changes": "absent", "local_changes_base": "a" * 40, "dirty": True,
-               "dirty_count": 3, "safe_to_apply": False}, "none", "Uncommitted changes are stashed and restored"),
+               "dirty_count": 3, "safe_to_apply": False}, "none", "Uncommitted changes go into a Git stash for the update"),
 }
 
 
@@ -90,7 +90,8 @@ def test_update_pill_and_panel_name_local_content_not_commit_counts(direct_serve
                         page.route("**/api/update/apply*", lambda route: errors.append("apply was sent"))
                         page.locator("#btn-update-primary").click()
                         dialog = page.locator(".confirm-dialog")
-                        expect(dialog).to_contain_text("3 uncommitted file(s) are stashed and restored", timeout=30_000)
+                        expect(dialog).to_contain_text("3 uncommitted file(s): Uncommitted changes go into a Git stash",
+                                                       timeout=30_000)
                         dialog.screenshot(path=str(evidence / f"updates-confirm-{name}-{theme}-{engine}.png"))
                         dialog.locator("[data-confirm-cancel]").last.click()
                         expect(dialog).to_have_count(0)

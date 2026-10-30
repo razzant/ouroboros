@@ -515,6 +515,11 @@ async def _serve_chat_upload(request: Request) -> Response:
 
 
 async def api_files_download(request: Request) -> Response:
+    if "carried_list" in request.query_params:
+        # The Update's own list of the work its live candidate carries, by that candidate's id (never the Files root).
+        from ouroboros.gateway.update_activation import carried_list_download
+
+        return await carried_list_download(request)
     if "upload" in request.query_params:
         # A separate early authority: chat attachments never depend on the Files root.
         return await _serve_chat_upload(request)

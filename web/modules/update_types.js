@@ -38,17 +38,19 @@
 
 /**
  * @typedef {Object} UpdateApplyRequest
- * @property {'auto_merge'|'assisted'|'manual'|'replace'} strategy
+ * @property {'auto_merge'|'assisted'|'manual'|'replace'|'prepare'|'activate'|'discard_candidate'|'apply_without_local_changes'} strategy
  * @property {string=} expected_base_sha
  * @property {string=} expected_target_sha
  * @property {boolean=} confirm_recovery
+ * @property {string=} candidate_id
  */
 
 /**
  * @typedef {Object} UpdateApplySuccessResponse
- * @property {'ok'|'restart_required'|'assisted_started'|'manual'} status
+ * @property {'ok'|'restart_required'|'assisted_started'|'manual'|'preparing'|'discarded'} status
  * @property {boolean=} restarting
- * @property {'auto_merge'|'assisted'|'manual'|'replace'=} strategy
+ * @property {('auto_merge'|'assisted'|'manual'|'replace'|'prepare'|'activate'|'discard_candidate'|'apply_without_local_changes')=} strategy
+ * @property {Object=} candidate
  * @property {string=} task_id
  * @property {UpdateMergePlan=} merge_plan
  * @property {string=} error
@@ -75,6 +77,38 @@
  * @property {string=} stash_note Stash-first prologue disclosure: how stashed local work was unwound.
  * @property {?number=} estimated_wave_usd Wave-floor admission estimate (worst-case review-pack caps).
  * @property {?number=} remaining_usd Remaining model budget the floor compared against.
+ * @property {Object=} candidate The candidate a prepare/activate refusal concerns.
+ */
+
+/**
+ * The Update prepared beside the serving checkout, as `/api/update/status` `candidate` projects it
+ * (`supervisor/update_prepare.py::projection`); web/modules/update_candidate.js words it.
+ * @typedef {Object} UpdateCandidate
+ * @property {'none'|'preparing'|'checking'|'adapting'|'ready'|'needs_adaptation'|'needs_decision'|'paused_budget'|'failed'|'stale'|'activating'|'activated'|'unknown'} state
+ * @property {string=} candidate_id
+ * @property {string=} reason
+ * @property {string=} target_sha
+ * @property {string=} target_ref
+ * @property {string=} channel
+ * @property {string=} base_sha
+ * @property {boolean=} local_changes Staged, unstaged or untracked work in the prepared base.
+ * @property {boolean=} without_local_changes
+ * @property {('clean'|'fast_forward'|'conflicting'|'')=} merge_kind
+ * @property {string[]=} conflict_paths
+ * @property {{index?: string[], files?: string[]}=} layer_conflicts
+ * @property {?boolean=} environment_same
+ * @property {Object=} checks `{ok, tests?, environment_note?, skipped?}`
+ * @property {Object=} activation `{outcome?: 'adopted'|'returned'|'returning'|'start_failed', note?, reasons?, decision?, sha?, previous?}`
+ * @property {boolean=} newer_available
+ * @property {{step?: string, task_id?: string, resolution?: string}=} adaptation A conflict resolved under review.
+ * @property {{status?: 'none'|'staged'|'manual', reason?: string, version?: string, instruction?: string}=} native
+ *   The desktop app the target needs: staged for the restart, or a manual instruction.
+ * @property {string=} question What `needs_decision` asks of the owner.
+ * @property {string=} updated_at
+ * @property {Array<'prepare'|'activate'|'discard_candidate'|'apply_without_local_changes'>=} actions
+ * @property {{code: string, text: string, at?: string}=} refusal A preparation refused before any copy existed.
+ * @property {Object=} start_failure `{cause: 'import_failed', composition?: 'healthy'|'unverified', rescue?, paths?, detail, at}`
+ * @property {string=} error Why the record could not be read (`state: 'unknown'`).
  */
 
 /**

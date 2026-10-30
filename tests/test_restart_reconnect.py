@@ -401,7 +401,7 @@ def test_owner_restart_copy_is_explicit_about_stopped_task(tmp_path, monkeypatch
 
     def checked(function, **kwargs):
         assert function is ctx.safe_restart and not flags.exists()
-        assert kwargs == {"reason": "owner_restart", "unsynced_policy": "rescue_and_reset"}
+        assert kwargs == {"reason": "owner_restart", "unsynced_policy": "keep"}
         calls.append("checked")
         return True, "ok"
 

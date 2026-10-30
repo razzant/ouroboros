@@ -169,20 +169,29 @@ def test_boot_health_fails_only_when_the_phase_is_failed():
             server.shutdown()
 
 
+# What in-app Update does to the desktop interpreter (supervisor/update_native.py): it replaces an official macOS app
+# only when the update needs a newer one, and stages only an app of the same Python minor version (runtime_differs).
+NATIVE_UPDATE = ("an update that needs a newer app also replaces an official signed app, bundled interpreter "
+                 "included, when the newer app runs the same Python minor version")
+
+
 def test_the_guides_point_to_the_carrier_instead_of_repeating_it():
     deployment = (REPO / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert "packaging/docker/compose.yaml" in deployment and "```yaml" not in deployment
     assert "python-build-standalone release 20261009" in deployment
     assert "CPython 3.10.22 and SQLite 3.53.1" in deployment
-    assert "does not replace" in deployment
+    assert NATIVE_UPDATE in " ".join(deployment.split())
     assert "installing the app again" in deployment
     assert "boot.phase" in deployment and "no start deadline" in deployment
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     assert "CPython 3.10.22 and SQLite 3.53.1" in readme
-    assert "install the app again" in readme
+    assert NATIVE_UPDATE in readme and "install the app again" in readme
     for page in (REPO / "site" / "install" / "index.html", REPO / "docs" / "install" / "index.html"):
         html = page.read_text(encoding="utf-8")
         assert "CPython 3.10.22 and SQLite 3.53.1" in html
-        assert "install the app again" in html
+        assert NATIVE_UPDATE in html and "install the app again" in html
+    for text in (deployment, readme):
+        assert "does not replace the bundled interpreter" not in " ".join(text.split())
+        assert "not that interpreter" not in text
     assert "packaging/docker/compose.yaml" in readme
     assert "docker/compose.yaml" in (REPO / "packaging" / "systemd" / "README.md").read_text(encoding="utf-8")

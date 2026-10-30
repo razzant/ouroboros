@@ -477,6 +477,16 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             log.warning("%s; continuing with local reset for branch %s", msg, branch)
 
     policy = str(unsynced_policy or "ignore").strip().lower()
+    if policy == "keep":
+        # Restart and cold boot keep the owner's composition (committed, staged, unstaged and
+        # untracked work) exactly: no rescue, reset or clean. A legacy update intent or the
+        # first boot's bundle pin still owns its own checkout move; another branch or a
+        # detached HEAD is protected as rescue_and_block protects it.
+        rc_b, current, _err = _go().git_capture(["git", "symbolic-ref", "-q", "--short", "HEAD"])
+        if not update_intent_target and not pin_bundle_sha and rc_b == 0 and current.strip() == branch:
+            _record_checkout_facts({"current_branch": branch, "current_sha": before_head})
+            return True, "kept"
+        policy = "rescue_and_reset" if (update_intent_target or pin_bundle_sha) else "rescue_and_block"
     if policy not in {"ignore", "block", "rescue_and_block", "rescue_and_reset"}:
         policy = "ignore"
 
@@ -561,12 +571,12 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
 
 def _dependency_install_plan(repo_dir: pathlib.Path) -> Tuple[List[str], str, pathlib.Path]:
     """``(command, source, lock path)`` of the one runtime-dependency install for ``repo_dir``."""
+    from ouroboros.launcher_bootstrap import DEPENDENCY_INPUTS
     from ouroboros.platform_layer import pip_install_target_args
 
-    req_path = repo_dir / "requirements-runtime.lock"
-    if not req_path.exists():
-        # Preserve upgrades from managed repositories created before uv locks.
-        req_path = repo_dir / "requirements.txt"
+    # The launcher's own selection (pre-uv repositories carry only the legacy filename).
+    req_path = next((repo_dir / name for name in DEPENDENCY_INPUTS if (repo_dir / name).exists()),
+                    repo_dir / DEPENDENCY_INPUTS[-1])
     # The sixth and last pip call site. On a packaged install `sys.executable` IS the
     # bundled interpreter, so an unflagged install wrote into the signed bundle.
     cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q",
@@ -581,7 +591,11 @@ def runtime_dependency_command(repo_dir: pathlib.Path) -> Optional[List[str]]:
     this chokepoint installs nothing (a frozen bundle, an active test boundary)."""
     if getattr(sys, 'frozen', False) or os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1":
         return None
-    return _dependency_install_plan(pathlib.Path(repo_dir))[0]
+    from ouroboros.runtime_venv import dependency_python
+
+    cmd = _dependency_install_plan(pathlib.Path(repo_dir))[0]
+    dependency_python(_go().DRIVE_ROOT, repo_dir, cmd[0])  # a broken private environment refuses the switch
+    return cmd
 
 
 def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
@@ -612,7 +626,10 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         if synced == fingerprint:
             return True, "unchanged:" + source
         from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
+        from ouroboros.runtime_venv import dependency_python
         from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
+
+        dependency_python(_go().DRIVE_ROOT, _go().REPO_DIR, cmd[0])  # never the interpreter's own packages instead
 
         with tracked_start() as publish:
             proc = publish(subprocess.Popen(
@@ -732,7 +749,7 @@ def safe_restart(
     reason: str,
     unsynced_policy: str = "rescue_and_reset",
 ) -> Tuple[bool, str]:
-    """Checkout dev, sync deps, import-test, then fall back to stable if needed.
+    """Checkout dev, sync deps, import-test; a failed import keeps the checkout and records the start failure.
 
     ``OUROBOROS_DISABLE_MANAGED_UPDATES=1`` is the stand lever: it keeps the deps
     sync and the import test but skips the checkout, so a stand pinned to one sha
@@ -766,6 +783,7 @@ def safe_restart(
 
     t = _go().import_test()
     if t["ok"]:
+        _note_start_failure(None)
         return True, f"OK: {_go().BRANCH_DEV}"
 
     _go().append_jsonl(
@@ -780,20 +798,72 @@ def safe_restart(
             "returncode": t.get("returncode", -1),
         },
     )
+    if unsynced_policy == "keep":
+        return _kept_import_failure(reason, t)
+    # No automatic fallback to an older branch: nothing proves its code runs on data this generation may have
+    # migrated (§5.4), so the checkout stays for recovery and Restore chooses a version explicitly.
+    _note_start_failure({"reason": reason, "cause": "import_failed", "detail": _tail(t)})
+    return False, (f"Import test failed on {_go().BRANCH_DEV} (rc={t.get('returncode', -1)}); the checkout was kept "
+                   "for recovery, and no older branch was started on the current data.")
 
-    ok_s, err_s = _checkout_outcome(_go().BRANCH_STABLE, f"{reason}_fallback_stable", "rescue_and_reset")
-    if not ok_s:
-        return False, f"Failed checkout {_go().BRANCH_STABLE}: {err_s}"
 
-    deps_ok_s, deps_msg_s = _go().sync_runtime_dependencies(reason=f"{reason}_fallback_stable")
-    if not deps_ok_s:
-        return False, f"Failed deps for {_go().BRANCH_STABLE}: {deps_msg_s}"
+def _tail(result: Dict[str, Any]) -> str:
+    return str(result.get("stderr") or result.get("stdout") or "")[-1500:]
 
-    t2 = _go().import_test()
-    if t2["ok"]:
-        return True, f"OK: fell back to {_go().BRANCH_STABLE}"
 
-    return False, "Both branches failed import (dev and stable)"
+def _note_start_failure(fact: Optional[Dict[str, Any]]) -> None:
+    """The last bootstrap import failure, for the Updates panel's recovery (cleared by the next good one): one of
+    the Update's retained facts (``update_prepare.retain_fact``), so a providerless root keeps it too."""
+    from supervisor.update_prepare import retain_fact
+
+    try:
+        retain_fact("start_failure", None if fact is None else {**fact, "at": _go().utc_now_iso()}, _go().DRIVE_ROOT)
+    except OSError:
+        log.warning("Start failure fact not recorded", exc_info=True)
+
+
+def _kept_import_failure(reason: str, result: Dict[str, Any]) -> Tuple[bool, str]:
+    """``keep`` and a tree that does not import: never reset to the last commit, never fall back.
+
+    A composition recorded healthy that now fails names its environment, data or the
+    outside world, not the edit; an unverified one (edited while the app was closed) is
+    copied into a rescue snapshot and stays in place. Either way the boot reports it.
+    """
+    from supervisor.update_prepare import fingerprint, retained_fact, snapshot
+
+    try:
+        composition = fingerprint(snapshot(_go().REPO_DIR, _go().BRANCH_DEV))
+    except Exception as exc:
+        composition = {"error": f"{type(exc).__name__}: {exc}"}
+    healthy = (retained_fact("healthy_composition", _go().DRIVE_ROOT) or {}).get("composition")
+    fact: Dict[str, Any] = {"reason": reason, "cause": "import_failed", "detail": _tail(result)}
+    if composition == healthy:
+        fact["composition"] = "healthy"
+        cause = ("the composition that last reached ready no longer imports, so its environment, data or "
+                 "something outside the checkout changed")
+    else:
+        repo_state = _go()._collect_repo_sync_state()
+        rescue = _go()._create_rescue_snapshot(branch=_go().BRANCH_DEV, reason=f"{reason}_unverified_edit",
+                                               repo_state=repo_state)
+        fact.update(composition="unverified", rescue=str(rescue.get("path") or ""),
+                    paths=list(repo_state.get("dirty_lines") or [])[:20])
+        cause = (f"local changes that never reached ready break it ({len(fact['paths'])} path(s)); they stay in "
+                 f"place{' and were copied to ' + fact['rescue'] if fact['rescue'] else ''}")
+    _note_start_failure(fact)
+    return False, (f"Import test failed (rc={result.get('returncode', -1)}): {cause}. The checkout was kept; the "
+                   "last commit was not started without these changes.")
+
+
+def record_healthy_composition() -> None:
+    """A ready boot records the composition it ran as healthy (``keep`` reads it after a failure), beside the
+    Update's other retained facts."""
+    from supervisor.update_prepare import fingerprint, retain_fact, snapshot
+
+    snap = snapshot(_go().REPO_DIR, _go().BRANCH_DEV)
+    if snap["refusals"]:
+        return
+    retain_fact("healthy_composition", {"composition": fingerprint(snap), "recorded_at": _go().utc_now_iso()},
+                _go().DRIVE_ROOT)
 
 
 def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True) -> None:

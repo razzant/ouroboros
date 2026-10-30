@@ -349,6 +349,56 @@ def test_live_materializer_resolves_carrier_conflicts_for_the_assisted_lane(tmp_
     assert m0_version == "7.0.1\n"
 
 
+def test_the_live_materializer_stages_no_carrier_once_the_stop_began(tmp_path, monkeypatch):
+    """Producer -> Stop -> next spawn in the SERVING checkout. The live materializer's carrier step runs its Git
+    through the shell's tracked admission (``update_carriers.tracked_run_git``); when an owner Restart enters this
+    generation's stop door once the resolver read the first carrier's stages, no further child starts: every
+    carrier stays exactly as Git's merge left it (nothing staged after the door) and no baseline is pinned."""
+    from ouroboros import owned_shutdown
+    from ouroboros.tools import release_sync
+
+    repo, head = _init_carrier_repo(tmp_path)
+
+    def official_code(r):
+        (r / "a.txt").write_text("official code change\n", newline="\n")
+
+    def local_code(r):
+        (r / "a.txt").write_text("local code change\n", newline="\n")
+
+    _official_bump(repo, head, "7.0.1", extra=official_code)
+    _local_bump(repo, "7.1.0", extra=local_code)
+    _point_at(monkeypatch, tmp_path, repo, head)
+    plan = update_merge.plan_managed_update_merge(fetch=False)
+    assert plan["kind"] == "conflicting", plan
+    monkeypatch.setattr(owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())  # this test's own generation
+    started, real_popen, real_substitute = [], subprocess.Popen, release_sync.substitute_carrier_spans
+
+    class Recorded(real_popen):  # every child this process starts, with whether the door had opened
+        def __init__(self, args, *rest, **kwargs):
+            started.append((list(args) if isinstance(args, (list, tuple)) else [args], owned_shutdown.stop_begun()))
+            super().__init__(args, *rest, **kwargs)
+
+    def substitute(*args, **kwargs):  # called once the resolver holds the three stages of a carrier
+        if not owned_shutdown.stop_begun():
+            owned_shutdown.begin_owned_stop(tmp_path / "data", cause="owner_restart")
+        return real_substitute(*args, **kwargs)
+
+    monkeypatch.setattr(release_sync, "substitute_carrier_spans", substitute)
+    subprocess.Popen = Recorded
+    try:
+        ok, message, m0_tree = update_merge.materialize_assisted_merge_live(
+            head, plan["local_snapshot"], plan["target_sha"], plan["base_sha"])
+    finally:
+        subprocess.Popen = real_popen
+
+    carrier = [args[3:5] for args, stopping in started if args[:2] == ["git", "-C"] and not stopping]
+    assert carrier and all(step[0] == "show" for step in carrier)  # the resolver began before the door
+    assert [args for args, stopping in started if stopping] == []
+    assert not ok and not m0_tree, message
+    unmerged = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert set(CARRIER_FILES) <= set(unmerged) and "<<<<<<<" in (repo / "VERSION").read_text()
+
+
 # --- rollback case -----------------------------------------------------------
 
 

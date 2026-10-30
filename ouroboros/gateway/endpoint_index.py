@@ -364,8 +364,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/files/list": Shape(f"200:FileBrowserListResponse {_FILE_ERRORS}", query="path"),
     "GET /api/files/read": Shape(f"200:FileBrowserReadResponse {_FILE_ERRORS}", query="path"),
     "GET /api/files/content": Shape(f"200:file {_FILE_ERRORS}", query="path"),
-    "GET /api/files/download": Shape(f"200,206:file {_FILE_ERRORS} 503:ErrorResponse", query="path upload",
-                                     headers="Range", note="?upload=<stored id> reads a chat attachment, never a path"),
+    "GET /api/files/download": Shape(f"200,206:file {_FILE_ERRORS} 503:ErrorResponse", query="path upload carried_list",
+                                     headers="Range", note="?upload=<stored id> reads a chat attachment and "
+                                     "?carried_list=<candidate id> the live Update's list of carried work, never a path"),
     "POST /api/files/upload": Shape(f"200:FileChangeResponse {_FILE_ERRORS} 413:ErrorResponse", "multipart",
                                     note="form fields file and path (target directory); an existing name answers 409"),
     "POST /api/files/mkdir": Shape(f"200:FileChangeResponse {_FILE_ERRORS}", "FileMkdirRequest"),

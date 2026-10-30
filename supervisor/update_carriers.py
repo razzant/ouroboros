@@ -28,7 +28,10 @@ runs while the update lock is held, and a hung git must die with its whole
 process tree instead of wedging the update flow. The resolver itself never runs
 ``git merge`` — it substitutes explicit index stages and re-merges them with
 ``git merge-file`` — so the engine is neutral to rerere by construction, in
-line with the update flow's ``_MERGE_NEUTRAL_FLAGS`` discipline. Honest frame:
+line with the update flow's ``_MERGE_NEUTRAL_FLAGS`` discipline. Inside a server every
+insertion point and the Update's own merge pass ``tracked_run_git``, so the
+server's stop door refuses each step; the operator rebase helper keeps the
+self-contained ``_run_git``. Honest frame:
 the FIRST pre-v7 upgrade is driven by the OLD updater, which never calls this
 module; the policy targets steady state (7.0.0 -> 7.0.1 and beyond).
 """
@@ -38,7 +41,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Index stages of a conflicted path: 1 = merge base, 2 = ours, 3 = theirs.
 # During a managed update "theirs" is the official target in all three
@@ -50,6 +53,10 @@ _CARRIER_GIT_TIMEOUT_SEC = 300.0
 ``supervisor.update_candidate._GIT_RUN_TIMEOUT_SEC``. Kept as a local constant
 (and the runner below self-contained) so the operator rebase helper can import
 this module standalone without dragging git_ops or the tool registry in."""
+
+GitRunner = Callable[..., Tuple[int, bytes, bytes]]
+"""``(worktree, args, *, input_bytes=None) -> (returncode, stdout, stderr)``: this module's
+``_run_git`` by default; a caller inside a server passes ``tracked_run_git``."""
 
 
 def _run_git(
@@ -89,9 +96,26 @@ def _run_git(
     return proc.returncode, stdout or b"", stderr or b""
 
 
-def _stage_text(worktree: str, stage: int, path: str) -> Optional[str]:
+def tracked_run_git(
+    worktree: str, args: List[str], *, input_bytes: Optional[bytes] = None
+) -> Tuple[int, bytes, bytes]:
+    """``_run_git`` through the server's Git owner (``git_ops._run_git_process_bounded``: the
+    shell's tracked admission and publication, the same bound and tree kill): once the server's
+    stop began no step starts (rc 127, so that file is kept). Imported only when called, so the
+    standalone operator helper, which never calls it, still loads nothing of the server."""
+    from pathlib import Path
+
+    from supervisor.git_ops import _run_git_process_bounded
+
+    return _run_git_process_bounded(
+        ["git", "-C", str(worktree), *args], timeout=_CARRIER_GIT_TIMEOUT_SEC,
+        cwd=Path(worktree), text=False, input_data=input_bytes,
+    )
+
+
+def _stage_text(worktree: str, stage: int, path: str, run_git: Optional[GitRunner] = None) -> Optional[str]:
     """UTF-8 text of one index stage, or None (missing stage / undecodable)."""
-    rc, out, _err = _run_git(worktree, ["show", f":{stage}:{path}"])
+    rc, out, _err = (run_git or _run_git)(worktree, ["show", f":{stage}:{path}"])
     if rc != 0:
         return None
     try:
@@ -101,7 +125,7 @@ def _stage_text(worktree: str, stage: int, path: str) -> Optional[str]:
 
 
 def _merge_span_substituted_texts(
-    current: str, base: str, other: str
+    current: str, base: str, other: str, run_git: Optional[GitRunner] = None
 ) -> Tuple[Optional[str], str]:
     """Ordinary textual 3-way over the span-substituted stages.
 
@@ -116,7 +140,7 @@ def _merge_span_substituted_texts(
             stage_paths.append(stage_path)
         # merge-file needs no repository; -C pins the bounded runner to the
         # temp dir and the absolute stage paths stay valid either way.
-        rc, out, _err = _run_git(tmp, ["merge-file", "-p", "--", *stage_paths])
+        rc, out, _err = (run_git or _run_git)(tmp, ["merge-file", "-p", "--", *stage_paths])
         if rc == 0:
             try:
                 return out.decode("utf-8"), ""
@@ -129,7 +153,7 @@ def _merge_span_substituted_texts(
 
 
 def resolve_carrier_conflict_file(
-    worktree: str, path: str, prefer: str
+    worktree: str, path: str, prefer: str, *, run_git: Optional[GitRunner] = None
 ) -> Tuple[bool, str]:
     """Resolve ONE conflicted carrier file in *worktree*; (resolved, reason)."""
     from ouroboros.tools.release_sync import carrier_spans_for, substitute_carrier_spans
@@ -139,7 +163,7 @@ def resolve_carrier_conflict_file(
         return False, "not_a_carrier"
     stage_texts: Dict[int, str] = {}
     for stage in (1, 2, 3):
-        text = _stage_text(worktree, stage, path)
+        text = _stage_text(worktree, stage, path, run_git)
         if text is None:
             return False, f"stage_{stage}_unavailable"
         stage_texts[stage] = text
@@ -151,7 +175,7 @@ def resolve_carrier_conflict_file(
             return False, reason
         substituted[stage] = text
     merged, reason = _merge_span_substituted_texts(
-        substituted[2], substituted[1], substituted[3]
+        substituted[2], substituted[1], substituted[3], run_git
     )
     if merged is None:
         return False, reason
@@ -161,20 +185,23 @@ def resolve_carrier_conflict_file(
             handle.write(merged.encode("utf-8"))
     except OSError:
         return False, "worktree_write_failed"
-    rc_add, _out, _err = _run_git(worktree, ["add", "--", path])
+    rc_add, _out, _err = (run_git or _run_git)(worktree, ["add", "--", path])
     if rc_add != 0:
         return False, "stage_failed"
     return True, ""
 
 
 def resolve_carrier_conflicts(
-    worktree: str, conflict_paths: List[str], *, prefer: str = "theirs"
+    worktree: str, conflict_paths: List[str], *, prefer: str = "theirs",
+    run_git: Optional[GitRunner] = None,
 ) -> Dict[str, Any]:
     """Resolve carrier-span conflicts among *conflict_paths* in *worktree*.
 
     Returns ``{"resolved": [paths staged here], "kept": {path: reason}}``.
     ``prefer`` picks the winning side INSIDE the spans only: ``"theirs"`` for
     managed updates (the official target), ``"ours"`` for tactical rebases.
+    ``run_git`` runs every Git step (``GitRunner``): a start it refuses fails that
+    step, so the file is kept, and only the caller can tell a refusal from Git's answer.
     Per-file failures degrade that file to the assisted path — this function
     never raises for a file it cannot resolve."""
     if prefer not in _PREFER_STAGE:
@@ -186,7 +213,7 @@ def resolve_carrier_conflicts(
         if not path:
             continue
         try:
-            ok, reason = resolve_carrier_conflict_file(worktree, path, prefer)
+            ok, reason = resolve_carrier_conflict_file(worktree, path, prefer, run_git=run_git)
         except Exception:  # degrade, never crash the update machinery
             ok, reason = False, "resolver_error"
         if ok:

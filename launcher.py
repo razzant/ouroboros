@@ -64,15 +64,16 @@ from ouroboros.config import (
 from ouroboros.launcher_bootstrap import (
     BootstrapContext,
     bootstrap_repo as _bootstrap_repo,
-    check_git as _check_git, launcher_sources_changed, remember_loaded_checkout,
-    install_deps as _install_deps_impl,
+    check_git as _check_git, launcher_sources_changed, loaded_packages_replaced, remember_loaded_checkout,
+    install_deps as _install_deps_impl, restart_dependencies,
     embedded_python_env, update_external_host,
     exec_source_launcher, find_embedded_python, macos_source_entry, parse_launch_options, shell_runtime_facts,
     automatic_launch_allowed,
     sync_existing_repo_from_bundle as _sync_existing_repo_from_bundle_impl,
 )
 from ouroboros.desktop_media import attach_media_permissions, display_ready as _display_ready, host_environment, route_gtk_browser
-from ouroboros.runtime_venv import PREPARATION_DEPS_TIMEOUT_SEC, RuntimeVenvRefused, mark_ready, prepare_runtime_venv
+from ouroboros.runtime_venv import (PREPARATION_DEPS_TIMEOUT_SEC, RuntimeVenvRefused, mark_ready, prepare_runtime_venv,
+                                    private_entry_interpreter)
 from ouroboros.launcher_onboarding import (
     prepare_first_run_settings as _prepare_first_run_settings,
     present_first_run_onboarding as _present_first_run_onboarding,
@@ -475,6 +476,7 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> Optional[subprocess.Popen]:
     env["OUROBOROS_REPO_DIR"] = str(REPO_DIR)
     env["OUROBOROS_APP_VERSION"] = _shell_facts()["bundle_version"] or str(APP_VERSION)
     env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"
+    env["OUROBOROS_LAUNCHER_PACKAGE_HANDOFF"] = "1"  # it hands itself over when an Update swaps its packages
     env["OUROBOROS_MANAGED_REPO_DIR"] = str(REPO_DIR.resolve())
     env["OUROBOROS_LAUNCH_INTENT"] = _launch_intent  # this launcher's parsed intent, never an inherited one
     # Re-stamp presentation each generation (other hosts: web); a killed launcher's value stays until reap.
@@ -492,6 +494,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> Optional[subprocess.Popen]:
         env.pop("OUROBOROS_EXTERNAL_HOST_RESULT", None)
     # The managed server still resolves payloads from this bundle.
     env[BUNDLE_DIR_ENV] = str(_bundle_dir())
+    if IS_WINDOWS and (private := private_entry_interpreter(DATA_DIR, REPO_DIR, EMBEDDED_PYTHON)):
+        env["__PYVENV_LAUNCHER__"] = private  # run by its base Python itself: this PID and Job (a redirector's is not)
 
     server_py = REPO_DIR / "server.py"
     log.info("Starting agent: %s %s (port=%d)", EMBEDDED_PYTHON, server_py, port)
@@ -795,22 +799,12 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
+            if loaded_packages_replaced(REPO_DIR):  # an Update switched the packages this process imported: a fresh
+                _exec_source_launcher()  # launcher syncs, installs and starts on them, before any work here
+                log.error("Packages replaced and no fresh launcher started: reopen Ouroboros.")
+                break  # no generation on mixed packages (Quit and Panic keep their own exit)
             _sync_existing_repo_from_bundle()
-            if not _install_deps():
-                # Retry dependency sync once before letting imports fail under the crash fuse.
-                log.error(
-                    "Dependency install failed after the restart request; "
-                    "retrying once in %ds.", _DEPS_RETRY_DELAY_SEC,
-                )
-                time.sleep(_DEPS_RETRY_DELAY_SEC)
-                if not _install_deps():
-                    log.error(
-                        "Dependency install failed twice; starting the agent anyway "
-                        "under the crash fuse (%d crashes in %ds stops the launcher). "
-                        "If the new commit added packages, the server will fail to "
-                        "import them — see the pip output above for the cause.",
-                        MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC,
-                    )
+            restart_dependencies(_install_deps, log, _DEPS_RETRY_DELAY_SEC, (MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC))
             if launcher_sources_changed(REPO_DIR, bundle_dir=_bundle_dir(), source_root=pathlib.Path(__file__).parent):
                 _exec_source_launcher()  # a refused successor: this launcher starts the next generation itself
             continue

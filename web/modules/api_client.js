@@ -656,6 +656,12 @@ export const apiClient = {
         expected_target_sha: String(plan.target_sha || ''),
         ...(confirmRecovery ? { confirm_recovery: true } : {}),
     }),
+    /** The Update prepared beside the serving checkout: `prepare` / `apply_without_local_changes` (202 `preparing`),
+     *  `activate` (Restart to update) and `discard_candidate`, each naming the candidate the panel showed.
+     *  @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
+    updateCandidate: (strategy, candidateId = '') => jsonPost('/api/update/apply', {
+        strategy, ...(candidateId ? { candidate_id: String(candidateId) } : {}),
+    }),
 };
 
 /** Read-only import preview. Values return only to this Settings draft; this never saves or connects.

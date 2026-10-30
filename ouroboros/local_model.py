@@ -134,6 +134,8 @@ class LocalModelManager:
         # even before _install_proc is assigned, closing the panic-window race.
         self._install_cancelled = threading.Event()
         self._panic_requested = False
+        # Why the runtime install may not write the serving packages now: an Update's activation replaces them.
+        self._install_hold = ""
 
     def get_status(self) -> str:
         if self._proc is not None and self._proc.poll() is not None:
@@ -213,6 +215,8 @@ class LocalModelManager:
             # stop_server may have cancelled a previous lifecycle.
             if self._panic_requested:
                 raise RuntimeError("Local runtime install cancelled by Panic")
+            if self._install_hold:
+                raise RuntimeError(f"Local runtime install refused: {self._install_hold}")
             self._install_cancelled.clear()
             self._runtime_status = "installing"
             self._runtime_install_log = ""
@@ -220,6 +224,19 @@ class LocalModelManager:
         threading.Thread(
             target=self._run_install, daemon=True, name="llama-install"
         ).start()
+
+    def hold_runtime_install(self, reason: str) -> str:
+        """Keep the runtime install out of the serving packages while ``reason`` replaces them (an Update's
+        activation, from its environment check to its restart): ``""`` once held, else why not (one writes now)."""
+        with self._lock:
+            if self._runtime_status == "installing":
+                return "the local model runtime is being installed into the serving Python packages"
+            self._install_hold = str(reason)
+            return ""
+
+    def release_runtime_install(self) -> None:
+        with self._lock:
+            self._install_hold = ""
 
     def _run_install(self) -> None:
         """Background install worker."""

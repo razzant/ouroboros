@@ -539,11 +539,11 @@ def test_boot_rollback_restored_work_survives_its_required_restart(tmp_path, mon
     monkeypatch.setattr(workers, "REPO_DIR", repo)
     assert worker_pool_lifecycle._worker_sha_relation(saved["current_sha"], tx["pre_update_sha"])["relation"] == "equal"
 
-    # After the pending handoff closes, unrelated later manual Restart keeps
-    # its established reset policy. This fix grants no permanent dirty bypass.
+    # After the pending handoff closes, a later cold boot keeps the owner's composition
+    # (owner decision 3, unified Update): no rescue, reset or clean of dirty or untracked work.
     assert server._bootstrap_supervisor_repo({})[0] is True
-    assert (repo / "a.txt").read_text(encoding="utf-8") == "base\n"
-    assert not (repo / "scratch.txt").exists()
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "owner work plus later edit\n"
+    assert (repo / "scratch.txt").read_text(encoding="utf-8") == "owner scratch\n"
 
 
 def test_assisted_boot_with_pre_update_head_reexecs_once_after_rollback(tmp_path, monkeypatch):

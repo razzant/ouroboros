@@ -194,19 +194,62 @@ def checkout_sha(repo_dir: pathlib.Path) -> str:
 
 
 _LOADED_CHECKOUT_SHA = ""  # the commit whose modules this launcher process imported (remember_loaded_checkout)
+_LOADED_PACKAGES: tuple = ()  # where this launcher process's packages came from (package_environment)
+
+
+def package_environment(data_dir: pathlib.Path, repo_dir: pathlib.Path) -> tuple:
+    """Where a fresh entry of this launcher (its interpreter, this checkout) loads its packages: the kind and
+    ``(device, inode)`` of the one directory an Update switches under it (``update_prepare.serving_environment``),
+    the private environment the package-init hook would run it in, its venv or its user base. A frozen
+    launcher's own bundle, and an interpreter's own packages, are never switched."""
+    import site
+
+    from ouroboros.runtime_venv import PRIVATE_NAME, private_entry_interpreter
+
+    def identity(kind: str, path) -> tuple:
+        try:
+            found = os.lstat(path)
+        except OSError:
+            return (kind, None, None)
+        return (kind, found.st_dev, found.st_ino)
+
+    if getattr(sys, "frozen", False):
+        return ("frozen",)
+    if private_entry_interpreter(data_dir, repo_dir, sys.executable):
+        return identity("private", pathlib.Path(data_dir) / "state" / PRIVATE_NAME)
+    if sys.prefix != sys.base_prefix:
+        return identity("venv", sys.prefix)
+    if os.environ.get("PYTHONUSERBASE") and site.ENABLE_USER_SITE:  # off for -s, PYTHONNOUSERSITE and venvs
+        return identity("user_site", os.environ["PYTHONUSERBASE"])
+    return ("system",)
+
+
+def loaded_packages_replaced(repo_dir: pathlib.Path, data_dir: pathlib.Path | None = None) -> bool:
+    """True once the packages this launcher process imported were replaced (an Update switched them): a fresh
+    launcher must load the new ones before ordinary work. Recorded with the loaded checkout
+    (``remember_loaded_checkout``); nothing recorded (unknown) is never a relaunch."""
+    from ouroboros.config import DATA_DIR
+
+    return bool(_LOADED_CHECKOUT_SHA and _LOADED_PACKAGES) and package_environment(
+        data_dir or DATA_DIR, repo_dir) != _LOADED_PACKAGES
 
 
 def remember_loaded_checkout(repo_dir: pathlib.Path, *, bundle_dir: pathlib.Path | None = None) -> str:
     """Record once, before bootstrap can advance the checkout, which commit the launcher's modules came
     from: a frozen app or a seed copy imported them from ``bundle_dir`` (its manifest's ``source_sha``),
-    the checkout's own launcher from ``repo_dir`` (its HEAD)."""
-    global _LOADED_CHECKOUT_SHA
+    the checkout's own launcher from ``repo_dir`` (its HEAD); with it, where its packages came from
+    (``loaded_packages_replaced``)."""
+    global _LOADED_CHECKOUT_SHA, _LOADED_PACKAGES
     if _LOADED_CHECKOUT_SHA:
         return _LOADED_CHECKOUT_SHA
     # Frozen helpers came from the seed, even when the managed checkout is newer.
     loaded = (_read_json_file(bundle_dir / BUNDLE_MANIFEST_NAME).get("source_sha", "")
               if bundle_dir is not None else checkout_sha(repo_dir))
     _LOADED_CHECKOUT_SHA = str(loaded or "")
+    if _LOADED_CHECKOUT_SHA:  # one record of what this process loaded: both, or neither yet
+        from ouroboros.config import DATA_DIR
+
+        _LOADED_PACKAGES = package_environment(DATA_DIR, repo_dir)
     return _LOADED_CHECKOUT_SHA
 
 
@@ -652,26 +695,30 @@ def _pip_output_tail(result: Any, limit: int = 800) -> str:
     return ("\n".join(parts))[-limit:]
 
 
+# The dependency input a checkout installs from: the first of these that exists. Managed
+# repositories from before the uv migration may still carry only the legacy filename.
+DEPENDENCY_INPUTS = ("requirements-runtime.lock", "requirements.txt")
+
+
 def install_deps(context: BootstrapContext) -> bool:
     """Install/update Python deps for the embedded interpreter.
 
     ``pip_install_target_args`` keeps a packaged install OUT of the signed bundle
-    the embedded interpreter lives in; the return value reports whether pip
-    actually succeeded.
+    the embedded interpreter lives in; a bare interpreter whose entries of this
+    checkout run in their private environment installs there, never into its own
+    packages; the return value reports whether pip actually succeeded.
     """
     try:
-        requirements = context.repo_dir / "requirements-runtime.lock"
-        if not requirements.exists():
-            # Managed repositories from before the uv migration may still use
-            # the legacy filename during an in-place upgrade.
-            requirements = context.repo_dir / "requirements.txt"
-        if not requirements.exists():
+        requirements = next((context.repo_dir / name for name in DEPENDENCY_INPUTS
+                             if (context.repo_dir / name).exists()), None)
+        if requirements is None:
             return True
         from ouroboros.platform_layer import pip_install_target_args
+        from ouroboros.runtime_venv import dependency_python
 
+        python = dependency_python(context.data_dir, context.repo_dir, context.embedded_python)
         result = context.hidden_run(
-            [context.embedded_python, "-m", "pip", "install",
-             *pip_install_target_args(context.embedded_python), "-r", str(requirements)],
+            [python, "-m", "pip", "install", *pip_install_target_args(python), "-r", str(requirements)],
             env=embedded_python_env(context.data_dir),
             timeout=context.deps_timeout_sec,
             capture_output=True,
@@ -690,6 +737,24 @@ def install_deps(context: BootstrapContext) -> bool:
         )
         return False
     return True
+
+
+def restart_dependencies(install: Callable[[], bool], log: Any, retry_delay_sec: float, fuse: tuple) -> bool:
+    """The launcher's exit-42 dependency step: ``install``, one visible retry, then the crash fuse decides.
+
+    A second failure is logged and the agent still starts, so a lost pip failure cannot hide behind a later
+    ImportError; offline checkouts holding their requirements still restart.
+    """
+    if install():
+        return True
+    log.error("Dependency install failed after the restart request; retrying once in %ds.", retry_delay_sec)
+    time.sleep(retry_delay_sec)
+    if install():
+        return True
+    log.error("Dependency install failed twice; starting the agent anyway under the crash fuse (%d crashes in %ds "
+              "stops the launcher). If the new commit added packages, the server will fail to import them — see the "
+              "pip output above for the cause.", *fuse)
+    return False
 
 
 def ensure_data_skills_seeded() -> int:
@@ -888,6 +953,10 @@ def find_embedded_python(bundle_dir: pathlib.Path, *, macos: bool) -> str:
             return str(path)
     if macos and macos_source_entry(bundle_dir) is not None:
         raise RuntimeError("The app's bundled Python is missing; the source entry cannot run the server.")
+    from ouroboros.runtime_venv import PRIVATE_MARKER
+
+    if sys.platform == "win32" and (pathlib.Path(sys.executable).parent.parent / PRIVATE_MARKER).is_file():
+        return getattr(sys, "_base_executable", "") or sys.executable  # its private venv's base: start_agent
     return sys.executable
 
 

@@ -62,7 +62,7 @@ def test_bootstrap_matching_repo_identity_keeps_managed_reset(monkeypatch, tmp_p
 
     assert ok is True
     assert message == "reset"
-    assert git.safe_restart_calls == [{"reason": "bootstrap", "unsynced_policy": "rescue_and_reset"}]
+    assert git.safe_restart_calls == [{"reason": "bootstrap", "unsynced_policy": "keep"}]  # the cold boot keeps local work
     assert git.local_sync_calls == []
 
 
@@ -84,4 +84,4 @@ def test_bootstrap_legacy_launcher_metadata_keeps_managed_reset(monkeypatch, tmp
     ok, message = server._bootstrap_supervisor_repo({}, git)
 
     assert ok is True and message == "reset"
-    assert git.safe_restart_calls == [{"reason": "bootstrap", "unsynced_policy": "rescue_and_reset"}]
+    assert git.safe_restart_calls == [{"reason": "bootstrap", "unsynced_policy": "keep"}]  # the cold boot keeps local work

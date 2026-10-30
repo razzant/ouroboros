@@ -54,7 +54,7 @@ from ouroboros.server_process import (  # noqa: F401
     _request_restart_exit, _restart_requested,
     _supervisor_stop, _exit_signalled,
     _SignalStopServer, _embedded_uvicorn_server,
-    capture_server_source_baseline, server_stop_cause, log,
+    capture_server_source_baseline, hold_for_launcher_stop, server_stop_cause, log,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
     _active_direct_roots,
@@ -131,11 +131,13 @@ if not os.environ.get("OUROBOROS_AGENT_PYTHON"):
 # Logging is configured in main(), not at import: a spawn/forkserver worker re-imports
 # this module as ``__mp_main__`` and configures itself in ``worker_main``
 # (ouroboros/process_logging.py), so importing the server never attaches handlers.
-_pytest_default_real_data_dir = (
-    "pytest" in sys.modules
-    and not os.environ.get("OUROBOROS_DATA_DIR")
-    and same_location(DATA_DIR, pathlib.Path.home() / "Ouroboros" / "data")
-)
+def _pytest_on_owner_data(root, *, inherited: bool = False) -> bool:
+    """A test process (``inherited``: or one a test started) at the owner's real default data root, never admitted."""
+    return ((inherited and bool(os.environ.get("PYTEST_CURRENT_TEST"))) or "pytest" in sys.modules) and not \
+        os.environ.get("OUROBOROS_DATA_DIR") and same_location(root, pathlib.Path.home() / "Ouroboros" / "data")
+
+
+_pytest_default_real_data_dir = _pytest_on_owner_data(DATA_DIR)
 
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
@@ -536,7 +538,7 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
         except Exception:
             _managed_update_active = False
         block = _has_active_evolution_transaction() or _managed_update_active
-        policy = "rescue_and_block" if block else "rescue_and_reset"
+        policy = "rescue_and_block" if block else "keep"  # a cold boot keeps the owner's composition
         from ouroboros.server_restart import _noticed_bootstrap  # its failure, not a deferral, is told
         ok, msg = _safe_restart_serialized(
             _noticed_bootstrap(git_ops_module.safe_restart),
@@ -949,10 +951,12 @@ def _boot_managed_update_tasks() -> None:
         ready = _wait_for_supervisor_update_finalize()
         # Observation only: the finalizer's result and every decision below stay its own.
         result = observe_boot(finalize_managed_update_on_boot, ready=ready, bootstrap_ok=_bootstrap_ok is True)
-        # A failed bootstrap (dependency sync or the import test of this tree) is not a
-        # ready generation even when the supervisor thread survived it: the adoption
-        # of a tree that does not import is returned, not finalized.
-        body_adoption.settle_on_boot(DATA_DIR, REPO_DIR, supervisor_ready=ready and _bootstrap_ok is True)
+        # A failed bootstrap (dependency sync or the import test of this tree) is not a ready generation even if
+        # the supervisor survived it; a providerless one runs none, so its recovery's readiness is weighed instead.
+        providerless = None if not ready or _bootstrap_ok is not None else (lambda: server_boot.generation_ready(
+            _supervisor_ready, lambda: _supervisor_error, _supervisor_stop) and _bootstrap_ok is not False)
+        body_adoption.settle_on_boot(DATA_DIR, REPO_DIR, supervisor_ready=ready and _bootstrap_ok is True,
+                                     request_restart=_request_restart_exit, providerless_ready=providerless)
         stash_note = str(result.get("stash_note") or "")
         if stash_note:
             # Q1=C disclosure contract: a stash restore that conflicted keeps the
@@ -1106,12 +1110,7 @@ async def lifespan(app):
     _supervisor_ready.clear()  # readiness is this generation's: its recovery or its supervisor proves it
     _dialogue_bridge = None
     lifespan_drive_root = pathlib.Path(getattr(getattr(app, "state", None), "drive_root", DATA_DIR))
-    default_real_data_dir = pathlib.Path.home() / "Ouroboros" / "data"
-    pytest_default_real_data_dir = (
-        (bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules)
-        and same_location(lifespan_drive_root, default_real_data_dir)
-        and not os.environ.get("OUROBOROS_DATA_DIR")
-    )
+    pytest_default_real_data_dir = _pytest_on_owner_data(lifespan_drive_root, inherited=True)
     if not pytest_default_real_data_dir:  # an imported ASGI app is admitted here; main() already was
         admit_data_root(lifespan_drive_root)
         process_scope.initialize_installation_scope(lifespan_drive_root)  # idempotent after main(); first for an imported app
@@ -1529,6 +1528,8 @@ def main() -> int:
         try:
             # Our listeners close on exit/exec; port sweeps add no ownership proof.
             store_switch.switch_at_restart(DATA_DIR, REPO_DIR, _emergency_process_cleanup())  # the seam: after every reader is dead, before the exit
+            if _LAUNCHER_MANAGED and body_adoption.native_hold(DATA_DIR) != "recycle":
+                return exit_after_shutdown(hold_for_launcher_stop(DATA_DIR))  # the old app's Quit ends it, no 42
             if not _LAUNCHER_MANAGED:
                 if _planned_delegate_restart_transaction_id:
                     from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV

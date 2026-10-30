@@ -46,16 +46,23 @@ class UpdatePreflightResponse(TypedDict):
 
 
 class UpdateApplyRequest(TypedDict):
-    strategy: Literal["auto_merge", "assisted", "manual", "replace"]
+    """``prepare``/``apply_without_local_changes`` build the candidate beside the serving checkout,
+    ``activate`` restarts into a ready one, ``discard_candidate`` settles it; ``auto_merge`` and
+    ``assisted`` stay the legacy in-place lanes and ``replace`` the recovery."""
+    strategy: Literal["auto_merge", "assisted", "manual", "replace", "prepare", "activate", "discard_candidate",
+                      "apply_without_local_changes"]
     expected_base_sha: NotRequired[str]
     expected_target_sha: NotRequired[str]
     confirm_recovery: NotRequired[bool]
+    candidate_id: NotRequired[str]  # activate / discard_candidate: the candidate the panel showed
 
 
 class UpdateApplySuccessResponse(TypedDict):
-    status: Literal["ok", "restart_required", "assisted_started", "manual"]
+    status: Literal["ok", "restart_required", "assisted_started", "manual", "preparing", "discarded"]
     restarting: NotRequired[bool]
-    strategy: NotRequired[Literal["auto_merge", "assisted", "manual", "replace"]]
+    strategy: NotRequired[Literal["auto_merge", "assisted", "manual", "replace", "prepare", "activate",
+                                  "discard_candidate", "apply_without_local_changes"]]
+    candidate: NotRequired[Dict[str, Any]]  # the candidate projection of /api/update/status
     task_id: NotRequired[str]
     merge_plan: NotRequired[UpdateMergePlan]
     error: NotRequired[str]
@@ -84,6 +91,7 @@ class UpdateApplyErrorResponse(TypedDict):
     stash_note: NotRequired[str]
     estimated_wave_usd: NotRequired[Optional[float]]
     remaining_usd: NotRequired[Optional[float]]
+    candidate: NotRequired[Dict[str, Any]]  # the candidate a prepare/activate refusal concerns
 
 
 class UpdateDescriptionRequest(TypedDict):

@@ -382,3 +382,38 @@ def test_a_busy_dialogue_store_is_named_instead_of_initialization(busy):
     assert sent and sent[0]["client_message_id"] == "cm-1" and sent[0]["system_type"] == "initialization_notice"
     assert ("dialogue store is busy" in sent[0]["content"]) is busy
     assert ("still initializing" in sent[0]["content"]) is (not busy)
+
+
+def test_a_generations_readiness_is_observed_on_its_event_its_failure_or_its_stop():
+    """The supervisor's readiness, or a providerless generation's recovery: what the Update's adoption weighs."""
+    from ouroboros.server_boot import generation_ready
+    from ouroboros.server_liveness import BootDocument
+
+    ready, stop = threading.Event(), threading.Event()
+    threading.Timer(0.2, ready.set).start()
+    assert generation_ready(ready, lambda: None, stop, BootDocument()) is True  # it waits for the recovery
+    assert generation_ready(threading.Event(), lambda: "Supervisor init failed: boom", stop, BootDocument()) is False
+    failed = BootDocument()
+    failed.fail("current-facts store not published")
+    assert generation_ready(threading.Event(), lambda: None, stop, failed) is False
+    stop.set()
+    assert generation_ready(threading.Event(), lambda: None, stop, BootDocument()) is False
+
+
+def test_a_ready_generation_that_stopped_or_failed_is_not_reported_ready():
+    """The observer's contract holds when readiness came too: a stop or a failed boot is not ready. The boot
+    coordinator's own wait keeps its outcome: it returns once any of them holds and raises only on an init error."""
+    from ouroboros.server_boot import generation_ready, wait_supervisor_outcome
+    from ouroboros.server_liveness import BootDocument
+
+    ready, stop, failed = threading.Event(), threading.Event(), BootDocument()
+    ready.set()
+    stop.set()
+    failed.fail("current-facts store not published")
+    assert generation_ready(ready, lambda: None, stop, BootDocument()) is False
+    assert generation_ready(ready, lambda: None, threading.Event(), failed) is False
+    assert generation_ready(ready, lambda: "Supervisor init failed: boom", threading.Event(), BootDocument()) is False
+    assert generation_ready(ready, lambda: None, threading.Event(), BootDocument()) is True
+    assert wait_supervisor_outcome(ready, lambda: None, stop, failed) is None
+    with pytest.raises(RuntimeError, match="boom"):
+        wait_supervisor_outcome(ready, lambda: "Supervisor init failed: boom", stop, BootDocument())

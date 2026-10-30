@@ -68,6 +68,47 @@ FORBIDDEN_SIGNAL_ATTRS: Set[str] = {
     "SIGTERM",
 }
 
+# Captured stdlib-only helpers run outside the tree before any body module is imported, so they
+# cannot import the layer (docs/development/10-platform-abstraction-rule.md): exactly these direct
+# uses, each as (file, the function whose own body holds it, operation, call form), each still
+# present (a stale one fails below instead of allowing a later use silently). Any other function,
+# form or file stays a violation.
+CAPTURED_HELPER_USES = frozenset({
+    # a recorded process's liveness: signal 0 only probes, it never signals
+    ("ouroboros/body_switch.py", "process_gone", "os.kill", "(pid, 0)"),
+    # the forked app installer leads its own session
+    ("ouroboros/app_install.py", "_detach", "os.setsid", "()"),
+})
+
+
+def _call_form(call) -> str:
+    """The exempt call shapes: ``os.kill(<pid>, 0)`` (a literal int 0) and ``os.setsid()``; ``""`` for any other."""
+    if call is None or call.keywords or any(isinstance(arg, ast.Starred) for arg in call.args):
+        return ""
+    if not call.args:
+        return "()"
+    signal = call.args[-1]
+    zero = isinstance(signal, ast.Constant) and type(signal.value) is int and signal.value == 0
+    return "(pid, 0)" if len(call.args) == 2 and zero else ""
+
+
+def _os_contexts(tree) -> dict:
+    """``{id(attribute node): (scope, call form)}``: the dotted chain of the class and function bodies the node
+    sits in (``process_gone``, ``_Installer.run``; decorators, defaults and annotations belong to the enclosing
+    scope) and the form of the call it is the callee of (``_call_form``; ``""`` when it is not called)."""
+    contexts, stack = {}, [(tree, "")]
+    while stack:
+        node, scope = stack.pop()
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            contexts[id(node.func)] = (scope, _call_form(node))
+        elif isinstance(node, ast.Attribute):
+            contexts.setdefault(id(node), (scope, ""))
+        owner = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        body = {id(child) for child in node.body} if owner else set()
+        inner = f"{scope}.{node.name}".lstrip(".") if owner else scope
+        stack.extend((child, inner if id(child) in body else scope) for child in ast.iter_child_nodes(node))
+    return contexts
+
 
 def _collect_python_files() -> List[pathlib.Path]:
     """Collect all .py files to scan."""
@@ -83,19 +124,29 @@ def _collect_python_files() -> List[pathlib.Path]:
     return sorted(set(files))
 
 
-def _scan_file(filepath: pathlib.Path) -> List[str]:
+def _scan_file(filepath: pathlib.Path, allowed=CAPTURED_HELPER_USES) -> List[str]:
     """Scan a single file for platform-specific API violations.
 
     Returns a list of violation descriptions.
     """
-    violations = []
     try:
         source = filepath.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(filepath))
-    except (SyntaxError, UnicodeDecodeError):
+    except UnicodeDecodeError:
+        return []
+    return _scan_source(source, filepath.relative_to(REPO_ROOT), allowed)
+
+
+def _scan_source(source: str, relative, allowed=CAPTURED_HELPER_USES) -> List[str]:
+    """``_scan_file`` of ``source`` as the file at ``relative`` (a repository-relative path)."""
+    violations = []
+    try:
+        tree = ast.parse(source, filename=str(relative))
+    except SyntaxError:
         return violations
 
-    rel_path = str(filepath.relative_to(REPO_ROOT))
+    rel_path = str(relative)
+    posix = pathlib.PurePath(relative).as_posix()
+    contexts = _os_contexts(tree)
 
     # Check top-level imports (not inside if/try/def/class)
     for node in ast.iter_child_nodes(tree):
@@ -118,7 +169,9 @@ def _scan_file(filepath: pathlib.Path) -> List[str]:
     # Check ALL attribute access for os.kill, signal.SIGKILL, etc.
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id == "os" and node.attr in FORBIDDEN_OS_ATTRS:
+            scope, form = contexts.get(id(node), ("", ""))
+            if node.value.id == "os" and node.attr in FORBIDDEN_OS_ATTRS and (
+                    posix, scope, f"os.{node.attr}", form) not in allowed:
                 violations.append(
                     f"{rel_path}:{node.lineno}: "
                     f"Direct use of platform-specific os.{node.attr}"
@@ -148,6 +201,51 @@ def _scan_file(filepath: pathlib.Path) -> List[str]:
                         )
 
     return violations
+
+
+def test_each_captured_helper_exception_is_a_present_use():
+    for use in sorted(CAPTURED_HELPER_USES):
+        tree = ast.parse((REPO_ROOT / use[0]).read_text(encoding="utf-8"))
+        contexts = _os_contexts(tree)
+        present = {(use[0], contexts[id(node)][0], f"os.{node.attr}", contexts[id(node)][1])
+                   for node in ast.walk(tree)
+                   if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os"}
+        assert use in present, use
+
+
+_FALSIFIERS = {
+    "signal 0 in another function": ("ouroboros/body_switch.py", "def elsewhere(pid):\n    os.kill(pid, 0)\n"),
+    "a real signal in process_gone": ("ouroboros/body_switch.py", "def process_gone(pid):\n    os.kill(pid, 9)\n"),
+    "a run-time signal in process_gone": ("ouroboros/body_switch.py",
+                                         "def process_gone(pid, sig):\n    os.kill(pid, sig)\n"),
+    "a bool, not the literal 0": ("ouroboros/body_switch.py", "def process_gone(pid):\n    os.kill(pid, False)\n"),
+    "a keyword signal": ("ouroboros/body_switch.py", "def process_gone(pid):\n    os.kill(pid, sig=0)\n"),
+    "a method of the same name": ("ouroboros/body_switch.py",
+                                  "class Other:\n    def process_gone(self, pid):\n        os.kill(pid, 0)\n"),
+    "a function nested in process_gone": ("ouroboros/body_switch.py",
+                                          "def process_gone(pid):\n    def inner():\n        os.kill(pid, 0)\n"),
+    "a default of process_gone": ("ouroboros/body_switch.py", "def process_gone(pid, probe=os.kill(1, 0)):\n    pass\n"),
+    "the operation taken as a value": ("ouroboros/body_switch.py", "def process_gone(pid):\n    probe = os.kill\n"),
+    "the same function and form in another file": ("ouroboros/app_install.py",
+                                                   "def process_gone(pid):\n    os.kill(pid, 0)\n"),
+    "setsid outside the detachment": ("ouroboros/app_install.py", "def main(argv):\n    os.setsid()\n"),
+    "setsid with an argument": ("ouroboros/app_install.py", "def _detach(log):\n    os.setsid(log)\n"),
+    "the detachment's form in another file": ("ouroboros/body_switch.py", "def _detach(log):\n    os.setsid()\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FALSIFIERS))
+def test_a_captured_helper_exception_admits_only_its_one_function_and_form(case):
+    path, body = _FALSIFIERS[case]
+    found = _scan_source("import os\n\n\n" + body, path)
+    assert any("Direct use of platform-specific os." in violation for violation in found), (case, found)
+
+
+def test_the_captured_helper_forms_themselves_pass():
+    assert not _scan_source("import os\n\n\ndef process_gone(identity):\n    try:\n        os.kill(int(identity), 0)\n"
+                            "    except ProcessLookupError:\n        return True\n", "ouroboros/body_switch.py")
+    assert not _scan_source("import os\n\n\ndef _detach(log):\n    if os.fork():\n        os._exit(0)\n"
+                            "    os.setsid()\n", "ouroboros/app_install.py")
 
 
 def test_no_platform_specific_apis_outside_platform_layer():

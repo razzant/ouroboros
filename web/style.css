@@ -8796,6 +8796,7 @@ body.keyboard-open .project-panel {
     line-height: var(--line-meta);
     color: var(--text-meta);
     margin-top: var(--space-1);
+    overflow-wrap: anywhere;  /* a server's URL or path wraps instead of widening the card */
 }
 .updates-attempt {
     margin-top: var(--space-3);
@@ -8830,6 +8831,7 @@ body.keyboard-open .project-panel {
     margin: 0;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
 }
 /* A group heading inside the list (Before / After the update): the list's meta size and ink, semibold. */
 .updates-facts-head {

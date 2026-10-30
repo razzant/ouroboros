@@ -19,6 +19,11 @@ from typing import Iterable
 # Minimal witnesses of the contracts verification and every install rely on.
 # Replacing a witness is a verifier change and requires full qualification.
 # The whole Node lane is unconditional in both runners, outside this Python list.
+# Also a shipped format: updaters read this declaration statically (``floor_of``, never imported or run) from the
+# official target's ouroboros/test_selection.py, as its one module-level, unannotated ``FLOOR_TESTS = {...}`` literal
+# that no other statement names. Moving or reshaping it strands every installation with such an updater for that
+# target and each later one: migrate compatibly (the new form beside this one, this one retired once they have updated).
+# tests/test_test_selection.py::test_the_selector_declares_its_floor_the_way_shipped_updaters_read_it guards it.
 FLOOR_TESTS = {
     "tests/test_contracts.py": "frozen ABI and tool/context protocols",
     "tests/test_gateway_parity.py": "HTTP/WS wire schemas and router parity",
@@ -78,10 +83,10 @@ def is_test_module(path: str) -> bool:
     return bool(p.parts) and p.parts[0] == "tests" and p.name.startswith("test_") and p.suffix == ".py"
 
 
-def apparatus_change(path: str) -> bool:
+def apparatus_change(path: str, floor=None) -> bool:
     p = PurePosixPath(path)
     # Under tests/, everything but a test module (helpers, conftest, fixture data) is shared apparatus.
-    return (path in _APPARATUS or path in FLOOR_TESTS
+    return (path in _APPARATUS or path in (FLOOR_TESTS if floor is None else floor)
             or (p.parts[0] == "tests" and not is_test_module(path))
             or (p.name.startswith("requirements") and p.suffix in {".txt", ".lock"}))
 
@@ -212,24 +217,62 @@ class TestSelection:
         return record
 
 
+class FloorMissing(ValueError):
+    """The scanned tree lacks required floor witnesses (``missing``); the selection is refused."""
+
+    def __init__(self, missing):
+        super().__init__("required gate floor is missing: " + ", ".join(missing))
+        self.missing = list(missing)
+
+
+def floor_of(source: str) -> dict:
+    """The floor another tree's selector declares, read from its source without importing or running it.
+
+    The one recognized shape is this module's own: a single module-level ``FLOOR_TESTS = {...}`` literal of
+    test-module paths to their invariants, which no other module-level statement names. Anything else (no
+    parse, another shape, a later module-level change, an empty or malformed floor) is ``ValueError``, named."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise ValueError(f"the selector source does not parse ({exc})") from None
+    named = [node for node in tree.body if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+             and any(isinstance(sub, ast.Name) and sub.id == "FLOOR_TESTS" for sub in ast.walk(node))]
+    declared = named[0] if len(named) == 1 else None
+    if not (isinstance(declared, ast.Assign) and len(declared.targets) == 1 and isinstance(declared.value, ast.Dict)
+            and isinstance(declared.targets[0], ast.Name)):
+        raise ValueError("it holds no single module-level FLOOR_TESTS = {...} declaration")
+    try:
+        floor = ast.literal_eval(declared.value)
+    except (ValueError, TypeError):  # a name, a call or a spread; an unhashable key
+        raise ValueError("its FLOOR_TESTS is not a literal") from None
+    if not floor or not all(isinstance(path, str) and is_test_module(path) and ".." not in PurePosixPath(path).parts
+                            and isinstance(why, str) for path, why in floor.items()):
+        raise ValueError("its FLOOR_TESTS is empty or names something other than test modules and their invariants")
+    return floor
+
+
 def select_from_paths(repo: Path, paths: Iterable[str], *, base: str,
-                      extra_tests=(), full_tests=False, test_reason="") -> TestSelection:
-    """Pure candidate scan seam, also used for historical shadow comparisons."""
+                      extra_tests=(), full_tests=False, test_reason="", floor=None) -> TestSelection:
+    """Pure candidate scan seam, also used for historical shadow comparisons.
+
+    ``floor`` replaces this process's ``FLOOR_TESTS`` for one scan (an Update's, read from its official
+    target with ``floor_of``); the policy digest stays this selector's own."""
     repo = Path(repo)
+    floor = FLOOR_TESTS if floor is None else floor
     extra = validate_widening(repo, extra_tests, full_tests, test_reason)
-    missing = [path for path in FLOOR_TESTS if not (repo / path).is_file()]
+    missing = [path for path in floor if not (repo / path).is_file()]
     if missing:
-        raise ValueError("required gate floor is missing: " + ", ".join(missing))
+        raise FloorMissing(missing)
     changed = tuple(sorted(set(paths)))
     files = tuple(sorted(p.relative_to(repo).as_posix() for p in (repo / "tests").rglob("test_*.py")))
-    reasons = [(path, f"floor: {invariant}") for path, invariant in FLOOR_TESTS.items()]
+    reasons = [(path, f"floor: {invariant}") for path, invariant in floor.items()]
     versions = _release_versions(repo, base) if _RELEASE_CARRIERS & set(changed) else set()
-    full = [(p, "verification apparatus changed") for p in changed if apparatus_change(p)
+    full = [(p, "verification apparatus changed") for p in changed if apparatus_change(p, floor)
             and not (p in _RELEASE_CARRIERS and _version_only_change(repo, base, p, versions))]
     full += [(p, "body cutover/recovery changed") for p in changed if p in _CUTOVER]
     if full_tests:
         full.append(("*", "author requested full: " + test_reason.strip()))
-    selected = set(FLOOR_TESTS)
+    selected = set(floor)
     modules = {_module(p) for p in changed if p.endswith(".py") and not p.startswith("tests/")}
     for path in files:
         if path in changed:

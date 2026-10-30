@@ -61,6 +61,7 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
 
     class FakeProcess:
         returncode = 1
+        stdin = stdout = stderr = None  # the runner closes an exited child's pipes; this fake opens none
 
         def __init__(self):
             self.communicates = 0
@@ -245,31 +246,37 @@ def test_prepare_managed_update_blocks_when_ahead_check_fails(monkeypatch, tmp_p
     assert ok is False
     assert "Could not compare local branch with managed update target" in payload["error"]
 
-def test_safe_restart_fallback_does_not_rewrite_dev_branch(monkeypatch):
-    checkout_calls = []
+def test_a_failed_import_keeps_the_checkout_and_starts_no_older_branch(monkeypatch, tmp_path):
+    """No automatic fallback to ``ouroboros-stable``: nothing proves an older branch runs on data this generation may
+    have migrated. The dev checkout stays, the failure is the Update's retained start fact (the panel's recovery,
+    Restore chooses a version), and the next good import clears it. Data is never rolled back by a restart."""
+    from supervisor import update_prepare
+
+    checkout_calls, imports = [], []
 
     def fake_checkout(branch, reason="unspecified", unsynced_policy="ignore"):
         checkout_calls.append((branch, reason, unsynced_policy))
         return True, "ok"
 
-    import_results = [
-        {"ok": False, "stdout": "", "stderr": "broken dev", "returncode": 1},
-        {"ok": True, "stdout": "import_ok", "stderr": "", "returncode": 0},
-    ]
-
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
     monkeypatch.setattr(git_ops, "checkout_and_reset", fake_checkout)
     monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda reason: (True, reason))
-    monkeypatch.setattr(git_ops, "import_test", lambda: import_results.pop(0))
+    monkeypatch.setattr(git_ops, "import_test", lambda: imports.pop(0))
     monkeypatch.setattr(git_ops, "append_jsonl", lambda _path, _payload: None)
+    imports.append({"ok": False, "stdout": "", "stderr": "ImportError: broken dev", "returncode": 1})
 
     ok, message = git_ops.safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
 
-    assert ok is True
-    assert message == "OK: fell back to ouroboros-stable"
-    assert checkout_calls == [
-        ("ouroboros", "owner_restart", "rescue_and_reset"),
-        ("ouroboros-stable", "owner_restart_fallback_stable", "rescue_and_reset"),
-    ]
+    assert ok is False and "the checkout was kept" in message and "no older branch" in message
+    assert checkout_calls == [("ouroboros", "owner_restart", "rescue_and_reset")]  # never ouroboros-stable
+    failure = update_prepare.retained_fact("start_failure", tmp_path / "data")
+    assert (failure["cause"], failure["reason"], failure["detail"]) == ("import_failed", "owner_restart",
+                                                                        "ImportError: broken dev")
+    assert "fallback" not in failure
+
+    imports.append({"ok": True, "stdout": "import_ok", "stderr": "", "returncode": 0})
+    assert git_ops.safe_restart(reason="owner_restart") == (True, "OK: ouroboros")
+    assert update_prepare.retained_fact("start_failure", tmp_path / "data") is None
 
 def test_a_stand_can_keep_its_pinned_checkout_across_restarts(monkeypatch):
     """OUROBOROS_DISABLE_MANAGED_UPDATES=1 is the lever for running a stand.

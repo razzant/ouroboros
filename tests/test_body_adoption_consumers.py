@@ -108,7 +108,7 @@ def test_managed_boot_right_after_a_switch_does_not_reset_or_clean_the_checkout(
     server = _managed_server(monkeypatch, scene)
     ordinary = _GitOps()
     assert server._bootstrap_supervisor_repo({}, ordinary)[0] is True
-    assert [call["unsynced_policy"] for call in ordinary.safe_restart_calls] == ["rescue_and_reset"]
+    assert [call["unsynced_policy"] for call in ordinary.safe_restart_calls] == ["keep"]
 
     (scene.serving / "owner-notes.txt").write_text("kept through the switch\n")
     _switch(scene)
@@ -124,7 +124,7 @@ def test_managed_boot_right_after_a_switch_does_not_reset_or_clean_the_checkout(
     assert body_adoption.finalize_on_boot(scene.data, scene.serving, supervisor_ready=True)["outcome"] == "adopted"
     later = _GitOps()
     server._bootstrap_supervisor_repo({}, later)
-    assert [call["unsynced_policy"] for call in later.safe_restart_calls] == ["rescue_and_reset"]  # unchanged since
+    assert [call["unsynced_policy"] for call in later.safe_restart_calls] == ["keep"]  # the ordinary cold boot
 
 
 def test_exit_tail_arms_only_with_the_stop_owners_confirmation(scene, monkeypatch):

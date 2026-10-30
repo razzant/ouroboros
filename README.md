@@ -27,7 +27,7 @@ Ouroboros sends no telemetry by default, and the official project operates no us
 
 > **Just want to use Ouroboros? Click the download for your platform below. You do not need to clone this repository or install Python or uv.**
 
-Desktop downloads bundle CPython 3.10.22 and SQLite 3.53.1. In-app Update replaces the repository and its packages, not that interpreter: install the app again to get this runtime.
+Desktop downloads bundle CPython 3.10.22 and SQLite 3.53.1. In-app Update replaces the repository and its packages; on macOS, an update that needs a newer app also replaces an official signed app, bundled interpreter included, when the newer app runs the same Python minor version. Otherwise install the app again to get this runtime.
 
 - **macOS 12+ on Apple silicon:** [**Download for macOS (.dmg)**][download-macos-arm64]
 - **Windows x64:** [**Download for Windows (.zip)**][download-windows-x64]

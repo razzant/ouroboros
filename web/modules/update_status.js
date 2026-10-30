@@ -1,11 +1,13 @@
 // Main-screen Update affordance (P2): one compact pill. While an update attempt runs it names the
 // real stage; afterwards a failed or unconfirmed outcome stays on it until the owner hides it with the
 // close button beside it (owner 3A, #1818); a confirmed success never wears it (owner 1B): that record
-// lives in Dashboard -> Updates alone and cannot mask a newer version. Otherwise the pill appears when a
-// managed update is available (status is populated by the boot-time check-on-restart). The pill is a
-// pointer, not a second apply surface: clicking it opens Dashboard -> Updates, where the ONE apply flow
-// (with its verified preflight and typed outcomes) lives. The former pill-local staged dialog was removed
-// (owner decision 2026-08-31) so two hand-rolled apply controllers cannot drift apart again.
+// lives in Dashboard -> Updates alone and cannot mask a newer version. The prepared Update (`candidate`)
+// speaks the same way: its stage, ready or waiting for the owner, then its activation's outcome. Otherwise
+// the pill appears when a managed update is available (status is populated by the boot-time
+// check-on-restart). The pill is a pointer, not a second apply surface: clicking it opens Dashboard ->
+// Updates, where the ONE apply flow (with its verified preflight and typed outcomes) lives. The former
+// pill-local staged dialog was removed (owner decision 2026-08-31) so two hand-rolled apply controllers
+// cannot drift apart again.
 
 import { apiClient, updateStrategyForPlan } from './api_client.js';
 import { SHELL_ICONS } from './page_icons.js';
@@ -196,6 +198,88 @@ const OUTCOMES = {
     unknown: { tone: 'neutral', pill: 'Update outcome unconfirmed', headline: 'The last update outcome is unconfirmed.' },
 };
 
+/** The words of one concluded outcome (`applied`, `not_applied`, `rolled_back`, `failed`, `unknown`), or null. */
+export function attemptOutcome(key) {
+    return OUTCOMES[key] || null;
+}
+
+// A prepared Update's activation outcome (update_prepare.record_activation) in the same words; a code this table
+// does not know is an unconfirmed outcome, never a success.
+const ACTIVATION_OUTCOMES = { adopted: 'applied', returned: 'rolled_back', start_failed: 'failed',
+    not_applied: 'not_applied', superseded: 'unknown' };
+export function activationOutcomeKey(outcome) {
+    return ACTIVATION_OUTCOMES[outcome] || 'unknown';
+}
+
+const plain = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+const WAITING_FOR_OWNER = new Set(['needs_adaptation', 'needs_decision', 'paused_budget', 'stale']);
+
+/**
+ * The prepared Update's notice for the pill: `{id, pill, tone, title, when, terminal}` or null. Its stage, ready
+ * or waiting for the owner while it lives (no close: a current fact ends with it); then its activation's outcome,
+ * or a preparation that failed, which the owner may hide. A confirmed success has no word (owner 1B).
+ */
+export function candidateNotice(status = {}) {
+    const candidate = plain(status?.candidate);
+    const state = String(candidate.state || '');
+    const current = (pill, tone, title) => ({ id: '', pill, tone, title, when: '', terminal: false });
+    const observed = plain(candidate.activation);
+    if (state === 'activating' && observed.outcome === 'unconfirmed') {
+        // The boot observed the switch without attesting it: an unconfirmed outcome, neutral, the owner may hide it.
+        return { id: `activation:${candidate.candidate_id || ''}:unconfirmed`, pill: OUTCOMES.unknown.pill,
+            tone: OUTCOMES.unknown.tone, title: OUTCOMES.unknown.headline,
+            when: String(observed.observed_at || candidate.updated_at || ''), terminal: true };
+    }
+    if (state === 'activating') {
+        return plain(candidate.activation).outcome === 'returning'
+            ? current(PILL_STAGES.rolling_back, 'neutral', 'The update did not start; returning to the previous version.')
+            : current(PILL_STAGES.restart_requested, 'neutral', 'Restarting to switch to the prepared update.');
+    }
+    if (['preparing', 'checking', 'adapting'].includes(state)) {
+        return current(PILL_STAGES.preparing, 'neutral', 'The update is prepared in a separate copy; nothing changes yet.');
+    }
+    if (state === 'ready') {
+        const appOnly = candidate.merge_kind === 'current' && plain(candidate.native).status === 'staged';
+        return current(appOnly ? 'App update ready' : 'Update ready', '', 'Restart to switch to it in Dashboard → Updates.');
+    }
+    if (WAITING_FOR_OWNER.has(state)) return current('Update needs you', 'warn', 'The update waits for your decision.');
+    // The activation's settled outcome: retained past its record, else the live record's own (a failed state).
+    const last = plain(candidate.last_activation);
+    const own = String(candidate.reason || '').startsWith('activation:')
+        ? { ...plain(candidate.activation), candidate_id: candidate.candidate_id, at: candidate.updated_at } : {};
+    const settled = last.outcome ? last : own;
+    if (settled.outcome) {
+        const outcome = OUTCOMES[activationOutcomeKey(settled.outcome)];
+        return { id: `activation:${settled.candidate_id || ''}:${settled.outcome}`, pill: outcome.pill, tone: outcome.tone,
+            title: outcome.headline, when: String(settled.at || ''), terminal: true };
+    }
+    if (state === 'failed') {
+        return { id: `candidate:${candidate.candidate_id || ''}:failed`, pill: 'Update not prepared', tone: 'error',
+            title: 'The update could not be prepared. Nothing was changed.', when: String(candidate.updated_at || ''),
+            terminal: true };
+    }
+    return null;
+}
+
+/**
+ * The one notice the pill wears: a running stage first (an executor's, then the prepared Update's), then the
+ * prepared Update's own state, then the newer of the concluded outcomes. Null when none applies.
+ */
+export function updateNotice(status = {}) {
+    const attempt = updateAttemptView(status?.update_progress);
+    if (attempt && !attempt.terminal) {
+        return { id: attempt.id, pill: attempt.pill, tone: attempt.tone,
+            title: [attempt.headline, attempt.text].filter(Boolean).join(' '), when: attempt.when, terminal: false };
+    }
+    const prepared = candidateNotice(status);
+    if (prepared && !prepared.terminal) return prepared;
+    const legacy = attempt ? { id: attempt.id, pill: attempt.pill, tone: attempt.tone,
+        title: [attempt.headline, attempt.text].filter(Boolean).join(' '), when: attempt.when, terminal: true } : null;
+    const time = (notice) => Date.parse(notice?.when || '') || 0;
+    const newest = [prepared, legacy].filter(Boolean).sort((a, b) => time(b) - time(a))[0];
+    return newest?.pill ? newest : null;  // a newer confirmed success leaves no notice
+}
+
 const UNKNOWN_REASONS = {
     startup_unconfirmed: 'The restarted server did not confirm its startup checks.',
     running_source_mismatch: 'The running version is not the commit this update landed.',
@@ -373,21 +457,23 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
 
     function renderPill(status) {
         const pill = ensurePill();
-        const attempt = updateAttemptView(status?.update_progress);
-        // A stage always shows; a concluded attempt shows only if its outcome has a word for the pill (a success has
-        // none) and this browser has not hidden it. What is hidden is the notice: the record stays in the panel.
-        const shown = Boolean(attempt?.pill) && !(attempt.terminal && attempt.id === dismissedUpdateAttempt());
+        const notice = updateNotice(status || {});
+        // A stage or a current state always shows; a concluded outcome shows only if it has a word for the pill (a
+        // success has none) and this browser has not hidden it. What is hidden is the notice: the record stays in
+        // the panel.
+        const shown = Boolean(notice?.pill) && !(notice.terminal && notice.id === dismissedUpdateAttempt());
         // Content or uncommitted work of the checkout's own is a caveat about an AVAILABLE update, not a
         // count of commits ahead; while an attempt shows, its stage or outcome is the pill's one fact.
         pill.classList.toggle('has-local', Boolean(!shown && status?.available
             && (status.dirty || status.local_changes !== 'absent')));
-        hideable = shown && attempt.terminal ? attempt.id : '';
+        hideable = shown && notice.terminal ? notice.id : '';
         if (closeButton) closeButton.hidden = !hideable;
         pill.classList.toggle('has-close', Boolean(hideable));
         if (shown) {
-            pill.textContent = attempt.pill;
-            pill.title = [attempt.headline, attempt.text].filter(Boolean).join(' ');
-            pill.dataset.tone = attempt.tone;
+            pill.textContent = notice.pill;
+            pill.title = notice.title;
+            if (notice.tone) pill.dataset.tone = notice.tone;
+            else delete pill.dataset.tone;
         } else {
             delete pill.dataset.tone;
             if (status?.available) {

@@ -49,15 +49,13 @@ def test_return_to_old_hands_over_only_when_this_process_began_on_a_half_switche
     body_candidate.record_reviewed_commit(ctx, cand)
     handoff = _armed(serving, data, ctx, cand)
     root, rows, helper = str(serving), handoff["switch"], str(body_adoption.helper_dir(data))
-    handovers = []
-    monkeypatch.setattr(body_switch, "_handover", lambda: handovers.append(True))
     tracked = body_switch._tracks_filemode(root)
 
-    # Wholly old tree + a foreign file: returned in place, boot continues in this process.
+    # Wholly old tree + a foreign file: returned in place, boot continues in this process (no hand-over owed).
     foreign = next(row for row in rows if row["old_sha"] and row["new_sha"])
     (serving / foreign["path"]).write_text("owner edit\n", encoding="utf-8")
-    body_switch._switch(root, helper, body_switch.read_handoff(helper))
-    assert body_adoption.read(data)["phase"] == "abandoned" and handovers == []
+    assert body_switch._switch(root, helper, body_switch.read_handoff(helper)) is False
+    assert body_adoption.read(data)["phase"] == "abandoned"
     assert (serving / foreign["path"]).read_text() == "owner edit\n"
     assert git(serving, "rev-parse", "HEAD") == handoff["old"]
 
@@ -69,8 +67,8 @@ def test_return_to_old_hands_over_only_when_this_process_began_on_a_half_switche
     first = next(row for row in rows if row["new_sha"] and row["path"] != foreign["path"])
     body_switch._put(root, first["path"], first["new_mode"], first["new_sha"])
     (serving / foreign["path"]).write_text("owner edit\n", encoding="utf-8")
-    body_switch._switch(root, helper, body_switch.read_handoff(helper))
-    assert body_adoption.read(data)["phase"] == "abandoned" and handovers == [True]
+    assert body_switch._switch(root, helper, body_switch.read_handoff(helper)) is True  # the caller hands over
+    assert body_adoption.read(data)["phase"] == "abandoned"
     files = body_switch._states(root, rows, tracked)
     assert files[first["path"]] == body_switch._side(first, "old", tracked)
 
@@ -133,7 +131,8 @@ def test_boot_settles_an_adoption_as_unready_when_the_bootstrap_failed(body, mon
     monkeypatch.setattr(server, "DATA_DIR", data)
     monkeypatch.setattr(server, "REPO_DIR", serving)
     seen = []
-    monkeypatch.setattr(body_adoption, "settle_on_boot", lambda *a, **kw: seen.append(kw["supervisor_ready"]) or {})
+    monkeypatch.setattr(body_adoption, "settle_on_boot", lambda *a, **kw: seen.append(
+        (kw["supervisor_ready"], callable(kw.get("providerless_ready")))) or {})
     monkeypatch.setattr("supervisor.update_merge.finalize_managed_update_on_boot", lambda **kw: {})
     monkeypatch.setattr("supervisor.update_merge.active_update_tx", lambda: None)
     monkeypatch.setattr("supervisor.git_ops.compute_managed_update_status", lambda *a, **kw: {})
@@ -144,7 +143,8 @@ def test_boot_settles_an_adoption_as_unready_when_the_bootstrap_failed(body, mon
     for outcome, expected in ((True, True), (False, False), (None, False)):
         monkeypatch.setattr(server, "_bootstrap_ok", outcome)
         server._boot_managed_update_tasks()
-    assert seen == [True, False, False]
+    # No bootstrap ran (providerless): never ready by itself; its recovery's readiness is offered for an Update.
+    assert seen == [(True, False), (False, False), (False, True)]
 
 
 @pytest.mark.serial  # real cold entries

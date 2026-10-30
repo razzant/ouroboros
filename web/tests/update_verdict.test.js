@@ -70,7 +70,10 @@ test('an unsafe update keeps ONE button plus a warning, never a second control',
     assert.equal(chip('Commits'), '2 local');
     assert.equal(chip('Local changes'), 'present since c0ffee01');
     assert.equal(chip('Uncommitted'), '1 file(s)');
-    assert.match(verdict.hint, /changed since its last shared commit .* applying merges those changes\. Uncommitted changes are stashed/);
+    // The in-place path (a status without `candidate`) stashes; a conflict keeps that stash, so no restore is promised.
+    assert.match(verdict.hint, /changed since its last shared commit .* applying merges those changes\. Uncommitted changes go into a Git stash/);
+    assert.match(verdict.hint, /if they conflict, they stay in that stash/);
+    assert.doesNotMatch(verdict.hint, /stashed and restored/);
 });
 
 
@@ -89,7 +92,8 @@ test('commits ahead with no content of their own are history, not a caution (#17
     assert.equal(unknown.chips.find((chip) => chip.label === 'Local changes').value, 'unknown');
     const dirtyOnly = updateVerdict({ ...facts, ahead: 0, safe_to_apply: false, local_changes: 'absent',
         dirty: true, dirty_count: 3 }, '');
-    assert.equal(dirtyOnly.hint, 'Uncommitted changes are stashed and restored around the update.');
+    assert.equal(dirtyOnly.hint, 'Uncommitted changes go into a Git stash for the update and are applied again after the '
+        + 'restart (staged ones come back unstaged); if they conflict, they stay in that stash.');
     assert.equal(dirtyOnly.chips.find((chip) => chip.label === 'Commits').value, '1 incoming');
 });
 

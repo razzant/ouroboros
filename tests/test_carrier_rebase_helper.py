@@ -93,6 +93,29 @@ def test_helper_degrades_a_broken_anchor_and_reports_failure(tmp_path):
     assert "<<<<<<<" in body and ">>>>>>>" in body
 
 
+def test_the_helper_resolves_standalone_and_loads_none_of_the_servers_owners(tmp_path):
+    """The operator helper keeps the carrier engine's own runner: resolving a real conflict loads neither the
+    server's Git owner nor its shell admission nor the tool registry (``tracked_run_git`` is imported only by the
+    server's callers, when they call it)."""
+    import json
+
+    repo = _conflicted_repo(tmp_path)
+    probe = ("import json, runpy, sys\n"
+             f"sys.argv = [{str(HELPER)!r}, '--worktree', {str(repo)!r}]\n"
+             "code = None\n"
+             "try:\n    runpy.run_path(sys.argv[0], run_name='__main__')\n"
+             "except SystemExit as exc:\n    code = exc.code\n"
+             "print(json.dumps({'code': code, 'loaded': sorted(name for name in sys.modules if name in ("
+             "'supervisor.git_ops', 'ouroboros.tools.shell_process', 'ouroboros.tools.registry'))}))\n")
+
+    # Isolated, and writing no bytecode beside the sources it imports.
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"code": 0, "loaded": []}
+    assert (repo / "VERSION").read_text() == "7.0.1\n"
+
+
 def test_helper_is_quiet_on_a_clean_tree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

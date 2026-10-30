@@ -313,8 +313,10 @@ def test_upgrade_keeps_token_grant_and_local_proxy(
 ):
     """The proxy is skill-local state: reseeding changes payload, not credentials or grants."""
     import ouroboros.config as config
+    from ouroboros import skill_builtin
     from ouroboros.skill_builtin import reseed_changed_builtins
     from ouroboros.skill_loader import (
+        compute_content_hash,
         load_skill,
         load_skill_grants,
         requested_skill_permissions,
@@ -335,6 +337,9 @@ def test_upgrade_keeps_token_grant_and_local_proxy(
     monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")
     local_state = drive / "state" / "skills" / "telegram"
     local_state.mkdir(parents=True)
+    digest = compute_content_hash(installed)  # an unmodified recorded install (a bare legacy copy is kept)
+    skill_builtin._write_record(drive, "telegram", version="1.2.13", digest=digest, base_digest=digest,
+                                turn_on_when_ready=False, installed_by="ouroboros")
     local_settings = local_state / "settings.json"
     local_settings.write_text(json.dumps({"TELEGRAM_PROXY": _PROXY if owner_set_proxy else ""}), encoding="utf-8")
     settings_before = local_settings.read_bytes()

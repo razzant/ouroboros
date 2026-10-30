@@ -78,23 +78,16 @@ supervisor/ — background thread inside server.py (§5)
   steering.py — running-task mailbox steering, keyed on the host-minted `issuer`, refused during pending cancellation (§6 Owner routing verbs)
   direct_roots.py — live direct roster and ended-process handover (§5)
   telemetry_events.py — rare typed telemetry-only worker events: durable appends exclude high-rate narration
-  git_ops.py — git operations (clone, checkout, rescue, rollback, push, credential helper) and the bounded local-Git runner
-  git_ops_remotes.py, git_ops_rescue.py, git_ops_reset.py, git_ops_updates.py — leaves re-exported through `git_ops.py`: remotes and push, the rescue snapshot before destructive tree movement (§2), checkout/reset admission, managed-update status
-  update_source.py — official update-source selection and network policy
-  update_recovery.py — exact owner Restore: pinned prior HEAD, rescue before reset
-  update_merge.py — managed-update engine: exact-target 3-way plan, reviewed assisted merge, write-ahead transaction, verified rollback, boot recovery (DEVELOPMENT "Managed Update Rule")
-  update_candidate.py — candidate/carrier primitives: rerere-neutral merges, failed-update preservation branches, write-ahead stash restore (§6 Hermetic preflight proof)
-  update_carriers.py, update_merge_plan.py — carriers a merge may not resolve by hand; merge planning
-  update_merge_policy.py — presentation-only conflict labels
+  git_ops.py, git_ops_remotes.py, git_ops_rescue.py, git_ops_reset.py, git_ops_updates.py — git operations (clone, checkout, rescue, rollback, push, credential helper), the bounded local-Git runner and its re-exported leaves: remotes and push, the rescue snapshot before destructive tree movement (§2), checkout/reset admission, managed-update status
+  update_source.py, update_recovery.py — official update-source selection and network policy; exact owner Restore (pinned prior HEAD, rescue before reset)
+  update_prepare.py, update_adaptation.py, update_checks.py, update_native.py, update_merge.py, update_merge_plan.py, update_carriers.py, update_candidate.py, update_merge_policy.py — managed-update engine (DEVELOPMENT "Managed Update Rule"): the Update (§2); legacy exact-target 3-way plan, reviewed assisted merge, write-ahead transaction, verified rollback and boot recovery, hand-unresolvable carriers, rerere-neutral merges, failed-update branches, stash restore (§6 Hermetic preflight proof) and presentation-only conflict labels
 ouroboros/ — agent core and shared runtime (§6)
   config.py, launch_roots.py — SSOT facade: paths, settings load/save, PID lock (§7)
   settings_defaults.py, settings_scales.py, model_slots.py, review_model_routes.py, runtime_limits.py — settings vocabularies `config.py` re-exports (§7; §10 invariant 3)
   version.py — version string from VERSION, importlib.metadata fallback
   secret_masking.py, settings_integrity.py, route_choice.py — Settings/MCP wire placeholders and secret repair before env overlay/persistence; task-local/skill settings views, snapshot pin (`OUROBOROS_SETTINGS_SHA256`), projection echo/digests (`OUROBOROS_PROJECTED_*`); live route keys, a turn's route choice (§6, §7)
   credential_shapes.py — credential leaf names and physical locations (§6 Credential mutation and diagnostic redaction)
-  update_channels.py — Stable/QA/Development channel mapping (§8)
-  update_letter.py — update description: check facts, owner request, the writer (§3 Updates)
-  update_qualification.py, update_generation_facts.py, update_impact.py, engine_pin_policy.py — range-bound merge/check evidence, before/after update facts, Apply effects and the pin rule restart shares (§3)
+  update_channels.py, update_letter.py, update_qualification.py, update_generation_facts.py, update_impact.py, engine_pin_policy.py — Stable/QA/Development channel mapping (§8); update description: check facts, owner request, the writer (§3 Updates); range-bound merge/check evidence, before/after update facts, Apply effects and the pin rule restart shares (§3)
   evolution_history.py — Evolution's version history (§3)
   colab_bootstrap.py — Google Colab source-mode bootstrap (official source, Drive-backed data, no-UI server)
   cli.py — source/headless CLI over gateway tasks, logs, settings, skills, local model and MCP (CLI / Headless Boundary below)
@@ -299,10 +292,8 @@ ouroboros/ — agent core and shared runtime (§6)
   owner_relay.py — `tell_task` relays: held owner quotes, one atomic mailbox row, the room's `relay_entry`, return addresses (§6 Owner routing verbs)
   owner_mailbox.py — per-task user message mailbox: revocation-aware drain, proven-empty peek, closed provenance set
   peer_roster.py — host-listed roots from queue_snapshot/direct_roots, hidden included, with recorded waits; admits source-bound inline Presence mailboxes for `forward_to_worker` (§12; §6 Owner routing verbs)
-  launcher_bootstrap.py, runtime_venv.py, launcher_onboarding.py — Bootstrap/sync, source-shell handoff and compatibility probe, native host and body interpreter; desktop onboarding on the gateway /onboarding page (§2)
-  launcher_server_reaper.py — Startup stray-server discovery; recorded-owner close/Panic cleanup (§9)
-  launcher_readiness.py — Launcher `/api/health` probe (§2 Boot order)
-  launcher_windows_runtime.py — Windows runtime; pre-import legacy GUI handoff (§2)
+  launcher_bootstrap.py, runtime_venv.py, launcher_onboarding.py, native_package.py, app_install.py — Bootstrap/sync, source-shell handoff and compatibility probe, native host, app installer, body interpreter; desktop onboarding on the gateway /onboarding page (§2)
+  launcher_server_reaper.py, launcher_readiness.py, launcher_windows_runtime.py — Startup stray-server discovery, recorded-owner close/Panic cleanup (§9); the `/api/health` probe (§2 Boot order); Windows runtime, pre-import legacy GUI handoff (§2)
   launcher_background.py — Desktop close/quit, consent, second-launch activation (§9); `DesktopApi` supplies `MainApi` alerts, shell facts and Panic (§3)
   panic_source.py, platform_peer.py — Diagnostic Panic source (§9)
   launcher_appearance.py, launcher_window_chrome.py, launcher_page_zoom.py, standalone_page.py — Windows caption tint; macOS per-document title bar, appearance; page zoom; theme.js/ui.css inlined into pages before assets (§3)
@@ -430,8 +421,7 @@ ouroboros/ — agent core and shared runtime (§6)
     settings_secrets.py, secret_rows.py — Explicit single-secret reads; list-row secrets masked/rehydrated by row identity (§3)
     settings.py — /api/settings and /api/owner/*; `GET /api/review-pool` (`ReviewPoolResponse`); an unreadable catalog is a typed `config_error`, never a 500 (§7 Review pool)
     desktop_autostart.py — GET/POST /api/desktop/autostart and /api/desktop/background (§4)
-    control.py — /api/reset, /api/command, /api/git/*, /api/update/*, /api/evolution-data
-    update_progress.py — Retained last-attempt observation, executor stages and boot conclusions; WS invalidation, never recovery authority (§3)
+    control.py, update_activation.py, update_progress.py — /api/reset, /api/command, /api/git/*, /api/update/*, /api/evolution-data; retained last-attempt observation, executor stages and boot conclusions, WS invalidation, never recovery authority (§3)
     schedules.py — Cron schedule HTTP surface
     files.py — File Browser and chat upload
     ui_preferences.py — Install-wide `state/ui_preferences.json`: widgets, layout, welcome, voice choice and contribution arrangement

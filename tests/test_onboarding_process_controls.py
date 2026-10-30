@@ -136,7 +136,7 @@ def test_onboarding_restart_uses_existing_restart_transaction_and_exit_signal(st
     monkeypatch.setattr(server_restart, '_stop_owned_work', lambda ctx: calls.append(('stopped', ctx.RUNNING)))
     response = obj.client.post('/api/command', json={'cmd': '/restart'})
     assert response.status_code == 200 and response.json() == {'status': 'ok'}
-    assert calls == [('checked', {'reason': 'owner_restart', 'unsynced_policy': 'rescue_and_reset'}), ('stopped', {})]
+    assert calls == [('checked', {'reason': 'owner_restart', 'unsynced_policy': 'keep'}), ('stopped', {})]
     assert obj.server._restart_requested.is_set() and obj.server._owner_restart_requested.is_set()
     assert obj.server.RESTART_EXIT_CODE == 42
     assert active_restart_transaction(obj.data)["door"] == "owner_restart"

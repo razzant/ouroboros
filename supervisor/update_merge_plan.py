@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor import git_ops as _g
 from supervisor import update_candidate as _uc
-from supervisor.update_carriers import resolve_carrier_conflicts
+from supervisor.update_carriers import resolve_carrier_conflicts, tracked_run_git
 
 
 def _um():
@@ -83,7 +83,7 @@ def _build_clean_merge_commit(
             # base conflict confined to declared version-carrier spans adopts
             # the official side of the span and stays on the clean path;
             # anything else routes to the assisted lane exactly as before.
-            resolution = resolve_carrier_conflicts(tmp_wt, base_conflicts, prefer="theirs")
+            resolution = resolve_carrier_conflicts(tmp_wt, base_conflicts, prefer="theirs", run_git=tracked_run_git)
             carrier_resolved = set(resolution["resolved"])
             remaining = [path for path in base_conflicts if path not in carrier_resolved]
             if remaining:
@@ -329,7 +329,7 @@ def plan_managed_update_merge(
         # every other conflict classifies exactly as before.
         carrier_resolved: List[str] = []
         if unmerged:
-            resolution = resolve_carrier_conflicts(tmp_wt, unmerged, prefer="theirs")
+            resolution = resolve_carrier_conflicts(tmp_wt, unmerged, prefer="theirs", run_git=tracked_run_git)
             carrier_resolved = list(resolution["resolved"])
             if carrier_resolved:
                 unmerged = [path for path in unmerged if path not in set(carrier_resolved)]
@@ -456,7 +456,7 @@ def materialize_assisted_merge_live(
         ]
         if carrier_conflicted:
             resolve_carrier_conflicts(
-                str(_g.REPO_DIR), carrier_conflicted, prefer="theirs"
+                str(_g.REPO_DIR), carrier_conflicted, prefer="theirs", run_git=tracked_run_git
             )
     # Re-base the first parent to the reviewed pre-update state WITHOUT disturbing the merge
     # result: `git reset --soft` is refused mid-merge, so move the branch ref directly with

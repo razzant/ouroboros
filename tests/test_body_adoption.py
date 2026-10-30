@@ -145,6 +145,7 @@ def test_direct_server_entry_switches_before_body_imports_and_keeps_argv(scene):
     # Disk HEAD alone proves nothing about what THIS process imported: unattested stays unconfirmed.
     unattested = body_adoption.finalize_on_boot(scene.data, scene.serving, supervisor_ready=True)
     assert unattested["outcome"] == "unconfirmed" and "did not verify" in unattested["note"]
+    assert unattested["why"] == "loaded_tree_unattested"  # what keeps this start from recording its tree healthy
     assert scene.attest()["sha"] == scene.cand and scene.attest()["later_edits"] == []
     not_ready = body_adoption.finalize_on_boot(scene.data, scene.serving, supervisor_ready=False)
     assert not_ready["outcome"] == "unconfirmed" and scene.phase() == "switched"

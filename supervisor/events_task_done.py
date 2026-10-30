@@ -709,6 +709,8 @@ def _resolve_lifecycle_fault(
 
         abort_orphaned_assisted_tx(str(task_id), task_metadata)
         release_assisted_writer_gate_after_task(task_metadata)
+        from supervisor.update_adaptation import resolution_settled
+        resolution_settled(str(task_id), task_metadata)  # an Update adaptation continues off this thread
     except Exception:
         log.debug("assisted-merge orphan watchdog failed (lifecycle fault)", exc_info=True)
     stored: Dict[str, Any] = {}
@@ -984,6 +986,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
 
             abort_orphaned_assisted_tx(str(task_id), task_metadata)
             release_assisted_writer_gate_after_task(task_metadata)
+            from supervisor.update_adaptation import resolution_settled
+            resolution_settled(str(task_id), task_metadata)  # an Update adaptation continues off this thread
         except Exception:
             log.debug("assisted-merge orphan watchdog failed", exc_info=True)
     task_type = str(evt.get("task_type") or task.get("type") or "")

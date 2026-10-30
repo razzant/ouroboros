@@ -5,7 +5,7 @@ coordinator's thread while the socket already answers (``server_liveness.start_b
 the step list and the pinned seams stay in ``server.py::lifespan``). Each function is one named
 step: it does its work or raises, and the coordinator records the outcome in the boot document.
 Nothing here decides readiness; the two waits at the end only observe the store's publication
-and the supervisor's outcome for the document's phase.
+and the supervisor's outcome for the document's phase (``generation_ready`` reports the latter).
 """
 
 from __future__ import annotations
@@ -135,11 +135,19 @@ def wait_store_published(root: pathlib.Path, stop: threading.Event, document: Bo
         raise RuntimeError(f"store not published: {outcome.get('status')}")
 
 
+def generation_ready(ready: threading.Event, error: Callable[[], Optional[str]], stop: threading.Event,
+                     document: BootDocument = BOOT) -> bool:
+    """Observe the generation's readiness: the supervisor's, or the providerless recovery's. True once
+    it is ready; False on its failure (an init error, a failed boot) or its stop, readiness or not."""
+    while not (ready.wait(0.5) or error() or stop.is_set() or document.phase() == "failed"):
+        pass
+    return ready.is_set() and not (error() or stop.is_set() or document.phase() == "failed")
+
+
 def wait_supervisor_outcome(ready: threading.Event, error: Callable[[], Optional[str]], stop: threading.Event,
                             document: BootDocument = BOOT) -> None:
     """The generation is ready once the supervisor (or the providerless recovery) is; its failure
     is this step's failure."""
-    while not (ready.wait(0.5) or error() or stop.is_set() or document.phase() == "failed"):
-        pass
+    generation_ready(ready, error, stop, document)
     if error():
         raise RuntimeError(error())

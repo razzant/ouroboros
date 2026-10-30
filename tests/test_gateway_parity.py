@@ -509,11 +509,14 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         assert re.search(
             rf"@property \{{[^}}]*=\}} {optional_field}\b", typing_decl.group(1)
         ), f"TypingOutbound.{optional_field} must stay optional in the browser mirror"
-    assert re.search(r"@property \{'auto_merge'\|'assisted'\|'manual'\|'replace'\} strategy\b", text)
+    assert re.search(r"@property \{'auto_merge'\|'assisted'\|'manual'\|'replace'\|'prepare'\|'activate'\|"
+                     r"'discard_candidate'\|'apply_without_local_changes'\} strategy\b", text)
+    assert re.search(r"@property \{string=\} candidate_id\b", text)
     assert re.search(r"@property \{string=\} expected_base_sha\b", text)
     assert re.search(r"@property \{string=\} expected_target_sha\b", text)
     assert re.search(r"@property \{boolean=\} confirm_recovery\b", text)
-    assert re.search(r"@property \{'ok'\|'restart_required'\|'assisted_started'\|'manual'\} status\b", text)
+    assert re.search(r"@property \{'ok'\|'restart_required'\|'assisted_started'\|'manual'\|'preparing'\|'discarded'\} "
+                     r"status\b", text)
     assert re.search(r"@typedef \{Object\} UpdateApplyErrorResponse.*?@property \{string\} error\b", text, re.S)
     assert re.search(r"@property \{boolean\} context_mode_auto_low\b", text), (
         "StateResponse.context_mode_auto_low must remain a JSDoc boolean compatibility field"

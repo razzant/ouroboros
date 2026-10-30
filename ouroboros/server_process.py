@@ -477,6 +477,28 @@ class _SignalStopServer(uvicorn.Server):
         threading.Thread(target=receive, name="launcher-stop", daemon=True).start()
 
 
+def hold_for_launcher_stop(data_dir: pathlib.Path, *, poll_sec: float = 0.5) -> int:
+    """The exit code of an activating generation whose Update replaces the app, once it may exit.
+
+    Its exit tail is done and the switch is armed for the app installer, which quits the old
+    app: that Quit stops this process through the launcher's own pipe (``watch_launcher_stop``),
+    so the launcher shuts down instead of recycling it, and 0 follows. Panic's code once Panic
+    is recorded; the restart code once the transition is no longer held (the installer abandoned
+    it, or is provably gone and it was abandoned): nothing was switched, the old app restarts.
+    """
+    from ouroboros import body_adoption
+    from ouroboros.config import PANIC_EXIT_CODE, RESTART_EXIT_CODE
+
+    log.info("Holding this generation's exit for the old app's Quit: the update replaces the app")
+    while not _exit_signalled.wait(poll_sec):
+        verdict = body_adoption.native_hold(data_dir)
+        if verdict == "panic":
+            return PANIC_EXIT_CODE
+        if verdict == "recycle":
+            return RESTART_EXIT_CODE
+    return 0
+
+
 def _launcher_stop_backstop(source: str) -> None:
     """The ordinary stop outlived the launcher's own grace: nobody else will end this process."""
     log.critical("Ordinary stop (%s) did not finish within the launcher grace; exiting", source)

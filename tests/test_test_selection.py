@@ -1,6 +1,8 @@
 """The deterministic minimum and author widening on candidate-owned source."""
-from pathlib import Path
+import ast
+import re
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -181,6 +183,71 @@ def test_a_release_bump_alone_stays_selected_but_other_carrier_edits_run_full(re
 def test_floor_exists_in_this_checkout():
     root = Path(__file__).resolve().parents[1]
     assert all((root / path).is_file() and invariant for path, invariant in selection.FLOOR_TESTS.items())
+
+
+# An Update reads the floor its official target declares statically, from this exact path (``floor_of`` through
+# supervisor.update_checks): the declaration is a format shipped to every installation, and a target that reshapes
+# or moves it leaves those installations unverified for it and for every later one. The rule is written out here
+# from what those readers recognize, not taken from ``floor_of``: a wider reader of a later version must not loosen
+# what this tree's own selector keeps declaring until the installations carrying the older one have moved on.
+SHIPPED_FLOOR_SOURCE = "ouroboros/test_selection.py"
+SHIPPED_FLOOR_MODULE = re.compile(r"tests/(?:[^/]+/)*test_[^/]*\.py")
+
+
+def shipped_floor_declaration(root):
+    """The floor ``root``'s selector declares in the form shipped updaters recognize, else an AssertionError."""
+    shipped = (f"shipped updaters read an official target's floor from {SHIPPED_FLOOR_SOURCE} as its one module-level, "
+               "unannotated FLOOR_TESTS = {...} literal of test modules and their invariants; ")
+    source = Path(root) / SHIPPED_FLOOR_SOURCE
+    assert source.is_file(), shipped + "that file is not there"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    naming = [node for node in tree.body if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+              and any(isinstance(inner, ast.Name) and inner.id == "FLOOR_TESTS" for inner in ast.walk(node))]
+    assert len(naming) == 1, shipped + f"{len(naming)} module-level statements name FLOOR_TESTS"
+    statement = naming[0]
+    assert (isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.Dict)), (
+        shipped + f"FLOOR_TESTS is named by {type(statement).__name__}, not by a plain assignment of a dict literal")
+    try:
+        floor = ast.literal_eval(statement.value)
+    except (ValueError, TypeError):
+        raise AssertionError(shipped + "FLOOR_TESTS is not a literal") from None
+    assert floor and all(isinstance(path, str) and SHIPPED_FLOOR_MODULE.fullmatch(path) and ".." not in path.split("/")
+                         and isinstance(invariant, str) for path, invariant in floor.items()), (
+        shipped + "FLOOR_TESTS is empty or holds more than test modules and their invariants")
+    return floor
+
+
+def test_the_selector_declares_its_floor_the_way_shipped_updaters_read_it():
+    root = Path(__file__).resolve().parents[1]
+    declared = shipped_floor_declaration(root)  # the members are the selector's to change, never listed here
+    assert declared == selection.FLOOR_TESTS
+    assert selection.floor_of((root / SHIPPED_FLOOR_SOURCE).read_text(encoding="utf-8")) == declared
+
+
+SCRATCH_FLOOR = '{"tests/test_a.py": "an invariant"}'
+
+
+@pytest.mark.parametrize("files", [
+    {SHIPPED_FLOOR_SOURCE: f"FLOOR_TESTS: dict[str, str] = {SCRATCH_FLOOR}\n"},
+    {SHIPPED_FLOOR_SOURCE: f"FLOOR_TESTS = {SCRATCH_FLOOR}\nFLOOR_MODULES = tuple(FLOOR_TESTS)\n"},
+    {SHIPPED_FLOOR_SOURCE: f"import sys\nFLOOR_TESTS = {SCRATCH_FLOOR}\n"
+                           "if sys.platform == 'win32':\n    FLOOR_TESTS['tests/test_w.py'] = 'x'\n"},
+    {SHIPPED_FLOOR_SOURCE: 'WHY = "an invariant"\nFLOOR_TESTS = {"tests/test_a.py": WHY}\n'},
+    {SHIPPED_FLOOR_SOURCE: "from ouroboros.test_floor import FLOOR_TESTS\n",
+     "ouroboros/test_floor.py": f"FLOOR_TESTS = {SCRATCH_FLOOR}\n"},
+    {"ouroboros/selection/test_selection.py": f"FLOOR_TESTS = {SCRATCH_FLOOR}\n"},
+], ids=["annotated", "named-again", "conditional", "not-a-literal", "declared-elsewhere", "module-moved"])
+def test_a_floor_declaration_shipped_updaters_cannot_read_fails_the_witness(tmp_path, files):
+    for path, text in files.items():
+        write(tmp_path, path, text)
+    with pytest.raises(AssertionError, match="shipped updaters read"):
+        shipped_floor_declaration(tmp_path)
+
+
+def test_the_witness_accepts_the_plain_declaration_its_negatives_depart_from(tmp_path):
+    write(tmp_path, SHIPPED_FLOOR_SOURCE, f"FLOOR_TESTS = {SCRATCH_FLOOR}\n")
+    assert shipped_floor_declaration(tmp_path) == {"tests/test_a.py": "an invariant"}
 
 
 def test_reviewed_tool_binds_widening_and_force_uses_full(repo, monkeypatch):

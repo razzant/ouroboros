@@ -69,9 +69,7 @@ def tracked_start():
     global _spawning_subprocesses
     finalizing = getattr(_FINALIZING, "active", False)
     with _start_settled:
-        refusal = ("Emergency Stop has retired command admission" if _panic_requested else
-                   "this server generation's stop has begun: command admission is closed"
-                   if stop_begun() and not finalizing else "")
+        refusal = admission_refusal()
         if not refusal:
             _spawning_subprocesses += 1
     if refusal:
@@ -97,6 +95,16 @@ def tracked_start():
             with _start_settled:
                 _spawning_subprocesses -= 1
                 _start_settled.notify_all()
+
+
+def admission_refusal() -> str:
+    """Why ``tracked_start`` refuses a start on this thread now (Emergency Stop, or this generation's begun stop
+    outside ``exit_finalization``), or ``""``: a producer that got no child tells a refusal from a child's answer."""
+    if _panic_requested:
+        return "Emergency Stop has retired command admission"
+    if stop_begun() and not getattr(_FINALIZING, "active", False):
+        return "this server generation's stop has begun: command admission is closed"
+    return ""
 
 
 @contextmanager

@@ -22,8 +22,12 @@ be examined), it exits 2 naming both choices: that data with the old
 ports. Source CLI, desktop CLI, Settings, extensions and launcher use the published
 port of the roots they resolve. Desktop `run --start` accepts a running server only when
 that data root's service binding names it (`--url` names one outright); otherwise it opens
-the app, on macOS through `open -n --env` with its resolved paths, including defaults. Keep containers'
-published port free.
+the app, on macOS through `open -n --env` with its resolved paths, including defaults.
+An in-app replacement of the desktop app opens the new app with the requested
+port (never a fallback) and the `--runtime-venv` its body ran in; its readback
+refuses another port or a body outside that venv. A venv made on another Python
+of the app's version keeps that Python, and the readback holds the body to it.
+Keep containers' published port free.
 
 An older release ignores the basis: it creates new work roots under `~/Ouroboros`, and
 its direct server given only APP_ROOT keeps memory in `~/Ouroboros/data`. Set DATA_DIR
@@ -45,6 +49,45 @@ into the destination's task layout, then call
 updated `budget_drive_root`, `drive_root`/`child_drive_root` as applicable, and
 cleared `reason_code`/`reason_detail`. Keep sources through adoption.
 Copying the directory alone never rewrites those pointers.
+
+## A Source Server on a System Python
+
+A server started directly (`python server.py`, `ouroboros server`) or by the source
+launcher (`python launcher.py`) on a Python that is neither the app's nor a virtual
+environment installs its dependency lock into that interpreter's own packages. An Update
+that changes the lock does not: it prepares a venv of exactly that interpreter beside the
+data root (`<data>/state/python-private`), every pin of the lock installed in it and the
+interpreter's own packages visible underneath. From its activation on, every entry of that
+checkout on that interpreter re-executes there before any import, so the command stays the
+same; a venv, another interpreter or another checkout runs as it is. The launcher installs
+into that venv too and, once an Update switched it, hands itself over to a fresh launcher
+before any other work (the fresh one syncs, installs and starts the new server); one from
+before this hand-over makes the Update refuse (quit and open it again). The venv gets its
+pip from `ensurepip`; where that is missing or disabled (Debian and Ubuntu without
+`python3-venv`), from the interpreter's own pip; for an interpreter without pip, from the
+lock's own pip wheel, fetched at its reviewed size and digest; and a Python shipped without
+`venv` gets the few files `venv` would write. Each needs the package index, as the lock does;
+without it the Update stops at preparation and nothing changes. Once an Update selected
+that venv (`private_environment` in `<data>/state/update_activation.json`), a venv that is
+gone or no longer serves the checkout on that interpreter (its marker gone, another
+checkout's or another interpreter's) makes every dependency install refuse rather than
+write into the interpreter's own packages, and so does a gone one whose record exists but
+cannot be read, since it may say one was selected: restart to update prepares a new one; to
+run on the interpreter's own packages again, stop, remove that record and move the directory
+aside.
+
+## Updates on Windows
+
+The app's own user base (`<data>\state\python-userbase`) and a `--runtime-venv` take a
+lock-changing Update the same way: the new packages are prepared beside them and renamed
+into place before the next start imports anything, console scripts (`Scripts\*.exe`) are
+pointed at the path they then run from, and the launcher hands itself over to a fresh one.
+Windows can refuse that rename (WinError 5 was measured while a process worked inside the
+folder): the start then switches everything back before any of the new version runs, quotes
+the error in Dashboard › Updates and keeps the update ready; close what uses the folder and
+restart to update again. A system Python gets its private venv as described above: the
+launcher starts its server as that venv's base Python (one process, in the launcher's Job),
+and a direct command stays the waited-on parent of its entry, which runs there.
 
 ## Unknown model role at startup
 
@@ -113,9 +156,11 @@ profile per volume set; never point two containers at one data volume.
 CPython 3.10.22 and SQLite 3.53.1, the same assets
 `scripts/download_python_standalone.sh` and `scripts/download_python_standalone.ps1`
 pin for the desktop packages. It is not Debian's `python:3.10-slim` (SQLite 3.46.1).
-Desktop installs receive that interpreter only by installing the app again.
-Settings → Update replaces the repository and its packages; it does not replace
-the bundled interpreter. A managed container keeps its runtime venv on a volume.
+Settings → Update replaces the repository and its packages. On macOS, an update
+that needs a newer app also replaces an official signed app, bundled interpreter
+included, when the newer app runs the same Python minor version; otherwise desktop
+installs receive that interpreter only by installing the app again. A managed
+container keeps its runtime venv on a volume.
 A venv whose interpreter no longer matches this image is left untouched, and the
 log names the recovery step: stop, move that directory aside, start again. Code
 and data stay; packages that lived only in the old venv do not.
