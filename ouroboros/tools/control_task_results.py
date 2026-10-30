@@ -560,7 +560,7 @@ def _wait_attention_poll(
     from ouroboros.owner_mailbox import OwnerMailboxPeek
 
     rid = tree_root_id(ctx)
-    mailbox_peek = OwnerMailboxPeek()
+    mailbox_peek = OwnerMailboxPeek(waking_only=True)  # a False place arrival waits for the drain
 
     cursor_store = getattr(ctx, "_wait_attention_cursors", None)
     if not isinstance(cursor_store, dict):
@@ -1058,7 +1058,7 @@ def await_messages_entry() -> ToolEntry:
             "them or its subtree, the terminal of delegated `runs` you "
             "own, the exit of your own `services` (warm only: the start each has now; a replaced, stopped "
             "or lost one wakes you as unknown, never as success), and/or `wake_at`/`wake_after_sec`; with "
-            "nothing selected any addressed mail wakes you. The "
+            "nothing selected any addressed mail wakes you. A place event the host marks as a wake wakes any wait past its selectors; one marked as context ends none and stays unread for your next round. The "
             "owner's messages, controls and typed descendant escalations always wake you; other unselected mail waits unread. Warm keeps your "
             "process and browser (a pooled slot is lent meanwhile). Cold saves your continuation and releases "
             "the process only after the body accepts custody of your bound external runs; local services "

@@ -815,6 +815,7 @@ def test_storage_route_surface(tmp_path):
         ("/api/storage/free/preview", frozenset({"POST"})),
         ("/api/storage/free", frozenset({"POST"})),
         ("/api/storage/free/cancel", frozenset({"POST"})),
+        ("/api/storage/free/items", frozenset({"GET", "HEAD"})),
     }
 
 
@@ -832,7 +833,7 @@ def test_mounted_storage_routes_read_passively_until_the_owner_measures(tmp_path
     spawned = _fake_spawn(monkeypatch, [b'{"event":"progress","place":"engine","current":"","places_done":1,"places_total":12,"bytes":1,"files":1,"done":[]}\n'], hold=hold)
     monkeypatch.setattr(storage, "count", StorageCounter())
     routes = [route for route in collect_routes(data_dir=data) if getattr(route, "path", "").startswith("/api/storage")]
-    assert len(routes) == 6
+    assert len(routes) == 7
     # The owner's cancel writes one supervisor row (logs/); nothing else under the data folder may change.
     snapshot = lambda: sorted((str(path), path.stat().st_mtime_ns) for path in data.rglob("*")  # noqa: E731
                               if "logs" not in path.relative_to(data).parts)
@@ -887,8 +888,9 @@ def test_storage_envelopes_have_a_field_identical_browser_twin():
 
     names = [name for name in contracts.__all__ if name.startswith("Storage")]
     assert names == ["StorageCount", "StorageCounting", "StorageError", "StoragePart", "StoragePlace", "StorageResponse",
-                     "StorageRest", "StorageVolume", "StorageRemover", "StorageFree", "StorageFreeGroup", "StorageFreeItem",
-                     "StorageFreeKept", "StorageFreeRequest", "StorageFreeRun"]
+                     "StorageRest", "StorageVolume", "StorageRemover", "StorageFree", "StorageFreeEntry", "StorageFreeGroup",
+                     "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept", "StorageFreePool", "StorageFreeRequest",
+                     "StorageFreeRun"]
     for name in names:
         home = storage_free if name.startswith("StorageFree") else storage
         assert getattr(contracts, name) is getattr(home, name)

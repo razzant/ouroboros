@@ -133,6 +133,7 @@ TOOL_POLICY: Dict[str, str] = {
     "delegate_answer": POLICY_SKIP,
     "delegate_message": POLICY_SKIP,
     "cancel_task": POLICY_SKIP,
+    "set_task_retention": POLICY_SKIP,  # a retention fact on the owner's own held words; never deletes
     "resume_child_task": POLICY_SKIP,
     "discard_child_result": POLICY_SKIP,
     "override_delegation_constraint": POLICY_SKIP,

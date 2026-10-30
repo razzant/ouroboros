@@ -54,7 +54,7 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
-        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, place_arrival_wake,
     )
 
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
@@ -75,7 +75,7 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     if KIND_HURRY in kinds:
         return "hurry"
     for kind, row in zip(kinds, entries):
-        if kind == KIND_TASK_MESSAGE:  # the first mail is the one that woke the task
+        if kind == KIND_TASK_MESSAGE and place_arrival_wake(row) is not False:  # the first waking mail
             source = str(row.get("source_task_id") or "").strip()
             return f"mail:{source}" if source else "mail:unknown"
     return "mail:unknown" if entries else "unknown"
@@ -793,7 +793,7 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
         del ctx.pending_events[0]
     wait = set_owner_wait(root, ctx.task_id, {**checkpoint, "state": "waiting", "is_direct_chat": True})
     get_direct_activity_registry().mark_parked(ctx.task_id, wait, drive_root=root)
-    peek = OwnerMailboxPeek()
+    peek = OwnerMailboxPeek(waking_only=True)  # an inline author still hears place arrivals here
     deadline = parse_deadline_ts((checkpoint or {}).get("wait_deadline_at"))  # None = unbounded
     outcome = "unknown"
     warm_pause = checkpoint.get("reason") == REASON_OWNER_PAUSE_WARM

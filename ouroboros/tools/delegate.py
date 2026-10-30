@@ -35,7 +35,7 @@ from ouroboros.subagent_work_order import (  # noqa: F401 - compatibility re-exp
     session_design_navigation,
     session_host_references,
 )
-from ouroboros.subagent_work_order import session_service_directories
+from ouroboros.subagent_work_order import in_place_scratch, session_service_directories
 from ouroboros.delegate_source_coverage import (
     add_terminal_source_verification,  # noqa: F401  (leaf reads it through _delegate() at call time)
     prepare_work_order_start_binding,
@@ -537,7 +537,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 target_root = record_auth["target_root"]
                 authority_source = record_auth["source"]
                 if workspace == "in_place":
-                    snapshot, snap_error, resource_ref, run_binding = in_place_start(continuation.snapshot, target_root)
+                    snapshot, snap_error, resource_ref, run_binding = in_place_start(continuation.snapshot, target_root, in_place_scratch(ctx, gateway, route, authority, invocation_id, target_root))
                 elif continuation.snapshot:
                     snapshot, snap_error = continuation.snapshot, None
                 elif authority_source == "skill_payload":
@@ -1437,7 +1437,7 @@ def get_tools() -> List[ToolEntry]:
                 "An observed terminal, a new interaction, "
                 "fault, addressed owner/task message, a direct-child attention/terminal event, "
                 "cancel/deadline control, recovery judgment, or an explicit one-shot checkpoint "
-                "wakes exactly once. "
+                "wakes exactly once. Host-marked context-only place arrivals stay unread until a genuine wake. "
                 "A host-confirmed retry successor may retrieve a predecessor's proven terminal result; live control stays with its starter. "
                 "Usable terminal output returns before pending host capture/accounting; "
                 "rereading it is immediate, not a wait for that preparation. A wake's leaf_live_input is the "

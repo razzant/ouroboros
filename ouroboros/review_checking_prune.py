@@ -41,6 +41,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from ouroboros.owner_keep import OWNER_KEEP, gate, is_kept
 from ouroboros.review_checking import (
     VIEWS_LOCK_NAME,
     _RECEIPTED,
@@ -143,6 +144,8 @@ def _checkout_hold(data_root: Any, entry: pathlib.Path, *, rounds: tuple, source
     repo = unindexed(entry, "repo").resolve(strict=False)
     if not task_id:
         return "owner_unknown"
+    if is_kept(data_root, task_id):
+        return OWNER_KEEP
     if entry.name in active:
         return "review_custody_active"
     if any(root == repo or root.is_relative_to(repo) for root in sources):
@@ -170,6 +173,18 @@ def _checkout_registration_gone(repo: pathlib.Path) -> bool:
     except FileNotFoundError:
         return True
     return False
+
+
+def _remove_unless_kept(data_root: Any, entry: pathlib.Path, rounds: tuple) -> str:
+    """The removal under the keep gate of the checkout's task, read as ``_checkout_hold`` reads it."""
+    from ouroboros.tools.review_subject import CHECKOUT_MARKER
+
+    try:
+        task_id = str(json.loads((entry / CHECKOUT_MARKER).read_text(encoding="utf-8")).get("task_id") or "")
+    except (OSError, ValueError, AttributeError):
+        task_id = rounds[1].get(entry.name, "")
+    with gate(data_root, task_id, timeout_sec=0) as why:
+        return f"{entry.name}: {why}" if why else _remove_checkout(entry)
 
 
 def _remove_checkout(entry: pathlib.Path) -> str:
@@ -208,7 +223,7 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
             return
         try:
             hold = _checkout_hold(data_root, entry, rounds=rounds, sources=sources, live=live, cutoff=cutoff)
-            error = "" if hold else _remove_checkout(entry)
+            error = "" if hold else _remove_unless_kept(data_root, entry, rounds)
         except Exception as exc:  # an unreadable marker, row or tree keeps the checkout
             hold, error = "", f"{entry.name}: {type(exc).__name__}: {exc}"
         if error:
@@ -275,20 +290,33 @@ def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str],
 
 def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[str, bool]) -> str:
     """Move one finished seat home (its evidence and marker) into the custody trash the maintenance child
-    empties, after re-checking it under the seat lock; returns why it stayed, or ``""``."""
-    with finished_home_held(data_root, home, live, proven) as why:
-        if why:
-            return why
-    trash = pathlib.Path(data_root) / "state" / "custody_trash" / f"{home.name}-{uuid.uuid4().hex[:12]}"
-    trash.parent.mkdir(parents=True, exist_ok=True)
-    home.replace(trash)  # outside the lock: Windows moves no folder with an open file
+    empties, after re-checking it under the seat lock; returns why it stayed, or ``""``. Its task is proven
+    over before the owner's keep gate (the probe takes the supervisor's queue lock, which drive settlement
+    holds while it waits for custody); inside, only the recorded terminal status is read again."""
+    from ouroboros.body_candidate import _recorded_terminal
+    from ouroboros.subagent_worktrees import _task_proven_over
+
+    task_id = str(json.loads((home / "checking.json").read_text(encoding="utf-8")).get("task_id") or "")
+    if task_id not in proven:
+        proven[task_id] = _task_proven_over(task_id, data_root, live)
+    with gate(data_root, task_id, timeout_sec=0) as kept:  # outside the seat lock's file: it covers the move too
+        if kept:
+            return kept
+        if proven[task_id] and not _recorded_terminal(task_id, data_root):
+            return "in_use"  # continued since it was proven over: no stale proof deletes it
+        with finished_home_held(data_root, home, live, proven) as why:
+            if why:
+                return why
+        trash = pathlib.Path(data_root) / "state" / "custody_trash" / f"{home.name}-{uuid.uuid4().hex[:12]}"
+        trash.parent.mkdir(parents=True, exist_ok=True)
+        home.replace(trash)  # outside the seat lock: Windows moves no folder with an open file
     return ""
 
 
 def orphan_review_checkouts(data_root: Any, live: Callable[[str], Any], homes: Optional[list] = None) -> list:
     """For the owner's Storage -> Free: ``(checkout, verdict)`` per isolated review checkout, ``offer``
     when no task owns it (made before the marker, named by no recorded round) or the background pass
-    would retire it now, else ``in_use`` or ``unreadable``. Pure, like ``finished_seat_homes``."""
+    would retire it now, else ``owner_keep``, ``in_use`` or ``unreadable``. Pure, like ``finished_seat_homes``."""
     entries = _checkout_entries(pathlib.Path(data_root) / "state" / "review_checkouts")
     if not entries:
         return []
@@ -311,7 +339,7 @@ def orphan_review_checkouts(data_root: Any, live: Callable[[str], Any], homes: O
                 data_root, entry, rounds=rounds, sources=sources, live=lambda: _Probed(live), cutoff=float("inf"))
         except Exception:
             hold = "marker_unreadable"
-        found.append((entry, "offer" if hold in ("", "owner_unknown") else
+        found.append((entry, "offer" if hold in ("", "owner_unknown") else OWNER_KEEP if hold == OWNER_KEEP else
                       "unreadable" if hold == "marker_unreadable" else "in_use"))
     return found
 
@@ -324,11 +352,18 @@ def retire_orphan_checkouts(data_root: Any, chosen: list, live: Callable[[str], 
         return {entry: "busy" for entry in chosen}
     try:
         verdicts, outcome = dict(orphan_review_checkouts(data_root, live)), {}
+        rounds: Optional[tuple] = None
         for entry in chosen:
             if stop():
                 break
             verdict = verdicts.get(entry, "other")
-            outcome[entry] = verdict if verdict != "offer" else "other" if _remove_checkout(entry) else ""
+            if verdict == "offer" and rounds is None:
+                try:  # once, for a checkout with no marker; unknown custody keeps every checkout, as the listing does
+                    rounds = _review_rounds(data_root)
+                except Exception:
+                    rounds = ()
+            verdict = "unreadable" if verdict == "offer" and not rounds else verdict
+            outcome[entry] = verdict if verdict != "offer" else "other" if _remove_unless_kept(data_root, entry, rounds) else ""
         return outcome
     finally:
         _PASS_LOCK.release()
@@ -390,7 +425,11 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                     report["capture_failed"] += 1
                     return True
             if receipt.get("status") in _RECEIPTED:
-                receipt = _release_area(area, receipt, marker.get("git"))
+                with gate(data_root, task_id, timeout_sec=0) as held:  # the owner's keep holds a captured copy too
+                    if held:
+                        report["kept"] += 1
+                        return True
+                    receipt = _release_area(area, receipt, marker.get("git"))
                 if receipt.get("cleanup_error"):
                     report["errors"].append(receipt["cleanup_error"])
                     return True

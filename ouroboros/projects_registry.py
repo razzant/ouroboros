@@ -1330,7 +1330,7 @@ def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any,
     entry = create_project(drive_root, project_id, admission_basis=admission_basis)
     if not str(entry.get("working_dir") or "").strip():
         try:
-            from ouroboros.subagent_worktrees import provision_genesis_project
+            from ouroboros.genesis_project import provision_genesis_project
 
             handle = provision_genesis_project(
                 repo_dir=repo_dir, task_id=f"project_{entry['id']}", data_dir=drive_root,

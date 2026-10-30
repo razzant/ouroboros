@@ -7,7 +7,7 @@ Chromium and WebKit, light and dark, a phone and a window, over fixture answers 
   ledger says so and invents no zero.
 * Activity rows name their work whole (no ellipsis), in the primary ink above their quieter facts, say how long a task
   has run in words, and never put a control over the words.
-* Storage's Temporary space keeps a group's name its room on a narrow card: the long size that carries a qualifier goes
+* Storage's saved groups keep a group's name its room on a narrow card: the long size that carries a qualifier goes
   under the name.
 * The Widgets card head keeps the menu and the move handle visible at rest, quiet, the same box and side by side on
   every card, and a framed card's lifecycle controls never push the pair below them.
@@ -220,15 +220,19 @@ def _storage():
     return {"count": count, "counting": None, "error": None, "volume": volume, "retention_days": 7, "free": {
         "state": "ready", "plan": "plan-7", "started_at": "2026-10-27T15:10:00Z", "finished_at": "2026-10-27T15:11:00Z",
         "done": 3, "total": 3, "run": None, "error": None, "groups": [
-            group("work_folders", 2 * GB), group("working_copies", int(1.3 * GB)),
-            group("review_evidence", int(3.7 * GB), bytes_complete=False, unreadable=2)]}}
+            group("review_checkouts", 2 * GB), group("lost_copies", int(1.3 * GB)),
+            group("review_evidence", int(3.7 * GB), bytes_complete=False, unreadable=2)],
+        "pool": {"count": 0, "bytes": 0, "bytes_complete": True, "kinds": {}, "excluded": []}}}
 
 
 @pytest.mark.parametrize("width,theme", [(390, "light"), (1100, "dark")], ids=["phone-light", "window-dark"])
 def test_temporary_space_keeps_a_groups_name_its_room_on_a_narrow_card(ui, width, theme):
     page = _open(ui, width=width, theme=theme, place="dashboard", tab="storage",
                  routes=[("**/api/storage", _json(_storage(), path="/api/storage"))])
-    page.wait_for_selector(".storage-free-group")
+    # The saved groups stand behind "Not included": read-only rows first, the checklist on purpose.
+    page.locator('[data-free-disclosure="left"] > summary').click()
+    page.locator("[data-free-saved]").click()
+    page.wait_for_selector("[data-free-group]")
     groups = page.evaluate("""() => [...document.querySelectorAll('.storage-free-group')].map((group) => {
         const label = group.querySelector('.storage-free-label'), size = group.querySelector('.storage-free-size');
         const l = label.getBoundingClientRect(), s = size.getBoundingClientRect();

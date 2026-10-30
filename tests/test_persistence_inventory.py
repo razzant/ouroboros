@@ -891,7 +891,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # the scan no longer yields the legacy ``state/usage_attempts.lock`` spelling.
 # 430 -> 431: checkout-specific preflight heads, registered in the review-ledger row.
 # 433 target paths plus the three call wire/import-lock/tariff paths.
-EXPECTED_SCAN_PATHS = 436
+# Two existing disposable families are now named by their owner-keep readers:
+# task_drives/*/session_scratch_owners and task_trees/*.
+EXPECTED_SCAN_PATHS = 438
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

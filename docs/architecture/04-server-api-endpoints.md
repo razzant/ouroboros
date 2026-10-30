@@ -139,6 +139,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/tasks/{task_id}/cancel` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/hurry` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/pause` | (§6 Owner Pause of a whole tree) |
+| POST | `/api/tasks/{task_id}/owner-keep` | `OwnerKeepRequest`; keep or release exactly this task's materials |
 | POST | `/api/tasks/{task_id}/continue` | (§6 Owner Continue after a technical interruption) |
 | POST | `/api/tasks/{task_id}/resume` | |
 | POST | `/api/call/open` | admits a live call as an ordinary room turn when Calls (beta) is on (§13 Live Conversation) |
@@ -166,7 +167,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/storage/measure` | start/join child count |
 | POST | `/api/storage/measure/cancel` | stop child; saved count stays |
 | POST | `/api/storage/free/preview` | pure preview; 202, start/join |
-| POST | `/api/storage/free` | `StorageFreeRequest`; exact plan ids; 202, `started`/`reason` |
+| POST | `/api/storage/free` | `StorageFreeRequest`: exact pool `items`, `groups`, or `manual` ids of `view=manual` with `accept_loss: true`; 202, `started`/`reason` |
+| GET | `/api/storage/free/items` | `StorageFreeItemsResponse`: one `view=` page: `pool`, `excluded`, `manual` or `outcomes` |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
 | GET | `/api/projects` | optional `chat_id`: that active room from the full registry, beyond sidebar limits (missing → empty `projects`; unreadable → error) |

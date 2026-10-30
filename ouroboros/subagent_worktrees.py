@@ -43,12 +43,22 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.force_remove import force_rmtree as _force_rmtree  # the shared permission-granting removal
 from ouroboros.utils import atomic_write_json, utc_now_iso
-from ouroboros.config import DATA_DIR, get_subagent_projects_root, get_subagent_worktree_root
+from ouroboros.config import DATA_DIR, get_subagent_worktree_root
 from ouroboros.retention import age_cutoff, get_gc_retention_days
 from ouroboros.unindexed import copy_path  # new checkouts are born where desktop search skips them
-from ouroboros import worktree_removal
+from ouroboros import owner_keep, worktree_removal
 
 log = logging.getLogger(__name__)
+
+
+def __getattr__(name: str) -> Any:
+    """The two genesis names this module used to own; ``genesis_project`` owns them and imports this module."""
+    if name in ("provision_genesis_project", "remove_genesis_project"):
+        from ouroboros import genesis_project
+
+        return getattr(genesis_project, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 _RECORDS_NAME = "private_copies"
 _LEGACY_REGISTRY_NAME = "subagent_worktrees.json"
@@ -105,12 +115,9 @@ def _assert_root_isolated(root: Path, repo_dir: Path, data_dir: Path) -> None:
 def _safe_name(task_id: Any) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(task_id or "").strip())
     safe = safe or f"wt_{int(time.time())}"
-    # Bound the path component so an arbitrary-length input (e.g. a project display name,
-    # which is not length-validated upstream) never hits ENAMETOOLONG on mkdir. On
-    # truncation keep a short hash of the full slug so two long names with the same prefix
-    # do not silently collide.
+    # Bound the component (a project display name is not length-validated upstream: ENAMETOOLONG);
+    # a short hash of the full slug keeps two long names with one prefix apart.
     if len(safe) > 64:
-        import hashlib
         digest = hashlib.sha256(safe.encode("utf-8")).hexdigest()[:8]
         safe = f"{safe[:55]}_{digest}"
     return safe
@@ -160,16 +167,35 @@ def _record_file(path: Any, data_dir: Optional[Any] = None) -> Path:
     return _records_dir(data_dir) / f"{_record_name(path)}.json"
 
 
+def _names_copy(row: Any) -> bool:
+    return isinstance(row, dict) and bool(str(row.get("path") or "").strip())
+
+
+def _parse_record(file: Path) -> Optional[Dict[str, Any]]:
+    """One record, ``None`` when absent; an unreadable file raises ``ValueError`` or ``OSError``. Reports nothing."""
+    try:
+        row = json.loads(file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not _names_copy(row):
+        raise ValueError("a copy record must be an object naming its path")
+    return row
+
+
+def _legacy_entries(data: bytes) -> List[Any]:
+    """The rows of the legacy whole-file registry's bytes; malformed bytes raise ``ValueError``."""
+    raw = json.loads(data.decode("utf-8"))
+    entries = raw.get("worktrees") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        raise ValueError("legacy registry 'worktrees' is not a list")
+    return entries
+
+
 def _read_record(file: Path, *, op: str = "", data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     """One record, ``None`` when absent; an unreadable file raises (and is reported)."""
     try:
-        row = json.loads(file.read_text(encoding="utf-8"))
-        if not isinstance(row, dict) or not str(row.get("path") or "").strip():
-            raise ValueError("a copy record must be an object naming its path")
-        return row
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return _parse_record(file)
+    except (OSError, ValueError) as exc:
         _report_unreadable(file, op, exc, data_dir)
         raise SubagentWorktreeRegistryCorrupt(f"{file.name}: {exc}") from exc
 
@@ -239,18 +265,14 @@ def _import_legacy_registry(data_dir: Optional[Any] = None) -> None:
             return
         data = legacy.read_bytes()
         try:
-            raw = json.loads(data.decode("utf-8"))
-            entries = raw.get("worktrees") if isinstance(raw, dict) else raw
-            if not isinstance(entries, list):
-                raise ValueError("legacy registry 'worktrees' is not a list")
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            entries = _legacy_entries(data)
+        except ValueError as exc:
             _report_unreadable(legacy, "legacy_import", exc, data_dir)
             _imported_roots.add(key)
             return
         moved = 0
         for row in entries:
-            if isinstance(row, dict) and str(row.get("path") or "").strip() \
-                    and not _record_file(row["path"], data_dir).exists():
+            if _names_copy(row) and not _record_file(row["path"], data_dir).exists():
                 _put_record(row, data_dir)
                 moved += 1
         atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", {
@@ -490,95 +512,6 @@ def provision_worktree(
         task_copy=True, parent_task_id=parent_task_id,
         source_is_system_repo=source_is_system_repo,
     )
-
-
-def provision_genesis_project(
-    *,
-    repo_dir: Any,
-    task_id: Any,
-    parent_task_id: str = "",
-    projects_root: Optional[Any] = None,
-    data_dir: Optional[Any] = None,
-    dir_name: str = "",
-) -> WorktreeHandle:
-    """Provision a durable, isolated, EMPTY git project for a genesis acting child.
-
-    Unlike a worktree this is a standalone repo (not a checkout of the live body)
-    under the durable projects root. It is the deliverable itself and is NEVER
-    GC-pruned, so it is intentionally not added to the worktree registry. The
-    child builds the whole project here and returns a ``workspace.patch`` that is
-    a diff from the empty initial commit (``base_sha``).
-
-    ``dir_name`` names the genesis directory meaningfully (e.g. the project name,
-    readable Unicode via ``project_folder_basename``) instead of the raw task id, so
-    sibling builders share a recognizable project root; the handle's binding
-    identity stays ``task_id`` (I, v6.39). Existing folders are never renamed.
-    """
-    from ouroboros.project_facts import project_folder_basename
-
-    repo_dir = Path(repo_dir).resolve()
-    root = Path(projects_root) if projects_root else Path(get_subagent_projects_root())
-    root = root.expanduser().resolve()
-    _assert_root_isolated(root, repo_dir, _data_dir(data_dir))
-    safe_task = project_folder_basename(dir_name) or _safe_name(task_id)
-    # Genesis projects are durable: never clobber an existing entry. The candidate is
-    # created EXCLUSIVELY before anything resolves it, so an existing directory, a
-    # case/normalization alias, or a (dangling) symlink all count as taken -> "_N".
-    root.mkdir(parents=True, exist_ok=True)
-    _suffix = 0
-    while True:
-        proj = root / (f"{safe_task}_{_suffix}" if _suffix else safe_task)
-        try:
-            os.mkdir(proj)
-            break
-        except FileExistsError:
-            _suffix += 1
-    if proj.resolve().parent != root:
-        raise RuntimeError(f"genesis project escaped its root: {proj}")
-    proj = proj.resolve()
-    try:
-        _git(proj, "init")
-        # A fresh repo may have no commit identity; set a local one for the seed
-        # commit only (does not touch the user's global git config).
-        _git(
-            proj,
-            "-c", "user.email=ouroboros@localhost",
-            "-c", "user.name=Ouroboros",
-            "commit", "--allow-empty", "-m", "genesis: empty project",
-        )
-        base_sha = _git(proj, "rev-parse", "HEAD").stdout.strip()
-    except Exception:
-        # Do not leak a partial/uninitialized project dir on git failure.
-        _force_rmtree(proj)
-        raise
-    return WorktreeHandle(
-        task_id=str(task_id),
-        path=str(proj),
-        branch="",
-        base_sha=base_sha,
-        repo_dir=str(proj),
-        created_at=time.time(),
-        parent_task_id=str(parent_task_id or ""),
-    )
-
-
-def remove_genesis_project(path: str, *, projects_root: Optional[Any] = None) -> bool:
-    """Best-effort removal of a provisioned-but-unused genesis project.
-
-    Only removes a path strictly INSIDE the configured projects root (never an
-    arbitrary caller path). Used to clean up a genesis project whose schedule was
-    rejected before the child ran; genesis projects are otherwise durable.
-    """
-    if not str(path or "").strip():
-        return False
-    root = Path(projects_root) if projects_root else Path(get_subagent_projects_root())
-    root = root.expanduser().resolve()
-    target = Path(path).resolve()
-    if target == root or not _is_within(target, root):
-        return False
-    if target.exists():
-        _force_rmtree(target)
-    return True
 
 
 @dataclass(frozen=True)
@@ -945,11 +878,14 @@ def release_snapshot_checkout(snapshot_id: str, *, worktree_root: Optional[Any] 
         return False
     root = _resolve_root(worktree_root)
     wt_path = Path(str(row.get("path") or ""))
-    with _record_lock(wt_path, data_dir, op="release_checkout", task_id=str(row.get("task_id") or "")):
-        if wt_path.exists() and not _deletable(wt_path, root):
-            return False  # not under this root: the checkout stays whole and unmarked
-        current = _record_at(wt_path, data_dir, op="release_checkout") or row
-        _put_record({**current, "checkout_released": current.get("checkout_released") or utc_now_iso()}, data_dir)
+    with _record_lock(wt_path, data_dir, op="release_checkout", task_id=str(row.get("task_id") or "")), \
+            owner_keep.gate(_data_dir(data_dir), row.get("task_id")) as why:
+        if why or (wt_path.exists() and not _deletable(wt_path, root)):
+            return False  # kept by the owner, or not under this root: the checkout stays whole and unmarked
+        row = _record_at(wt_path, data_dir, op="release_checkout")
+        if row is None or row.get("snapshot_id") != snapshot_id:
+            return False  # no stale row decides: this record went or became another's
+        _put_record({**row, "checkout_released": row.get("checkout_released") or utc_now_iso()}, data_dir)
         if wt_path.exists():
             _force_rmtree(wt_path)
         if wt_path.exists():
@@ -1383,11 +1319,15 @@ def remove_execution_snapshot(
     *,
     worktree_root: Optional[Any] = None,
     data_dir: Optional[Any] = None,
+    holds: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    reasons: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Remove a disposed snapshot: its checkout (if still there), its baseline and
     result pins and its record. Call only after explicit disposition or GC's
     ownership/custody proof. A surviving tree, or one outside the worktree root,
-    keeps its record and pins; unchanged failures wait until a new process.
+    keeps its record and pins; unchanged failures wait until a new process. The record read under
+    the lock decides, with ``holds`` (GC's proof) and the owner's keep, also after apply or reject.
+    ``reasons`` receives the keep gate's refusal by the copy's path, as in ``prune_orphans``.
     """
     entry = find_execution_snapshot(snapshot_id, data_dir)
     if entry is None or worktree_removal.unchanged(entry):
@@ -1395,20 +1335,27 @@ def remove_execution_snapshot(
     root = _resolve_root(worktree_root)
     wt_path = Path(str(entry.get("path") or ""))
     with _record_lock(wt_path, data_dir, op="remove", task_id=str(entry.get("task_id") or "")):
-        if _deletable(wt_path, root) and wt_path.exists():
-            _force_rmtree(wt_path)
-        if wt_path.exists() if _deletable(wt_path, root) else os.path.lexists(wt_path):
-            # It survived its removal, or lies outside this worktree root: record and pins stay.
-            _mark_removal_failed(entry, data_dir)
+        entry = _record_at(wt_path, data_dir, op="remove")
+        if entry is None or entry.get("snapshot_id") != snapshot_id or (holds is not None and not holds(entry)):
             return False
-        if not entry.get("standalone"):
-            # A standalone payload snapshot (R1 §10.4) keeps its .git INSIDE the
-            # directory just deleted; a Git snapshot also owns an admin dir and
-            # pins in the TARGET repository.
-            target = Path(str(entry.get("git_dir") or entry.get("target_root") or "."))
-            _forget_checkout(target, wt_path)
-            _unpin_snapshot(target, entry)
-        _drop_record(wt_path, data_dir)
+        with owner_keep.gate(_data_dir(data_dir), entry.get("task_id")) as why:
+            if why:
+                if reasons is not None:
+                    reasons[str(wt_path)] = why
+                return False
+            if _deletable(wt_path, root) and wt_path.exists():
+                _force_rmtree(wt_path)
+            if wt_path.exists() if _deletable(wt_path, root) else os.path.lexists(wt_path):
+                # It survived its removal, or lies outside this worktree root: record and pins stay.
+                _mark_removal_failed(entry, data_dir)
+                return False
+            if not entry.get("standalone"):
+                # A standalone payload snapshot (R1 §10.4) keeps its .git INSIDE the directory just
+                # deleted; a Git snapshot also owns an admin dir and pins in the TARGET repository.
+                target = Path(str(entry.get("git_dir") or entry.get("target_root") or "."))
+                _forget_checkout(target, wt_path)
+                _unpin_snapshot(target, entry)
+            _drop_record(wt_path, data_dir)
     worktree_removal.retired(entry, _data_dir(data_dir))
     return True
 
@@ -1434,6 +1381,7 @@ def snapshot_released(entry: Dict[str, Any], open_snapshot_ids: set, *, data_dir
     snap = str(entry.get("snapshot_id") or "")
     try:
         return snap not in open_snapshot_ids and _task_proven_over(str(entry.get("task_id") or ""), data_dir, live) \
+            and not owner_keep.is_kept(_data_dir(data_dir), entry.get("task_id")) \
             and not custody.custody_log_unreadable(_data_dir(data_dir)) \
             and snap not in custody.open_snapshot_ids(_data_dir(data_dir))
     except Exception:
@@ -1447,12 +1395,13 @@ def prune_execution_snapshots(
     data_dir: Optional[Any] = None,
     only: Optional[Any] = None,
     live: Optional[Any] = None,
+    reasons: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Retire snapshots only after their task is proven over and custody releases them
     (``snapshot_released``, ``live`` as there; the keep-set is conservative, fresh custody is checked
     before each removal). A provisional snapshot can precede START_REQUESTED, so absent custody is not
     proof its owner is over; unknown task/process/custody state keeps even a missing checkout's row
-    and pin. ``only`` restricts the pass; surviving trees keep ``removal_failed``."""
+    and pin. ``only`` restricts the pass; surviving trees keep ``removal_failed``. ``reasons``: as in ``prune_orphans``."""
     open_ids = {str(s) for s in (open_snapshot_ids or set())}
     chosen = None if only is None else {str(s) for s in only}
     removed: List[str] = []
@@ -1466,7 +1415,8 @@ def prune_execution_snapshots(
         if not snapshot_released(entry, open_ids, data_dir=data_dir, live=live):
             kept.append(snap)
             continue
-        (removed if remove_execution_snapshot(snap, worktree_root=worktree_root, data_dir=data_dir) else kept).append(snap)
+        (removed if remove_execution_snapshot(snap, worktree_root=worktree_root, data_dir=data_dir, holds=lambda row: snapshot_released(
+            row, open_ids, data_dir=data_dir, live=live), reasons=reasons) else kept).append(snap)
     return {"removed": removed, "kept": kept}
 
 
@@ -1499,24 +1449,40 @@ def remove_worktree(
 
 
 def _retire_worktree(match: Dict[str, Any], root: Path, data_dir: Any, branch: str,
-                     lock_wait_sec: Optional[float] = None) -> bool:
-    """Retire one copy under its own record lock, only while its record still equals ``match``."""
+                     lock_wait_sec: Optional[float] = None, holds: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None,
+                     reasons: Optional[Dict[str, str]] = None) -> bool:
+    """Retire one copy under its own record lock, only while its record still equals ``match`` and
+    ``holds`` (the deciding owner's current proof, asked before the keep gate) still answers the branch to
+    drop, not ``None``. An own-body candidate is marked retiring inside the gate, at the effect: a keep or a
+    busy gate leaves its record as it was."""
     if worktree_removal.unchanged(match):
         return False
     wt_path = Path(match.get("path") or "")
     with _record_lock(wt_path, data_dir, op="remove_worktree", task_id=str(match.get("task_id") or ""),
                       timeout_sec=lock_wait_sec):
         if _record_at(wt_path, data_dir, op="remove_worktree") != match:
+            if reasons is not None:
+                reasons[str(wt_path)] = "changed"
             return False  # another writer changed ownership since the decision
-        if _deletable(wt_path, root) and wt_path.exists():
-            _force_rmtree(wt_path)
-        from ouroboros import body_candidate
-        body_candidate.discard_scratch(match)  # an own-body copy's sibling process environment, unless retained
-        if not _remove_paths(Path(match.get("git_dir") or match.get("repo_dir") or "."), wt_path,
-                             branch, allowed_root=root):
-            _mark_removal_failed(match, data_dir)  # the directory survived: record and pin stay
+        branch = holds(match, branch) if holds else branch
+        if branch is None:
             return False
-        _drop_record(wt_path, data_dir)
+        with owner_keep.gate(_data_dir(data_dir), match.get("task_id")) as why:
+            if why:
+                if reasons is not None:
+                    reasons[str(wt_path)] = why
+                return False
+            if match.get("kind") == _KIND_BODY_CANDIDATE and not match.get("retiring"):
+                _put_record({**match, "retiring": True}, data_dir)  # no resume takes it now, even if its removal fails
+            if _deletable(wt_path, root) and wt_path.exists():
+                _force_rmtree(wt_path)
+            from ouroboros import body_candidate
+            body_candidate.discard_scratch(match)  # an own-body copy's sibling process environment, unless retained
+            if not _remove_paths(Path(match.get("git_dir") or match.get("repo_dir") or "."), wt_path,
+                                 branch, allowed_root=root):
+                _mark_removal_failed(match, data_dir)  # the directory survived: record and pin stay
+                return False
+            _drop_record(wt_path, data_dir)
     worktree_removal.retired(match, _data_dir(data_dir))
     return True
 
@@ -1528,17 +1494,24 @@ def prune_orphans(
     retention_days: Optional[int] = None,
     live: Optional[Any] = None,
     only: Optional[Any] = None,
+    only_rows: Optional[Dict[str, Dict[str, Any]]] = None,
+    reasons: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Reconcile worktrees on the custody cadence and the owner's free action.
 
     A plain copy missing or past retention goes only with proof its task is over: its record is
-    terminal, ``live(task_id)`` (the supervisor's liveness probe: True live, False proven
-    not live, None unknown) answers False, and no lineage process lives. Without a probe,
-    or with an unknown answer, age alone deletes nothing. ``only`` restricts the pass to
+    terminal, ``live(task_id)`` (the supervisor's probe: True live, False proven not live, None
+    unknown) answers False, no lineage process lives, and its unique work is proven saved
+    (``copy_capture_proof``). Without a probe or with an unknown answer, age alone deletes nothing. ``only`` restricts the pass to
     those task ids (the free action's previewed rows), leaving every other copy untouched.
+    ``only_rows`` (path -> the record previewed) names exact objects: one whose record changed stays.
     Each decision is rechecked under that copy's record lock; a checkout that survives
     removal keeps its first failure stamp and pin; a new process or directory identity retries it.
+    ``reasons``, when given, receives by copy path the typed answer a kept copy got from this pass
+    (a body verdict's reason, a busy or unreadable record, the keep gate's refusal); a proof that
+    simply no longer holds names none: the caller reads that fresh.
     """
+    reasons = {} if reasons is None else reasons
     retention = retention_days if retention_days is not None else get_gc_retention_days()
     cutoff = age_cutoff(retention)
     root = _resolve_root(worktree_root)
@@ -1546,17 +1519,33 @@ def prune_orphans(
     entries = _records(data_dir, op="prune_orphans")
     selected = [entry for entry in entries if entry.get("kind") != _KIND_DELEGATED_EXEC
                 and (chosen is None or str(entry.get("task_id") or "") in chosen)
+                and (only_rows is None or only_rows.get(str(entry.get("path") or "")) == entry)
                 and not worktree_removal.unchanged(entry)]
+    for entry in entries:
+        previewed = (only_rows or {}).get(str(entry.get("path") or ""))
+        if previewed is not None and previewed != entry:
+            reasons[str(entry["path"])] = "changed"
     if not selected:
         return {"removed": 0, "kept": len(entries)}
-    # Candidate evidence is gathered without any lock; each copy's decision is then
-    # rechecked, and a retiring candidate marked, under that copy's own lock.
+    # Candidate evidence comes without any lock; each decision is rechecked under that copy's own lock.
+    from functools import partial
     from ouroboros import body_candidate
-    verdicts = {
-        str(entry.get("path") or ""): body_candidate.retention_verdict(
-            entry, data_dir=data_dir,
-            expired=max(float(entry.get("created_at") or 0), float(entry.get("used_at") or 0)) < cutoff)
-        for entry in selected if entry.get("kind") == _KIND_BODY_CANDIDATE}
+    from ouroboros.copy_capture_proof import plain_copy_branch
+    verdicts: Dict[str, Dict[str, Any]] = {}
+    for entry in selected:
+        if entry.get("kind") == _KIND_BODY_CANDIDATE:
+            expired = max(float(entry.get("created_at") or 0), float(entry.get("used_at") or 0)) < cutoff
+            # A kept task's candidate is not captured: no pin or event for what stays (the gate reads the keep again).
+            verdicts[str(entry.get("path") or "")] = {"remove": False, "reason": owner_keep.OWNER_KEEP} if expired and \
+                owner_keep.is_kept(_data_dir(data_dir), entry.get("task_id")) else body_candidate.retention_verdict(
+                    entry, data_dir=data_dir, expired=expired)
+
+    def body_branch(verdict: Dict[str, Any], match: Dict[str, Any], branch: str) -> Optional[str]:
+        if body_candidate.verdict_holds(match, verdict, data_dir=data_dir):
+            return "" if verdict.get("keep_branch") else branch
+        reasons[str(match.get("path") or "")] = "changed"
+        return None
+
     removed = 0
     for preview in selected:
         path = str(preview.get("path") or "")
@@ -1565,24 +1554,22 @@ def prune_orphans(
             with _record_lock(path, data_dir, op="prune", task_id=str(preview.get("task_id") or "")):
                 entry = _record_at(path, data_dir, op="prune_orphans")
                 if entry != preview:
+                    reasons[path] = "changed"
                     continue
                 if entry.get("kind") == _KIND_BODY_CANDIDATE:
-                    verdict = verdicts[path]
-                    if not verdict["remove"] or not body_candidate.verdict_holds(entry, verdict, data_dir=data_dir):
+                    if not verdicts[path]["remove"]:
+                        reasons[path] = verdicts[path]["reason"]
                         continue
-                    if not entry.get("retiring"):
-                        entry = {**entry, "retiring": True}
-                        _put_record(entry, data_dir)
-                    if verdict.get("keep_branch"):
-                        branch = ""
                 else:
                     path_exists = bool(entry.get("path")) and Path(entry["path"]).exists()
                     if (path_exists and float(entry.get("created_at") or 0) >= cutoff) \
                             or not _task_proven_over(str(entry.get("task_id") or ""), data_dir, live):
                         continue
-        except (WorktreeOpsLockBusy, SubagentWorktreeRegistryCorrupt):
+        except (WorktreeOpsLockBusy, SubagentWorktreeRegistryCorrupt) as exc:
+            reasons[path] = "record_busy" if isinstance(exc, WorktreeOpsLockBusy) else "record_unreadable"
             continue  # busy or unreadable: the next pass decides
-        removed += bool(_retire_worktree(entry, root, data_dir, branch))
+        removed += bool(_retire_worktree(entry, root, data_dir, branch, holds=partial(body_branch, verdicts[path]) if entry.get(
+            "kind") == _KIND_BODY_CANDIDATE else partial(plain_copy_branch, root=root, data_dir=data_dir, live=live), reasons=reasons))
     return {"removed": removed, "kept": len(_records(data_dir, op="prune_orphans"))}
 
 
@@ -1592,9 +1579,7 @@ def list_worktrees(data_dir: Optional[Any] = None) -> List[Dict[str, Any]]:
 
 
 def registered_checkout(path: Any, data_dir: Optional[Any] = None) -> bool:
-    """Is ``path`` one of the recorded copies (a child's copy, a delegated execution
-    snapshot, a body candidate)? A soft read: an unreadable record answers no."""
-    target = Path(str(path or "")).resolve()
-    return bool(str(path or "").strip()) and any(
-        Path(str(entry.get("path"))).resolve() == target
-        for entry in _records(data_dir) if entry.get("path"))
+    """Is ``path`` one of the recorded copies? An unreadable own record answers yes: it was never read as absent."""
+    from ouroboros.private_copy_read import checkout_registration
+
+    return checkout_registration(path, data_dir) != "absent"

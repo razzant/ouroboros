@@ -5906,7 +5906,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .storage-summary-actions { flex: 0 0 auto; }
 /* A busy action keeps its focus (aria-disabled, not disabled) but stops looking pressable. */
-.storage-actions > .btn[aria-disabled="true"] { box-shadow: none; color: var(--text-meta); cursor: default; }
+.storage-actions > .btn[aria-disabled="true"], .storage-free-picks > .btn[aria-disabled="true"] { box-shadow: none; color: var(--text-meta); cursor: default; }
 .storage-progress {
     display: flex;
     align-items: baseline;
@@ -5956,6 +5956,26 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-group-places { display: grid; margin: var(--space-2) 0 0 calc(8px + var(--space-2)); padding: 0; list-style: none; }
 .storage-place.is-member { grid-template-columns: minmax(0, 1fr) auto minmax(56px, auto); padding-block: var(--space-2); border-top: 1px solid var(--surface-border-soft); }
 .storage-group-places > .storage-place:first-child { border-top: 0; }
+/* A group folds under its head and one line; the caret is drawn because the row's own layout drops the native marker. */
+.storage-group-fold > summary { position: relative; display: block; padding-inline-end: 20px; list-style: none; cursor: pointer; }
+.storage-group-fold > summary::-webkit-details-marker { display: none; }
+.storage-group-fold > summary::after {
+    content: '';
+    position: absolute;
+    inset-inline-end: 4px;
+    top: 7px;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--text-meta);
+    border-bottom: 1.5px solid var(--text-meta);
+    transform: rotate(-45deg);
+}
+.storage-group-fold[open] > summary::after { transform: rotate(45deg); }
+.storage-group-fold > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+.storage-group-said { display: block; margin: 2px 0 0 calc(8px + var(--space-2)); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-group-open { margin-top: var(--space-2); }
+.storage-group-open > .storage-group-places,
+.storage-group-open > .storage-group-body { margin-top: 0; }
 .storage-place-label { grid-column: 1; min-width: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 500; overflow-wrap: anywhere; }
 .storage-place.is-member > .storage-place-size { grid-column: 2; }
 .storage-place.is-member > .storage-place-delta { grid-column: 3; }
@@ -5967,8 +5987,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-parts-list > li { display: flex; justify-content: space-between; gap: var(--space-3); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .storage-parts-rest { justify-content: flex-start; }
 
-/* Temporary space: the tray closing the list card (layout B1). */
-.storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--surface-border); }
+/* Free temporary space: the flow under the free-space reading in the first card. */
+.storage-auto { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--surface-border); }
 .storage-tray:empty { display: none; }
 .storage-tray p { margin: 0; }
 .storage-tray-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
@@ -5998,7 +6019,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .storage-free-size { grid-column: 3; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); white-space: nowrap; }
 .storage-free-why { grid-column: 2 / -1; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-/* One offered group: no checkbox column, the name is plain text. */
+/* Rows of a read-only list: no checkbox column, the name is plain text. */
 .storage-free-groups.is-single > .storage-free-group { grid-template-columns: minmax(0, 1fr) auto; }
 .storage-free-groups.is-single .storage-free-label { grid-column: 1; cursor: auto; }
 .storage-free-groups.is-single .storage-free-size { grid-column: 2; }
@@ -6011,6 +6032,19 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-largest-size { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); white-space: nowrap; }
 .storage-largest-group { grid-column: 1 / -1; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .storage-tray > .storage-actions > .storage-meta { margin: 0; }
+.storage-free-more { padding-top: 0; }
+.storage-free-more .storage-free-groups { margin-top: var(--space-1); }
+.storage-free-list > .storage-free-group:first-child { border-top: 0; }
+.storage-free-path { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+/* A copy offered by hand: what it would lose is the row's one line of ink, its largest unsaved paths fold under it. */
+.storage-free-risk { color: var(--text-primary); }
+.storage-free-group > .storage-free-paths { grid-column: 2 / -1; margin-top: var(--space-1); }
+.storage-free-paths .storage-largest-list { gap: 2px; }
+.storage-free-paths :is(.storage-largest-name.storage-free-path, .storage-largest-size) { font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-free-paths .storage-largest-size { color: var(--text-meta); }
+.storage-free-sub { margin: var(--space-3) 0 0; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 650; }
+.storage-free-picks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-top: var(--space-2); }
+.storage-free-picks > .storage-meta { margin: 0 auto 0 0; }
 
 /* A size that carries a qualifier ("3.7 GB (some could not be read)") is too long to share the name's line on a
    narrow card: it goes under the name, so a group's name never shrinks to a column of a few letters. The card's own
@@ -6028,6 +6062,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     .storage-summary-actions { align-self: stretch; }
     .storage-actions { flex-direction: column; align-items: stretch; }
     .storage-actions > .btn { width: 100%; }
+    .storage-panel-actions { flex-direction: row; }
+    .storage-panel-actions > .btn { width: auto; }
     .storage-group-head { grid-template-columns: 8px minmax(0, 1fr) auto; }
     .storage-group-head > .storage-place-delta { grid-column: 2 / -1; text-align: start; }
     .storage-place.is-member { grid-template-columns: minmax(0, 1fr) auto; }

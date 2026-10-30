@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from hashlib import sha256
+from typing import Any
 
 
 HOST_INSTRUCTIONS = (
@@ -60,6 +61,14 @@ UNPROVEN_BOUNDARY_INSTRUCTION = (
 # releases a copy (`delegate_named_evidence.retain_named_evidence` reads it from here); a session
 # is told it, never asked to guess.
 EVIDENCE_DIRNAME = ".review-evidence"
+# What the host declares about the scratch it made for one run, before the run uses it.
+# Purpose and ownership, never a promise that the contents come back byte for byte.
+DISPOSABLE_SCRATCH = (
+    "disposable by the host's declaration: it is never captured, and it is removed when the task that "
+    "started this run retires its work folder under the shared retention term, unless its producer "
+    "retained it or the owner kept that task (the OS may clear it sooner), so anything left only there "
+    "may be lost: keep edits in your working tree and return the results you need; nothing installed "
+    "there is reinstalled for a later session, which builds its own from the project's files")
 
 
 def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:
@@ -68,11 +77,11 @@ def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:
 
     ``launcher`` names safe_test, for a copy of the body, whose checkout carries it; any
     other project hears the same place with no command it lacks. The session's own
-    temporary directory may still differ. ``granted`` is the exact scratch the session's
-    engine grants it (``workspace_preflight.session_service_directories``): then it is the
-    one place named, the place its request permits."""
+    temporary directory may still differ. ``granted`` is the exact scratch the host made
+    for the session (``workspace_preflight.session_service_directories``), granted by its
+    engine or, at full access, merely named: then it is the one place named."""
     if granted:
-        return f"{'pass --temp-parent ' if launcher else 'in '}{granted}, the scratch your engine grants this run"
+        return f"{'pass --temp-parent ' if launcher else 'in '}{granted}, this run's disposable scratch"
     from pathlib import Path
 
     from ouroboros.test_environment import default_temp_parent, git_ancestor
@@ -259,14 +268,20 @@ def directory_copy_binding_instruction(authority_root: str, binding_sha256: str 
     )
 
 
-def in_place_binding_instruction(root: str) -> str:
-    """Tell an in-place Git writer that its host's own folder is its working tree."""
+def in_place_binding_instruction(root: str, service: Any = None) -> str:
+    """Tell an in-place Git writer that its host's own folder is its working tree. ``service`` is
+    what ``subagent_work_order.session_service_directories`` made for it: its disposable scratch,
+    or the typed reason there is none."""
+    scratch, why = getattr(service, "scratch", ""), getattr(service, "limitation", "")
+    place = (f"{scratch_fact(granted=scratch)}, {DISPOSABLE_SCRATCH}" if scratch else scratch_fact()
+             + (f" (no disposable scratch could be made for this run: {why}; nothing owns or removes that place, "
+                "so report the gap)" if why else ""))
     return (
         "\n\nDELEGATED IN-PLACE BINDING (typed host fact): you work directly in "
         f"{str(root or '').strip() or '(unknown)'}, your host task's own folder, as it chose. Every change lands "
         "there as you make it and nothing is captured for a separate apply. Your host may be working there too: "
         "change only what the assignment needs; never reset, clean, stash, check out or commit. Keep test "
-        "scratch, environments and caches outside every Git working tree, " + scratch_fact() + "."
+        "scratch, environments and caches outside every Git working tree, " + place + "."
     )
 
 

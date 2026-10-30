@@ -22,7 +22,7 @@ from ouroboros import delegate_custody as custody
 from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
 from ouroboros.delegate_start_instructions import INVESTIGATION_INSTRUCTION, scratch_fact
 from ouroboros.unindexed import COPIES
-from ouroboros.workspace_preflight import SNAPSHOT_ENVIRONMENT_NOTE
+from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, SNAPSHOT_ENVIRONMENT_NOTE
 
 ENGINE_VERSION = "3.25.1"  # carries workspaceRoot (3.8.1+) and scope.ephemeral (3.3.7+)
 
@@ -158,10 +158,14 @@ def test_git_subdirectory_investigation_copies_the_worktree_and_starts_in_the_fo
     assert f"the private execution root for this run is {start_folder}:" in request["instructions"]
     assert f"evidence worth returning under {start_folder / '.review-evidence'}:" in request["instructions"]
     # Dependency files are read at the clone's root, but the environment does not go there (outside the
-    # folder this session may write): it is disposable state outside every Git tree. A foreign project
-    # hears no safe_test.
+    # folder this session may write): it is disposable state outside every Git tree, in the scratch the
+    # host owns for a full-access run, else the unowned default. A foreign project hears no safe_test.
     assert f"Dependency files in {clone.resolve()} (sha256): none at its top level" in request["instructions"]
-    assert f"disposable process state ({scratch_fact()}), since this session writes only in " \
+    record = Path(ctx.drive_root) / "task_drives" / "child" / SESSION_SCRATCH_DIRNAME / held.snapshot_id / "scratch.json"
+    place = (scratch_fact(granted=json.loads(record.read_text(encoding="utf-8"))["path"]) if access == "full"
+             else scratch_fact())
+    assert record.exists() is (access == "full")
+    assert f"disposable process state ({place}), since this session writes only in " \
            f"{start_folder.resolve()}, a folder of the copy" in request["instructions"]
     assert SNAPSHOT_ENVIRONMENT_NOTE not in request["instructions"] and "safe_test" not in request["instructions"]
     assert f"authority/project root {folder} is a read-only" in request["instructions"]
