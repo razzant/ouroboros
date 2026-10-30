@@ -1223,14 +1223,13 @@ preference when it opens and on every reconnect; there is no file watcher.
   source: a pin glyph before a pinned level, `· model name` for a level the
   model name carries, `(Cyber Pro)` under Cyber Pro, nothing for the owner's
   range. A frame without a level paints no chip; an older frame is never
-  back-filled. A child keeps one useful activity line visible, a root up to
-  three; empty activity reserves no band, and a duplicate title is not activity.
+  back-filled. A child keeps one useful activity line visible, a root its whole
+  name and line (owner 30.10, B); empty activity reserves no band, and a duplicate title is not activity.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
   collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). The root keeps primary title
-  ink at weight 500, children secondary ink at 400. Nested frames preserve real
-  ancestry; their opaque secondary surface avoids accumulating translucent white
-  tints at greater depth.
+  ink at weight 500, children secondary ink at 400. Nested frames keep real
+  ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the helper and states only exceptions.** The
   ordinary case is the bare name — an assigned route beside the card's own
   `Working` chip, or every settled run ok; it names the selected helper and is
@@ -1460,8 +1459,8 @@ answer A: compact opinions under the card, full text in the reader). Harness and
 API marks identify delivery beside explicit execution evidence; neither marks nor
 reviews create child tasks or prove execution.
 
-- A collapsed parent or child card has a quiet `Reviews N` door with the Details
-  chevron, independent of Details: no alert, verdict or dollars. It opens flat
+- A card's quiet `Reviews N` door is Details' independent twin, in a root's head beside
+  it, in a child's foot (owner 30.10, B): no alert, verdict or dollars. It opens flat
   rows named for the reviewed subject (`Code review · goal`, `Plan · revision
   n`), each with its state and a time · tally line; only an opened row takes the
   tray. A reviewer is two lines: model (else the requested one, `requested · not
@@ -2148,28 +2147,28 @@ owner 27.10, A). A stream end before the observed cursor is unresolved coverage.
 Live, reconnect and replay agree; Telegram's speech preview leaves room for
 problems, gaps and the task reference.
 
-`web/modules/chat.js::blockHasWork` governs chrome from work, excluding open
-attention and a bare outcome (owner 16.09: real work is a card, a greeting is
+`web/modules/chat.js::blockHasWork` governs chrome from work, not open
+attention or a bare outcome (owner 16.09: real work is a card, a greeting is
 nothing). Reviews, children, evidence, narration or tool errors give managed
 roots and direct turns the same card: a coined name or narration headline
 (`Task activity` when finished without either; untitled while Working), status,
 host-attested Stop, and `Turn into project` in Main unless already bound. Bound
 direct turns route later rows to their Project like `move_to_project`. The foot
 holds metadata and one action row: [Reply], Turn into project, Resume, Stop…,
-one primary. Nested children stay inside their root, carry neither root control,
-and convert with it. Attention-only blocks and non-Done endings without work
-have their status and wait controls, no title placeholder or conversion; the
-first work row adds the title.
+one primary; on a root they share one band, the row right, wrapping whole
+(owner 30.10, B). Nested children stay inside their root, carry no root control,
+and convert with it. Attention-only blocks and workless non-Done endings have
+status and wait controls but no title or conversion until the first work row
+adds one.
 
 The compact meta line names executor/model (roots: observed solve model, else
-agent model), duration, cost, exceptions and running narration's `updated`.
+agent model), duration, cost, exceptions and running narration's `updated`
+(in a root's head).
 One positive task-local tool-call count joins that line and remains after Done
 (owner 22.10, A). Helpers are not aggregated. Rounds (usable solve responses)
-and known zero calls stay in Details; missing counts stay absent. For footer
-and Details counters, session nanny counts appear only in `Supervision`,
-separate from unreported executor counts. Portals keep one count.
-Neither rounds nor zero calls create work or a second footer row. Model
-provenance, origin and a finished card's update time stay in Details. Money
+and known zero calls stay in Details, making no work or footer row; missing
+counts stay absent. Session nanny counts appear only in `Supervision` (footer and
+Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. Money
 there is ONE line whose wording carries its openness and never renders an
 unknown as a number: `$0.00` only where priced rows evidenced that zero,
 `up to $1.20` while the tracked subtotal is inexact, `Tracked: $1.20` when part
@@ -2181,10 +2180,10 @@ stays unknown; neither proves a free result. The chip's short word (`Sending`,
 `some steps have no price`), not a tooltip; real ` · ` text separates meta parts
 for copies and assistive technology. The host's `_is_direct_chat` fact keeps its
 host jobs (routing, census `kind`, Stop custody, terminal rows); the client
-draws no chrome or status from it. A block that existed only for open attention leaves when that attention
-closes: a wait-only block disappears when the wait resolves, and the resolved
-episode's no-reopen ledger survives with the record, so a stale revision cannot
-bring it back. A host wait (accounting access, control storage: the typed
+draws no chrome or status from it. A block that existed only for open attention leaves when it
+closes: a wait-only block when its wait resolves, and the resolved
+episode's no-reopen ledger stays with the record, so a stale revision cannot
+revive it. A host wait (accounting access, control storage: the typed
 `usage_lock_wait`/`control_store_wait` episodes) is how the host ran, not the
 turn's work: a block's episodes of one kind are one receipt row, live while one
 is open, then their count and the longest measured one, so a wait never makes or

@@ -174,10 +174,18 @@ def note_lane_process(exc: BaseException, container, proc) -> None:
     """What a contained lane that raised had acquired, for ``launching``: ``True`` once
     ``spawn`` returned its process, ``False`` while the container never created one,
     ``None`` (unknown) when it created one but raised before handing it over, or cannot
-    say. Never raises: the lane's own exception is what propagates."""
+    say. Its first reap's answer travels too: a missing handle proves nothing either way.
+    Never raises: the lane's own exception is what propagates."""
     created = getattr(container, "root_created", None)
     try:
+        teardown = container.reap()
+        if not teardown and proc is not None and proc.poll() is None:
+            proc.wait(timeout=5)
+    except Exception as failure:
+        teardown = f"the lane's teardown is unconfirmed: {failure}"
+    try:
         exc.preflight_lane_process = True if proc is not None else False if created is False else None
+        exc.preflight_lane_teardown = teardown
     except (AttributeError, TypeError):  # an exception that takes no attributes stays unknown
         pass
 
@@ -188,13 +196,16 @@ def launching(evidence: dict):
     acquired: ``attempted`` while the lane runs, ``executed`` once it returns (a pytest pass
     returns only after its spawn did; the node lane then states its own phase). A lane that
     raises leaves ``executed`` once its process was acquired, the earlier phase when it
-    never created one, and ``attempted`` (unknown) otherwise."""
+    never created one, and ``attempted`` (unknown) otherwise. Only a raising lane's own
+    teardown answer may later replace the runner's armed "did not return"."""
     before, evidence["execution"] = evidence.get("execution", "not_run"), "attempted"
     try:
         yield
     except BaseException as exc:
         acquired = getattr(exc, "preflight_lane_process", None)
         evidence["execution"] = "executed" if acquired is True else before if acquired is False else "attempted"
+        if isinstance(teardown := getattr(exc, "preflight_lane_teardown", None), str):
+            evidence["lane_teardown"] = teardown
         raise
     evidence["execution"] = "executed"
 

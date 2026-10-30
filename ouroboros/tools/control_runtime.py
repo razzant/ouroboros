@@ -1009,9 +1009,12 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "") -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
-    without a Presence binding) may choose silence and may leave one sentence for its human."""
+    without a Presence binding) may choose silence and may leave one sentence for its human.
+    A task that answers its own retained place conversation (its reply carrier: a promoted or
+    scheduled place root) may choose silence too; inherited binding authority alone names no speaker."""
     from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
     from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.place_reply import reply_carrier
     from ouroboros.task_results import resolve_ctx_lineage
 
     metadata = getattr(ctx, "task_metadata", None) or {}
@@ -1026,10 +1029,11 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
     if silent and action != "finish":
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_ARGUMENT: silent requires action=finish"))
-    if (summary or silent) and not self_started:
+    if (summary and not self_started) or (silent and not self_started and not reply_carrier(metadata)):
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_ARGUMENT: silent and summary are available only on a self-started run: "
-                 "a consciousness wake's own turn, or a schedule-born root without a Presence binding"))
+                 "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
+                 "silent also on a task answering its own place conversation"))
     allow_empty = False
     if silent:
         allow_empty = True

@@ -234,6 +234,13 @@ def _accepts(accept: Any, view: pathlib.Path) -> bool:
         return False
 
 
+def _copy_folder(source: Any, destination: Any, **kwargs: Any) -> None:
+    """A physical copy of a folder a seat reads, links kept: it shares blocks where the filesystem clones."""
+    from ouroboros.artifact_storage import clone_or_copy2
+
+    shutil.copytree(source, destination, symlinks=True, copy_function=clone_or_copy2, **kwargs)
+
+
 def _retained_view(folder: pathlib.Path, data_root: Any, *, payload: bool = False, name: str = "",
                    copy: Any = None, accept: Any = None) -> pathlib.Path:
     """One retained copy of a folder under the install's data root beside the
@@ -264,7 +271,7 @@ def _retained_view(folder: pathlib.Path, data_root: Any, *, payload: bool = Fals
     staging = views / f".{container.name}.{uuid.uuid4().hex[:8]}"
     try:
         if copy is None:
-            shutil.copytree(folder, staging / relative, symlinks=True)
+            _copy_folder(folder, staging / relative)
         else:
             copy(folder, staging / relative)
         if accept is not None and not accept(staging / relative):
@@ -338,7 +345,7 @@ def _materialize(area: pathlib.Path, source: Mapping[str, Any]) -> Dict[str, str
     if kind == "git_tree":
         return _materialize_git(area, source)
     if kind == "directory":
-        shutil.copytree(str(source["view"]), area, symlinks=True)
+        _copy_folder(str(source["view"]), area)
     elif kind == "workspace":  # the reviewer reads the folder in place and copies what it runs
         area.mkdir()
     else:
@@ -365,7 +372,7 @@ def _materialize_git(area: pathlib.Path, source: Mapping[str, Any]) -> Dict[str,
         raise CheckingAreaUnavailable(
             f"checking copy tree {applied[:12]} is not the frozen tree {str(source['tree'])[:12]}")
     for name, view in evidence_views:
-        shutil.copytree(view, area / name, symlinks=True, dirs_exist_ok=True)
+        _copy_folder(view, area / name, dirs_exist_ok=True)
     return {"common_dir": str(common), "objects": str(common / "objects")}
 
 

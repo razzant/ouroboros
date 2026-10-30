@@ -1,5 +1,6 @@
 """docs/WIDGET_HOST_PROTOCOL.md is the public host side of module widgets; the builtin host
-(``web/modules/widget_module.js`` page side, ``web/modules/widget_frame.js`` frame bootstrap) is
+(``web/modules/widget_module.js`` page side, ``web/modules/widget_frame.js`` and its classic
+``web/modules/widget_frame_bridge.js`` frame bootstrap) is
 its reference implementation. Every message, attribute, policy directive and number the document
 states is checked against that code, so an independent host built from the document alone keeps
 the promises widget authors rely on."""
@@ -12,7 +13,8 @@ import re
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DOC = (REPO / "docs" / "WIDGET_HOST_PROTOCOL.md").read_text(encoding="utf-8")
 PAGE = (REPO / "web" / "modules" / "widget_module.js").read_text(encoding="utf-8")
-FRAME = (REPO / "web" / "modules" / "widget_frame.js").read_text(encoding="utf-8")
+FRAME = ((REPO / "web" / "modules" / "widget_frame.js").read_text(encoding="utf-8")
+         + (REPO / "web" / "modules" / "widget_frame_bridge.js").read_text(encoding="utf-8"))
 JOB = (REPO / "web" / "modules" / "widget_job.js").read_text(encoding="utf-8")
 
 
@@ -35,11 +37,13 @@ def test_the_documented_grammar_is_exactly_the_bridge_grammar():
     # Direction: what the frame posts is what the page handles, and the reverse.
     frame_posts = set(re.findall(r"post\(\{\s*type: '(ouro-widget-[a-z-]+)'", FRAME))
     frame_posts |= set(re.findall(r"type: '(ouro-widget-resize)'", FRAME))
-    page_posts = set(re.findall(r"post\(\{\s*type: '(ouro-widget-[a-z-]+)'", PAGE))
-    page_posts |= {"ouro-widget-dispose", "ouro-widget-fetch-chunk"}  # posted through postMessage / frame()
+    page_posts = set(re.findall(r"(?:post|reply)\(\{\s*type: '(ouro-widget-[a-z-]+)'", PAGE))
+    page_posts |= {"ouro-widget-fetch-chunk"}  # posted through frame()
     to_page = set(re.findall(r"`(ouro-widget-[a-z-]+)`", _section("Frame to page:")))
     to_frame = set(re.findall(r"`(ouro-widget-[a-z-]+)`", _section("Page to frame:")))
     assert frame_posts == to_page, (sorted(frame_posts ^ to_page))
+    # The one window message: the hello that hands the page its channel, documented beside the tables.
+    assert "postMessage({ type: 'ouro-widget-hello'" in FRAME and "`ouro-widget-hello`" in _section("The handshake:")
     assert page_posts == to_frame, (sorted(page_posts ^ to_frame))
     assert re.findall(r"phase === '([a-z]+)'", FRAME) == ["headers", "data", "end", "error"]
     for phase in ("headers", "data", "end", "error"):
@@ -55,6 +59,7 @@ def test_the_frame_attributes_and_document_policy_are_the_builtin_ones():
     for template in templates:
         directives = [literal[1].replace("${prefix}", "ORIGIN/api/extensions/SKILL/")
                       .replace("${assetBase}", "ASSET_BASE")
+                      .replace("${passive}", "data: blob: RESOURCE_BASE")
                       for literal in re.findall(r"""^\s*(["'`])(.*?)\1,?$""", template, re.M)]
         policies.append('; '.join(directives))
     documented = re.findall(r"```\n\s*(default-src[^\n]+)\n\s*```", DOC)

@@ -3,7 +3,8 @@
 This is a command lifetime owner, not a recovery daemon. Its guardian ends the
 command's tree if this owner is SIGKILLed, but then nothing records a result
 and scratch stays; an exit or a matching filename never proves deletion safe.
-Stage one prints the one final SAFE_TEST_RETAINED/RELEASED line.
+A launch that failed stays red, yet with its result recorded and its first reap
+clean it holds no scratch. Stage one prints the one final SAFE_TEST_RETAINED/RELEASED line.
 """
 from __future__ import annotations
 
@@ -137,7 +138,7 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
     proc = None
     container = ProcessContainer(lifeline=True)
     code, reap_error, evidence_error, fallback, source_gap = 2, "command not started", "", "", ""
-    stopped = ""
+    stopped = launch_error = ""
     reaped = False
     execution = "not_run"
     requested: list[int] = []
@@ -173,27 +174,35 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
                 # No pipe EOF wait: first wait for the direct child, then reap ALL
                 # attributed descendants, then close/read the regular log files.
                 execution = "attempted"
-                proc = container.spawn(command, cwd=repo, env=env,
-                                       stdout=output.stdout, stderr=output.stderr)
-                execution = "executed"
-                display.start()
-                deadline = None if timeout is None else time.monotonic() + timeout
-                while proc.poll() is None and not requested and (deadline is None or time.monotonic() < deadline):
-                    time.sleep(0.05)
-                if proc.poll() is None:
-                    stopped = f"signal {requested[0]}" if requested else "timeout"
-                    report_diagnostic(f"SAFE_TEST_INTERRUPTED by {stopped}: stopping the command and every process it started"
-                                      if requested else f"SAFE_TEST_TIMEOUT after {timeout:g}s: stopping the command "
-                                      "and every process it started")
-                    if requested and requested[0] == signal.SIGINT and container.interrupt_root():
-                        # spawn's new session cannot receive the terminal's INT.
-                        # Give pytest time to export sessionfinish/JUnit first.
-                        try:
-                            proc.wait(timeout=_GRACE_SEC)
-                        except subprocess.TimeoutExpired:
-                            pass
-                    # Also when the root already exited: what it left gets TERM grace.
-                    container.terminate_tree(_GRACE_SEC)
+                try:
+                    proc = container.spawn(command, cwd=repo, env=env,
+                                           stdout=output.stdout, stderr=output.stderr)
+                    execution = "executed"
+                except Exception as exc:
+                    # The command's own red result, not lost evidence: the reap and the
+                    # records below still decide the scratch.
+                    launch_error = f"{type(exc).__name__}: {exc}"
+                    execution = "attempted" if container.root_created else "not_run"
+                    report_diagnostic(f"SAFE_TEST_ERROR {launch_error}")
+                if proc is not None:
+                    display.start()
+                    deadline = None if timeout is None else time.monotonic() + timeout
+                    while proc.poll() is None and not requested and (deadline is None or time.monotonic() < deadline):
+                        time.sleep(0.05)
+                    if proc.poll() is None:
+                        stopped = f"signal {requested[0]}" if requested else "timeout"
+                        report_diagnostic(f"SAFE_TEST_INTERRUPTED by {stopped}: stopping the command and every process it started"
+                                          if requested else f"SAFE_TEST_TIMEOUT after {timeout:g}s: stopping the command "
+                                          "and every process it started")
+                        if requested and requested[0] == signal.SIGINT and container.interrupt_root():
+                            # spawn's new session cannot receive the terminal's INT.
+                            # Give pytest time to export sessionfinish/JUnit first.
+                            try:
+                                proc.wait(timeout=_GRACE_SEC)
+                            except subprocess.TimeoutExpired:
+                                pass
+                        # Also when the root already exited: what it left gets TERM grace.
+                        container.terminate_tree(_GRACE_SEC)
             reap_error = container.reap()
             reaped = True
             if proc is not None and proc.poll() is None:
@@ -208,7 +217,7 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
             if display.is_alive() and (failure := display.finish()) is not None:
                 output.failed("display", failure)
             output.finish(command=command, returncode=None if proc is None else proc.returncode,
-                          stopped=stopped, containment_error=reap_error)
+                          stopped=stopped, containment_error=reap_error, launch_error=launch_error)
             evidence_error = "; ".join(output.errors)
         finally:
             output.close()
@@ -218,7 +227,7 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
     finally:
         if not reaped:
             # spawn may have created a process before raising. Even without a
-            # returned handle, the container still owns its token/job.
+            # returned handle, the container still holds its first reap's answer.
             reap_error = container.reap() or reap_error
         container.close()
         cleanup = {"released": [], "retained": [str(root)]}
@@ -228,7 +237,7 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
             # evidence write is itself a reason to keep the source tree.
             try:
                 write_record(evidence / "result.json", {"command": command, "returncode": code,
-                             "containment_error": reap_error, "evidence_error": evidence_error,
+                             "containment_error": reap_error, "evidence_error": evidence_error, "launch_error": launch_error,
                              "source_gap": source_gap, "scratch": str(root), "cleanup": "pending"})
                 (root / EVIDENCE_POINTER).unlink()
                 cleanup = release_scratch(root)
@@ -240,7 +249,7 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
         if evidence is not None:
             try:
                 write_record(evidence / "result.json", {"command": command, "returncode": code,
-                             "containment_error": reap_error, "evidence_error": evidence_error,
+                             "containment_error": reap_error, "evidence_error": evidence_error, "launch_error": launch_error,
                              "source_gap": source_gap, "scratch": str(root), "cleanup": cleanup, "retention_reason": why,
                              "execution": execution, "stopped": stopped, "evidence_fallback": fallback})
             except OSError as exc:

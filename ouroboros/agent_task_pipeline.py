@@ -908,7 +908,7 @@ def emit_task_results(
     if not quiet or _presence:
         pending_events.append(build_presence_result_event(
             task, text, ctx, terminal_origin=str(usage.get("terminal_origin") or ""),
-            retain_scheduled_handoff=failed_or_forced,
+            retain_scheduled_handoff=failed_or_forced, silent=usage.get("wake_silent") is True,
         ) if _presence else send_event)
     # Every root registers its full answer payload in the durable outbox BEFORE
     # the live send and the result write, including the nonblocking post-task

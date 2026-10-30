@@ -961,11 +961,13 @@
  */
 
 /**
- * Parent-only controls for a finite widget file lease; the token is a read capability, not API auth.
+ * Parent-only controls for a widget lease; the token is a read capability, not API auth.
  * @typedef {Object} WidgetAssetLeaseRequest
  * @property {string} skill
  * @property {string} tab_id
  * @property {string} generation
+ * @property {'files'|'routes'=} scope  // files (default): ESM declared files; routes: GET/HEAD of the own skill's routes
+ * @property {string=} token  // routes only: re-establish the lease the running frame already uses
  */
 
 /**

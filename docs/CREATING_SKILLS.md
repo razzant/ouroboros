@@ -1105,6 +1105,9 @@ Use the connector's ordinary content-hash-bound skill token for:
   Main messages/questions and live/late answer routing; `presence_work_output_version: 1`
   advertises canonical output identities and separate producer/child references in
   work polls. `presence_wake_facts` lists accepted provider facts.
+  `presence_explicit_completion: 1` advertises that a new completion's outcome comes from
+  its explicit answer, silence or handoff, never from a delivery receipt. An absent key means
+  an older host without this promise: any confirmed tool receipt may suppress its final.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1185,15 +1188,15 @@ handoff is not exactly-once across a Host crash. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
 arrivals alone never do.
 
-A focus uses ordinary `finish_task`, including `silent=true`. The host derives
-`message`, `silent`, `tool_delivered` or `deferred` from the final, delivery receipts
-and successfully started long work. Automatic speech passes the `place_reply`
-Safety check; a flag returns to the mind, including for long work promoted from a
-focus. Silent/Paused/disconnected destinations and Advises autonomy hold the reply
+A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
+`silent=true`; receipts never choose its outcome. An answer after any send, file or
+reaction is new speech; started work stays `deferred` (empty after silence).
+Automatic speech passes the `place_reply` Safety check; a flag returns to the mind.
+Silent/Paused/disconnected destinations and Advises autonomy hold the reply
 with a System fact. Cached replies, continuation envelopes and work polls apply the
 current place state without another generation or paid check. A held projection keeps
 the durable answer and its output identity; repeated holds record one fact per subject.
-Late receipts still record what happened and add a visible warning. Proactive speech uses the connector's own tools; `presence_finish` and
+Late receipts still record what happened, with a visible warning. Proactive speech uses the connector's own tools; `presence_finish` and
 `initiate_presence` are no longer public tools.
 
 Private Main contact uses the mind's existing tools: a Presence root can call
@@ -1846,7 +1849,7 @@ same promises through the host-side protocol in
 
 Framed render declarations may add a bounded `height` (320–8,192 pixels).
 When a module omits `height`, the host starts at 320px and measures its
-existing `#root` through a nonce-bound resize message. The host
+existing `#root` through a resize message on the bridge's channel. The host
 integer-deduplicates and clamps that value to 8,192px by default; an optional
 module-only `max_height` lowers the ceiling. A fixed `height` disables
 auto-growth. Legacy route iframes accept explicit `height` only because the
@@ -1887,11 +1890,11 @@ can raise the same error.
 
 The frame has no scriptable network of its own: `connect-src` stays closed, so
 `XMLHttpRequest`, `WebSocket`, `EventSource` and beacons are refused by the
-document policy, and every request goes through the parent over one nonce-bound
-message grammar (passive image, media and font loads from your own route prefix,
-and an ESM widget's native imports, stylesheets and passive loads of its own
-declared files, are the exceptions — "What the frame may do" below). The bridge
-exposes:
+document policy, and every request goes through the parent over one message
+grammar on a channel bound to your frame's own document (a classic widget's passive image, media and font loads through
+its route lease, and an ESM widget's native imports, stylesheets and passive
+loads of its own declared files, are the exceptions — "What the frame may do"
+below). The bridge exposes:
 
 - **`OuroborosWidget.fetch(url, init)`** (also installed as the frame's
   `fetch`). `url` must resolve under `/api/extensions/<skill>/...`, or, for an
@@ -1919,6 +1922,13 @@ exposes:
   aborts the parent's request; the optional `init.timeoutMs` is an author-side
   bound that aborts it for you (the read fails with
   `widget request timed out`).
+- **`OuroborosWidget.resourceUrl(url)`** (classic widgets) returns the URL your
+  frame's own elements load a route through: this mount's route lease,
+  `OuroborosWidget.resourceBase` (`<origin>/api/widget-resources/<lease>/`).
+  A relative path (`'media/clip.webm'`) and a URL under your own
+  `/api/extensions/<skill>/` prefix both map onto it; any other URL comes back
+  unchanged, for the frame policy to refuse. `OuroborosWidget.fetch` and
+  `download` accept these URLs too and send them as the matching own route.
 - **`OuroborosWidget.onEvent(callback)`** returns an unsubscribe function. The
   callback receives `{type, data}` for every event this skill emits with
   `api.send_ws_message(type, data)` — `type` is the short name you passed; the
@@ -1927,7 +1937,7 @@ exposes:
 
 - **`OuroborosWidget.onTheme(callback)`** is an optional resolved-palette
   subscription for module widgets. The callback receives `light` or `dark`
-  through the nonce-bound parent bridge; `onTheme` returns an unsubscribe function.
+  through the parent bridge; `onTheme` returns an unsubscribe function.
   The module applies the value itself, commonly with
   `document.documentElement.dataset.theme = theme`; the host never injects CSS,
   changes the child DOM or forces a remount. The first callback receives the
@@ -1937,8 +1947,8 @@ exposes:
   normally sees the injected bootstrap value immediately, then the parent
   confirms the current value asynchronously; after a prior unsubscribe, the
   next listener waits for that confirmation instead of using stale bootstrap.
-  Route
-  iframes have no bridge. A module declaration may record
+  A route
+  page gets the bridge by loading it ("What the frame may do" below). A module declaration may record
   `render.appearance: host | independent | fixed` for author/reviewer intent:
   `host` opts into the resolved bridge, `independent` leaves palette choice to
   the author, and `fixed` names an intentionally stable visual world;
@@ -1990,9 +2000,9 @@ default-src 'none';
 script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: <origin>/api/extensions/<skill>/module/;
 worker-src blob:;
 style-src 'unsafe-inline';
-img-src data: blob: <origin>/api/extensions/<skill>/;
-media-src data: blob: <origin>/api/extensions/<skill>/;
-font-src data: blob: <origin>/api/extensions/<skill>/
+img-src data: blob: <origin>/api/widget-resources/<lease>/;
+media-src data: blob: <origin>/api/widget-resources/<lease>/;
+font-src data: blob: <origin>/api/widget-resources/<lease>/
 ```
 
 ESM opt-in replaces script/resource prefixes with the mount's finite asset URL,
@@ -2007,17 +2017,18 @@ closed. The classic capabilities below are verified on Chromium and WebKit throu
   `instantiateStreaming` on bytes your own route serves — the recipe below.
 - **Workers** from `blob:` URLs (`new Worker(URL.createObjectURL(new Blob([src])))`);
   `importScripts` inside one may load from your module prefix.
-- **Images, audio, video and fonts** from your own route prefix and from
-  `data:` / `blob:` URLs — "Assets" below, including the CORS rule for fonts.
+- **Images, audio, video and fonts** from your own routes through the mount's
+  route lease (`OuroborosWidget.resourceUrl`), and from `data:` / `blob:` URLs —
+  "Assets" below, including the CORS rule for fonts.
 - **Clipboard write** (`navigator.clipboard.writeText`) from a user click; the
   clipboard is never readable from the frame.
 - **Downloads**: module widgets use `OuroborosWidget.download` or ordinary
   `<a download>` controls for their own route files, declared ESM files, data
   URLs and frame-created Blobs; the existing host save path supports both the
   desktop app and browsers.
-  A legacy `kind: iframe` route page has no module bridge: its downloads still
-  depend on the embedding engine. Use a module widget or a host-side declarative
-  `file` component when a native Downloads handoff is required.
+  A `kind: iframe` route page gets the same native Downloads handoff through
+  `OuroborosWidget.download` once it loads the bridge; its own `<a download>`
+  clicks are left to the embedding engine.
 - **Pointer lock** (`allow-pointer-lock`) and **fullscreen**
   (`allowfullscreen` + `allow="fullscreen"`) for games and emulators. Both need
   a user gesture and a focused window; feature-detect with
@@ -2029,12 +2040,32 @@ closed. The classic capabilities below are verified on Chromium and WebKit throu
   rules (a user gesture for audible playback) still apply.
 
 A `kind: iframe` route frame is your own page under the same sandbox and
-permissions set, with no bridge and no host CSP: its scripts may use the
-network exactly as your skill's backend already can, without the SPA's cookies
-or DOM. Because its origin is opaque, its `fetch` calls are cross-origin: a
-route it reads must answer with `Access-Control-Allow-Origin: *` (or be
-requested with `mode: "no-cors"` for a fire-and-forget opaque response), and
-on a network install its requests carry no session cookie either.
+permissions set, with no bridge and no host CSP, loaded from the mount's route
+lease (`/api/widget-resources/<lease>/<route>`): your page keeps its own HTTP
+`Content-Security-Policy`, and its own URL is its base, so **relative** URLs
+(images, styles, scripts, `<audio>`/`<video>`, fonts, a relative HLS playlist
+and its segments, and GET reads) reach your routes through the lease without
+the SPA's cookies or DOM. The core refuses the frame's requests to the raw
+`/api/extensions/...` prefix (its origin is opaque, another site's page to the
+core), and the lease reads only GET/HEAD. For everything else, load the host
+bridge, admitted by your own policy (a nonce, or `'self'`):
+
+```html
+<script nonce="…" src="/api/widget-bridge.js"></script>
+```
+
+It gives the page `OuroborosWidget.fetch` (any method, headers and body, to
+your own routes, with the owner's session, streamed back), `onEvent`, `onTheme`,
+`download`, `openExternal`, `resourceUrl` and `ready` (resolves once the host
+accepted the page). A relative `url` resolves against your page. It changes
+nothing else: your page's own `fetch`, links, popups and error handling stay
+yours, and media stay native under the lease. The host hears the page only on a
+channel its own document opened, proven by the lease in its URL: a page your
+frame navigates or redirects to, on another site, gets neither the channel nor
+the lease. Your next own page (a link within your routes) joins again. Because
+its origin is opaque, the page's own `fetch` calls are cross-origin: a route it
+reads that way must answer with `Access-Control-Allow-Origin: *` (or be
+requested with `mode: "no-cors"` for a fire-and-forget opaque response).
 
 What the module frame does not give you, by design: a scriptable network (`connect-src` is
 closed — use `OuroborosWidget.fetch`), `eval`/`new Function` (there is no
@@ -2181,10 +2212,30 @@ state directory remains available for dynamic data. Declared automatic
 dependencies select the existing process executor; persistent subscriptions
 and long-lived work still use the documented companion facilities.
 Locally installed skills have no per-file cap; the review pack budget is the
-only bound. The frame's `img-src`/`media-src`/`font-src` admit your skill's
-route prefix, so `<img src="/api/extensions/<skill>/logo.png">`,
-`<audio src>` / `<video src>` and `@font-face { src: url(...) }` load straight
-from your routes. Two rules come with that:
+only bound. A classic frame's elements load your routes natively through the
+mount's **route lease**: `img.src = OuroborosWidget.resourceUrl('logo.png')`,
+`<audio>` / `<video>` sources and `@font-face { src: url(...) }` built the same
+way. The browser streams them as usual: playback starts before the body ends,
+`Range` requests seek, and an endless live stream keeps playing; nothing is
+buffered into a Blob. A raw `/api/extensions/<skill>/...` URL in a media
+attribute, CSS or a playlist your script resolves must go through
+`resourceUrl` (the frame policy refuses it otherwise); a playlist the browser
+reads itself (HLS in a route page) should use relative entries.
+
+The lease reads only your own skill's GET/HEAD routes, with no session cookie
+or credential header reaching the handler, so it works the same on a network
+install. A redirect to your own prefix stays under the lease; one to another
+skill or the core is answered 403; one to another site is followed without the
+lease or a referrer. Responses are `no-store` with `Referrer-Policy:
+no-referrer`. The URL is a bearer capability like the file lease below: the
+frame can see and share it, it is renewed with the mount, and stop, a module
+frame that navigates to another document, unload, disable, logout and password
+changes end it, ending its open responses too (a route page may navigate within
+its own routes; leaving them does not hand the lease on). A failed or hanging
+renewal and a core restart do not: the host retries and re-establishes the same
+URL, so your running page keeps its state (requests made while the core is down
+fail as usual; reconnect live streams yourself). Your GET routes must not be
+effects you would not let the frame trigger. Two rules come with that:
 
 - **Fonts need the CORS header.** The frame is an opaque origin, so
   `@font-face` (like `import()`) is a CORS-mode fetch: a font route must answer
@@ -2192,19 +2243,10 @@ from your routes. Two rules come with that:
   face (`FontFace.status === "error"`; WebKit is lenient, so test on Chromium).
   Images and media are plain no-cors loads and need no header; the module
   endpoint already sends it for scripts.
-- **Passive network loads are browser-dependent.** On a password-protected
-  install, an opaque frame's requests may lack the `SameSite=Lax` session and
-  get 401. A passive image was refused in Chromium but sent the cookie and
-  loaded in WebKit in the separate-host tests; this is not a guarantee for
-  other browsers or request modes. Loopback remains exempt from the gate.
-  For an asset that must work across browsers, use the bridge — the parent
-  sends the session — and hand the bytes to the element as a `blob:` URL, which
-  `img-src`/`media-src`/`font-src` admit:
-
-  ```js
-  const blob = await (await OuroborosWidget.fetch('/api/extensions/<skill>/logo.png')).blob();
-  img.src = URL.createObjectURL(blob);
-  ```
+- **The lease, not the session, authorizes these loads.** They need no cookie
+  on any browser or install. For bytes your script must read, use
+  `OuroborosWidget.fetch` (it sends the owner's session) and, if an element
+  needs them, a `blob:` URL, which `img-src`/`media-src`/`font-src` admit.
 
 #### Native modules and declared resources
 

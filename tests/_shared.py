@@ -38,12 +38,14 @@ def producer_evidence_dir(fallback, name, *, env=()):
     return diagnostic_directory(fallback, name)
 
 
-def retire_synthetic_retention(directory, *reasons) -> bool:
+def retire_synthetic_retention(directory, *reasons, release=None) -> bool:
     """Remove the retention marker THIS test manufactured, only when it says exactly ``reasons``.
 
     A fixture that fakes an unproven hold or an export fault proves no surviving
     process, yet its marker would keep the whole enclosing run. Any other line may
     describe a real one, so it keeps the marker. True when no marker remains.
+    ``release`` frees what that marker held, only once it is proven synthetic; unless
+    it returns True, the marker stays and keeps holding it.
     """
     from ouroboros.test_environment import RETENTION_MARKER
 
@@ -59,8 +61,26 @@ def retire_synthetic_retention(directory, *reasons) -> bool:
     known = {line for reason in reasons for line in reason.rstrip().splitlines()}
     if not lines or not known.issuperset(lines):
         return False
+    if release is not None and not release():
+        return False
     marker.unlink()
     return True
+
+
+def retire_synthetic_gate_hold(repo, temp_root, reason) -> bool:
+    """Undo a hermetic gate's hold over a lane this test stubbed or faulted, by its exact reason.
+
+    Only a marker saying nothing but that reason (the gate's line and its release owner's)
+    lets the worktree and its registration go, and the marker goes only after they did.
+    Any other line, an unreadable marker or a failed removal keeps all three.
+    """
+    import subprocess
+
+    def remove_worktree() -> bool:
+        return subprocess.run(["git", "worktree", "remove", "--force", str(pathlib.Path(temp_root) / "repo")],
+                              cwd=str(repo), capture_output=True).returncode == 0
+
+    return retire_synthetic_retention(temp_root, reason, "hermetic preflight: " + reason, release=remove_worktree)
 
 
 def retention_left_in(directory) -> str:

@@ -290,6 +290,8 @@ class ProcessContainer:
         self._lifeline = self._watch = None
         self._birth = ""
         self._protection_error = ""
+        # ``reap``'s first answer; ``None`` until it starts.
+        self._teardown: Optional[str] = None
 
     def containment_env(self) -> "dict[str, str]":
         """Environment entries that make a process and its descendants members. ``spawn`` applies
@@ -318,10 +320,11 @@ class ProcessContainer:
             self._suspended = True
         if flags:
             kwargs["creationflags"] = flags
-        if self._protect_owner and not _pl.IS_WINDOWS:
-            from ouroboros.process_lifeline import ProcessLifeline
-            self._lifeline = ProcessLifeline(self._token)
         try:
+            if self._protect_owner and not _pl.IS_WINDOWS:
+                from ouroboros.process_lifeline import ProcessLifeline
+                self._lifeline = ProcessLifeline()
+                self._lifeline.start(self._token)
             if self._watch_overload:
                 from ouroboros.process_overload import OverloadWatch
                 from ouroboros.test_parallelism import nested_workers
@@ -348,7 +351,10 @@ class ProcessContainer:
                 self._watch.start()
         except BaseException:
             self.reap()
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._teardown = self._teardown or "the root did not exit after its reap"
             raise
         return proc
 
@@ -469,32 +475,43 @@ class ProcessContainer:
             time.sleep(0.1)
 
     def reap(self) -> str:
-        """Stop protection, reap, and only then release the independent guardian."""
-        if self._watch is not None:
-            watch, self._watch = self._watch, None
-            try:
-                self._protection_error = watch.stop() or self._protection_error
-            except Exception as exc:
-                self._protection_error = f"overload watch stop unconfirmed: {exc}"
+        """Stop protection, reap, and only then release the independent guardian.
+
+        The first call is the answer. It consumes the token, root and group a later scan would
+        need, so a later call (the owner's, after ``spawn``'s own) repeats it: an empty rescan of
+        nothing is not evidence. A first call that never finished stays unconfirmed, though an
+        interrupt while the watch stops still reaches the tree and guardian cleanup below."""
+        if self._teardown is not None:
+            return self._teardown
+        self._teardown = "the container's first reap did not finish, so nothing is proven gone"
         error = ""
         try:
-            if self._protect_owner or self._watch_overload:
+            if self._watch is not None:
+                watch, self._watch = self._watch, None
                 try:
-                    self.stop_tree()
+                    self._protection_error = watch.stop() or self._protection_error
                 except Exception as exc:
-                    error = f"contained tree stop unconfirmed: {exc}"
-            try:
-                error = "; ".join(part for part in (error, self._reap()) if part)
-            except Exception as exc:
-                error = "; ".join(part for part in (error, f"container reap unconfirmed: {exc}") if part)
+                    self._protection_error = f"overload watch stop unconfirmed: {exc}"
         finally:
-            if self._lifeline is not None:
-                lifeline, self._lifeline = self._lifeline, None
+            try:
+                if self._protect_owner or self._watch_overload:
+                    try:
+                        self.stop_tree()
+                    except Exception as exc:
+                        error = f"contained tree stop unconfirmed: {exc}"
                 try:
-                    error = lifeline.finish(released=not error) or error
+                    error = "; ".join(part for part in (error, self._reap()) if part)
                 except Exception as exc:
-                    error = "; ".join(part for part in (error, f"lifeline release unconfirmed: {exc}") if part)
-        return "; ".join(part for part in (self._protection_error, error) if part)
+                    error = "; ".join(part for part in (error, f"container reap unconfirmed: {exc}") if part)
+            finally:
+                if self._lifeline is not None:
+                    lifeline, self._lifeline = self._lifeline, None
+                    try:
+                        error = lifeline.finish(released=not error) or error
+                    except Exception as exc:
+                        error = "; ".join(part for part in (error, f"lifeline release unconfirmed: {exc}") if part)
+        self._teardown = "; ".join(part for part in (self._protection_error, error) if part)
+        return self._teardown
 
     def _reap(self) -> str:
         """SCAN the container; return "" only when nothing of it is left, else why not. Detection,

@@ -15,7 +15,7 @@ import json
 import logging
 import pathlib
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -65,7 +65,8 @@ class _ExtensionRegistrations:
     # over small current control files, never rehash the publisher's payload.
     loaded_skill: Any = None
     context_snapshot: Optional[Dict[str, str]] = None
-    # Only scoped call work blocks automatic replacement; background tasks do not.
+    # Only scoped call work blocks automatic replacement; background tasks and
+    # ordinary responses do not.
     active_call_work: int = 0
 
 
@@ -314,6 +315,19 @@ def live_widget_files(skill: str, tab_id: str, generation: str) -> Optional[Dict
         return {path: bundle.widget_sources[path] for path in paths}
 
 
+def live_widget_route_generation(skill: str, tab_id: str) -> Optional[str]:
+    """Live publication of a classic module or route-iframe tab, whose mount may GET its own skill's routes."""
+    with _lock:
+        bundle = _extensions.get(skill)
+        tab = _ui_tabs.get(f"{skill}:{tab_id}")
+        if bundle is None or skill in _unloading or tab is None:
+            return None
+        render = tab["render"]
+        if render.get("kind") != "iframe" and (render.get("kind") != "module" or render.get("entry_type") == "module"):
+            return None
+        return str(bundle.generation_digest or "") or None
+
+
 def live_contribution_projection() -> List[Dict[str, Any]]:
     """Entries and revisions from the same publication, detached under one lock."""
     with _lock:
@@ -403,31 +417,35 @@ def _record_companion_name(bundle: _ExtensionRegistrations, name: str) -> None:
 
 
 @contextmanager
-def extension_work_scope(spec: Dict[str, Any], work: Any):
-    """Attach cancellable call work to its publication, excluding automatic replacement.
+def extension_work_scope(spec: Dict[str, Any], work: Any, *, call_work: bool = True):
+    """Attach cancellable work to its publication; call work also excludes automatic replacement.
 
-    Owner unload still cancels without joining teardown; a late relative import
-    in that teardown can fail after the package has been removed.
+    An ordinary response passes ``call_work=False``: replacing its publication
+    simply cancels it. Owner unload still cancels without joining teardown; a
+    late relative import in that teardown can fail after the package has been removed.
     """
     from ouroboros.contracts.plugin_api import ExtensionRegistrationError
 
     name = str(spec.get("skill") or "")
     generation = str(spec.get("extension_generation") or "")
-    # Loading and admission share this short entry fence. The call itself never
-    # holds the lifecycle lock, so an owner's disable remains immediate.
-    with _lifecycle_lock_for(name), _lock:
+    # Loading and call admission share this short entry fence. The call itself
+    # never holds the lifecycle lock, so an owner's disable remains immediate. An
+    # ordinary response can enter on the server loop and never waits for a load.
+    with (_lifecycle_lock_for(name) if call_work else nullcontext()), _lock:
         bundle = _extensions.get(name)
         if bundle is None or name in _unloading or bundle.generation_digest != generation:
             raise ExtensionRegistrationError("extension generation changed before response dispatch")
         bundle.supervised_futures.append(work)
-        bundle.active_call_work += 1
+        if call_work:
+            bundle.active_call_work += 1
     try:
         yield
     finally:
         with _lock:
             # Captured identity: finishing old work never changes a replacement.
             bundle.supervised_futures[:] = [item for item in bundle.supervised_futures if item is not work]
-            bundle.active_call_work -= 1
+            if call_work:
+                bundle.active_call_work -= 1
 
 
 def realtime_load_refusal(skill_name: str) -> str:

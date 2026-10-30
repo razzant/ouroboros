@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ouroboros.browser_boundary import CROSS_ORIGIN_CODE, JSON_CONTENT_TYPE_CODE, browser_request_refused, json_body_refused
 from ouroboros.config import load_settings
 from ouroboros.standalone_page import themed_page
 
@@ -27,7 +28,8 @@ if TYPE_CHECKING:
 
 NETWORK_PASSWORD_KEY = "OUROBOROS_NETWORK_PASSWORD"
 AUTH_COOKIE_NAME = "ouroboros_auth"
-_PUBLIC_HTTP_PATHS = {"/api/health", "/auth/login", "/auth/logout"}
+# The widget frame bridge is static host code a route page loads from its opaque frame, which carries no session.
+_PUBLIC_HTTP_PATHS = {"/api/health", "/auth/login", "/auth/logout", "/api/widget-bridge.js"}
 _NO_STORE = {"Cache-Control": "no-store"}
 
 
@@ -362,7 +364,8 @@ class NetworkAuthGate:
             return
 
         password = get_configured_network_password()
-        from ouroboros.gateway.widget_assets import ASSET_PREFIX, widget_asset_response
+        from ouroboros.gateway.widget_assets import (ASSET_PREFIX, RESOURCE_PREFIX, widget_asset_response,
+                                                     widget_resource_response)
 
         epoch = hashlib.sha256(password.encode()).hexdigest()
         self.widget_assets.password_changed(epoch)
@@ -379,6 +382,24 @@ class NetworkAuthGate:
             response = await widget_asset_response(Request(scope, receive), self.widget_assets)
             await response(scope, receive, send)
             return
+        if scope["type"] == "http" and path.startswith(RESOURCE_PREFIX):
+            # The route lease is this request's whole authority: no session, boundary or password applies.
+            await widget_resource_response(scope, receive, send, self.widget_assets, self.app)
+            return
+        # The browser boundary comes before every handler, the login form and the password check.
+        if browser_request_refused(scope):
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 4403})
+            else:
+                await JSONResponse({"error": "Requests from another site's page are not accepted.",
+                                    "code": CROSS_ORIGIN_CODE}, status_code=403)(scope, receive, send)
+            return
+        if scope["type"] == "http":
+            refused, receive = await json_body_refused(scope, receive)
+            if refused:
+                await JSONResponse({"error": "Send a JSON body with Content-Type: application/json.",
+                                    "code": JSON_CONTENT_TYPE_CODE}, status_code=415)(scope, receive, send)
+                return
         if scope["type"] == "http" and path in {"/auth/login", "/auth/logout"}:
             # These names belong to the gate even when it is inactive: a selected
             # asset named login/logout must not become a different operation.

@@ -193,6 +193,7 @@ BAND_PATHS = {
     "ouroboros/workspace_executor.py": "Executor paths have their own resolution owner; process lifetime, service custody and execution remain together below the giant-module ceiling.",
     "scripts/claudexor_platform_smoke.py": "The managed Claudexor platform smoke owns a multi-platform fixture, lifecycle receipt, and cleanup proof; keeping this runner in the documented band preserves the release gate without moving those checks into product runtime.",
     "scripts/run_external_review.py": "Wrapper with two lanes and no review flow of its own: argument parsing, settings and key loading, OpenRouter key health, the --contributor budget and panel policy, data isolation before any config import, the proposal's hermetic test preflight and the public contributor packet (its leaf is scripts/contributor_review_evidence.py) stay here; the contributor lane calls the runtime review_change operation on the frozen base..head subject, the operator lane runs the commit gate's review-only cycle in the runtime's isolated checkout of the staged index.",
+    "skills/live_conversation/driver.py": "R29 GoAway repairs take the driver from 997 to 1025 lines: the complete serving-batch measure and successful-write resume authority belong with its existing delivery custody and quiet handoff. Splitting this boundary would add a second state owner; no new module or function-size debt.",
     "skills/telegram/plugin.py": None,
     "skills/telegram/scripts/companion.py": None,
     "skills/telegram/scripts/sidecar.py": None,

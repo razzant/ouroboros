@@ -106,8 +106,8 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
     from ouroboros.task_status import reconcile_orphaned_running_tasks
     from supervisor import queue as _task_queue  # noqa: F401 -- normal supervisor import order for Panic
     from tests.test_presence_continuation import review, waits
-    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, finish
-    from tests.test_presence_continuation_process import ROOT, ANSWER, MANUAL, LATE_CHILD, REVISED_ANSWER
+    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, finish, tool_call
+    from tests.test_presence_continuation_process import ROOT, ANSWER, MANUAL, LATE_CHILD, REVISED_ANSWER, TOOL_NOTE
 
     assert Path(os.environ["OUROBOROS_DATA_DIR"]).resolve() == (root / "data").resolve()
     assert Path(os.environ["HOME"]).resolve() == (root / "home").resolve()
@@ -192,8 +192,10 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
                               metadata={"presence": dict(ctx.task_metadata["presence"])})
             ctx._swarm_handoff_attempt = {"status": "scheduled", "task_id": LATE_CHILD}
             return review(answer=REVISED_ANSWER)
-        if scenario == "tool_delivered":
-            return finish("select", message=ANSWER)  # the actual receipt selects tool_delivered
+        if scenario == "tool_silent":
+            # Its tool delivered the result: the mind chooses silence; a receipt never chooses for it.
+            return {"content": None, "tool_calls": [tool_call("finish_task", {
+                "action": "finish", "silent": True, "answer": TOOL_NOTE}, "select")]}
         return finish("select", message=REVISED_ANSWER if scenario == "late_child" else ANSWER)
 
     h.script = script

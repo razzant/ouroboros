@@ -113,6 +113,8 @@ import { placeCheckRow, placeReplayedEvidence } from './verification_presentatio
 import {
     COLLAPSED_ACTIVITY_MAX,
     boundActivityPreview,
+    authoredLine,
+    authoredTitle,
     buildTimelineItemHtml,
     buildMessageKey,
     chatLogThreadAccepts,
@@ -159,6 +161,7 @@ import {
     readCandidateRemainder,
     renderLiveCardMeta as renderCardMeta,
     ensureLiveActionsEl,
+    dockChildReviewDoor,
     cardRowEvidenceRef,
     cardRowSummary,
     evidenceLinkHtml,
@@ -781,7 +784,7 @@ export function createChatInstance({
     // root with work takes its newest narration, `Task activity` once ended (#1369).
     function cardTitle(record, work = blockHasWork(record)) {
         return record.isSubagent ? childTitle(record) : record.suggestedName
-            || (work ? record.lastHumanHeadline || (record.finished ? 'Task activity' : '') : '');
+            || (work ? authoredTitle(record) || (record.finished ? 'Task activity' : '') : '');
     }
 
     // Write only on change: a rewrite would destroy a selection being copied. A finished root's own sentence is its
@@ -792,7 +795,7 @@ export function createChatInstance({
         const own = record.finished && !record.isSubagent && !record.causeHeld && record.wakeSummary;
         const line = own && own !== title ? own : record.collapsedActivity;
         if (record.titleEl.textContent !== title) { record.titleEl.textContent = title; portals.relabel(record); }
-        renderCollapsedActivity(record, projectCollapsedActivity({ isSubagent: record.isSubagent, suggestedName: title, headline: line, body: line }));
+        renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: title, headline: line, body: line }));
     }
 
     // Fold host facts; absent counters stay absent.
@@ -1252,22 +1255,23 @@ export function createChatInstance({
                         <span class="chat-live-phase working" data-live-phase role="status" aria-live="polite" aria-atomic="true" aria-label="${options.isSubagent ? 'Subagent' : 'Task'} status: Working">Working</span>
                         <span class="chat-live-phase-secondary" data-live-phase-secondary hidden></span>
                         <span class="chat-live-hurry" data-live-hurry role="img" hidden></span>
+                        <span class="chat-live-when" data-live-when hidden></span>
                     </div>
                     <span class="chat-live-title" data-live-title>Waiting for work</span>
+                    <div class="chat-live-doors">
+                    <button type="button" class="chat-live-review-summary ui-hit-area" data-live-review-summary aria-expanded="false" hidden>${CHEVRON}</button>
                     <button type="button" class="chat-live-summary-side ui-hit-area" data-live-disclosure aria-expanded="false" aria-controls="${escapeHtmlAttr(timelineId)}">
                         <span class="chat-live-count" data-live-count hidden></span>
                         <span class="chat-live-toggle" data-live-toggle>Details</span>
                         ${CHEVRON}
-                    </button>
+                    </button></div>
                 </div>
                 <div class="chat-live-episodes" data-live-episodes hidden></div>
                 <div class="chat-live-activity" data-live-activity></div>
             </div>
             <div class="chat-live-foot" data-live-foot>
                 <div class="chat-live-meta" data-live-meta></div>
-                <div class="chat-live-foot-end" data-live-foot-end>
-                    <button type="button" class="chat-live-review-summary ui-hit-area" data-live-review-summary aria-expanded="false" hidden>${CHEVRON}</button>
-                </div>
+                <div class="chat-live-foot-end" data-live-foot-end></div>
             </div>
             <div data-live-reviews-host></div>
             <div class="chat-live-details">
@@ -1458,6 +1462,7 @@ export function createChatInstance({
         record.isSubagent = true;
         record.parentGroupId = parentId;
         record.subagentRole = role || record.subagentRole || '';
+        dockChildReviewDoor(record);
         if (promoted) {
             record.root.classList.add('subagent');
             record.root.dataset.subagent = '1';
@@ -1642,7 +1647,7 @@ export function createChatInstance({
         if (!summary.human || !summary.headline) return;
         const previous = record.lastHumanHeadlineSource, shown = previous?.preview || '';
         const incoming = { time: Date.parse(rawTs), position: _historyRow?.history_position,
-            preview: boundActivityPreview(summary.activityPreview ?? summary.headline) || shown };
+            preview: authoredLine(record, summary) || shown };
         if (Number.isFinite(previous?.time) && (!Number.isFinite(incoming.time) || incoming.time < previous.time)) return;
         if (incoming.time === previous?.time && (compareHistoryPosition(incoming.position, previous.position) < 0
                 || previous.position && !incoming.position)) return;

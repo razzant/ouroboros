@@ -105,8 +105,11 @@ def presence_result_from_stored(stored: Mapping[str, Any], task_id: str, drive_r
 
 
 def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, terminal_origin: str = "",
-                                retain_scheduled_handoff: bool = False) -> dict[str, Any]:
-    """Freeze typed delivery metadata before the ordinary durable result write."""
+                                retain_scheduled_handoff: bool = False, silent: bool = False) -> dict[str, Any]:
+    """Freeze typed delivery metadata before the ordinary durable result write.
+
+    ``silent`` is the terminal's own quiet fact (``usage["wake_silent"]``): the candidate that
+    actually ended the loop, never an earlier completion request a forced exit outlived."""
     from ouroboros.presence_continuation import _handoff_ref, terminal_output
     from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS
 
@@ -115,15 +118,14 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a
         # new round: preserve the flag as a held reply instead of releasing unchecked speech.
-        allowed, refusal = prepare_focus_reply(ctx, str(text or ""), quiet=terminal_origin != "model_final" or bool(
-            (getattr(ctx, "_completion_selected", {}) or {}).get("wake_silent")))
+        allowed, refusal = prepare_focus_reply(ctx, str(text or ""), quiet=terminal_origin != "model_final" or silent)
         if not allowed:
             from ouroboros.place_reply import record_notice
             from ouroboros.tool_access import canonical_data_root
             record_notice(canonical_data_root(ctx), place_id=carrier["place_id"],
                           conversation_key=carrier["conversation_key"], task_id=task["id"],
                           text="Reply held after finalization: " + refusal, identity=task["id"] + ":forced-hold")
-            ctx._presence_completion = {"outcome": "silent"}
+            ctx._presence_completion = {"outcome": "silent", "quiet": True}
             ctx._presence_completion_accepted = True
     completion = getattr(ctx, "_presence_completion", None)
     completion = completion if (
@@ -138,6 +140,10 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
         # when owed work below turns the outcome into deferred.
         text = str(completion.get("message") or "") if completion.get("outcome") in {"message", "deferred"} else ""
     note = str(completion.get("message") or "") if completion.get("outcome") == "tool_delivered" else ""
+    if completion.get("quiet"):
+        # Not speech, so an owed handoff below polls with an empty body; the mind's own
+        # silent words stay its finish note, host text never becomes one.
+        note, text = (str(text or "") if silent and terminal_origin == "model_final" else ""), ""
     outcome = str(completion.get("outcome") or "message").strip()
     work_ref = _handoff_ref(ctx)
     if outcome == "deferred" and not work_ref:

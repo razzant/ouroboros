@@ -161,7 +161,8 @@ _WIDGET_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8"><title>sr
 <body><h1>VISIBLE_PARENT_CONTROL</h1><iframe id="plain" src="/plain.html"></iframe>
 <section><div id="mount"></div></section><pre id="status">Loading</pre>
 <script type="module">import {mountModuleWidget} from '/web/modules/widget_module.js';
-window.dispose = await mountModuleWidget(document.querySelector('#mount'), {skill: 'repro', ws_prefix: 'repro.'},
+window.dispose = await mountModuleWidget(document.querySelector('#mount'),
+  {skill: 'repro', ws_prefix: 'repro.', tab_id: 'main', generation: 'g1'},
   {kind: 'module', entry: 'widget.js', height: 240});
 document.querySelector('#status').textContent = 'Parent mounted';
 window.probe = () => { const f = document.querySelector('#mount iframe');
@@ -185,6 +186,21 @@ def widget_page_url():
             body, kind = bodies[self.path][0].encode(), bodies[self.path][1]
             self.send_response(200)
             self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):  # noqa: N802 - stdlib callback name
+            # The parent's lease controls; a classic mount mints its route lease before it frames the module.
+            if not self.path.startswith("/api/widgets/asset-leases"):
+                return self.send_error(404)
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            token = "t" * 43
+            reply = {"ok": True} if self.path.endswith("/revoke") else {
+                "token": token, "base_url": f"/api/widget-resources/{token}/", "expires_in": 120, "renew_after": 40}
+            body = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

@@ -59,7 +59,7 @@ def kill_attributed_tree(token: str, root: int = 0, birth: str = "", *, graceful
 class ProcessLifeline:
     """An owner-held pipe; release only after the workload has been reaped."""
 
-    def __init__(self, token: str):
+    def __init__(self):
         from ouroboros.process_containment import ProcessContainer
 
         # This container owns the guardian itself, with a DIFFERENT token. The
@@ -67,22 +67,22 @@ class ProcessLifeline:
         # make the guardian attribute itself or its ps helpers to the workload).
         self._container = ProcessContainer()
         self._proc = None
-        try:
-            self._proc = self._container.spawn(
-                [sys.executable, "-I", "-B", "-c",
-                 "import sys; sys.path.insert(0, sys.argv[1]); "
-                 "from ouroboros.process_lifeline import _guardian_main; _guardian_main()",
-                 str(Path(__file__).resolve().parents[1])],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            )
-            ready, _, _ = select.select([self._proc.stdout], [], [], _HANDSHAKE_SEC)
-            if not ready or self._proc.stdout.read(1) != b"R":
-                raise RuntimeError("process lifeline failed to start")
-            self._proc.stdout.close()
-            self._send({"token": token})
-        except BaseException:
-            self.finish(released=False)
-            raise
+
+    def start(self, token: str) -> None:
+        """Raises with the guardian possibly running: the owner's reap ``finish``es either way,
+        so what that teardown found reaches the owner instead of dying with this frame."""
+        self._proc = self._container.spawn(
+            [sys.executable, "-I", "-B", "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); "
+             "from ouroboros.process_lifeline import _guardian_main; _guardian_main()",
+             str(Path(__file__).resolve().parents[1])],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        )
+        ready, _, _ = select.select([self._proc.stdout], [], [], _HANDSHAKE_SEC)
+        if not ready or self._proc.stdout.read(1) != b"R":
+            raise RuntimeError("process lifeline failed to start")
+        self._proc.stdout.close()
+        self._send({"token": token})
 
     def _send(self, message: dict) -> None:
         self._proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
@@ -94,7 +94,7 @@ class ProcessLifeline:
     def finish(self, *, released: bool) -> str:
         proc, self._proc = self._proc, None
         if proc is None:
-            return ""
+            return self._container.reap()  # a guardian spawn that raised answered there
         error = ""
         gone = False  # EPIPE: the guardian's read end is closed, so it has already exited
         try:

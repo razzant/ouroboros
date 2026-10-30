@@ -245,13 +245,25 @@ the last `X-Forwarded-For` entry that is not such a proxy:
 - A proxy on another machine must be listed in `FORWARDED_ALLOW_IPS`; otherwise
   the core treats the proxy itself as the client and does not see TLS, so the
   session cookie is not marked `Secure`.
-- Widget file-lease controls (`/api/widgets/asset-leases`) accept the page by
-  the browser's `Sec-Fetch-Site: same-origin`, so the proxy may rewrite `Host`
-  or terminate TLS. A browser that sends no Fetch Metadata is accepted only when
+- The core accepts a browser's requests and WebSocket handshakes by the
+  browser's `Sec-Fetch-Site: same-origin`, so the proxy may rewrite `Host` or
+  terminate TLS. A browser that sends no Fetch Metadata is accepted only when
   its `Origin` equals the scheme and host the core sees: pass `Host` through,
   plus `X-Forwarded-Proto` from a proxy in `FORWARDED_ALLOW_IPS`.
 - Visitors who are not loopback need `OUROBOROS_FILE_BROWSER_DEFAULT` for Files;
   without it the path-addressed `/api/files/*` operations refuse them.
+
+With or without a password, on loopback too, the core answers another site's
+page with 403 (a WebSocket closes with 4403) and a body that is not JSON where
+the API expects JSON with 415. Pages and files any page may load (the interface,
+setup and login pages, their static files, extensions' reviewed widget files)
+pass this check; the password gate above still applies. A request with neither
+`Origin` nor `Sec-Fetch-Site` counts as a native client (the CLI, sidecars,
+skills). Browsers send Fetch Metadata only to HTTPS, `localhost` and loopback
+addresses and omit `Origin` on simple GET/HEAD loads, so through a plain-HTTP
+hostname another site's page can still make the browser run GET/HEAD handlers,
+without reading the answers. A hostname that resolves to this machine (DNS
+rebinding) is not told apart either.
 
 ## Extra CA Certificates
 

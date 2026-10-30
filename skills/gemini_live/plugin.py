@@ -239,6 +239,8 @@ class GeminiSession(JsonSession):
         self.read_task = None
         self.pending_event = asyncio.Event()
         self.resume_handle = options.resume_handle
+        self.resume_revision = 0
+        self.tool_response_revision = None
         self.resume_requested = bool(options.resume_handle)
         now = time.monotonic()
         for key, (expiry, _) in tuple(RESUMPTIONS.items()):
@@ -248,6 +250,12 @@ class GeminiSession(JsonSession):
         if saved:
             for name, value in saved[1].items():
                 setattr(self, name, value)
+
+    @property
+    def resume_after_tool_response(self):
+        if self.tool_response_revision is None:
+            return None
+        return self.resume_revision > self.tool_response_revision
 
     @property
     def renewal_ready(self):
@@ -529,6 +537,7 @@ class GeminiSession(JsonSession):
                     await self.send(command)
         if 'sessionResumptionUpdate' in event:
             update = event['sessionResumptionUpdate']
+            self.resume_revision += 1
             self.resume_handle = update.get('newHandle', '') if update.get('resumable') else ''
             result.append(LiveEvent('resumable', {'handle': self.resume_handle}))
         if 'goAway' in event:
@@ -594,7 +603,8 @@ class GeminiSession(JsonSession):
                 elif not message.get('tool_calls'):
                     other.append(message)
             if responses:
-                await self.write({'toolResponse': {'functionResponses': responses}})
+                self.tool_response_revision = await self.write({'toolResponse': {'functionResponses': responses}},
+                                                               snapshot=lambda: self.resume_revision)
                 ids = {r['id'] for r in responses}
                 self.hold_context([row for row in command.messages if row.get('tool_call_id') in ids
                                    or any(c.get('id') in ids for c in row.get('tool_calls', ()))])

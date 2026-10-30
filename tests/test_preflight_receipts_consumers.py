@@ -718,6 +718,7 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
     from ouroboros import preflight_node, process_containment
     from ouroboros.process_overload import OverloadWatch
     from tests.test_preflight_receipts import _ctx
+    from tests.test_preflight_runner import _pin_preflight_root
 
     repo = _tiny_repo(tmp_path, web=lane == "node")
     ctx = _ctx(repo, tmp_path / "canonical")
@@ -741,12 +742,18 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
 
         monkeypatch.setattr(OverloadWatch, "start", refused)
 
+    # Nothing here is retired: only a real, unproven teardown could hold this tree, and that fails the test.
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+
     verdict = _tier_run(repo, ctx, monkeypatch, tier)
 
     assert verdict and "hermetic preflight failed" in verdict, verdict
     terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
     execution, outcome = {"no_process": ("not_run", "not_started"), "custody_failed": ("attempted", "start_unknown")}[failure]
     assert (terminal["execution"], terminal["lanes"], ctx._preflight_test_disclosure["outcome"]) == (execution, [], outcome)
+    assert (terminal["cleanup"], terminal["retention_reason"]) == ("released", "") and not temp_root.exists()
     assert getattr(ctx, "_preflight_tests_passed", None) is not True and getattr(ctx, "_preflight_test_proof", None) is None
     exhibit = receipts.execution_exhibit(ctx, otherwise="tests preflight did not pass")
     [run] = exhibit["observed"]

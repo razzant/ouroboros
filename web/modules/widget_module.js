@@ -5,12 +5,12 @@
    widgets.js keeps the page host, the mountTab dispatcher, the card registry and the
    declarative renderer; every mount here returns its disposer to that dispatcher. */
 
-import { apiClient, apiFetch, extensionRoutePath, extensionRoutePrefix } from './api_client.js';
+import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePrefix } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bridgeChunkBuffer, moduleBridgeScript, moduleResizeScript } from './widget_frame.js';
 import { boundedNumber, WIDGET_DISPOSE_ACK_TIMEOUT_MS, WIDGET_REQUEST_TIMEOUT_MS } from './widget_job.js';
 import { onThemeChange } from './theme_palette.js';
-import { openWidgetAssetLease, readWidgetAsset, revokeWidgetAssetLease, maintainWidgetAssetLease } from './widget_assets.js';
+import { openWidgetAssetLease, readWidgetAsset, revokeWidgetAssetLease, maintainWidgetAssetLease, reopenWidgetAssetLease } from './widget_assets.js';
 import { setWidgetCardFault } from './widget_card.js';
 import { downloadViaHostBridge, downloadBlobViaHostBridge, openExternalViaHostBridge } from './ui_helpers.js';
 
@@ -22,7 +22,7 @@ export const WIDGET_FRAME_BORDER_RESERVE = 2;
 export const WIDGET_FAULT_REPORTS_PER_MOUNT = 10;
 const FAULT_KINDS = ['error', 'rejection', 'csp'];
 const faultText = (value, max) => (typeof value === 'string'
-    ? value.replace(/(\/api\/widget-assets\/)[A-Za-z0-9_-]+/g, '$1[redacted]').slice(0, max) : '');
+    ? value.replace(/(\/api\/widget-(?:assets|resources)\/)[A-Za-z0-9_-]+/g, '$1[redacted]').slice(0, max) : '');
 
 // One capability set for both framed mounts (route iframe and module srcdoc):
 // scripts, pointer lock and downloads; autoplay, fullscreen and clipboard
@@ -42,10 +42,11 @@ function createWidgetFrame() {
 }
 
 // Sources are absolute because an opaque frame's 'self' matches nothing.
-// Classic widgets keep the skill route sources; ESM uses only this mount's
-// finite file prefix. Neither mode admits a scriptable network source: requests
-// fall to default-src 'none', and the parent bridge carries fetch.
-export function moduleFrameCsp(skill, origin = window.location.origin, assetBase = '') {
+// Classic widgets keep the skill's module sources and load passive images,
+// media and fonts from this mount's GET/HEAD route lease; ESM uses only this
+// mount's finite file prefix. Neither mode admits a scriptable network source:
+// requests fall to default-src 'none', and the parent bridge carries fetch.
+export function moduleFrameCsp(skill, origin = window.location.origin, assetBase = '', resourceBase = '') {
     const prefix = `${origin}${extensionRoutePrefix(skill)}`;
     if (assetBase) return [
         "default-src 'none'",
@@ -57,14 +58,15 @@ export function moduleFrameCsp(skill, origin = window.location.origin, assetBase
         `font-src data: blob: ${assetBase}`,
         `base-uri ${assetBase}`,
     ].join('; ');
+    const passive = ['data:', 'blob:', resourceBase].filter(Boolean).join(' ');
     return [
         "default-src 'none'",
         `script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ${prefix}module/`,
         'worker-src blob:',
         "style-src 'unsafe-inline'",
-        `img-src data: blob: ${prefix}`,
-        `media-src data: blob: ${prefix}`,
-        `font-src data: blob: ${prefix}`,
+        `img-src ${passive}`,
+        `media-src ${passive}`,
+        `font-src ${passive}`,
     ].join('; ');
 }
 
@@ -83,23 +85,56 @@ export function setFrameHeight(node, height) {
     node.style.setProperty('--widget-frame-height', `${Math.ceil(height)}px`);
 }
 
-export function mountRouteIframeWidget(mount, tab, render) {
-    const src = extensionRoutePath(tab.skill, render.route);
-    if (!src) throw new Error('invalid widget iframe route');
+// A fresh unguessable nonce per mount; getRandomValues also works on a plain-http LAN page.
+function frameNonce() {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+const resolvedTheme = () => {
+    const candidate = window.ouroTheme?.theme || document.documentElement?.dataset?.theme;
+    return ['light', 'dark'].includes(candidate) ? candidate : 'dark';
+};
+
+// Mint a route lease within the mount's own deadline; a stop during the mint aborts it.
+async function openRouteLease(tab, mountSignal) {
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    if (mountSignal?.aborted) controller.abort();
+    else mountSignal?.addEventListener('abort', relayAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), WIDGET_REQUEST_TIMEOUT_MS);
+    try {
+        return await openWidgetAssetLease(tab, controller.signal, 'routes');
+    } finally {
+        clearTimeout(timer);
+        mountSignal?.removeEventListener('abort', relayAbort);
+    }
+}
+
+export async function mountRouteIframeWidget(mount, tab, render, mountSignal = null, inline = null, messageHandlers = null) {
+    const route = cleanExtensionRoute(render.route);
+    if (!route) throw new Error('invalid widget iframe route');
     // The skill's own page in a sandboxed opaque-origin frame with the same
-    // capability set as a module frame and no bridge: its scripts may use the
-    // network as the skill's backend already can, without the SPA's cookies
-    // or DOM. The URL goes in through the property, never an attribute string.
+    // capability set as a module frame, loaded from this mount's GET/HEAD route
+    // lease: its relative images, media, styles, scripts and reads stay under the
+    // lease, with no SPA cookies or DOM and no referrer, and its own HTTP policy
+    // and URL base. A page that loads /api/widget-bridge.js gets the same bridge
+    // as a module frame (fetch with any method to its own routes, events, theme,
+    // downloads), proven by the lease in its own URL. The URL goes in through the
+    // property, never an attribute string.
+    const lease = await openRouteLease(tab, mountSignal);
+    if (mountSignal?.aborted) { revokeWidgetAssetLease(lease); return; }
     const iframe = createWidgetFrame();
-    iframe.src = src;
+    iframe.referrerPolicy = 'no-referrer';
     mount.replaceChildren(iframe);
     setFrameHeight(iframe, frameHeight(render));
-    let disposed = false;
-    return () => {
-        if (disposed) return;
-        disposed = true;
-        if (iframe?.parentNode === mount) iframe.remove();
-    };
+    const dispose = attachFrameBridge(iframe, mount, tab, {
+        accepts: (hello) => hello.lease === lease.token, rehello: true, resourceBase: lease.baseUrl,
+        inline, messageHandlers, lease,
+    });
+    iframe.src = `${lease.baseUrl}${route}`;
+    return dispose;
 }
 
 // `messageHandlers` is the page's Set of WebSocket message handlers (fanned from
@@ -131,6 +166,7 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
         } else {
             resp = await apiFetch(entryUrl, { cache: 'no-store', signal: sourceController.signal });
             moduleSource = await resp.text();
+            if (resp.ok) lease = await openWidgetAssetLease(tab, sourceController.signal, 'routes');
         }
     } catch (error) {
         if (sourceTimedOut) {
@@ -150,25 +186,20 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
         return;
     }
     const expectedPrefix = extensionRoutePrefix(tab.skill);
-    const wsPrefix = String(tab.ws_prefix || '').trim();
-    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const assetBase = lease?.baseUrl || '';
-    const csp = moduleFrameCsp(tab.skill, window.location.origin, assetBase);
+    const nonce = frameNonce();
+    const esm = render.entry_type === 'module';
+    const assetBase = esm ? lease?.baseUrl || '' : '';
+    const resourceBase = esm ? '' : lease?.baseUrl || '';
+    const csp = moduleFrameCsp(tab.skill, window.location.origin, assetBase, resourceBase);
     const escapeScript = (value) => String(value || '')
         .replace(/<\/script/gi, '<\\/script')
         .replace(/<!--/g, '<\\!--');
     const autoHeight = render.height === undefined || render.height === null;
     const maxHeight = frameMaxHeight(render);
-    const resolvedTheme = () => {
-        const candidate = window.ouroTheme?.theme || document.documentElement?.dataset?.theme;
-        return ['light', 'dark'].includes(candidate) ? candidate : 'dark';
-    };
     const initialTheme = resolvedTheme();
-    const bridge = moduleBridgeScript(nonce, `${window.location.origin}${expectedPrefix}`, initialTheme, assetBase);
+    const bridge = moduleBridgeScript(nonce, `${window.location.origin}${expectedPrefix}`, initialTheme, assetBase, resourceBase);
     const resizeBridge = autoHeight
-        ? moduleResizeScript(
-            nonce, WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE,
-        )
+        ? moduleResizeScript(WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE)
         : '';
     // The initial theme is carried inside the bridge bootstrap, not as a
     // document attribute: a module must explicitly subscribe before it gets
@@ -185,9 +216,30 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
     if (assetBase) iframe.referrerPolicy = 'no-referrer';
     iframe.srcdoc = srcdoc;
     mount.replaceChildren(iframe);
-    let appliedHeight = frameHeight(render);
+    const appliedHeight = frameHeight(render);
     if (inline) inline.fit(autoHeight ? 0 : appliedHeight);
     else setFrameHeight(iframe, appliedHeight);
+    return attachFrameBridge(iframe, mount, tab, {
+        accepts: (hello) => hello.nonce === nonce, nonce, assetBase, resourceBase, autoHeight, maxHeight,
+        appliedHeight, inline, messageHandlers, lease, leaves: true,
+        leaseEnded: esm ? 'Widget file access ended' : 'Widget access ended',
+    });
+}
+
+// The parent side of the one bridge, shared by module and route frames. A frame is heard only after its
+// document says hello with a MessageChannel port and the mount's proof (`accepts`: the module nonce, or the
+// route page's lease); every request, reply, event, theme, resize and dispose then travels on that port and
+// nothing is ever posted to `iframe.contentWindow`, so whatever document later occupies the frame learns
+// nothing. A route page may hello again from its next own document (`rehello`), which retires the previous
+// document's requests and subscriptions; a module frame that loads a second document (`leaves`) ends at once.
+function attachFrameBridge(iframe, mount, tab, {
+    accepts, rehello = false, nonce = '', assetBase = '', resourceBase = '', autoHeight = false,
+    maxHeight = WIDGET_FRAME_MAX_HEIGHT, appliedHeight: initialHeight = 0, inline = null, messageHandlers = null,
+    lease = null, leaves = false, leaseEnded = 'Widget access ended',
+}) {
+    const expectedPrefix = extensionRoutePrefix(tab.skill);
+    const wsPrefix = String(tab.ws_prefix || '').trim();
+    let appliedHeight = initialHeight;
     // The fault a card shows also reaches the host's event log once per kind+message, under this mount's own
     // identity (captured now, never the frame's words). Best effort: no retry, and a failed report changes nothing.
     const faultIdentity = { skill: String(tab.skill || ''), tab_id: String(tab.tab_id || ''),
@@ -204,14 +256,24 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
     };
     const pendingRequests = new Map();
     let disposed = false;
+    let left = false;
     let disposing = null;
     let onDisposed = null;
     let themeSubscribed = false;
     let stopTheme = () => {};
     let releaseLease = () => {};
-    const post = (message, transfer = []) => {
-        if (!disposed) iframe.contentWindow?.postMessage({ ...message, nonce }, '*', transfer);
+    let port = null;
+    // A reply belongs to the document that asked: it is dropped once that document's port was retired.
+    const sender = () => {
+        const target = port;
+        return (message, transfer = []) => {
+            if (!disposed && target && target === port) target.postMessage({ ...message, nonce }, transfer);
+        };
     };
+    const post = (message, transfer = []) => sender()(message, transfer);
+    // A lease URL names this skill's own route; the bridge sends it as that route, with the owner's session.
+    const routed = (parsed) => (resourceBase && parsed.href.startsWith(resourceBase)
+        ? new URL(`${expectedPrefix}${parsed.href.slice(resourceBase.length)}`, window.location.origin) : parsed);
     const postTheme = () => {
         const theme = resolvedTheme();
         if (themeSubscribed) post({ type: 'ouro-widget-theme', theme });
@@ -263,6 +325,7 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
             credit = false;
         };
         pendingRequests.set(id, controller);
+        const reply = sender();
         let timedOut = false;
         const timeoutMs = Number(init.timeoutMs);
         const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -271,9 +334,9 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
                 controller.abort();
             }, timeoutMs)
             : 0;
-        const frame = (fields, transfer) => post({ type: 'ouro-widget-fetch-chunk', id, ...fields }, transfer);
+        const frame = (fields, transfer) => reply({ type: 'ouro-widget-fetch-chunk', id, ...fields }, transfer);
         try {
-            const parsed = new URL(String(msg.url || ''), assetBase || window.location.origin);
+            const parsed = routed(new URL(String(msg.url || ''), assetBase || window.location.origin));
             const asset = assetBase && parsed.href.startsWith(assetBase);
             const method = String(init.method || 'GET').toUpperCase();
             if (parsed.origin !== window.location.origin
@@ -309,10 +372,11 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
             frame({ phase: 'error', error: timedOut ? 'widget request timed out' : (err?.message || String(err)) });
         } finally {
             clearTimeout(timer);
-            pendingRequests.delete(id);
+            if (pendingRequests.get(id) === controller) pendingRequests.delete(id);
         }
     };
     const relayDownload = async (msg) => {
+        const reply = sender();
         let result;
         try {
             const source = msg.source;
@@ -320,7 +384,7 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
             if (source instanceof Blob || (typeof source === 'string' && source.startsWith('data:'))) {
                 result = await downloadBlobViaHostBridge(source, name);
             } else {
-                const parsed = new URL(String(source || ''), assetBase || window.location.origin);
+                const parsed = routed(new URL(String(source || ''), assetBase || window.location.origin));
                 const asset = Boolean(assetBase) && parsed.href.startsWith(assetBase);
                 if (parsed.origin !== window.location.origin || (!parsed.pathname.startsWith(expectedPrefix) && !asset)) {
                     throw new Error('module widget download outside extension route prefix');
@@ -333,9 +397,10 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
         } catch (error) {
             result = { ok: false, error: error?.message || String(error) };
         }
-        post({ type: 'ouro-widget-download-result', id: msg.id, result });
+        reply({ type: 'ouro-widget-download-result', id: msg.id, result });
     };
     const relayExternal = async (msg) => {
+        const reply = sender();
         let result;
         try {
             if (disposing || !iframe.isConnected) throw new Error('widget disposed');
@@ -347,10 +412,10 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
         } catch (error) {
             result = { ok: false, error: error?.message || String(error) };
         }
-        post({ type: 'ouro-widget-open-external-result', id: msg.id, result });
+        reply({ type: 'ouro-widget-open-external-result', id: msg.id, result });
     };
     const onMessage = (event) => {
-        if (disposed || !iframe || event.source !== iframe.contentWindow) return;
+        if (disposed || left) return;
         const msg = event.data || {};
         if (msg.nonce !== nonce) return;
         if (msg.type === 'ouro-widget-disposed') {
@@ -410,7 +475,28 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
         }
         if (msg.type === 'ouro-widget-fetch') relayFetch(msg);
     };
-    window.addEventListener('message', onMessage);
+    // A document's work ends with it: its requests, its event and theme subscriptions and its port.
+    const retireDocument = () => {
+        pendingRequests.forEach((controller) => controller.abort());
+        pendingRequests.clear();
+        messageHandlers?.delete(onWsMessage);
+        stopThemeSubscription();
+        if (port) { port.onmessage = null; port.close(); }
+        port = null;
+    };
+    let helloSinceLoad = false;
+    const onHello = (event) => {
+        if (disposed || left || !iframe || event.source !== iframe.contentWindow) return;
+        const msg = event.data || {};
+        const next = event.ports?.[0];
+        if (msg.type !== 'ouro-widget-hello' || !next || !accepts(msg) || (port && !rehello) || disposing) return;
+        retireDocument();
+        port = next;
+        port.onmessage = onMessage;
+        helloSinceLoad = true;
+        post({ type: 'ouro-widget-ready', routeBase: `${window.location.origin}${expectedPrefix}` });
+    };
+    window.addEventListener('message', onHello);
     // Ordered stop with acknowledgement: post the dispose message, keep
     // answering bridged fetches the child's hooks issue meanwhile, and tear down
     // on `ouro-widget-disposed` or after WIDGET_DISPOSE_ACK_TIMEOUT_MS —
@@ -426,25 +512,43 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
                 clearTimeout(ackTimer);
                 releaseLease();
                 stopThemeSubscription();
-                pendingRequests.forEach((controller) => controller.abort());
-                pendingRequests.clear();
-                messageHandlers?.delete(onWsMessage);
-                window.removeEventListener('message', onMessage);
+                retireDocument();
+                window.removeEventListener('message', onHello);
                 if (iframe?.parentNode === mount) iframe.remove();
                 resolve();
             };
             onDisposed = finish;
             ackTimer = setTimeout(finish, WIDGET_DISPOSE_ACK_TIMEOUT_MS);
-            const child = iframe?.contentWindow;
-            if (child) child.postMessage({ type: 'ouro-widget-dispose', nonce }, '*');
+            if (port && !left) post({ type: 'ouro-widget-dispose' });
             else finish();
         });
         return disposing;
     };
-    if (lease) releaseLease = maintainWidgetAssetLease(lease, () => {
-        if (inline) inline.fault('Widget file access ended');
-        else setWidgetCardFault(mount.closest('[data-widget-key]'), 'Widget file access ended');
-        dispose();
+    const fault = (text) => {
+        if (inline) inline.fault(text);
+        else setWidgetCardFault(mount.closest('[data-widget-key]'), text);
+    };
+    // A load without a hello since the previous one is a document that never joined (another site, or a page
+    // without the bootstrap): the previous document is gone, so its channel retires. For a module frame the
+    // first load is its own srcdoc and any later one means it navigated: the mount ends at once.
+    let loads = 0;
+    iframe.addEventListener('load', () => {
+        loads += 1;
+        if (disposed || left) return;
+        if (leaves && loads >= 2) {
+            left = true;
+            fault('The widget left its own page and was stopped');
+            dispose();
+            return;
+        }
+        if (!helloSinceLoad && port) retireDocument();
+        helloSinceLoad = false;
     });
+    // A route lease outlives a failed renewal and a core restart (the same URL is re-established), so the
+    // running document keeps its state; a file lease ends the mount as before.
+    if (lease) releaseLease = maintainWidgetAssetLease(lease, () => {
+        fault(leaseEnded);
+        dispose();
+    }, resourceBase ? { reestablish: (signal) => reopenWidgetAssetLease(tab, lease, signal) } : {});
     return dispose;
 }

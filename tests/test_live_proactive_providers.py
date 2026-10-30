@@ -40,6 +40,9 @@ def test_attend_silent_or_look_continues_through_driver_and_native_session(packa
         host, wires = Host(), []
         host.state['greeted'] = True
         host.model = replace(host.model, vision=engine != 'grok')
+        async def fits(rows, tools):
+            return True  # ample room in this port fake; boundary tests use the real serving measure
+        host.delivery_fits = fits
         feature_tools = {t.name: t for t in call_tools(tmp_path)}
         tool = feature_tools['attend']
         host.schemas = [{'type':'function', 'function': {'name':tool.name, 'description':tool.description,

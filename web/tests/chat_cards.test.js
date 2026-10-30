@@ -12,6 +12,7 @@ import { createChatMedia } from '../modules/chat_media.js';
 import { messageRow } from '../modules/message_actions.js';
 import { stampNodeTimestamp } from '../modules/chat_activity.js';
 import { installCardDom } from './helpers/card_dom.js';
+import { joinFrame } from './helpers/fake_channel.js';
 
 const flush = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 const json = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
@@ -299,6 +300,8 @@ test('a classic widget frame survives a same-bytes republication; an ESM card fo
             widget: { skill: 'clock', tab_id: 'face' }, submissions_summary: [] }),
         'GET /api/widgets': () => json(200, { ui_tabs: [tab] }),
         'GET /api/extensions/clock/module/widget.js': page('// reviewed module'),
+        // A classic frame's elements load its routes through the mount's route lease.
+        'POST /api/widgets/asset-leases': json(200, { token: 'route-lease', base_url: '/api/widget-resources/route-lease/', expires_in: 120, renew_after: 40 }),
     });
     try {
         const cards = feed();
@@ -423,6 +426,8 @@ test('a stopped widget frame cannot size or fault the frame that replaced it; th
         'GET /api/widgets': json(200, { ui_tabs: [{ key: 'clock:face', skill: 'clock', tab_id: 'face', revision: '1',
             render: { kind: 'module', entry: 'widget.js' } }] }),
         'GET /api/extensions/clock/module/widget.js': page('// reviewed module'),
+        // A classic frame's elements load its routes through the mount's route lease.
+        'POST /api/widgets/asset-leases': json(200, { token: 'route-lease', base_url: '/api/widget-resources/route-lease/', expires_in: 120, renew_after: 40 }),
     });
     try {
         const cards = feed();
@@ -433,9 +438,8 @@ test('a stopped widget frame cannot size or fault the frame that replaced it; th
             bubble.querySelector('[data-card-open]').click();
             await flush();
             const frame = bubble.querySelector('iframe');
-            const nonce = frame.srcdoc.match(/const nonce = "([^"]+)"/)[1];
             frame.contentWindow = { postMessage() {} };  // a live child: its stop waits for the acknowledgement
-            const send = (data) => window.emit('message', { source: frame.contentWindow, data: { nonce, ...data } });
+            const { send } = joinFrame(frame, (event) => window.emit('message', event));
             return { host: bubble.querySelector('.chat-card-frame-host'), send };
         };
         const height = (host) => host.style.getPropertyValue('--widget-frame-height');

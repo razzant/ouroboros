@@ -136,6 +136,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "PATCH /api/claudexor/credential-profiles/{harness}/{profile_id}",
     "GET /api/widgets",
     "POST /api/widgets/fault",
+    "GET /api/widget-bridge.js",
     "POST /api/widgets/asset-leases",
     "POST /api/widgets/asset-leases/{op}",
     "GET /api/extensions",
@@ -206,7 +207,8 @@ class Shape(NamedTuple):
     the TypedDict its items follow (``sse/TaskEvent``), or alternatives joined by ``|``.
     ``request`` uses the same body words (plus ``multipart``); ``query`` names the parameters
     the handler reads and ``headers`` the request headers it reads (a ``!`` suffix: required).
-    Gateway-wide rules cover what a row does not list: 401 from the network auth gate, and 500
+    Gateway-wide rules cover what a row does not list: 403 ``cross_origin_request`` and 415
+    ``json_content_type_required`` from the browser boundary, 401 from the network auth gate, and 500
     as ``ErrorResponse`` or plain text for an unexpected failure.
     """
 
@@ -378,8 +380,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/logs/{name}": Shape("200:LogTailResponse 404:ErrorResponse", query="limit task_id"),
     "GET /api/extensions": Shape("200:ExtensionsIndexResponse 500:ErrorResponse"),
     "GET /api/widgets": Shape("200:WidgetsResponse"),
-    "POST /api/widgets/asset-leases": Shape("200:WidgetAssetLeaseResponse 400,403,409,413:ErrorResponse", "WidgetAssetLeaseRequest",
-                                          note="parent origin only; exact live publication; finite browser files"),
+    "GET /api/widget-bridge.js": Shape("200:js", note="public static frame bridge for route pages; no authority of its own"),
+    "POST /api/widgets/asset-leases": Shape("200:WidgetAssetLeaseResponse 400,403,409,410,413:ErrorResponse", "WidgetAssetLeaseRequest",
+                                          note="parent origin only; exact live publication; finite browser files, or scope=routes for own-skill GET/HEAD; scope=routes with token re-establishes that lease (410 once ended)"),
     "POST /api/widgets/asset-leases/{op}": Shape("200:WidgetAssetLeaseResponse|WidgetAssetRevokeResponse 400,403,404,409,413:ErrorResponse", "WidgetAssetTokenRequest",
                                                note="op=renew or revoke; parent session only; token confers no control authority"),
     "POST /api/widgets/fault": Shape("200:WidgetFaultResponse 400,413,503:ErrorResponse", "WidgetFaultRequest",
@@ -557,6 +560,8 @@ HTTP_SHAPES: dict[str, Shape] = {
 AUTH_ENDPOINTS: dict[str, Shape] = {
     "GET /api/widget-assets/{token}/{path:path}": Shape("200:any 400,404,405:ErrorResponse",
         note="GET/HEAD only; declared captured bytes; opaque-origin CORS; scoped bearer read, never API authentication"),
+    "GET /api/widget-resources/{token}/{path:path}": Shape("200:any 400,403,404,405:ErrorResponse",
+        note="GET/HEAD only; the leased mount's own skill route without the owner's cookies; own-prefix redirects stay under the lease, others 403"),
     "GET /auth/login": Shape("200:html", query="next builtin", note="selected login or builtin form; builtin=1 forces builtin; next is a same-origin path"),
     "POST /auth/login": Shape(
         "200:AuthLoginResponse 303:empty 401:ErrorResponse|html", "AuthLoginRequest|form",

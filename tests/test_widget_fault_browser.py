@@ -54,14 +54,14 @@ def _write_fault_probe(data_dir: pathlib.Path) -> None:
         "document.getElementById('root').textContent = 'fault probe';\n"
         "throw new Error('widget-fault-probe deliberate fault');\n", encoding="utf-8")
     (skill_dir / "burst.js").write_text(textwrap.dedent("""\
-        const text = [...document.scripts].map((script) => script.textContent).join('\\n');
-        const nonce = (text.match(/const nonce = "([^"]+)"/) || [])[1];
+        // The widget's own code can post on its channel (the bridge's report hook): a per-mount cap still holds.
+        const report = window.__ouroWidgetReport;
         for (let i = 0; i < 30; i += 1) {
-            window.parent.postMessage({ type: 'ouro-widget-error', nonce, kind: 'error', message: `forged ${i}`,
-                source: '', line: i, skill: 'telegram', tab_id: 'chat', revision: 'forged', where: 'message' }, '*');
+            report({ type: 'ouro-widget-error', kind: 'error', message: `forged ${i}`,
+                source: '', line: i, skill: 'telegram', tab_id: 'chat', revision: 'forged', where: 'message' });
         }
-        document.getElementById('root').textContent = nonce ? 'burst sent' : 'no nonce';
-        window.parent.postMessage({ type: 'fault-probe-marker', name: 'burst sent' }, '*');
+        document.getElementById('root').textContent = report ? 'burst sent' : 'no channel';
+        report({ type: 'fault-probe-marker', name: 'burst sent' });
         """), encoding="utf-8")
     (skill_dir / "late.js").write_text(
         "document.getElementById('root').textContent = 'late armed';\n"
@@ -79,14 +79,15 @@ def _write_fault_probe(data_dir: pathlib.Path) -> None:
         "blocked.src = 'data:text/javascript,void%200';\n"
         "document.body.append(blocked);\n", encoding="utf-8")
     (skill_dir / "isolation.js").write_text(textwrap.dedent("""\
-        const text = [...document.scripts].map((script) => script.textContent).join('\\n');
-        const nonce = text.match(/const nonce = "([^"]+)"/)[1];
+        const report = window.__ouroWidgetReport;
         document.getElementById('root').textContent = 'isolation armed';
-        // A hostile frame can queue a fault behind its own stop acknowledgement. These are real postMessages,
-        // already enqueued when the host removes this iframe, not a synthetic MessageEvent in the parent.
+        // A hostile frame can queue a fault behind its own stop acknowledgement. These are real channel messages,
+        // already enqueued when the host removes this iframe, not a synthetic MessageEvent in the parent. The page
+        // closes the channel when it handles the acknowledgement, so the marker that says the hook ran goes to the
+        // window; the test then waits for the frame to be removed before it reads the fault log.
         window.__ouroWidgetOnDispose(() => {
-            parent.postMessage({ type: 'ouro-widget-disposed', nonce }, '*');
-            parent.postMessage({ type: 'ouro-widget-error', nonce, kind: 'error', message: 'after disposal' }, '*');
+            report({ type: 'ouro-widget-disposed' });
+            report({ type: 'ouro-widget-error', kind: 'error', message: 'after disposal' });
             parent.postMessage({ type: 'fault-probe-marker', name: 'after disposal' }, '*');
         });
         """), encoding="utf-8")
@@ -120,6 +121,19 @@ _OBSERVE = """(() => {
     };
     window.addEventListener('message', (event) => {
         if (event.data?.type === 'fault-probe-marker') window.faultProbeMarkers.push(event.data.name);
+    });
+    // A frame's bridge traffic arrives on its channel port: a marker there is FIFO with the frame's messages.
+    const handler = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage');
+    Object.defineProperty(MessagePort.prototype, 'onmessage', {
+        configurable: true,
+        get() { return handler.get.call(this); },
+        set(fn) {
+            handler.set.call(this, fn && function (event) {
+                const result = fn.call(this, event);
+                if (event.data?.type === 'fault-probe-marker') window.faultProbeMarkers.push(event.data.name);
+                return result;
+            });
+        },
     });
 })();"""
 
@@ -210,7 +224,7 @@ def test_a_running_widget_fault_reaches_the_events_log(direct_server_with_data, 
                 isolated = page.frame_locator(f"{card('isolation')} iframe").locator("text=isolation armed")
                 isolated.wait_for(timeout=30_000)
                 nonce = page.locator(f"{card('isolation')} iframe").evaluate(
-                    "frame => frame.srcdoc.match(/const nonce = \"([^\"]+)\"/)[1]")
+                    "frame => frame.srcdoc.match(/\"nonce\":\"([^\"]+)\"/)[1]")
                 isolated.evaluate("""() => {
                     parent.postMessage({ type: 'ouro-widget-error', nonce: 'wrong', kind: 'error', message: 'wrong nonce' }, '*');
                     parent.postMessage({ type: 'fault-probe-marker', name: 'wrong nonce' }, '*');
@@ -236,12 +250,14 @@ def test_a_running_widget_fault_reaches_the_events_log(direct_server_with_data, 
                 }""", arg=card("late"), timeout=10_000)
                 page.locator(f"{card('late')} iframe").evaluate(
                     "frame => frame.contentWindow.postMessage({type: 'fault-probe-trigger'}, '*')")
-                page.wait_for_function(f"""async (skill) => {{
-                    const rows = await ({_FAULT_ROWS})(skill);
-                    return rows.some((row) => row.tab_id === 'late') && rows.filter((row) => row.tab_id === 'burst').length >= 10
-                        && ['fault', 'rejection', 'csp', 'unicode'].every(tab => rows.some((row) => row.tab_id === tab));
-                }}""", arg=SKILL, timeout=30_000, polling=500)
-                rows = page.evaluate(_FAULT_ROWS, SKILL)
+                # Poll the log itself: wait_for_function settles on an async predicate's first promise, true or not.
+                for _attempt in range(60):
+                    rows = page.evaluate(_FAULT_ROWS, SKILL)
+                    if (any(row["tab_id"] == "late" for row in rows)
+                            and len([row for row in rows if row["tab_id"] == "burst"]) >= 10
+                            and all(any(row["tab_id"] == tab for row in rows) for tab in ("fault", "rejection", "csp", "unicode"))):
+                        break
+                    page.wait_for_timeout(500)
                 _assert_log_only(page, SKILL, 15)
                 assert not [row for row in rows if row["tab_id"] == "isolation"], rows
                 assert not [report for report in reports if report.get("tab_id") == "isolation"], reports

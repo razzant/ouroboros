@@ -81,11 +81,15 @@ def _reply_digest(carrier, text):
 
 
 def project_reply(root, metadata, result):
-    """Hold only the outward view; keep the durable answer and output identity."""
+    """Hold only the outward view; keep the durable answer, output identity and owed polling.
+
+    Transports poll only deferred outcomes: a held reply's admitted work stays observed, and its own
+    result meets the place state of its own poll.
+    """
     from dataclasses import replace
     if (root is not None and result.outcome in {"message", "deferred"}
             and reply_hold(root, metadata, result.task_id, result.text)):
-        return replace(result, outcome="silent", text="")
+        return replace(result, outcome="deferred" if result.outcome == "deferred" and result.work_ref else "silent", text="")
     return result
 
 
@@ -97,32 +101,36 @@ def project_output(root, metadata, task_id, output):
 
 
 def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, str]:
+    """Speech follows the mind's selection, never delivery receipts: an answer is new speech even
+    after a tool sent an acknowledgement, file or reaction, while ``quiet`` (an explicit silent
+    finish or a host-authored final) says nothing new. An admitted handoff stays deferred either
+    way; words that are not speech never ride it (``quiet`` in the completion)."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = reply_carrier(metadata)
     if not carrier:
         return True, ""
     from ouroboros.tool_access import canonical_data_root
-    from ouroboros.presence_context import confirmed_delivery_receipts
     from ouroboros.presence_continuation import _handoff_ref, selection_for
     root = canonical_data_root(ctx)
-    outcome = "silent" if quiet else "deferred" if _handoff_ref(ctx) else "tool_delivered" if confirmed_delivery_receipts(ctx) else "message"
-    if outcome in {"message", "deferred"} and text:
+    held = ""
+    if not quiet and text:
         subject = {"text": text, "destination": carrier["destination"], "place_id": carrier["place_id"]}
         digest = _reply_digest(carrier, text)
-        message = reply_hold(root, metadata, ctx.task_id, text)
-        if message:
-            ctx._focus_reply_hold = message
-            outcome = "silent"
+        held = reply_hold(root, metadata, ctx.task_id, text)
+        if held:
+            ctx._focus_reply_hold = held
         elif getattr(ctx, "_focus_checked_reply", None) != digest:
             from ouroboros.safety import check_safety
             allowed, message = check_safety("place_reply", subject, ctx=ctx)
             if not allowed:
                 return False, message
             ctx._focus_checked_reply = digest
+    outcome = "deferred" if _handoff_ref(ctx) else "silent" if quiet or held else "message"
     old = getattr(ctx, "_presence_completion", {}) or {}
     selection = old.get("selection") if old.get("message") == text else None
     ctx._presence_completion = {"outcome": outcome, "message": text,
-                                "selection": selection or selection_for(ctx, hashlib.sha256(text.encode()).hexdigest())}
+                                "selection": selection or selection_for(ctx, hashlib.sha256(text.encode()).hexdigest()),
+                                **({"quiet": True} if quiet or held else {})}
     ctx._presence_completion_accepted = True
     return True, ""
 

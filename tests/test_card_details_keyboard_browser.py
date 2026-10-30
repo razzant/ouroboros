@@ -230,24 +230,28 @@ FOOT_HITS = """() => {
     const card = document.querySelector('.chat-live-card[data-task-id="root"]');
     const min = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--touch-target-min'));
     // The shared recipe's hit area (ui.css .ui-hit-area): centred on the control, at least the touch minimum each way.
-    const hits = [...card.querySelectorAll(':scope > .chat-live-foot .ui-hit-area')].filter((el) => el.getClientRects().length)
+    // The card's own doors (its head) and commands (its foot), never a child's.
+    const hits = [...card.querySelectorAll(':scope > .chat-live-summary-button .ui-hit-area, :scope > .chat-live-foot .ui-hit-area')]
+        .filter((el) => el.getClientRects().length)
         .map((el) => { const r = el.getBoundingClientRect(), dx = Math.max(0, (min - r.width) / 2), dy = Math.max(0, (min - r.height) / 2);
-            return {name: el.textContent.trim(), top: r.top, l: r.left - dx, t: r.top - dy, r: r.right + dx, b: r.bottom + dy}; });
+            return {name: el.querySelector('[data-live-toggle]')?.textContent.trim() || el.textContent.trim(), top: r.top,
+                head: Boolean(el.closest('.chat-live-summary-button')), l: r.left - dx, t: r.top - dy, r: r.right + dx, b: r.bottom + dy}; });
     const overlaps = [];
     hits.forEach((a, i) => hits.slice(i + 1).forEach((b) => {
         const w = Math.min(a.r, b.r) - Math.max(a.l, b.l), h = Math.min(a.b, b.b) - Math.max(a.t, b.t);
         if (w > 0.5 && h > 0.5) overlaps.push([a.name, b.name, w, h]);
     }));
     return {coarse: matchMedia('(pointer: coarse)').matches, names: hits.map((hit) => hit.name),
-        rows: new Set(hits.map((hit) => Math.round(hit.top))).size, overlaps};
+        head: hits.filter((hit) => hit.head).map((hit) => hit.name), rows: new Set(hits.map((hit) => Math.round(hit.top))).size, overlaps};
 }"""
 
 
 @pytest.mark.ui_browser
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_a_wrapped_card_foot_parts_its_rows_so_finger_targets_never_overlap(engine):
-    """№4 on a 320px phone: a card's `Reviews 2 · 1 active` door and `Turn into project` no longer share a row, and the
-    two rows part by the hit areas' overshoot, so no point of the foot belongs to both targets."""
+    """№4 on a 320px phone: a card's `Reviews 2 · 1 active` door, now Details' twin in the card's head (owner 30.10, B),
+    and `Turn into project` in its foot never share a row, and the rows part by the hit areas' overshoot, so no point
+    of the card belongs to two targets."""
     from playwright.sync_api import sync_playwright
 
     server = _serve()
@@ -273,7 +277,8 @@ def test_a_wrapped_card_foot_parts_its_rows_so_finger_targets_never_overlap(engi
                 page.wait_for_function("""() => document.querySelector('.chat-live-card[data-task-id="root"] [data-live-review-summary]')
                     ?.textContent === 'Reviews 2 · 1 active'""")
                 foot = page.evaluate(FOOT_HITS)
-                assert foot['coarse'] and foot['names'] == ['Reviews 2 · 1 active', 'Turn into project'], foot
+                assert foot['coarse'] and foot['names'] == ['Reviews 2 · 1 active', 'Details', 'Turn into project'], foot
+                assert foot['head'] == ['Reviews 2 · 1 active', 'Details'], foot
                 assert foot['rows'] == 2 and foot['overlaps'] == [], foot
                 assert not errors.unexpected(), errors
             finally:

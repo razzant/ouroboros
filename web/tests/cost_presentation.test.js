@@ -344,20 +344,24 @@ test('an unavailable snapshot is sticky but never pins the card (v6.82 r2)', () 
 test('a cost-only frame never moves the card’s activity clock', () => {
     // "updated" answers "when did this task last DO something". A cost frame carries
     // no narration, so letting it move the clock would make a silent card look
-    // freshly active. Pinned at source: the meta line reads the activity clock, and
-    // only a human/activity-bearing frame advances it.
+    // freshly active. Pinned at source: the card's clock (a root's stands in its head,
+    // beside the chip) reads the activity clock, and only a human/activity-bearing frame advances it.
     const source = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
     const priorDocument = globalThis.document;
     globalThis.document = { createElement: () => ({ textContent: '', get innerHTML() { return this.textContent; } }) };
     try {
+        const when = { textContent: '', hidden: true };
         const record = { latestActivityTs: '10:04', metaEl: { innerHTML: '', isConnected: true },
+            summaryButtonEl: { querySelector: (sel) => (sel === '[data-live-when]' ? when : null) },
             costMeta: { meta: ['$1.00'] } };
         renderLiveCardMeta(record);
-        assert.match(record.metaEl.innerHTML, /updated 10:04/);
+        assert.equal(when.textContent, 'updated 10:04');
+        assert.equal(when.hidden, false);
         record.costMeta = { meta: ['$2.00'] };
         renderLiveCardMeta(record);
-        assert.match(record.metaEl.innerHTML, /updated 10:04/);
+        assert.equal(when.textContent, 'updated 10:04');
         assert.match(record.metaEl.innerHTML, /\$2\.00/);
+        assert.doesNotMatch(record.metaEl.innerHTML, /updated/, 'the clock moved whole to the head: once, never twice');
     } finally { globalThis.document = priorDocument; }
     assert.match(source, /if \(ts && \(summary\.human \|\| activityCandidate\)\) record\.latestActivityTs = ts/);
 });
