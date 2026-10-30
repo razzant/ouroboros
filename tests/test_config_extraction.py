@@ -395,5 +395,6 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     # saved-choice precedence the config read and persist seams share.
     # +7: independent Consciousness level, Supervisor model, owner rules and disk ownership.
     # +1: Main's Subagents mode (OUROBOROS_SUBAGENTS_MODE, default auto).
-    assert counts["ouroboros.settings_defaults"] <= 568
+    # +2: Main chat's model choice (OUROBOROS_MAIN_CHAT_MODEL) and its export exclusion.
+    assert counts["ouroboros.settings_defaults"] <= 570
     assert (PACKAGE / "config.py").is_file()

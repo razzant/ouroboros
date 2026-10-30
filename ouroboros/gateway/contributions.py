@@ -170,4 +170,5 @@ class UiPreferencesResponse(TypedDict):
     main_seen_revision: Optional[int]  # Main's monotonic paint ACK; null until a client first sets it
     read_ahead_revisions: dict[str, list[list[int]]]  # per chat id: revisions read in full in another room (host-owned)
     welcome: dict[str, str]  # install-wide empty-Main UI copy: mode default|hidden|custom and plain text
+    model_favorites: list[str]  # the chat model picker's starred routes, source included (never an allowlist)
 

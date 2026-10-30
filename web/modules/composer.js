@@ -1,6 +1,7 @@
 // The Main and Project composer (docs/DESIGN.md "Controls and editable choices", "Composer owner controls",
 // "Chat attachments"): its markup inside the room's input dock, the message field (its growth, Enter, the input
-// recall and the room's draft), the room's Subagents, Context and Effort capsules with their readback, the "+" menu
+// recall and the room's draft), the room's chat model (composer_model_picker.js) and its Subagents, Context and
+// Effort capsules with their readback, the "+" menu
 // (Attach file first, then the sections later controls set), the voice and chips slots, the staged attachments with
 // their paste and drop routes, and the send path that turns the draft into the owner's frame. Skills' "+" items and
 // chips follow the live contributions (composer_plus.js, composer_chips.js). The room (chat.js) mounts the markup,
@@ -15,6 +16,7 @@ import { bindEnterSubmit, bindMenu } from './ui_interactions.js';
 import { controlIcon, strokeIcon } from './page_icons.js';
 import { renderMobileNavToggle } from './page_header.js';
 import { createComposerOwnerControls } from './composer_owner_controls.js';
+import { createComposerModelPicker } from './composer_model_picker.js';
 import { attachChatInputSizing } from './chat_input_sizing.js';
 import { showToast } from './toast.js';
 import { bindComposerPlus } from './composer_plus.js';
@@ -38,6 +40,7 @@ export function composerMarkup() {
                 <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
                 <div class="chat-toolbar-row">
                     ${renderMobileNavToggle({ inComposer: true })}
+                    <div class="chat-model-picker" id="chat-model-picker"></div>
                     <div class="chat-subagents-mode" id="chat-subagents-mode"></div>
                     <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max"></div>
                     <span class="chat-composer-chips" data-composer-chips hidden></span>
@@ -275,9 +278,12 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             return;
         }
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
-        if (ownerControls.hasPendingSave()) {  // the room's settings land before the next message
+        if (ownerControls.hasPendingSave() || modelPicker?.hasPendingSave()) {  // the room's settings land first
             setSendBusy(true, 'Saving');
-            try { if (!(await ownerControls.pendingSave())) return; } finally { setSendBusy(false); }
+            try {
+                const saved = await Promise.all([ownerControls.pendingSave(), modelPicker?.hasPendingSave() ? modelPicker.pendingSave() : true]);
+                if (saved.some((ok) => ok === false)) return;  // a refused save keeps the draft, said by its control
+            } finally { setSendBusy(false); }
         }
         text = input.value.trim();
         const hasAttachments = attachments.count > 0;
@@ -344,10 +350,14 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         }
     }
 
-    // Each composer owns its room's Subagents, Context and Effort settings.
+    // Each composer owns its room's chat model and its Subagents, Context and Effort settings.
+    const pickerEl = byId('model-picker');
+    const modelPicker = pickerEl ? createComposerModelPicker({ el: pickerEl, projectId, save: apiClient.ownerChatModel,
+        showToast, onLayout }) : null;
     const ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), box: page, byId, apiFetch, showToast,
         projectId, saveEffortRange: apiClient.ownerEffortRange,
         saveSubagentsMode: apiClient.ownerSubagentsMode,
+        fitValues: () => (modelPicker ? [modelPicker.nameEl()] : []),
         openSettings: () => openSettings?.('agents'), refreshState, onLayout, readingBack });
 
     // Rooms outside the bounded sidebar still read their settings.
@@ -356,7 +366,11 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         cognitionRead = true;
         try {
             const room = await apiFetch(`/api/projects?chat_id=${encodeURIComponent(chatId)}`, { cache: 'no-store' });
-            if (room.ok && !destroyed) ownerControls.syncState(await room.json());
+            if (room.ok && !destroyed) {
+                const data = await room.json();
+                ownerControls.syncState(data);
+                modelPicker?.syncState(data);
+            }
         } catch { /* Preserve the last room value, never substitute Main. */ }
         finally { cognitionRead = false; }
     }
@@ -406,6 +420,8 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         input,
         // `setSections(sections)` adds items after Attach file; see createPlusMenu.
         plusMenu,
+        // The room's chat model (composer_model_picker.js): its readback, its one save path and its pending save.
+        modelPicker,
         // Empty and hidden until a control mounts into them: the dictation mic between the field and Send, and
         // contributed chips after the room's capsules.
         voiceSlot: page.querySelector('[data-composer-voice]'),
@@ -432,9 +448,10 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         // After a send, once the feed shows it: the emptied field's height and the room's dock.
         resize: resizeChatInput,
         seedInputHistory,
-        // The room's Subagents, Context and Effort readback, from Main's state or the named Project.
+        // The room's chat model, Subagents, Context and Effort readback, from Main's state or the named Project.
         syncState(data) {
             ownerControls.syncState(data);
+            modelPicker?.syncState(data);
             if (projectId && !data?.projects?.some(project => project.id === projectId && project.cognition)) void refreshProjectCognition();
         },
         // A brief composer brighten when a task leaves the main chat for a project — a calm "you're free to start
@@ -455,6 +472,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             for (const dispose of contributed) dispose();
             plusMenu.destroy();
             attachments.destroy();
+            modelPicker?.destroy();
             ownerControls.destroy();
             inputSizing.dispose();
         },

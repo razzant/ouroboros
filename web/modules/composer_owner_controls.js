@@ -32,6 +32,10 @@ const HOVER_MEDIA = '(hover: hover) and (pointer: fine)';
 // An inline strip collapses in 0.4 s (style.css); the closed capsule's width has settled by then.
 const COLLAPSE_MS = 450;
 const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value));
+// How far a closed line's values give way in turn (fitNames): the chat model's name to a few letters, then away to
+// its source's mark, before a capsule's value goes to a letter and its ellipsis.
+const VALUE_FLOOR_PX = 18;
+const NAME_FLOOR_PX = 44;
 
 // Refitting changes the observed row/strip. Leave ResizeObserver delivery before writing
 // layout, coalesce notifications, and release pending work with the composer's lifetime.
@@ -812,8 +816,9 @@ function createContextModeControl({ el, row, saveContextMode, showToast, refresh
  * @param {() => void} [deps.onLayout]  a strip opened or closed on its own line
  * @param {HTMLElement} [deps.box]  independently sized page the composer docks inside
  * @param {() => boolean} [deps.readingBack]  the owner's own gesture took the room off its newest row (composer_fold.js)
+ * @param {() => Element[]} [deps.fitValues]  other values on the line the fit may cut with the capsules' (the chat model)
  */
-export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRange, saveSubagentsMode, openSettings = () => {}, showToast, refreshState, onLayout, projectId = '', box = null, win = globalThis.window, doc = globalThis.document, readingBack }) {
+export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRange, saveSubagentsMode, openSettings = () => {}, showToast, refreshState, onLayout, projectId = '', box = null, win = globalThis.window, doc = globalThis.document, readingBack, fitValues = () => [] }) {
     let destroyed = false;
     const scoped = body => projectId ? { ...body, project_id: projectId } : body;
     const readback = reply => {
@@ -843,27 +848,59 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         const first = kids[0]?.getBoundingClientRect?.();
         return Boolean(first) && kids.some((kid) => kid.getBoundingClientRect().top >= first.bottom);
     }
-    function fitNames() {
-        if (destroyed || !row?.dataset || capsules.some((capsule) => !capsule.isSettled())) return;
-        delete row.dataset.ownerCompact;
-        row.style.setProperty('--capsule-value-cap', '');
-        capsules.forEach((capsule) => capsule.measureName());
-        if (!wraps()) return;
-        row.dataset.ownerCompact = 'true';
-        const rowStyle = win?.getComputedStyle?.(row);
-        const room = widthOf(row) - px(rowStyle?.paddingLeft) - px(rowStyle?.paddingRight);
-        if (!(room > 0) || !wraps()) return;  // not laid out (the unit-test DOM), or the line holds
-        const kids = shownKids();
-        const over = kids.reduce((sum, kid) => sum + widthOf(kid), 0) + px(rowStyle?.columnGap) * (kids.length - 1) - room + 1;  // 1 px of slack
-        // The cap that takes `over` off the widest values, each cut to it (a water level).
-        const values = capsules.map((capsule) => widthOf(capsule.el.querySelector('.chat-capsule-value'))).sort((a, b) => b - a);
+    // The cap that takes `over` off the widest of `widths`, each cut to it (a water level).
+    function waterLevel(widths, over) {
+        const values = [...widths].sort((a, b) => b - a);
         let cap = 0;
         for (let k = 1, sum = 0; k <= values.length; k += 1) {
             sum += values[k - 1];
             cap = (sum - over) / k;
             if (k === values.length || cap >= values[k]) break;
         }
-        row.style.setProperty('--capsule-value-cap', `${Math.max(0, Math.floor(cap))}px`);
+        return Math.max(0, Math.floor(cap));
+    }
+    function fitNames() {
+        if (destroyed || !row?.dataset || capsules.some((capsule) => !capsule.isSettled())) return;
+        delete row.dataset.ownerCompact;
+        delete row.dataset.ownerModelMark;
+        row.style.setProperty('--capsule-value-cap', '');
+        row.style.setProperty('--chat-model-name-cap', '');
+        capsules.forEach((capsule) => capsule.measureName());
+        if (!wraps()) return;
+        row.dataset.ownerCompact = 'true';
+        const rowStyle = win?.getComputedStyle?.(row);
+        const room = widthOf(row) - px(rowStyle?.paddingLeft) - px(rowStyle?.paddingRight);
+        if (!(room > 0) || !wraps()) return;  // not laid out (the unit-test DOM), or the line holds
+        const overflow = () => {
+            const kids = shownKids();
+            return kids.reduce((sum, kid) => sum + widthOf(kid), 0) + px(rowStyle?.columnGap) * (kids.length - 1) - room + 1;  // 1 px of slack
+        };
+        // Values yield in turns, each to its floor: the chat model's name to a few letters, then away with `this chat`
+        // (the source's mark stays, crimson for the room's own choice; the trigger's label, title and sheet keep the
+        // whole name), so Auto, Max and Medium stay readable on a phone; then the capsules' to a letter and its
+        // ellipsis (their rings still say them), then to their rings.
+        const widths = { capsule: capsules.map((capsule) => widthOf(capsule.el.querySelector('.chat-capsule-value'))),
+            model: fitValues().map(widthOf) };
+        const caps = {};
+        let rest = overflow();
+        const yieldTo = (group, floor) => {
+            if (rest <= 0 || !widths[group].length) return;
+            const current = widths[group].map((width) => Math.min(width, caps[group] ?? width));
+            const give = current.reduce((sum, width) => sum + Math.max(0, width - floor), 0);
+            caps[group] = give >= rest ? Math.max(floor, waterLevel(current, rest)) : floor;
+            rest -= Math.min(give, rest);
+        };
+        yieldTo('model', NAME_FLOOR_PX);
+        if (rest > 0 && widths.model.length) {
+            // Never a letter and an ellipsis beside the mark: the name and `this chat` go whole (style.css), and the
+            // line is measured again as the mark leaves it.
+            row.dataset.ownerModelMark = 'true';
+            rest = overflow();
+        }
+        yieldTo('capsule', VALUE_FLOOR_PX);
+        yieldTo('capsule', 0);
+        if (caps.capsule !== undefined) row.style.setProperty('--capsule-value-cap', `${caps.capsule}px`);
+        if (caps.model !== undefined) row.style.setProperty('--chat-model-name-cap', `${caps.model}px`);
         row.dataset.ownerCompact = 'values';
     }
     const shared = { showToast, refreshState, onLayout, onSettled: fitNames, win, doc };

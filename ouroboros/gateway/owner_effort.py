@@ -1,4 +1,4 @@
-"""Save the composer's effort and live Subagents choice for its room."""
+"""Save the composer's effort, live Subagents choice and chat model for its room."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ from typing import Any, Dict
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.composer_cognition import main_cognition, request_project_id, update_project_cognition
+from ouroboros.composer_cognition import (
+    MAIN_CHAT_MODEL_KEY, main_cognition, main_model_choice, model_choice_setting, normalize_model_choice,
+    request_project_id, update_project_cognition, update_project_model_choice,
+)
 from ouroboros.gateway._helpers import request_drive_root
 from ouroboros.gateway.owner_settings import (
     _owner_audit,
@@ -117,4 +120,37 @@ def _api_owner_subagents_mode_sync(request: Request, body: Any) -> JSONResponse:
     return JSONResponse({"ok": True, "project_id": project_id, "subagents_mode": mode, "cognition": cognition})
 
 
-__all__ = ["RANGE_FIELDS", "api_owner_effort_range", "api_owner_subagents_mode", "effort_range_refusal"]
+@owner_write_guard
+async def api_owner_chat_model(request: Request) -> JSONResponse:
+    """The room's model for new owner work: Main's or the first Fallback's reference, or one route."""
+    from ouroboros.gateway.settings import _json_body_or_empty, _run_settings_writer
+
+    return await _run_settings_writer(_api_owner_chat_model_sync, request, await _json_body_or_empty(request))
+
+
+def _api_owner_chat_model_sync(request: Request, body: Any) -> JSONResponse:
+    if not isinstance(body, dict):
+        return unsaved_error("JSON body must be an object with a kind.", 400, code="chat_model_invalid")
+    try:
+        choice = normalize_model_choice({key: value for key, value in body.items() if key != "project_id"})
+        project_id = request_project_id(body)
+    except ValueError as exc:
+        return unsaved_error(str(exc), 400, code="chat_model_invalid")
+    with settings_document_mutation():
+        if project_id:
+            try:
+                previous, choice = update_project_model_choice(request_drive_root(request), project_id, choice)
+            except ValueError as exc:
+                return unsaved_error(str(exc), 404, code="project_unavailable")
+        else:
+            previous, value = main_model_choice(), model_choice_setting(choice)
+            # Never exported to the environment, never a role slot: Light, Supervisor and the rest keep theirs.
+            _owner_update_settings(lambda current: {**current, MAIN_CHAT_MODEL_KEY: value},
+                                   settings_document_digest(), authored_keys=(MAIN_CHAT_MODEL_KEY,))
+            choice = main_model_choice()  # the readback is the saved document's
+    _owner_audit(request, "chat_model", {"project_id": project_id, "model_choice": choice, "previous_model_choice": previous})
+    return JSONResponse({"ok": True, "project_id": project_id, "model_choice": choice, "previous_model_choice": previous})
+
+
+__all__ = ["RANGE_FIELDS", "api_owner_chat_model", "api_owner_effort_range", "api_owner_subagents_mode",
+           "effort_range_refusal"]

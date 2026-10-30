@@ -42,10 +42,7 @@ from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-
     McpStatusResponse, ModelCatalogResponse, SkillLifecycleQueueResponse,
 )
 from ouroboros.gateway.schedule_contracts import (  # noqa: F401 -- public re-exports
-    ScheduleActionResponse,
-    ScheduledTasksResponse,
-    ScheduleDeleteResponse,
-    ScheduleUpsertResponse,
+    ScheduleActionResponse, ScheduledTasksResponse, ScheduleDeleteResponse, ScheduleUpsertResponse,
 )
 
 try:  # Python 3.11+
@@ -580,6 +577,7 @@ class ProjectEntry(TypedDict, total=False):
     working_dir: str
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
+    model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
     provenance: str
     clone_url: str
     trusted_at: str
@@ -770,6 +768,8 @@ class StateResponse(WorkStateFields):
     subagents_availability: Literal["available", "disabled", "unsaved"]
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
+    model_choice: NotRequired[ChatModelChoice]  # Main chat's model for new owner work (POST /api/owner/chat-model)
+    model_routes: NotRequired[ChatModelRoutes]  # what Main's and the first Fallback's references resolve to now
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
@@ -1469,7 +1469,7 @@ class OnboardingPresetFailureResponse(TypedDict):
 
 # Human/test-visible contract index; routers own executable Route objects.
 from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
-from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState  # noqa: E402,F401
+from ouroboros.gateway.client_contracts import ChatModelChoice, ChatModelRoutes, FileBrowserListResponse, ServedUiState  # noqa: E402,F401
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
     "conversation_finished", "chat", "command",

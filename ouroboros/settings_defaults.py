@@ -218,6 +218,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # REVIEW_POOL_MIGRATED_SETTING_KEYS) and migrate into this catalog on read.
     "OUROBOROS_SUBAGENTS": "",
     "OUROBOROS_SUBAGENTS_MODE": "auto",
+    "OUROBOROS_MAIN_CHAT_MODEL": "",  # Main chat's model (POST /api/owner/chat-model): "" follows Main; never a role slot
     # INSTALL-TIME facts: the agent-preset generation this install received, and WHEN onboarding last completed
     # and by which client attempt (recorded on EVERY completion). Endpoint-authored and disk-only — see
     # ENDPOINT_AUTHORED_SETTINGS.
@@ -547,6 +548,7 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
     # copied: the desktop launcher keeps its environment across Restart, so clearing a saved directory or
     # `none` would come back from that stale copy. The environment stays an operator's input for an ABSENT key.
     "OUROBOROS_UI_DIR",
+    "OUROBOROS_MAIN_CHAT_MODEL",  # a room choice admission reads from the document, never a routing input to inherit
 }) | ENDPOINT_AUTHORED_SETTINGS  # disk-only in BOTH directions (never read from env, never exported to it)
 
 # A SAVED value of these keys, blank included, is the owner's choice and wins over the environment; an

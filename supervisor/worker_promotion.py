@@ -494,6 +494,19 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             task["task_contract"].update(authority)
     # Popped BEFORE the row is built/queued so the announce fact never rides it.
     announce_project = task.pop("_announce_project", None)
+    from ouroboros.consciousness_authority import is_consciousness_origin
+
+    if (not _presence_promotion(evt) and task.get("actor_id") != "consciousness"
+            and not is_consciousness_origin(task.get("metadata"))):
+        # The same request in the same room keeps the chat model it was admitted on; other new owner work
+        # starts on its destination room's choice as it is now (route_choice).
+        from ouroboros.route_choice import ROOM_ROUTE_KEY, capture_room_route, room_route_snapshot
+
+        carried = room_route_snapshot(evt.get(ROOM_ROUTE_KEY))
+        if carried:
+            task.setdefault("metadata", {})[ROOM_ROUTE_KEY] = carried
+        else:
+            capture_room_route(task, _pool().DRIVE_ROOT)
     attach_task_contract(task)
     admitted = ctx.enqueue_task(task)
     if isinstance(admitted, dict) and admitted.get("_admission_blocked"):

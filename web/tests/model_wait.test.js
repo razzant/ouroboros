@@ -193,3 +193,22 @@ test('a requested Settings save that did not land is told only once its wait res
         'Reviewer · one: model wait ended; whether it was saved in Settings is unconfirmed.', 'missing receipt proves no application outcome');
     assert.equal(unsavedPersistenceNotice(resolved, null), '', 'no Settings save was requested');
 });
+
+test('a room-model wait clears and disables global-role persistence while keeping task switching', (t) => {
+    const env = installDom();
+    t.after(() => restoreDom(env.prior));
+    const root = document.createElement('div');
+    const timelineEl = document.createElement('div');
+    root.append(timelineEl);
+    const controller = createModelWaitController({ getRecord: () => ({ root, timelineEl, finished: false }) });
+    t.after(() => controller.destroy());
+    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'room' }) } });
+    const persist = root.querySelector('[data-wait-persist]');
+    assert.equal(persist.disabled, true);
+    assert.equal(persist.checked, false);
+    assert.match(root.querySelector('[data-wait-scope]').textContent, /composer/);
+    persist.checked = true;
+    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'room', revision: 2 }) } });
+    assert.equal(persist.checked, false);
+    assert.equal(modelWaitAction('task', row({ role: 'room' }), 'switch', { model: 'openai::replacement' }, 'r').persist_role, false);
+});

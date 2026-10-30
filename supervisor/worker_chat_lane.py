@@ -30,7 +30,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 from supervisor.state import append_jsonl
-from ouroboros.consciousness_authority import wake_cause
+from ouroboros.consciousness_authority import apply_consciousness_authority, is_consciousness_origin, wake_cause
 from ouroboros.observability import stamp_finalization_enqueue
 from ouroboros.utils import utc_now_iso
 
@@ -327,7 +327,6 @@ def _admit_chat_task(
     # Close/check/register is one short transaction with the update owner.
     # The registered execution includes agent construction, attachment staging,
     # the whole native lifecycle and event delivery, not just its LLM rounds.
-    from ouroboros.consciousness_authority import is_consciousness_origin
     from supervisor.active_activity import reply_expected
 
     quiet = is_consciousness_origin(task_metadata)  # a wake: the alarm reports the refusal, not the chat
@@ -369,7 +368,6 @@ def _admit_chat_task(
                 agent._realtime_turn = realtime_turn
             task["model"] = realtime_turn.model
             task["use_local_model"] = False
-        from ouroboros.consciousness_authority import apply_consciousness_authority
         from ouroboros.contracts.task_contract import attach_task_contract
 
         if task_constraint:
@@ -502,6 +500,8 @@ def _admit_chat_task(
         apply_consciousness_authority(task)
         from ouroboros.settings_integrity import record_subagents_admission
         record_subagents_admission(task, _pool().DRIVE_ROOT)
+        from ouroboros.route_choice import capture_room_route  # the room's chat model, as sent (route_choice)
+        capture_room_route(task, _pool().DRIVE_ROOT)
         attach_task_contract(task)
         from ouroboros.tool_access_roots import freeze_tool_profile
         freeze_tool_profile(task)
@@ -576,7 +576,6 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
     registry, execution = admitted["registry"], admitted.get("execution")
     ok = False
     try:
-        from ouroboros.consciousness_authority import is_consciousness_origin
         from ouroboros.server_restart import agent_restart_holds, agent_restart_pending
         from supervisor import queue
 

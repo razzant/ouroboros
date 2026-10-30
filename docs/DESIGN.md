@@ -446,11 +446,36 @@ Enter as a line break.
 
 ### Composer owner controls
 
-Each composer saves its room's **Subagents**, **Context** and **Effort** through the owner endpoints,
-in that order after ☰. Main supplies a one-time copy to new Projects; later changes stay in their room.
+Each composer saves its room's **model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
+in that order after ☰. Main supplies a one-time copy of the three capsules to new Projects (the model is never
+copied: a new room follows Main); later changes stay in their room.
 Readback comes from Main state or the named Project, never another room. Saves apply
 to new participants; running work retains its choices through Resume. A refusal
 keeps the saved value and says why. No scope selector or extra settings row.
+
+**The chat model names what new work starts on** (owner 29.10, the approved Favorites / Subscription / API mockup).
+First on the row, before the capsules, a quiet trigger with no body until hovered or open: the source's mark, the
+model's name (the first value a closed line too narrow cuts: to a few letters, then to the mark alone, whose
+crimson still says `this chat`, so the capsules keep their values on a 390 px phone; the trigger's label and the
+sheet keep the whole name; 30.10), `this chat` in the crimson word while the room chose its own, and a chevron;
+while a choice saves the word says `Saving`. It opens the composer's one sheet (the capsules still
+never do): a search, then **Favorites · Subscription · API** as equal filter segments (the chosen one in the accent
+wash of a chosen menu choice), a source rail of marks (vertical beside the list on a desk, a row above it on a
+phone; a source without a mark of its own shows its initial, never an invented logo), the routes, and a foot with
+**Main** and **Fallback**, each `In use` or `Use`, over «Applies to new work in this chat; running work keeps its
+model. Main and Fallback stay as set.» A row is one route, its source included: the same model through two sources
+is two rows and two stars; a row names its source and lane in Favorites, in search and under All API sources. Rows
+read newer first (owner 30.10): no catalog states a release date, so within a family, the words before a name's
+first number, the higher stated version leads (6.1, 6, 5.6); families follow each other by name and a name stating
+no number comes after them; a list across sources keeps the rail's order of sources; Favorites keep the order they
+were starred in. A row is an explicit route even when it is Main's model; the foot's `Use` is the reference that
+follows Settings. Subscription lists the catalog's model sources, never agent sessions; API the connections whose
+lists answered or failed. The catalog suggests and never admits: a saved or starred route it does not list stays,
+marked `not listed`; a search offers the typed model ID through the selected source; a list that could not be read
+says so beside the rows it kept. The catalog is read when the sheet opens, never polled. Search spans every source
+and steps the tabs aside; Escape clears it, then closes; an outside press closes; focus returns to the trigger. On a
+narrow screen the sheet rises from the bottom over a dim, and a touch opening leaves the keyboard down. A choice
+posts at once; Send waits for it, Panic never does.
 
 Each is a neutral **capsule** of the pills' height — ring, name, value: `Subagents Auto`, `Context Max`,
 `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,

@@ -288,6 +288,43 @@ class OwnerSubagentsModeRequest(TypedDict):
     project_id: NotRequired[str]
 
 
+class OwnerChatModelRequest(TypedDict):
+    """The room's model for new owner work: ``main`` or ``fallback`` (the configured reference) or ``model``."""
+
+    kind: Literal["main", "fallback", "model"]
+    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
+    use_local: NotRequired[bool]  # kind ``model`` only
+    project_id: NotRequired[str]
+
+
+class ChatModelChoice(TypedDict):
+    """A room's model for new owner work (``composer_cognition``): the configured Main's or first
+    Fallback's reference, or one raw route; a reference is never the same model pinned."""
+
+    kind: Literal["main", "fallback", "model"]
+    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
+    use_local: NotRequired[bool]  # kind ``model`` only
+
+
+class ChatModelRoute(TypedDict):
+    model: str
+    use_local: bool
+
+
+class ChatModelRoutes(TypedDict):
+    """What a room's two references resolve to now (``route_choice.configured_references``)."""
+
+    main: ChatModelRoute
+    fallback: Optional[ChatModelRoute]  # null: no Fallback configured, so its reference admits work on Main
+
+
+class OwnerChatModelResponse(TypedDict):
+    ok: bool
+    project_id: str
+    model_choice: ChatModelChoice
+    previous_model_choice: ChatModelChoice
+
+
 class OwnerSafetyModeRequest(TypedDict):
     kind: NotRequired[Literal["your_work", "consciousness"]]
     mode: Literal["full", "light", "off"]
@@ -754,7 +791,7 @@ __all__ = [
     "SettingsReadResponse", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
-    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
+    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "ChatModelRoutes", "OwnerChatModelResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
     "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceSummary", "PlaceDisconnectRequest",
     "PlaceOwnerAccountRequest", "PlaceUpdateRequest",

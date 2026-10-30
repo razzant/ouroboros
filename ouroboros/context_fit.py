@@ -511,12 +511,14 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
     from ouroboros.capability_evidence import model_account_options
     from ouroboros.config import runtime_settings
     from ouroboros.gateway.settings import _active_main_route
+    from ouroboros.route_choice import room_route
     from ouroboros.server_runtime import apply_runtime_provider_defaults
 
     settings, _changed, _keys = apply_runtime_provider_defaults(runtime_settings())
-    local_override = task.get("use_local_model")
+    carried = None if task.get("model") else room_route(task.get("task_metadata", task.get("metadata")))  # sized from its first plan
+    local_override = carried["use_local"] if carried else task.get("use_local_model")
     route = _active_main_route(
-        settings, model_override=str(task.get("model") or "").strip(),
+        settings, model_override=str((carried or task).get("model") or "").strip(),
         use_local_override=(
             bool(local_override) if local_override is not None else None
         ),

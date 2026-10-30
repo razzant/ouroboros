@@ -171,7 +171,8 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     """
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
-    from ouroboros.composer_cognition import main_cognition
+    from ouroboros.composer_cognition import main_cognition, main_model_choice
+    from ouroboros.route_choice import configured_references
     from ouroboros.subagent_runtime import subagents_availability
 
     settings = load_settings()
@@ -308,6 +309,7 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
         "github_token_configured": bool(github_token_from_env_or_settings()),
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
+        "model_choice": main_model_choice(settings), "model_routes": configured_references(),
         "projects": projects,
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,
@@ -957,6 +959,7 @@ async def api_state(request: Request) -> JSONResponse:
             # Frozen one-window compatibility field. Persistent auto-Low is retired.
             "context_mode_auto_low": False,
             "effort_range": effort_range(),  # the owner's range, the tolerant read
+            "model_choice": snap["model_choice"], "model_routes": snap["model_routes"],  # Main chat's model picker
             "safety_mode": get_safety_mode(),
             "skills_repo_configured": bool(get_skills_repo_path()),
             "github_token_configured": snap["github_token_configured"],

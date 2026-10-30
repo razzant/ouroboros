@@ -2,8 +2,9 @@
 
 Keys: ``voice`` (``stt``, ``tts``, ``tts_voice``), ``contributions``, ``widget_order``, ``widget_size``, ``widget_start_mode`` (values from
 ``extension_ui_validation.WIDGET_START_MODES``), ``nested_subagents_expanded``, the
-empty-Main ``welcome`` copy, the two side-section widths, the read cursors and
-``read_ahead_revisions``. A POST may carry any subset of keys; an unknown key answers 400.
+empty-Main ``welcome`` copy, the two side-section widths, the read cursors,
+``read_ahead_revisions`` and the chat model picker's starred routes (``model_favorites``).
+A POST may carry any subset of keys; an unknown key answers 400.
 ``shared_read`` (row addresses) is an input only: the host records it as read-ahead.
 """
 from __future__ import annotations
@@ -63,6 +64,10 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # Main's empty-state copy, a hidden install-wide preference (no Settings control):
     # never a model reply or a chat-history row.
     "welcome": {"mode": "default", "text": ""},
+    # The chat model picker's stars (DESIGN "Composer owner controls"): whole route strings, source included, so
+    # one model through two sources is two favorites. A list only orders and filters suggestions: never an
+    # entitlement, never checked against a catalog, and a POST replaces it whole.
+    "model_favorites": [],
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
@@ -76,6 +81,8 @@ _MAX_PROJECT_CURSORS = 1000
 _MAX_PROJECT_ID_LENGTH = 64
 _MAX_WELCOME_CHARS = 500
 _MAX_SHARED_READS = 64  # addresses one POST may name; recorded facts are never capped
+_MAX_MODEL_FAVORITES = 200
+_MAX_MODEL_ROUTE_CHARS = 400
 
 
 @contextmanager
@@ -195,6 +202,19 @@ def _normalize_preferences(
     if "widget_size" in raw:
         value = raw.get("widget_size")
         prefs["widget_size"] = {} if value is None else _normalize_widget_size(value)
+    if "model_favorites" in raw:
+        value = raw.get("model_favorites")
+        if value is not None and not isinstance(value, list):
+            raise ValueError("model_favorites must be a list of model routes")
+        if value is not None and len(value) > _MAX_MODEL_FAVORITES:
+            raise ValueError(f"model_favorites must contain at most {_MAX_MODEL_FAVORITES} routes")
+        routes: list[str] = []
+        for item in value or []:
+            if not isinstance(item, str) or len(item) > _MAX_MODEL_ROUTE_CHARS or any(ord(c) < 32 for c in item):
+                raise ValueError(f"model_favorites entries must be routes of at most {_MAX_MODEL_ROUTE_CHARS} printable characters")
+            if item.strip() and item.strip() not in routes:
+                routes.append(item.strip())
+        prefs["model_favorites"] = routes
     if "nested_subagents_expanded" in raw:
         value = raw.get("nested_subagents_expanded")
         if not isinstance(value, bool):

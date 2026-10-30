@@ -198,10 +198,12 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         node.querySelector('[data-wait-apply]').disabled = pending || !view.editor;
         const taskOnlyLocal = view.editor && row.role.startsWith('fallback:')
             && view.editor.collect().USE_LOCAL_MAIN !== view.sharedFallbackLocal;
+        const roomOnly = row.role === 'room';
         const persist = node.querySelector('[data-wait-persist]');
-        persist.disabled = pending || taskOnlyLocal;
-        if (taskOnlyLocal) persist.checked = false;
-        node.querySelector('[data-wait-scope]').textContent = taskOnlyLocal
+        persist.disabled = pending || taskOnlyLocal || roomOnly;
+        if (taskOnlyLocal || roomOnly) persist.checked = false;
+        node.querySelector('[data-wait-scope]').textContent = roomOnly
+            ? 'This change is task-only. Use the chat composer for a permanent room choice.' : taskOnlyLocal
             ? 'Local applies to all fallbacks in Settings. This change is task-only; edit Models for a permanent change.'
             : row.review_operation ? 'This role changes for this review operation.' : 'This role changes until the task ends.';
     }

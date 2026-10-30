@@ -148,7 +148,10 @@ def task_model_binding(task: dict, *, context_fit_plan: object = None,
 
     Callers may pass their live owner's overrides; this pure projection never
     captures another task's ambient wait or turns an observed Auto account into a pin.
+    Owner work admitted with its room's chat model acts on that route's role
+    (``route_choice.room_route_role``): a chosen route on Auto, never Main's pin.
     """
+    from ouroboros.route_choice import ROOM_ROLE, room_route, room_route_role
     from ouroboros.supervisor_route import supervisor_binding
 
     cognitive, supervisor_role = supervisor_binding(task)
@@ -159,10 +162,14 @@ def task_model_binding(task: dict, *, context_fit_plan: object = None,
     route = actor.get("route") or {}
     actor_id = str(actor.get("selected_subagent_id") or "")
     actor_role = supervisor_role or (f"subagent:{actor_id}" if actor_id and route.get("kind") == "api_model" else "main")
+    room_role = room_route_role(room_route(metadata)) if actor_role == "main" else ""
+    actor_role = room_role or actor_role
     role = str(task.get("model_role") or getattr(context_fit_plan, "model_role", "")
                or metadata.get("model_role") or actor_role)
     pin = task.get("credential_profile_id")
-    if pin is None and role == actor_role and actor_role != "main":
+    if pin is None and role == actor_role and room_role:
+        pin = "" if room_role == ROOM_ROLE else None  # the Fallback reference reads its own entry's account
+    elif pin is None and role == actor_role and actor_role != "main":
         followed = str((cognitive or {}).get("follows_role") or "")  # a nanny following its parent's role: that role's current pin
         pin = (str(model_role_option(MODEL_ACCOUNTS_KEY, followed) or "") if followed
                else str((cognitive or route).get("credential_profile_id") or ""))
@@ -193,9 +200,11 @@ def route_binding(model: str, use_local: bool, role: str, *,
 
 def task_processing_preference(task: dict, *, model_role: str = "",
                               override: str | None = None) -> str:
-    """Capture the actor's intent; an unconfigured fallback preserves that intent."""
+    """Capture the actor's intent; an unconfigured fallback preserves that intent (a room route's is the
+    route default, never Main's)."""
     if override is not None:
         return resolve_processing_preference(override=override)
+    from ouroboros.route_choice import ROOM_ROLE, room_route
     from ouroboros.supervisor_route import supervisor_binding
 
     cognitive, supervisor_role = supervisor_binding(task)
@@ -210,7 +219,7 @@ def task_processing_preference(task: dict, *, model_role: str = "",
         if authored:
             return resolve_processing_preference(override=str(authored))
         role = supervisor_role or (f"subagent:{actor_id}" if actor_id and (actor.get("route") or {}).get("kind") == "api_model"
-                                  else "main")
+                                  else ROOM_ROLE if room_route(metadata) else "main")
     if supervisor_role and role == supervisor_role:
         return resolve_processing_preference(override=cognitive["processing_preference"])
     if actor_id and role == f"subagent:{actor_id}":
@@ -285,6 +294,8 @@ def apply_model_role_override(settings: dict, *, role: str, model: str,
         return result
     from ouroboros.configured_subagents import normalize_configured_subagents, configured_subagents_dict
 
+    if family == "room":
+        raise ValueError("This chat's model is chosen in its composer: change it there, or switch for this task only.")
     if family not in ("reviewer", "subagent"):
         raise ValueError("Unknown waiting model role")
     routed_model = model if not use_local or model.endswith(" (local)") else f"{model} (local)"

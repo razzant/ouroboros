@@ -113,6 +113,25 @@ def _inherited_project_scope(ctx: ToolContext) -> str:
                or getattr(ctx, "project_id", "") or "")
 
 
+def _carry_room_route(ctx: ToolContext, metadata: Any, pid: str, evt: Dict[str, Any]) -> None:
+    """The owner's request moving to its own task in the same room keeps the chat model its room admitted it on
+    (``route_choice``); work for another room starts on that room's choice (the promote captures it)."""
+    from ouroboros import route_choice
+    from ouroboros.project_facts import sanitize_project_id
+
+    if not isinstance(metadata, dict) or str(metadata.get("delegation_role") or "").lower() == "subagent":
+        return
+    carried = route_choice.room_route_snapshot(metadata.get(route_choice.ROOM_ROUTE_KEY))
+    if not carried:
+        return
+    try:
+        same_room = pid == sanitize_project_id(_inherited_project_scope(ctx))
+    except (OSError, ValueError):
+        return  # an unreadable room proves no sameness: the destination's own choice applies
+    if same_room:
+        evt[route_choice.ROOM_ROUTE_KEY] = carried
+
+
 def _attach_client_surface(ctx: ToolContext, evt: Dict[str, Any]) -> None:
     """Copy the routing turn's per-message client-surface fact onto a
     promote/route/steer event BY VALUE (the origin_message_ref rail's sibling:
@@ -356,6 +375,7 @@ def _start_task(
         "ts": utc_now_iso(),
     }
     metadata = getattr(ctx, "task_metadata", {})
+    _carry_room_route(ctx, metadata, pid, evt)
     presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
     if presence_carrier:
         contract = dict(getattr(ctx, "task_contract", {}) or {})

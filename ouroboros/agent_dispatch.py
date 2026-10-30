@@ -381,12 +381,15 @@ def _initial_effort_for(task: Dict[str, Any], task_type: str) -> str:
 
 
 def main_model_named_effort(task_metadata: Dict[str, Any]) -> str:
-    """The level the task's own model name carries — the role slot's model or Main's
-    (``route_spec.api_model_named_effort``) — '' when the model names none."""
+    """The level the task's own model name carries — its room's admitted chat model, the role slot's
+    model or Main's (``route_spec.api_model_named_effort``) — '' when the model names none."""
+    from ouroboros.route_choice import room_route
     from ouroboros.route_spec import api_model_named_effort
 
-    override = model_role_slot_override(task_metadata if isinstance(task_metadata, dict) else {})
-    model = override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or "")
+    metadata = task_metadata if isinstance(task_metadata, dict) else {}
+    carried = room_route(metadata)
+    override = None if carried else model_role_slot_override(metadata)
+    model = carried["model"] if carried else override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or "")
     return api_model_named_effort(model)
 
 

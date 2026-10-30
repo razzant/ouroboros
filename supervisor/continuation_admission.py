@@ -466,6 +466,11 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     # an absent handbook choice into false before deciding whether to copy it.
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     model_role = str(metadata.get("model_role") or "").strip()
+    # The same work keeps the chat model its room admitted it on, Main's reference included (route_choice),
+    # never the room's newer choice.
+    from ouroboros.route_choice import ROOM_ROUTE_KEY, room_route_snapshot
+
+    room = room_route_snapshot(metadata.get(ROOM_ROUTE_KEY)) if not model_role else None
     stored = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
     canonical = result.get("task_contract") if isinstance(result.get("task_contract"), dict) else {}
     contract = {**stored, **canonical}
@@ -489,6 +494,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                 {"origin_message_ref": origin_ref} if isinstance(origin_ref, dict) and origin_ref else {})}),
             **({"project_id": binding["project_id"]} if binding.get("project_id") else {}),
             **({"model_role": model_role} if model_role else {}),
+            **({ROOM_ROUTE_KEY: room} if room else {}),
             **({"resource_intent": dict(intent)} if isinstance(intent, dict) and intent.get("kind") else {}),
             # Keep verified owner-door provenance on its canonical carrier;
             # the new objective below is still the host's continuation text.

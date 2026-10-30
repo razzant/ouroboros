@@ -553,6 +553,41 @@
  */
 
 /**
+ * The room's model for new owner work: `main` or `fallback` (the configured reference) or `model`.
+ * @typedef {Object} OwnerChatModelRequest
+ * @property {"main"|"fallback"|"model"} kind
+ * @property {string=} model  // kind "model" only: the raw route, its source included
+ * @property {boolean=} use_local  // kind "model" only
+ * @property {string=} project_id
+ */
+/**
+ * A room's model for new owner work: the configured Main's or first Fallback's reference, or one raw route.
+ * @typedef {Object} ChatModelChoice
+ * @property {"main"|"fallback"|"model"} kind
+ * @property {string=} model  // kind "model" only: the raw route, its source included
+ * @property {boolean=} use_local  // kind "model" only
+ */
+
+/** @typedef {Object} ChatModelRoute
+ * @property {string} model
+ * @property {boolean} use_local
+ */
+
+/** What a room's two references resolve to now.
+ * @typedef {Object} ChatModelRoutes
+ * @property {ChatModelRoute} main
+ * @property {?ChatModelRoute} fallback  // null: no Fallback configured, so its reference admits work on Main
+ */
+
+/**
+ * @typedef {Object} OwnerChatModelResponse
+ * @property {boolean} ok
+ * @property {string} project_id
+ * @property {ChatModelChoice} model_choice
+ * @property {ChatModelChoice} previous_model_choice
+ */
+
+/**
  * @typedef {Object} OwnerSafetyModeRequest
  * @property {'your_work'|'consciousness'=} kind
  * @property {'full'|'light'|'off'} mode
