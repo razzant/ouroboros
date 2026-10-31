@@ -269,6 +269,21 @@ def project_admission_view(drive_root: Any, project_id: str, *,
     return {**project_admission_basis(project_id, project, frozen=frozen), "registry_present": present}
 
 
+def direct_turn_basis(drive_root: Any, project_id: str) -> dict:
+    """The room row a direct turn's binding consumes, frozen as queued work keeps it (#2547).
+
+    A direct turn has no queue append, so its binding is the admission: the caller
+    binds under this basis. An absent room is registered first, as binding always did.
+    """
+    from ouroboros.projects_registry import create_project
+
+    basis = project_admission_view(drive_root, project_id, allow_unregistered=True, frozen=True)
+    if basis["project"] is None:
+        basis = project_admission_basis(
+            project_id, create_project(drive_root, project_id, admission_basis=basis), frozen=True)
+    return basis
+
+
 def _folder_owners(rows: Any, canonical: str) -> list:
     """Ordered claims of the active rooms whose folder resolves to ``canonical`` now.
 

@@ -31,7 +31,8 @@ PID = "room-2547"
 def _admit_project_turn(tmp_path, monkeypatch):
     """The real direct lane admits one owner turn in a registered Project room."""
     from ouroboros.projects_registry import create_project
-    from supervisor import message_bus, worker_chat_lane as lane, workers
+    from supervisor import message_bus, workers
+    from supervisor import worker_chat_lane as lane
 
     project = create_project(tmp_path, PID, name="Room 2547")
     monkeypatch.setattr(workers, "REPO_DIR", tmp_path / "repo")
@@ -147,9 +148,9 @@ def test_a_direct_project_turn_continues_after_stop_restore_and_resume(tmp_path,
 @pytest.mark.serial
 def test_a_direct_turn_without_a_recorded_basis_keeps_its_project_hold(tmp_path, monkeypatch):
     """A row from before the basis existed proves no original identity; Resume never synthesizes one."""
+    from ouroboros import working_checkpoint as wc
     from ouroboros.projects_registry import bind_task_to_project, create_project
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
-    from ouroboros import working_checkpoint as wc
     from ouroboros.task_status import execution_owner_record
     from tests._budget_pause_exact_helpers import _loop_ctx
 

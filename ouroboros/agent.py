@@ -542,7 +542,7 @@ class OuroborosAgent:
                 # The producer's raw origin marker (promote_chat_to_task, presence_promote,
                 # api, ...): ``dialogue_provenance.run_origin`` reads it from this record.
                 source=task.get("source"),
-                project_id=str(task.get("project_id") or ""),
+                project_id=str(task.get("project_id") or ""), **{key: task[key] for key in ("_project_admission",) if isinstance(task.get(key), dict)},  # a direct turn's only basis carrier (#2547)
                 role=task.get("role"),
                 description=task.get("description"),
                 objective=task.get("objective") or task.get("description"),

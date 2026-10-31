@@ -488,7 +488,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             "id": task_id, "type": "task", "chat_id": stored.get("chat_id"), "_is_direct_chat": True,
             "_attempt": attempt, "root_task_id": task_id, "depth": 0,
         }
-        for key in ("origin_message_ref", "origin_message_text", "metadata", "project_id",
+        for key in ("origin_message_ref", "origin_message_text", "metadata", "project_id", "_project_admission",
                     "tool_profile", "detached_at", "detached_by",
                     "task_contract", "title", "text", "budget_drive_root"):
             if stored.get(key) not in (None, ""):
