@@ -9,7 +9,8 @@ asks ``dispatch_refusal`` once per call, the way it asks
 * Silent / Paused: a ``message`` or ``write`` aimed at such a place is refused
   from every focus (Main, tasks, schedules, wakes). A connector write whose
   target cannot be attributed is refused while any of that connector's places
-  is Silent or Paused, and the reason says so.
+  is Silent or Paused, and the reason says so. An explicit account outside all
+  applicable place scopes is attributable without becoming a place.
 * One author per conversation: a send into a conversation another turn is
   authoring is refused with that author's task id (hand the intent over with
   ``tell_task``).
@@ -25,6 +26,8 @@ from ouroboros import places, conversation_lease
 from ouroboros.tool_effects import EFFECT_MESSAGE, EFFECT_READ, ToolEffect, connector_of, effect_of, target_values
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
+PLACE_BINDING_VERSION = 1
+_DELIVERY_TARGET_FIELDS = ("provider", "account_id", "conversation_id", "thread_id")
 
 
 def _metadata(ctx: Any) -> Mapping[str, Any]:
@@ -173,3 +176,68 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                      "conversation_key": keys[0] if len(keys) == 1 else "", "conversation_keys": keys})
     return {"effect": effect.effect, "declared": effect.declared, "targets": targets,
             "attributable": attributable, "places": rows}
+
+
+def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[str, str], *,
+                         binding: Mapping[str, Any] | None = None, require_place: bool = False) -> dict[str, Any]:
+    """Capture or recheck one connector's enqueue-time place binding, without writes.
+
+    The snapshot records provenance, not a grant: delivery still checks current
+    scopes. A removed bound place never turns into an unbound operation. Callers
+    retain this snapshot with the queued effect, and never synthesize it for old
+    rows or infer it from ``origin.kind=tool``.
+    """
+    target = {key: destination.get(key, "") for key in _DELIVERY_TARGET_FIELDS}
+    if any(not isinstance(value, str) for value in target.values()) or not target["provider"] or not target["account_id"]:
+        raise ValueError("A canonical provider and account_id are required for an outbox binding.")
+    declared_targets = {key: [value] for key, value in target.items() if key != "provider" and value}
+    if binding is not None:
+        if (not isinstance(binding, Mapping) or type(binding.get("version")) is not int
+                or binding["version"] != PLACE_BINDING_VERSION or binding.get("connector") != connector
+                or any(binding.get(key) != value for key, value in target.items())
+                or not isinstance(binding.get("place_id"), str)):
+            raise ValueError("The retained outbox binding does not match this connector and destination.")
+        if binding["place_id"]:
+            try:
+                original = places.get_place(drive_root, binding["place_id"])
+            except places.PlaceError as exc:
+                if exc.code != "place_not_found":
+                    raise
+                return {"allowed": False, "binding": dict(binding), "state": "disconnected",
+                        "code": "place_disconnected", "label": "", "place_id": binding["place_id"]}
+            if original.connector != connector or original.provider != target["provider"]:
+                raise ValueError("The retained place belongs to a different connector or provider.")
+            primary_scope = places.resolve_place(drive_root, connector=connector, binding_id=original.place_id, **target)
+            declared_scope, _ = places.target_place([original], targets=declared_targets,
+                                                    conversation="conversation_id", thread="thread_id")
+            if primary_scope is None and declared_scope is None:
+                return {"allowed": False, "binding": dict(binding), "state": "changed",
+                        "code": "place_scope_changed", "label": original.label, "place_id": original.place_id}
+            if original.state in (places.STATE_SILENT, places.STATE_PAUSED):
+                return _outbox_decision(original, binding)
+        elif require_place:
+            raise ValueError("Place-bound delivery cannot use an unbound snapshot.")
+
+    current = places.outbox_place(drive_root, connector=connector, **target)
+    if current is None:
+        current, attributable = places.place_for_target(
+            drive_root, connector=connector, provider=target["provider"],
+            targets=declared_targets,
+            conversation="conversation_id", thread="thread_id")
+        if current is None and binding and binding["place_id"]:
+            return {"allowed": False, "binding": dict(binding), "state": "changed",
+                    "code": "place_scope_changed", "label": "", "place_id": binding["place_id"]}
+        if current is None and (not attributable or require_place):
+            return {"allowed": False, "binding": dict(binding) if binding else None, "state": "unknown",
+                    "code": "place_not_connected" if require_place else "place_unattributable", "label": "", "place_id": ""}
+    captured = dict(binding) if binding is not None else {
+        "version": PLACE_BINDING_VERSION, "connector": connector, **target,
+        "place_id": current.place_id if current else ""}
+    return _outbox_decision(current, captured)
+
+
+def _outbox_decision(place: Any, binding: Mapping[str, Any]) -> dict[str, Any]:
+    state = place.state if place else "unbound"
+    return {"allowed": state in (places.STATE_ACTIVE, "unbound"), "binding": dict(binding),
+            "state": state, "code": f"place_{state}", "label": place.label if place else "",
+            "place_id": place.place_id if place else ""}

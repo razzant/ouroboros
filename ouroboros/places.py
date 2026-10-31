@@ -259,7 +259,7 @@ def resolve_place(drive_root: Any, *, connector: str, provider: str = "", accoun
             continue
         if provider and provider != place.provider:
             continue
-        if account_id and place.account_id and account_id != place.account_id:
+        if account_id and place.account_id not in ("", "*", account_id):
             continue
         if conversation_id and place.conversation_id and conversation_id != place.conversation_id:
             continue
@@ -280,14 +280,37 @@ def places_of_connector(drive_root: Any, connector: str) -> list[Place]:
     return [place for place in load_places(drive_root) if place.connector == connector]
 
 
+def account_in_place_scope(place: Place, account_id: str) -> bool:
+    """An account may be addressed by the place itself or its declared destination.
+
+    IDs are exact connector-owned keys, not sender addresses or display labels.
+    An absent/wildcard account keeps the existing connector-wide scope.
+    """
+    return (place.account_id in ("", "*", account_id)
+            or bool(place.destination and place.destination.get("account_id", "") in ("", "*", account_id)))
+
+
 def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, list[str]],
-                     conversation: str = "", thread: str = "") -> tuple[Place | None, bool]:
+                     conversation: str = "", thread: str = "", provider: str = "") -> tuple[Place | None, bool]:
     """Resolve declared target values against stored account/conversation ids.
 
     Multiple destinations must be checked separately by the dispatch caller. An
-    unresolved value is unknown when scoped places exist, never an active default.
+    unresolved value inside an account's place scopes stays unknown. An explicit
+    account outside every applicable scope is an ordinary, unbound tool target.
     """
     places = places_of_connector(drive_root, connector)
+    if provider:
+        places = [place for place in places if place.provider == provider]
+    return target_place(places, targets=targets, conversation=conversation, thread=thread)
+
+
+def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
+                 conversation: str = "", thread: str = "") -> tuple[Place | None, bool]:
+    """Match outbound targets, including declared destinations, in the supplied scopes.
+
+    Dispatch loads the connector's current places; a retained outbox also uses
+    this matcher to validate its particular bound place. Ingress stays separate.
+    """
     if not places:
         return None, True
     values = {str(value) for key, group in targets.items() if key not in {thread, "thread_id", "account_id"}
@@ -301,7 +324,8 @@ def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, l
     def matches(account, room, topic):
         return ((not accounts or account in {"", "*"} or account in accounts)
                 and (not topic or topic in threads)
-                and ((room and room in conversations) or (not room and account and account in values)))
+                and ((room and room in conversations)
+                     or (not room and account and (account in values or (accounts and account == "*")))))
     exact = [p for p in places if matches(p.account_id, p.conversation_id, p.thread_id)
              or (p.destination and matches(p.destination.get("account_id", ""),
                                            p.destination.get("conversation_id", ""), p.destination.get("thread_id", "")))]
@@ -316,7 +340,23 @@ def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, l
     if (len(places) == 1 and not places[0].conversation_id and not places[0].thread_id
             and (not accounts or places[0].account_id in {"", "*"} or places[0].account_id in accounts)):
         return places[0], True
+    if accounts and not accounts.intersection({"", "*"}) and not any(
+            account_in_place_scope(place, account) for place in places for account in accounts):
+        return None, True
     return None, False
+
+
+def outbox_place(drive_root: Any, *, connector: str, provider: str, account_id: str,
+                 conversation_id: str, thread_id: str = "") -> Place | None:
+    """Current outbox scope; an opaque operation retains matching account holds."""
+    if not conversation_id:
+        restricted = next((p for p in places_of_connector(drive_root, connector)
+                           if p.provider == provider and p.account_id in ("", "*", account_id)
+                           and p.state in {STATE_SILENT, STATE_PAUSED}), None)
+        if restricted is not None:
+            return restricted
+    return resolve_place(drive_root, connector=connector, provider=provider, account_id=account_id,
+                         conversation_id=conversation_id, thread_id=thread_id)
 
 
 def wake_matches(place: Place, facts: Iterable[str]) -> tuple[WakeItem, ...]:

@@ -1,18 +1,13 @@
 # 12. Host Service, Companion Processes, and Chat IDs
 
-Place facts and identity:
-- Connectors report typed facts; the mind judges. Core matches membership, never text.
-- With `presence_identity: 1`, send `identity` on every event and status payload, never in `places.json`.
-- Focus voice, owner match, Safety and delivery stamps use the event's identity or none.
-- Other Safety targets/own wakes: the first valid identity among 50 newest arrivals.
-- Only `kind: user` matches an account-scoped owner confirmation.
-- The browser derives owner/can_confirm from status identity/labels; no server path dispatches a route.
-- Status `labels` suit any host (older hosts ignore them); a labelled core **manifest** kind needs this release (older hosts drop the place entry).
-Silent can wake; Paused admits no new focus. Unverified speech grants no owner authority.
+Connectors supply typed facts and identity; the mind judges. Focus voice, owner match, Safety and delivery use the
+event snapshot; other Safety/own wakes use the first valid identity among 50 newest arrivals. Browser status is
+account-scoped (§3); server consumers never dispatch connector routes. Only `kind: user` can match account-scoped owner confirmation;
+unverified speech grants no owner authority. Identity never enters `places.json`; Place/identity wire and label compatibility: CREATING_SKILLS. Silent can wake; Paused admits no new focus.
 
 ### Host Service boundary
 
-The Host Service (`gateway/host_service.py`, `OUROBOROS_HOST_SERVICE_PORT`) authenticates `x-skill-token` against payload hash, executable review, enablement and grants. Tokens hold no secrets, stale on edits and refuse stringification (`skill_token.py`); routes/permissions: §4. `POST /notify` (`host_notify.py`, `notify_owner` grant, `/identity.notify_version`) writes one sentence ≤`NOTIFY_TEXT_MAX_CHARS` as a `skill_notice` System row signed `Notice · <skill>` in the owner's chat, waking no model; 503 means unconfirmed. Review covers transport identity/attribution, bounded polling, panic cleanup, token confinement and exfiltration. Reviewed owner-bound transports may control Ouroboros; external slash commands use a separate positive-owner slot (`supervisor/state.py`): unidentified transports cannot bind, web identity cannot exclude the remote owner. `wait_for_response` is A2A-only.
+The Host Service (`gateway/host_service.py`, `OUROBOROS_HOST_SERVICE_PORT`) authenticates `x-skill-token` against payload hash, executable review, enablement and grants. `skill_token.py` tokens hold no secrets, stale on edits and refuse stringification; routes/permissions: §4. `host_notify.py` writes signed, bounded `skill_notice` rows without waking a model; grant, capability and receipt contract: CREATING_SKILLS “Telling the owner something”. Reviewed owner-bound transports may control Ouroboros; external slash commands use a positive-owner slot (`supervisor/state.py`): unidentified transports cannot bind and web identity cannot exclude the remote owner. `wait_for_response` is A2A-only.
 
 Decision/language writers: §4. Review waits reach their live controller after author completion via `pending_action`; a stale revision/identity or absent consumer is 409 (§6 Quota and auth waits). A verdict grants no continuation or skill authority.
 
@@ -86,4 +81,10 @@ Heard-only events create no task/context blob; the room row keeps identity/reaso
 
 `places.place_room_index` indexes latest arrivals/nonterminal focus counts, never walking history or loading per-arrival tasks; unknown counts stay null; only the rooms endpoint decodes arrival details. Discovery may miss legacy/outgoing-only rooms; import/gap flags describe the store, not provider completeness. Indexes build once from source rows. `ouroboros/gateway/place_history.py` projects recorded delivery/heard facts, exact-task focus starts, current owner confirmation gated by captured actor authentication, import facts/send times (CLIENT_CONTRACT “Places”). `account_candidates` suggests up to 20 nonbots (not the account itself) of the newest 50 arrivals, confirming no identity, keeping no actor list. Migration imports valid bindings, records failures in `migration.problems` (shown by `/api/places`) and publishes one marker.
 
-For an opaque outbox mutation (empty conversation id), `GET /presence/place` reports any Silent/Paused place owned by that authenticated connector/provider/account, including broad and migrated wildcard accounts. An optional `thread_id` resolves a topic-specific place; omission keeps the room lookup. Declared tool destinations match account, conversation and thread as separate facts, each recipient checked independently. Retained-work GET/POST may omit `binding_id`; authentication checks the retained task's connector, never the ref alone. POST accepts exactly `transport_queue` plus an optional `binding_id`; legacy binding ids remain checked.
+`places.outbox_place` resolves queued targets; an opaque mutation retains matching Silent/Paused account scopes,
+wildcards included. Declared tool targets keep account, conversation and thread separate, each recipient checked.
+An explicit account outside applicable scopes stays attributable without a Place. `place_guard.outbox_binding_facts`
+serves optional enqueue/delivery binding checks through `GET /presence/place`: retained provenance never overrides
+current scopes or turns disconnected bound work into unbound work. Default queries keep their lookup contract;
+capability and wire: CREATING_SKILLS “Places and focus transport ingress”. Retained-work GET/POST may omit `binding_id`;
+authentication checks the stored connector. POST accepts `transport_queue` plus optional `binding_id`; supplied legacy ids remain checked.

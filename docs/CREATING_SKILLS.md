@@ -426,30 +426,14 @@ flowchart LR
   `data/state/skills/<name>/install.json`, outside the payload. ClawHub
   installs also keep their `.clawhub.json` sidecar; skills installed from the
   hub by earlier versions keep `.ouroboroshub.json`.
-- **Review** is one wave of the shared review mechanism (`skill_review` →
-  `review_change(subject="skill")`, `tools/review_skill.py`): the panel the
-  review mode composes answers the one skill question against the Skill Review
-  Checklist (see [`docs/CHECKLISTS.md`](CHECKLISTS.md)) in the common
-  findings-only form — Blocking seats every ticked reviewer; Advisory accepts a
-  panel of at least one ticked reviewer when the narrowing carries its reason;
-  in Cyber Pro the review is evidence for Ouroboros's judgment. The record is a
-  `surface="skill"` entry of the review ledger; `review.json` is the run gate's
-  projection of it, bound to the content hash of every runtime-reachable file
-  in the skill directory, so any later edit stales that verdict. A review after
-  an edit is change-focused in every mode: reviewers get the manifest, the
-  changed files and a diff since the last verdict, every unchanged file one
-  read away, and judge the whole current skill. Under Advisory, after the first
-  feedback the author may accept a later edit with
-  `skill_review(author_disposition="accepted", author_rationale=…)` (the
-  deterministic preflight still runs) instead of buying another panel. The tool
-  waits for the panel but hears an addressed owner message: it then returns
-  pending while the reviewers finish, and the same call later collects the
-  verdict at $0.
-  `.self_authored.json` is provenance only; self-authored skills use the same
-  review, grant, enable, and extension reload flow as other executable skills.
-  Reviewers also read how the skill was installed (`install.json`: by the
-  owner or by Ouroboros, from which source and trust, why, in which task) as
-  context, never as approval.
+- **Review** uses `skill_review` → `review_change(subject="skill")` (`tools/review_skill.py`).
+  Panel composition, verdicts and author acceptance follow the [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist),
+  not a separate skill policy. A `surface="skill"` ledger record projects into `review.json`, bound to all runtime-reachable
+  payload bytes; edits stale it. Change-focused review sees the manifest, changed files and diff, with unchanged files
+  readable, and judges the whole skill. Advisory authors may finish through
+  `skill_review(author_disposition="accepted", author_rationale=…)` with current preflight; see “Skill Review Checklist” below.
+  An addressed owner message can return the tool pending while reviewers finish; the same call later collects at $0.
+  `.self_authored.json` and installation history are provenance, never approval; self-authored skills use the same lifecycle.
 - **Isolated deps** (pip / npm / uv / node) install into
   `data/skills/<bucket>/<name>/.ouroboros_env/`. Status is recorded
   in `data/state/skills/<name>/deps.json`. Its Python venv names the app's interpreter: after
@@ -892,37 +876,17 @@ approved (the tool returns `SKILL_TOGGLE_ERROR` with `code: "grants"` and the se
 do not authorize grants or enablement. Automatic grants and first enablement
 follow the setting below; an explicitly authorized task toggle remains separate.
 
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` is enabled by default as of v6.10.0; the
-owner may disable it in Settings → Behavior → Skills (desktop asks for native
-confirmation and web uses the owner endpoint). When enabled, current executable
-review authority grants only the manifest-declared keys and host permissions for the
-current content hash. Under
-blocking enforcement, blocker reviews are not executable and do not auto-grant;
-under advisory enforcement, blocker findings may auto-grant only because that
-mode makes the review executable. Qualified current Advisory author acceptance
-uses the same gate even when the original critic state stays pending. Editing the
-skill still invalidates those grants.
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
+(native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
+release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
+label alone; see the Skill Review Checklist. Editing the payload invalidates grants.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
 same release has one identity on every install.
 
-Transport and control skills are first-class control surfaces — a legitimate
-full replacement for the local UI, not demos. An owner may have no screen, no
-notebook, and no terminal; the control skill (Telegram today, any remote-control
-skill tomorrow) is how they run Ouroboros. After fresh executable review,
-enablement, content-hash-bound token issuance, explicit grants, and owner/chat
-binding, such a skill is **expected** to carry every owner command the direct UI
-accepts (`/panic`, `/restart`, `/evolve`, `/bg`, `/review`, `/status`, and
-free-form owner text), run a long-lived poller (`supervised_task`), and observe
-the owner-conversation events it mirrors. Power is not a defect: review judges
-the skill's actual safety properties — owner/chat binding, trustworthy source
-attribution, bounded polling/backpressure, cleanup on unload/panic, host-token
-confinement, and no exfiltration of secrets or owner-conversation content to
-unrelated parties — never the breadth of control it exposes. The capability is
-gated by the host (token + fresh review + enablement + content-hash grants) and
-by core owner/chat binding, not by withholding control from the skill. See
-`docs/CHECKLISTS.md` → "Transport and control skills are first-class".
+Transport/control skills are first-class local-UI replacements: every owner command (Panic included), supervised
+polling and justified owner-event mirroring. Their review and runtime obligations belong to [CHECKLISTS](CHECKLISTS.md#transport-and-control-skills-are-first-class-binding-for-all-reviewers).
 
 `POST /chat/inject` treats text beginning with `/panic` (case-insensitive, surrounding whitespace ignored,
 trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop.
@@ -964,8 +928,10 @@ contributes:
   Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
   gives `message` its speech semantics (a flagged message returns to the mind; the identical re-issue is sent and
   recorded). A tool that reads or writes depending on its arguments is `write`. MCP tools are always `write`.
-- `target`/`conversation`/`thread` let the host attribute a call to one place; a write it cannot attribute is held
-  while any place of that connector is Silent or Paused, and the refusal says so.
+- `target`/`conversation`/`thread` attribute each destination. Declare `account_id` for multi-account writes:
+  an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
+  Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
+  in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.
 - `icon` is reduced at staging to viewBox and geometry (path, circle, ellipse, line, polyline, polygon, rect, g),
   bounded, with fills and strokes set to `currentColor`; anything else falls back to the house glyph.
   Authors of `provides: place` skills must include `ui/icon.svg` and declare `icon: ui/icon.svg`.
@@ -1071,8 +1037,9 @@ Each entry has exactly nonblank `id` and `label` strings (at most 200 characters
 Invalid event identity returns 400 `presence_identity_invalid`. The voice line, owner match, focused
 Safety facts and delivery stamp read the event snapshot only; an undeclared event has no identity.
 Outside that focus, Safety and own-wake text use the first valid identity among the place's newest 50
-captured arrivals, or none. The sheet reads identity from the status payload it already fetches for
-readiness. The server never dispatches a connector route for a place view, focus, Safety check or own wake.
+captured arrivals, or none. The sheet requests its `account_id` on the declared status route, for identity and readiness;
+Connect omits it to list instances. Return only that account, never a neighbor. An optional response `account_id`
+must match the query; older responses without it remain supported. The server never dispatches a connector route for a place view, focus, Safety check or own wake.
 Neither carrier adds fields to `places.json`.
 
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
@@ -1131,11 +1098,16 @@ Use the connector's ordinary content-hash-bound skill token for:
   facts. `review_requested` and `assigned` mean requests addressed to the watched
   identity; narrow wake declarations may use them. A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
-- `GET /presence/place?provider=&account_id=&conversation_id=&thread_id=`: returns
-  `{place_id, label, state}` for the connector's outbox recheck. `/identity`
-  advertises `places_version: 1`. Optional `thread_id` selects the topic; omission keeps
-  the room lookup. An empty conversation id is an opaque queued mutation:
-  any Silent/Paused place for that connector, provider and matching/broad account restricts it.
+- `GET /presence/place?provider=&account_id=&conversation_id=&thread_id=` (`places_version: 1`) returns `{place_id,label,state}`;
+  missing means 404 `place_not_connected`, never permission. With empty conversation, matching account/broad
+  Silent/Paused scopes restrict the opaque operation; a thread selects its topic.
+  Hosts advertising `presence_place_binding_version: 1` additionally accept `operation=bind` at enqueue,
+  returning `{ok,allowed,binding,state,code,label,place_id}`. The snapshot is
+  `{version:1,connector,provider,account_id,conversation_id,thread_id,place_id}`; empty `place_id` means confirmed
+  unbound, null binding means unresolved. Retain it with the effect. Delivery uses `operation=check`, JSON-encoded
+  `binding` and identical target fields. Current scopes still apply; disconnected bound work never becomes unbound.
+  `require_place=true` requires a Place for transport-bound replies, not every tool call from a Presence focus.
+  Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
   the authenticated connector must still own the stored work.
@@ -1749,6 +1721,22 @@ def register(api):
     # Read settings keys allow-listed in env_from_settings.
     keys = api.get_settings(["OPENROUTER_API_KEY"])
 ```
+
+### Provider sign-in return
+
+Redirect the provider to `<public base>/onboarding/static/provider-return.html`. This passive builtin page survives
+custom or disabled main UI and keeps the normal network login. Check that the page exists before issuing consent
+on an older host. A remote Web client needs its registered reachable base; loopback requires a browser on that host.
+An opaque widget's `location.origin` is `null`: use the host-bridged begin request's Origin or a configured public base
+(prefix included), not the frame's URL. Telegram launches need the ordinary authorized web/desktop handoff.
+
+Encode OAuth `state` as base64url UTF-8 JSON `{v:1,skill:<canonical name>,nonce:<random>}` and retain it with PKCE
+in your state directory. Register POST `oauth/complete`; the page forwards `{state,code}` or
+`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix. The skill validates
+its issued state, handles denial, exchanges credentials and stores tokens. The page neither validates grants nor owns tokens.
+Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
+The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported.
+Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.
 
 ### Reading memory
 
@@ -2378,19 +2366,9 @@ else:
 
 ## Skill Review Checklist
 
-Reviewers grade your skill on the checklist defined in
-[`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist". That file is
-the authoritative SSOT — read it there once and consult it whenever you author
-or repair a skill instead of reading a paraphrase here. Review verdicts are
-`clean`, `warnings`, `blockers`, or `pending`; execution is decided by
-`review_gate.executable_review`.
-Advisory explicit author finish can accept unchanged or corrected bytes after
-feedback (a verdict in `review.json` or a settled skill record with findings), or
-the exact `review_reference` (`record_id`/`job_id` + `content_hash`) returned by a
-terminal review that formed no verdict, with current deterministic preflight. It
-buys no second critic and retains the original hash, status and findings; a review
-still running is not unavailable. Blocking requires fresh reviewer approval. See
-ARCHITECTURE §13 for the shared runtime gate.
+Read the authoritative [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist) when authoring or repairing:
+its verdicts, enforcement and Advisory author-finish rules are not a separate policy here. `clean`, `warnings`,
+`blockers` and `pending` remain independent from `review_gate.executable_review`. Calls: the lifecycle above; runtime gate: ARCHITECTURE §13. A running review is not unavailable.
 
 ## Reference skills
 

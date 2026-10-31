@@ -416,11 +416,32 @@ async def _api_presence_work(request: Request) -> JSONResponse:
 async def _api_presence_place(request: Request) -> JSONResponse:
     """An authenticated connector's outbox rechecks current state without model work."""
     from ouroboros.gateway import host_service as host
+    from ouroboros.places import outbox_place
     ctx = request.app.state.host_service_context
     try:
         skill, _token = await host._authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
+        operation = request.query_params.get("operation", "")
+        if operation:
+            from ouroboros.place_guard import outbox_binding_facts
+            if operation not in {"bind", "check"} or request.query_params.get("require_place", "false") not in {"true", "false"}:
+                return _presence_error("Invalid place binding operation.", 400, "place_binding_invalid", "rejected")
+            try:
+                binding = json.loads(request.query_params.get("binding", "null")) if operation == "check" else None
+                if operation == "check" and not isinstance(binding, dict):
+                    raise ValueError("A retained binding object is required for delivery checks.")
+                target = {key: request.query_params.get(key, "") for key in
+                          ("provider", "account_id", "conversation_id", "thread_id")}
+                result = await host._bounded_host_read(ctx, functools.partial(
+                    outbox_binding_facts, ctx.data_dir, skill, target, binding=binding,
+                    require_place=request.query_params.get("require_place") == "true"))
+                return JSONResponse({"ok": True, **result})
+            except ValueError as exc:
+                from ouroboros.places import PlaceError
+                if isinstance(exc, PlaceError):
+                    raise
+                return _presence_error(str(exc), 400, "place_binding_invalid", "rejected")
         place = await host._bounded_host_read(ctx, functools.partial(
-            _outbox_place, ctx.data_dir, connector=skill,
+            outbox_place, ctx.data_dir, connector=skill,
             provider=str(request.query_params.get("provider") or ""),
             account_id=str(request.query_params.get("account_id") or ""),
             conversation_id=str(request.query_params.get("conversation_id") or ""),
@@ -432,16 +453,3 @@ async def _api_presence_place(request: Request) -> JSONResponse:
         return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
     except (ValueError, OSError) as exc:
         return _presence_error(str(exc), 503, "places_unavailable", "retry")
-
-
-def _outbox_place(drive_root, *, connector, provider, account_id, conversation_id, thread_id=""):
-    from ouroboros.places import places_of_connector, resolve_place
-
-    if not conversation_id:
-        restricted = next((p for p in places_of_connector(drive_root, connector)
-                           if p.provider == provider and p.account_id in ("", "*", account_id)
-                           and p.state in {"silent", "paused"}), None)
-        if restricted is not None:
-            return restricted
-    return resolve_place(drive_root, connector=connector, provider=provider,
-                         account_id=account_id, conversation_id=conversation_id, thread_id=thread_id)

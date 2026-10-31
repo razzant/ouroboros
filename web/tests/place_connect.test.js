@@ -95,6 +95,22 @@ test('the declared route uses the extension helper and no-store; unrelated route
     assert.equal(calls.length, 1);
 });
 
+test('a concrete Place asks for its own account identity and readiness; Connect retains the account list', async (t) => {
+    const { routes, calls } = setup(t);
+    for (const account of ['first+tag@example.test', 'second']) {
+        routes.set(`/api/extensions/github/status?account_id=${encodeURIComponent(account)}`, () => ({ ok: true,
+            json: async () => ({ account_id: account, text: `Ready ${account}`, identity: { sends_as: { id: account, kind: 'user', label: account } } }) }));
+        const status = await readPlaceConnector({ ...place, accountId: account });
+        assert.equal(status.identity.sends_as.id, account);
+        assert.equal(status.text, `Ready ${account}`);
+    }
+    routes.set('/api/extensions/github/status?account_id=legacy', () => ({ ok: true, json: async () => ({ text: 'Legacy ready' }) }));
+    assert.equal((await readPlaceConnector({ ...place, accountId: 'legacy' })).text, 'Legacy ready');
+    routes.set('/api/extensions/github/status?account_id=unknown', () => ({ ok: true, json: async () => ({ account_id: 'neighbor' }) }));
+    await assert.rejects(readPlaceConnector({ ...place, accountId: 'unknown' }), /different account/);
+    assert.equal(calls.length, 4);
+});
+
 test('an unreadable Places response is an error; a known empty projection is empty', async (t) => {
     const { routes } = setup(t);
     routes.set('/api/places', { ok: true, json: async () => ({ error: 'not JSON' }) });

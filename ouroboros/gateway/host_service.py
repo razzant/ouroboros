@@ -437,6 +437,7 @@ async def _api_identity(request: Request) -> JSONResponse:
     from ouroboros.presence_history import HISTORY_IMPORT_VERSION, SOURCE_ORDER_VERSION
     from ouroboros.presence_owner_contact import MAIN_CONTACT_VERSION
     from ouroboros.presence_recovery import WORK_OUTPUT_VERSION
+    from ouroboros.place_guard import PLACE_BINDING_VERSION
 
     return JSONResponse({"ok": True, "name": name, "description": description,
                          "presence_delivery_version": DELIVERY_VERSION, "places_version": 1,
@@ -450,6 +451,7 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_wake_signals": 1,
                          "presence_explicit_completion": 1,
                          "presence_identity": 1,
+                         "presence_place_binding_version": PLACE_BINDING_VERSION,
                          "notify_version": NOTIFY_VERSION})
 
 
