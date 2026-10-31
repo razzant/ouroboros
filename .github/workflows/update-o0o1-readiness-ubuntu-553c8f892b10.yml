@@ -1,0 +1,196 @@
+# O0 -> O1 published-range readiness of update implementation 553c8f892b10 on Ubuntu: qualification equipment,
+# not a product lane.
+#
+# Two independent ubuntu-24.04 jobs, one per installation root (clean, evolved), each on its own runner with nothing
+# shared, run the existing readiness driver (.github/qualification/o0o1-readiness-linux/o0o1_readiness.py,
+# byte-identical to the reviewed one) through its Linux wrapper (o0o1_linux.sh). The driver runs the unified Update's
+# own admit -> prepare with update_checks.workspace_checks, unstubbed, on a root at the published O0 whose managed
+# remote serves the published O1. Each job first:
+#   - builds its readiness mirror from the official remote: ouroboros = O1, fetched by id, and three official tags;
+#   - builds its root (clean: O0; evolved: O0 plus a local commit, staged, unstaged and untracked work, a local test
+#     and a local cutover edit) and a separate witness root at O0;
+#   - installs a separate bare runtime through the implementation's own pinned downloader: CPython 3.10.22 from
+#     python-build-standalone 20261009 (SQLite 3.53.1), with O0's complete requirements-runtime.lock installed into
+#     the interpreter itself (no venv, no editable install, no dev or test group);
+#   - observes O0's own server.py serving on that runtime (o0o1_witness_linux.py: its health answer and the kernel's
+#     facts of the serving process; the server's own binding record is checked when it wrote one, and the boot need
+#     not reach ready), then stops it. That observation is the driver's interpreter evidence; the driver refuses to
+#     run without it.
+#
+# Fixed inputs: O0 e00fec02e69ef07d65d180f5b27c6660e5177a38 and O1 28a6ed8f9714c9ce7e279e99b5656d2c4c453b68 (61
+# commits on the same official branch, the same runtime lock); the implementation C2
+# 553c8f892b10ed7b278b0f87c0e48adb82b9a4a5 (tree 50ab1b2d1e7a5f0e3b935f103339dc509e6ca95c), checked out by id beside
+# the equipment. `github.sha` is the equipment commit: exactly one commit above C2 that only adds this workflow and the
+# equipment folder, verified before anything runs. It is never the tested implementation.
+#
+# This is production function readiness on real Linux with a real installed runtime. It is NOT Linux app-package
+# delivery (AppImage, deb, rpm), a macOS app exchange, Windows, activation or restart, the return of current data, or
+# C2's full all-lane battery. ci.yml is not used: its plain dispatch also runs paid provider and skill jobs.
+#
+# No secret is referenced and the token is contents:read. workflow_dispatch would need this file on the default
+# branch, so the trigger is a push to a qualification branch. The readiness step's exit status is the driver's verdict
+# (0 PASS, 1 FAIL, 3 UNKNOWN, 2 refused before any effect). A step that ends without a verdict (its timeout, a cancel)
+# leaves the outcome UNKNOWN: that is not a non-readiness, and it says nothing about whether a process stopped.
+# Timeouts are observation allowances, not bounds on the product: each of the product's up to three test runs has its
+# own 3600 s deadline and nothing bounds the whole preparation.
+
+name: O0 -> O1 readiness of update implementation 553c8f892b10 on Ubuntu
+
+on:
+  push:
+    branches:
+      - 'qualification/update-o0o1-readiness-553c8f892b10-*'
+
+permissions:
+  contents: read
+
+# A second push to the branch waits behind a running qualification instead of cancelling hours of work.
+concurrency:
+  group: update-o0o1-readiness-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  readiness:
+    name: readiness (${{ matrix.kind }})
+    runs-on: ubuntu-24.04
+    # GitHub-hosted jobs end at 360 minutes. The readiness step's allowance below ends first, so the evidence steps
+    # still run after it.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        kind: [clean, evolved]
+    env:
+      KIND: ${{ matrix.kind }}
+      IMPL_COMMIT: 553c8f892b10ed7b278b0f87c0e48adb82b9a4a5
+      IMPL_TREE: 50ab1b2d1e7a5f0e3b935f103339dc509e6ca95c
+      DRIVER_SHA256: 9f1bcf6aad1ab06a26cf9470d06ac46fa77ff2d38042288a1957fb4ad8824295
+      EQUIPMENT: .github/qualification/o0o1-readiness-linux
+      WORKFLOW_FILE: .github/workflows/update-o0o1-readiness-ubuntu-553c8f892b10.yml
+      # The wrapper's namespace; it runs only from $Q/bin.
+      Q: /home/runner/oulab/qu1
+    steps:
+      # The equipment commit and its parent (C2), so its own change set can be read.
+      - name: Check out the equipment commit without keeping the token
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: equip
+          fetch-depth: 2
+          persist-credentials: false
+      # Nothing writes into this checkout afterwards: the driver refuses one that is not clean, ignored files included.
+      - name: Check out the implementation C2 by id without keeping the token
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.IMPL_COMMIT }}
+          path: impl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the equipment and the implementation, then install the equipment
+        run: |
+          set -u
+          test ! -e /home/runner/oulab || { echo "::error::/home/runner/oulab already exists"; exit 1; }
+          equip="$GITHUB_WORKSPACE/equip" impl="$GITHUB_WORKSPACE/impl"
+          head="$(git -C "$equip" rev-parse HEAD)"
+          parents="$(git -C "$equip" rev-list --parents -n 1 HEAD | cut -d' ' -f2-)"
+          changes="$(git -C "$equip" diff --name-status --no-renames HEAD^ HEAD)"
+          expected="$(printf 'A\t%s\n' "$EQUIPMENT/o0o1_linux.sh" "$EQUIPMENT/o0o1_readiness.py" \
+            "$EQUIPMENT/o0o1_witness_linux.py" "$WORKFLOW_FILE")"
+          commit="$(git -C "$impl" rev-parse HEAD)" tree="$(git -C "$impl" rev-parse 'HEAD^{tree}')"
+          dirty="$(git -C "$impl" status --porcelain=v1 --untracked-files=all --ignored=matching)"
+          mkdir -p "$Q/bin" "$Q/evidence/qu1-job"
+          {
+            echo "equipment_commit=$head parents=$parents"
+            echo "equipment_changes:"; echo "$changes"
+            echo "implementation_commit=$commit expected=$IMPL_COMMIT"
+            echo "implementation_tree=$tree expected=$IMPL_TREE"
+            echo "implementation_worktree=$([ -z "$dirty" ] && echo clean || echo dirty)"
+            echo "workflow_commit=$GITHUB_SHA workflow_ref=$GITHUB_REF kind=$KIND"
+            echo "repository=$GITHUB_REPOSITORY run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+            echo "runner_image=${ImageOS:-unknown} ${ImageVersion:-unknown} runner=${RUNNER_NAME:-unknown} ${RUNNER_ENVIRONMENT:-unknown}"
+          } | tee "$Q/evidence/qu1-job/source-identity.txt"
+          test "$head" = "$GITHUB_SHA" || { echo "::error::the equipment checkout is not github.sha"; exit 1; }
+          test "$parents" = "$IMPL_COMMIT" || { echo "::error::the equipment commit is not one commit above C2"; exit 1; }
+          test "$changes" = "$expected" || { echo "::error::the equipment commit changes more than its equipment"; exit 1; }
+          test "$commit" = "$IMPL_COMMIT" || { echo "::error::the implementation checkout is not C2"; exit 1; }
+          test "$tree" = "$IMPL_TREE" || { echo "::error::the implementation checkout is not C2's tree"; exit 1; }
+          test -z "$dirty" || { echo "::error::the implementation checkout is not clean"; echo "$dirty"; exit 1; }
+          cp "$equip/$EQUIPMENT/o0o1_linux.sh" "$equip/$EQUIPMENT/o0o1_readiness.py" \
+            "$equip/$EQUIPMENT/o0o1_witness_linux.py" "$Q/bin/"
+          sha256sum "$Q"/bin/* | tee "$Q/evidence/qu1-job/equipment-sha256.txt"
+          test "$(ls "$Q/bin" | tr '\n' ' ')" = "o0o1_linux.sh o0o1_readiness.py o0o1_witness_linux.py " \
+            || { echo "::error::bin does not hold exactly the equipment"; exit 1; }
+          test "$(sha256sum "$Q/bin/o0o1_readiness.py" | cut -c1-64)" = "$DRIVER_SHA256" \
+            || { echo "::error::the driver is not $DRIVER_SHA256"; exit 1; }
+      # Only uv itself: no cache, no environment, no Python of its own (activate-environment would make a venv).
+      - name: Install the pinned uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          enable-cache: false
+          activate-environment: false
+      - name: Record this runner
+        run: bash "$Q/bin/o0o1_linux.sh" facts before
+      - name: Build the readiness mirror, the witness root and the ${{ matrix.kind }} root
+        id: roots
+        timeout-minutes: 20
+        run: bash "$Q/bin/o0o1_linux.sh" roots "$KIND"
+      - name: Install the bare runtime with O0's lock
+        id: runtime
+        timeout-minutes: 30
+        run: bash "$Q/bin/o0o1_linux.sh" runtime "$GITHUB_WORKSPACE/impl" "$(command -v uv)"
+      - name: Observe O0's own server serving on that runtime
+        id: witness
+        timeout-minutes: 15
+        run: bash "$Q/bin/o0o1_linux.sh" witness
+      # 300 minutes: an allowance for up to three test runs of 3600 s each plus 7200 s for preparation, the
+      # materializations and the driver's own reads; measured nowhere yet.
+      - name: Run the readiness driver on the ${{ matrix.kind }} root
+        id: readiness
+        timeout-minutes: 300
+        run: bash "$Q/bin/o0o1_linux.sh" readiness "$KIND" "$GITHUB_WORKSPACE/impl"
+      - name: Finish the evidence
+        if: ${{ always() }}
+        timeout-minutes: 15
+        env:
+          ROOTS_OUTCOME: ${{ steps.roots.outcome }}
+          RUNTIME_OUTCOME: ${{ steps.runtime.outcome }}
+          WITNESS_OUTCOME: ${{ steps.witness.outcome }}
+          READINESS_OUTCOME: ${{ steps.readiness.outcome }}
+        run: |
+          set -u
+          job="$Q/evidence/qu1-job"
+          mkdir -p "$job"
+          if [ -f "$Q/evidence/o0o1-$KIND-readiness/verdict.txt" ]; then
+            verdict="$(head -c 4000 "$Q/evidence/o0o1-$KIND-readiness/verdict.txt")"
+          else
+            verdict="verdict=UNKNOWN expected=$KIND detail=no readiness verdict was recorded (roots $ROOTS_OUTCOME, runtime $RUNTIME_OUTCOME, witness $WITNESS_OUTCOME, readiness $READINESS_OUTCOME): the outcome is unknown, which is neither a non-readiness nor evidence that any process stopped"
+          fi
+          printf '%s\n' "$verdict" > "$job/verdict.txt"
+          witness="$(head -c 4000 "$Q/evidence/o0o1-witness/verdict.txt" 2>/dev/null || echo 'no witness verdict was recorded')"
+          if [ -f "$Q/bin/o0o1_linux.sh" ]; then
+            timeout 600 bash "$Q/bin/o0o1_linux.sh" pack final > "$job/pack.txt" 2>&1 || echo "pack exit $?" >> "$job/pack.txt"
+            timeout 120 bash "$Q/bin/o0o1_linux.sh" facts after > "$job/facts-after.txt" 2>&1 || true
+          fi
+          {
+            echo "### O0 -> O1 readiness ($KIND) of update implementation ${IMPL_COMMIT:0:12} on Ubuntu"
+            echo "Steps: roots $ROOTS_OUTCOME, runtime $RUNTIME_OUTCOME, witness $WITNESS_OUTCOME, readiness $READINESS_OUTCOME."
+            echo 'Scope: production function readiness on Linux with an installed bare runtime; not app-package delivery, macOS, Windows, activation or the full battery.'
+            echo '```'
+            cat "$job/source-identity.txt" 2>/dev/null || echo 'the source identity was not recorded'
+            echo "witness: $witness"
+            echo "readiness: $verdict"
+            echo '```'
+          } | tee "$job/result-summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-o0o1-readiness-${{ matrix.kind }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/oulab/qu1/evidence/
+          retention-days: 30
+          if-no-files-found: error
