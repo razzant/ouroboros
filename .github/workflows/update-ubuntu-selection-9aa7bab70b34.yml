@@ -1,0 +1,197 @@
+# One environment-selection node of update candidate 9aa7bab70b34 on Ubuntu: qualification equipment, not a
+# product lane.
+#
+# One ubuntu-latest job runs, once, on the exact tree of candidate C (9aa7bab70b34c067226c62246f345828b73cea7d),
+# the single pytest node
+#   tests/test_update_environment_selection.py::test_a_selection_that_cannot_complete_returns_the_whole_transition_before_any_entry
+# the red of the Ubuntu default battery R4 (run 41189652814, serial pass, `KeyError: 'return'` at line 125) that
+# this Update introduced, then one separately labelled control. Both run under the repository's own safe_test
+# owner (a disposable short root under /tmp, the scrubbed owner/provider environment, raw logs, the source
+# record), whose evidence root is uploaded whole. Nothing is retried. The result is the node step's own outcome and
+# its pytest records; the control's exit is reported and never decides it. The job's final conclusion can differ
+# from the node step's outcome (a setup step before it can skip it; the summary or the upload after it can fail on
+# their own), so a red job does not by itself mean that the node failed, or ran.
+#
+# C's test and product bytes run unchanged. The one instrument (INSTRUMENT_PATH, pinned below by blob and sha256)
+# is read from this equipment commit's objects into the runner's temp directory, never into C's checkout. It
+# hands pytest.main an observer plugin object which, around this node only, wraps the test helper Scene's
+# activate and boot and records, outside the released scratch: the identities authorization recorded,
+# os.lstat [st_dev, st_ino] of the generation path after activation (before the test's rmtree) and before the
+# boot (after its mkdir), the boot's exit and output, and the raw handoff.json at each point. The selection runs
+# in the boot's own process on C's body_switch and is seen only through what it leaves. An I/O error of the
+# observer's own output is a gap it reports, on stderr (SELECTION_OBSERVATION_INCOMPLETE) and in its end record
+# (observer_errors) wherever each still works, never the node's outcome.
+#
+# The control is not the product test: under its own safe_test root, one directory shaped like the prepared
+# generation is removed with shutil.rmtree and made again at its path, os.lstat before and after. No verdict.
+#
+# This is NOT the default battery (update-ubuntu-battery-9aa7bab70b34.yml), Windows or macOS, a fix, or a claim
+# about the filesystem beyond what findmnt and the records show. No secret is referenced and the token is
+# contents:read. This file rides one equipment commit above C with exactly the instrument beside it (checked
+# before anything runs) on a qualification branch: the trigger is the push. The job checks out C itself, by
+# SHA, without keeping the token, and proves its commit and tree; `github.sha` is the equipment commit, never the
+# tested tree.
+
+name: Ubuntu environment-selection node of update candidate 9aa7bab70b34
+
+on:
+  push:
+    branches:
+      - 'qualification/update-ubuntu-selection-9aa7bab70b34-*'
+
+permissions:
+  contents: read
+
+# A second push to the branch waits behind a running diagnostic instead of cancelling it.
+concurrency:
+  group: update-ubuntu-selection-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ubuntu-selection-node:
+    runs-on: ubuntu-latest
+    # The node step below expires first, so the evidence steps still run after it, as in the battery.
+    timeout-minutes: 45
+    env:
+      CANDIDATE_COMMIT: 9aa7bab70b34c067226c62246f345828b73cea7d
+      CANDIDATE_TREE: 8cbe97254b73d32bff6f26069fd551f5827ed01d
+      WORKFLOW_PATH: .github/workflows/update-ubuntu-selection-9aa7bab70b34.yml
+      INSTRUMENT_PATH: .github/qualification/update_ubuntu_selection_9aa7bab70b34.py
+      INSTRUMENT_BLOB: fda1fe3028d47d4863124f8e325a554d39c35d15
+      INSTRUMENT_SHA256: 0b29f11e6640084cbfac7ed8cdcf8b64ba08b2c7b6f0d19fb3b0ed58a84e0ae8
+      # As the battery job that ran R4's serial pass sets them; this node reads neither.
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: "1"
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: "1"
+    steps:
+      # Full history, as the battery checks out. Every branch comes with it, so this equipment commit (the pushed
+      # head) is present too: the next step reads the instrument from it and stops if it is not.
+      - name: Check out exact candidate C without keeping the token
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify C, the equipment commit and the instrument before anything runs
+        run: |
+          evidence="$RUNNER_TEMP/selection-evidence"
+          equipment="$RUNNER_TEMP/selection-equipment"
+          mkdir -p "$evidence" "$equipment"
+          commit="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          dirty="$(git status --porcelain --untracked-files=all)"
+          delta="$(git diff --no-renames --name-status "$CANDIDATE_COMMIT" "$GITHUB_SHA" 2>&1)" || delta="unreadable: $delta"
+          blob="$(git rev-parse --verify --quiet "$GITHUB_SHA:$INSTRUMENT_PATH")" || blob=missing
+          {
+            echo "candidate_commit=$commit"
+            echo "candidate_tree=$tree"
+            echo "expected_commit=$CANDIDATE_COMMIT"
+            echo "expected_tree=$CANDIDATE_TREE"
+            echo "worktree=$([ -z "$dirty" ] && echo clean || echo dirty)"
+            echo "workflow_commit=$GITHUB_SHA"
+            echo "workflow_parent=$(git rev-parse --verify --quiet "$GITHUB_SHA^" || echo unreadable)"
+            echo "workflow_ref=$GITHUB_REF"
+            echo "workflow_blob=$(git rev-parse --verify --quiet "$GITHUB_SHA:$WORKFLOW_PATH" || echo missing)"
+            echo "instrument_blob=$blob"
+            echo "expected_instrument_blob=$INSTRUMENT_BLOB"
+            echo "expected_instrument_sha256=$INSTRUMENT_SHA256"
+            echo "equipment_delta_from_candidate:"
+            echo "$delta"
+            echo "repository=$GITHUB_REPOSITORY run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+            echo "runner_image=${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          } | tee "$evidence/source-identity.txt"
+          test "$commit" = "$CANDIDATE_COMMIT" || { echo "::error::checked-out commit $commit is not C"; exit 1; }
+          test "$tree" = "$CANDIDATE_TREE" || { echo "::error::checked-out tree $tree is not the tree of C"; exit 1; }
+          test -z "$dirty" || { echo "::error::the checkout of C is not clean"; echo "$dirty"; exit 1; }
+          # As git lists them, by path: the instrument, then this file.
+          expected="$(printf 'A\t%s\nA\t%s' "$INSTRUMENT_PATH" "$WORKFLOW_PATH")"
+          test "$delta" = "$expected" || { echo "::error::the equipment commit is not C plus exactly this file and its instrument"; exit 1; }
+          test "$blob" = "$INSTRUMENT_BLOB" || { echo "::error::the instrument is not the pinned blob"; exit 1; }
+          git cat-file blob "$INSTRUMENT_BLOB" > "$equipment/update_ubuntu_selection_9aa7bab70b34.py"
+          (cd "$equipment" && echo "$INSTRUMENT_SHA256  update_ubuntu_selection_9aa7bab70b34.py" | sha256sum -c -) | tee -a "$evidence/source-identity.txt"
+      # What a red run may owe to the machine (disk, memory, cores) rather than to C, and the mount /tmp is on:
+      # both safe_test roots, with the node's scratch and the control's directory, live beneath /tmp.
+      - name: Record what this runner offers
+        run: |
+          { date -u +%FT%TZ; uname -srm; nproc; free -m; df -h / /mnt; findmnt --target /tmp; } 2>&1 | tee "$RUNNER_TEMP/selection-evidence/runner-before.txt" || true
+      - name: Set up the locked Python environment on the shipped interpreter
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped  # the interpreter and SQLite the battery ran R4's serial pass on
+      - name: The stores run WAL here
+        run: |
+          python -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); sys.exit(mode != sys.argv[1])" WAL
+      # The battery's environment, kept; this node starts no Node process.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      # The one node, once, under the repository's own safe_test owner; nothing is retried. The bootstrap is
+      # run_tests.py's own: the instrument then runs pytest.main from the checkout as `python -m pytest` would,
+      # with the serial pass's flags and its observer. safe_test's run directory beneath the evidence root keeps
+      # the raw logs and source record; pytest/node holds the pytest projection, observation/node.jsonl the record.
+      - name: Run the one node once under safe_test, observed, no retry
+        id: node
+        timeout-minutes: 15
+        env:
+          OUROBOROS_TEST_EVIDENCE_ROOT: ${{ runner.temp }}/selection-evidence
+        run: |
+          py="$(command -v python)"
+          "$py" -I -S scripts/safe_test.py --temp-parent /tmp --timeout 600 -- \
+            "$py" -c 'import runpy, sys; raise SystemExit(runpy.run_path(sys.argv[1])["main"](sys.argv[2:]))' \
+            "$RUNNER_TEMP/selection-equipment/update_ubuntu_selection_9aa7bab70b34.py" node
+      # The control, separately labelled and never a stand-in for the node: once, when the run is not cancelled and
+      # the node step was attempted (its outcome is not 'skipped'; a node step that failed before pytest ran counts
+      # too, the node's own command and pytest records say whether pytest ran), under its own safe_test root;
+      # observation/recreate.json in its own run directory. It decides nothing.
+      - name: Run the one control once, a directory made again at its path, not the product test
+        id: control
+        if: ${{ !cancelled() && steps.node.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          OUROBOROS_TEST_EVIDENCE_ROOT: ${{ runner.temp }}/selection-evidence
+        run: |
+          py="$(command -v python)"
+          "$py" -I -S scripts/safe_test.py --temp-parent /tmp --timeout 60 -- \
+            "$py" -I "$RUNNER_TEMP/selection-equipment/update_ubuntu_selection_9aa7bab70b34.py" recreate
+      # The commands' own lines: safe_test's exits, the node's pytest outcome lines, the observer's start and end
+      # records (the end compares the raw records written before it) and the control's record.
+      - name: Record the result
+        if: ${{ always() }}
+        env:
+          NODE_OUTCOME: ${{ steps.node.outcome }}
+          CONTROL_OUTCOME: ${{ steps.control.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          evidence="$RUNNER_TEMP/selection-evidence"
+          mkdir -p "$evidence"
+          { date -u +%FT%TZ; df -h / /mnt; } > "$evidence/runner-after.txt" 2>&1 || true
+          {
+            echo "### Ubuntu environment-selection node of update candidate ${CANDIDATE_COMMIT:0:12}"
+            echo "Node step outcome: $NODE_OUTCOME; control step outcome: $CONTROL_OUTCOME; job status so far: $JOB_STATUS."
+            echo 'Scope: one ubuntu-latest run of one pytest node and one labelled control, no retry; not the battery, Windows or macOS.'
+            echo '```'
+            cat "$evidence/source-identity.txt" || echo 'source identity was not recorded'
+            echo '--- the mount holding /tmp ---'
+            grep -A1 '^TARGET' "$evidence/runner-before.txt" || echo 'no mount was recorded'
+            echo '--- safe_test exit of each command ---'
+            grep -H '"returncode"' "$evidence"/run-*/result.json || echo 'no safe_test result was recorded'
+            echo '--- pytest outcome lines of the node ---'
+            grep -ahE '^(FAILED|ERROR) |(passed|failed|error|errors|no tests ran).* in [0-9.]+s' "$evidence"/run-*/command-*/stdout.bin || echo 'no pytest outcome line was recorded'
+            echo '--- the observer: start and end records ---'
+            grep -hE '"point": "(start|end)"' "$evidence"/run-*/observation/node.jsonl || echo 'no observer record was written'
+            echo '--- the control record ---'
+            cat "$evidence"/run-*/observation/recreate.json || echo 'no control record was written'
+            echo '```'
+          } | tee "$evidence/result-summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the raw evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-ubuntu-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/selection-evidence/
+          retention-days: 30
+          if-no-files-found: error
