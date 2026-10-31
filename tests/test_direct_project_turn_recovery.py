@@ -174,3 +174,25 @@ def test_a_direct_turn_without_a_recorded_basis_keeps_its_project_hold(tmp_path,
     assert hold.get("reason") == "project_routing_fence_lookup_failed"
     assert "missing or invalid" in hold.get("detail", "")
     assert "_project_admission" not in row, "no basis is recaptured from today's registry"
+
+
+@pytest.mark.serial
+def test_a_parked_direct_project_turn_keeps_its_basis_through_the_queue_and_a_stop(tmp_path, monkeypatch):
+    """The pause branch (31 Oct: Nova, Circles): the queue parks the turn's own record,
+    which a later pooled attempt and the next restore read; its basis rides unchanged."""
+    from supervisor.direct_pause import retain_direct_hold
+
+    queue, workers = _install(tmp_path, monkeypatch)
+    _project, admitted = _admit_project_turn(tmp_path, monkeypatch)
+    task = _run_until_saved(tmp_path, admitted)
+    basis = task["_project_admission"]
+    retain_direct_hold(task, unsaved=True)  # parks parkable_direct_task(task) and publishes the queue
+    admitted["registry"].unregister(task["id"])
+    [parked] = [row for row in workers.PENDING if row["id"] == task["id"]]
+    assert parked["_project_admission"] == basis
+
+    _restore_next_generation(tmp_path, monkeypatch, queue)
+
+    [row] = [row for row in queue.PENDING if row["id"] == task["id"]]
+    assert row["_project_admission"] == basis, row.get("_project_admission")
+    assert not row["_project_admission"].get("legacy_basis"), "restore never recaptures the basis"
