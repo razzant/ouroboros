@@ -69,6 +69,8 @@ _AGENT_FAULT_REASONS = frozenset({
     # replayed with DIFFERENT text: the caller reused an invocation identity.
     "idempotency_conflict",
     "message_text_required",
+    "message_frame_conflict",
+    "reply_to_mismatch",
     "missing_interaction_id",
     "missing_run_id",
     "payload_binding_mismatch",
@@ -76,6 +78,7 @@ _AGENT_FAULT_REASONS = frozenset({
     "payload_selector_unresolved",
     "retry_prompt_mismatch",
     "retry_selector_conflict",
+    "run_selector_conflict",
     "selector_on_retry",
     "source_response_invalid",
     "source_response_not_required",
@@ -130,6 +133,9 @@ def delegate_payload(result: ToolResult) -> Dict[str, Any]:
 
 def publish_delegate_result(ctx: Any, result: ToolResult) -> str:
     """The family's ONE public boundary: publish the native result, return its text."""
+    from ouroboros.delegate_progress import message_journal_receipt
+
+    result = message_journal_receipt(ctx, result)
     return _publish_tool_result(ctx, result)
 
 
@@ -144,19 +150,6 @@ def _fail(tool: str, code: str, detail: str, **extra: Any) -> ToolResult:
 # The typed facts a refused snapshot provision may carry; the same keys ride the
 # refusal payload, the $0 terminal, the availability row and the START_FAILED row.
 REFUSAL_FACT_KEYS = ("cause", "holder", "waited_sec", "retryable", "retry_hint")
-
-
-def lock_busy_facts(exc: BaseException) -> Dict[str, Any]:
-    """Typed facts when a HELD worktree ops lock refused a snapshot provision (#1241):
-    who holds it and for what (``subagent_worktrees.WorktreeOpsLockBusy``), so the
-    nanny can wait for that provision instead of guessing. ``{}`` for any other cause."""
-    holder = getattr(exc, "holder", None)
-    if not isinstance(exc, TimeoutError) or holder is None:
-        return {}
-    return {"cause": "lock_busy", "holder": dict(holder), "retryable": True,
-            "waited_sec": round(float(getattr(exc, "waited_sec", 0.0) or 0.0), 1),
-            "retry_hint": "Another snapshot is being provisioned under the shared worktree "
-                          "lock; wait for it (see holder) and retry delegate_start."}
 
 
 def _emit(ctx: ToolContext, kind: str, payload: Dict[str, Any]) -> bool:
@@ -198,6 +191,50 @@ def _owned_run(ctx: ToolContext, tool: str, run_id: str) -> Tuple[Optional[ToolR
                      run_settled=bool(getattr(entry, "settled", False)),
                      run_terminal_state=str(getattr(entry, "terminal_state", "") or "")), None
     return None, entry
+
+
+def message_run(ctx: ToolContext, tool: str, run_id: str):
+    """Context-only reach: starter, ancestors and durable same-tree tasks.
+
+    Unlike forward_to_worker, the independent-root roster is not a door into
+    another root's executor. This resolver is never used for lifecycle control.
+    """
+    from ouroboros.install_identity import require_owned_root, StoreForeign
+    from ouroboros.peer_roster import durable_descendant_of, peer_relation_to
+    from ouroboros.task_status import load_effective_task_result
+
+    root = custody.custody_root(ctx)
+    sender = str(getattr(ctx, "task_id", "") or "")
+    try:
+        require_owned_root(root)
+        require_owned_root(ctx.drive_root)
+        status, entry = custody.lookup(root, sender, run_id)
+        if status == custody.UNKNOWN or entry is None:
+            return _fail(tool, "run_ownership_unknown", "No durable run custody is available.", run_id=run_id), None, ""
+        target = load_effective_task_result(root, entry.task_id) or {}
+        for key in ("child_drive_root", "headless_child_drive_root", "drive_root"):
+            if target.get(key):
+                require_owned_root(pathlib.Path(target[key]))
+        if status == custody.OWNED:
+            return None, entry, "starter"
+        own = load_effective_task_result(root, sender) if sender else {}
+        if target and own:
+            # Resolve the same reach facts as task mail; only host-stored lineage
+            # supplies peer provenance, never anything in the sender's text.
+            relation = peer_relation_to(root, sender, own, entry.task_id, target)
+            if durable_descendant_of(root, entry.task_id, target, sender):
+                relation = "ancestor"
+            target_root = str(target.get("root_task_id") or (entry.task_id if not target.get("parent_task_id") else ""))
+            own_root = str(own.get("root_task_id") or (sender if not own.get("parent_task_id") else ""))
+            if relation and target_root and target_root == own_root and (
+                    not entry.root_task_id or entry.root_task_id == target_root):
+                return None, entry, relation
+        return _fail(tool, "run_not_owned", "Messages require an ancestor or a task in the same durable tree.",
+                     run_id=run_id, owner_task_id=entry.task_id), None, ""
+    except StoreForeign as exc:
+        return _fail(tool, "foreign_install_root", str(exc), run_id=run_id), None, ""
+    except (OSError, ValueError, StoreError) as exc:
+        return _fail(tool, "run_ownership_unknown", str(exc), run_id=run_id), None, ""
 
 
 def _retry_lineage(task_id: str, row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -305,7 +342,7 @@ def retry_result_status(ctx: ToolContext, drive: Any, run_id: str, *,
         return custody.UNKNOWN, None, ""
     if reader and reader == entry.task_id:
         return custody.OWNED, entry, ""
-    if (reader and entry.task_id and not entry.review_owned and entry.settled
+    if (reader and entry.task_id and not entry.review_owned  # the observed terminal, not money (#1969)
             and entry.terminal_state in custody.TERMINAL_STATES
             and _confirmed_retry_chain(drive, entry.task_id, reader)):
         return custody.OWNED, entry, entry.task_id
@@ -368,8 +405,8 @@ def orphan_disposition_status(
         if retry_status == custody.OWNED and predecessor:
             # A successor is not an orphan aggregator: keep exact target rules.
             return retry_status, retry_entry, ""
-    if (status == custody.FOREIGN and entry is not None
-            and entry.settled and not entry.patch_disposed
+    if (status == custody.FOREIGN and entry is not None and not entry.patch_disposed
+            and (entry.settled or entry.terminal_state in custody.TERMINAL_STATES)  # execution ended (#1969)
             and str(active_tool_profile(ctx)) in _TOP_LEVEL_PRINCIPAL_PROFILES
             and _task_is_terminal(drive, entry.task_id)):
         return custody.OWNED, entry, str(entry.task_id or "")
@@ -377,22 +414,15 @@ def orphan_disposition_status(
 
 
 def orphan_apply_target_ok(target: Any, active_root: Any) -> bool:
-    """May a disposition APPLY a run recorded against ``target`` from ``active_root``?
+    """Target geometry for a terminal owner's orphan, never write authority.
 
-    The nanny's own run still needs exact equality. An ORPHAN of a terminal
-    owner may additionally apply into a target NESTED inside the caller's
-    active root, provided BOTH live under ``get_subagent_projects_root()`` —
-    the host-minted project area. That is the aggregator shape the host itself
-    creates: a swarm fans into ``<project>/contributions/<track>`` clones of
-    the very tree the parent works in, and the host already checkpoint-commits
-    exactly those descendants (``coop_checkpoint._task_tree_coop_roots``), so
-    the widened set adds no tree the host was not already writing to. An
-    owner-attached folder never lives there, so this can never reach one.
-
-    ONE predicate for the apply gate, the health invariant, and the tool
-    description: a rule stated three ways drifts into three rules.
+    The recorded target may equal the active folder or lie inside configured
+    projects/worktrees roots, regardless of its creator. Own/retry keep equality
+    at their callers. Apply separately rechecks current write/Presence/body rights
+    through ``workspace_copies.copy_apply_refusal``; this predicate grants none.
     """
-    from ouroboros.config import get_subagent_projects_root
+    from ouroboros.config import get_subagent_projects_root, get_subagent_worktree_root
+    from ouroboros.launch_roots import WorkRootUnavailable
     from ouroboros.tool_access import path_is_relative_to
 
     try:
@@ -404,10 +434,14 @@ def orphan_apply_target_ok(target: Any, active_root: Any) -> bool:
         return False
     if target_path == root_path:
         return True
-    projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
-    return (path_is_relative_to(target_path, root_path)
-            and path_is_relative_to(target_path, projects_root)
-            and path_is_relative_to(root_path, projects_root))
+
+    def inside(root) -> bool:
+        try:
+            return path_is_relative_to(target_path, pathlib.Path(root()).expanduser().resolve(strict=False))
+        except WorkRootUnavailable:  # an undecided default root contains nothing
+            return False
+
+    return any(inside(root) for root in (get_subagent_projects_root, get_subagent_worktree_root))
 
 
 def orphan_capture_read_target(

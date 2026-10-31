@@ -107,23 +107,36 @@ _BOOTSTRAP_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>Ouroboros</title>
   <style>
-    html,body{height:100%;margin:0;background:#0d0f12;color:#e8eaed;font:16px system-ui,sans-serif}
+    html{color-scheme:dark;--bg-primary:#0f0f11;--text-secondary:rgba(255,255,255,.58)}
+    html[data-theme="light"]{color-scheme:light;--bg-primary:#ffffff;--text-secondary:#626977}
+    html,body{height:100%;margin:0;background:var(--bg-primary);color:var(--text-secondary);
+      font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
     main{height:100%;display:grid;place-items:center;text-align:center;padding:24px;box-sizing:border-box}
-    #status{max-width:28rem;line-height:1.45;opacity:.85}
+    #status{max-width:28rem}
   </style>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="/__telegram/bootstrap.js" defer></script>
+  <script src="/__telegram/bootstrap.js"></script>
 </head>
-<body><main><div id="status">Connecting to Ouroboros…</div></main></body>
+<body><main><div id="status" role="status">Connecting to Ouroboros…</div></main></body>
 </html>
 """
 
+# Runs in <head>, after Telegram's script and before the first paint: the interface's room and ink
+# (web/ui.css) for the Mini App's saved Light or Dark (web/theme.js keeps it under this key), else
+# Telegram's own light or dark (the interface's System here), else the device's. Then, once the
+# document is parsed, the launch.
 _BOOTSTRAP_JS = r"""(() => {
-  const status = document.getElementById('status');
-  const fail = () => { if (status) status.textContent = 'Open this app from its Telegram bot menu.'; };
+  const webApp = window.Telegram && window.Telegram.WebApp;
+  let saved = '';
+  try { saved = localStorage.getItem('ouroboros.theme') || ''; } catch (_) { /* blocked: Telegram's own */ }
+  const scheme = webApp && webApp.colorScheme;
+  document.documentElement.dataset.theme = saved === 'light' || saved === 'dark' ? saved
+    : scheme === 'light' || scheme === 'dark' ? scheme
+    : window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  const say = (text) => { const status = document.getElementById('status'); if (status) status.textContent = text; };
+  const fail = () => say('Open this app from its Telegram bot menu.');
   const start = async () => {
     try {
-      const webApp = window.Telegram && window.Telegram.WebApp;
       if (!webApp || !webApp.initData) { fail(); return; }
       webApp.ready();
       webApp.expand();
@@ -139,13 +152,14 @@ _BOOTSTRAP_JS = r"""(() => {
         method: 'GET', credentials: 'same-origin', cache: 'no-store'
       });
       if (!session.ok) {
-        if (status) status.textContent = 'This Telegram web client cannot store the secure owner session. Use the native Telegram app.';
+        say('This Telegram web client cannot store the secure owner session. Use the native Telegram app.');
         return;
       }
       window.location.replace('/');
     } catch (_) { fail(); }
   };
-  start();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
 })();
 """
 

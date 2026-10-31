@@ -1,4 +1,4 @@
-"""Direct Project model-wait census uses the live owner through the JS reducer."""
+"""Direct Project model-wait census uses the live owner through the JS readers of the server's work projection."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from ouroboros.settings_integrity import TaskSettingsSnapshot
 from ouroboros.task_results import write_task_result
 from supervisor import queue as supervisor_queue
 from supervisor.active_activity import get_direct_activity_registry
+from tests._work_projection_shared import state_fields
 
 NODE_BIN = (
     str(Path.home() / ".claudexor" / "node" / "bin" / "node")
@@ -28,31 +29,38 @@ NODE_BIN = (
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
 
 
-def _js_project_summary(rows: list[dict]) -> dict:
+def _state_body(drive_root, **census) -> dict:
+    """The census rows and the server's work projection of them, as ``/api/state`` builds both (gateway/state.py)."""
+    return state_fields(drive_root, **census)
+
+
+def _js_project_summary(body: dict, chat_id: int) -> dict:
+    """The sidebar's marker for one Project room, read from one ``/api/state`` body by the real JS."""
     script = """
-import { buildProjectActivityIndex } from './modules/project_activity.js';
+import { buildProjectActivityIndex, reconcileProjectRooms } from './modules/project_activity.js';
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
-const rows = JSON.parse(raw);
-const summary = buildProjectActivityIndex(rows).byProject.get('project-1');
+const { body, chat } = JSON.parse(raw);
+const { rooms } = reconcileProjectRooms(new Map(), { ...body, supervisor_ready: true });
+const summary = buildProjectActivityIndex(rooms, [chat]).byChat.get(String(chat));
 process.stdout.write(JSON.stringify(summary || null));
 """
     result = subprocess.run(
         [NODE_BIN, "--input-type=module", "-e", script],
-        input=json.dumps(rows), text=True, encoding="utf-8", capture_output=True, cwd=WEB_ROOT,
+        input=json.dumps({"body": body, "chat": chat_id}), text=True, encoding="utf-8", capture_output=True, cwd=WEB_ROOT,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
-def _js_pause_cards(snapshots: list[list[dict]]) -> list[dict]:
-    """Consume the real gateway rows through history, hydration and card rendering."""
+def _js_pause_cards(snapshots: list[dict]) -> list[dict]:
+    """Consume the real gateway bodies (census rows and work projection) through history, hydration and card rendering."""
     script = """
 import { createChatInstance } from './modules/chat.js';
 import { installDom, restoreDom, walkCard } from './tests/chat_dom_fixture.js';
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
-const snapshots = JSON.parse(raw), task = snapshots[0][0].activity_id;
+const snapshots = JSON.parse(raw), task = snapshots[0].active_chat_activities[0].activity_id;
 const env = installDom(async url => ({ ok: true, json: async () =>
     String(url).startsWith('/api/chat/history') ? { messages: [{task_id: task, chat_id: 7,
         role: 'assistant', is_progress: true, text: 'Checking retained work',
@@ -68,13 +76,15 @@ const find = (node, selector) => node.querySelector(selector)
     || node.children.map(child => find(child, selector)).find(Boolean) || null;
 try {
     await instance.refreshHistory({revision: 1});
-    const results = snapshots.map((rows, generation) => {
-        instance.hydrateStateSnapshot({active_chat_activities: rows,
-            active_chat_activities_complete: true, supervisor_ready: true}, Infinity, generation + 1);
+    const results = snapshots.map((body, generation) => {
+        instance.hydrateStateSnapshot({...body, active_chat_activities_complete: true, supervisor_ready: true},
+            Infinity, generation + 1);
         const card = walkCard(document.byId.get('chat-messages'), task);
-        return {phase: card.querySelector('[data-live-phase]').textContent,
+        const mark = card.querySelector('[data-live-phase]').firstElementChild;
+        const line = card.querySelector('[data-live-phase-secondary]');
+        return {phase: card.querySelector('[data-live-phase]').textContent, line: line.hidden ? '' : line.textContent,
             resume: Boolean(find(card, '[data-resume-run]')),
-            typing: card.querySelector('[data-live-typing]').style.display};
+            mark: mark.hidden ? 'none' : `${mark.dataset.shape}/${mark.dataset.hue}`};
     });
     process.stdout.write(JSON.stringify(results));
 } finally {instance.destroy(); restoreDom(env.prior);}
@@ -112,29 +122,55 @@ def test_warm_owner_pause_registry_and_fence_reach_the_rendered_card(tmp_path, m
             assert requested[0]["phase"] == ("preparing" if kind == "direct_chat" else "budget_pausing")
             assert not requested[0].get("finishing_reviews"), "a requested Pause is not yet a paused author"
             set_owner_wait(tmp_path, task["id"], {"wait_id": "pause-wait", "state": "waiting", "reason": "owner_pause"})
+            if kind == "managed_task":
+                supervisor_queue.RUNNING[task["id"]]["owner_wait"] = {"state": "waiting", "reason": "owner_pause"}
             settling = gateway_state._chat_activities_snapshot_safe(tmp_path)[0]
-            assert settling["phase"] == "budget_pausing" and not settling.get("finishing_reviews")
+            assert settling["phase"] == "budget_paused" and not settling.get("finishing_reviews")
+            # A review the parked author already sent still runs while the Pause settles: its work says it and stays
+            # live, for a direct turn and a managed member alike; an unreadable operation proves none and drops no work.
+            from ouroboros import review_operation
+
+            with monkeypatch.context() as patch:
+                patch.setattr(review_operation, "task_has_live_review_operation",
+                              lambda root, task_id, sent_only=False, **_: sent_only and task_id == task["id"])
+                [work] = _state_body(tmp_path)["works"]
+                assert (work["live"], [tail["code"] for tail in work["tails"]]) == (True, ["review_work_finishing"])
+
+                def unreadable(root, task_id, sent_only=False, **_):
+                    raise OSError("store busy")
+
+                patch.setattr(review_operation, "task_has_live_review_operation", unreadable)
+                [work] = _state_body(tmp_path)["works"]
+                assert (work["activity"], work["transition"], work["live"], work["tails"]) == (
+                    "paused", "none", False, [])
+                assert "resume" in [control["action"] for control in work["controls"]]
+            supervisor_queue.RUNNING.get(task["id"], {}).pop("owner_wait", None)
             # One reviewer as the census records it: its task (delegated run or live
             # operation) and its own model send. Mixed ids are never a reviewer count.
             owner_pause.set_fence_state(tmp_path, task["id"], fence_id=fence["fence_id"],
                                         state="paused", finishing_reviews=[task["id"], "attempt-review-send"])
-            samples.append(gateway_state._chat_activities_snapshot_safe(tmp_path))
-            row = samples[-1][0]
+            samples.append(_state_body(tmp_path))
+            row = samples[-1]["active_chat_activities"][0]
             assert row["kind"] == kind and row["phase"] == "budget_paused"
             assert row["pause_cause"] == "owner" and row["finishing_reviews"] is True
             owner_pause.set_fence_state(tmp_path, task["id"], fence_id=fence["fence_id"],
                                         state="paused", finishing_reviews=[])
-            samples.append(gateway_state._chat_activities_snapshot_safe(tmp_path))
+            samples.append(_state_body(tmp_path))
             owner_pause.release_fence(tmp_path, task["id"], reason="owner_resume")
-            samples.append(gateway_state._chat_activities_snapshot_safe(tmp_path))
+            samples.append(_state_body(tmp_path))
             assert registry.snapshot() == raw, "the canonical projection never mutates the raw registry"
     finally:
         registry.clear()
+    # The card of the work's current episode says the work's word alone and its line beside it; Resume is its work's
+    # control. This press declared nobody, so the line names nobody: only the reviews the Pause lets finish. Its status
+    # mark is the server's: the Pause stands as its bars in ink, never the owner's move.
     assert _js_pause_cards(samples) == [
-        {"phase": "Paused · owner pause · review work finishing", "resume": True, "typing": "none"},
-        {"phase": "Paused · owner pause", "resume": True, "typing": "none"},
-        # A resumed direct turn reads its own census phase (``preparing``), a managed task ``working``.
-        {"phase": "Preparing" if kind == "direct_chat" else "Working", "resume": False, "typing": ""},
+        {"phase": "Paused", "line": "Review work finishing", "resume": True, "mark": "pause/ink"},
+        {"phase": "Paused", "line": "", "resume": True, "mark": "pause/ink"},
+        # A resumed direct turn reads its own census phase (``preparing``) beside the start step it stands at (registered,
+        # never started), a managed task ``working``.
+        {"phase": "Preparing" if kind == "direct_chat" else "Working",
+         "line": "Setting up the turn" if kind == "direct_chat" else "", "resume": False, "mark": "moving/ink"},
     ]
 
 
@@ -248,9 +284,8 @@ def test_direct_project_model_wait_census_reaches_js_and_resumes(
             availability = {"complete": True}
             direct = gateway_state._direct_turns_snapshot_safe(availability=availability)
             if direct and direct[0].get("model_waits"):
-                waiting_rows = gateway_state._chat_activities_snapshot_safe(
-                    tmp_path, direct_turns=direct, availability=availability,
-                )
+                waiting_body = _state_body(tmp_path, direct_turns=direct, availability=availability)
+                waiting_rows = waiting_body["active_chat_activities"]
                 break
             time.sleep(0.01)
         assert waiting_rows is not None
@@ -263,26 +298,30 @@ def test_direct_project_model_wait_census_reaches_js_and_resumes(
         assert wait_row["state"] == "waiting"
         assert wait_row["reason"] == wait_reason
         assert wait_row["task_attempt"] == 2
-        assert _js_project_summary(waiting_rows) == {
-            "state": "waiting",
-            "motion": False,
-            "waiting": True,
-            "label": "Waiting for access",
+        # The room waits on the model: still dots, its reason beside the word, and amber only when the owner has to act.
+        work = next(item for item in waiting_body["works"] if item["episode"]["task_id"] == task["id"])
+        owner_acts = wait_row["requires_owner_action"] is True
+        if wait_reason == "auth":
+            assert owner_acts, "a sign-in is the owner's to do"
+        assert work["because"][0]["code"] == ("model_access" if owner_acts else "model_wait")
+        note = "Something here waits for you" if owner_acts else ""
+        assert _js_project_summary(waiting_body, task["chat_id"]) == {
+            "mark": "still", "owner": owner_acts, "word": "Waiting", "note": note,
+            "label": " · ".join(filter(None, ["Waiting", work["because"][0]["text"], note])),
         }
 
         catalog.available = True
         assert resumed.wait(3), failures
         availability = {"complete": True}
         resumed_direct = gateway_state._direct_turns_snapshot_safe(availability=availability)
-        resumed_rows = gateway_state._chat_activities_snapshot_safe(
-            tmp_path, direct_turns=resumed_direct, availability=availability,
-        )
+        resumed_body = _state_body(tmp_path, direct_turns=resumed_direct, availability=availability)
+        resumed_rows = resumed_body["active_chat_activities"]
         assert availability["complete"] is True
         resumed_activity = next(row for row in resumed_rows if row["activity_id"] == task["id"])
         assert resumed_activity["task_attempt"] == 2
         assert list(resumed_activity["model_waits"].values())[0]["state"] == "resolved"
-        assert _js_project_summary(resumed_rows)["waiting"] is False
-        assert _js_project_summary(resumed_rows)["motion"] is True
+        resumed_summary = _js_project_summary(resumed_body, task["chat_id"])
+        assert (resumed_summary["mark"], resumed_summary["owner"]) == ("moving", False)
     finally:
         catalog.available = True
         keep_owner_open.set()

@@ -17,17 +17,19 @@ def _src(rel: str) -> str:
 
 def test_agent_context_budget_values_pinned():
     """Values are the SSOT; changing them is a deliberate, visible edit."""
-    # Owner choice of 2026-09-29 (Low 250K, Nano 85K); the memory view's working room
-    # is two low-water levels under a window, one under an owner Low/Nano target.
+    # Owner choice of 2026-09-29 (Low 250K, Nano 85K). The memory view's working room is two
+    # low-water levels for a root; a wake (consciousness or a Presence focus), a direct chat
+    # turn and a helper leave one (owner decision 2026-10-29, question 3 = A).
     assert cb.OWNER_LOW_TARGET_TOKENS == 250_000
     assert cb.OWNER_NANO_TARGET_TOKENS == 85_000
-    assert cb.MEMORY_VIEW_WORKING_MARGINS == 2
-    assert cb.MODE_TARGET_WORKING_MARGINS == 1
+    assert cb.start_room_levels("integrator") == 2
+    assert cb.start_room_levels("consciousness") == cb.start_room_levels("consciousness", direct_chat=True) == 1
+    assert cb.start_room_levels("integrator", direct_chat=True) == cb.start_room_levels("presence") == 1
+    assert cb.start_room_levels("child") == cb.start_room_levels("nanny") == 1
     for retired in ("BG_CONTEXT_WARN_CHARS", "BG_CONTEXT_MAX_CHARS", "BG_STATE_JSON_WARN_CHARS", "BG_OBSERVATIONS_WARN_BYTES"):
         assert not hasattr(cb, retired), retired  # a wake-up is a Main turn under Main's budgets
     assert cb.LARGE_CONTEXT_SECTION_CHARS == 200_000
     assert not hasattr(cb, "MAX_RECENT_CHAT_TAIL")  # the request reads no chat tail: the memory view holds the open conversation
-    assert cb.CHAT_ARCHIVE_SCAN_WARN_BYTES == 100_000_000
     assert not hasattr(cb, "CONTEXT_SOFT_CAP_TOKENS")
     # Structural low-water divisor of the automatic reclaim pass (12.5 % of the
     # binding boundary): a disclosed design choice, not a setting.
@@ -40,10 +42,12 @@ def test_reclaim_low_water_divisor_is_one_constant_read_at_call_time(monkeypatch
     the later reply facts are APPENDED measurement fields (older readers stay positional-safe)."""
     from ouroboros import context_fit
 
-    assert "RECLAIM_LOW_WATER_DIVISOR" in _src("ouroboros/context_fit.py")
+    assert "RECLAIM_LOW_WATER_DIVISOR" in inspect.getsource(context_fit.reclaim_low_water_margin)
     assert "/ 8" not in inspect.getsource(context_fit.measure_main_fit)
-    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-3:] == [
-        "low_water_margin_tokens", "raw_input_tokens", "reply_allowance_tokens"]
+    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-12:] == [
+        "low_water_margin_tokens", "raw_input_tokens", "reply_allowance_tokens", "anchor_input_tokens",
+        "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "view_kind", "window_witness_bound",
+        "window_observation_fp", "window"]
     assert context_fit.reclaim_low_water_margin(250_000, 500_000) == 31_250  # target binds
     assert context_fit.reclaim_low_water_margin(None, 70_000) == 8_750  # capacity alone
     assert context_fit.reclaim_low_water_margin(None, None) == 0  # nothing known
@@ -100,7 +104,8 @@ def test_call_sites_import_the_ssot_names():
     ):
         assert not hasattr(cb, name)
         assert name not in loop_src
-    assert "OWNER_LOW_TARGET_TOKENS" in _src("ouroboros/context_fit.py")
+    from ouroboros.context_fit import measure_main_fit
+    assert "OWNER_LOW_TARGET_TOKENS" in inspect.getsource(measure_main_fit)
 
     # The request reads no chat tail: the open conversation is the memory view's, and the
     # readers of the frozen consolidation cursor's tail are gone with it.
@@ -135,23 +140,23 @@ def test_old_bare_literals_are_gone_from_call_sites():
 
 
 def test_overflow_classification_is_one_shared_seam():
-    """Main, the local transport, and the summarizer must classify overflow
-    through the SAME context_budget helper and constants — a seam keeping a
-    private marker copy or private output-size precedence regresses S1 N-1."""
+    """Main and the local transport must classify overflow through the SAME
+    context_budget helper and constants — a seam keeping a private marker copy
+    or private output-size precedence regresses S1 N-1. (The helper summarizer,
+    the third reader, left with its engine.)"""
     import ouroboros.context_compaction as cc_mod
     import ouroboros.llm as llm_mod
     import ouroboros.loop_llm_call as loop_call_mod
 
     assert llm_mod.context_overflow_message is cb.context_overflow_message
-    assert cc_mod._context_overflow_message is cb.context_overflow_message
     assert loop_call_mod._context_overflow_message is cb.context_overflow_message
     assert loop_call_mod._output_or_body_size_message is cb.output_or_body_size_message
     assert llm_mod.CONTEXT_OVERFLOW_CODES is cb.CONTEXT_OVERFLOW_CODES
-    assert cc_mod._TYPED_CONTEXT_OVERFLOW_CODES is cb.CONTEXT_OVERFLOW_CODES
     assert loop_call_mod._STRUCTURED_CONTEXT_OVERFLOW_CODES is cb.CONTEXT_OVERFLOW_CODES
-    # No module keeps a private marker tuple beside the shared one.
+    # No module keeps a private marker tuple beside the shared one, nor a classifier of its own.
     for mod in (llm_mod, cc_mod, loop_call_mod):
         assert not hasattr(mod, "_OUTPUT_OR_BODY_SIZE_MARKERS")
+    assert not hasattr(cc_mod, "_context_overflow_message") and not hasattr(cc_mod, "_TYPED_CONTEXT_OVERFLOW_CODES")
 
 
 def test_output_size_precedence_lives_inside_the_shared_helper():

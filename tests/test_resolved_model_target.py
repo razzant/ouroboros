@@ -157,33 +157,93 @@ def test_fallback_notice_carries_lane_switch_incident_reason_and_pin(tmp_path, m
 
     assert len(progress) == 1
     text, incident = progress[0]
-    assert "account: account-a" in text and "reason: provider_transient" in text
-    assert "pinned account: siblings were not tried" in text
+    assert text == (f"⚡ Fallback: primary → {fallback}; account: account-a; pinned account: siblings were "
+                    "not tried. Trying the next model after a temporary provider failure.")
     assert incident == {
         "task_incident": "model_lane_switch",
         "toast_once": f"task-7:model_lane_switch:3:{fallback}",
     }
 
 
-def test_second_lane_switch_names_the_candidate_that_just_failed(tmp_path, monkeypatch):
-    """Each notice names the model actually tried, beside that model's own reason."""
+def test_each_lane_switch_names_the_candidate_that_just_failed_in_its_own_words(tmp_path, monkeypatch):
+    """Two refused candidates, then an answer. Each notice names the model actually tried,
+    that model's own failure class in words and only the sentence its own provider left
+    (stamped by the real owner, as the call owner stamps it); only the answering route is
+    adopted, every notice is announced before its dispatch and keeps its own toast key."""
     from types import SimpleNamespace
     from ouroboros import fallback_cooldown, loop, loop_model_call
+    from ouroboros.loop_transport import stamp_owner_provider_message
 
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "alt-a,alt-b")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "alt-a,alt-b,alt-c")
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_: False)
     monkeypatch.setattr(fallback_cooldown, "mark_cooldown", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_task_deadline_epoch", lambda _: None)
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
-    usage = {"_last_llm_error_kind": "primary_kind"}
-    progress = []
+    cut = ("The provider kept only the start of this sentence about the refused tool payload. " * 9)[:300]
+    failures = {  # each failed call's typed kind and failure, as the call owner stamps them
+        "alt-a": ("auth_error", RuntimeError("AuthenticationError('401 invalid_api_key')")),
+        "alt-b": ("provider_body_error", {"message": cut, "message_truncated": True}),
+    }
+    usage = {"_last_llm_error_kind": "bad_request", "_last_llm_provider_message": "Upstream request failed."}
+    progress, dispatched = [], []
 
     def call(ctx):
-        # Each candidate fails and stamps its own typed kind on the record.
-        usage["_last_llm_error_kind"] = f"{ctx.active_model}_kind"
+        dispatched.append(ctx.active_model)
+        if ctx.active_model not in failures:
+            return {"role": "assistant", "content": "done"}, 0.0, "max"
+        usage["_last_llm_error_kind"], failure = failures[ctx.active_model]
+        stamp_owner_provider_message(usage, failure)
         return None, 0.0, "max"
 
     monkeypatch.setattr(loop, "_call_round_model", call)
+    ctx = SimpleNamespace(active_model="primary", active_use_local=False)
+    msg, model, *_rest = loop_model_call._run_cross_model_fallback_chain(
+        llm=None, ctx=ctx, tools=SimpleNamespace(_ctx=SimpleNamespace()), messages=[], active_model="primary",
+        active_use_local=False, tool_schemas=[], active_effort="high", max_retries=1,
+        drive_logs=tmp_path / "logs", task_id="task-7", round_idx=3, event_queue=None,
+        accumulated_usage=usage, task_type="task",
+        emit_progress=lambda text, *, incident=None: progress.append((text, incident)),
+        context_fit_plan=None, active_context_mode="max",
+    )
+
+    assert [text for text, _incident in progress] == [
+        "⚡ Fallback: primary → alt-a. Trying the next model after a rejected request. "
+        'The provider said: "Upstream request failed."',
+        "⚡ Fallback: alt-a → alt-b. Trying the next model after an authentication or authorization "
+        "refusal; sign-in is still needed there.",
+        "⚡ Fallback: alt-b → alt-c. Trying the next model after an error in the provider's response. "
+        f'The provider said: "{" ".join(cut.split())}…" (shortened). '
+        "The task's Logs keep the host's record of this failure.",
+    ]
+    assert [incident for _text, incident in progress] == [
+        {"task_incident": "model_lane_switch", "toast_once": f"task-7:model_lane_switch:3:{name}"}
+        for name in ("alt-a", "alt-b", "alt-c")]
+    assert dispatched == ["alt-a", "alt-b", "alt-c"]
+    assert msg["content"] == "done" and model == ctx.active_model == "alt-c"
+
+
+@pytest.mark.parametrize("usage,reason", [
+    ({}, ""),
+    # An opaque 400 is a rejected request, never a guessed context overflow.
+    ({"_last_llm_error_kind": "bad_request"}, " after a rejected request"),
+    ({"_last_llm_error_kind": "provider_outcome_unknown"},
+     " after an attempt with no known outcome; the earlier attempt’s outcome and cost stay unknown"),
+    ({"_last_llm_error_kind": "a_future_kind"}, " after a provider failure"),
+])
+def test_a_lane_switch_says_no_more_than_the_record_knows(tmp_path, monkeypatch, usage, reason):
+    """The class the table has no words for reads as the owner's generic words; the
+    exception text and a typed code stay in the record, never on the notice."""
+    from types import SimpleNamespace
+    from ouroboros import fallback_cooldown, loop, loop_model_call
+
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "alt-a")
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_: False)
+    monkeypatch.setattr(loop, "_task_deadline_epoch", lambda _: None)
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
+    monkeypatch.setattr(loop, "_call_round_model", lambda _ctx: ({"role": "assistant"}, 0, "max"))
+    usage = {**usage, "_last_llm_error": "BadRequestError('Error code: 400 - {}')"} if usage else usage
+    progress = []
+
     loop_model_call._run_cross_model_fallback_chain(
         llm=None, ctx=SimpleNamespace(active_model="primary", active_use_local=False),
         tools=SimpleNamespace(_ctx=SimpleNamespace()), messages=[], active_model="primary",
@@ -194,10 +254,7 @@ def test_second_lane_switch_names_the_candidate_that_just_failed(tmp_path, monke
         context_fit_plan=None, active_context_mode="max",
     )
 
-    assert progress == [
-        "⚡ Fallback: primary → alt-a; reason: primary_kind",
-        "⚡ Fallback: alt-a → alt-b; reason: alt-a_kind",
-    ]
+    assert progress == [f"⚡ Fallback: primary → alt-a. Trying the next model{reason}."]
 
 
 @pytest.mark.parametrize("override,expected_account,pinned", [

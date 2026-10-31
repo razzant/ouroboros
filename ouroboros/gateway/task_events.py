@@ -4,12 +4,20 @@ The existing ``gateway.tasks`` exports remain the route and injection surface.
 Both transports share current result/lineage projections and all five sources;
 v2 owns only read positions, never event persistence or task state.
 
-v2 cursor: one byte offset per root and source over the complete
-archive-plus-live chain, valid while archives stay immutable and retained.
-Only an explicit ``created_at`` on the task result bounds the scan (API
-admission stamps it for generated ids); a result without it, such as a
-caller-supplied id, keeps the full cold scan. Skipped archive bytes still
-count in the offset.
+``progress`` and ``chat`` are the dialogue store's streams (``state/dialog.sqlite``):
+a task tree's rows are indexed probes over its identifiers (``dialogue_store.task_rows``),
+never a scan of other rooms' history; the v1 ``line`` is the row's durable position
+among every stored object of its stream (``dialogue_positions``). ``events``, ``tools``
+and ``supervisor`` stay rotated files read by byte offset.
+
+v2 cursor: one coordinate per root and source -- a dialogue stream's chain coordinate
+(the byte offset the row has in the frozen archive plus the rows appended since) or a
+file chain's byte offset over archive plus live -- valid while archives stay immutable
+and retained. Only an explicit ``created_at`` on the task result bounds a file scan and
+lets the cursor step over a not-yet-imported archive segment that predates the task
+(API admission stamps it for generated ids). A pending segment the task may have rows
+in is disclosed once (``history_gap`` ``still_importing``) and never crossed, so no row
+is skipped; skipped archive bytes still count in the offset.
 """
 
 from __future__ import annotations
@@ -21,12 +29,16 @@ import json
 import os
 import pathlib
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
+from ouroboros import dialogue_store as ds
+from ouroboros.dialogue_import import coverage as dialogue_coverage, pending_segments
+from ouroboros.dialogue_positions import ordinals_of, skipped_between
 from ouroboros.gateway._helpers import coerce_int, request_drive_root, run_sync_to_completion
+from ouroboros.gateway.logs import replica_key
 from ouroboros.headless import ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_PENDING
 from ouroboros.outcomes import public_task_result
 from ouroboros.task_results import load_task_result, validate_task_id
@@ -63,6 +75,9 @@ _LOG_SOURCES = (
     ("tools", ("logs", "tools.jsonl")),
     ("supervisor", ("logs", "supervisor.jsonl")),
 )
+_DIALOGUE_SOURCES = frozenset(ds.STREAMS)  # read from the store; the other sources are rotated files
+_DIALOGUE_BATCH = 200  # rows per probe page: one short read transaction, never the whole stream
+_TASK_COLUMNS = ("task_id", "parent_task_id", "root_task_id", "subagent_task_id")
 
 
 async def api_task_events(request: Request) -> StreamingResponse:
@@ -129,8 +144,7 @@ async def api_task_events(request: Request) -> StreamingResponse:
                         pending.append(row)
                     if pending:
                         tail_key = _event_sort_key(pending[-1])
-            if follower._lineage_notice is not None:
-                notice, follower._lineage_notice = follower._lineage_notice, None
+            for notice in follower.take_notices():
                 # A read diagnostic is not a legacy history row/rank.
                 yield _sse({**notice, "seq": cursor}, event_id=cursor)
             for event in pending:
@@ -191,7 +205,7 @@ async def api_task_events(request: Request) -> StreamingResponse:
         try:
             async for frame in _legacy_events():
                 yield frame
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, StoreError) as exc:
             yield _sse({"type": "error", "task_id": task_id, "seq": cursor + 1,
                         "error": str(exc), "reason": "history_unavailable"}, event_id=cursor + 1)
 
@@ -278,6 +292,7 @@ class _TaskEventFollower:
         self.result: Dict[str, Any] = {}
         self.suppress_task_done = False
         self.filter_grew = False
+        self.replicas: set = set()  # REPLICA_RULE rows already emitted on this connection, by natural key
         self._queue_snapshot_mtime: Any = None
         # A lineage notice is raised when the store cannot answer the lineage query (a
         # migration window); it clears once the query answers again. The last answered
@@ -285,6 +300,10 @@ class _TaskEventFollower:
         self._lineage_unavailable = False
         self._lineage_notice: Optional[dict] = None
         self._lineage_proof: Optional[tuple] = None
+        # A dialogue stream whose archive import has not covered this root yet: its rows below the
+        # frontier are unknown, which the stream says once per (root, source), never "no rows".
+        self._import_notices: Dict[tuple, dict] = {}
+        self._import_noted: set = set()
         # Only an explicit creation fact may bound the scan. Legacy ``ts`` can
         # describe finalization and must never hide earlier task history.
         raw = load_task_result(self.drive_root, task_id) or {}
@@ -354,15 +373,64 @@ class _TaskEventFollower:
         key = (str(root), source)
         state = self.logs.get(key)
         if state is None:
-            state = {"archives": [], "offset": 0, "ino": None, "lines": 0}
+            state = {"archives": [], "offset": 0, "ino": None, "lines": 0, "after": -1}
             self.logs[key] = state
         return state
 
-    def _read_chain_delta(self, root: pathlib.Path, source: str, parts: tuple) -> List[Dict[str, Any]]:
-        """Entries appended to one (root, source) chain since the recorded state.
+    def take_notices(self) -> List[dict]:
+        """The read diagnostics raised since the last take: the lineage gap, then each dialogue
+        stream whose archive import is incomplete for a root (once per root and source)."""
+        notices = [self._lineage_notice] if self._lineage_notice is not None else []
+        self._lineage_notice = None
+        notices.extend(self._import_notices.values())
+        self._import_notices = {}
+        return notices
+
+    def _note_import(self, root: pathlib.Path, source: str) -> None:
+        """Disclose once that ``source`` of ``root`` is still importing (or holds a segment that
+        never will be): the merge below the frontier is incomplete, not empty."""
+        key = (str(root), source)
+        facts = dialogue_coverage(root, source)
+        if facts["imported"]:
+            self._import_noted.discard(key)
+            return
+        if key not in self._import_noted:
+            self._import_noted.add(key)
+            self._import_notices[key] = {
+                "type": "history_gap", "source": source, "root": str(root), "task_id": self.task_id,
+                "reason": "segment_unimportable" if facts["mismatch"] and not facts["pending"] else "still_importing",
+                "data": {"pending": facts["pending"], "mismatch": facts["mismatch"]}}
+
+    def _read_dialogue_delta(self, root: pathlib.Path, source: str) -> List[Tuple[Dict[str, Any], Optional[int]]]:
+        """The task tree's rows stored in one dialogue stream after the recorded coordinate, with
+        each row's ``line`` (its durable ordinal + 1; None while the archive import has not settled
+        the counts, which ``_note_import`` discloses). Indexed probes, one statement per column, paged."""
+        state = self._log_state(root, source)
+        rows: List[ds.Row] = []
+        after = int(state["after"])
+        while True:
+            page = ds.task_rows(root, self.task_filter_ids, stream=source, after=after, limit=_DIALOGUE_BATCH)
+            rows.extend(page)
+            if len(page) < _DIALOGUE_BATCH:
+                break
+            after = page[-1].seq
+        if rows:
+            state["after"] = rows[-1].seq
+        self._note_import(root, source)
+        try:
+            ordinals = ordinals_of(root, source, [row.seq for row in rows]) if rows else {}
+        except StoreError:  # the counts below the cutover are not settled: no number is better than a guess
+            ordinals = {}
+        return [(row.row, ordinals[row.seq].ordinal + 1 if row.seq in ordinals else None) for row in rows]
+
+    def _read_chain_delta(self, root: pathlib.Path, source: str, parts: tuple) -> List[Any]:
+        """Entries appended to one (root, source) chain since the recorded state: a dialogue
+        stream's rows after the recorded coordinate (with their lines), or a file chain's bytes.
 
         Fresh state (a late-discovered log) naturally degenerates to reading the
         whole chain: every archive is "new" and the live offset is 0."""
+        if source in _DIALOGUE_SOURCES:
+            return self._read_dialogue_delta(root, source)
         state = self._log_state(root, source)
         live = root.joinpath(*parts)
         prefix = _ROTATED_LOG_PREFIXES.get(source)
@@ -426,13 +494,17 @@ class _TaskEventFollower:
         entries.extend(got)
         return entries
 
-    def _entries_to_rows(
-        self, root: pathlib.Path, source: str, entries: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    def _entries_to_rows(self, root: pathlib.Path, source: str, entries: List[Any]) -> List[Dict[str, Any]]:
+        """Events for the entries that match the lineage filter: a file chain's entries are
+        numbered as they are consumed; a dialogue row carries its own ``line`` (or none)."""
         state = self._log_state(root, source)
         rows: List[Dict[str, Any]] = []
-        for entry in entries:
-            state["lines"] += 1
+        for item in entries:
+            if source in _DIALOGUE_SOURCES:
+                entry, line = item
+            else:
+                state["lines"] += 1
+                entry, line = item, state["lines"]
             entry_task = str(entry.get("task_id") or "")
             entry_subagent = str(entry.get("subagent_task_id") or "")
             entry_parent = str(entry.get("parent_task_id") or "")
@@ -444,9 +516,15 @@ class _TaskEventFollower:
                 and entry_root != self.task_id
             ):
                 continue
-            event = _event_from_log_entry(source, state["lines"], entry, root)
+            event = _event_from_log_entry(source, line or 0, entry, root)
+            if line is None:
+                event.pop("line")  # unknown while the archive import settles the counts (disclosed once)
             if self.suppress_task_done and event.get("type") == "task_done":
                 continue
+            if (key := replica_key(entry)) is not None:
+                if key in self.replicas:
+                    continue
+                self.replicas.add(key)
             rows.append(event)
         return rows
 
@@ -454,6 +532,7 @@ class _TaskEventFollower:
         """Full archive-aware merge; rebuilds ALL follow state from scratch."""
         self.logs = {}
         self.roots = []
+        self.replicas = set()
         self.task_filter_ids = {self.task_id}
         # The process-local stat memo survives a connection/replay rebuild.
         # A replay rebuilds log positions, not the live follower's prior proof.
@@ -564,11 +643,14 @@ class _TaskEventCursorFollower(_TaskEventFollower):
         Each source's logical EOF is pinned for this pass; later appends wait
         for the next pass so a busy source cannot starve the rest of the view.
         """
-        if self._lineage_notice is not None:
-            notice, self._lineage_notice = self._lineage_notice, None
+        for notice in self.take_notices():
             yield self.envelope(notice, delivery=False)
+        skipped = False  # a skipped replica's position, which only a frame carries to the client
         for root in self.roots:
             for source, parts in _LOG_SOURCES:
+                if source in _DIALOGUE_SOURCES:
+                    yield from self._read_dialogue_events(root, source)
+                    continue
                 live = root.joinpath(*parts)
                 position = self.positions[str(root)][source]
                 if position == 0 and self._created_floor:
@@ -631,9 +713,80 @@ class _TaskEventCursorFollower(_TaskEventFollower):
                         event.pop("line")
                         if self.suppress_task_done and event["type"] == "task_done":
                             continue
+                        if (key := replica_key(entry)) is not None:  # one per connection; a cursor resumed between
+                            if key in self.replicas:                   # the two copies' frames shows both (disclosed)
+                                skipped = True
+                                continue
+                            self.replicas.add(key)
+                        skipped = False
                         yield self.envelope(event, identity=identity)
                     if position == before:
                         break
+        if skipped:  # a cut in the idle window after the pass would otherwise re-read the copy it skipped
+            yield self.envelope({"type": "cursor_checkpoint", "task_id": self.task_id}, delivery=False)
+
+    def _read_dialogue_events(self, root: pathlib.Path, source: str):
+        """One pass over a dialogue stream from the cursor's coordinate: the task tree's rows and
+        the lines the import skipped, in coordinate order, each moving the position to its exact
+        end. The pass ends at the stream's end pinned when it began, so later appends wait for
+        the next pass, or at the archive import's frontier: a pending segment that may hold the
+        task's rows is disclosed once and never crossed (a segment proven to predate the task's
+        creation holds none and is stepped over), so no row is ever skipped."""
+        key = str(root)
+        position = self.positions[key][source]
+        end = ds.stream_end(root, source)
+        if position > end:
+            raise ValueError("cursor position is beyond the dialogue stream")
+        bound, waiting = end, False
+        for segment in pending_segments(root):
+            if segment["stream"] != source or int(segment["base"]) + int(segment["size"]) <= position:
+                continue
+            if self._created_floor and _archive_stamp_predates(segment["name"], source, self._created_floor):
+                continue  # rotated before the task existed: none of its rows; the probes find nothing there
+            bound, waiting = min(bound, max(position, int(segment["base"]))), True
+            break
+        if waiting and (key, source) not in self._import_noted:
+            self._import_noted.add((key, source))
+            yield self.envelope({"type": "history_gap", "source": source, "root": key, "task_id": self.task_id,
+                                 "reason": "still_importing"}, delivery=False)
+        elif not waiting:
+            self._import_noted.discard((key, source))
+        if bound > position and ds.range_coverage(root, source, lower=position, upper=bound)["mismatch"]:
+            yield self.envelope({"type": "history_gap", "source": source, "root": key, "task_id": self.task_id,
+                                 "reason": "segment_unimportable"}, delivery=False)
+        keys = [(column, task) for task in sorted(self.task_filter_ids) for column in _TASK_COLUMNS]
+        skipped = list(skipped_between(root, source, position, bound)) if bound > position else []
+        lower = position
+        while lower < bound:
+            rows = ds.probe_rows(root, source, keys, lower=lower, before=bound, limit=_DIALOGUE_BATCH, newest_first=False)
+            for row in rows:
+                while skipped and skipped[0].seq < row.seq:
+                    gap = skipped.pop(0)
+                    self.positions[key][source] = gap.end
+                    yield self.envelope({"type": "history_gap", "source": source, "root": key, "task_id": self.task_id,
+                                         "reason": "invalid_archive_line"},
+                                        identity=json.dumps([key, source, gap.seq], separators=(",", ":")), delivery=False)
+                self.positions[key][source] = row.end
+                entry = row.row
+                if (str(entry.get("task_id") or "") not in self.task_filter_ids
+                        and str(entry.get("subagent_task_id") or "") not in self.task_filter_ids
+                        and str(entry.get("parent_task_id") or "") != self.task_id
+                        and str(entry.get("root_task_id") or "") != self.task_id):
+                    continue
+                event = _event_from_log_entry(source, 0, entry, root)
+                event.pop("line")  # v2 rows carry a coordinate identity, never a count
+                if self.suppress_task_done and event["type"] == "task_done":
+                    continue
+                yield self.envelope(event, identity=json.dumps([key, source, row.seq], separators=(",", ":")))
+            if len(rows) < _DIALOGUE_BATCH:
+                break
+            lower = rows[-1].seq + 1
+        for gap in skipped:
+            self.positions[key][source] = gap.end
+            yield self.envelope({"type": "history_gap", "source": source, "root": key, "task_id": self.task_id,
+                                 "reason": "invalid_archive_line"},
+                                identity=json.dumps([key, source, gap.seq], separators=(",", ":")), delivery=False)
+        self.positions[key][source] = bound
 
 
 async def _api_task_events_v2(request: Request, task_id: str):
@@ -690,7 +843,7 @@ async def _api_task_events_v2(request: Request, task_id: str):
                     yield _sse(event, event_id=follower.seq)
                     break
                 await asyncio.sleep(0.5)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, StoreError) as exc:
             event = follower.envelope({"type": "error", "task_id": task_id,
                 "error": str(exc), "reason": "cursor_unavailable"}, delivery=False)
             yield _sse(event, event_id=follower.seq)
@@ -699,11 +852,11 @@ async def _api_task_events_v2(request: Request, task_id: str):
 
 
 def iter_task_events(drive_root: pathlib.Path, task_id: str) -> List[Dict[str, Any]]:
-    """Return synthesized replayable events for a task from existing logs.
+    """Return synthesized replayable events for a task from the dialogue store and the file logs.
 
-    Archive-aware (v6.90.x P2): each rotated log's ``archive/<prefix>_*.jsonl``
-    chain is read oldest-first before the live file, so a rotation never erases
-    replay history. Also the SSE initial-replay/re-merge path."""
+    The dialogue streams answer the task tree's rows by indexed probe; each rotated file log's
+    ``archive/<prefix>_*.jsonl`` chain is read oldest-first before the live file, so a rotation
+    never erases replay history. Also the SSE initial-replay/re-merge path."""
     return _TaskEventFollower(drive_root, task_id).full_merge()
 
 

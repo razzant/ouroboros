@@ -45,7 +45,39 @@ def provider_cost_value(value: Any) -> Optional[float]:
     return number if math.isfinite(number) and number >= 0 else None
 
 
-_number = provider_cost_value  # historical local name at this boundary
+# The ``cost_basis`` of a reply priced as the gateway charge plus the provider-billed share.
+BYOK_COST_BASIS = "byok_gateway_plus_upstream"
+
+
+def consumed_cost_value(usage: Any) -> Any:
+    """What one reply consumed, whichever wallet paid, read from RAW provider ``usage``.
+
+    ``cost`` is the gateway's own charge. A request served on the caller's own provider
+    key (``is_byok is True``) was billed by that provider too, reported as
+    ``cost_details.upstream_inference_cost``: the reply consumed both. Every other reply
+    returns ``cost`` untouched; there OpenRouter repeats the charge in that field (recorded
+    wire: equal), so adding it would double the bill. A BYOK reply without a valid upstream
+    figure is unknown (``None``), never free. A normalized dict already carries the sum in
+    ``cost`` (``cost_basis``): never price it again.
+    """
+    charge = usage.get("cost") if isinstance(usage, dict) else None
+    if not isinstance(usage, dict) or usage.get("is_byok") is not True or provider_cost_value(charge) is None:
+        return charge
+    details = usage.get("cost_details")
+    upstream = provider_cost_value(details.get("upstream_inference_cost")) if isinstance(details, dict) else None
+    return None if upstream is None else provider_cost_value(charge) + upstream
+
+
+def reported_price(usage: Dict[str, Any], *fallbacks: Any) -> Tuple[Optional[float], bool, str]:
+    """``(price, invalid, cost_basis)`` of one reply: the first trustworthy amount among what
+    it consumed, its ``total_cost`` and the caller's ``fallbacks``. ``invalid`` = amounts were
+    reported but none is trustworthy. The ledger and loop lanes share it so they cannot fork."""
+    consumed = consumed_cost_value(usage)
+    candidates = (consumed, usage.get("total_cost"), *fallbacks)
+    cost = next((number for value in candidates if (number := provider_cost_value(value)) is not None), None)
+    byok = usage.get("is_byok") is True and cost is not None and provider_cost_value(consumed) is not None
+    return cost, cost is None and any(value is not None for value in candidates), BYOK_COST_BASIS if byok else ""
+
 
 # Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``
 # and Anthropic ``max_tokens``. The one vocabulary every finish-reason reader shares.
@@ -222,15 +254,15 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         }
         if split:
             normalized["cache_write_tokens_by_ttl"] = split
-    candidates = (
-        usage.get("cost"), usage.get("total_cost"),
-        payload.get("total_cost_usd") if isinstance(payload, dict) else None,
+    cost, invalid, basis = reported_price(
+        usage, payload.get("total_cost_usd") if isinstance(payload, dict) else None,
         getattr(response, "total_cost_usd", None),
     )
-    cost = next((number for value in candidates if (number := _number(value)) is not None), None)
     normalized.pop("cost_invalid", None)  # Derive from provider prices, never trust their marker.
-    if cost is None and any(value is not None for value in candidates):
+    if invalid:
         normalized["cost_invalid"] = True
+    if basis:  # the same consumed amount the loop lane reports, tagged on the settled row
+        normalized.update(cost=cost, cost_basis=basis)
     if cost is not None:
         return normalized, cost, True
     completion = normalized["completion_tokens"]
@@ -242,7 +274,7 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         and isinstance(payload.get("error"), dict)
         and prompt == 0
         and completion == 0
-        and all(value is None for value in candidates)
+        and not invalid  # no amount was reported at all
         and not cache_usage_reported
     ):
         normalized.update(prompt_tokens=0, completion_tokens=0, cached_tokens=0, cache_write_tokens=0)

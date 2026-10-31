@@ -1001,7 +1001,8 @@ def test_local_and_model_operation_transports_receive_no_stream_option(isolated,
     import ouroboros.llm_claudexor as operations
     client = LLMClient()
     seen = []
-    def local(messages, tools, max_tokens, choice, *, timeout=None, reasoning_effort=None):
+    def local(messages, tools, max_tokens, choice, *, timeout=None, reasoning_effort=None,
+              processing_preference=None):
         seen.append({"timeout": timeout, "reasoning_effort": reasoning_effort})
         return {"content": "local"}, {}
     def operation(*args, **kwargs):

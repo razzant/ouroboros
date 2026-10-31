@@ -45,7 +45,7 @@ from ouroboros.task_results import (
     write_task_result,
 )
 from tests._shared import write_queue_document
-from tests._store_shared import result_signature
+from tests._store_shared import release_store_handles, result_signature
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -535,6 +535,7 @@ def test_gr6_4_unreadable_custody_log_is_typed_unknown_not_clean(qenv, monkeypat
 
     unreadable = qenv.drive / STORE_REL
     if unreadable.exists():
+        release_store_handles(unreadable)  # this process's cached handle (Windows refuses the delete)
         unreadable.unlink()
     unreadable.mkdir(parents=True)
     assert dc.custody_log_unreadable(qenv.drive) is True

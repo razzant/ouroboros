@@ -96,6 +96,26 @@ def terminal_custody_notice_text(result: Dict[str, Any]) -> str:
     return terminal_custody_notice(result, owner_row=True)
 
 
+def quiet_finish(row: Dict[str, Any]) -> bool:
+    """A silent finish is quiet only when neither the mind nor the host sent a message."""
+    return row.get("wake_silent") is True and not row.get("owner_message_sent") and not terminal_host_notice_text(row)
+
+
+def wake_cause_title(metadata: Dict[str, Any]) -> str:
+    """The host's admission title; the authored title slot stays empty."""
+    from ouroboros.consciousness_authority import wake_cause
+    from ouroboros.usage_origin import cause_label
+
+    cause = wake_cause(metadata)
+    if cause == "own_clock":
+        return "Own time"
+    if cause == "focus":
+        focus, place = metadata.get("focus") or {}, (metadata.get("presence") or {}).get("place") or {}
+        return str(focus.get("label") or cause_label(
+            str(metadata.get("consciousness_cause") or "place:" + str(focus.get("place_id") or "")), [place]))
+    return ""
+
+
 def terminal_notice_text(result: Dict[str, Any]) -> str:
     """The same terminal notices on transports with one text body or no event stream."""
     return "\n\n".join(part for part in (
@@ -181,7 +201,7 @@ def stamp_root_final_phase(
 def prepare_terminal_send_event(
     env_drive_root: Any, task: Dict[str, Any], text: str,
     usage: Dict[str, Any], send_event: Dict[str, Any],
-    *, presence: bool,
+    *, presence: bool, custody_audit: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Preserve raw host salvage, then build the one live/replay projection."""
     timing = usage.get("_finalization_timing")
@@ -196,19 +216,16 @@ def prepare_terminal_send_event(
     if not presence and task.get("_is_direct_chat") and (task.get("metadata") or {}).get("_host_operation"):
         correlation = host_operation_reply_kwargs(task.get("origin_message_ref"))
         send_event.setdefault("progress_meta", {}).update(correlation.get("progress_meta", {}))
-    # Loop cleanup may have cancelled a run after the last model observation.
-    # Read the audit it already persisted before constructing this delivery.
-    from ouroboros.task_results import load_task_result
+    # Cleanup may settle a run after the model observed it. Read only this task's
+    # current rows; annotation and result persistence follow the live queue put.
+    from ouroboros.delegate_terminal import terminal_custody_disclosure
 
-    try:
-        current = load_task_result(
+    if custody_audit is None:
+        custody_audit = terminal_custody_disclosure(
             pathlib.Path(task.get("budget_drive_root") or env_drive_root), str(task.get("id") or ""),
-        ) or {}
-    except Exception:
-        log.warning("Current delegated receipt was unavailable at final delivery", exc_info=True)
-        current = {}
-    if isinstance(current.get("delegate_terminal_reconciliation"), dict):
-        usage["delegate_terminal_reconciliation"] = current["delegate_terminal_reconciliation"]
+            usage.get("delegate_terminal_reconciliation"),
+        )
+    usage["delegate_terminal_reconciliation"] = custody_audit
     origin = str(usage.get("terminal_origin") or "")
     notice = str(usage.get("terminal_provider_notice") or "")
     # One voice: the host disclosure stays a typed field OF THE RESULT (CLI
@@ -219,6 +236,13 @@ def prepare_terminal_send_event(
     custody_notice = terminal_custody_notice_text(usage)
     if not presence and custody_notice:
         send_event["terminal_custody_notice"] = custody_notice
+    if not presence:  # Wrap up's receipt: its own row, one Stop identity on every carrier
+        from ouroboros.owner_stop_receipt import retained_work_fields
+
+        try:  # a receipt that cannot render never holds the answer
+            send_event.update(retained_work_fields(usage))
+        except Exception:
+            log.warning("Wrap up receipt row unavailable for %s", task.get("id"), exc_info=True)
     if origin not in _STAMPED_TERMINAL_ORIGINS:
         return send_event
     canonical_root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
@@ -243,15 +267,34 @@ def prepare_terminal_send_event(
     )
 
 
-def terminal_result_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
-    """Additive durable origin/full-copy fields; unknown producers stay legacy."""
+def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | None = None,
+                           title: str | None = "") -> Dict[str, Any]:
+    """Carry current custody and origin facts without minting empty custody envelopes."""
+    from ouroboros.delegate_terminal import _stored_disclosure_matches
+
     fields: Dict[str, Any] = {}
+    audit = usage.get("delegate_terminal_reconciliation")
+    prior = existing or {}
+    if isinstance(audit, dict) and (prior.get("delegate_terminal_reconciliation")
+            or "delegated_runs_unreconciled" in prior or not _stored_disclosure_matches({}, audit)):
+        fields["delegate_terminal_reconciliation"] = dict(audit)
+        fields["delegated_runs_unreconciled"] = list(audit.get("unreconciled") or [])
     origin = str(usage.get("terminal_origin") or "")
     if origin in _STAMPED_TERMINAL_ORIGINS:
         fields["terminal_origin"] = origin
     path = str(usage.get("terminal_salvage_path") or "")
     if path:
         fields["terminal_salvage_path"] = path
+    if usage.get("wake_silent") is True:
+        fields["wake_silent"] = True
+    if usage.get("wake_summary"):
+        # The run's one sentence for its human names the card only when no authored name does
+        # (a wake); a schedule-born root keeps the schedule's name and shows the sentence under it.
+        fields["wake_summary"] = str(usage["wake_summary"])
+        if not str(title or prior.get("title") or "").strip():
+            fields["suggested_name"] = fields["wake_summary"]
+    if usage.get("owner_message_sent") is True:
+        fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:
         fields["terminal_plan_review_open"] = True
     for key in ("terminal_provider_notice", "terminal_host_notice"):
@@ -260,6 +303,8 @@ def terminal_result_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
     handovers = usage.get("authoring_handovers")
     if isinstance(handovers, list) and handovers:
         fields["authoring_handovers"] = handovers
+    if isinstance(usage.get("cancel_origin"), dict) and usage["cancel_origin"]:
+        fields["cancel_origin"] = dict(usage["cancel_origin"])  # the owner's typed stop (owner_stop_origin)
     return fields
 
 
@@ -537,19 +582,14 @@ def focus_source_projection(
     return {**payload, **current, **({"reason": reason} if reason else {})}
 
 
-def review_source_reader(task_id: str, ref: Dict[str, Any]) -> Dict[str, Any]:
-    """A receiver-independent selector for one author's immutable acceptance source."""
-    return {"tool": "get_task_result", "arguments": {
-        "task_id": task_id, "review_source_sha256": str(ref.get("sha256") or "")}}
-
-
-def host_acceptance_source(drive_root: Any, task_id: str, digest: str) -> tuple:
+def host_acceptance_source(drive_root: Any, task_id: str, digest: str, *, anchor: Any = None) -> tuple:
     """``(ref, bytes)`` of this physical author's own HOST acceptance record, named by digest.
 
-    The digest fixes the path (no caller path, no store search); the bytes must
-    hash to it and decode to a host-root task-acceptance run of this very task,
-    or this raises. The model's ``review_source_sha256`` reader and the owner's
-    record download (``gateway.task_archive.serve_task_source``) share it.
+    These records are history: the retired task acceptance wrote them and nothing
+    writes a new one. The digest fixes the path (no caller path, no store search);
+    the bytes must hash to it and decode to a host-root task-acceptance run of this
+    very task, or this raises. The model's ``review_source_sha256`` reader and the
+    owner's record download (``gateway.task_archive.serve_task_source``) share it.
     """
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.source_retention import retained_task_roots
@@ -561,12 +601,15 @@ def host_acceptance_source(drive_root: Any, task_id: str, digest: str) -> tuple:
     # this author's known retained drives can supply a not-yet-canonical file.
     from ouroboros.evidence_packs import handle_info
 
-    roots = [drive_root, *retained_task_roots(drive_root, task_id)]
-    stored = next((info for root in roots if (info := handle_info(root, task_id, path)) is not None), None)
+    # An anchor stays as configured: the confined readers re-spell its rows' paths themselves.
+    stored = handle_info(drive_root, task_id, path, anchor=anchor)
+    if stored is None:
+        stored = next((info for child in retained_task_roots(drive_root, task_id)
+                       if (info := handle_info(child, task_id, path, anchor=anchor)) is not None), None)
     if stored is None:
         raise FileNotFoundError(path)
     ref = {"kind": "task_source", "root": "artifact_store", "path": path, "size": stored["size"], "sha256": digest}
-    raw = read_actor_source_bytes(drive_root, task_id, ref)
+    raw = read_actor_source_bytes(drive_root, task_id, ref, anchor=anchor)
     run = json.loads(raw)
     request = run.get("request") if isinstance(run, dict) else None
     if (not isinstance(request, dict) or run.get("authority") != "host_root"
@@ -577,11 +620,11 @@ def host_acceptance_source(drive_root: Any, task_id: str, digest: str) -> tuple:
 
 def review_source_projection(drive_root: Any, task_id: str, digest: str,
                              start_char: Any = None, end_char: Any = None) -> Dict[str, Any]:
-    """Read a physical author's exact acceptance source, including historical panels.
+    """Read a physical author's exact host acceptance record, named by its digest.
 
-    Only host acceptance panels (``host_acceptance_source``) and the canonical
-    debt's exact pinned subject qualify; no caller path, successor substitution
-    or artifact-store search.
+    Host acceptance panels (``host_acceptance_source``) and the exact subject an
+    older record's acceptance debt pinned qualify (both read-only history); no
+    caller path, successor substitution or artifact-store search.
     """
     from ouroboros.artifacts import read_actor_source_bytes, text_source_range_projection
 
@@ -593,12 +636,8 @@ def review_source_projection(drive_root: Any, task_id: str, digest: str,
 
         debt = (load_task_result(drive_root, task_id, strict=True) or {}).get("acceptance_debt") or {}
         historical_ref = debt.get("source_ref") or {}
-        if historical_ref.get("sha256") == digest:
-            from ouroboros.acceptance_history import read_acceptance_history
-
-            read_acceptance_history(drive_root, task_id, debt)
-            ref = historical_ref
-            raw = read_actor_source_bytes(drive_root, task_id, ref)
+        if isinstance(historical_ref, dict) and historical_ref.get("sha256") == digest:
+            ref, raw = historical_ref, read_actor_source_bytes(drive_root, task_id, historical_ref)
         else:
             ref, raw = host_acceptance_source(drive_root, task_id, digest)
         projection, reason = text_source_range_projection(raw.decode("utf-8"), unavailable["kind"], start_char, end_char)
@@ -637,6 +676,8 @@ def build_sealed_final_package(result_row: Any, final_text: str) -> Dict[str, An
         "completion_observations": row.get("completion_observations") or {"status": "unavailable"},
         **({"terminal_host_notice": terminal_host_notice_text(row)} if terminal_host_notice_text(row) else {}),
     }
+    if row.get("wake_silent") is True:  # no model words were submitted; the retained ones are not speech
+        package.update(final_result_text="", wake_silent=True, internal_terminal_text=str(row.get("result") or ""))
     if is_presence_task(row):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         # Remember the event-time body, not today's replay policy: a historical
@@ -687,6 +728,11 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
     )
     heading, presence_facts, internal_text = "Final result text (submitted for delivery):\n", "", ""
     presence = sealed_final.get("presence_delivery")
+    if sealed_final.get("wake_silent") is True:
+        heading, final_text = "Final result text:\n", "(none: the run finished silently; no model words were submitted)"
+        if raw := str(sealed_final.get("internal_terminal_text") or ""):
+            internal_text = "Internal run result (retained, never sent to the owner):\n" + truncate_review_artifact(
+                raw, limit=_SEALED_FINAL_TEXT_PROMPT_CHARS) + "\n"
     if isinstance(presence, dict):
         introduction = (
             "The recorded automatic-reply body was prepared for the Presence adapter;\n"
@@ -755,8 +801,9 @@ def rescued_files_fact(task_id: str, stores: List[pathlib.Path]) -> Dict[str, An
     (``artifacts.collect_task_artifact_records(measure=False, strict=True)``), so a
     store's metadata, receipt stream, staged inputs and source handles are never
     counted, a registration whose file is gone is not a file, and an unregistered
-    output is. The listing reads only the registration; no deliverable is opened,
-    hashed, copied or registered, and the fact says so (``hash_computed``). ``state`` is
+    output is. The listing reads only the registration's content; the confined walk
+    opens each deliverable for its kind and size, but none is read, hashed, copied or
+    registered, and the fact says so (``hash_computed``). ``state`` is
     ``positive``, ``zero`` (every store was listed and holds none; a store never
     created is one nothing was written to) or ``unknown`` (a store could not be
     listed — ``count`` is then what the listed stores held, a floor, never a total).
@@ -779,9 +826,8 @@ def rescued_files_fact(task_id: str, stores: List[pathlib.Path]) -> Dict[str, An
 def _listed_file_count(task_id: str, store: pathlib.Path) -> int:
     """Deliverables the shared listing finds in ``store``; raises when it cannot vouch for them.
 
-    The listing reads a missing store as empty through ``exists()``, which also says
-    False for some unreadable paths and follows a link: the store's own ``lstat``
-    decides first, so only a store that is not there counts as zero.
+    The listing reads a missing store as empty; the store's own ``lstat`` decides
+    first, so only a store that is not there counts as zero, never a file or link.
     """
     from ouroboros.artifacts import collect_task_artifact_records, task_artifact_dir_path
 
@@ -840,20 +886,35 @@ def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | N
 
     Swarm intent with no observed fan-out stays explicit; requested counts and
     lanes never claim actual concurrency, dispatch lanes or child-wait time.
-    Legacy rows catch up once; later calls decode only the unconsumed suffix.
+    Producer-owned facts need no shared-journal read. This explicit observation
+    catches up legacy history; missing/damaged history cannot claim zero.
     """
     task_id = str(task.get("id") or task.get("task_id") or "")
     if not task_id:
         return None
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    swarm_intent = metadata.get("force_plan_source") == "swarm"
+    swarm_intent = metadata.get("subagents_mode") == "swarm"
     try:
         from ouroboros.swarm_rollup import load_swarm_rollup
 
         drive_root = getattr(env, "drive_root", None)
         if drive_root is None:
             return None
-        facts = load_swarm_rollup(drive_root, task_id)
+        from ouroboros.swarm_receipt import publish
+        try:
+            facts = load_swarm_rollup(drive_root, task_id)
+        finally:
+            if (not (task.get("parent_task_id") or metadata.get("parent_task_id"))
+                    and str(task.get("root_task_id") or metadata.get("root_task_id") or task_id) == task_id):
+                canonical = pathlib.Path(task.get("budget_drive_root") or drive_root)
+                if canonical.resolve() != pathlib.Path(drive_root).resolve():
+                    try:
+                        load_swarm_rollup(canonical, task_id)
+                    except Exception:
+                        log.debug("canonical swarm history unavailable", exc_info=True)
+                # Other known actors/usage still deserve a provisional receipt
+                # when fan-out is unavailable. Publishing never repairs history.
+                publish(canonical, task_id, task=task)
         child_ids = facts.get("child_ids", [])
         if not child_ids:
             if swarm_intent:

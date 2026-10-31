@@ -37,7 +37,9 @@ def test_old_agent_media_pruned_owner_uploads_untouched(tmp_path):
     assert not old_shot.exists() and not old_view.exists()
     assert fresh_shot.exists()
     assert owner_upload.exists()  # owner authority: never swept, any age
-    assert report == {"removed": 2, "kept": 1, "skipped": 0, "errors": 0}
+    from ouroboros.retention import get_gc_retention_days
+    assert report == {"removed": 2, "kept": 1, "skipped": 0, "errors": 0,
+                      "next_due": fresh_shot.stat().st_mtime + get_gc_retention_days() * 86400}
 
 
 def test_missing_media_dirs_are_a_noop(tmp_path):
@@ -75,9 +77,23 @@ def test_the_sweep_never_follows_a_symlink_out_of_the_drive(tmp_path):
     assert report == {"removed": 1, "kept": 0, "skipped": 2, "errors": 0}
 
 
-def test_startup_prune_sweeps_run_the_media_prune():
-    import inspect
-
+def test_every_reconcile_pass_runs_the_media_prune(tmp_path, monkeypatch):
     import ouroboros.server_maintenance as sm
 
-    assert "prune_agent_media_uploads" in inspect.getsource(sm._run_deferred_startup_prunes)
+    shots = tmp_path / "uploads" / "screenshots"
+    shots.mkdir(parents=True)
+    old_shot = shots / "old.png"
+    old_shot.write_bytes(b"agent image")
+    owner_upload = shots.parent / "owner.png"
+    owner_upload.write_bytes(b"owner image")
+    for path in (old_shot, owner_upload):
+        os.utime(path, (_OLD, _OLD))
+
+    monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
+
+    sm._run_reconcile_prunes()
+    from ouroboros.maintenance import run_job
+    run_job(tmp_path, "runtime_retirement")
+
+    assert not old_shot.exists()
+    assert owner_upload.read_bytes() == b"owner image"

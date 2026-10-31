@@ -2,11 +2,13 @@
 
 The sleeper payload keeps process containment real without starting a server or
 requiring browser binaries. Real UI consumers run in their existing marker lane.
+Cases boot from an owner copy of a small synthetic source: the copy's custody is
+under test here, not the repository's bytes.
 """
 
 from __future__ import annotations
 
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 import json
 import os
 from pathlib import Path
@@ -21,9 +23,13 @@ from ouroboros import platform_layer as pl, process_containment as pc
 from ouroboros.subagent_worktrees import _force_rmtree
 from ouroboros.test_environment import RETENTION_MARKER
 from tests import test_ui_smoke_playwright as ui
+from tests.candidate_checkout import VERSION_PATH, CandidateError, candidate_checkout
+from tests.test_candidate_checkout import source as source_fixture
 
 
 pytestmark = pytest.mark.serial
+source = source_fixture
+_REPO = Path(__file__).resolve().parents[1]
 
 
 def _fixture_python() -> str:
@@ -75,19 +81,40 @@ def _assert_stopped(probe, run):
     assert probe.sentinel.poll() is None, "cleanup killed an unrelated process"
 
 
-def _assert_retained_then_discard(checkout):
-    """The fixture kept a checkout it could not prove idle; the caller has since proved it."""
-    assert "never proven gone" in (checkout / RETENTION_MARKER).read_text(encoding="utf-8")
-    _force_rmtree(checkout)
+def _owner_copy(source, tmp_path, monkeypatch):
+    """The session-style owner copy the fixture's cases boot from, of a source it reads as REPO_ROOT."""
+    (source / "VERSION").write_bytes(b"9.9.9\n")
+    (source / "web").mkdir()
+    (source / "web" / "index.html").write_bytes(b"<!doctype html>\n")
+    monkeypatch.setattr(ui, "REPO_ROOT", str(source))
+    return candidate_checkout(source, tmp_path / "candidate" / "repo", origin_proof=True)
+
+
+def _assert_owner_deletes(probe):
+    """A proven-clean case gives the copy back to its owner, whose own retirement deletes it."""
+    assert probe.owner.unproven == 0 and probe.owner.path.exists()
+    probe.retire()
+    assert not probe.owner.path.exists()
+
+
+def _assert_retained_then_discard(retire, checkout):
+    """The case's unproven hold kept the owner's copy; the caller has since proved it idle."""
+    with pytest.raises(CandidateError, match="CANDIDATE_RETAINED"):
+        retire()
+    for marked in (checkout, checkout.parent):  # the owner's retirement, and the case's own at once
+        assert "never proven gone" in (marked / RETENTION_MARKER).read_text(encoding="utf-8")
+    _force_rmtree(checkout.parent)
 
 
 @pytest.fixture
-def fixture_probe(tmp_path, monkeypatch):
+def fixture_probe(tmp_path, monkeypatch, source):
     """Use a sleeper tree at the fixture's one spawn seam; keep containment real."""
     original_container = pc.ProcessContainer
+    owner = ExitStack()
     probe = SimpleNamespace(
         mode="alive", fail_at="", reap_error="", reap_exception=False,
         runs=[], containers=[], generators=[], events=[], prior_gone=[],
+        owner=owner.enter_context(_owner_copy(source, tmp_path, monkeypatch)), retire=owner.close,
     )
     sentinel_ready = tmp_path / "sentinel-ready"
     probe.sentinel = subprocess.Popen(
@@ -120,10 +147,12 @@ def fixture_probe(tmp_path, monkeypatch):
             )
             probe.runs.append(run)
             probe.events.append(("spawn", self.index))
+            # The sleeper imports the platform layer from this repository; its cwd is the synthetic copy.
+            imports = os.pathsep.join(filter(None, (str(_REPO), kwargs["env"].get("PYTHONPATH"))))
             run.proc = super().spawn(
                 [_fixture_python(), "-c", _TREE_SCRIPT,
                  str(run.receipt), str(run.entered), str(run.ready), probe.mode],
-                **kwargs,
+                **{**kwargs, "env": {**kwargs["env"], "PYTHONPATH": imports}},
             )
             return run.proc
 
@@ -175,12 +204,10 @@ def fixture_probe(tmp_path, monkeypatch):
         return proc
 
     def open_fixture():
-        gen = ui.direct_server_with_data.__wrapped__(tmp_path / f"fixture-{len(probe.generators)}")
+        gen = ui.direct_server_with_data.__wrapped__(tmp_path / f"fixture-{len(probe.generators)}", probe.owner)
         probe.generators.append(gen)
         return gen, next(gen)
 
-    probe.checkout = lambda index: tmp_path / f"fixture-{index}" / "repo"
-    monkeypatch.setenv("OUROBOROS_RUN_UI_SMOKE", "1")
     monkeypatch.setattr(pc, "ProcessContainer", ObservedContainer)
     monkeypatch.setattr(ui, "MockLLMServer", lambda: nullcontext(
         SimpleNamespace(base_url="http://127.0.0.1:9/v1")
@@ -216,6 +243,8 @@ def fixture_probe(tmp_path, monkeypatch):
                         if run.proc.poll() is None:
                             run.proc.kill()
                         run.proc.wait(timeout=15)
+            with suppress(CandidateError):
+                probe.retire()  # A test that already retired the owner leaves nothing to close.
         finally:
             if probe.sentinel.stdin is not None:
                 probe.sentinel.stdin.close()
@@ -233,7 +262,7 @@ def test_ui_fixture_reaps_descendants_after_parent_exit_or_normal_stop(fixture_p
     assert (run.proc.poll() is not None) == (mode == "exited")
     gen.close()
     _assert_stopped(probe, run)
-    assert not probe.checkout(0).exists(), "a proven-clean teardown deletes its checkout"
+    _assert_owner_deletes(probe)
 
 
 @pytest.mark.parametrize("stage", ["health", "supervisor"])
@@ -244,7 +273,7 @@ def test_ui_fixture_reaps_after_readiness_failure(fixture_probe, stage):
         probe.open()
     assert len(probe.runs) == 1
     _assert_stopped(probe, probe.runs[0])
-    assert not probe.checkout(0).exists(), "the failed start was reaped clean, so nothing pins it"
+    _assert_owner_deletes(probe)  # the failed start was reaped clean, so nothing pins the copy
 
 
 def test_ui_fixture_restart_retires_one_container_before_spawning_another(fixture_probe):
@@ -261,7 +290,29 @@ def test_ui_fixture_restart_retires_one_container_before_spawning_another(fixtur
     assert second.proc.poll() is None and not _gone(second.child)
     gen.close()
     _assert_stopped(probe, second)
-    assert not probe.checkout(0).exists()
+    _assert_owner_deletes(probe)
+
+
+def test_cases_boot_from_the_owners_one_copy_with_their_own_roots_and_overlay(fixture_probe, monkeypatch):
+    """Sequential cases reuse one materialization; a VERSION one case rewrote is back for the next."""
+    from tests import candidate_checkout as checkouts
+
+    probe = fixture_probe
+    monkeypatch.setattr(checkouts, "_copy_candidate", lambda *args: pytest.fail("a case copied the source again"))
+    gen, first = probe.open()
+    first["stop_server"]()
+    first["candidate"].rewrite(VERSION_PATH, b"9.9.10+restarted\n")  # a stopped case restarts into another VERSION
+    first["start_server"]()
+    gen.close()
+    _assert_stopped(probe, probe.runs[1])
+    gen, second = probe.open()
+    assert second["repo_dir"] == first["repo_dir"] == probe.owner.path
+    assert second["data_dir"] != first["data_dir"] and second["candidate"] is not first["candidate"]
+    assert second["candidate_version"] == first["candidate_version"] == probe.owner.version_text
+    assert (probe.owner.path / VERSION_PATH).read_text(encoding="utf-8").strip() == probe.owner.version_text
+    gen.close()
+    _assert_stopped(probe, probe.runs[2])
+    _assert_owner_deletes(probe)
 
 
 @pytest.mark.parametrize("raises", [False, True], ids=["returned-error", "raised-error"])
@@ -285,7 +336,7 @@ def test_ui_fixture_surfaces_reap_failure_and_still_closes(fixture_probe, raises
         gen.close()
     assert len(probe.runs) == 1
     # Unproven custody keeps the tree in place for every enclosing layer.
-    _assert_retained_then_discard(probe.checkout(0))
+    _assert_retained_then_discard(probe.retire, probe.owner.path)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires actual Windows Job and suspended-start APIs")
@@ -338,8 +389,10 @@ def test_ui_fixture_native_windows_assigns_suspended_root_then_reaps_orphan(fixt
 
 
 @pytest.mark.parametrize("reap_result", ["returned-error", "raised-error", "clean"])
-def test_ui_fixture_preserves_reap_diagnostic_when_parent_survives(tmp_path, monkeypatch, reap_result):
+def test_ui_fixture_preserves_reap_diagnostic_when_parent_survives(tmp_path, monkeypatch, source, reap_result):
     waits, closed, probed, spawned = [], [], [], []
+    owner = ExitStack()
+    copy = owner.enter_context(_owner_copy(source, tmp_path, monkeypatch))
 
     class UnstoppedProcess:
         pid = 12345  # Synthetic identity; the served-candidate probe is stubbed below.
@@ -367,7 +420,6 @@ def test_ui_fixture_preserves_reap_diagnostic_when_parent_survives(tmp_path, mon
         def close(self):
             closed.append(True)
 
-    monkeypatch.setenv("OUROBOROS_RUN_UI_SMOKE", "1")
     monkeypatch.setattr(pc, "ProcessContainer", FailedContainer)
     monkeypatch.setattr(ui, "MockLLMServer", lambda: nullcontext(SimpleNamespace(base_url="http://127.0.0.1:9")))
     monkeypatch.setattr(ui, "_assert_served_candidate", lambda *args: None)
@@ -375,7 +427,7 @@ def test_ui_fixture_preserves_reap_diagnostic_when_parent_survives(tmp_path, mon
     monkeypatch.setattr(ui, "_free_port", lambda: 27991)
     monkeypatch.setattr(ui, "_wait_health", lambda _: None)
     monkeypatch.setattr(ui, "_wait_supervisor_ready", lambda _: None)
-    gen = ui.direct_server_with_data.__wrapped__(tmp_path)
+    gen = ui.direct_server_with_data.__wrapped__(tmp_path, copy)
     next(gen)
     # The interpreter validated is the one launched, with the server's own env and cwd.
     assert probed == spawned and spawned[0][0] == ui._fixture_interpreter()
@@ -388,4 +440,4 @@ def test_ui_fixture_preserves_reap_diagnostic_when_parent_survives(tmp_path, mon
         assert "owned root could not be proven gone" in str(failure.value)
     # Even a clean reap is not proof while the parent never exited. The synthetic
     # process owns nothing real, so this test may discard what the fixture kept.
-    _assert_retained_then_discard(tmp_path / "repo")
+    _assert_retained_then_discard(owner.close, copy.path)

@@ -229,6 +229,11 @@ export function bindHeaderFields(card, { server, savedIdentity, onChange, render
         });
         node.querySelector('[data-mcp-header-remove]').addEventListener('click', () => {
             state.rows.splice(number, 1); changed(); render();
+            // The caret moves to the header now in this place, else to Add (DESIGN "List editors").
+            const host = document.querySelector(`[data-mcp-index="${card.dataset.mcpIndex}"]`);
+            const next = host?.querySelector(`[data-mcp-header-row="${Math.min(number, state.rows.length - 1)}"]`);
+            if (next) revealNewRow(next, next.querySelector('[data-mcp-header-field="name"]'));
+            else host?.querySelector('[data-mcp-header-add]')?.focus();
         });
     });
     card.querySelector('[data-mcp-header-reset]')?.addEventListener('click', () => {

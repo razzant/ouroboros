@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The same page without defects</title>
+<!-- defects.html without its planted defects: measure.js must stay quiet here. -->
+<style>
+  body { margin: 0; padding: 24px 24px 96px; background: #ffffff; color: #1c2230; font: 16px/1.5 system-ui, sans-serif; }
+  .tabs { width: 560px; display: flex; gap: 8px; overflow-x: auto; white-space: nowrap; margin-bottom: 24px; }
+  .tab { flex: none; min-height: 32px; padding: 6px 14px; border: 1px solid #9aa3b2; border-radius: 16px; background: #f3f4f7; color: #1c2230; font: inherit; }
+  .card { width: 360px; padding: 12px; background: #f3f4f7; margin-bottom: 24px; }
+  .card p { margin: 0; }
+  .label-row { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+  .label { margin: 0; }
+  .badge { width: 120px; height: 28px; background: #ffd966; }
+  .tail { margin: 0; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; height: 72px; background: #e9ecf2; display: flex; align-items: center; padding: 0 24px; }
+  .bar button { min-height: 40px; padding: 8px 16px; border: 1px solid #9aa3b2; border-radius: 20px; background: #ffffff; color: #1c2230; font: inherit; }
+  .side { position: absolute; left: 440px; top: 100px; width: 320px; display: grid; gap: 12px; justify-items: start; }
+  .side p { margin: 0; }
+  .pair { display: flex; gap: 8px; }
+  .pair button, .icon { min-height: 32px; padding: 6px 12px; border: 1px solid #9aa3b2; border-radius: 8px; background: #f3f4f7; color: #1c2230; font: inherit; }
+  .icon { width: 32px; height: 32px; padding: 0; }
+  .small { font-size: 13px; }
+  .plain { padding: 4px 8px; background: #eef1f6; color: #1c2230; }
+  .dark { padding: 4px 8px; background: oklch(0.25 0.03 300); color: oklch(0.98 0 0); }
+</style>
+</head>
+<body>
+  <div class="tabs" id="tabs">
+    <button class="tab">General</button><button class="tab">Models</button><button class="tab">Skills</button>
+    <button class="tab">Network</button><button class="tab">Advanced</button>
+  </div>
+  <div class="card" id="card">
+    <p>This paragraph fits its card. The card grows with its text, so every line reaches the reader.</p>
+  </div>
+  <div class="label-row"><p class="label" id="label">Notification sound settings</p><div class="badge" id="badge"></div></div>
+  <p class="tail" id="tail">The last line of content ends well above the fixed bar.</p>
+  <div class="side">
+    <p id="self-fit">A label with room to breathe</p>
+    <p id="short">A short label</p>
+    <div class="pair"><button class="first">Save</button><button class="second">Cancel</button></div>
+    <button class="icon" id="icon" aria-label="Close"></button>
+    <p class="small" id="small">Fine print at a readable size</p>
+    <p class="plain" id="plain">Dark text on a pale panel</p>
+    <p class="dark" id="dark">Light text on a dark oklch panel</p>
+  </div>
+  <div class="bar" id="bar"><button>Send</button></div>
+</body>
+</html>

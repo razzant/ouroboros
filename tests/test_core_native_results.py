@@ -381,7 +381,9 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
         ),
     ],
 )
-def test_write_edit_search_and_forward_terminals_are_native(tmp_path, tool, args, code, text):
+def test_write_edit_search_and_forward_terminals_are_native(tmp_path, monkeypatch, tool, args, code, text):
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     repo, drive = _tree(tmp_path)
     (drive / "notes.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     tools = ToolRegistry(repo_dir=repo, drive_root=drive)

@@ -3,10 +3,10 @@
 A paid review that settles after its author can no longer receive it is advice for Ouroboros,
 never a decision, a veto or a wake (owner decision on late review delivery, 2026-10-11, #1738):
 it waits in the next ordinary turn of the room the work came from, and consciousness reads it
-when that room stays quiet. Its record writer (a late acceptance settlement, a plan council
-reply that settled after its task ended, a left change or commit review) persists the full
-source first, then calls ``publish_late_review`` once per settled publication with immutable
-facts: no live context, no clock.
+when that room stays quiet. Its record writer (a plan council reply that settled after its task
+ended, a left change, result or commit review; marks of the deleted acceptance panel stay as
+history) persists the full source first, then calls ``publish_late_review`` once per settled
+publication with immutable facts: no live context, no clock.
 
 The publication becomes ONE chronicle ``mark`` signed by the host (``LATE_REVIEW_OPERATION``)
 in the room the memory view reads for that work: the room ``dialogue_evidence.own_room_chat``
@@ -20,8 +20,9 @@ bounded with a disclosed omission (``utils.truncate_within_limit``); the target 
 source itself, read whole from any focus with ``memory_read(source_ref=…)`` unless the writer
 names another reader (``source_read``).
 
-``memory_view`` shows it in its own section to that room's view and to consciousness; only the
-integrating mind releases it, with a reason (``chronicle_store._rule_mark_release``). Showing it,
+``memory_view`` shows its words only in that room; consciousness gets one source-pointer line
+per foreign mark. Only the integrating mind releases it, with a reason
+(``chronicle_store._rule_mark_release``). Showing it,
 a tool read or a mailbox acknowledgement of a notice is not that release.
 
 A publication that could not be placed (``failed``) and every duty only the end of its author's
@@ -31,7 +32,7 @@ producer's own duty (``owe_after_end``: a change or commit wave its author left)
 producer turns into marks once the task's canonical terminal status is recorded. The off-loop
 maintenance pass replays those rows (``replay_owed_late_reviews``); a placed, unchanged or
 released mark discharges the row, so a replay can neither duplicate nor resurrect it. A plan
-reply needs no row of its own: its ask records which seats are still pending, so the same pass
+reply needs no row of its own: its ask records which seats are still pending, so the maintenance child job
 collects ended tasks' pending seats at $0 (``_collect_ended_plan_asks``).
 """
 from __future__ import annotations
@@ -51,8 +52,9 @@ from ouroboros.utils import truncate_within_limit
 log = logging.getLogger(__name__)
 
 # The review a mark names, by its writer's surface; another surface is named as recorded.
-SURFACE_NAMES = {"task_acceptance": "result review", "plan_review": "plan review", "commit_gate": "commit review",
-                 "multi_model_review": "change review", "change": "change review"}
+SURFACE_NAMES = {"task_acceptance": "result review", "result": "result review", "plan_review": "plan review",
+                 "commit_gate": "commit review", "multi_model_review": "change review", "change": "change review",
+                 "skill": "skill review"}
 LINE_LIMIT = 800  # one line of the writer's words
 TEXT_LIMIT = 4000  # the whole mark: the view never degrades a mark, so the bound is set here
 OWED_SET = "late_review_marks"  # owner-held rows: id -> {record | left_review, after_end?}
@@ -188,11 +190,23 @@ def owe_after_end(drive_root: Any, duty_id: str, duty: Mapping[str, Any]) -> boo
     return _owed(drive_root, duty_id, {**json.loads(json.dumps(dict(duty), default=str)), "after_end": True})
 
 
+def update_wait_cursors(drive_root: Any, duty_id: str, waiting: Mapping[str, Any]) -> None:
+    """Refresh an existing duty's delivery facts; never discharge or recreate it."""
+    from ouroboros import store
+
+    with store.open_store(drive_root, write=True) as txn:
+        row = txn.get_row(OWED_SET, duty_id)
+        if row is None or not isinstance(row.get("left_review"), dict):
+            return
+        row["left_review"].update({key: waiting[key] for key in
+                                  ("selection", "seen_helpers", "seen_outcomes", "review_reference") if key in waiting})
+        txn.put_row(OWED_SET, duty_id, row)
+
+
 def replay_owed_late_reviews(drive_root: Any, *, stop: Any = None) -> Dict[str, int]:
     """The maintenance pass over owed rows: each duty whose author ended is published or handed back to its
-    producer, and a row that names nothing it can owe is retired. Then the plan replies of ended tasks
-    whose producers completed while nobody was listening settle at $0 into their records and rooms; each
-    one counts as settled."""
+    producer; a row that names nothing it can owe is retired. Ended plan asks belong to the
+    separate maintenance child job, which uses their pending seats as debt."""
     from ouroboros import store  # D15->D17 is lazy-only
 
     report = {"settled": 0, "waiting": 0, "retired": 0, "failed": 0}
@@ -212,40 +226,40 @@ def replay_owed_late_reviews(drive_root: Any, *, stop: Any = None) -> Dict[str, 
             report["waiting"] += 1
         else:
             report[_settle_owed(drive_root, duty_id, row)] += 1
-    if stop is None or not stop():
-        report["settled"] += _collect_ended_plan_asks(drive_root, stop)
     return report
 
 
-def _collect_ended_plan_asks(drive_root: Any, stop: Any) -> int:
+def _collect_ended_plan_asks(drive_root: Any, stop: Any, *, candidates=None, on_examined=None) -> int:
     """The crash window of a plan reply: a seat of an ended task whose producer completed while nobody was
     listening settles at $0 through the organ's own collector (``plan_ask.collect_pending``), whose settlement
     keeps the reply in its room. The ask's pending seat is the duty, so nothing else is written for it; a seat
-    with no retained outcome stays pending and is never cleaned."""
+    with no retained outcome stays pending and is never cleaned. Only contention keeps an examination
+    owed; deterministic failures rest until the task changes, without discharging any pending seat."""
+    from ouroboros.maintenance import _contention  # D15->D17 is lazy-only
     from ouroboros import plan_record  # D15->D06 is lazy-only
-    from ouroboros.task_store import ids_with_fields  # D15->D17 is lazy-only
+    from ouroboros.task_store import plan_collection_candidates  # D15->D17 is lazy-only
     from ouroboros.tools.plan_ask import collect_pending  # D15->D06 is lazy-only
 
     root, settled = pathlib.Path(drive_root), 0
     try:
-        candidates = ids_with_fields(root, (plan_record.PLAN_RECORD_KEY,))
+        for task_id in plan_collection_candidates(root, stop=stop) if candidates is None else candidates:
+            if stop is not None and stop():
+                break
+            try:
+                record = plan_record.load_plan_record(root, task_id)
+                pending = {(ask.get("ask_id"), seat.get("seat_id")) for ask, seat in plan_record.pending_participants(record)}
+                if pending and ended_task_row(root, task_id, strict=True) is not None:
+                    after = collect_pending(None, record, state_root=root, task_id=task_id)
+                    settled += sum(1 for ask in after.get("asks") or [] for seat in ask.get("participants") or []
+                                   if (ask.get("ask_id"), seat.get("seat_id")) in pending and seat.get("status") != "pending")
+            except Exception as exc:
+                log.warning("plan record of %s: its pending seats stay pending", task_id, exc_info=True)
+                if _contention(exc):
+                    continue
+            if on_examined is not None:
+                on_examined(task_id)
     except Exception:
         log.warning("plan records are unreadable; their pending seats stay pending", exc_info=True)
-        return 0
-    for task_id in candidates:
-        if stop is not None and stop():
-            break
-        try:
-            record = plan_record.load_plan_record(root, task_id)
-            pending = {(ask.get("ask_id"), seat.get("seat_id")) for ask, seat in plan_record.pending_participants(record)}
-            if not pending or ended_task_row(root, task_id) is None:
-                continue
-            after = collect_pending(None, record, state_root=root, task_id=task_id)
-        except Exception:
-            log.warning("plan record of %s: its pending seats stay pending", task_id, exc_info=True)
-            continue
-        settled += sum(1 for ask in after.get("asks") or [] for seat in ask.get("participants") or []
-                       if (ask.get("ask_id"), seat.get("seat_id")) in pending and seat.get("status") != "pending")
     return settled
 
 
@@ -290,14 +304,16 @@ def _owed(drive_root: Any, mark_id: str, row: Optional[Dict[str, Any]]) -> bool:
         return False
 
 
-def ended_task_row(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+def ended_task_row(drive_root: Any, task_id: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
     """The canonical row of a task whose terminal status is recorded (a latch), else ``None``; unreadable is
-    not ended. A writer reads its owning chat from the same row."""
+    not ended. Strict readers propagate failures for the caller's retry policy. A writer reads its owning chat here."""
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result  # D15->D17 is lazy-only
 
     try:
         row = load_task_result(drive_root, task_id) or {}
     except Exception:
+        if strict:
+            raise
         log.debug("task %s status unreadable; an owed late review keeps waiting", task_id, exc_info=True)
         return None
     return row if str(row.get("status") or "") in _TRULY_TERMINAL_STATUSES else None

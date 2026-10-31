@@ -218,7 +218,7 @@ def test_marker_free_candidate_does_not_invent_applied_cache_ttl(data_root):
     assert final["prompt_cache_ttl"] == ""
 
 
-def test_local_candidate_is_measured_after_existing_local_transform(data_root, monkeypatch):
+def test_local_candidate_is_measured_as_prepared_without_a_compactor(data_root, monkeypatch):
     import ouroboros.local_model as local_model
 
     client = LLMClient(api_key="unused")
@@ -241,11 +241,6 @@ def test_local_candidate_is_measured_after_existing_local_transform(data_root, m
 
         lambda: SimpleNamespace(serving_context_evidence=lambda: {"context_window": 8192, "confirmed": True}, measure_prepared_input=lambda payload: {"supported": False}),
     )
-    monkeypatch.setattr(
-        client,
-        "_prepare_messages_for_local_context",
-        lambda messages, ctx_len, max_tokens: [{"role": "system", "content": "post-local-compactor"}],
-    )
     tools = [{
         "type": "function",
         "function": {"name": "local_tool", "parameters": {"type": "object"}},
@@ -261,7 +256,7 @@ def test_local_candidate_is_measured_after_existing_local_transform(data_root, m
             tool_choice="auto",
         )
     assert message["content"] == "local"
-    assert sent["messages"] == [{"role": "system", "content": "post-local-compactor"}]
+    assert sent["messages"] == [{"role": "user", "content": "pre-transform"}]  # whole, never cut to the window
     assert sent["tools"] == [{
         "type": "function",
         "function": {"name": "local_tool", "parameters": {"type": "object"}},
@@ -392,12 +387,6 @@ def test_internal_retry_gets_distinct_attempt_but_stable_context_identity(data_r
             raise _Rejected("temperature unsupported")
         return _Response()
 
-    def retry_without_temperature(candidate, model, exc):
-        retry = copy.deepcopy(candidate)
-        retry.pop("temperature", None)
-        return retry
-
-    monkeypatch.setattr(client, "_retry_without_optional_sampling", retry_without_temperature)
     monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *args: None)
     payload = {
         "model": "gpt-5.2",

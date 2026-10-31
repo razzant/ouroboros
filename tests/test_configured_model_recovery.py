@@ -98,11 +98,11 @@ def test_saved_external_work_does_not_gate_supervising_cognition(tmp_path, monke
     assert [row for row in rows if row.get("type", "").startswith("delegate_")] == [
         json.loads(line) for line in custody_before.splitlines() if json.loads(line).get("type", "").startswith("delegate_")]
     if external in {"pending", "patch", "unreadable"}:
-        # Ability to think is not authority to duplicate the external work.
-        accepted, refusal = claimed_start_request(tmp_path, claim_target="", payload_busy=lambda *a: "",
-            actor_ctx=registry._ctx, enforce_actor_idle=True, task_id=task_id, invocation_id="duplicate")
-        assert not accepted
-        assert refusal["reason"] == ("replacement_custody_unknown" if external == "unreadable" else "replacement_requires_settlement")
+        # Independent work may start; unreadable custody still refuses admission.
+        accepted, refusal = claimed_start_request(tmp_path, actor_ctx=registry._ctx, task_id=task_id, invocation_id="duplicate")
+        assert accepted == (external != "unreadable")
+        if not accepted:
+            assert refusal["reason"] == "replacement_custody_unknown"
 
 
 def test_live_hold_takes_over_an_existing_transport_episode(tmp_path, monkeypatch):

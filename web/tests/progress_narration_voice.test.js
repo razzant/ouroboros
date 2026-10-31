@@ -192,7 +192,9 @@ test('finalizing outcome overlay keeps narration as title while publishing phase
             model_execution: { source: 'usable_solve_response', used_model: 'actual-solver' } });
         assert.equal(f.title(), 'still working');
         assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Finalizing…');
-        assert.match(f.card().querySelector('[data-live-meta]').innerHTML, /Last solve response: actual-solver/);
+        // The observed solver is the compact line's model; its full solve evidence is a row of the details.
+        assert.match(f.card().querySelector('[data-live-meta]').innerHTML, />actual-solver</);
+        assert.match(f.card().querySelector('[data-live-facts]').innerHTML, /<dt>Last solve response<\/dt><dd>actual-solver<\/dd>/);
         f.emit({ is_progress: false, role: 'system', system_type: 'task_summary', content: 'Done.',
             outcome_final: true, outcome_phase: 'done', outcome_axes: { execution: { status: 'ok' } } });
         assert.equal(f.title(), 'still working');

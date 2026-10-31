@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from tests._work_projection_shared import with_work_fields
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_failure_evidence import FailureEvidence, exception_fact
 
@@ -44,6 +45,7 @@ def _observe_census(route, state, evidence):
         original_scope = {key: copy.deepcopy(payload.get(key)) for key in (
             "active_chat_activities_complete", "supervisor_ready", "chat_id", "project_id")}
         payload["active_chat_activities_complete"] = True
+        payload = with_work_fields(payload)  # and the server's work projection of those rows, which the page reads
         record("response_built", rows=payload["active_chat_activities"],
                original_scope=original_scope, active_chat_activities_complete=True)
         phase = "fulfill"

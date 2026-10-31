@@ -44,10 +44,10 @@ def _github_task(tmp_path, monkeypatch, target):
 
 
 @pytest.mark.parametrize("tool,args", [
-    ("get_github_issue", {"number": 7, "repo": ""}),
-    ("close_github_issue", {"number": 7, "comment": "closing", "repo": ""}),
-    ("create_github_issue", {"title": "T", "body": "B", "labels": "bug", "repo": ""}),
-    ("list_github_prs", {}),
+    ("github_read", {"method": "get", "kind": "issue", "target": 7, "repo": ""}),
+    ("github_write", {"method": "update", "target": 7, "state": "closed", "repo": ""}),
+    ("github_write", {"method": "create_issue", "title": "T", "body": "B", "labels": ["bug"], "repo": ""}),
+    ("github_read", {"method": "list", "kind": "pr"}),
 ])
 @pytest.mark.parametrize("target", ["folderless", "unavailable", "invalid", "cli_missing"])
 def test_refusal_before_the_first_launch_settles_its_claim(tmp_path, monkeypatch, tool, args, target):
@@ -62,8 +62,8 @@ def test_refusal_before_the_first_launch_settles_its_claim(tmp_path, monkeypatch
     result = registry.execute_result(tool, args)
 
     assert result.status != "ok" and result.meta.get("operation_outcome") == "completed_no_effect", result
-    first = {"get_github_issue": ["issue", "view"], "close_github_issue": ["issue", "comment"],
-             "create_github_issue": ["issue", "create"], "list_github_prs": ["pr", "list"]}[tool]
+    first = {"get": ["api", "repos/{owner}/{repo}/issues/7"], "update": ["api", "--method"],
+             "create_issue": ["api", "--method"], "list": ["api", "--include"]}[args["method"]]
     assert launched == ([first] if target == "cli_missing" else [])  # exec of `gh` itself failed
     expected = {"folderless": "GH_TARGET_REQUIRED", "unavailable": "GH_TARGET_UNAVAILABLE",
                 "invalid": "GH_TARGET_INVALID", "cli_missing": "`gh` CLI not found"}[target]
@@ -75,7 +75,9 @@ def test_refusal_before_the_first_launch_settles_its_claim(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("second", ["unavailable", "folderless"])
 def test_later_refusal_keeps_prior_effect_unknown_but_closes_local_invocation(tmp_path, monkeypatch, second):
-    """The close's refusal cannot claim no effect for the already-returned comment."""
+    """A second subcall's target refusal cannot claim no effect for the already-launched first one."""
+    import json
+
     from ouroboros.task_results import load_task_result
 
     registry, queue, workers, launched = _github_task(tmp_path, monkeypatch, "workspace")
@@ -83,19 +85,21 @@ def test_later_refusal_keeps_prior_effect_unknown_but_closes_local_invocation(tm
     ctx.task_metadata = {}
     fake = subprocess.run
 
-    def comment_then_lose_target(argv, *args, **kwargs):
-        result = fake(argv, *args, **kwargs)
-        if argv[1:3] == ["issue", "comment"]:
+    def read_then_lose_target(argv, *args, **kwargs):
+        if argv[:1] == ["gh"] and argv[1] == "api":  # the pull request read; the diff subcall then finds no target
+            launched.append(argv[1:3])
             if second == "unavailable":
                 workspace.rmdir()
             else:
                 ctx.workspace_mode, ctx.workspace_root, ctx.project_id = "", None, "project-folderless"
-        return result
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                {"number": 7, "title": "x", "state": "open", "html_url": "https://github.example/owner/selected/pull/7"}))
+        return fake(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", comment_then_lose_target)
-    result = registry.execute_result("close_github_issue", {"number": 7, "comment": "closing", "repo": ""})
+    monkeypatch.setattr(subprocess, "run", read_then_lose_target)
+    result = registry.execute_result("github_read", {"method": "get", "kind": "pr", "target": 7, "include": ["diff"], "repo": ""})
 
-    assert launched == [["issue", "comment"]]
+    assert launched == [["api", "repos/{owner}/{repo}/pulls/7"]]
     assert "GH_TARGET_" in result.text and result.status != "ok", result
     assert result.meta.get("operation_outcome") != "completed_no_effect"
     assert not load_task_result(tmp_path, "root").get("launch_handoffs", {})
@@ -119,10 +123,11 @@ def test_returned_unknown_gh_outcome_preserves_error_without_ghost_invocation(tm
         return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502: Bad Gateway (https://api.github.com)")
 
     monkeypatch.setattr(subprocess, "run", unknown)
-    result = registry.execute_result("comment_on_issue", {"number": 7, "body": "text", "repo": ""})
+    result = registry.execute_result("github_write", {"method": "comment", "target": 7, "body": "text", "repo": ""})
 
-    assert launched == [["issue", "comment"]] and result.status != "ok", result
-    assert result.meta.get("operation_outcome") != "completed_no_effect"
+    # The send, then exactly one lookup that also failed: the outcome stays unknown, nothing is resent.
+    assert launched == [["api", "--method"], ["api", "repos/{owner}/{repo}/issues/7/comments?since=" + launched[1][1].split("since=")[1]]]
+    assert result.status != "ok" and result.meta.get("operation_outcome") == "unknown", result
     assert not load_task_result(tmp_path, "root").get("launch_handoffs", {})
     _park(tmp_path, monkeypatch, queue, workers)
     assert queue.resume_budget_paused_task("root")["ok"]
@@ -130,7 +135,7 @@ def test_returned_unknown_gh_outcome_preserves_error_without_ghost_invocation(tm
 
 def test_direct_handler_calls_attest_nothing(tmp_path, monkeypatch):
     """Only a public invocation scope proves "first launch"; internal callers do not."""
-    from ouroboros.tools import github
+    from ouroboros.tools import github_read
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.tool_result import (
         _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar)
@@ -139,7 +144,9 @@ def test_direct_handler_calls_attest_nothing(tmp_path, monkeypatch):
     sentinel = object()
     token = _install_tool_result_sidecar(ctx, sentinel)
     try:
-        assert "GH_TARGET_REQUIRED" in github._get_issue(ctx, 7)
+        assert "GH_TARGET_REQUIRED" in github_read.run_read(ctx, method="get", kind="issue", target=7)
+        assert "operation_outcome" not in _published_tool_result(ctx, sentinel).meta
+        assert "TOOL_ARG_ERROR" in github_read.run_read(ctx, method="get", kind="issue", target=0)
         assert "operation_outcome" not in _published_tool_result(ctx, sentinel).meta
     finally:
         _restore_tool_result_sidecar(token)
@@ -200,43 +207,43 @@ def _mcp_names(registry):
                   if schema["function"]["name"].startswith("mcp_"))
 
 
-def test_task_discovery_lists_every_server_when_not_paused(tmp_path, monkeypatch):
+def test_task_never_discovers_even_when_not_paused(tmp_path, monkeypatch):
     registry, events = _discovery(tmp_path, monkeypatch)
-    assert _mcp_names(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
-    assert events == [("transport", "alpha"), ("initialize", "alpha"),
-                      ("transport", "beta"), ("initialize", "beta")]
+    assert _mcp_names(registry) == []
+    assert events == []
 
 
-def test_pause_before_discovery_opens_no_transport_and_owes_the_listing(tmp_path, monkeypatch):
+def test_pause_and_unpaused_task_both_use_published_catalog(tmp_path, monkeypatch):
     from ouroboros import mcp_client
     from ouroboros.task_results import write_task_result
     from supervisor.owner_pause_control import request_owner_pause
 
     registry, events = _discovery(tmp_path, monkeypatch)
+    mcp_client.ensure_configured_from_settings()
+    manager = mcp_client.get_manager()
+    assert manager.refresh_all()["refreshed"]["beta"]["published"]
+    expected = ["mcp_alpha__lookup", "mcp_beta__lookup"]
+    assert len(events) == 4
+    events.clear()
     assert request_owner_pause("root", request_id="pause-before")["ok"]
-
-    assert _mcp_names(registry) == [] and events == []
-    status = {row["id"]: row for row in mcp_client.get_manager().status_payload()["servers"]}
-    assert all(not row["last_error"] and not row["last_attempted"] for row in status.values()), status
-    # Another, unpaused task in this worker process performs the owed listing.
+    assert _mcp_names(registry) == expected
+    assert events == []
     write_task_result(tmp_path, "other", "running", root_task_id="other", chat_id=0)
     registry._ctx.task_id = registry._ctx.root_task_id = "other"
-    assert _mcp_names(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
-    assert [kind for kind, _ in events].count("transport") == 2
-    assert _mcp_names(registry) == ["mcp_alpha__lookup", "mcp_beta__lookup"]
-    assert [kind for kind, _ in events].count("transport") == 2, "a listed catalog is not re-listed"
+    assert _mcp_names(registry) == expected
+    assert events == []
 
 
-def test_pause_between_listings_keeps_the_admitted_one_and_refuses_the_next(tmp_path, monkeypatch):
+def test_pause_without_catalog_opens_nothing_and_keeps_gap(tmp_path, monkeypatch):
+    from ouroboros import mcp_client
     from supervisor.owner_pause_control import request_owner_pause
 
-    def pause_during(server_id):
-        if server_id == "alpha":
-            assert request_owner_pause("root", request_id="pause-between")["ok"]
-
-    registry, events = _discovery(tmp_path, monkeypatch, on_initialize=pause_during)
-    assert _mcp_names(registry) == ["mcp_alpha__lookup"]
-    assert events == [("transport", "alpha"), ("initialize", "alpha")]
+    registry, events = _discovery(tmp_path, monkeypatch)
+    assert request_owner_pause("root", request_id="pause-unlisted")["ok"]
+    assert _mcp_names(registry) == [] and events == []
+    status = mcp_client.get_manager().status_payload()["servers"]
+    assert all(not row["last_attempted"] and row["listed_at"] is None for row in status)
+    assert all("not listed yet" in row["detail"] for row in mcp_client.get_manager().catalog_notices())
 
 
 def test_settings_probes_carry_no_task_authority(tmp_path, monkeypatch):
@@ -255,3 +262,9 @@ def test_settings_probes_carry_no_task_authority(tmp_path, monkeypatch):
     assert probe["ok"] is True and probe["tool_count"] == 1
     assert manager.refresh_all()["refreshed"]["beta"]["ok"] is True
     assert [kind for kind, _ in events].count("transport") == 4
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

@@ -1,4 +1,4 @@
-"""Serial Main fit, reclaim, and actual-overflow recovery orchestration."""
+"""Serial Main fit and the refusal passes: a typed size refusal measured, recovered model-free, retried once per pass."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from unittest.mock import Mock
 import pytest
 
 from ouroboros.context_budget import RECLAIM_LOW_WATER_DIVISOR
-from ouroboros.context_fit import reclaim_low_water_margin
 
 
 def _fit(
@@ -24,24 +23,33 @@ def _fit(
     used=False,
     estimated_input=120_000,
     low_water_margin=0,
+    anchor_input=None,
+    anchor_round=None,
+    accepted_input=None,
+    reply_allowance=0,
+    round_id="exec:round:1",
 ):
     from ouroboros.context_fit import MainFitDisposition, MainFitMeasurement
 
     measurement = MainFitMeasurement(
         route_fp="route-a",
-        round_id="exec:round:1",
+        round_id=round_id,
         profile=profile,
         rendered_mode=mode,
         estimated_input_tokens=estimated_input,
         response_reserve_tokens=65_536,
         target_total_tokens=250_000 if profile == "owner_low" else None,
         capacity_total_tokens=500_000,
-        measurement_basis="cold_estimate",
+        measurement_basis="fresh_route_usage" if anchor_input else "cold_estimate",
         measurement_density=1.0,
         target_deficit_tokens=target_deficit,
         capacity_deficit_tokens=capacity_deficit,
         reclaim_goal_tokens=goal,
         low_water_margin_tokens=low_water_margin,
+        reply_allowance_tokens=reply_allowance,
+        anchor_input_tokens=anchor_input,  # this conversation's own accepted input (``context_anchor``)
+        anchor_round=anchor_round,
+        accepted_input_tokens=accepted_input,  # the largest input this model accepted in this task
     )
     return MainFitDisposition(
         measurement=measurement,
@@ -64,12 +72,13 @@ def _plan(*, preferred="max"):
         projection=lambda _mode: SimpleNamespace(calibration_ratio=1.0),
         reproject_transcript=reproject, reproject_for_route=Mock(),
     )
-    plan.reproject_for_route.return_value = plan  # records the rebind; keeps this double's mode stubs
+    # The rebound plan names the selected mode, as the real projection does.
+    plan.reproject_for_route.return_value = SimpleNamespace(**vars(plan), initial_mode="low")
     return plan
 
 
 def _lowered_from_max(plan, messages):
-    """The one rebind an actual overflow's Low rung makes: Low books from the level Max showed."""
+    """The one rebind the floor makes when memory alone did not save the target: Low books from the level Max showed."""
     plan.reproject_for_route.assert_called_once_with(
         window_tokens=500_000, known_window=True, ratio=1.0, output_reserve=65_536,
         tool_schemas=[], start_mode="max", current_messages=messages, select_mode="low")
@@ -83,9 +92,7 @@ def _ctx(tmp_path, *, preferred="max", mode="max"):
         messages=[],
         active_context_mode=mode,
         task_metadata={},
-        _context_reclaim_passes=set(),
         _context_overflow_retries=set(),
-        _context_reclaim_negative_memo=set(),
     )
     tools = SimpleNamespace(_ctx=inner)
     messages = [
@@ -160,6 +167,41 @@ def _candidate_request(disposition, *, size, reserve=65_536):
     )
 
 
+def _measure_cycle(dispositions):
+    """A measurement stub that records every fit and keeps returning the last one."""
+    from itertools import chain, repeat
+    from ouroboros import loop
+
+    fits = chain(dispositions[:-1], repeat(dispositions[-1]))
+
+    def measure(ctx, **_kwargs):
+        disposition = next(fits)
+        loop._remember_main_fit(ctx, disposition)
+        return disposition
+
+    return measure
+
+
+def _steps_applied(monkeypatch, outcome=lambda step: True):
+    """Stub every refusal step; ``outcome(step)`` says whether it changed the candidate.
+
+    A changing stub sheds 0 measured tokens, so every later step of its pass keeps the whole
+    target (``loop_model_call._apply_refusal_pass``); an unchanged one answers None."""
+    from ouroboros import loop_model_call
+
+    steps = []
+
+    def apply(ctx, step, fit, target, slack=None):
+        steps.append((step, target))
+        return 0 if outcome(step) else None
+
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_step", apply)
+    return steps
+
+
+PASS_ONE, PASS_TWO = ("exec:round:1", "host_copies+bodies"), ("exec:round:1", "floor+books+unseen_bodies")
+
+
 def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
     from ouroboros import loop
 
@@ -208,236 +250,15 @@ def test_failed_fallback_restores_entire_primary_fit_bundle():
     assert usage["unrelated"] == "kept"
 
 
-def test_checkpoint_proves_automatic_materializer_attempt_even_on_binding_mismatch(
-    tmp_path, monkeypatch,
-):
-    from ouroboros import loop
-    from ouroboros.context_budget import ContextReclaimReceipt
-
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    disposition = _fit(
-        action="reclaim_once", profile="owner_low", mode="low", goal=100,
-        target_deficit=100,
-    )
-    receipt = ContextReclaimReceipt(
-        status="binding_mismatch",
-        before_transcript_sha256="a" * 64,
-        after_transcript_sha256="a" * 64,
-        selection_fingerprint="b" * 64,
-        selected_unit_ids=("unit",),
-        reclaimed_tokens=0,
-        goal_reached=False,
-        checkpoint_ref={"path": "checkpoint", "sha256": "c" * 64},
-        capsule_refs=(),
-    )
-    monkeypatch.setattr(
-        loop, "compact_tool_history_llm",
-        lambda *_a, **_kw: (context.messages, receipt, {"prompt_tokens": 1}),
-    )
-    monkeypatch.setattr(loop, "_account_compaction_usage", lambda *_a, **_kw: None)
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
-    loop._run_main_reclaim(context, disposition)
-    assert ("route-a", "exec:round:1") in context.tools._ctx._context_reclaim_materializations
-
-
-def _applied_receipt(*, reclaimed: int, goal_reached: bool):
-    from ouroboros.context_budget import ContextReclaimReceipt
-
-    return ContextReclaimReceipt(
-        status="applied",
-        before_transcript_sha256="a" * 64,
-        after_transcript_sha256="b" * 64,
-        selection_fingerprint="f" * 64,
-        selected_unit_ids=("unit",),
-        reclaimed_tokens=reclaimed,
-        goal_reached=goal_reached,
-        checkpoint_ref={"path": "checkpoint", "sha256": "c" * 64},
-        capsule_refs=(),
-    )
-
-
-# Owner Low: the 250,000 target binds (capacity 500,000); its input boundary is
-# 250,000 - 65,536 = 184,464 estimated tokens; margin = ceil(250,000 / 8) = 31,250.
-_LOW_BOUNDARY_INPUT = 250_000 - 65_536
-
-
-@pytest.mark.parametrize("landed_input,headroom,reached,below", [
-    (_LOW_BOUNDARY_INPUT, 0, True, False),  # reclaimed == deficit: AT the boundary, not below
-    (_LOW_BOUNDARY_INPUT - 31_250, 31_250, True, True),  # the full margin achieved
-    (_LOW_BOUNDARY_INPUT - 12_000, 12_000, True, False),  # under-landed: reached, margin missed
-    (_LOW_BOUNDARY_INPUT + 2_000, -2_000, False, False),  # still above the boundary
-])
-def test_reclaim_checkpoint_separates_boundary_from_low_water(
-    tmp_path, monkeypatch, landed_input, headroom, reached, below,
-):
+def test_predicted_deficit_alone_sends_without_a_recovery_pass(tmp_path, monkeypatch):
+    """7A: prediction is recorded as facts; no pass and no downgrade runs before the send."""
     from ouroboros import loop
 
     context = _ctx(tmp_path, preferred="low", mode="low")
-    disposition = _fit(
-        action="reclaim_once", profile="owner_low", mode="low", goal=10_000 + 31_250,
-        target_deficit=10_000, capacity_deficit=0, estimated_input=_LOW_BOUNDARY_INPUT + 10_000,
-        low_water_margin=31_250,
-    )
-    landed = _fit(
-        action="send", profile="owner_low", mode="low", used=True, estimated_input=landed_input,
-    )
-    measured, events = [], []
-    monkeypatch.setattr(
-        loop, "compact_tool_history_llm",
-        lambda *_a, **_kw: (context.messages, _applied_receipt(reclaimed=1, goal_reached=False), None),
-    )
-    monkeypatch.setattr(
-        loop, "_measure_round_main_fit", lambda _ctx, **kwargs: measured.append(kwargs) or landed,
-    )
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _q, _t, _d, data: events.append(data))
-
-    loop._run_main_reclaim(context, disposition)
-
-    # The landing is re-measured on the SAME basis as the trigger, once, as a used pass.
-    assert measured == [{"automatic_pass_used": True}]
-    event = events[-1]
-    assert event["checkpoint_kind"] == "context_reclaim_automatic"
-    assert event["deficit_tokens"] == 10_000
-    assert event["requested_margin_tokens"] == 31_250
-    assert event["reclaim_goal_tokens"] == 41_250
-    assert event["achieved_headroom_tokens"] == headroom
-    assert event["boundary_reached"] is reached
-    assert event["below_boundary"] is below
-    assert event["rounds_since_previous_pass"] is None
-    assert context.tools._ctx._context_reclaim_last_pass_round == 1
-
-
-def test_reclaim_checkpoint_counts_rounds_since_the_previous_pass_without_remeasuring_a_no_op(
-    tmp_path, monkeypatch,
-):
-    from ouroboros import loop
-
-    context = replace(_ctx(tmp_path, preferred="low", mode="low"), round_idx=9)
-    context.tools._ctx._context_reclaim_last_pass_round = 3
-    disposition = _fit(
-        action="reclaim_once", profile="owner_low", mode="low", goal=10_000 + 31_250,
-        target_deficit=10_000, capacity_deficit=0, estimated_input=_LOW_BOUNDARY_INPUT + 10_000,
-        low_water_margin=31_250,
-    )
-    disposition = replace(
-        disposition, measurement=replace(disposition.measurement, round_id="exec:round:9"),
-    )
-    events = []
-    monkeypatch.setattr(
-        loop, "compact_tool_history_llm",
-        lambda *_a, **_kw: (context.messages, replace(
-            _applied_receipt(reclaimed=0, goal_reached=False), status="no_eligible",
-        ), None),
-    )
-    monkeypatch.setattr(
-        loop, "_measure_round_main_fit",
-        lambda *_a, **_kw: pytest.fail("a pass that changed nothing has no new landing to measure"),
-    )
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _q, _t, _d, data: events.append(data))
-
-    loop._run_main_reclaim(context, disposition)
-
-    event = events[-1]
-    assert event["status"] == "no_eligible"
-    assert event["rounds_since_previous_pass"] == 6
-    # Unchanged transcript: the pre-pass fit IS the landing, 10,000 above the boundary.
-    assert event["achieved_headroom_tokens"] == -10_000
-    assert event["boundary_reached"] is False
-    assert event["below_boundary"] is False
-    assert event["requested_margin_tokens"] == 31_250
-    assert context.tools._ctx._context_reclaim_last_pass_round == 9
-
-
-def test_reclaim_checkpoint_reports_an_unmeasurable_landing_as_unknown(tmp_path, monkeypatch):
-    """A route/plan rebind can leave the post-pass fit unmeasurable (the fit seam
-    returns None by contract): the pass still applies and the event says UNKNOWN,
-    never "boundary not reached"."""
-    from ouroboros import loop
-
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    disposition = _fit(
-        action="reclaim_once", profile="owner_low", mode="low", goal=10_000 + 31_250,
-        target_deficit=10_000, capacity_deficit=0, estimated_input=_LOW_BOUNDARY_INPUT + 10_000,
-        low_water_margin=31_250,
-    )
-    events = []
-    monkeypatch.setattr(
-        loop, "compact_tool_history_llm",
-        lambda *_a, **_kw: (context.messages, _applied_receipt(reclaimed=30_000, goal_reached=False), None),
-    )
-    monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *_a, **_kw: None)
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _q, _t, _d, data: events.append(data))
-
-    receipt = loop._run_main_reclaim(context, disposition)
-
-    assert receipt.status == "applied"
-    assert events[-1]["reclaimed_tokens"] == 30_000
-    assert events[-1]["achieved_headroom_tokens"] is None
-    assert events[-1]["boundary_reached"] is None
-    assert events[-1]["below_boundary"] is None
-    assert events[-1]["requested_margin_tokens"] == 31_250
-
-
-def test_overflow_minimum_goal_is_low_water_sized_even_without_a_predicted_deficit(
-    tmp_path, monkeypatch,
-):
-    """Both directions: the measurement found no deficit (goal 0), the provider still
-    overflowed; the pass requests the low-water minimum, and its telemetry reports
-    that minimum as the requested margin over a zero deficit."""
-    from ouroboros import loop
-
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    disposition = _fit(action="send", profile="owner_low", mode="low", goal=0, target_deficit=0,
-                       capacity_deficit=0, estimated_input=_LOW_BOUNDARY_INPUT - 500)
-    requests, events = [], []
-
-    def compact(messages, *, request, **_kwargs):
-        requests.append(request.reclaim_goal_tokens)
-        return messages, replace(_applied_receipt(reclaimed=0, goal_reached=False),
-                                 status="no_eligible"), None
-
-    monkeypatch.setattr(loop, "compact_tool_history_llm", compact)
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _q, _t, _d, data: events.append(data))
-    minimum = max(1, reclaim_low_water_margin(250_000, 500_000))  # what the overflow path passes
-    loop._run_main_reclaim(context, disposition, minimum_goal_tokens=minimum)
-
-    assert requests == [31_250]
-    assert events[-1]["deficit_tokens"] == 0
-    assert events[-1]["requested_margin_tokens"] == 31_250
-    assert events[-1]["achieved_headroom_tokens"] == 500
-    assert events[-1]["boundary_reached"] is True
-    assert events[-1]["below_boundary"] is False
-
-
-def _applied():
-    """What a materialized ``_run_main_reclaim`` pass returns (the helper rung reads ``status``)."""
-    return SimpleNamespace(status="applied")
-
-
-def _measure_cycle(dispositions):
-    """A measurement stub that records every fit and keeps returning the last one."""
-    from itertools import chain, repeat
-    from ouroboros import loop
-
-    fits = chain(dispositions[:-1], repeat(dispositions[-1]))
-
-    def measure(ctx, **_kwargs):
-        disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
-        return disposition
-
-    return measure
-
-
-def test_predicted_deficit_alone_sends_without_a_helper_pass(tmp_path, monkeypatch):
-    """7A: prediction is recorded as facts; neither a helper pass nor a downgrade runs before the send."""
-    from ouroboros import loop
-
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    reclaimed, dispatched = [], []
+    dispatched = []
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([
-        _fit(action="reclaim_once", profile="owner_low", mode="low", goal=10_000, target_deficit=10_000)]))
-    monkeypatch.setattr(loop, "_run_main_reclaim", lambda ctx, d, **kw: reclaimed.append(d) or _applied())
+        _fit(action="send_target_miss", profile="owner_low", mode="low", goal=10_000, target_deficit=10_000)]))
+    steps = _steps_applied(monkeypatch)
 
     def dispatch(_ctx, disposition, **kwargs):
         dispatched.append((disposition, kwargs))
@@ -446,53 +267,282 @@ def test_predicted_deficit_alone_sends_without_a_helper_pass(tmp_path, monkeypat
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "ok" and mode == "low"
-    assert reclaimed == [] and len(dispatched) == 1
-    assert dispatched[0][0].action == "reclaim_once"  # the prediction travels as a fact, not as an action
+    assert steps == [] and len(dispatched) == 1
+    assert dispatched[0][0].action == "send_target_miss"  # the prediction travels as a fact, not as an action
     assert dispatched[0][1].get("candidate_predicate") is None
     assert context.accumulated_usage["_context_reclaim_goal_tokens"] == 10_000
-    assert context.accumulated_usage["_context_target_miss"] is False
+    assert context.accumulated_usage["_context_target_miss"] is True
     assert context.messages[0]["content"] == "LOW_SYSTEM"
     assert not context.tools._ctx._context_overflow_retries
 
 
-def test_actual_max_overflow_walks_the_ladder_and_retries_only_smaller_context(tmp_path, monkeypatch):
-    """7A: the provider's refusal opens the ordered rungs; the helper (rung c) asks for a low-water
-    pass under ``provider_refused``; a materialized rung earns one strictly smaller retry on the
-    same model and mode (Max is lowered only by a later rung, after the helper failed to fit)."""
+# --- the measured target -------------------------------------------------------------------------------------
+
+STATED = "This model's maximum context length is 500000 tokens. However, your messages resulted in 520000 tokens."
+NUMBERLESS = "Your input exceeds the context window of this model"
+SLACK = math.ceil(500_000 / RECLAIM_LOW_WATER_DIVISOR)  # the owner's return-after-fold eighth
+
+
+@pytest.mark.parametrize("message,anchor,accepted,estimate,target", [
+    (STATED, 480_000, 480_000, 520_000, 520_000 + 65_536 - 500_000 + SLACK),  # the provider's stated limit
+    (NUMBERLESS, 480_000, 480_000, 520_000, 520_000 - 480_000 + SLACK),  # the refused estimate over the accepted floor
+    (NUMBERLESS, 480_000, 480_000, 480_000, None),  # an estimate at the floor contradicts the reading: unknown
+    (NUMBERLESS, 480_000, 480_000, 470_000, None),  # below the floor likewise
+    (NUMBERLESS, 480_000, None, 520_000, None),  # nothing accepted yet: no floor to measure against
+    (STATED, None, None, 520_000, 520_000 + 65_536 - 500_000 + SLACK),  # a stated limit measures even a cold E
+])
+def test_refusal_target_is_measured_from_a_stated_limit_or_the_accepted_floor_else_unknown(
+        tmp_path, monkeypatch, message, anchor, accepted, estimate, target):
+    from ouroboros import capability_evidence as ce, loop_model_call
+    from ouroboros.context_anchor import refused_input
+
+    # A stated limit is a durable window observation: it stays in this test's store, not the session's.
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    context = _ctx(tmp_path)
+    context.accumulated_usage["_last_llm_provider_message"] = message
+    fit = _fit(estimated_input=estimate, anchor_input=anchor, anchor_round=3, accepted_input=accepted,
+               reply_allowance=65_536)
+    assert loop_model_call._refusal_target(context, fit)[0] == target
+    # The refused size is recorded whatever the target: the facts stop stating free room for this model.
+    assert refused_input(context.accumulated_usage, context.context_fit_plan) == estimate
+
+
+# --- the two passes ------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("second_refused", [False, True])
+def test_each_pass_earns_one_retry_and_the_second_pass_runs_only_after_a_refused_retry(tmp_path, monkeypatch, second_refused):
+    """Both directions: pass 1 (host copies, shown bodies) earns one strictly smaller retry; when that retry
+    is accepted the floor and the late rescue never run; when it is refused again pass 2 runs once and its
+    retry must shrink below THAT refused candidate, not the first one."""
     from ouroboros import loop
 
     context = _ctx(tmp_path)
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
-    reclaims, sends = [], []
-
-    def reclaim(ctx, _disposition, **kwargs):
-        # An actual overflow asks for a low-water-sized pass (an eighth of the 500K
-        # route), never a token-sized one, before its single strict-shrink retry.
-        assert kwargs["minimum_goal_tokens"] == math.ceil(500_000 / RECLAIM_LOW_WATER_DIVISOR)
-        reclaims.append(kwargs["provider_refused"])
-        ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
-        return _applied()
+    steps = _steps_applied(monkeypatch)
+    sends, captures = [], iter([_failed_capture(size=1_000), _failed_capture(size=900)])
+    current = {"value": next(captures)}
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
-        if not sends:
-            sends.append("failed-main")
+        sends.append(candidate_predicate)
+        if len(sends) == 1:  # the actual request: refused
             ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
             return None, 0.0
-        request = _candidate_request(disposition, size=800)
-        assert candidate_predicate is not None and candidate_predicate(request) is True
-        sends.append("smaller-retry")
+        if len(sends) == 2 and second_refused:  # pass 1's smaller candidate (900 < 1000): refused again
+            assert candidate_predicate(_candidate_request(disposition, size=900))
+            current["value"] = next(captures)
+            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0
+        if len(sends) == 3:
+            assert not candidate_predicate(_candidate_request(disposition, size=900))  # the base moved to 900
+        assert candidate_predicate(_candidate_request(disposition, size=800))
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: current["value"])
+    msg, _cost, mode = loop._call_round_model(context)
+    assert msg["content"] == "fits" and mode == "max"
+    assert len(sends) == (3 if second_refused else 2)
+    expected = ["host_copies", "bodies"] + (["floor", "books", "unseen_bodies"] if second_refused else [])
+    assert [step for step, _target in steps] == expected
+    assert all(target is None for _step, target in steps)  # a cold first request measures no target
+    assert context.tools._ctx._context_overflow_retries == ({PASS_ONE, PASS_TWO} if second_refused else {PASS_ONE})
+
+
+def test_a_pass_that_changes_nothing_earns_no_retry_and_the_next_pass_still_runs(tmp_path, monkeypatch):
+    from ouroboros import loop
+
+    context = _ctx(tmp_path)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
+    steps = _steps_applied(monkeypatch, outcome=lambda step: step in ("floor", "unseen_bodies"))
+    sends = []
+
+    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
+        sends.append(candidate_predicate)
+        if len(sends) == 1:
+            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0
+        assert candidate_predicate(_candidate_request(disposition, size=800))
+        return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
+    msg, _cost, _mode = loop._call_round_model(context)
+    assert msg["content"] == "fits" and len(sends) == 2  # no retry was bought for the unchanged candidate
+    assert [step for step, _target in steps] == ["host_copies", "bodies", "floor", "books", "unseen_bodies"]
+    assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
+
+
+@pytest.mark.parametrize("started_by", ["numbered_refusal", "prediction"])
+def test_the_rounds_first_failure_decides_whether_a_just_chosen_body_pays_last(tmp_path, monkeypatch, started_by):
+    """Owner 2A, both directions: pass 1 sheds part of the target and the pre-send prediction stops its retry. A round
+    a provider's numbered refusal started stays that refusal's round, so pass 2 may take the just-chosen body last,
+    for what its other steps left; a round a pre-send prediction started never takes one."""
+    from dataclasses import asdict
+    from ouroboros import capability_evidence as ce, loop, loop_model_call
+    from ouroboros.loop_llm_call import REFUSED_CANDIDATE_KEY
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)  # a stated limit is a durable observation
+    context = _ctx(tmp_path)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(estimated_input=520_000)]))
+    shed = {"host_copies": 10_000, "floor": 5_000}  # each pass sheds part of its target, never all of it
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_step", lambda ctx, step, fit, target, slack=None: shed.get(step))
+    chosen = []
+    monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass", lambda ctx, fit, *, rung, goal_tokens=None: (
+        chosen.append((rung, goal_tokens)) or SimpleNamespace(status="applied")))
+    sends = []
+
+    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
+        sends.append(candidate_predicate)
+        if len(sends) == 3:
+            assert candidate_predicate(_candidate_request(disposition, size=800))
+            return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
+        ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+        if len(sends) == 1 and started_by == "numbered_refusal":
+            ctx.accumulated_usage["_last_llm_provider_message"] = STATED
+        else:  # the pre-send gate stopped this candidate: its facts, no provider words
+            ctx.accumulated_usage.update({"_last_llm_provider_message": "", REFUSED_CANDIDATE_KEY: {
+                **asdict(_failed_capture(size=1_000 if len(sends) == 1 else 900)),
+                "predicted_free_tokens": -30_000, "predicted_slack_tokens": 0}})
+        return None, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
+    msg, _cost, _mode = loop._call_round_model(context)
+    assert msg["content"] == "fits" and len(sends) == 3
+    assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
+    # Pass 2 measures the predicted retry (30,000 over); the floor took 5,000 of it.
+    assert chosen == ([("chosen_bodies", 25_000)] if started_by == "numbered_refusal" else [])
+
+
+def test_unchanged_candidate_after_every_pass_gets_no_retry(tmp_path, monkeypatch):
+    """Negative: when no step changes the candidate there is no paid retry at all; the round returns
+    unanswered to the ordinary recovery with both passes spent."""
+    from ouroboros import loop
+
+    context = _ctx(tmp_path, preferred="low", mode="low")
+    sends = []
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(profile="owner_low", mode="low")]))
+    _steps_applied(monkeypatch, outcome=lambda step: False)
+
+    def dispatch(ctx, disposition, **_kwargs):
+        sends.append(disposition)
+        ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+        return None, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture(profile="owner_low", mode="low"))
+    msg, _cost, mode = loop._call_round_model(context)
+    assert msg is None and mode == "low" and len(sends) == 1
+    assert context.accumulated_usage["_last_llm_error_kind"] == "context_overflow"  # the chain and the terminal read it
+    assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
+
+
+def test_a_fallback_candidate_in_the_same_round_walks_no_pass_again(tmp_path, monkeypatch):
+    """Both directions: a candidate of a round whose passes already ran (the configured fallback receives the
+    applied view) is refused without another pass; a new round walks its passes afresh."""
+    from ouroboros import loop
+
+    context = _ctx(tmp_path)
+    context.tools._ctx._context_overflow_retries = {PASS_ONE, PASS_TWO}
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
+    steps = _steps_applied(monkeypatch)
+    sends = []
+
+    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
+        sends.append(candidate_predicate)
+        if candidate_predicate is None:
+            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0
+        return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
+    msg, _cost, _mode = loop._call_round_model(context)
+    assert msg is None and len(sends) == 1 and steps == []
+    assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
+
+    context.round_idx, sends[:] = 2, []
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(round_id="exec:round:2")]))
+    msg, _cost, _mode = loop._call_round_model(context)
+    assert msg["content"] == "fits" and len(sends) == 2
+    assert [step for step, _target in steps] == ["host_copies", "bodies"]
+    assert ("exec:round:2", "host_copies+bodies") in context.tools._ctx._context_overflow_retries
+
+
+@pytest.mark.parametrize("saved", [True, False])
+def test_the_floor_keeps_books_when_memory_alone_saved_the_target_and_drops_them_when_it_did_not(tmp_path, monkeypatch, saved):
+    """Both directions of the owner's books-last order: the floor narrows memory by the measured excess (the target
+    without its return-after-fold slack, review r1 17.10); when the narrowed view saved the whole target, Max keeps
+    its books; otherwise they become navigation (task-local Low)."""
+    from ouroboros import loop, loop_model_call
+
+    context = _ctx(tmp_path)
+    target = 520_000 - 480_000 + SLACK  # measured from the accepted floor
+    before = _fit(estimated_input=520_000, anchor_input=480_000, anchor_round=3, accepted_input=480_000)
+    after = replace(before, measurement=replace(before.measurement,
+                                                estimated_input_tokens=520_000 - target if saved else 500_000))
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([before, before, after]))
+    monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass",
+                        lambda ctx, fit, *, rung, goal_tokens=None: SimpleNamespace(status="no_eligible"))
+    coarsened = []
+    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view",
+                        lambda ctx, fit, *, saving=None: coarsened.append(saving) or True)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    sends = []
+
+    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
+        sends.append(candidate_predicate)
+        if len(sends) == 1:
+            ctx.accumulated_usage["_last_llm_provider_message"] = NUMBERLESS
+            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0
+        assert candidate_predicate(_candidate_request(disposition, size=800))
+        return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
+
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, mode = loop._call_round_model(context)
+    assert msg["content"] == "fits" and len(sends) == 2
+    assert coarsened == [target - SLACK]  # memory narrows by the measured excess, from the level it shows
+    if saved:
+        assert mode == "max" and context.messages[0]["content"] == "MAX_SYSTEM"
+        context.context_fit_plan.reproject_for_route.assert_not_called()
+    else:
+        assert mode == "low" and context.messages[0]["content"] == "LOW_SYSTEM"
+        _lowered_from_max(context.context_fit_plan, context.messages)
+
+
+def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch):
+    from ouroboros import loop, loop_model_call
+
+    context = _ctx(tmp_path, preferred="low", mode="low")
+    events = []
+    calls = 0
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(profile="owner_low", mode="low")]))
+    monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass",
+                        lambda ctx, fit, *, rung, goal_tokens=None: SimpleNamespace(status="no_eligible"))
+    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view", lambda ctx, fit, *, saving=None: True)
+
+    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0
+        assert candidate_predicate(_candidate_request(disposition, size=700))
+        return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(
+        loop, "last_physical_attempt_capture",
+        lambda: _failed_capture(profile="owner_low", mode="low"),
+    )
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **kw: events.append(kw or _a[-1]))
+    msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "fits"
-    assert sends == ["failed-main", "smaller-retry"] and reclaims == [True]
-    assert mode == "max" and context.messages[0]["content"] == "MAX_SYSTEM"  # the same model and mode continue
-    rungs = context.tools._ctx._context_overflow_retries
-    assert ("route-a", "exec:round:1", "helper") in rungs
-    assert ("route-a", "exec:round:1", "low") not in rungs  # Max is lowered only after the helper did not fit
+    assert mode == "low" and context.messages[0]["content"] == "LOW_SYSTEM"
+    assert not any(event.get("checkpoint_kind") == "context_fit_low_retry" for event in events)
+    context.context_fit_plan.reproject_for_route.assert_not_called()
 
 
 def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch):
@@ -502,11 +552,8 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
     context = _ctx(tmp_path)
     events = []
     provider_sends = 0
-    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(), _fit(profile="task_local_low", mode="low")]))
-
-    def reclaim(ctx, _disposition, **_kwargs):
-        ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
-        return _applied()
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
+    _steps_applied(monkeypatch)
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
         nonlocal provider_sends
@@ -519,108 +566,14 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
         provider_sends += 1
         raise AssertionError("equal context must not dispatch")
 
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **kw: events.append(kw or _a[-1]))
-    msg, _cost, mode = loop._call_round_model(context)
+    msg, _cost, _mode = loop._call_round_model(context)
     assert msg is None
-    assert mode == "low"  # every rung ran: the helper's equal candidate was released, Max was lowered, still equal
-    assert provider_sends == 1
+    assert provider_sends == 1  # both passes ran; each equal candidate was released before any send
     skipped = [event for event in events if event.get("reason") == "context_candidate_not_strictly_smaller"]
-    assert [event["rung"] for event in skipped] == ["helper", "low"]
-    _lowered_from_max(context.context_fit_plan, context.messages)
-
-
-def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch):
-    from ouroboros import loop
-
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    events = []
-    calls = 0
-    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(profile="owner_low", mode="low")]))
-
-    def reclaim(ctx, _disposition, **_kwargs):
-        ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
-        return _applied()
-
-    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
-            return None, 0.0
-        assert candidate_predicate(_candidate_request(disposition, size=700))
-        return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
-
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    monkeypatch.setattr(
-        loop, "last_physical_attempt_capture",
-        lambda: _failed_capture(profile="owner_low", mode="low"),
-    )
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **kw: events.append(kw or _a[-1]))
-    msg, _cost, mode = loop._call_round_model(context)
-    assert msg["content"] == "fits"
-    assert mode == "low"
-    assert not any(event.get("checkpoint_kind") == "context_fit_low_retry" for event in events)
-
-
-def test_unchanged_candidate_after_every_rung_gets_no_retry(tmp_path, monkeypatch):
-    """Negative: when no rung changes the candidate (nothing exposed, helper found nothing, Low
-    already) there is no paid retry at all; the round returns unanswered to the ordinary recovery."""
-    from ouroboros import loop
-    from ouroboros.loop_model_call import OVERFLOW_RUNGS
-
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    sends = []
-    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(profile="owner_low", mode="low")]))
-    monkeypatch.setattr(loop, "_run_main_reclaim", lambda ctx, d, **kw: SimpleNamespace(status="no_eligible"))
-
-    def dispatch(ctx, disposition, **_kwargs):
-        sends.append(disposition)
-        ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
-        return None, 0.0
-
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture(profile="owner_low", mode="low"))
-    msg, _cost, mode = loop._call_round_model(context)
-    assert msg is None and mode == "low" and len(sends) == 1
-    assert context.accumulated_usage["_last_llm_error_kind"] == "context_overflow"  # the chain and the terminal read it
-    assert {key[2] for key in context.tools._ctx._context_overflow_retries} == set(OVERFLOW_RUNGS)
-
-
-def test_one_route_round_materialization_pass_is_latched(tmp_path, monkeypatch):
-    from ouroboros import loop
-    from ouroboros.context_budget import ContextReclaimReceipt
-
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    disposition = _fit(
-        action="reclaim_once", profile="owner_low", mode="low", goal=10,
-        target_deficit=10,
-    )
-    calls = 0
-
-    def compact(messages, **_kwargs):
-        nonlocal calls
-        calls += 1
-        receipt = ContextReclaimReceipt(
-            status="no_eligible",
-            before_transcript_sha256="a" * 64,
-            after_transcript_sha256="a" * 64,
-            selection_fingerprint="",
-            selected_unit_ids=(),
-            reclaimed_tokens=0,
-            goal_reached=False,
-            checkpoint_ref=None,
-            capsule_refs=(),
-        )
-        return messages, receipt, None
-
-    monkeypatch.setattr(loop, "compact_tool_history_llm", compact)
-    loop._run_main_reclaim(context, disposition)
-    assert loop._run_main_reclaim(context, disposition) is None
-    assert calls == 1
+    assert [event["rung"] for event in skipped] == ["host_copies+bodies", "floor+books+unseen_bodies"]
 
 
 def test_strict_shrink_predicate_uses_failed_physical_reserve():
@@ -633,19 +586,19 @@ def test_strict_shrink_predicate_uses_failed_physical_reserve():
     assert predicate(_candidate_request(disposition, size=900, reserve=2_048)) is True
 
 
-def test_failed_main_capture_is_snapshotted_before_reclaim_attempt(tmp_path, monkeypatch):
-    """A receipted summarizer must not replace the failed Main comparison candidate."""
-    from ouroboros import loop
+def test_failed_main_capture_is_snapshotted_before_the_passes(tmp_path, monkeypatch):
+    """A pass's own physical receipts must not replace the failed Main comparison candidate."""
+    from ouroboros import loop, loop_model_call
 
     context = _ctx(tmp_path)
     current_capture = {"value": _failed_capture(size=1_000)}
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
 
-    def reclaim(ctx, _disposition, **_kwargs):
-        current_capture["value"] = _failed_capture(size=700)  # the summarizer's own receipted capture
-        ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
-        return _applied()
+    def apply(ctx, step, fit, target, slack=None):
+        current_capture["value"] = _failed_capture(size=700)  # a receipt the pass itself produced
+        return True
 
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_step", apply)
     sends = 0
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
@@ -660,13 +613,12 @@ def test_failed_main_capture_is_snapshotted_before_reclaim_attempt(tmp_path, mon
         assert loop._strict_context_shrink_predicate(current_capture["value"])(request) is False
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: current_capture["value"])
 
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "fits"
-    assert mode == "max"  # the helper's retry fit on the same model and mode
+    assert mode == "max"  # the retry fit on the same model and mode
     assert sends == 2
 
 
@@ -730,7 +682,6 @@ def test_overflow_retry_is_skipped_while_the_round_holds_an_unresolved_attempt(t
     context.accumulated_usage.update(execution_id="exec", **{
         TRANSPORT_DEATHS_KEY: {"round_id": "exec:round:1", "count": 1, "backoff_sec": 4.0}})
     fit = _fit()  # Pure measurement may run again for the per-send facts line.
-    reclaims = []
 
     def measure(ctx, **_kwargs):
         disposition = fit
@@ -738,7 +689,7 @@ def test_overflow_retry_is_skipped_while_the_round_holds_an_unresolved_attempt(t
         return disposition
 
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", lambda ctx, d, **_k: reclaims.append(d))
+    steps = _steps_applied(monkeypatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
 
     msg, _cost, mode = loop._call_round_model(context)
@@ -747,8 +698,7 @@ def test_overflow_retry_is_skipped_while_the_round_holds_an_unresolved_attempt(t
     assert context.llm.calls == 1  # the current refusal; no compaction retry
     assert context.accumulated_usage["_last_llm_error_kind"] == "context_overflow"
     assert context.accumulated_usage[TRANSPORT_DEATHS_KEY]["count"] == 1
-    assert reclaims == []
-    assert ("route-a", "exec:round:1") not in context.tools._ctx._context_overflow_retries
+    assert steps == [] and not context.tools._ctx._context_overflow_retries
     assert mode == "max"  # the retry was refused before any low re-projection
     rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines() if line.strip()]
     skipped = [row for row in rows if row.get("type") == "context_overflow_retry_skipped"]
@@ -757,232 +707,3 @@ def test_overflow_retry_is_skipped_while_the_round_holds_an_unresolved_attempt(t
     assert [(row["error_kind"], row["retry_same_request"]) for row in api_errors] == [
         ("context_overflow", False),
     ]
-
-
-@pytest.fixture
-def real_main_reclaim(tmp_path, monkeypatch):
-    """Real Main/materializer boundary with only the paid actor and event sinks stubbed."""
-    from copy import deepcopy
-    from ouroboros import context_compaction as cc, loop
-    from tests.test_context_reclaim_materializer import _SPEC, _request, _unit
-
-    calls, events, accounted = [], [], []
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
-
-    def summarize(parts, **kwargs):
-        calls.extend(parts)
-        kwargs["usage_total"].update(cost=0.01, prompt_tokens=10, completion_tokens=5)
-        return {part.source_id: "The source was inspected; its original remains available." for part in parts}
-
-    monkeypatch.setattr(cc, "_call_summarizer", summarize)
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _q, _t, _d, row: events.append(row))
-    monkeypatch.setattr(loop, "_account_compaction_usage", lambda usage, fact, *_args: accounted.append(fact))
-    old_source = _unit("old", "old evidence ")
-    compacted, receipt, _usage = cc.compact_tool_history_llm(
-        old_source, request=_request(old_source, 500), drive_root=tmp_path, task_id="seed-old",
-        exposed_units=cc.exposed_context_units(old_source, old_source),
-    )
-    assert receipt.status == "applied" and len(compacted) == 1
-    capsule = deepcopy(compacted[0])
-    assert cc._capsule_metadata(capsule)[1]["generation"] == 1
-    calls.clear()
-    context = _ctx(tmp_path, preferred="low", mode="low")
-    context.messages.extend([capsule, *_unit("new", "new evidence ")])
-    context.tools._ctx._last_context_observation = {
-        "exposed_units": cc.exposed_context_units(context.messages, context.messages),
-    }
-    return SimpleNamespace(context=context, capsule=deepcopy(capsule), calls=calls,
-                           events=events, accounted=accounted, root=tmp_path)
-
-
-def test_main_unreachable_reclaim_retains_capsule_without_paid_checkpoint(real_main_reclaim):
-    from copy import deepcopy
-    from ouroboros import context_compaction as cc, loop
-
-    run = real_main_reclaim
-    context = run.context
-    units = cc._atomic_units(context.messages)
-    raw_capacity = sum(unit.context_size_tokens for unit in units if unit.generation == 0)
-    capsule_capacity = sum(unit.context_size_tokens for unit in units if unit.generation > 0)
-    deficit = raw_capacity + max(1, capsule_capacity // 2)
-    before = deepcopy(context.messages)
-    before_files = {str(path) for path in run.root.rglob("*") if path.is_file()}
-    disposition = _fit(action="reclaim_once", profile="owner_low", mode="low",
-                       goal=deficit + 25000, target_deficit=deficit, capacity_deficit=0)
-
-    receipt = loop._run_main_reclaim(context, disposition)
-
-    assert receipt.status == "no_positive_reclaim"
-    assert receipt.fit["reason"] == "automatic_reclaim_unreachable"
-    assert receipt.fit["required_reclaim_tokens"] == deficit
-    assert receipt.fit["maximum_reclaim_tokens"] < deficit
-    assert receipt.fit["measurement_basis"] == "cold_estimate"
-    assert receipt.fit["measurement_density"] == 1.0
-    assert receipt.checkpoint_ref is None and receipt.capsule_refs == ()
-    assert run.calls == [] and run.accounted == []
-    assert context.messages[:len(before)] == before  # any appended host fact cannot rewrite residue
-    assert {str(path) for path in run.root.rglob("*") if path.is_file()} == before_files
-    assert run.events[-1]["reclaim_fit"] == receipt.fit
-    calls = len(run.events)
-    assert loop._run_main_reclaim(context, disposition) is None
-    assert len(run.events) == calls  # route/round fact is not repeated
-    context.round_idx = 2
-    next_round = replace(disposition, measurement=replace(disposition.measurement, round_id="exec:round:2"))
-    again = loop._run_main_reclaim(context, next_round)
-    assert again.status == "no_positive_reclaim" and not run.calls
-    notices = [message for message in context.messages if isinstance(message.get("content"), str)
-               and message["content"].startswith("[Context reclaim facts:")]
-    assert len(notices) == 1  # an unchanged impossible boundary does not grow the next prompt
-    assert len(run.events) == calls + 1  # the new round still has its own checkpoint facts
-
-
-def test_main_partial_margin_reclaim_uses_only_new_raw_and_keeps_old_capsule(real_main_reclaim):
-    from ouroboros import context_compaction as cc, loop
-
-    run = real_main_reclaim
-    context = run.context
-    raw = [unit for unit in cc._atomic_units(context.messages) if unit.generation == 0]
-    assert len(raw) == 1
-    deficit = max(1, raw[0].context_size_tokens // 4)
-    goal = raw[0].context_size_tokens + 25000
-    disposition = _fit(action="reclaim_once", profile="owner_low", mode="low",
-                       goal=goal, target_deficit=0, capacity_deficit=deficit)
-
-    receipt = loop._run_main_reclaim(context, disposition)
-
-    assert receipt.status == "applied" and receipt.checkpoint_ref
-    assert receipt.reclaimed_tokens >= deficit
-    assert receipt.goal_reached is False  # optional headroom cannot veto useful shrink
-    assert run.calls and run.accounted
-    assert {part.root_id for part in run.calls} == {raw[0].unit_id}
-    assert "new evidence" in "".join(part.text for part in run.calls)
-    assert "old evidence" not in "".join(part.text for part in run.calls)
-    assert context.messages[2] == run.capsule
-    assert cc._capsule_metadata(context.messages[2])[1]["generation"] == 1
-    assert cc._capsule_metadata(context.messages[3])[1]["generation"] == 1
-    assert run.events[-1]["reclaim_goal_tokens"] == goal
-    assert run.events[-1]["goal_reached"] is False
-
-
-def test_main_new_exposed_raw_after_unreachable_round_can_progress(real_main_reclaim):
-    from ouroboros import context_compaction as cc, loop
-    from tests.test_context_reclaim_materializer import _unit
-
-    run = real_main_reclaim
-    context = run.context
-    raw_capacity = sum(unit.context_size_tokens for unit in cc._atomic_units(context.messages) if not unit.generation)
-    old_unit_id = next(unit.unit_id for unit in cc._atomic_units(context.messages) if unit.generation)
-    deficit = raw_capacity + 1000
-    disposition = _fit(action="reclaim_once", profile="owner_low", mode="low",
-                       goal=deficit + 25000, target_deficit=deficit, capacity_deficit=0)
-    assert loop._run_main_reclaim(context, disposition).status == "no_positive_reclaim"
-    assert not run.calls
-    context.messages.extend(_unit("later", "later complete source " * 2))
-    context.tools._ctx._last_context_observation = {
-        "exposed_units": cc.exposed_context_units(context.messages, context.messages),
-    }
-    context.round_idx = 2
-    disposition = replace(disposition, measurement=replace(disposition.measurement, round_id="exec:round:2"))
-
-    receipt = loop._run_main_reclaim(context, disposition)
-
-    assert receipt.status == "applied" and receipt.reclaimed_tokens >= deficit
-    assert run.calls and context.messages[2] == run.capsule
-    assert all(part.root_id != old_unit_id for part in run.calls)
-    assert "later complete source" in "".join(part.text for part in run.calls)
-
-
-def test_main_real_overflow_without_predicted_deficit_allows_partial_shrink(real_main_reclaim):
-    from ouroboros import context_compaction as cc, loop
-
-    run = real_main_reclaim
-    context = run.context
-    raw_capacity = sum(unit.context_size_tokens for unit in cc._atomic_units(context.messages) if not unit.generation)
-    minimum_goal = raw_capacity + 25000
-    disposition = _fit(action="send", profile="owner_low", mode="low", goal=0,
-                       target_deficit=0, capacity_deficit=0)
-
-    receipt = loop._run_main_reclaim(context, disposition, minimum_goal_tokens=minimum_goal)
-
-    assert receipt.status == "applied" and receipt.reclaimed_tokens > 0
-    assert not receipt.goal_reached
-    assert context.messages[2] == run.capsule
-    assert run.calls and run.events[-1]["deficit_tokens"] == 0
-    assert run.events[-1]["reclaim_goal_tokens"] == minimum_goal
-
-
-def test_main_unexposed_new_raw_cannot_make_automatic_reclaim_reachable(real_main_reclaim):
-    from ouroboros import context_compaction as cc, loop
-
-    run = real_main_reclaim
-    context = run.context
-    only_old = context.messages[:3]
-    context.tools._ctx._last_context_observation = {
-        "exposed_units": cc.exposed_context_units(only_old, only_old),
-    }
-    receipt = loop._run_main_reclaim(context, _fit(action="reclaim_once", profile="owner_low",
-        mode="low", goal=1000, target_deficit=500, capacity_deficit=0))
-
-    assert receipt.status == "no_eligible"
-    assert not run.calls and not receipt.checkpoint_ref
-    assert context.messages[2] == run.capsule
-    assert context.messages[3]["tool_calls"][0]["id"] == "new"
-
-
-@pytest.mark.parametrize("physical", [0, 100, 1000000])
-def test_economic_target_cannot_veto_real_pressure_relief(real_main_reclaim, physical):
-    from ouroboros import loop
-    run = real_main_reclaim
-    fit = _fit(action="reclaim_once", profile="owner_low", mode="low",
-        goal=1000000, target_deficit=1000000, capacity_deficit=physical)
-    receipt = loop._run_main_reclaim(run.context, fit, minimum_goal_tokens=1000)
-    assert receipt.status == "applied" and receipt.reclaimed_tokens > 0
-    assert receipt.fit["required_reclaim_tokens"] == 0  # Actual refusal supplies no numeric deficit.
-    assert run.calls
-
-
-def test_helper_rung_runs_once_per_route_round_and_later_rungs_compare_with_the_latest_refusal(tmp_path, monkeypatch):
-    """7A: a predicted deficit never starts the helper; the refusal does, exactly once per
-    route/round, with the low-water goal and ``provider_refused``. When the helper's retry is
-    refused again, the next rung (Max lowered to task-local Low) earns a retry that must shrink
-    below THAT candidate, not the first one, and the helper is not run a second time."""
-    from ouroboros import loop
-
-    context = _ctx(tmp_path)
-    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([
-        _fit(action="reclaim_once", goal=10_000, capacity_deficit=10_000)]))
-    reclaims, sends, captures = [], [], iter([_failed_capture(size=1_000), _failed_capture(size=900)])
-    current = {"value": next(captures)}
-
-    def reclaim(ctx, disposition, **kwargs):
-        reclaims.append((kwargs.get("minimum_goal_tokens", 0), kwargs.get("provider_refused", False)))
-        ctx.tools._ctx._context_reclaim_passes.add(_fit_key_of(disposition))
-        return _applied()
-
-    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
-        sends.append(candidate_predicate)
-        if len(sends) == 1:  # the actual request: refused
-            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
-            return None, 0.0
-        if len(sends) == 2:  # the helper's smaller candidate (900 < 1000): refused again
-            assert candidate_predicate(_candidate_request(disposition, size=900))
-            current["value"] = next(captures)
-            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
-            return None, 0.0
-        assert not candidate_predicate(_candidate_request(disposition, size=900))  # the base moved to 900
-        assert candidate_predicate(_candidate_request(disposition, size=800))
-        return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
-
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: current["value"])
-    msg, _cost, mode = loop._call_round_model(context)
-
-    assert msg["content"] == "fits" and mode == "low" and len(sends) == 3
-    assert reclaims == [(max(1, reclaim_low_water_margin(None, 500_000)), True)]
-    assert context.messages[0]["content"] == "LOW_SYSTEM"
-    _lowered_from_max(context.context_fit_plan, context.messages)
-
-
-def _fit_key_of(disposition):
-    return (disposition.measurement.route_fp, disposition.measurement.round_id)

@@ -63,6 +63,22 @@ def setup(tmp_path, scope="global", fork=False):
     return ctx, registry, address, store.read_knowledge_note(address)
 
 
+def retain_named_refs(value, source, custody, task_id, *, carrier="metadata"):
+    """Retain ``value``'s host-named source closure into ``custody``: ``source_retention.retain_tree``,
+    the walk child copy-back and blob promotion share, read through ``source_carrier``. Its
+    review-request entry (``review_source_closure.retain_review_refs``) left with task acceptance;
+    like that entry, a pending or unavailable named source fails here."""
+    from ouroboros.observability import child_ref_promotion_scope
+    from ouroboros.source_retention import retain_tree
+
+    facts = {"schema_version": 1, "status": "complete", "promoted_ref_count": 0,
+             "promoted_source_handle_count": 0, "pending_refs": [], "unavailable_refs": []}
+    with child_ref_promotion_scope():
+        retained = retain_tree(value, custody, source, task_id, facts, carrier=carrier)
+    assert not facts["pending_refs"] and not facts["unavailable_refs"], facts
+    return retained
+
+
 def transition(registry, note, mode="archive", **extra):
     return registry.execute("knowledge_write", {"topic": note.address.topic,
         "scope": note.address.scope, "mode": mode, "expected_revision": note.revision,
@@ -194,8 +210,8 @@ def test_revision_and_input_refusals_leave_source_history_and_index_unchanged(tm
     assert not (address.shelf / "missing.md").exists()
 
 
-@pytest.mark.parametrize("topic", ["overview", "patterns", "improvement-backlog"])
-def test_reserved_roots_cannot_be_hidden_even_by_imported_archive_metadata(tmp_path, topic):
+def test_the_overview_cannot_be_hidden_even_by_imported_archive_metadata(tmp_path):
+    topic = "overview"
     _, registry, _, _ = setup(tmp_path)
     address = store.resolve_knowledge_address(tmp_path, topic)
     raw = b"---\narchive: {at: yesterday, reason: old}\n---\nIndependent loader body.\n"
@@ -212,6 +228,20 @@ def test_reserved_roots_cannot_be_hidden_even_by_imported_archive_metadata(tmp_p
     assert current.state == "active" and not current.archive_error
     assert "archive" not in current.metadata and body(current) == body(note)
     assert read_previous(registry, restored["knowledge_previous_source"]) == raw
+
+
+@pytest.mark.parametrize("topic", ["patterns", "improvement-backlog"])
+def test_the_former_register_and_backlog_archive_like_any_note(tmp_path, topic):
+    _, registry, _, _ = setup(tmp_path)
+    address = store.resolve_knowledge_address(tmp_path, topic)
+    address.path.parent.mkdir(parents=True, exist_ok=True)
+    address.path.write_bytes(b"---\narchive: {at: yesterday, reason: closed by a test}\n---\nOld classes.\n")
+    note = store.read_knowledge_note(address)
+    assert note.state == "archived" and not note.archive_error
+    assert f"**{topic}**" not in registry.execute("knowledge_list", {})
+    restored = store.read_knowledge_note(address)
+    assert store.write_knowledge_note(address, "", "restore", restored.revision).ok
+    assert store.read_knowledge_note(address).state == "active"
 
 
 @pytest.mark.parametrize("metadata", ["archive: null", "archive: []", "archive: old",
@@ -447,7 +477,6 @@ def test_external_result_metadata_lookalikes_do_not_promote_knowledge_sources(tm
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.loop_tool_execution import _execute_single_tool
     from ouroboros.observability import read_call_payload
-    from ouroboros.review_source_closure import retain_review_refs
     from ouroboros.tools.extension_dispatch import _extension_completion
 
     child, custody = tmp_path / "child", tmp_path / "custody"
@@ -470,8 +499,8 @@ def test_external_result_metadata_lookalikes_do_not_promote_knowledge_sources(tm
     # in either the external producer body or the annotated result body.
     assert recorded["result_meta"]["tool_result_meta"] == dict(typed.meta)
     assert previous["sha256"] not in json.dumps(recorded["result_meta"])
-    retain_review_refs({"trace_refs": {"tool_call_refs": [executed["trace_ref"]]}},
-                       child, custody, ctx.task_id, carrier="task_result")
+    retain_named_refs({"trace_refs": {"tool_call_refs": [executed["trace_ref"]]}},
+                      child, custody, ctx.task_id, carrier="task_result")
     _, retained, _ = read_call_payload(custody, task_id=ctx.task_id, call_id=call_id)
     assert retained == recorded
     assert not (task_artifact_dir_path(custody, ctx.task_id) / previous["path"]).exists()
@@ -482,7 +511,6 @@ def test_external_result_metadata_lookalikes_do_not_promote_knowledge_sources(tm
 
 def test_presence_payload_metadata_lookalikes_stay_data_in_retained_context(tmp_path):
     from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
-    from ouroboros.review_source_closure import retain_review_refs
 
     child, custody = tmp_path / "child", tmp_path / "custody"
     ctx, registry, _, note = setup(child)
@@ -500,7 +528,7 @@ def test_presence_payload_metadata_lookalikes_stay_data_in_retained_context(tmp_
         source_id="presence-data", data=captured, extension="json")
     # source_carrier follows the host checkpoint and its message roles, but the
     # rendered Presence event cannot nominate its own source closure.
-    retained = retain_review_refs({"checkpoint_ref": checkpoint}, child, custody, ctx.task_id)
+    retained = retain_named_refs({"checkpoint_ref": checkpoint}, child, custody, ctx.task_id)
     assert read_actor_source_bytes(custody, ctx.task_id, retained["checkpoint_ref"]) == captured
     assert not (task_artifact_dir_path(custody, ctx.task_id) / previous["path"]).exists()
     with pytest.raises(FileNotFoundError):
@@ -510,7 +538,6 @@ def test_presence_payload_metadata_lookalikes_stay_data_in_retained_context(tmp_
 
 def test_tool_metadata_closure_retains_only_named_previous_note_source(tmp_path):
     from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
-    from ouroboros.review_source_closure import retain_review_refs
 
     child, custody, task = tmp_path / "child", tmp_path / "custody", "metadata-closure"
     previous = store_actor_source_bytes(child, task, category="tool_results",
@@ -520,10 +547,10 @@ def test_tool_metadata_closure_retains_only_named_previous_note_source(tmp_path)
     payload = {"result_meta": {"source_ref": unrelated, "refs": [unrelated],
         "tool_result_meta": {"knowledge_previous_source": previous,
                              "source_ref": unrelated, "sources": [unrelated]}}}
-    retained = retain_review_refs(payload, child, custody, task)
+    retained = retain_named_refs(payload, child, custody, task)
     assert read_actor_source_bytes(custody, task,
         retained["result_meta"]["tool_result_meta"]["knowledge_previous_source"]) == b"previous note"
     assert not (task_artifact_dir_path(custody, task) / unrelated["path"]).exists()
-    # Missing arbitrary metadata is data, not a reason to refuse review.
+    # Missing arbitrary metadata is data, not a reason to refuse retention.
     (task_artifact_dir_path(child, task) / unrelated["path"]).unlink()
-    assert retain_review_refs(payload, child, custody, task) == retained
+    assert retain_named_refs(payload, child, custody, task) == retained

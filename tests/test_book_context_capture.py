@@ -3,8 +3,10 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import context
-from ouroboros.context_fit import build_context_fit_plan
+from ouroboros.context_fit import MinimumViewUnfit, build_context_fit_plan
 from ouroboros.memory import Memory
 
 
@@ -116,6 +118,9 @@ def test_large_nano_task_retains_exact_owner_source_without_changing_max(tmp_pat
     assert plan.messages_for("max")[-1]["content"] == task_text
     assert "FINAL OWNER CRITERION" in json.loads(core.user_content_json)
     assert plan.nano_projection.estimated_tokens < window
+    # Only a window that cannot hold even the pointer request names the incompatibility.
+    with pytest.raises(MinimumViewUnfit, match="cannot fit"):
+        _plan(env, core, task, "nano", 10_000)
 
 
 def test_authored_common_understanding_is_resident_with_every_note_summary(tmp_path):

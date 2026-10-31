@@ -62,6 +62,10 @@ def _system(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "_repo_writer_gate_reason", "")
     monkeypatch.setattr(workers, "MAX_WORKERS", 1)
     monkeypatch.setattr(workers, "mp", SimpleNamespace(get_context=lambda _method: SimpleNamespace(Queue=stdqueue.Queue)))
+    # The real spawn_workers caches that fake context in the global ``workers._CTX``, which the
+    # ``mp`` patch does not restore: the next test in this process that starts the real event bus
+    # would build its manager on it (no ``Process``) and every task_done publish would fail.
+    monkeypatch.setattr(workers, "_CTX", None)
     monkeypatch.setattr(workers, "threading", SimpleNamespace(Thread=_InlineThread))
     processes, launches = {}, []
 
@@ -246,6 +250,10 @@ def test_failed_source_conversion_releases_lease_but_remains_explicitly_held(tmp
     assert "saved" not in system.workers.RUNNING
     [held] = system.workers.PENDING
     assert held["id"] == "saved" and budget_hold_fact(held)
+    from supervisor.budget_resume import newer_continuation_basis, resume_hold_requires_fence
+    assert newer_continuation_basis(held, tmp_path)
+    assert not resume_hold_requires_fence(held, tmp_path)
+    assert budget_hold_fact(held)["reason"] == "saved_work_hold"  # admission still owns the failed source
     assert not running_project_ids(system.workers.RUNNING.values())
     system.workers.assign_tasks()
     assert all(commands.empty() for commands in system.launches)
@@ -481,6 +489,9 @@ def test_unreadable_money_after_abort_still_refuses_assignment(tmp_path, monkeyp
         if str(database).split("?")[0] == ledger.as_uri():
             raise usage_store.sqlite3.OperationalError("injected money-store open failure")
         return original_connect(database, *args, **kwargs)
+    from ouroboros import store
+
+    store.close_connections()  # a thread keeps its open handle; the next money read opens the file again
     monkeypatch.setattr(usage_store.sqlite3, "connect", denied)
     system.control._respawn_workers_after_failed_update()
     _assert_returned(system, tmp_path)

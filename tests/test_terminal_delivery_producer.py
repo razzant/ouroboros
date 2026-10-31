@@ -22,7 +22,7 @@ pytestmark = pytest.mark.serial
 
 
 def _finish_in_worker(root_text, task, event_queue, report_queue, attach):
-    from ouroboros.agent_task_pipeline import _run_post_task_processing_async
+    from ouroboros import agent_task_pipeline, post_task_evolution
     from supervisor import event_observation, terminal_delivery, workers
 
     manager_calls = []
@@ -43,14 +43,13 @@ def _finish_in_worker(root_text, task, event_queue, report_queue, attach):
     root = pathlib.Path(root_text)
     env = SimpleNamespace(drive_root=root, repo_dir=pathlib.Path(__file__).parents[1],
                           drive_path=lambda rel: root / rel)
-    # Resume after all paid stages: exercise the actual final callback without
+    # The paid stages do nothing here: exercise the actual final callback without
     # asking a provider or replacing the checkpoint/projection/outbox writers.
-    _run_post_task_processing_async(
+    agent_task_pipeline._run_memory_fallback_draft = lambda *args, **kwargs: ""
+    post_task_evolution.maybe_promote = lambda *args, **kwargs: None
+    agent_task_pipeline._run_post_task_processing_async(
         env, task, {}, {}, root / "logs", blocking=True,
         event_queue=event_queue if attach else None,
-        resume={"usage_snapshot": {}, "completed_stages": [
-            "memory_fallback_draft", "scratchpad_consolidation", "reflection", "promotion",
-        ]},
     )
     report_queue.put((terminal_delivery.pending_deliveries(root), manager_calls))
 

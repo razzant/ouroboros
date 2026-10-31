@@ -267,13 +267,13 @@ def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None) -> D
                 raw, settings_path=_config.SETTINGS_PATH, warn_ambiguous=True,
             )
             document = _config.normalize_settings_raw(raw)
-            merged.update(document)
     except SettingsIntegrityError:
         raise
     except Exception:
         log.debug("Failed to read raw owner settings; using defaults", exc_info=True)
     if document_out is not None:
         document_out.update(document)
+    merged.update(_config.normalize_effort_document(document))
     return merged
 
 
@@ -409,15 +409,16 @@ def _owner_update_settings(
         proposed = transform(current)
         if proposed is None:
             return
-        to_write = _config.prepare_settings_for_persist(
-            dict(proposed), authored_keys=authored_keys,
-            allow_context_lowering=allow_context_lowering,
-            allow_safety_lowering=allow_safety_lowering)
+        to_write = dict(proposed)
         if not whole_document:
             from ouroboros.server_runtime import unedited_unauthored_slots
 
             for key in unedited_unauthored_slots(document, to_write, shown) - set(authored_keys):
                 to_write.pop(key, None)
+        to_write = _config.prepare_settings_for_persist(
+            to_write, authored_keys=authored_keys,
+            allow_context_lowering=allow_context_lowering,
+            allow_safety_lowering=allow_safety_lowering)
         write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
         if boundary is not None:
             boundary.commit()

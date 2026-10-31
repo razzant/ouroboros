@@ -770,6 +770,49 @@ def test_a_dispatched_first_send_that_fails_is_still_a_round(subject_repo):
     assert custody["native_rounds"] == 2 and custody["native_transcript_chars"] == wire[1] != wire[0]
 
 
+def test_a_late_strict_paid_stamp_failure_keeps_the_dispatched_round_failure(subject_repo, caplog):
+    """#1652 native copy: the send that left keeps ITS exception and capture as the cached failure
+    when the strict paid stamp fails after it, so custody reads an unknown outcome rather than the
+    rounds' settled one; the attempt is observed and no second episode or send follows."""
+    from ouroboros.review_custody import _review_exception_projection, _ReviewAttemptHistory
+    from ouroboros.review_dispatch import ReviewPaidStamp
+
+    class _Capture:
+        state = "dispatched"
+        attempt_id = "attempt-1"
+        provider_status_code = None
+
+    errors, observed = [], []
+
+    class _DispatchedFailureLLM(_ScriptedLLM):
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            exc = RuntimeError("socket reset after dispatch")
+            exc.physical_attempt_capture = _Capture()
+            errors.append(exc)
+            raise exc
+
+    def refuse():
+        raise RuntimeError("commit review paid write-ahead could not be verified")
+
+    llm = _DispatchedFailureLLM([])
+    assignment = dataclasses.replace(_assignment(subject_repo, llm), dispatch_stamp=ReviewPaidStamp(refuse, fail_closed=True))
+    executor = NativeToolRoundReviewExecutor(assignment, llm=llm)
+    executor.usage_observer = observed.append
+    for _ in range(2):  # a repeat of the rail re-raises the cached failure, never a second episode
+        with pytest.raises(RuntimeError) as raised:
+            executor.execute()
+        assert raised.value is errors[0]
+    assert len(llm.calls) == 1 and [row["ledger_attempt_ids"] for row in observed] == [["attempt-1"]]
+    assert "commit review paid write-ahead could not be verified" in caplog.text
+    history = _ReviewAttemptHistory()
+    history.observe(errors[0])
+    custody, state, _status, operation_state, failure_code = _review_exception_projection(
+        errors[0], executor.failure_custody(), history, None)
+    assert (state, operation_state, failure_code) == ("dispatched", "custody_lost", "provider_outcome_unknown")
+    assert custody["native_rounds"] == 1
+
+
 def test_transcript_counter_includes_system_schemas_and_args(subject_repo):
     """Diagnostics include the system, schemas and exact serialized call arguments."""
     llm = _ScriptedLLM([

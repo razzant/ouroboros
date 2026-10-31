@@ -1,0 +1,77 @@
+{
+ "_schema_version": 1,
+ "cancel_receipt": {
+  "delivered_chat_id": 1,
+  "delivery_id": "cancel:t1:ci_defc1cf034fd",
+  "files_rescued": {
+   "count": 0,
+   "hash_computed": false,
+   "state": "zero",
+   "stores": [
+    {
+     "count": 0,
+     "readable": true,
+     "store": "/private/tmp/ob-53e6pwjc/b0/t/test_parent_writer_records_the1/task_results/artifacts/t1"
+    }
+   ]
+  },
+  "outcome": "stopped by the owner",
+  "preview_omitted_chars": 0,
+  "salvage": {
+   "path": "",
+   "preserved": false
+  },
+  "settled_status": "cancelled",
+  "stop_reason": "owner stop",
+  "stop_requested_at": "2026-10-26T22:36:15.046551+00:00",
+  "ts": "2026-10-26T22:36:15.047542+00:00"
+ },
+ "canonical_terminal_projection_origin": "terminal_transition",
+ "chat_id": 1,
+ "followup_stop": {
+  "control_id": "96b05e3aceb440f3a05d7d1521fb2538",
+  "requested_at": "2026-10-26T22:36:15.046543+00:00",
+  "source": "owner"
+ },
+ "owner_mailbox": {
+  "captured_at": "2026-10-26T22:36:15.024721+00:00",
+  "read_complete": true,
+  "rows": [],
+  "schema": 1,
+  "total": 0
+ },
+ "status": "cancelled",
+ "swarm_fanout_basis": {
+  "base": {
+   "child_ids": [],
+   "fanout_count": 0,
+   "fanout_interval_sec_total": 0,
+   "lanes_requested": [],
+   "requested_count": 0,
+   "version": 2
+  }
+ },
+ "swarm_fanout_rollup": {
+  "child_ids": [],
+  "fanout_count": 0,
+  "fanout_interval_sec_total": 0,
+  "lanes_requested": [],
+  "requested_count": 0,
+  "version": 2
+ },
+ "task_id": "t1",
+ "terminal_time": {
+  "attempt": {
+   "_attempt": null,
+   "metadata_attempt": null,
+   "metadata_task_attempt": null,
+   "started_at": null,
+   "task_attempt": null
+  },
+  "occurred_at": null,
+  "source": "unknown",
+  "v": 1
+ },
+ "ts": "2026-10-26T22:36:15.029644+00:00",
+ "updated_at": "2026-10-26T22:36:15.029644+00:00"
+}

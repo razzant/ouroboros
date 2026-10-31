@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import json
 import time
+from urllib.parse import urlsplit
 
 import pytest
 
+from ouroboros.test_evidence import diagnostic_directory
+
 from tests.ui_failure_evidence import FailureEvidence
+
+
+def state_reads(url: str) -> bool:
+    """Every shared state read of the page: the first `/api/state` and each `?bindings_since=` read after it
+    (#2307, state_snapshots.js createStateSnapshotSequencer). A `**/api/state` glob matches the first alone."""
+    return urlsplit(url).path == "/api/state"
 
 _CAPTURE_TEST_SOCKET = """() => {
     const NativeWebSocket = window.WebSocket;
@@ -19,10 +28,10 @@ _CAPTURE_TEST_SOCKET = """() => {
         }
     };
 }"""
-# One page-wide /api/state read is in flight at a time (chat_activity.js
+# One page-wide /api/state read is in flight at a time (state_snapshots.js
 # createStateSnapshotSequencer.gate): a forced refresh that lands behind an
-# in-flight read starts only after that read settles, so the socket-open census
-# can still be reading after the socket reports OPEN. A frame emitted on the test
+# in-flight read starts once that read settles, or at once when a socket change
+# retires it, so the socket-open census can still be reading after OPEN. A frame emitted on the test
 # socket exists nowhere on the server; a complete census whose request started
 # after that frame concludes its card by absence, exactly as it would a task the
 # queue really lost. Tests that emit such frames wait for the reads to land first.
@@ -73,6 +82,47 @@ _SETTLE_RESTORE_FRAMES = """() => new Promise(resolve => {
     const tick = () => { if (--remaining <= 0) resolve(); else requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
 })"""
+
+
+# web/theme.js switches the shell's layout (html[data-layout]) from a media query's change event, which an engine may
+# run frames after the new size is in place (WebKit does): a resize ends once the layout is the new width's.
+_LAYOUT_FOR_WIDTH = """width => document.documentElement.dataset.layout
+    === (width >= window.ouroLayout.dockedMinWidth ? 'docked' : 'stack')"""
+
+
+# A feed lays its rows out at a new width once the width holds (chat_reading_position.js marks a width still moving
+# [data-resizing] and re-applies the reading place when it stops): every feed keeps one unmarked width for 16 frames.
+_FEEDS_HOLD_WIDTH = """() => {
+    const now = [...document.querySelectorAll('#chat-messages, .chat-messages')]
+        .map(feed => feed.hasAttribute('data-resizing') ? 'moving' : feed.offsetWidth).join();
+    const seen = window.__feedsHoldWidth;
+    window.__feedsHoldWidth = { now, frames: seen?.now === now && !now.includes('moving') ? seen.frames + 1 : 0 };
+    return window.__feedsHoldWidth.frames >= 16;
+}"""
+
+
+def set_viewport(page, width, height, timeout=10_000):
+    """Resize the page, then wait for the shell to take the layout of the new width and its feeds to hold it."""
+    page.set_viewport_size({"width": width, "height": height})
+    page.wait_for_function(_LAYOUT_FOR_WIDTH, arg=width, timeout=timeout)
+    page.evaluate("() => { window.__feedsHoldWidth = null; }")
+    page.wait_for_function(_FEEDS_HOLD_WIDTH, polling="raf", timeout=timeout)
+
+
+# On a phone (the stack layout) the closed drawer lies under the room, a step to the left (style.css), so its own box
+# no longer says whether it is closed. Closed is the drawer's own state (no nav-drawer-open, the sidebar inert: app.js)
+# with every room (Main, a Project open over it) back at the screen's left edge, its motion finished.
+_DRAWER_CLOSED = """() => {
+    const side = document.getElementById('primary-sidebar');
+    const rooms = [document.getElementById('content'), document.querySelector('#project-panel.open')].filter(Boolean);
+    return !document.body.classList.contains('nav-drawer-open') && side.inert
+        && rooms.every((room) => Math.abs(room.getBoundingClientRect().left) < 0.5 && !room.getAnimations().length);
+}"""
+
+
+def wait_drawer_closed(page, timeout=None):
+    """On a phone, wait until the drawer is closed and the room has settled back over it (the page's default timeout)."""
+    page.wait_for_function(_DRAWER_CLOSED, timeout=timeout)
 
 
 def _emit_ws_frame(page, frame):
@@ -274,7 +324,7 @@ def run_chat_viewport_smoke(
         held_census.append(route)
 
     def release_census(page):
-        page.unroute("**/api/state", hold_census)
+        page.unroute(state_reads, hold_census)
         while held_census:
             held_census.pop(0).fallback()
 
@@ -288,7 +338,7 @@ def run_chat_viewport_smoke(
         # cards (switched below between complete and incomplete) repaints them,
         # and inside the follow zone that repaint follows. The frame under test
         # is the window's only writer; the census answers after it.
-        page.route("**/api/state", hold_census)
+        page.route(state_reads, hold_census)
         page.locator("#chat-scroll-bottom").dispatch_event("click")
         read_to_latest(page)
         state = jump_state(page)
@@ -348,7 +398,7 @@ def run_chat_viewport_smoke(
             evidence = FailureEvidence(page, browser, evidence_dir, nodeid, browser_engine)
             with evidence:
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
-                page.route("**/api/state", incomplete_activity_census)
+                page.route(state_reads, incomplete_activity_census)
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 page.add_style_tag(
                     content="#chat-messages, #chat-messages * { overflow-anchor: none !important; }"
@@ -735,7 +785,7 @@ def run_chat_viewport_smoke(
                 # The reader is inside a child. Naming the parent and growing its
                 # visible timeline above that child must keep the child stationary.
                 parent = page.locator('.chat-live-card[data-task-id="vp-parent"]')
-                parent.locator(':scope > [data-live-summary-button]').click()
+                parent.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
                 child_selector = '.chat-live-card[data-task-id="vp-child-2"] > [data-live-summary-button]'
                 mid = put_at_viewport_top(page, child_selector)
                 page.evaluate(_SETTLE_TWO_FRAMES)
@@ -803,9 +853,11 @@ def run_chat_viewport_smoke(
                     raise AssertionError(f"Late child did not grow its parent: {geometry}") from exc
                 assert parent.evaluate("card => card.getBoundingClientRect().height") > parent_before_mount + 30
                 assert abs(card_top(page, anchor_id) - anchor_before) <= 6
+                # The row's own sleep mark (chat_row_sleep.js `data-laid`) is the browser's rendering hint, not a write of
+                # the card: a no-op frame writes nothing else.
                 parent.evaluate("""card => { window.__subagentNoopMutations = []; window.__subagentNoopObserver = new MutationObserver(records => window.__subagentNoopMutations.push(...records)); window.__subagentNoopObserver.observe(card, {attributes: true, attributeOldValue: true, childList: true, characterData: true, subtree: true}); }""")
                 assert_noop_frame(page, late_child_frame)
-                noop_mutations = page.evaluate("""() => { window.__subagentNoopObserver.disconnect(); return window.__subagentNoopMutations.map(record => `${record.type}:${record.target.dataset?.taskId || record.target.dataset?.subagentsFor || record.target.className}:${record.attributeName || ''}:${record.oldValue || ''}->${record.target.getAttribute?.(record.attributeName) || ''}`); }""")
+                noop_mutations = page.evaluate("""() => { window.__subagentNoopObserver.disconnect(); return window.__subagentNoopMutations.filter(record => record.attributeName !== 'data-laid').map(record => `${record.type}:${record.target.dataset?.taskId || record.target.dataset?.subagentsFor || record.target.className}:${record.attributeName || ''}:${record.oldValue || ''}->${record.target.getAttribute?.(record.attributeName) || ''}`); }""")
                 assert noop_mutations == [], noop_mutations
                 put_at_viewport_top(page, anchor_selector)
                 enriched_child = {
@@ -915,7 +967,7 @@ def run_chat_viewport_smoke(
                 # The cancelable frame is then a duplicate and never sets the
                 # activity bit. Install the census only after that bit is observed.
                 page.route(
-                    "**/api/state",
+                    state_reads,
                     lambda route: route.fulfill(
                         status=200,
                         content_type="application/json",
@@ -969,8 +1021,8 @@ def run_chat_viewport_smoke(
                 )
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
-                page.unroute("**/api/state")
-                page.route("**/api/state", incomplete_activity_census)
+                page.unroute(state_reads)
+                page.route(state_reads, incomplete_activity_census)
 
                 # A production-shaped review reference hydrates asynchronously;
                 # both the fetch result and its review DOM reconcile stay anchored.
@@ -1010,8 +1062,9 @@ def run_chat_viewport_smoke(
 
                 # Repeating the exact applied revision consumes the frame but
                 # changes no projection, so it must not manufacture activity
-                # (the census poll waits, as in every no-op window).
-                page.route("**/api/state", hold_census)
+                # (the census poll waits, as in every no-op window). The row's own sleep
+                # mark (chat_row_sleep.js) may change between the reads: it is no write of the card.
+                page.route(state_reads, hold_census)
                 button.click()
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 set_remaining(page, 300)
@@ -1019,7 +1072,7 @@ def run_chat_viewport_smoke(
                     """() => {
                         const card = document.querySelector('.chat-live-card[data-task-id="vp-review"]');
                         const messages = document.querySelector('#chat-messages');
-                        return {html: card.outerHTML, height: card.getBoundingClientRect().height,
+                        return {html: card.outerHTML.replace(/ data-laid=""/g, ''), height: card.getBoundingClientRect().height,
                             scrollHeight: messages.scrollHeight};
                     }"""
                 )
@@ -1028,7 +1081,7 @@ def run_chat_viewport_smoke(
                     """() => {
                         const card = document.querySelector('.chat-live-card[data-task-id="vp-review"]');
                         const messages = document.querySelector('#chat-messages');
-                        return {html: card.outerHTML, height: card.getBoundingClientRect().height,
+                        return {html: card.outerHTML.replace(/ data-laid=""/g, ''), height: card.getBoundingClientRect().height,
                             scrollHeight: messages.scrollHeight};
                     }"""
                 )
@@ -1136,7 +1189,7 @@ def run_chat_viewport_smoke(
                 put_at_viewport_top(page, anchor_selector)
                 anchor_before = card_top(page, anchor_id)
                 assert jump_state(page)["dotHidden"]
-                review_child.locator(":scope > [data-live-summary-button]").evaluate("el => el.click()")
+                review_child.locator(":scope > [data-live-summary-button] [data-live-disclosure]").evaluate("el => el.click()")
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert review_child.get_attribute("data-expanded") == "1"
                 assert review_child.evaluate("card => card.getBoundingClientRect().height") > review_before + 20
@@ -1161,7 +1214,7 @@ def run_chat_viewport_smoke(
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
                 page.screenshot(
-                    path=str(data_dir.parent / f"live-card-viewport-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport") / f"live-card-viewport-{browser_engine}.png"),
                     full_page=True,
                 )
 
@@ -1187,7 +1240,7 @@ def run_chat_viewport_smoke(
                     "cards => cards.map(card => card.dataset.taskId).filter(id => id !== 'vp-detail-noop')"
                 )
                 page.route(
-                    "**/api/state",
+                    state_reads,
                     lambda route: route.fulfill(
                         status=200,
                         content_type="application/json",

@@ -304,12 +304,12 @@ def test_hold_controls_are_the_existing_ones_and_a_finalize_request_is_not_one(t
     monkeypatch.setattr(model_wait, "current_model_wait",
                         lambda: SimpleNamespace(control_reason=lambda: "absolute_ceiling"))
     assert budget_pause._hold_control_reason(ctx) == "absolute_ceiling"
-    # No bound wait: the owner-stop flags the restore gate reads answer instead.
+    # Installation input is not a task control; real Panic terminates the process.
     monkeypatch.setattr(model_wait, "current_model_wait", lambda: None)
     assert budget_pause._hold_control_reason(ctx) == ""
     (tmp_path / "state").mkdir(exist_ok=True)
     (tmp_path / "state" / "panic_stop.flag").write_text("panic")
-    assert budget_pause._hold_control_reason(ctx) == "panic"
+    assert budget_pause._hold_control_reason(ctx) == ""
 
 
 def test_pending_review_attempt_blocks_release_then_pauses_once_it_settles(tmp_path, monkeypatch):

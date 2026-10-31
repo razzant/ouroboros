@@ -47,6 +47,9 @@ if [ "${1:-}" = "--cli" ]; then
     exec "$PAYLOAD/bin/ouroboros" "$@"
 fi
 
+# The payload's desktop entry owns GUI setup for every package format. CLI
+# dispatch above keeps its caller's working directory/environment.
+
 if [ -z "$APPIMAGE_CUSTODY_BASE" ]; then
     exec "$PAYLOAD/Ouroboros" "$@"
 fi

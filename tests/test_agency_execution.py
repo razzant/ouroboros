@@ -20,7 +20,7 @@ def context(tmp_path, monkeypatch, mode, coverage):
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", coverage)
     monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
     monkeypatch.setattr(safety, "get_runtime_mode", lambda: mode)
-    monkeypatch.setattr(safety, "get_safety_mode", lambda: coverage)
+    monkeypatch.setattr(safety, "get_safety_mode", lambda kind="owner": coverage)
     ctx = ToolContext(repo_dir=repo, system_repo_dir=repo, drive_root=data,
                       workspace_root=work, workspace_mode="external", task_id="agency")
     registry = ToolRegistry(repo_dir=repo, drive_root=data)
@@ -88,10 +88,10 @@ def test_safety_keeps_full_task_sources_after_transcript_compaction(tmp_path, mo
         [{"role": "user", "content": "compacted conversation"}], ctx=ctx, resolved_binding=binding)
     assert origin in prompt and reply in prompt
     assert "answer-1" in prompt
-    source_json = prompt.split("Task sources and physical target (complete; provenance is not consent):\n", 1)[1]
+    source_json = prompt.split("Host evidence (provenance is not consent):\n", 1)[1]
     facts, _ = json.JSONDecoder().raw_decode(source_json)
-    assert facts["resolved_target"]["target_path"] == repr(work)
-    assert "Create the requested private repository" in prompt
+    assert facts["subject"]["physical_target"]["target_path"] == repr(work)
+    assert "Create the requested private repository" not in prompt  # task_contract is not retained source evidence
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
@@ -100,12 +100,10 @@ def test_supervisor_backend_failure_keeps_original_evidence(tmp_path, monkeypatc
     def failed(*args, **kwargs):
         raise RuntimeError("fixture backend unavailable")
     monkeypatch.setattr(safety, "_run_llm_check", failed)
-    if mode == "advanced":
-        with pytest.raises(RuntimeError, match="fixture backend unavailable"):
-            safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
-    else:
-        allowed, message = safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
-        assert allowed and "backend unavailable" in message
+    allowed, message = safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
+    assert allowed == (mode == "cyber_pro")
+    assert "SAFETY_UNAVAILABLE" in message and "backend unavailable" in message
+    if mode == "cyber_pro":
         assert "SAFETY_ADVICE" in message
 
 

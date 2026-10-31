@@ -86,6 +86,20 @@ export const FACET_QUOTA = 'quota';
 export const STATUS_FACETS = [FACET_CATALOG, FACET_ACCOUNTS, FACET_QUOTA];
 
 export const accountTargetKey = (target) => JSON.stringify([target.harness, target.profile_id]);
+
+/** Temporary account x model marks, only beside a successful account read; older engines have none. */
+export function accountCapabilityMarks(payload, row) {
+    if (payload?.reads?.accounts !== READ_OK) return [];
+    const marks = payload?.profiles?.routing_evidence?.capabilities;
+    return Array.isArray(marks) ? marks.filter(mark => mark?.harness_id === row.harness
+        && mark.profile_id === row.profile_id && typeof mark.requested_model === 'string') : [];
+}
+
+/** When the marks could not be read, its time: ONE fact for the whole section, never "no marks". */
+export function capabilityMarksReadFailedAt(payload) {
+    const read = payload?.reads?.accounts === READ_OK ? payload?.profiles?.routing_evidence_read : null;
+    return read?.state === READ_FAILED ? String(read.observed_at || '') : '';
+}
 const sameTarget = (a, b) => a?.harness === b?.harness && a?.profile_id === b?.profile_id;
 const quotaTarget = (row) => ({ harness: row?.subject?.harness, profile_id: row?.subject?.subject_id });
 const observationTime = values => Math.max(-Infinity, ...values.map(value => Date.parse(value || '')).filter(Number.isFinite));
@@ -137,12 +151,25 @@ export function mergeAccountResources(snapshot, envelope, target = null, { prefe
                 .every(name => merged[name] === held[name]) ? held : merged];
         } else if (!incoming && held && preferPreviousOnTie) resources = [held];
     }
-    return {
+    const quota = merge(snapshot.quota, keepQuota ? snapshot.quota : envelope.snapshots, quotaTarget);
+    const absences = merge(snapshot.quota_absences, keepQuota ? snapshot.quota_absences : envelope.absences, quotaTarget);
+    const heldScope = snapshot.availability_scope, incomingScope = envelope.availability_scope;
+    const sameScope = heldScope && incomingScope && ['model', 'requestKind', 'basis'].every(key =>
+        Object.hasOwn(heldScope, key) && Object.hasOwn(incomingScope, key) && heldScope[key] === incomingScope[key]);
+    const retainedQuota = target && quota === snapshot.quota && absences === snapshot.quota_absences;
+    const mixedQuota = target && [...quota, ...absences].some(row => !sameTarget(quotaTarget(row), target));
+    // Scope binds the quota value, never the refresh operation. A new echo
+    // cannot certify retained siblings from another (or unproven) scope.
+    const scope = retainedQuota ? heldScope : (!mixedQuota || sameScope ? incomingScope : undefined);
+    const result = {
         ...snapshot,
-        quota: merge(snapshot.quota, keepQuota ? snapshot.quota : envelope.snapshots, quotaTarget),
-        quota_absences: merge(snapshot.quota_absences, keepQuota ? snapshot.quota_absences : envelope.absences, quotaTarget),
+        quota,
+        quota_absences: absences,
         ...(Array.isArray(resources) ? { resources: merge(snapshot.resources, resources, row => row.target) } : {}),
     };
+    if (scope === undefined) delete result.availability_scope;
+    else result.availability_scope = scope;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,14 +411,35 @@ export function statusUnavailableNote(readState, {
 
 const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 
-export function unifiedAccounts(payload) {
-    // Whether the engine behind this payload serves the UNIFIED account model
-    // (every account a named registry row; routing facts in `accountPools`).
-    // The fact is stamped server-side from the engine's own /v2/operations
-    // catalog (`get:account-pools` present — sprint plan §L.2); anything else —
-    // old engine, unreadable catalog, an older backend without the field —
-    // reads false, which is the fail-closed legacy rendering.
-    return payload?.unified_accounts === true;
+// The accounts facet answers only the unified account model (Claudexor 3.6.0+).
+// A roster from before it is refused server-side with this typed reason
+// (gateway/claudexor_passive.py `roster_error`): a known state, never an empty
+// roster and never the generic "could not be read".
+export const ACCOUNT_MODEL_UNSUPPORTED = 'account_model_unsupported';
+// What a family says there, on Accounts and in onboarding alike.
+export const ACCOUNTS_UNSUPPORTED_STATUS = 'Not listed — needs a newer Claudexor';
+
+export function accountModelUnsupported(payload) {
+    return payload?.reads?.accounts === READ_FAILED
+        && payload?.facets?.accounts?.error === ACCOUNT_MODEL_UNSUPPORTED;
+}
+
+/** Why nothing is listed, and the way out the runtime projection actually names. */
+export function accountModelUnsupportedText(payload) {
+    const daemon = payload?.daemon || {};
+    const runtime = daemon.runtime || {};
+    const engine = String(daemon.engine_version || '');
+    const target = String(runtime.staged_version || runtime.target_version || '');
+    const way = runtime.source === 'override'
+        ? 'This Claudexor comes from OUROBOROS_CLAUDEXOR_BIN; point it at Claudexor 3.6 or later.'
+        : runtime.source === 'external' ? 'Update that Claudexor to 3.6 or later.'
+            : runtime.state === 'update_staged' && target
+                ? `Claudexor ${target} is installed and takes over when the agent daemon next restarts.`
+                : runtime.state === 'update_available' && target
+                    ? `Claudexor ${target} takes over when the agent daemon next restarts.`
+                    : 'Update Claudexor to 3.6 or later.';
+    return `${engine ? `Claudexor ${engine}` : 'This Claudexor'} keeps accounts in an older format that this `
+        + `version of Ouroboros no longer reads, so they can’t be listed or managed here. They are unchanged. ${way}`;
 }
 
 export function statusPayloadValid(payload) {
@@ -418,48 +466,18 @@ export function statusPayloadValid(payload) {
 export function accountRows(payload) {
     // Consume the REAL ControlCredentialProfilesResponse shape (Claudexor
     // packages/schema/src/credential-profile.ts): `profiles` is an ARRAY of
-    // wrapper objects `{profile, status, identity}` with snake_case fields, and
-    // `harnessAccounts` is an ARRAY of per-harness authority rows — not the flat
-    // camelCase maps an earlier draft invented. Fields are read exactly as the
-    // Zod schema names them so the golden fixture and the wire agree.
-    //
-    // DUAL-SHAPE (unified account model, sprint plan §L): a unified engine
-    // migrates every default CLI login into a named registry row, so ALL of
-    // its rows arrive as profile wrappers and `harnessAccounts` is emitted
-    // empty — no native pseudo-row is synthesized there. The synthesis below
-    // is additionally gated on the server-stamped `unified_accounts` fact so
-    // a unified engine that still emitted a compatibility row could not
-    // double-render the same account. A LEGACY engine keeps today's rule
-    // behavior-identical — a native pseudo-row per harness, addressed by the
-    // empty profile id — plus the additive fail-open `enabled` projection
-    // every row now carries.
+    // wrapper objects `{profile, status, identity}` with snake_case fields —
+    // not the flat camelCase maps an earlier draft invented. Fields are read
+    // exactly as the Zod schema names them so the golden fixture and the wire
+    // agree. Under the unified account model every account, a migrated default
+    // login included, is such a named row; an old client's `harnessAccounts`
+    // carrier is never read, so no pseudo-row with an empty id exists.
     //
     // Lives with the store because it is a projection OF the payload: the
     // accounts panel, the Subagents section and the login verify-race all read
     // it, and a second reader would be a second definition of "connected".
     const rows = [];
     const profiles = payload?.profiles?.profiles || [];
-    const harnessAccounts = unifiedAccounts(payload)
-        ? [] : (payload?.profiles?.harnessAccounts || []);
-    for (const native of Array.isArray(harnessAccounts) ? harnessAccounts : []) {
-        rows.push({
-            harness: String(native?.harness_id || ''),
-            profile_id: '',
-            kind: 'native',
-            identity: native?.identity || {},
-            // Whether the default login participates in the engine's
-            // credential ladder. Absent (older engines) reads as enabled —
-            // the pre-toggle behavior, never a silent exclusion claim.
-            enabled: native?.native_credentials_enabled !== false,
-            // Both engine schema versions declare this row
-            // additionalProperties:false with NO status field, so presence
-            // projects as local-store evidence — detected, liveness unproven.
-            status: {
-                verification: native?.native_login_detected ? 'passed' : '',
-                verification_source: 'local_store',
-            },
-        });
-    }
     for (const wrapper of Array.isArray(profiles) ? profiles : []) {
         const profile = wrapper?.profile || {};
         rows.push({
@@ -480,33 +498,27 @@ export function accountRows(payload) {
 
 export function accountName(row) {
     // The account's OWN name, in this order: the registry row's display name,
-    // the identity the daemon observed (email), the machine id. The old
-    // "Default CLI login" label claimed a TYPE — under the unified model every
-    // account is a named row of one type, and even on a legacy engine the
-    // honest name for the unnamed default is who it is signed in as. The
-    // legacy pseudo-row keeps a neutral fallback when the daemon observed no
-    // identity for it.
+    // the identity the daemon observed (email), the machine id. A label that
+    // claimed a TYPE ("Default CLI login") is gone: every account is a named
+    // row of one type, and the honest name of a migrated default login is who
+    // it is signed in as.
     //
     // Lives beside `accountRows` for the same reason: the Accounts tab and the
     // pin selects both name the rows this store projects, and a second namer is
     // how one of them ends up printing a raw profile id at the owner.
     const identity = row.identity || {};
     const named = String(row.display_name || '') || String(identity.email || '');
-    if (named) return named;
-    if (row.kind === 'native') return 'Default account';
-    return String(row.profile_id || '') || 'Account';
+    return named || String(row.profile_id || '') || 'Account';
 }
 
 export function nextUpAccount(payload, harness) {
-    // WHO an unpinned run of this harness would route to next — the DUAL-WIRE
-    // reader (one per app, same rule as accountRows): the unified engine's
-    // additive `profiles.accountPools` answers first; the legacy per-harness
-    // `harnessAccounts[].next_up` answers on engines that predate it. `null`
-    // means the payload carries no verdict for this harness (absence, never a
-    // synthesized "none"). The union is returned AS the wire spells it —
-    // {kind: profile|api_key_route|none|native|…} — and consumers must render
-    // an unknown kind fail-safe rather than crash: the legacy union and the
-    // pool union are both closed TODAY, but this reader outlives both.
+    // WHO an unpinned run of this harness would route to next: the engine's
+    // own `profiles.accountPools` verdict (one reader per app, same rule as
+    // accountRows). `null` means the payload carries no verdict for this
+    // harness (absence, never a synthesized "none"). The union is returned AS
+    // the wire spells it — {kind: profile|api_key_route|none|…} — and
+    // consumers must render an unknown kind fail-safe rather than crash: the
+    // pool union is closed TODAY, but this reader outlives it.
     const id = String(harness || '');
     if (!id) return null;
     const pools = payload?.profiles?.accountPools;
@@ -515,19 +527,13 @@ export function nextUpAccount(payload, harness) {
         const verdict = pool?.next_up;
         if (verdict && typeof verdict === 'object' && !Array.isArray(verdict)) return verdict;
     }
-    const legacy = payload?.profiles?.harnessAccounts;
-    for (const row of Array.isArray(legacy) ? legacy : []) {
-        if (String(row?.harness_id || '') !== id) continue;
-        const verdict = row?.next_up;
-        if (verdict && typeof verdict === 'object' && !Array.isArray(verdict)) return verdict;
-    }
     return null;
 }
 
 export function accountLoginConfirmed(payload, harness, profileId = '') {
     // The account-status truth the login verify-race re-check reads: the row
     // for THIS harness+profile shows a login — vendor-verified or the daemon's
-    // own local-store detection (accountRows already projects both as 'passed').
+    // local-store verdict, both 'passed'.
     const row = accountRows(payload).find((r) =>
         r.harness === String(harness || '')
         && String(r.profile_id || '') === String(profileId || ''));
@@ -615,6 +621,7 @@ export function createClaudexorStatusStore({
             const facets = payload.facets && { ...payload.facets, [FACET_QUOTA]: { ...payload.facets[FACET_QUOTA],
                 observed_at: held.facets?.[FACET_QUOTA]?.observed_at ?? null, stale: true } };
             payload = { ...payload, quota: held.quota, quota_absences: held.quota_absences, resources: held.resources,
+                availability_scope: held.availability_scope,
                 ...(facets ? { facets } : {}) };
         }
         // Agent discovery (reads.catalog) is independent of the operations catalog.
@@ -1065,6 +1072,11 @@ export function createClaudexorStatusStore({
         get reads() { return reads(); },
         get catalogKnown() { return facetKnown(facet(FACET_CATALOG)); },
         get accountsKnown() { return facetKnown(facet(FACET_ACCOUNTS)); },
+        // The engine answered with the retired pre-unified account model (this
+        // read, never a held snapshot behind a dead request).
+        get accountsUnsupported() {
+            return facet(FACET_ACCOUNTS) === READ_FAILED && accountModelUnsupported(inner.snapshot);
+        },
         get quotaKnown() { return facetKnown(facet(FACET_QUOTA)); },
         get includesModels() { return inner.snapshotHasModels; },
         get polling() { return Boolean(inner.timer); },
@@ -1090,8 +1102,12 @@ export function createClaudexorStatusStore({
             // itself printed "could not be read" over an `unreachable` daemon
             // and silently dropped the one explanation the owner had.
             // A failed facet's own typed error (`facets.<name>.error`) is the exact detail;
-            // a backend without it leaves the daemon's last_error as before.
+            // a backend without it leaves the daemon's last_error as before. The
+            // retired account model is no read failure and says why in its own words.
             const state = facet(name);
+            if (name === FACET_ACCOUNTS && state === READ_FAILED && accountModelUnsupported(inner.snapshot)) {
+                return { tone: 'warn', action: null, text: accountModelUnsupportedText(inner.snapshot) };
+            }
             const daemonError = String(inner.snapshot?.daemon?.last_error || '');
             const own = String(inner.snapshot?.facets?.[name]?.error || '');
             const detail = inner.error

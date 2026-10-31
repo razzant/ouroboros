@@ -99,49 +99,18 @@ def task_lane_project_state(running: Any, pending: Any, tid: Any) -> dict:
 
 def mark_task_project(running: Any, pending: Any, tid: Any, pid: Any, *, authority: str = "",
                       project: dict | None = None, restore: dict | None = None) -> bool:
-    """Set a task's ``project_id`` wherever it currently lives in the supervisor queue
-    state — the live RUNNING map (``{tid: {"task": {...}}}``) AND the PENDING list (bare
-    task dicts) — so a POST-HOC project conversion/scope makes it a one-writer lane
-    occupant whether it has started yet or not. The lease + assignment read
-    ``task['project_id']`` from these IN-MEMORY structures (assign_tasks checks the
-    pending candidate's own dict, then copies it into RUNNING), NOT the durable bindings —
-    so a converted PENDING task that is only bound durably would still start unscoped and
-    miss its lane. This is the SSOT for both post-hoc convert paths — the supervisor
-    in-task ``ensure_project_scope`` and the UI ``api_project_from_task`` — so they cannot
-    drift apart again. The caller MUST hold the queue lock. Returns True if any in-memory
-    task dict was updated; a no-op (False) when the task is neither running nor pending
-    (then the durable bind alone is correct — there is no live lane to occupy).
+    """Mark PENDING work only, under Q, after its durable binding commits.
 
-    FILL-ONLY by default: a task already carrying a DIFFERENT project keeps it and
-    False comes back. The durable binding is the one truth about a task's project
-    (owner decision B4=A); this in-memory copy must never be what moves a task
-    between projects, which is how a second, empty project acquired a live lane.
-
-    ``authority="binding"`` is the ONE exception, for a conversion that owns the
-    durable binding for ``pid`` itself: there the in-memory copy FOLLOWS the truth
-    instead of contradicting it. Without it a project-SCOPED but unbound task (a
-    bare-workspace promote carries a derived ``proj_<hash>``) converted durably
-    while its lane stayed on the old id, so the new project's one-writer lane was
-    left free and a concurrent task in it became assignable. That authority also
-    carries the rollback: an EMPTY ``pid`` clears the lane, so a conversion whose
-    durable bind was refused after the mark can restore the value the lane held
-    (including none) instead of leaving it on a project no binding names. Without
-    the authority an empty ``pid`` stays the no-op it has always been.
-
-    Conversion passes the actual chosen ``project`` row: scope and frozen evidence
-    change together, without touching the prepared workspace or drive. Rollback
-    passes the saved ``restore`` state, preserving even absent/null evidence.
-    Legacy lane-only callers omit both; recovery never captures a replacement row.
+    RUNNING owns its old execution lease until it leaves that execution. Folder
+    and admission evidence are refreshed together at its next assignment.
     """
     key = str(tid or "")
     scope = str(pid or "").strip()
     if not key or (not scope and authority != "binding"):
         return False
     rows = []
-    meta = running.get(key) if hasattr(running, "get") else None
-    rtask = _as_task(meta) if isinstance(meta, dict) else None
-    if isinstance(rtask, dict):
-        rows.append(rtask)
+    if hasattr(running, "get") and running.get(key) is not None:
+        return False
     for item in (pending or ()):
         ptask = _as_task(item)
         if isinstance(ptask, dict) and str(ptask.get("id") or "") == key:
@@ -164,6 +133,7 @@ def mark_task_project(running: Any, pending: Any, tid: Any, pid: Any, *, authori
                     row[field] = restore[field]
         elif project is not None:
             row["_project_admission"] = basis
+            row.pop("_project_scope_none", None)
         updated = True
     return updated
 

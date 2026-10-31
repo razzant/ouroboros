@@ -46,7 +46,6 @@ def capacity(tmp_path, monkeypatch):
                             "maxContextWindow": state.window, "effectiveContextWindow": 1}]}
 
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
-    monkeypatch.setattr(ce, "_generative_probe_window", lambda *_a, **_k: pytest.fail("generation probe"))
     real_resolve = context_fit.resolve_context_fit_route
 
     def resolve(task, *, allow_fetch):

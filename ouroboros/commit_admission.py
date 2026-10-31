@@ -120,13 +120,13 @@ def release_metadata_diagnostics(
 
     Two explicit forms, told apart by the diff itself (``report["form"]``): a
     ``numbered`` release touches VERSION and must sync every carrier in the same
-    diff; a ``neutral`` contribution (code with VERSION untouched) must leave every
+    diff; a ``neutral`` contribution (VERSION untouched) must leave every
     version carrier span byte-identical to HEAD, and takes no tag. P9 admits the
     neutral form for a contribution to the official line (the prepared index lane)
-    and for a commit prepared in a body candidate (``neutral_allowed``, passed by
-    the caller that knows the bound candidate); a serving-checkout commit remains a
-    numbered release. A partial carrier change is neither form and is reported as
-    such. Doc-only changes need no release metadata (``doc_only``).
+    and for a body candidate or authorized managed update (``neutral_allowed``,
+    passed by the caller that knows that authority); an ordinary serving commit remains a
+    numbered release, including documentation-only changes. A partial carrier
+    change is neither form and is reported as such.
     """
     from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, release_metadata_findings
 
@@ -136,34 +136,38 @@ def release_metadata_diagnostics(
         report.update(status="unavailable", unavailable=["source must be worktree or index"])
         return report
     touched = set(paths or []) if source == "worktree" or read_text else set()
+    removed = set(deleted or ())
     try:
         if source == "worktree":
             touched.update(changed_worktree_paths(repo_dir, paths=paths, strict=True))
+            if "VERSION" in touched and not (pathlib.Path(repo_dir) / "VERSION").exists():
+                removed.add("VERSION")
         elif read_text is None:
             result = subprocess.run(
-                ["git", "--no-optional-locks", "diff", "--cached", "--name-only", "--diff-filter=d", "-z"],
+                ["git", "--no-optional-locks", "diff", "--cached", "--name-status", "--no-renames", "-z"],
                 cwd=str(repo_dir),
                 capture_output=True, timeout=10, check=True,
             )
-            touched.update(filter(None, result.stdout.decode("utf-8").split("\0")))
+            fields = result.stdout.decode("utf-8").split("\0")
+            for status, path in zip(fields[::2], fields[1::2]):
+                touched.add(path)
+                if status == "D":
+                    removed.add(path)
+        touched |= removed
     except Exception as exc:
         unavailable.append(f"Changed {source} paths could not be read ({type(exc).__name__}).")
 
-    from ouroboros.tools.git_review_cycle import _diff_is_doc_only
-
-    version_in_scope = "VERSION" in touched
-    removed: set = set()
+    version_in_scope = "VERSION" in touched - removed
     neutral_ok = neutral_allowed if neutral_allowed is not None else source == "index"
-    if not version_in_scope and (neutral_ok or not touched or _diff_is_doc_only(sorted(touched))):
-        # Discovery above lists surviving paths; a carrier the diff deletes or renames
-        # away is still a carrier change. Other deletions keep their release semantics.
-        # Surviving code already refuses the neutral form where it is not allowed.
-        removed = (set(deleted or ()) & CARRIER_SPAN_PATHS if read_text else
-                   _removed_carriers(repo_dir, source, paths if source == "worktree" else None, unavailable))
+    if source == "worktree" and not version_in_scope and (neutral_ok or not touched):
+        # Worktree status may list only a rename destination; a carrier renamed
+        # away is still a carrier change. Index/read_text discovery includes deletions.
+        # Surviving changes already refuse the neutral form where it is not allowed.
+        removed |= _removed_carriers(repo_dir, source, paths, unavailable)
         touched |= removed
     if version_in_scope:
         report["form"] = "numbered"
-        if source == "index" and version_in_scope and "README.md" not in touched:
+        if source == "index" and version_in_scope and "README.md" not in touched - removed:
             findings.append("Missing from staged: README.md (badge + changelog). Stage all related files together.")
         texts = {}
         for path in sorted(CARRIER_SPAN_PATHS):
@@ -176,7 +180,7 @@ def release_metadata_diagnostics(
             except Exception as exc:
                 unavailable.append(f"{source}:{path} could not be read ({type(exc).__name__}).")
         findings.extend(release_metadata_findings(texts))
-    elif touched and not _diff_is_doc_only(sorted(touched)):
+    elif touched:
         report["form"] = "neutral"
         if neutral_ok:
             findings.extend(_neutral_carrier_findings(repo_dir, touched & set(CARRIER_SPAN_PATHS), source,
@@ -190,12 +194,8 @@ def release_metadata_diagnostics(
         if not findings:
             report["status"] = "not_applicable"
     else:
-        report["form"] = "doc_only" if touched else "none"
+        report["form"] = "none"
         report["status"] = "not_applicable"
-        # Documentation may carry release identity too. The prose exemption does
-        # not permit changing, introducing or removing a declared carrier span.
-        findings.extend(_neutral_carrier_findings(repo_dir, touched & set(CARRIER_SPAN_PATHS), source,
-                                                  read_text, unavailable, removed))
     if unavailable:
         report["status"] = "unavailable"
     elif findings:
@@ -354,6 +354,19 @@ class PreflightTestProof(NamedTuple):
     index_tree: str
     workload: tuple
     head: str
+    selection: object = None
+
+    @property
+    def tier(self) -> str:
+        if self.selection is not None:
+            return self.selection.tier
+        from ouroboros.preflight_runner import DEFAULT_PYTEST_ARGS
+
+        specs = self.workload[0]
+        complete = ([spec[0] for spec in specs] == ["parallel", "serial"]
+                    and all(spec[1][0] == "tests/" for spec in specs))
+        legacy = len(specs) == 1 and tuple(specs[0][1]) == tuple(DEFAULT_PYTEST_ARGS)
+        return "full" if complete or legacy else "selected"
 
     def covers(self, candidate: PreflightTestProof | None) -> bool:
         return candidate is not None and self == candidate
@@ -390,6 +403,7 @@ def log_preflight_test_proof(ctx, proof: PreflightTestProof, *, reused: bool, ph
     from a receipt keeps that receipt as its provenance; any other row lends nothing.
     """
     from ouroboros.preflight_receipts import canonical_data_root
+    from ouroboros.preflight_inventory import scope_record
 
     fingerprint = workload_fingerprint(proof.workload)
     prior = getattr(ctx, "_preflight_test_disclosure", None)
@@ -405,6 +419,8 @@ def log_preflight_test_proof(ctx, proof: PreflightTestProof, *, reused: bool, ph
         "pass_seconds": dict(passes or ()), "budget_sec": proof.workload[1],
         "head": proof.head, "tree": proof.tree, "index_tree": proof.index_tree,
         "workload_fingerprint": fingerprint,
+        "evidence": getattr(ctx, "_preflight_test_evidence", None),
+        **scope_record(proof, getattr(ctx, "_preflight_test_inventory", None)),
         **({"receipt": receipt} if receipt is not None else {}),
         **({"empty_lanes": list(empty_lanes)} if isinstance(empty_lanes, list) else {}),
     }
@@ -421,27 +437,35 @@ def log_preflight_test_proof(ctx, proof: PreflightTestProof, *, reused: bool, ph
 
 
 def preflight_test_workload(
-    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="",
+    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="", selection=None,
 ) -> tuple:
     """Effective runner inputs, with generated paths and probe names normalized."""
     import sys
-    import tempfile
     from ouroboros import preflight_runner as pr
     from ouroboros.preflight_node import candidate_node_tests, resolve_node
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
+    from ouroboros.test_environment import OUTPUT_LOCATION_KEYS, default_temp_parent
+    from ouroboros.preflight_inventory import MODULE, selection_passes
+    from ouroboros.test_parallelism import requested_workers
 
-    base = pathlib.Path(tempfile.gettempdir()) / "ouroboros-preflight-contract"
-    env = pr._preflight_env(base, base / "repo", create=False)
+    base = default_temp_parent() / "ouroboros-preflight-contract"
+    # The workload names the requested worker count. The count free memory admits
+    # is an execution fact frozen in the run's own probe, so a memory sample never
+    # changes what a proof covers, and naming the workload reads no memory at all.
+    env = pr._preflight_env(base, base / "repo", create=False, workers=requested_workers(os.cpu_count() or 1))
     # Containment membership stays in the child env (an outer reap must see the
-    # tree), but its keys are per-launch nonces, not test inputs.
+    # tree), but its keys are per-launch nonces, not test inputs. Evidence and
+    # diagnostic destinations are output locations, never part of what a proof covers.
     environment = hashlib.sha256(json.dumps({key: value for key, value in env.items()
-                                             if not key.startswith(CONTAINMENT_ENV_PREFIX)},
+                                             if not key.startswith(CONTAINMENT_ENV_PREFIX)
+                                             and key not in OUTPUT_LOCATION_KEYS},
                                             sort_keys=True).encode()).hexdigest()
     python = agent_python or os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
-    specs = pr._preflight_pass_specs(pytest_args) if passes is None else passes
+    specs = passes if passes is not None else (selection_passes(selection) if selection else pr._preflight_pass_specs(pytest_args))
     node_tests = tuple(candidate_node_tests(repo))
     return (
-        tuple((p.label, tuple(pr._WORKER_PROBE_MODULE if probe_module and arg == probe_module else arg
+        tuple((p.label, tuple(pr._WORKER_PROBE_MODULE if probe_module and arg == probe_module else
+                             MODULE if arg.startswith(MODULE + "_") else arg
                              for arg in p.args), p.parallel) for p in specs),
         pr._resolve_preflight_timeout(pr._DEFAULT_PREFLIGHT_TIMEOUT_SEC if timeout is None else timeout),
         environment, _executable_identity(python),
@@ -451,7 +475,7 @@ def preflight_test_workload(
 
 
 def capture_preflight_test_subject(
-    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="",
+    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="", selection=None,
 ) -> PreflightTestProof | None:
     """Describe the actual checkout before execution, or decline reuse.
 
@@ -475,24 +499,41 @@ def capture_preflight_test_subject(
         head = head.stdout.strip()
         workload = preflight_test_workload(
             repo, timeout=timeout, pytest_args=pytest_args, passes=passes,
-            agent_python=agent_python, probe_module=probe_module,
+            agent_python=agent_python, probe_module=probe_module, selection=selection,
         )
-        return PreflightTestProof(tree, index_tree, workload, head)
+        return PreflightTestProof(tree, index_tree, workload, head, selection)
     except (OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError):
         log.debug("test workload could not be bound; no proof reuse", exc_info=True)
         return None
 
 
-def preflight_test_proof_matches(ctx, repo) -> bool:
+def preflight_test_proof_matches(ctx, repo, *, require_full=True) -> bool:
     proof = getattr(ctx, "_preflight_test_proof", None)
-    return isinstance(proof, PreflightTestProof) and proof.covers(capture_preflight_test_subject(repo))
+    if not isinstance(proof, PreflightTestProof) or (require_full and proof.tier != "full"):
+        return False
+    from ouroboros.test_selection import refresh_selection
+
+    selection = refresh_selection(pathlib.Path(repo), proof.selection) if proof.selection else None
+    return proof.covers(capture_preflight_test_subject(repo, selection=selection))
 
 
 def preflight_test_workload_unchanged(proof, repo, *, timeout, pytest_args) -> bool:
     try:
-        return proof.workload == preflight_test_workload(repo, timeout=timeout, pytest_args=pytest_args)
+        return (pytest_args is not None or proof.tier == "full") and proof.workload == preflight_test_workload(
+            repo, timeout=timeout, pytest_args=pytest_args)
     except (OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError):
         return False  # inability to bind reuse is not a failed test
+
+
+def selected_workload_unchanged(proof, repo, *, timeout, selection) -> bool:
+    """Selected proof reuse is separate from the full-only managed workload check."""
+    from ouroboros.test_selection import refresh_selection
+
+    try:
+        return selection == refresh_selection(pathlib.Path(repo), selection) and proof.workload == preflight_test_workload(
+            repo, timeout=timeout, selection=selection)
+    except (OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError):
+        return False
 
 
 def run_tests_preflight_with_proof(ctx: ToolContext, *, runner) -> Optional[str]:

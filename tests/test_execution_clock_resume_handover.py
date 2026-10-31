@@ -421,7 +421,7 @@ def test_a_second_pause_after_the_handover_folds_only_its_own_interval_through_s
     assert restored["ctx"].model_wait_context.executed_seconds() == pytest.approx(AT_STOP[True] + WORK_RESUMED)
 
 
-@pytest.mark.parametrize("change", ["stop", "completed", "panic"])
+@pytest.mark.parametrize("change", ["stop", "completed", "owner_restart"])
 def test_current_authority_still_decides_a_returned_handover(host, monkeypatch, clock, change):  # noqa: F811
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.task_results import load_task_result, write_task_result
@@ -439,8 +439,8 @@ def test_current_authority_still_decides_a_returned_handover(host, monkeypatch, 
     elif change == "completed":
         write_task_result(host.root, "held", "completed", result="Saved answer")
     else:
-        (host.root / "state").mkdir(exist_ok=True)
-        (host.root / "state" / "panic_stop.flag").write_text("panic")
+        from tests._work_stop_helpers import live_restart
+        live_restart(host.root, monkeypatch)
     clock[0] += HELD_2
     answer = queue.resume_budget_paused_task("held")
     sent = worker(host, monkeypatch)

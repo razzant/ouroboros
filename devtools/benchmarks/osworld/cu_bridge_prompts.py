@@ -3,7 +3,7 @@
 These strings
 are the runner's protocol surface: the read-only gate preamble/suffix, the
 working-phase OSWorld preamble, and the acceptance claims handed to the
-task-acceptance reviewer. They are data, they are large, and every byte is
+result review. They are data, they are large, and every byte is
 behaviour, so they get one owner instead of diluting the launcher.
 """
 
@@ -163,7 +163,8 @@ OSWORLD_PREAMBLE = (
     "VISION LOOP — do exactly this for GUI work:\n"
     "  1. screenshot — the image is ATTACHED to the conversation automatically; you see the "
     "desktop in the same round. Do NOT call view_image on a screenshot you just took.\n"
-    "  2. Read coordinates off that attached image, then act with click/key/type_text/scroll.\n"
+    "  2. Read coordinates off that image; pass its observation_id with coordinate inputs. "
+    "Use raw=true only for coordinates explicitly measured in native input space.\n"
     "  3. Take another screenshot only after a meaningful UI state change.\n"
     "view_image remains available for OTHER local files (a saved export, an older screenshot). "
     "(vlm_query, analyze_screenshot and browser tools are DISABLED — do not look for them.)\n"
@@ -338,7 +339,7 @@ OSWORLD_PREAMBLE = (
 )
 
 
-# Acceptance criteria handed to the task-acceptance reviewer that already runs on every
+# Acceptance criteria handed to the result review that Required mode runs on every
 # OSWorld task. Phrased as claims the delivery must be able to support from the trace, so the
 # reviewer adjudicates observations rather than the agent's narrative. Nothing here names a
 # task, an application or anything about how the benchmark grades.

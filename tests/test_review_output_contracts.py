@@ -41,55 +41,14 @@ class TestEmptyArrayIsVerifiedClean:
         assert empty_array_is_verified_clean(raw) is expected, repr(raw)
 
 
-class TestReviewRunFailureReason:
-    """`review_status` used to drop the per-run cause, so N identical
-    deterministic failures read as N generic `parse_failure` rows."""
-
-    def _run(self, status="parse_failure", raw=""):
-        from types import SimpleNamespace
-        return SimpleNamespace(status=status, raw_result=raw, items=[], snapshot_hash="h",
-                               commit_message="m", ts="t", snapshot_summary="s", attempt=1,
-                               bypass_reason="", repo_key="", tool_name="", task_id="",
-                               model_used="opus", duration_sec=48.35, prompt_chars=786401)
-
-    def test_rejected_clean_sentinel_is_named(self):
-        from ouroboros.review_evidence import _review_status_run_to_dict
-        data = _review_status_run_to_dict(self._run(raw="[]\nNO_FINDINGS"))
-        assert data["failure_reason"] == "clean_sentinel_rejected"
-
-    def test_sentinel_bearing_prose_is_not_called_a_rejected_clean_verdict(self):
-        """The diagnostic asks the shared predicate, so refusal prose carrying
-        the sentinel is reported as prose — not as a contract regression."""
-        from ouroboros.review_evidence import _review_status_run_to_dict
-        data = _review_status_run_to_dict(
-            self._run(raw="I cannot review this diff. []\nNO_FINDINGS"))
-        assert data["failure_reason"] == "non_json_prose"
-
-    def test_shapes_are_distinguished(self):
-        from ouroboros.review_evidence import _review_status_run_to_dict
-        assert _review_status_run_to_dict(self._run(raw=""))["failure_reason"] == "empty_response"
-        assert _review_status_run_to_dict(self._run(raw="[{bad"))["failure_reason"] == "malformed_array"
-        assert _review_status_run_to_dict(self._run(raw="sorry"))["failure_reason"] == "non_json_prose"
-
-    def test_fresh_run_has_no_failure_reason_but_keeps_diagnostics(self):
-        from ouroboros.review_evidence import _review_status_run_to_dict
-        data = _review_status_run_to_dict(self._run(status="fresh", raw="[]"))
-        assert data["failure_reason"] is None
-        assert not any("raw" in k and k != "failure_reason" for k in data), (
-            "the projection must not echo untrusted reviewer text to the model")
-        assert data["duration_sec"] == 48.35
-        assert data["model_used"] == "opus"
-        assert data["prompt_chars"] == 786401
-
-
 class TestReviewContractModes:
-    """Findings-only mode offers an all-clear; required-matrix mode must not,
-    because its parser rejects an empty array as missing every row."""
+    """One findings-only contract for every seat asked one question (a packet change seat, a result
+    seat, a skill seat): it offers the all-clear, and no second answer form exists beside it."""
 
-    def test_matrix_contract_has_no_all_clear_branch(self):
-        from ouroboros.triad_review import (
-            REVIEW_JSON_ARRAY_CONTRACT, REVIEW_JSON_MATRIX_CONTRACT,
-        )
+    def test_the_findings_contract_offers_the_all_clear_and_no_matrix_form_exists(self):
+        import ouroboros.triad_review as triad
+        from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT
+
         assert "NO_FINDINGS" in REVIEW_JSON_ARRAY_CONTRACT
-        assert "NO_FINDINGS" not in REVIEW_JSON_MATRIX_CONTRACT
-        assert "one entry per required checklist item" in REVIEW_JSON_MATRIX_CONTRACT
+        assert not hasattr(triad, "REVIEW_JSON_MATRIX_CONTRACT")
+        assert not hasattr(triad, "parse_model_review_results")

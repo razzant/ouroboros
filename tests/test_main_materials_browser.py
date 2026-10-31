@@ -1,20 +1,21 @@
-"""Main question materials and complete retained Files through the real SPA.
+"""Main question materials and Project result navigation through the real SPA.
 
 Readers, explicit downloads, keyboard navigation and reloads use the production
-server. Evidence is retained via OUROBOROS_BROWSER_EVIDENCE_OUT, including RED.
+server. Evidence goes to the shared diagnostic channel, or an explicit
+OUROBOROS_BROWSER_EVIDENCE_OUT, including RED.
 """
 
 import hashlib
 import struct
 import zlib
 import json
-import os
-from pathlib import Path
+import re
 
 import pytest
 
 from devtools.benchmarks.common.server_runner import _api
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
+from tests._shared import producer_evidence_dir
 from tests.system_e2e.harness import KeylessIsolatedServer, ScriptedStubModel, keyless_settings, write_settings_file
 
 wait_clone = clone_fixture
@@ -76,7 +77,8 @@ def _m1660_material_question(root):
 
 
 def _m1660_material_evidence(tmp_path, stem):
-    evidence = Path(os.environ.get('OUROBOROS_BROWSER_EVIDENCE_OUT') or tmp_path / 'screenshots') / stem
+    evidence = producer_evidence_dir(tmp_path / 'screenshots', "main-materials",
+                                     env='OUROBOROS_BROWSER_EVIDENCE_OUT') / stem
     evidence.mkdir(parents=True, exist_ok=True)
     return evidence
 
@@ -127,11 +129,9 @@ def test_main_question_materials_reader_and_keyboard(wait_clone, tmp_path, width
                 page = browser.new_page(viewport=receipt['viewport'], reduced_motion='reduce')
                 try:
                     page.goto(server.base_url, wait_until='domcontentloaded')
-                    summary = page.locator('.main-attention-summary')
-                    summary.wait_for(timeout=30000)
-                    summary.focus()
-                    page.keyboard.press('Enter')
-                    card = page.locator(f'.main-attention .project-question-card[data-quiz-id="{receipt["quiz_id"]}"]')
+                    # The Project question's Main copy stands in the feed at its ask.
+                    card = page.locator(f'#chat-messages .project-question-card[data-quiz-id="{receipt["quiz_id"]}"]')
+                    card.wait_for(timeout=30000)
                     materials = card.locator('.chat-quiz-materials')
                     expect(materials.locator('.chat-file-card')).to_have_count(3)
                     image = materials.locator('img.chat-file-thumb')
@@ -146,7 +146,25 @@ def test_main_question_materials_reader_and_keyboard(wait_clone, tmp_path, width
                         assert actual == payloads[material['label']]
                         assert hashlib.sha256(actual).hexdigest() == material['sha256']
                     receipt['stages'].append('PNG decoded at 240x120; all material bytes match registered custody')
+                    picture = materials.get_by_role('button', name='comparison.png', exact=False)
+                    expect(picture.locator('.chat-file-more')).to_have_text('View')
+                    card.locator('.chat-quiz-question').focus()
+                    _m1660_tab_to(page, picture)
+                    page.keyboard.press('Enter')
+                    dialog = page.locator('dialog.document-reader')
+                    expect(dialog).to_be_visible()
+                    page.wait_for_function("() => document.querySelector('dialog.document-reader .document-reader-image')?.naturalWidth === 240")
+                    expect(dialog.get_by_role('region', name='Image')).to_be_focused()
+                    shown = dialog.locator('.document-reader-image').evaluate('(img) => [img.width, img.height]')
+                    assert shown == [240, 120], f'Fit shows the material whole and never enlarges it: {shown}'
+                    page.screenshot(path=str(evidence / 'image-preview.png'), animations='disabled')
+                    page.keyboard.press('Escape')
+                    expect(dialog).to_have_count(0)
+                    expect(picture).to_be_focused()
+                    receipt['stages'].append('Keyboard opened the image material in the in-chat preview at its own size; Escape restored focus')
                     document = materials.get_by_role('button', name='decision-brief.md', exact=False)
+                    # The keyboard starts at the question text, where Main's waiting pill lands a question.
+                    card.locator('.chat-quiz-question').focus()
                     _m1660_tab_to(page, document)
                     expect(document).to_be_focused()
                     page.keyboard.press('Enter')
@@ -202,8 +220,8 @@ def test_main_question_unavailable_material_is_explicit(wait_clone, tmp_path):
                 page = browser.new_page(viewport={'width': 1100, 'height': 900}, reduced_motion='reduce')
                 try:
                     page.goto(server.base_url, wait_until='domcontentloaded')
-                    page.locator('.main-attention-summary').click(timeout=30000)
-                    card = page.locator(f'.main-attention .project-question-card[data-quiz-id="{receipt["quiz_id"]}"]')
+                    card = page.locator(f'#chat-messages .project-question-card[data-quiz-id="{receipt["quiz_id"]}"]')
+                    card.wait_for(timeout=30000)
                     with page.expect_response(lambda response: response.url.endswith(material['download_url'])) as read:
                         card.get_by_role('button', name='supporting-notes.txt', exact=False).click()
                     receipt['response_status'] = read.value.status
@@ -226,34 +244,27 @@ def test_main_question_unavailable_material_is_explicit(wait_clone, tmp_path):
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_main_files_inventory_includes_more_than_eight_files(wait_clone, tmp_path, engine):
+def test_main_live_completion_opens_project_answer_documents_and_task_files(wait_clone, tmp_path, engine):
+    """A real queued Project task sends documents and finishes while Main is open.
+    Only model judgment is scripted; delivery, task Files, history and reads are real."""
     from playwright.sync_api import expect, sync_playwright
-    from ouroboros.artifacts import collect_task_artifact_records, store_task_artifact_bytes
-    from ouroboros.project_dialogue import project_completion_delivery_outcome
-    from ouroboros.projects_registry import bind_task_to_project, create_project
-    from ouroboros.task_results import write_task_result
-    from supervisor.message_bus import log_chat
+    from ouroboros.projects_registry import create_project
+    from tests.test_ui_smoke_project_completion import _LONG_ANSWER
 
     root = tmp_path / 'instance' / 'data'
     root.mkdir(parents=True)
-    task_id = 'eleven-files-task'
-    project = create_project(root, 'retained-files', name='Retained files')
-    bind_task_to_project(root, task_id, project['id'], project['chat_id'], origin={'absent': 'system'})
-    payloads = {f'part-{index:02d}.txt': f'Retained result number {index}.\n'.encode() for index in range(1, 12)}
-    for name, payload in payloads.items():
-        store_task_artifact_bytes(root, task_id, name=name, data=payload)
-    records = collect_task_artifact_records(root, task_id, require_registered=True)
-    result = write_task_result(root, task_id, 'completed', project_id=project['id'], chat_id=project['chat_id'],
-        terminal_origin='model_final', result='All eleven retained reports are available.', artifacts=records,
-        outcome_axes={'execution': {'status': 'ok'}})
-    log_chat('out', project['chat_id'], 1, result['result'], task_id=task_id, drive_root=root, require_write=True)
-    task = {'id': task_id, 'project_id': project['id'], 'chat_id': project['chat_id'], 'root_task_id': task_id}
-    disposition, _queued = project_completion_delivery_outcome(root, {}, task_id, task, result, {'status': 'completed'})
-    assert disposition == 'owed'
-    evidence = _m1660_material_evidence(tmp_path, f'files-eleven-{engine}')
-    receipt = {'engine': engine, 'task_id': task_id, 'project': project, 'producer_disposition': disposition,
-               'registered_artifacts': records, 'stages': []}
-    with ScriptedStubModel([{'final': 'Unused model fixture.'}]) as stub:
+    project = create_project(root, 'project-door', name='Long report')
+    source = root / 'source'
+    source.mkdir()
+    brief = source / 'brief.md'
+    brief.write_text('# Project brief\n\nThe report remains readable in its Project.\n', encoding='utf-8')
+    note = source / 'notes.txt'
+    note.write_text('The notes are a separate delivered document.\n', encoding='utf-8')
+    answer = _LONG_ANSWER + '\n\nPROJECT_ANSWER_TAIL'
+    evidence = _m1660_material_evidence(tmp_path, f'project-door-{engine}')
+    receipt = {'engine': engine, 'project': project, 'stages': []}
+    script = [{'tool': 'send_file', 'arguments': {'file_path': str(path)}} for path in (brief, note)]
+    with ScriptedStubModel(script, final_answer=answer) as stub:
         settings_path = root / 'settings.json'
         write_settings_file(settings_path, keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
         server = KeylessIsolatedServer(wait_clone, root, settings_path)
@@ -262,59 +273,64 @@ def test_main_files_inventory_includes_more_than_eight_files(wait_clone, tmp_pat
             with sync_playwright() as pw:
                 browser = getattr(pw, engine).launch()
                 page = browser.new_page(viewport={'width': 1100, 'height': 900}, reduced_motion='reduce')
-                downloads = []
-                page.on('download', lambda download: downloads.append(download))
+                frames = []
+                page.on('websocket', lambda socket: socket.on('framereceived', lambda value: frames.append(json.loads(value))))
                 try:
                     page.goto(server.base_url, wait_until='domcontentloaded')
-                    final = page.locator('.chat-bubble.project-answer').filter(has_text=result['result'])
-                    final.wait_for(timeout=30000)
-                    files = final.get_by_role('button', name='Files', exact=True)
-                    files.click()
-                    inventory = final.locator('.project-answer-files')
-                    expect(inventory.get_by_role('button')).to_have_count(11)
-                    assert 'more files' not in inventory.inner_text()
-                    for name in payloads:
-                        entry = inventory.locator(f'[data-result-file="{name}"]')
-                        expect(entry.get_by_text(name, exact=True)).to_be_visible()
-                        expect(entry.get_by_role('button')).to_be_enabled()
-                    page.screenshot(path=str(evidence / 'complete-inventory.png'), animations='disabled')
-                    last = inventory.locator('[data-result-file="part-11.txt"]').get_by_role('button')
-                    last.click()
-                    dialog = page.locator('dialog.document-reader')
-                    expect(dialog).to_be_visible()
-                    expect(dialog.locator('.document-reader-body')).to_contain_text(payloads['part-11.txt'].decode().strip())
-                    assert downloads == [], 'Opening a retained file must read it without downloading'
-                    page.screenshot(path=str(evidence / 'eleventh-file-reader.png'), animations='disabled')
-                    with page.expect_download() as download_info:
-                        dialog.get_by_role('button', name='Download', exact=True).click()
-                    download = download_info.value
-                    assert downloads == [download], 'Only the explicit Download action may download the file'
-                    assert download.suggested_filename == 'part-11.txt'
-                    download_path = evidence / 'downloaded-part-11.txt'
-                    download.save_as(str(download_path))
-                    assert download_path.read_bytes() == payloads['part-11.txt']
-                    receipt['download_sha256'] = hashlib.sha256(download_path.read_bytes()).hexdigest()
-                    receipt['stages'].append('All eleven files visible; eleventh read in Main and explicitly downloaded with exact retained bytes')
-                    dialog.get_by_role('button', name='Close document', exact=True).click()
-                    expect(dialog).to_have_count(0)
-                    expect(last).to_be_focused()
-                    files.click()
-                    expect(inventory).to_be_hidden()
-                    files.click()
-                    expect(inventory.get_by_role('button')).to_have_count(11)
-                    page.reload(wait_until='domcontentloaded')
-                    final.get_by_role('button', name='Files', exact=True).click(timeout=30000)
-                    expect(inventory.get_by_role('button')).to_have_count(11)
-                    for name in payloads:
-                        expect(inventory.get_by_text(name, exact=True)).to_be_visible()
-                    last.click()
-                    expect(dialog).to_be_visible()
-                    expect(dialog.locator('.document-reader-body')).to_contain_text(payloads['part-11.txt'].decode().strip())
-                    assert downloads == [download]
-                    page.screenshot(path=str(evidence / 'eleventh-file-reader-after-reload.png'), animations='disabled')
-                    assert '#project/' not in page.url
-                    receipt['stages'].append('Inventory survives close/reopen and Main reload')
+                    page.wait_for_function("() => document.querySelector('#chat-status')?.textContent.trim() === 'Online'")
+                    created = _api(server.base_url, 'POST', '/api/tasks', {
+                        'description': 'Send the two prepared reports and return the selected final answer.',
+                        'title': 'Project completion door', 'project_id': project['id'], 'chat_id': project['chat_id'],
+                        'source': 'web', 'memory_mode': 'forked', 'metadata': {'delegation_role': 'root'}})
+                    receipt['task_id'] = task_id = created['task_id']
+                    final = page.locator(f'#chat-messages .chat-bubble.project-answer[data-task-id="{task_id}"]')
+                    final.wait_for(timeout=120000)
+                    assert any(frame.get('system_type') == 'project_completion_summary' and frame.get('task_id') == task_id
+                               for frame in frames), 'the mirror must first arrive through the real live transport'
+                    for stage in ('live', 'reload'):
+                        if stage == 'reload':
+                            page.reload(wait_until='domcontentloaded')
+                            final.wait_for(timeout=30000)
+                        expect(final).to_have_class(re.compile(r'\bis-folded\b'))
+                        assert final.locator('[data-answer-fold], .project-answer-files').count() == 0
+                        assert final.get_by_role('button', name='Files', exact=True).count() == 0
+                        assert final.locator('.system-message-actions button').count() == 1
+                        final.screenshot(path=str(evidence / f'main-{stage}.png'))
+                        final.locator('[data-intent="open-project"]').click()
+                        panel = page.locator(f'#panel-pchat-{project["id"]}')
+                        full = panel.locator('.chat-bubble.assistant .message').filter(has_text='PROJECT_ANSWER_TAIL')
+                        expect(full).to_have_count(1)
+                        assert full.evaluate('n => n.scrollHeight <= n.clientHeight + 1')
+                        expect(full).to_contain_text('Paragraph 8')
+                        expect(panel.locator('.chat-file-card')).to_have_count(2)
+                        card = panel.locator(f'.chat-live-card[data-task-id="{task_id}"]')
+                        card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
+                        files = card.locator('[data-result-files]')
+                        detail = _api(server.base_url, 'GET', f'/api/tasks/{task_id}')
+                        # Retention also publishes its own memory export; it is not a third sent document.
+                        expect(files).to_contain_text(f'{len(detail["artifacts"])} files')
+                        expect(files.locator('a[download]')).to_have_count(len(detail['artifacts']))
+                        with page.expect_download() as task_download:
+                            files.locator('a[download]').filter(has_text=re.compile(r'^brief-')).click()
+                        saved = evidence / f'task-file-{stage}.md'
+                        task_download.value.save_as(str(saved))
+                        assert saved.read_bytes() == brief.read_bytes()
+                        document = panel.get_by_role('button', name='brief.md', exact=False)
+                        document.click()
+                        dialog = page.locator('dialog.document-reader')
+                        expect(dialog.locator('.document-reader-body')).to_contain_text('The report remains readable in its Project.')
+                        page.screenshot(path=str(evidence / f'project-document-{stage}.png'), animations='disabled')
+                        with page.expect_download() as reader_download:
+                            dialog.get_by_role('button', name='Download', exact=True).click()
+                        saved = evidence / f'reader-{stage}.md'
+                        reader_download.value.save_as(str(saved))
+                        assert saved.read_bytes() == brief.read_bytes()
+                        page.keyboard.press('Escape')
+                        expect(document).to_be_focused()
+                        page.locator('#project-panel-close').click()
+                        receipt['stages'].append(f'{stage}: Main folded; Project full answer, delivered reader and task Files downloads match')
                 finally:
+                    receipt['live_completion_frames'] = [frame for frame in frames if frame.get('system_type') == 'project_completion_summary']
                     _m1660_material_finish(page, server, evidence, receipt)
                     browser.close()
         finally:
@@ -350,6 +366,15 @@ def _m1660_seed_readable_inventory(root, repo, answer='Read the retained files f
     result = write_task_result(root, task_id, 'completed', project_id=project['id'], chat_id=project['chat_id'],
         terminal_origin='model_final', result=answer,
         artifacts=records, outcome_axes={'execution': {'status': 'ok'}})
+    from urllib.parse import quote
+    # Ordinary delivered-document rows, not a replacement Main inventory.
+    for name, payload in payloads.items():
+        url = f'/api/tasks/{task_id}/artifacts/{quote(name.rsplit("/", 1)[-1])}'
+        if '/' in name:
+            url += '?relpath=' + quote(name, safe='')
+        log_chat('out', project['chat_id'], 1, f'Delivered {name}', task_id=task_id,
+                 record_type='document', filename=name, mime='text/plain', download_url=url,
+                 size_bytes=len(payload), drive_root=root, require_write=True)
     log_chat('out', project['chat_id'], 1, result['result'], task_id=task_id, drive_root=root, require_write=True)
     task = {'id': task_id, 'project_id': project['id'], 'chat_id': project['chat_id'], 'root_task_id': task_id}
     disposition, _queued = project_completion_delivery_outcome(root, {}, task_id, task, result, {'status': 'completed'})
@@ -359,130 +384,29 @@ def _m1660_seed_readable_inventory(root, repo, answer='Read the retained files f
             'completion_answer': result['result'], 'stages': [], 'downloads': []}, payloads
 
 
-@pytest.mark.parametrize('selection', ['root-file', 'nested-member'])
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_main_files_retained_text_opens_inapp_reader_with_project_closed(wait_clone, tmp_path, selection, engine):
-    """Activate Main's file UI; require an in-app reader, never a download substitute."""
-    from playwright.sync_api import expect, sync_playwright
-
-    root = tmp_path / 'instance' / 'data'
-    root.mkdir(parents=True)
-    repo = tmp_path / 'artifact-producer-repo'
-    repo.mkdir()
-    receipt, payloads = _m1660_seed_readable_inventory(root, repo)
-    receipt.update(selection=selection, engine=engine)
-    evidence = _m1660_material_evidence(tmp_path, f'files-reader-{engine}-{selection}')
-    with ScriptedStubModel([{'final': 'Unused model fixture.'}]) as stub:
-        settings_path = root / 'settings.json'
-        write_settings_file(settings_path, keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
-        server = KeylessIsolatedServer(wait_clone, root, settings_path)
-        server.start(ready_timeout=120)
-        try:
-            with sync_playwright() as pw:
-                browser = getattr(pw, engine).launch()
-                page = browser.new_page(viewport={'width': 1100, 'height': 900}, reduced_motion='reduce')
-                downloads = []
-                page.on('download', lambda download: downloads.append(download))
-                try:
-                    page.goto(server.base_url, wait_until='domcontentloaded')
-                    final = page.locator('.chat-bubble.project-answer').filter(has_text=receipt['completion_answer'])
-                    final.wait_for(timeout=30000)
-                    final.get_by_role('button', name='Files', exact=True).click()
-                    inventory = final.locator('.project-answer-files')
-                    inventory.get_by_text('Available files', exact=True).wait_for()
-                    assert not page.locator('#project-panel').is_visible()
-                    receipt['inventory_before'] = inventory.inner_text()
-                    receipt['inventory_controls_before'] = inventory.locator('a, button').evaluate_all(
-                        '(nodes) => nodes.map(node => ({tag: node.tagName, text: node.textContent, href: node.getAttribute("href"), download: node.getAttribute("download")}))')
-                    page.screenshot(path=str(evidence / 'inventory-before-activation.png'), animations='disabled')
-                    path = 'part-11.txt' if selection == 'root-file' else 'research/brief.txt'
-                    suffix = path.rsplit('/', 1)[-1]
-                    url = f'/api/tasks/{receipt["task_id"]}/artifacts/{suffix}'
-                    if selection == 'nested-member':
-                        url += '?relpath=research/brief.txt'
-                    # This proves fixture readiness only. It is not counted as
-                    # consumer access and does not satisfy the reader assertions.
-                    diagnostic = page.request.get(server.base_url + url)
-                    receipt['fixture_readiness_only'] = {'url': url, 'status': diagnostic.status,
-                        'sha256': hashlib.sha256(diagnostic.body()).hexdigest()}
-                    assert diagnostic.status == 200 and diagnostic.body() == payloads[path]
-                    if selection == 'nested-member':
-                        inventory.get_by_text('research/', exact=True).click()
-                        receipt['stages'].append('Activated the retained research folder from Main Files')
-                        member = inventory.get_by_text('research/brief.txt', exact=True)
-                        expect(member, 'Opening a Main Files folder must expose its individual retained files').to_be_visible(timeout=5000)
-                        member.click()
-                    else:
-                        inventory.get_by_text('part-11.txt', exact=True).click()
-                        receipt['stages'].append('Activated the eleventh retained text file from Main Files')
-                    dialog = page.locator('dialog.document-reader')
-                    expect(dialog, 'Main Files must open the existing in-app reader; downloading is not reading in Main').to_be_visible(timeout=5000)
-                    expect(dialog.locator('.document-reader-body')).to_contain_text(payloads[path].decode().strip())
-                    assert downloads == [], 'Opening a retained file must read it without downloading'
-                    assert not page.locator('#project-panel').is_visible()
-                    assert page.url == server.base_url + '/'
-                    page.screenshot(path=str(evidence / 'reader.png'), animations='disabled')
-                    receipt['stages'].append('Exact selected text visible in existing reader with Project closed')
-                    with page.expect_download() as download_info:
-                        dialog.get_by_role('button', name='Download', exact=True).click()
-                    download = download_info.value
-                    assert downloads == [download], 'Only the explicit Download action may download the file'
-                    downloaded = evidence / f'downloaded-{suffix}'
-                    download.save_as(str(downloaded))
-                    assert downloaded.read_bytes() == payloads[path]
-                    receipt['download_sha256'] = hashlib.sha256(downloaded.read_bytes()).hexdigest()
-                    receipt['stages'].append('Explicit reader Download returned exact selected retained bytes')
-                    page.keyboard.press('Escape')
-                    expect(dialog).to_have_count(0)
-                    entry = inventory.locator(f'[data-result-file="{path}"]').get_by_role('button')
-                    expect(entry).to_be_focused()
-                    page.reload(wait_until='domcontentloaded')
-                    final.get_by_role('button', name='Files', exact=True).click(timeout=30000)
-                    if selection == 'nested-member':
-                        inventory.get_by_text('research/', exact=True).click()
-                    entry.click()
-                    expect(dialog).to_be_visible()
-                    expect(dialog.locator('.document-reader-body')).to_contain_text(payloads[path].decode().strip())
-                    assert downloads == [download]
-                    assert not page.locator('#project-panel').is_visible()
-                    assert page.url == server.base_url + '/'
-                    page.screenshot(path=str(evidence / 'reader-after-reload.png'), animations='disabled')
-                    receipt['stages'].append('Selected file remains readable after Main reload with Project closed')
-                finally:
-                    for index, download in enumerate(downloads):
-                        name = Path(download.suggested_filename).name
-                        destination = evidence / f'observed-download-{index}-{name}'
-                        try:
-                            download.save_as(str(destination))
-                            receipt['downloads'].append({'name': name, 'saved': destination.name,
-                                'sha256': hashlib.sha256(destination.read_bytes()).hexdigest()})
-                        except Exception as exc:
-                            receipt['downloads'].append({'name': name, 'error': str(exc)})
-                    _m1660_material_finish(page, server, evidence, receipt)
-                    browser.close()
-        finally:
-            server.stop()
-
-
-@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_main_final_released_with_its_history_page_mounts_again_with_files_and_fold(wait_clone, tmp_path, engine):
+def test_main_final_released_with_its_history_page_mounts_again_with_project_door(wait_clone, tmp_path, engine):
     """Four older pages release the page holding Main's final; reading it again mounts the
-    answer, its fold and its Files once more, and a transport retry stays one outcome."""
+    folded preview and Project door once more, and a transport retry stays one outcome."""
     import re
     import time
     from datetime import datetime, timedelta, timezone
     from playwright.sync_api import expect, sync_playwright
-    from tests.test_chat_history_paging_browser import MAIN, _idle, _open, _step, _write
+    from ouroboros import dialogue_store
+    from tests import _dialogue as dialogue_test
+    from tests.test_chat_history_paging_browser import MAIN, _idle, _open, _step
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
     root = tmp_path / 'instance' / 'data'
     root.mkdir(parents=True)
     repo = tmp_path / 'artifact-producer-repo'
     repo.mkdir()
-    # Four Main pages older than the final: one history read holds 150 conversation rows.
-    _write(root / 'archive' / 'chat_20260901T000000.jsonl', [
+    # Four Main pages older than the final: one history read holds 150 conversation rows, an older
+    # install's archive that the upgrade imports before the final is written.
+    dialogue_test.seed(root, archives={'chat_20260901T000000.jsonl': [
         {'ts': '2026-09-01T10:00:00Z', 'chat_id': 1, 'direction': 'in', 'text': f'Older Main message {index:04d}'}
-        for index in range(620)])
+        for index in range(620)]})
+    dialogue_test.import_all(root)
     answer = '\n\n'.join(f'Paragraph {index}: the retained reports are ready to read.' for index in range(1, 31))
     receipt, payloads = _m1660_seed_readable_inventory(root, repo, answer=answer)
     receipt.update(engine=engine)
@@ -505,10 +429,9 @@ def test_main_final_released_with_its_history_page_mounts_again_with_files_and_f
             server.stop()
             # Newer Main conversation puts the final one page back from the newest read.
             start = datetime.now(timezone.utc)
-            with (root / 'logs' / 'chat.jsonl').open('a', encoding='utf-8') as stream:
-                for index in range(160):
-                    stream.write(json.dumps({'ts': (start + timedelta(seconds=index)).isoformat(), 'chat_id': 1,
-                                             'direction': 'in', 'text': f'Newer Main message {index:04d}'}) + '\n')
+            for index in range(160):
+                dialogue_store.append(root, 'chat', {'ts': (start + timedelta(seconds=index)).isoformat(), 'chat_id': 1,
+                                                     'direction': 'in', 'text': f'Newer Main message {index:04d}'})
             server.start(ready_timeout=120)
             with sync_playwright() as pw:
                 browser = getattr(pw, engine).launch()
@@ -520,22 +443,24 @@ def test_main_final_released_with_its_history_page_mounts_again_with_files_and_f
                     def readable(stage):
                         expect(final).to_have_count(1)
                         expect(final.locator('.message')).to_contain_text('Paragraph 1: the retained reports')
-                        final.get_by_role('button', name='Show full', exact=True).click()
-                        expect(final).to_have_class(re.compile(r'\bis-expanded\b'))
-                        assert final.locator('.message').evaluate('node => node.scrollHeight <= node.clientHeight + 1')
-                        final.get_by_role('button', name='Files', exact=True).click()
-                        final.locator('.project-answer-files').get_by_text('part-11.txt', exact=True).click()
+                        expect(final).to_have_class(re.compile(r'\bis-folded\b'))
+                        assert final.locator('[data-answer-fold], .project-answer-files').count() == 0
+                        assert final.get_by_role('button', name='Files', exact=True).count() == 0
+                        final.locator('[data-intent="open-project"]').click()
+                        panel = page.locator(f'#panel-pchat-{receipt["project"]["id"]}')
+                        full = panel.locator('.chat-bubble.assistant .message').filter(has_text='Paragraph 30:')
+                        expect(full).to_have_count(1)
+                        assert full.evaluate('node => node.scrollHeight <= node.clientHeight + 1')
+                        expect(panel.locator('.chat-file-card')).to_have_count(13)
+                        document = panel.get_by_role('button', name='research/brief.txt', exact=False)
+                        document.click()
                         dialog = page.locator('dialog.document-reader')
-                        expect(dialog.locator('.document-reader-body')).to_contain_text(
-                            payloads['part-11.txt'].decode().strip())
+                        expect(dialog.locator('.document-reader-body')).to_contain_text(payloads['research/brief.txt'].decode().strip())
                         page.screenshot(path=str(evidence / f'{stage}.png'), animations='disabled')
                         page.keyboard.press('Escape')
-                        expect(dialog).to_have_count(0)
-                        # Folded and unfocused again: a focused or visible row protects its page.
-                        final.get_by_role('button', name='Show less', exact=True).click()
-                        final.get_by_role('button', name='Files', exact=True).click()
+                        page.locator('#project-panel-close').click()
                         page.evaluate('() => document.activeElement?.blur()')
-                        receipt['stages'].append(f'{stage}: answer, fold, Files and reader readable')
+                        receipt['stages'].append(f'{stage}: Main fold and Project full answer/nested delivered document readable')
 
                     expect(final).to_have_count(0)
                     _step(page, MAIN, automatic=True)
@@ -563,176 +488,6 @@ def test_main_final_released_with_its_history_page_mounts_again_with_files_and_f
                     _idle(page, MAIN)
                     _step(page, MAIN, automatic=True)
                     readable('after-reload')
-                finally:
-                    _m1660_material_finish(page, server, evidence, receipt)
-                    browser.close()
-        finally:
-            server.stop()
-
-
-# The Files read waits until the test releases it, so the inventory lands while the reader is elsewhere.
-_M1660_HOLD_DETAIL = """task => {
-    const fetch = window.fetch.bind(window);
-    window.__holdDetail = false;
-    window.fetch = async (input, init) => {
-        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-        if (window.__holdDetail && url.pathname === `/api/tasks/${task}`) {
-            window.__holdDetail = false;
-            await new Promise(resolve => { window.__releaseDetail = resolve; });
-        }
-        return fetch(input, init);
-    };
-}"""
-_M1660_TOP = """node => node.getBoundingClientRect().top
-    - document.querySelector('#chat-messages').getBoundingClientRect().top"""
-_M1660_PLACE = """(node, offset) => { const feed = document.querySelector('#chat-messages');
-    feed.scrollTop += node.getBoundingClientRect().top - feed.getBoundingClientRect().top - offset; }"""
-_M1660_REMAINING = """() => { const feed = document.querySelector('#chat-messages');
-    return feed.scrollHeight - feed.clientHeight - feed.scrollTop; }"""
-
-
-@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_main_files_landing_above_the_reader_keeps_the_message_being_read(wait_clone, tmp_path, engine):
-    """Files opened on Main's final, then reading on below: the inventory that lands later above the
-    reader keeps the selected message in place with native scroll anchoring off (as in WKWebView),
-    a folder opens in place, and a reader back at the live edge keeps following."""
-    import time
-    from datetime import datetime, timedelta, timezone
-    from playwright.sync_api import expect, sync_playwright
-    from tests.test_chat_history_paging_browser import MAIN, _idle, _open
-    from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES
-
-    root = tmp_path / 'instance' / 'data'
-    root.mkdir(parents=True)
-    repo = tmp_path / 'artifact-producer-repo'
-    repo.mkdir()
-    receipt, _payloads = _m1660_seed_readable_inventory(root, repo)
-    receipt.update(engine=engine, measures={})
-    evidence = _m1660_material_evidence(tmp_path, f'files-anchor-{engine}')
-    with ScriptedStubModel([{'final': 'Unused model fixture.'}]) as stub:
-        settings_path = root / 'settings.json'
-        write_settings_file(settings_path, keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
-        server = KeylessIsolatedServer(wait_clone, root, settings_path)
-        server.start(ready_timeout=120)
-        try:
-            deadline, final_row = time.monotonic() + 90, None
-            while final_row is None and time.monotonic() < deadline:
-                rows = _api(server.base_url, 'GET', '/api/chat/history?chat_id=1').get('messages') or []
-                final_row = next((row for row in rows if row.get('system_type') == 'project_completion_summary'
-                                  and row.get('task_id') == receipt['task_id']), None)
-                time.sleep(0 if final_row else 0.5)
-            assert final_row and final_row.get('delivery_id'), 'the owed final was not published'
-            server.stop()
-            start = datetime.now(timezone.utc)
-            with (root / 'logs' / 'chat.jsonl').open('a', encoding='utf-8') as stream:
-                for index in range(40):
-                    stream.write(json.dumps({'ts': (start + timedelta(seconds=index)).isoformat(), 'chat_id': 1,
-                                             'direction': 'in', 'text': f'Later Main message {index:02d}'}) + '\n')
-            server.start(ready_timeout=120)
-            with sync_playwright() as pw:
-                browser = getattr(pw, engine).launch()
-                page = browser.new_page(viewport={'width': 1100, 'height': 900}, reduced_motion='reduce')
-                page.add_init_script(f"({_M1660_HOLD_DETAIL})({json.dumps(receipt['task_id'])})")
-                feed = page.locator(MAIN)
-                final = page.locator(f'{MAIN} .chat-bubble.project-answer'
-                                     f'[data-delivery-id="{final_row["delivery_id"]}"]')
-                files = final.get_by_role('button', name='Files', exact=True)
-                inventory = final.locator('.project-answer-files')
-
-                def settle():
-                    page.evaluate(_SETTLE_RESTORE_FRAMES)
-
-                def ready():
-                    page.wait_for_selector(f'{MAIN}[data-history-hydrated="true"]')
-                    page.add_style_tag(content='#chat-messages, #chat-messages * { overflow-anchor: none !important; }')
-                    receipt['measures']['overflow_anchor'] = feed.evaluate(
-                        "node => [getComputedStyle(node).overflowAnchor, CSS.supports('overflow-anchor: none')]")
-                    assert receipt['measures']['overflow_anchor'] in (['none', True], [None, False])
-                    settle()
-                    feed.hover()
-                    page.mouse.wheel(0, -120)  # a real gesture leaves the live edge and owns the position
-                    settle()
-                    final.evaluate(_M1660_PLACE, 120)  # Files on screen, far from the live edge
-                    settle()
-
-                def open_held():
-                    before = files.evaluate(_M1660_TOP)
-                    page.evaluate('() => { window.__holdDetail = true; }')
-                    files.click()
-                    expect(inventory).to_have_text('Loading available files…')
-                    assert abs(files.evaluate(_M1660_TOP) - before) <= 1, 'the expansion moved its own control'
-                    settle()
-                    expect(inventory).to_have_text('Loading available files…')  # this read is the held one
-
-                def landed():
-                    page.evaluate('() => window.__releaseDetail()')
-                    inventory.get_by_text('Available files', exact=True).wait_for(state='attached')
-                    settle()
-                    return inventory.evaluate('node => node.getBoundingClientRect().height')
-
-                try:
-                    _open(page, server.base_url)
-                    ready()
-                    open_held()
-                    # Read on below the final and select the message being read.
-                    later = page.locator(f'{MAIN} .chat-bubble').filter(has_text='Later Main message 06')
-                    later.evaluate(_M1660_PLACE, 40)
-                    settle()
-                    assert final.evaluate('node => node.getBoundingClientRect().bottom') < feed.evaluate(
-                        'node => node.getBoundingClientRect().top'), 'the final must be above the reader'
-                    later.locator('.message').click(click_count=3)
-                    selected = page.evaluate('() => window.getSelection().toString().trim()')
-                    assert selected == 'Later Main message 06'
-                    focused = '() => document.activeElement?.outerHTML.slice(0, 80)'
-                    before, focus = later.evaluate(_M1660_TOP), page.evaluate(focused)
-                    page.screenshot(path=str(evidence / 'reading-below-while-files-load.png'), animations='disabled')
-                    height = landed()
-                    after = later.evaluate(_M1660_TOP)
-                    receipt['measures']['selected'] = {'before': before, 'after': after, 'inventory_height': height}
-                    page.screenshot(path=str(evidence / 'files-landed-above.png'), animations='disabled')
-                    assert height > 300 and abs(after - before) <= 1, receipt['measures']['selected']
-                    assert page.evaluate('() => window.getSelection().toString().trim()') == selected
-                    assert page.evaluate(focused) == focus
-                    receipt['stages'].append('a held inventory landed above the selected message; it stayed put')
-                    # A folder opens below its own summary: nothing the reader is on moves.
-                    folder = inventory.locator('summary').filter(has_text='research/')
-                    folder.evaluate(_M1660_PLACE, 300)
-                    settle()
-                    tops = [folder.evaluate(_M1660_TOP), files.evaluate(_M1660_TOP)]
-                    folder.click()
-                    expect(inventory.get_by_text('research/brief.txt', exact=True)).to_be_visible()
-                    settle()
-                    assert [folder.evaluate(_M1660_TOP), files.evaluate(_M1660_TOP)] == pytest.approx(tops, abs=1)
-                    # Closing and reopening Files keeps its control under the pointer.
-                    files.evaluate(_M1660_PLACE, 200)
-                    settle()
-                    top = files.evaluate(_M1660_TOP)
-                    files.click()
-                    expect(inventory).to_be_hidden()
-                    assert abs(files.evaluate(_M1660_TOP) - top) <= 1, 'closing Files moved its control'
-                    files.click()
-                    expect(inventory.get_by_text('research/brief.txt', exact=True)).to_be_visible()
-                    assert abs(files.evaluate(_M1660_TOP) - top) <= 1, 'reopening Files moved its control'
-                    page.screenshot(path=str(evidence / 'folder-open-files-reopened.png'), animations='disabled')
-                    receipt['stages'].append('a folder opened in place; Files closed and reopened under the pointer')
-                    # Back at the live edge, an inventory landing above keeps following the newest message.
-                    page.reload(wait_until='domcontentloaded')
-                    page.wait_for_function(
-                        '() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)')
-                    _idle(page, MAIN)
-                    ready()
-                    open_held()
-                    page.locator('#chat-scroll-bottom').click()
-                    page.wait_for_function(f'() => ({_M1660_REMAINING})() <= 6')
-                    settle()
-                    height = landed()
-                    remaining = page.evaluate(_M1660_REMAINING)
-                    receipt['measures']['live_edge'] = {'remaining': remaining, 'inventory_height': height}
-                    page.screenshot(path=str(evidence / 'live-edge-after-landing.png'), animations='disabled')
-                    assert height > 300 and remaining <= 6, receipt['measures']['live_edge']
-                    newest = page.locator(f'{MAIN} .chat-bubble').filter(has_text='Later Main message 39')
-                    expect(newest).to_be_in_viewport()
-                    receipt['stages'].append('at the live edge the landing inventory kept the newest message in view')
                 finally:
                     _m1660_material_finish(page, server, evidence, receipt)
                     browser.close()

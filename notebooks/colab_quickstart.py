@@ -253,8 +253,9 @@ server = subprocess.Popen(
 )
 print("Ouroboros server PID:", server.pid)
 
-# Grant, enable, and configure the bundled native Telegram skill over loopback.
-telegram_status = ensure_native_telegram_live(settings=settings)
+# Grant, enable, and configure the bundled native Telegram skill over loopback; the wait for the
+# server's boot ends early if the server process exits.
+telegram_status = ensure_native_telegram_live(settings=settings, alive=lambda: server.poll() is None)
 print("Native Telegram:", telegram_status)
 if telegram_status.get("ok") and telegram_status.get("settings_ok"):
     print("Message your Telegram bot now. Your first owner slash command (e.g. /status) registers your chat and asks you to send it once more;")

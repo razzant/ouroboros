@@ -1,10 +1,11 @@
 """Panel identity and the compact, redacted projection of a review run.
 
-Owns the outward-facing view of a completed panel: full applied acceptance
-source persistence through the existing artifact/task-result owners, transport-failure
+Owns the outward-facing view of a completed panel: transport-failure
 classification, redaction of model-authored reason text, the per-actor and
-per-panel projections that task results and the UI consume, the enforcement
-impact label, and the panel-identity hash over the actor rows. Extracted from
+per-panel projections that task results and the UI consume (review-ledger
+records included), the enforcement impact label, the panel-identity hash over
+the actor rows, and the tolerant readers of task-acceptance records written
+before the result review replaced that machine. Extracted from
 ouroboros/review_substrate.py (v7 D06 split, re-cut on the v7next tip);
 review_substrate.py re-exports every name.
 """
@@ -15,18 +16,18 @@ import hashlib
 import json
 import copy
 import logging
+import math
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Dict, List, TYPE_CHECKING
 
 from ouroboros.review_records import review_slot_awaiting, review_slot_unresolved
-from ouroboros.store import StoreError
 
 # A slot released at the dispatch barrier has no transport or parse event:
 # its projection is a gap, never a transport failure or a malformed answer.
 AWAITING_PROJECTION = "awaiting"
 _AWAITING_REASON = "No answer recorded: the host returned at the dispatch barrier before this reviewer answered."
-# The plan review's outcome CLASS at delivery, stamped by owner_hurry.force_plan_decision and
+# The plan review's outcome CLASS at delivery, stamped by owner_hurry.plan_gate_decision and
 # carried on outcome_axes.execution.plan_review; the earlier engine's classes (unanswered,
 # none_answered, answered_open) survive only as the cause sentences of finished tasks.
 PLAN_REVIEW_OBJECTIONS_OPEN = "objections_open"  # objections stood open at delivery
@@ -50,6 +51,8 @@ def _sub():
 
 def _transport_error_status(error: Any, *, failure_phase: str = "") -> str:
     """Classify transport failures without depending on a non-empty message."""
+    if getattr(error, "review_run_state", "") in {"cancelled", "interrupted"}:
+        return "interrupted"
     if failure_phase == "authority":
         return "authority_error"
     error_type = type(error).__name__ if isinstance(error, BaseException) else ""
@@ -99,7 +102,8 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
     parsed = row.get("parsed") if isinstance(row.get("parsed"), (dict, list)) else None
     # The one decision point: a slot is awaited only while it carries no answer. A row that
     # carries one is judged by its answer, whatever its custody state says.
-    awaiting = review_slot_awaiting(row) and parsed is None and not str(row.get("raw_text") or "").strip()
+    outcome = row.get("outcome") or {}
+    awaiting = (review_slot_awaiting(row) or outcome.get("status") == "pending") and parsed is None and not str(row.get("raw_text") or "").strip()
     usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
     explicit_parse = str(row.get("parse_status") or "")
     if explicit_parse == AWAITING_PROJECTION:
@@ -156,9 +160,9 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
             )
             if reason:
                 break
-    reason = reason or error or ("Reviewer response was malformed or absent." if not valid else "")
+    reason = reason or error or ("Reviewer response was malformed or absent." if not valid and explicit_parse != "valid" else "")
     if awaiting:
-        reason = _AWAITING_REASON
+        reason = (reason or _AWAITING_REASON) if outcome else _AWAITING_REASON
     model = str(usage.get("resolved_model", row.get("model")) or "")
     provider = str(usage.get("provider") or row.get("provider") or "")
     if not provider:
@@ -202,6 +206,9 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
         # Flat, redacted pointer to the private full response artifact.
         "response_ref": _response_ref_projection(row.get("response_ref")),
     }
+    if outcome:
+        projection.update(transport_status=outcome["transport"], parse_status=outcome["parse"],
+                          semantic_verdict=outcome["verdict"])
     # Since when this row has been waiting, published only where the host wrote
     # a real instant on a row the two wait predicates still call unanswered. An
     # absent key is a hole, never a back-filled or inferred moment.
@@ -270,36 +277,6 @@ def _review_panel_id(request: ReviewRequest, actors: List[ReviewActorRecord]) ->
     return f"panel_{digest[:16]}"
 
 
-def build_review_binding(
-    *,
-    candidate: str,
-    evidence: Dict[str, Any],
-    fence_token_or_state: Any,
-) -> Dict[str, Any]:
-    """Build the exact host-panel identity without introducing another ledger."""
-    from ouroboros.review_evidence import task_acceptance_evidence_revision
-
-    candidate_hash = hashlib.sha256(str(candidate or "").encode("utf-8")).hexdigest()
-    evidence_revision = task_acceptance_evidence_revision(evidence)
-    fence_value = (
-        json.dumps(fence_token_or_state, sort_keys=True, separators=(",", ":"), default=str)
-        if isinstance(fence_token_or_state, (dict, list, tuple))
-        else str(fence_token_or_state or "direct_context")
-    )
-    fence_hash = hashlib.sha256(fence_value.encode("utf-8")).hexdigest()
-    binding_payload = {
-        "candidate_hash": candidate_hash,
-        "evidence_revision": evidence_revision,
-        "fence_hash": fence_hash,
-    }
-    binding_hash = _sub().review_binding_hash(**binding_payload)
-    return {
-        **binding_payload,
-        "binding_hash": binding_hash,
-        "panel_id": f"panel_{binding_hash[:16]}",
-    }
-
-
 def _panel_transport(statuses: List[str]) -> str:
     """One panel's transport word over the words of its collected actors."""
     if "authority_error" in statuses and all(word in {"authority_error", "not_dispatched"} for word in statuses):
@@ -317,15 +294,30 @@ LEDGER_RECORD_PANELS = 5
 _LEDGER_PARSE = {"responded": "valid", "partial": "partial"}
 
 
+def _ledger_seat_executions(seat: Dict[str, Any]) -> List[Dict[str, str]]:
+    """What actually ran for one seat, when the reviewer row's own last execution proved it
+    (``review_ledger._apply_execution``); a requested route alone proves nothing."""
+    from ouroboros.review_execution_projection import normalize_review_executions
+
+    effective = seat.get("effective") if isinstance(seat.get("effective"), dict) else {}
+    if effective.get("source") != "reviewer_slot_last_execution":
+        return []
+    route, model = str(effective.get("route") or ""), str(effective.get("model") or "")
+    harness = route.split(":", 1)[1] if route.startswith("agent_session:") else ""
+    kind = "harness" if harness else ("native" if effective.get("delivery") == "retrieving" else "api")
+    return normalize_review_executions([{"kind": kind, "harness_id": harness, "model": model}])
+
+
 def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
     """One ledger seat as a card reviewer: the parts it was asked, each part's answer
     with its findings COUNTED (the bodies ride once, bounded, in ``findings``), and the
-    observed model, else the requested one (``panel_facts`` counts the unobserved)."""
-    status, surface = str(seat.get("status") or ""), str(record.get("surface") or "review")
+    observed model, with requested identity kept separately when execution is unknown."""
+    outcome = seat.get("outcome") or {}
+    status, surface = str(outcome.get("status") or seat.get("status") or ""), str(record.get("surface") or "review")
     requested = seat.get("requested") if isinstance(seat.get("requested"), dict) else {}
     observed = str(seat.get("observed_model") or "")
-    model = observed if observed not in ("", "unknown") else str(requested.get("model") or "")
-    answers = seat.get("answers") if isinstance(seat.get("answers"), dict) else {}
+    model = observed if observed not in ("", "unknown") else ""
+    answers = outcome.get("answers") or (seat.get("answers") if isinstance(seat.get("answers"), dict) else {})
     parts = [str(part) for part in seat.get("parts") or [] if part in answers] or list(answers)
     findings: List[Dict[str, Any]] = []
     counted: Dict[str, Dict[str, Any]] = {}
@@ -341,41 +333,144 @@ def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str
                 if isinstance(item, dict) and item.get("role") == "observability_response"), None)
     actor = {
         "slot_id": str(seat.get("seat_id") or ""), "model": model,
+        "requested_model": str(requested.get("model") or ""), "observed_model": model,
         "provider": _sub().provider_for_model(model) if model else "unknown",
         "actor_role": f"{surface} {'additional ' if seat.get('additional') else ''}reviewer",
-        "transport_status": str(seat.get("transport_status") or ("success" if status in _LEDGER_PARSE else status or "unknown")),
-        "parse_status": _LEDGER_PARSE.get(status, "none"),
-        "semantic_verdict": str(((record.get("verdict") or {}).get("per_row") or {}).get(seat.get("seat_id")) or ""),
+        "transport_status": str(outcome.get("transport") or seat.get("transport_status") or ("success" if status in _LEDGER_PARSE else status or "unknown")),
+        "parse_status": outcome.get("parse") or _LEDGER_PARSE.get(status, "none"),
+        "semantic_verdict": str(outcome.get("verdict") or "") if outcome else str(((record.get("verdict") or {}).get("per_row") or {}).get(seat.get("seat_id")) or ""),
         "quorum_contribution": contributes,
         "enforcement_impact": str(record.get("enforcement") or "unknown") if contributes else "abstains",
         "operation_state": str(seat.get("operation_state") or ""),
         "parts": parts, "answers": counted, "response_ref": _response_ref_projection(ref),
         "reason": _actor_reason(seat, str(seat.get("raw_text") or seat.get("failure_code") or "")
                                 if status not in _LEDGER_PARSE else ""),
+        "executions": _ledger_seat_executions(seat),
     }
-    actor.update({key: seat[key] for key in _sub().TYPED_FAILURE_FACT_KEYS if seat.get(key) not in (None, "")})
+    actor.update({key: _sub().redact_projection(seat[key]).value for key in _sub().TYPED_FAILURE_FACT_KEYS if seat.get(key) not in (None, "")})
+    # The browser gets a selector, never a filesystem path. The source door
+    # re-reads the owning record/seat and verifies the exact saved source.
+    actor["sources"] = [
+        {"role": str(source.get("role") or ""), "part": str(source.get("part") or ""),
+         "status": str(source.get("status") or ""),
+         "sha256": str((source.get("ref") or {}).get("sha256") or ""),
+         "size": (source.get("ref") or {}).get("size"), "chars": source.get("chars")}
+        for source in seat.get("source_refs") or []
+        if isinstance(source, dict) and source.get("role") in {"response", "failure"}
+        and isinstance(source.get("ref"), dict)
+    ]
     actor.update(_sub().disclosed_list_projection(
         findings, key="findings", limit=_sub().MAX_PROJECTED_ACTOR_FINDINGS, item=_sub().projected_finding_row))
     return actor
 
 
+# The review pool's facts on a record's ``panel`` block (who was ticked when the wave was
+# composed, how strict review was, a widened request, the seats never reached); a record
+# written before them carries neither ``pool`` nor ``strictness`` and projects as before.
+_POOL_FACT_KEYS = ("pool", "strictness", "widened_from", "not_reached")
+
+
+def _seat_name(item: Any) -> str:
+    return item if isinstance(item, str) else str(item.get("seat_id") or "") if isinstance(item, dict) else ""
+
+
+def _pool_facts(recorded: Dict[str, Any]) -> Dict[str, Any]:
+    """The pool keys read defensively: a malformed value is dropped, never guessed, and a
+    not-reached cause is redacted like every other reason the card prints."""
+    out: Dict[str, Any] = {}
+    if isinstance(recorded.get("pool"), list):
+        out["pool"] = list(recorded["pool"])
+    if isinstance(recorded.get("strictness"), str) and recorded["strictness"].strip():
+        out["strictness"] = recorded["strictness"].strip()
+    if isinstance(recorded.get("widened_from"), list):
+        out["widened_from"] = [name for name in map(_seat_name, recorded["widened_from"]) if name]
+    if isinstance(recorded.get("not_reached"), list):
+        out["not_reached"] = [
+            {"seat_id": _seat_name(item),
+             "cause": _public_review_reason(item.get("cause") if isinstance(item, dict) else "")}
+            for item in recorded["not_reached"] if _seat_name(item)]
+    return out
+
+
+def _seat_cost(seat: Dict[str, Any]) -> Dict[str, Any]:
+    """One seat's cost on the card: a measured ``usd`` amount, a ``subscription`` seat or ``unknown``.
+    The seat's ``cost_kind`` (``measured`` | ``subscription`` | ``unknown``) and ``cost_usd`` decide;
+    a seat recorded without them shows the money it reported (``usd``)."""
+    kind = str(seat.get("cost_kind") or "")
+    if kind == "subscription":
+        return {"kind": "subscription", "usd": None}
+    value = seat.get("cost_usd") if kind or "cost_usd" in seat else seat.get("usd")
+    if kind != "unknown" and isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and math.isfinite(value) and value >= 0:
+        return {"kind": "usd", "usd": float(value)}
+    return {"kind": "unknown", "usd": None}
+
+
+def _wave_cost(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The wave total over its priced seats, and how many seats each kind of cost has."""
+    priced = [cost["usd"] for cost in costs if cost["kind"] == "usd"]
+    return {"usd": round(sum(priced), 6) if priced else None,
+            "seats": {kind: sum(1 for cost in costs if cost["kind"] == kind) for kind in ("usd", "subscription", "unknown")}}
+
+
+def _doctrine_panel(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Pass the author-check facts through. A record without them stays unchanged."""
+    decision = record.get("author_decision")
+    if not isinstance(decision, dict):
+        return {}
+    from ouroboros.review_doctrine import EVIDENCE_KIND, FACT_KIND, LANDING_KEY, public_card_decision
+
+    if not any(isinstance(decision.get(key), dict) for key in (FACT_KIND, EVIDENCE_KIND, LANDING_KEY)):
+        return {}
+    public = public_card_decision(decision)
+    return {"author_decision": public} if public else {}
+
+
+_LANDINGS_SHOWN = 16  # a panel names the newest landed commits; its record (``source_ref``) keeps every one
+
+
+def _landed_panel(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The commits that landed under this record, each against its reviewed tree (``commit_landings``):
+    the newest ones, with the count of older ones only the record holds (``commit_landings_omitted``)."""
+    from ouroboros.review_doctrine import public_commit_landings
+
+    landed = public_commit_landings(record)
+    shown = landed[-_LANDINGS_SHOWN:]
+    omitted = {"commit_landings_omitted": len(landed) - len(shown)} if len(landed) > len(shown) else {}
+    return {"commit_landings": shown, **omitted} if landed else {}
+
+
 def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
     """One review-ledger record (``review_ledger.build_wave_record``) as a card panel:
     the record's ``panel`` facts (who sat and why) and every seat's answer per brief
-    part. The aggregate is the record's own; the record file stays the full source."""
+    part. The aggregate is the record's own; the record file stays the full source.
+    A record carrying the pool's facts also gives each actor ``additional`` (an
+    adviser, never counted) and ``cost``, and the panel its wave ``cost``."""
     from ouroboros.review_ledger import LEDGER_SUBDIR
 
     verdict = record.get("verdict") if isinstance(record.get("verdict"), dict) else {}
     quorum = verdict.get("quorum") if isinstance(verdict.get("quorum"), dict) else {}
-    actors = [_ledger_seat_actor(seat, record) for seat in record.get("rows") or [] if isinstance(seat, dict)]
+    seats = [seat for seat in record.get("rows") or [] if isinstance(seat, dict)]
+    actors = [_ledger_seat_actor(seat, record) for seat in seats]
     parsed = {actor["parse_status"] for actor in actors}
     facts = dict(record.get("panel") or {}) if isinstance(record.get("panel"), dict) else {}
     if facts.get("reason"):
         facts["reason"] = _public_review_reason(facts["reason"])
+    recorded = {key: facts.pop(key) for key in _POOL_FACT_KEYS if key in facts}
+    facts.update(_pool_facts(recorded))
+    # A preflight seats one named row, ticked or not, and owes no reason: never a pool panel.
+    pooled = str(record.get("surface") or "") != "preflight" and ("pool" in facts or "strictness" in facts)
+    costs = [_seat_cost(seat) for seat in seats] if pooled else []
+    for actor, seat, cost in zip(actors, seats, costs):
+        actor.update(additional=bool(seat.get("additional")), cost=cost)
     aggregate, record_id = str(verdict.get("aggregate") or "UNKNOWN").upper(), str(record.get("record_id") or "")
     return {
         "panel_id": record_id, "record_id": record_id, "ts": str(record.get("ts") or ""),
         "surface": str(record.get("surface") or "review"), "authority": "review_ledger",
+        "record_state": str(record.get("state") or ""),
+        "revision": record.get("revision"), "review_wave_id": str(record.get("review_wave_id") or ""),
+        "subject": _sub().redact_projection(record.get("subject") or {}).value,
+        "goal": _public_review_reason((record.get("brief") or {}).get("goal")),
         "aggregate_signal": aggregate,
         "transport_status": _panel_transport([actor["transport_status"] for actor in actors]),
         "parse_status": "valid" if parsed == {"valid"} else ("none" if parsed <= {"none"} else "partial"),
@@ -386,6 +481,9 @@ def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
         "enforcement_impact": str(record.get("enforcement") or "unknown"),
         "panel_facts": facts, "actors": actors, "superseded": False,
         "source_ref": {"kind": "review_ledger_record", "path": f"state/{LEDGER_SUBDIR}/{record_id}.json"},
+        **({"cost": _wave_cost(costs)} if pooled else {}),
+        **_doctrine_panel(record),
+        **_landed_panel(record),
     }
 
 
@@ -400,14 +498,61 @@ def task_ledger_records(task: Dict[str, Any], drive_root: Any) -> tuple:
     try:
         from ouroboros import review_ledger as ledger
 
-        rows = [row for row in ledger.recent_records(root, task_id=task_id, limit=32, hot_only=True)
-                if row.get("task_id") == task_id]
-        records = [ledger.load_record(root, str(row.get("record_id") or "")) for row in rows[:LEDGER_RECORD_PANELS]]
-        more = "1+" if len(rows) > LEDGER_RECORD_PANELS else ("unknown" if ledger.archived_segments_exist(root) else 0)
+        rows, next_offset = ledger.task_record_page(root, task_id, limit=LEDGER_RECORD_PANELS, hot_only=True)
+        records = _read_record_rows(root, rows)
+        more = "1+" if next_offset is not None else ("unknown" if ledger.archived_segments_exist(root) else 0)
     except Exception:
         logging.getLogger(__name__).debug("Review ledger records unavailable for task %s", task_id, exc_info=True)
-        return [], "unknown"
+        return [review_record_gap("", "index_unavailable")], "unknown"
     return [record for record in reversed(records) if record], more
+
+
+def _read_record_rows(root: Any, rows: list) -> list:
+    from ouroboros import review_ledger as ledger
+
+    records = []
+    for row in rows:
+        record_id = str(row.get("record_id") or "")
+        try:
+            record = ledger.load_record(root, record_id)
+            records.append(record if record is not None else review_record_gap(record_id, "missing"))
+        except Exception:
+            records.append(review_record_gap(record_id, "unreadable"))
+    return records
+
+
+def task_review_history(root: Any, task_id: str, *, offset: int, limit: int) -> dict:
+    """Explicit archived history read; local gaps never hide the neighboring records."""
+    from ouroboros import review_ledger as ledger
+
+    rows, next_offset = ledger.task_record_page(root, task_id, offset=offset, limit=limit)
+    projection = compact_review_projection([], records=list(reversed(_read_record_rows(root, rows))))
+    projection["review_records_omitted"] = "1+" if next_offset is not None else 0
+    return {"task_id": task_id, "review_projection": projection, "next_offset": next_offset}
+
+
+def review_record_gap(record_id: str, reason: str) -> Dict[str, Any]:
+    """One missing unit of reading, separate from older records outside the view."""
+    return {"record_id": record_id, "review_gap": reason}
+
+
+_OWNER_SHORTENED = "… (shortened; the complete text is in the review record)"
+
+
+def owner_bounded_text(text: str, limit: int, *, in_record: bool) -> str:
+    """The SSOT display bound (``truncate_review_artifact``: same limit, same
+    anti-waste floor) with its model-facing marker said in words for a person.
+    The marker is replaced only where the SSOT itself appended it — no reviewer
+    text is pattern-matched — and the words point at the review record that
+    holds the complete text only when ``in_record`` says it holds it."""
+    from ouroboros.utils import truncate_review_artifact
+
+    full = str(text or "")
+    bounded = truncate_review_artifact(full, limit=limit)
+    marker = f"\n⚠️ OMISSION NOTE: truncated at {limit} chars; original length {len(full)}"
+    if bounded == full or not bounded.endswith(marker):
+        return bounded
+    return bounded[: -len(marker)].rstrip() + (_OWNER_SHORTENED if in_record else "… (shortened)")
 
 
 def compact_review_projection(review_runs: Any, records: Any = ()) -> Dict[str, Any]:
@@ -415,8 +560,8 @@ def compact_review_projection(review_runs: Any, records: Any = ()) -> Dict[str, 
     given review-ledger ``records`` (:func:`ledger_record_panel`), in their order."""
     panels: List[Dict[str, Any]] = []
     for index, raw_run in enumerate(review_runs or []):
-        if not isinstance(raw_run, dict):
-            continue
+        if not isinstance(raw_run, dict) or raw_run.get("surface") == "result":
+            continue  # a result run binds a ledger record, which projects as its own panel below
         request = raw_run.get("request") if isinstance(raw_run.get("request"), dict) else {}
         surface = str(request.get("surface") or "review")
         actors = [_review_actor_projection(actor, surface) for actor in (raw_run.get("actors") or []) if isinstance(actor, dict)]
@@ -472,6 +617,7 @@ def compact_review_projection(review_runs: Any, records: Any = ()) -> Dict[str, 
         if isinstance(raw_run.get("dialogue"), dict):
             panel["dialogue"] = raw_run.get("dialogue")
         if surface == "task_acceptance":
+            # A task-acceptance run written before the result review replaced that machine.
             panel["applied_source_status"] = str(raw_run.get("applied_source_status") or "unavailable")
             for key in ("task_attempt", "panel_index", "publication_revision", "applied_source_ref"):
                 if key in raw_run:
@@ -483,8 +629,6 @@ def compact_review_projection(review_runs: Any, records: Any = ()) -> Dict[str, 
             # words. The raw run keeps every byte, so a STORED applied record is
             # named as the home of the rest (many reviewers can pass the bound).
             if isinstance(raw_run.get("late_settlement"), dict):
-                from ouroboros.acceptance_settlement import owner_bounded_text
-
                 late = copy.deepcopy(raw_run["late_settlement"])
                 late["note"] = owner_bounded_text(str(late.get("note") or ""), 2000,
                                                   in_record=panel["applied_source_status"] == "available")
@@ -495,20 +639,20 @@ def compact_review_projection(review_runs: Any, records: Any = ()) -> Dict[str, 
             if raw_run.get(key) not in (None, ""):
                 panel[key] = str(raw_run.get(key))
         panels.append(panel)
-    panels.extend(ledger_record_panel(record) for record in records or () if isinstance(record, dict))
-    return {"panels": panels}
-
-
-def _applied_source_unchanged(run: Dict[str, Any], raw: bytes) -> bool:
-    """Does this panel's stored applied source already hold exactly ``raw``?
-
-    The write-once source handle names its bytes by digest, so equality here is
-    proof that nothing in the panel's record moved since its last publication.
-    A panel whose stored source is unavailable cannot prove that and is
-    published again (one more attempt at the store, never a new identity).
-    """
-    ref = run.get("applied_source_ref")
-    return isinstance(ref, dict) and str(ref.get("sha256") or "") == hashlib.sha256(raw).hexdigest()
+    gaps = []
+    for record in records or ():
+        if not isinstance(record, dict):
+            continue
+        if record.get("review_gap"):
+            gaps.append(record)
+            continue
+        try:
+            panels.append(ledger_record_panel(record))
+        except Exception:
+            # Valid JSON can still contain a malformed quorum/seat. It must
+            # not erase panels already collected from this or another domain.
+            gaps.append(review_record_gap(str(record.get("record_id") or ""), "projection_unreadable"))
+    return {"panels": panels, **({"gaps": gaps} if gaps else {})}
 
 
 def _actor_pending(actor: Dict[str, Any]) -> bool:
@@ -516,241 +660,13 @@ def _actor_pending(actor: Dict[str, Any]) -> bool:
             or actor.get("operation_state") in {"pending_dispatch", "in_flight"})
 
 
-def _producer_fact(actor: Dict[str, Any]) -> tuple:
-    """What one settled producer said, by identity and stored response, never by prose."""
-    ref = actor.get("response_ref") if isinstance(actor.get("response_ref"), dict) else {}
-    return (actor.get("operation_state"), actor.get("transport_status"), actor.get("parse_status"),
-            actor.get("semantic_verdict"), ref.get("sha256") or ref.get("call_id") or "")
-
-
-def _panel_merge(stored: Dict[str, Any], incoming: Dict[str, Any]) -> str:
-    """``advance``, ``same``, ``stored`` or ``conflict`` for one panel, compared slot by slot.
-
-    A slot advances (stored pending, incoming settled), regresses (the reverse)
-    or must carry the same producer facts. A snapshot that only advances wins;
-    one that only regresses is stale; a different operation, roster, subject
-    binding or settled fact — or a snapshot that advances one slot while
-    regressing another — is a conflict: neither projection can speak for both,
-    so the stored panel stays and the publisher is told.
-    """
-    for key in ("binding_hash", "candidate_hash"):
-        if stored.get(key) and incoming.get(key) and stored[key] != incoming[key]:
-            return "conflict"
-
-    def by_slot(panel: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-        return {str(actor.get("slot_id") or ""): actor for actor in panel.get("actors") or [] if isinstance(actor, dict)}
-
-    before, after = by_slot(stored), by_slot(incoming)
-    if set(before) != set(after):
-        return "conflict"
-    advances = regressions = 0
-    for slot_id, old in before.items():
-        new = after[slot_id]
-        if old.get("operation_id") and new.get("operation_id") and old["operation_id"] != new["operation_id"]:
-            return "conflict"
-        old_pending, new_pending = _actor_pending(old), _actor_pending(new)
-        if old_pending and not new_pending:
-            advances += 1
-        elif new_pending and not old_pending:
-            regressions += 1
-        elif not old_pending and _producer_fact(old) != _producer_fact(new):
-            return "conflict"
-    if advances and regressions:
-        return "conflict"
-    return "stored" if regressions else "advance" if advances else "same"
-
-
-def _keep_newer_producer_facts(existing: Any, incoming: Dict[str, Any]) -> tuple:
-    """Merge one incoming snapshot into the CANONICAL stored panels, slot by slot.
-
-    Another process (a late collector, the maintenance pass) may have published
-    a settled verdict or a late fact for the same panel. A stale snapshot keeps
-    the stored panel; a conflicting one is rejected rather than overwriting a
-    settled verdict; the first published late settlement keeps its bytes and
-    ``settled_at``; supersession only grows. Only a genuine advance is ordered
-    after the stored panel (its revision is raised past it); an unchanged
-    snapshot keeps its own revision, so a delayed older one never wins the
-    read-side merge. Returns ``(projection, rejected)``.
-    """
-    if not isinstance(existing, dict):
-        return incoming, []
-
-    def key(row: Dict[str, Any]) -> tuple:
-        return (str(row.get("surface") or ""), str(row.get("task_attempt") or ""), str(row.get("panel_id") or ""),
-                row.get("panel_index"))
-
-    stored = {key(row): row for row in existing.get("panels") or [] if isinstance(row, dict) and row.get("panel_id")}
-    panels, rejected, stamp = [], [], incoming.get("publication_revision") or 0
-    for row in incoming.get("panels") or []:
-        prior = stored.get(key(row)) if isinstance(row, dict) and row.get("panel_id") else None
-        if isinstance(prior, dict):
-            superseded = bool(prior.get("superseded") or row.get("superseded"))
-            decision = _panel_merge(prior, row)
-            if decision == "conflict":
-                rejected.append(str(row.get("panel_id") or ""))
-            if decision in {"stored", "conflict"}:
-                # The stored panel stands (the read-side union keeps it); this
-                # snapshot only adds a supersession it knows of.
-                if superseded and not prior.get("superseded"):
-                    panels.append({**copy.deepcopy(prior), "superseded": True})
-                continue
-            row = {**row, "superseded": superseded}
-            if isinstance(prior.get("late_settlement"), dict):
-                row["late_settlement"] = copy.deepcopy(prior["late_settlement"])
-            if decision == "advance" and type(prior.get("publication_revision")) is int:
-                row["publication_revision"] = max(int(row.get("publication_revision") or 0),
-                                                  prior["publication_revision"] + 1)
-                stamp = max(stamp, row["publication_revision"])
-        panels.append(row)
-    return {**incoming, "panels": panels, "publication_revision": stamp}, rejected
-
-
-def publish_acceptance_checkpoint(
-    ctx: Any, llm_trace: Dict[str, Any], *, task_id: str = "",
-    drive_root: Any = None, chat_id: Any = None, partial_trace: bool = False,
-) -> Dict[str, Any]:
-    """Save the complete applied host record before publishing its read model.
-
-    This does not grant review authority or alter task lifecycle. Source bytes
-    use the existing immutable artifact store; publication_revision only orders
-    snapshots of a panel. Under the result lock each panel is compared slot by
-    slot with the CANONICAL stored one (``_keep_newer_producer_facts``): only a
-    genuine producer advance is ordered past it, so neither a delayed older
-    snapshot nor a publication from another process (a late collector, the
-    maintenance pass) can overwrite a newer verdict. ``partial_trace`` (a trace
-    rebuilt from the published source) keeps the stored incident.
-
-    Returns what the canonical record now holds, read back from the locked
-    write itself: ``status`` (``published``, ``unavailable`` or ``skipped``),
-    the allocated ``revision``, the panel ids ``rejected`` as conflicting with
-    stored producer facts, and the stored ``projection``. A caller that must not
-    claim success unless its panel landed checks the returned projection.
-    """
-    from pathlib import Path
-
-    from ouroboros.artifacts import store_actor_source_bytes
-    from ouroboros.task_results import write_task_result
-    from ouroboros.tools.plan_review_references import _emit_review_reference
-
-    runs = [run for run in (llm_trace.get("review_runs") or [])
-            if isinstance(run, dict) and run.get("authority") == "host_root"
-            and isinstance(run.get("request"), dict)
-            and (run.get("request") or {}).get("surface") == "task_acceptance"]
-    task_id = str(task_id or getattr(ctx, "task_id", "") or "")
-    meta = getattr(ctx, "task_metadata", {})
-    meta = meta if isinstance(meta, dict) else {}
-    root = meta.get("budget_drive_root") or getattr(ctx, "budget_drive_root", None) or drive_root or getattr(ctx, "drive_root", None)
-    # A LOCAL preparation failure produces no panel at all, and that absence is
-    # exactly what the owner could not see (#1224). The incident rides the same
-    # projection the panels do, so live delivery, history and a reconnect read
-    # one fact with one identity.
-    from ouroboros.acceptance_preparation import TASK_ONLY_ORIGINS, current_incident, incident_projection
-
-    # The incident's diagnostic detail is host text, so it is redacted exactly
-    # like every other published section before it leaves for an owner surface.
-    incident = _sub().redact_projection(incident_projection(current_incident(llm_trace))).value
-    if (not runs and not incident) or not task_id or not root:
-        return {"status": "skipped", "revision": 0, "rejected": [], "projection": {}}
-    revision = int(llm_trace.get("_acceptance_publication_revision") or 0) + 1
-    llm_trace["_acceptance_publication_revision"] = revision
-    snapshots = copy.deepcopy(llm_trace.get("review_runs") or [])
-    # A task-only decision (the host's own local preparation or processing
-    # failure) is no panel's applied reviewer decision: it rewrites no prior
-    # panel's custody and grants a never-published LIVE producer none. A panel
-    # whose OWN record moved since its last publication — a pending producer
-    # that settled, a late-settlement note — is a genuine producer update and is
-    # published under the next revision, and so is a settled (or custody-lost)
-    # record that was never published at all: a missing publication stamp alone
-    # never suppresses a real verdict. An unchanged record stays bound to the
-    # revision and stored source it already has (its digest proves it unchanged).
-    from ouroboros.loop_acceptance_review import acceptance_run_pending
-
-    task_only = (llm_trace.get("acceptance_decision") or {}).get("origin") in TASK_ONLY_ORIGINS
-    for index, run in enumerate(snapshots):
-        if not isinstance(run, dict) or run.get("authority") != "host_root" or not isinstance(run.get("request"), dict) or run["request"].get("surface") != "task_acceptance":
-            continue
-        if task_only and "publication_revision" not in run and acceptance_run_pending(run):
-            continue
-        run.setdefault("panel_id", f"panel_{index + 1}")
-        run.setdefault("panel_index", index)
-        source = {key: value for key, value in run.items()
-                  if key not in {"applied_source_ref", "applied_source_status", "publication_revision"}}
-        raw = json.dumps(_sub().redact_projection(source).value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-        if task_only and _applied_source_unchanged(run, raw):
-            continue
-        run.pop("applied_source_ref", None)
-        run["applied_source_status"] = "unavailable"
-        try:
-            run["applied_source_ref"] = store_actor_source_bytes(
-                Path(root), task_id, category="context_checkpoints",
-                source_id="acceptance", data=raw, extension="json",
-            )
-            run["applied_source_status"] = "available"
-        except (OSError, ValueError, TimeoutError):
-            logging.getLogger(__name__).warning("Applied acceptance source unavailable", exc_info=True)
-        run["publication_revision"] = revision
-        # A later snapshot may have completed during slow artifact I/O. It owns
-        # the in-memory projection too; the durable merge applies the same rule.
-        if llm_trace.get("_acceptance_publication_revision") == revision:
-            current = llm_trace["review_runs"][index]
-            for key in ("panel_id", "panel_index", "task_attempt", "publication_revision", "applied_source_ref", "applied_source_status"):
-                if key in run:
-                    current[key] = copy.deepcopy(run[key])
-            if "applied_source_ref" not in run:
-                current.pop("applied_source_ref", None)
-    projection = compact_review_projection(snapshots)
-    # The snapshot carries its own ordering stamp, so the read-side merge can
-    # order the incident's presence and resolution — including a snapshot with
-    # no panel at all — exactly as it orders each panel's publications.
-    projection["publication_revision"] = revision
-    attempt = getattr(ctx, "task_attempt", None)
-    if type(attempt) is int:
-        projection["task_attempt"] = attempt
-    if incident:
-        projection["acceptance_incident"] = incident
-    published: Dict[str, Any] = {}
-
-    def project(current: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
-        existing = current.get("review_projection") if isinstance(current.get("review_projection"), dict) else None
-        incoming = copy.deepcopy(projection)
-        if partial_trace and isinstance(existing, dict) and "acceptance_incident" in existing:
-            incoming["acceptance_incident"] = copy.deepcopy(existing["acceptance_incident"])
-        incoming, rejected = _keep_newer_producer_facts(existing, incoming)
-        published.update(revision=incoming["publication_revision"], rejected=rejected,
-                         bumped={str(row.get("panel_id") or ""): row["publication_revision"]
-                                 for row in incoming.get("panels") or []
-                                 if isinstance(row, dict) and type(row.get("publication_revision")) is int
-                                 and row["publication_revision"] > revision})
-        return {"review_projection": merge_review_projection(existing, incoming),
-                "status": current.get("status") or fields["status"]}
-
-    try:
-        result = write_task_result(root, task_id, "running", strict_existing_dict=True, _field_projector=project)
-    except (OSError, ValueError, TimeoutError, StoreError) as exc:
-        logging.getLogger(__name__).warning("Applied acceptance projection unavailable", exc_info=True)
-        return {"status": "unavailable", "revision": 0, "rejected": [], "projection": {},
-                "error": f"{type(exc).__name__}: {exc}"}
-    allocated = published.get("revision", revision)
-    if published.get("rejected"):
-        logging.getLogger(__name__).warning("Acceptance panels %s conflict with stored producer facts; kept stored",
-                                            published["rejected"])
-    for run in llm_trace.get("review_runs") or []:
-        # An advance ordered past another process's stored panel carries that order on.
-        if isinstance(run, dict) and str(run.get("panel_id") or "") in (published.get("bumped") or {}) \
-                and run.get("publication_revision") == revision:
-            run["publication_revision"] = published["bumped"][str(run["panel_id"])]
-    llm_trace["_acceptance_publication_revision"] = max(
-        int(llm_trace.get("_acceptance_publication_revision") or 0), allocated)
-    state = result.get("review_projection") if isinstance(result.get("review_projection"), dict) else {}
-    try:
-        _emit_review_reference(ctx, task_id, state, surface="task_acceptance", state_root=Path(root), chat_id=chat_id)
-    except (OSError, ValueError, TimeoutError):
-        logging.getLogger(__name__).warning("Acceptance review reference unavailable", exc_info=True)
-    return {"status": "published" if "revision" in published else "unavailable", "revision": allocated,
-            "rejected": list(published.get("rejected") or []), "projection": copy.deepcopy(state)}
+# The origin an old decision names for the host's own local evidence-assembly failure.
+_LOCAL_PREPARATION_ORIGIN = "local_acceptance_preparation"
 
 
 def acceptance_decision_projection(acceptance_decision: Dict[str, Any], subject_hash: str = "") -> Dict[str, Any]:
+    """The tolerant reader of a task-acceptance decision written before the result
+    review replaced that machine; nothing writes a new one."""
     out = {
         "status": str(acceptance_decision.get("status") or ""),
         # v6.78.0: the typed reason carries the distinction the collapsed status no
@@ -773,9 +689,7 @@ def acceptance_decision_projection(acceptance_decision: Dict[str, Any], subject_
     if acceptance_decision.get("reason") in {"author_finish", "author_stop"} or acceptance_decision.get("author_action") == "stop":
         from ouroboros.review_records import validate_author_disposition
 
-        from ouroboros.acceptance_preparation import LOCAL_PREPARATION_ORIGIN
-
-        if acceptance_decision.get("origin") == LOCAL_PREPARATION_ORIGIN:
+        if acceptance_decision.get("origin") == _LOCAL_PREPARATION_ORIGIN:
             incident = acceptance_decision.get("acceptance_incident") or {}
             subject_hash = f"{incident.get('incident_id')}:attempt-{incident.get('attempts')}"
         record = validate_author_disposition(acceptance_decision.get("author_disposition"), subject_hash=subject_hash)
@@ -827,6 +741,9 @@ def merge_review_projection(previous: Any, incoming: Any) -> Any:
     The local preparation incident follows the same ordering: a delayed
     snapshot or replica can neither erase a newer warning nor resurrect an
     incident that a newer publication resolved, whichever order the two arrive in.
+    Publication stamps, late-notice receipts and the incident come only from
+    task-acceptance checkpoints stored before the result review replaced that
+    machine; nothing writes them now, and stored ones still merge this way.
     """
     if not isinstance(previous, dict) or not isinstance(incoming, dict):
         return incoming

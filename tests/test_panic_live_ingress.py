@@ -22,6 +22,16 @@ def test_panic_reaches_emergency_owner_with_stalled_normal_consumer(tmp_path, su
     assert "PANIC_INGRESS_OK" in result.stdout
 
 
+@pytest.mark.parametrize("surface", ["http_unbound", "ws_unbound", "ws_chat_unbound", "external_unbound"])
+def test_panic_unavailable_never_enters_ordinary_admission(tmp_path, surface):
+    from ouroboros.test_environment import isolated_environment
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    result = subprocess.run([sys.executable, "-m", "tests.test_panic_live_ingress", surface], cwd=repo,
+                            env=isolated_environment(tmp_path, repo), capture_output=True, text=True, timeout=40)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PANIC_INGRESS_OK" in result.stdout
+
+
 def _exercise(surface):
     import threading
     from types import SimpleNamespace
@@ -43,6 +53,8 @@ def _exercise(surface):
     known = state.update_state(lambda st: st.update(owner_external_id=17, owner_external_chat_id=23))
     bridge = message_bus.LocalChatBridge()
     bridge.panic = server_control.PanicIngress(server._startup_owner_command("/panic"))
+    if surface.endswith("unbound"):
+        bridge.panic = server_control.PanicIngress()
     bridge.panic.observe_owner(known)
     message_bus.init(drive_root=root, chat_bridge=bridge, total_budget_limit=10, budget_report_every=10)
     # No thread drains the inbox. Ordinary consumer and state/chat writes cannot
@@ -51,6 +63,12 @@ def _exercise(surface):
     request_made, completed = threading.Event(), threading.Event()
     mp = pytest.MonkeyPatch()
     prior_threads = set(threading.enumerate())
+
+    def acknowledged(socket):
+        for _ in range(10):
+            if socket.receive_json().get("type") == "panic_accepted":
+                return
+        raise AssertionError("missing immediate Panic acceptance")
 
     def forbidden(*_a, **_k):
         raise AssertionError("emergency request reached ordinary state/chat I/O")
@@ -91,10 +109,16 @@ def _exercise(surface):
                 for user, chat in [(0, 0), (99, 23), (17, 99)]:
                     response = client.post("/chat/inject", headers={"X-Skill-Token": "token"},
                                            json={"text": "/panic", "user_id": user, "chat_id": chat})
-                    assert response.status_code == 202, response.text
+                    assert response.status_code == 503, response.text
                     assert not request_made.is_set()
                     assert not server_control._restart_stop_requested
                 response = client.post("/chat/inject", headers={"X-Skill-Token": "token"}, json=payload)
+                if surface.endswith("unbound"):
+                    assert response.status_code == 503
+                    assert not request_made.is_set() and not bridge.get_updates(0, timeout=0)
+                    assert not server_control._restart_stop_requested
+                    print("PANIC_INGRESS_OK", surface)
+                    return
                 assert response.status_code == 202
         else:
             mp.setattr(server_auth, "get_configured_network_password", lambda: "test-only-password")
@@ -108,6 +132,35 @@ def _exercise(surface):
                 assert not request_made.is_set()
                 assert not server_control._restart_stop_requested
                 headers = {"Authorization": "Bearer test-only-password"}
+                if surface.endswith("unbound"):
+                    if surface.startswith("http"):
+                        import time
+                        control._RECENT_VISIBLE_COMMANDS["old-correlation"] = time.monotonic()
+                        response = client.post("/api/command", headers=headers,
+                                               json={"cmd": "/panic", "visible_task_id": "old-correlation"})
+                        assert response.status_code == 503, response.text
+                        from ouroboros.gateway.endpoint_index import HTTP_SHAPES
+                        assert "503:ErrorResponse" in HTTP_SHAPES["POST /api/command"].responses
+                        assert response.json()["error"] == "Panic emergency owner is unavailable."
+                    else:
+                        with client.websocket_connect("/ws", headers=headers) as socket:
+                            frame = ({"type": "chat", "content": "/panic"} if surface.startswith("ws_chat")
+                                     else {"type": "command", "cmd": "/panic"})
+                            socket.send_json(frame)
+                            for _ in range(10):
+                                notice = socket.receive_json()
+                                if (notice.get("type") == "log"
+                                        and notice["data"].get("message") == "Panic emergency owner is unavailable."):
+                                    from ouroboros.gateway.endpoint_index import WS_SHAPES
+                                    assert WS_SHAPES[notice["type"]][1] == "LogOutbound"
+                                    assert notice["data"]["level"] == "warning"
+                                    break
+                            else:
+                                raise AssertionError("missing immediate Panic refusal")
+                    assert not request_made.is_set() and not bridge.get_updates(0, timeout=0)
+                    assert not server_control._restart_stop_requested
+                    print("PANIC_INGRESS_OK", surface)
+                    return
                 if surface == "http":
                     response = client.post("/api/command", headers=headers, json={"cmd": "/panic"})
                     assert response.status_code == 200
@@ -133,12 +186,14 @@ def _exercise(surface):
                                               "client_message_id": "typed-panic"})
                             assert request_made.wait(3), "typed Panic waited behind ordinary chat acceptance"
                             assert not release.is_set()
+                            acknowledged(socket)
                         finally:
                             release.set()
                 else:
                     with client.websocket_connect("/ws", headers=headers) as socket:
                         socket.send_json({"type": "command", "cmd": "/panic"})
                         assert request_made.wait(3), "live WS Panic remained in the ordinary inbox"
+                        acknowledged(socket)
         assert request_made.wait(3), "live Panic remained in the ordinary inbox"
         assert completed.wait(5)
         # Other commands retain their ordinary routing.
@@ -146,7 +201,7 @@ def _exercise(surface):
         bridge.ui_send("/status", broadcast=False)
         queued = [item["message"]["text"] for item in bridge.get_updates(0, timeout=0)]
         assert queued[-2:] == ["/restart", "/status"]
-        assert queued.count("/panic") == (3 if surface.startswith("external") else 0)
+        assert queued.count("/panic") == 0
         print("PANIC_INGRESS_OK", surface)
     finally:
         for thread in set(threading.enumerate()) - prior_threads:

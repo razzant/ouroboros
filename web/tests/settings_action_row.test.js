@@ -7,6 +7,8 @@ const onboardingCss = await readFile(new URL('../onboarding.css', import.meta.ur
 const sharedCss = await readFile(new URL('../ui.css', import.meta.url), 'utf8');
 const documents = await Promise.all(['index.html','onboarding_template.html'].map(name => readFile(new URL('../'+name, import.meta.url), 'utf8')));
 const settingsJs = await readFile(new URL('../modules/settings.js', import.meta.url), 'utf8');
+const controlsJs = await readFile(new URL('../modules/settings_controls.js', import.meta.url), 'utf8');
+const connectionsJs = await readFile(new URL('../modules/settings_connections.js', import.meta.url), 'utf8');
 const catalogJs = await readFile(new URL('../modules/settings_catalog.js', import.meta.url), 'utf8');
 const primitivesJs = await readFile(new URL('../modules/ui_primitives.js', import.meta.url), 'utf8');
 
@@ -31,12 +33,15 @@ test('single-action settings rows reserve a flexible status and responsive actio
 });
 
 test('async actions expose the same busy and status semantics', () => {
-    assert.match(settingsJs, /function setButtonBusy\(button, busy\)/);
-    assert.match(settingsJs, /setAttribute\('aria-busy', 'true'\)/);
-    assert.match(settingsJs, /setInlineStatus\(status, 'Testing…', 'muted'\)/);
-    assert.match(settingsJs, /providerTestStatusText\(data\), data\?\.ok \? 'ok' : 'danger'/);
+    // Save and every API key's Test share one busy helper and one status vocabulary.
+    assert.match(controlsJs, /export function setButtonBusy\(button, busy\)/);
+    assert.match(controlsJs, /setAttribute\('aria-busy', 'true'\)/);
+    assert.match(settingsJs, /setButtonBusy\(saveButton, true\)/);
+    assert.match(connectionsJs, /setButtonBusy\(button, true\)/);
+    assert.match(connectionsJs, /setInlineStatus\(status, 'Testing…', 'muted'\)/);
+    assert.match(connectionsJs, /providerTestStatusText\(data\), data\?\.ok \? 'ok' : 'danger'/);
     assert.match(settingsJs, /refreshModelCatalog\(\{ button: byId\('btn-refresh-model-catalog'\) \}\)/);
-    assert.match(settingsJs, /setInlineStatus\(el, '', 'muted'\)/);
+    assert.match(connectionsJs, /setInlineStatus\(row\.querySelector\('\[data-connection-test-status\]'\), '', 'muted'\)/);
     assert.match(primitivesJs, /if \(el\.textContent !== next\) el\.textContent = next/);
     assert.match(catalogJs, /import \{ setInlineStatus \} from '\.\/ui_helpers\.js'/);
     assert.match(catalogJs, /setInlineStatus\(statusEl, text, tone\)/);

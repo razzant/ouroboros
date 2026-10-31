@@ -3,7 +3,7 @@
 When the worker's own terminal result lands inside the custody window, the monotonic
 guard keeps it, and the provisional ``cancel:<tid>:<request_id>`` salvage owed before
 the write is withdrawn with its undelivered receipt block: the outbox owes only the
-kept answer, so the Done card is not held behind a false row and no "was cancelled"
+kept answer, so the Done card is not held behind a false row and no "was stopped"
 message is replayed after the real answer. A Stop that wins keeps its salvage owed.
 """
 from __future__ import annotations
@@ -66,7 +66,7 @@ def test_completion_that_wins_the_custody_window_withdraws_the_provisional_salva
     owed = td.terminal_answer_receipts(qenv.drive, task_id)["owed_delivery_ids"]
     assert f"cancel:{task_id}:{rid}" not in owed and owed and all(did.startswith("final:") for did in owed)
     texts = [str(event.get("text") or "") for event in _replayed(qenv, monkeypatch)]
-    assert texts == ["Hello, the real answer."], "only the kept answer is ever sent, never a 'was cancelled' row"
+    assert texts == ["Hello, the real answer."], "only the kept answer is ever sent, never a 'was stopped' row"
 
 
 @pytest.mark.serial

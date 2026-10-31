@@ -1,16 +1,16 @@
 """TZ-2 C4: an explicit author stop stays a stop (owner-confirmed defect).
 
-The reported chain: Main calls ``task_acceptance_review(author_action=stop)``
-while the task still has running services; the host stops them at delivery
-(``services_stopped``), which changes the delivery evidence fingerprint; the
-finish-style freshness check then rejected the stop, a reviewer panel was
-bought, and the advisory ``author_finish`` recorded by ``_finish_cyber_acceptance``
-turned the objective green — a Done card over text saying "not ready".
+The reported chain: Main stopped while the task still had running services; the
+host stopped them at delivery (``services_stopped``), which changed the delivery
+evidence fingerprint; the finish-style freshness check then rejected the stop, a
+reviewer panel was bought, and an advisory finish turned the objective green — a
+Done card over text saying "not ready".
 
-A stop grants nothing, so nothing about it needs to be fresh: it is recorded at
-once as ``author_stop`` with no panel; only a finish binds to the reviewed
-feedback and the three freshness facts. A later explicit finish still replaces
-a stop through ``merge_agent_acceptance_stance`` (no new mechanism).
+A stop grants nothing, so nothing about it needs to be fresh: ``finish_task``
+with ``action="stop"`` records ``task_completion`` at once and never reaches the
+result review at delivery; only a finish is reviewed. The objective reads the
+stop as a failed author stop and the task card carries the author's rationale —
+for a stop recorded today and for the stop shapes historical records carry.
 """
 
 from __future__ import annotations
@@ -26,24 +26,41 @@ STOP_RATIONALE = "Not ready: the export endpoint still fails on empty input."
 STOP_TEXT = STOP_RATIONALE + " Stopping with the work unfinished."
 
 
-def _fail_panel_result():
-    from ouroboros.review_substrate import ReviewRunResult
+def _fail_result_wave(monkeypatch, reviews: list) -> None:
+    """Replace only the paid wave under the REAL delivery step: each new result
+    subject is reviewed FAIL once (a settled ledger-shaped record the step binds);
+    the same subject again is that settled record at $0."""
+    from ouroboros.tools import review_change, review_result
 
-    return ReviewRunResult(
-        request={"surface": "task_acceptance", "policy": {"min_successful_slots": 1}},
-        actors=[{"slot_id": "critic", "signal": "FAIL", "parsed": {
-            "verdict": "FAIL", "outcome_tier": "best_effort", "completion_coach": "Fix the output.",
-        }}], parsed_findings=[], aggregate_signal="FAIL",
-    )
+    records: dict = {}
+    asked: dict = {}
+
+    def settled(_ctx, subject_sha, rows=None):
+        asked["sha"] = subject_sha
+        return records.get(subject_sha)
+
+    def wave(_ctx, *, subject, answer="", **_kwargs):
+        assert subject == "result"
+        reviews.append(answer)
+        sha = asked["sha"]
+        records[sha] = {
+            "record_id": f"rl-fixture-{len(records) + 1}", "state": "settled", "surface": "result",
+            "subject": {"diff_sha": sha},
+            "verdict": {"aggregate": "FAIL", "reason": "", "advisory_findings": [], "critical_findings": [
+                {"severity": "critical", "seat_id": "critic", "item": "output", "reason": "Fix the output."}]},
+        }
+        return {"state": "settled", "record_id": records[sha]["record_id"]}
+
+    monkeypatch.setattr(review_result, "settled_result_record", settled)
+    monkeypatch.setattr(review_change, "run_review_change", wave)
 
 
 def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=False, mode="required"):
-    """A real loop: real tool round, real nomination, real host acceptance pass.
+    """A real loop: real tool round, real delivery step, real result review at delivery.
 
-    Only the model, the reviewer panel and the service teardown are substituted.
+    Only the model, the reviewers' paid wave and the service teardown are substituted.
     """
     import ouroboros.loop as loop
-    import ouroboros.review_substrate as review_substrate
     from ouroboros.tools import services as services_mod
     from ouroboros.tools.registry import ToolRegistry
     from tests.test_loop_acceptance_gate import _seed_acceptance_root
@@ -53,16 +70,11 @@ def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "3")
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "12")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("MCP_ENABLED", "false")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
-    monkeypatch.setattr(review_substrate, "triad_delivery_slots", lambda **_kw: [object()])
     panels: list = []
-
-    def panel(ctx):
-        panels.append(ctx.content)
-        return _fail_panel_result()
-
-    monkeypatch.setattr(loop, "_execute_task_acceptance_panel", panel)
+    _fail_result_wave(monkeypatch, panels)
     teardowns = {"count": 0}
 
     def fake_stop(_ctx):
@@ -115,13 +127,11 @@ def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=
                            model_inputs=model_inputs, teardowns=teardowns["count"], ctx=ctx)
 
 
-def _stop_tool_call(front_door="task_acceptance_review"):
-    arguments = ({"action": "stop", "answer": STOP_TEXT, "rationale": STOP_RATIONALE}
-                 if front_door == "finish_task" else
-                 {"claim": STOP_TEXT, "author_action": "stop", "rationale": STOP_RATIONALE})
+def _stop_tool_call():
+    arguments = {"action": "stop", "answer": STOP_TEXT, "rationale": STOP_RATIONALE}
     return {"content": None, "tool_calls": [{
         "id": "stop-1", "type": "function",
-        "function": {"name": front_door, "arguments": json.dumps(arguments)},
+        "function": {"name": "finish_task", "arguments": json.dumps(arguments)},
     }]}
 
 
@@ -134,41 +144,21 @@ def _finish_tool_call(answer):
     }]}
 
 
-@pytest.mark.parametrize("bookkeeping", [None, "list_available_tools", "enable_tools"])
-def test_informed_advisory_finish_allows_successful_schema_bookkeeping(tmp_path, monkeypatch, bookkeeping):
-    answer = "The available export answer, after considering the criticism."
-    reply = _finish_tool_call(answer)
-    arguments = json.loads(reply["tool_calls"][0]["function"]["arguments"])
-    arguments["rationale"] = "I considered the reviewer feedback and am delivering this available result."
-    reply["tool_calls"][0]["function"]["arguments"] = json.dumps(arguments)
-    if bookkeeping:
-        arguments = {"tools": "finish_task"} if bookkeeping == "enable_tools" else {}
-        reply["tool_calls"].insert(0, {"id": "schema", "type": "function", "function": {
-            "name": bookkeeping, "arguments": json.dumps(arguments)}})
-    run = _run_stop_loop(tmp_path, monkeypatch, ["The export endpoint ships.", reply,
-        _finish_tool_call(answer), _finish_tool_call(answer), _finish_tool_call(answer)], stop_services=False, produced=True)
-    assert len(run.model_inputs) == 2 and len(run.panels) == 1
-    assert run.result == answer
-    assert run.trace["acceptance_decision"]["reason"] == "author_finish"
-    assert run.trace["acceptance_decision"]["reviewer_signal"] == "FAIL"
-    assert not run.trace.get("completion_refusals")
-
-
-@pytest.mark.parametrize("front_door", ["finish_task", "task_acceptance_review"])
 @pytest.mark.parametrize("mode", ["auto", "required", "off"])
-def test_a_stop_survives_service_teardown_without_another_model_round(tmp_path, monkeypatch, front_door, mode):
+def test_a_stop_survives_service_teardown_without_another_model_round(tmp_path, monkeypatch, mode):
     """A selected stop survives teardown without purchasing another author or critic."""
     from ouroboros.outcomes import derive_loop_outcome
     from ouroboros.project_dialogue import _completion_verdict, completion_status_label
 
     run = _run_stop_loop(tmp_path, monkeypatch, [
-        _stop_tool_call(front_door),
+        _stop_tool_call(),
     ], stop_services=True, mode=mode)
     assert len(run.model_inputs) == 1, "teardown must not buy another author reply for a stop"
     assert run.teardowns >= 1
     assert [event["kind"] for event in run.trace.get("verification_events") or []] == ["services_stopped"]
     assert run.trace["task_completion"]["action"] == "stop"
-    assert run.panels == [], "an explicit stop must never buy a reviewer panel"
+    assert run.trace["task_completion"]["rationale"] == STOP_RATIONALE
+    assert run.panels == [], "an explicit stop must never buy a review"
     # #1602: the acknowledgement is a control fact, not a review that never ran.
     from ouroboros.outcomes import build_verification_ledger
     from ouroboros.review_projection import compact_review_projection
@@ -178,10 +168,6 @@ def test_a_stop_survives_service_teardown_without_another_model_round(tmp_path, 
     ledger = build_verification_ledger(task={"id": "stop-root"}, loop_outcome={"outcome_axes": {}},
                                        llm_trace=run.trace, artifact_bundle={})
     assert [row for row in ledger["entries"] if row["kind"] == "task_acceptance_review"] == []
-    decision = run.trace["acceptance_decision"]
-    assert decision["reason"] == "author_stop" and decision["author_action"] == "stop"
-    assert decision["author_disposition"]["action"] == "stop"
-    assert decision["author_disposition"]["rationale"] == STOP_RATIONALE
     assert run.result == STOP_TEXT
     outcome = derive_loop_outcome(run.result, run.usage, run.trace)
     axes = outcome["outcome_axes"]
@@ -194,102 +180,16 @@ def test_a_stop_survives_service_teardown_without_another_model_round(tmp_path, 
     assert verdict.startswith("Ouroboros stopped with unfinished work")
 
 
-def test_the_same_teardown_round_still_buys_the_panel_for_a_finish(tmp_path, monkeypatch):
-    """The control: a FINISH over changed evidence is not honoured — the panel runs."""
+def test_the_same_teardown_round_still_buys_the_review_for_a_finish(tmp_path, monkeypatch):
+    """The control: a FINISH over changed evidence is not honoured unseen — its result is reviewed."""
     run = _run_stop_loop(tmp_path, monkeypatch, [
-        {"content": None, "tool_calls": [{
-            "id": "finish-1", "type": "function",
-            "function": {"name": "task_acceptance_review", "arguments": json.dumps({
-                "claim": "The export endpoint ships.", "agent_disposition": "accepted",
-                "author_action": "finish", "rationale": "Everything verified.",
-            })},
-        }]},
+        _finish_tool_call("The export endpoint ships."),
         _finish_tool_call("The export endpoint ships."),
         _finish_tool_call("The export endpoint ships."),
         _finish_tool_call("The export endpoint ships."),
     ], stop_services=True, produced=True)
     assert run.panels, "a finish bound to stale evidence must still be reviewed"
-    assert run.trace["acceptance_decision"]["reason"] != "author_stop"
-
-
-def _finality_pass(tmp_path, monkeypatch):
-    """The reviewer-bound host pass over a fake tool ctx (as test_review_author_finality)."""
-    import ouroboros.loop as loop_mod
-    import ouroboros.loop_acceptance_review as review
-    from tests.test_loop_acceptance_gate import _seed_acceptance_root
-
-    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "3")
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "advisory")
-    tools_ctx = SimpleNamespace(_task_acceptance_reviewed=False, is_direct_chat=False,
-                               drive_root=str(tmp_path), _owner_directives=[])
-    _seed_acceptance_root(tmp_path, "author-root", tools_ctx)
-    tools = SimpleNamespace(_ctx=tools_ctx)
-    # An observed write (its outcome recorded): Required reviews production, never a bare argument.
-    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "answer.txt"}, "is_error": False}]}
-    messages = [{"role": "user", "content": "Solve the task."}]
-    calls: list = []
-
-    def panel(ctx):
-        calls.append(ctx.content)
-        return _fail_panel_result()
-
-    monkeypatch.setattr(loop_mod, "_execute_task_acceptance_panel", panel)
-
-    def run(text):
-        return review._run_task_acceptance_review_once(
-            tools=tools, content=text, task_id="author-root", task_type="task", llm_trace=trace,
-            drive_root=tmp_path, messages=messages, emit_progress=lambda *_a, **_k: None)
-
-    return SimpleNamespace(ctx=tools_ctx, trace=trace, messages=messages, calls=calls, run=run)
-
-
-def test_a_later_explicit_finish_replaces_the_stop(tmp_path, monkeypatch):
-    """(b) stop → later explicit finish → finish (the existing stance merge)."""
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-    from ouroboros.loop_acceptance import merge_agent_acceptance_stance
-
-    fx = _finality_pass(tmp_path, monkeypatch)
-    assert fx.run("initial answer") is True
-    expose_acceptance_feedback(fx.trace, fx.messages, "author-root")
-    fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-    merge_agent_acceptance_stance(fx.trace, {"explicit_finish": True, "author_action": "stop",
-                                             "rationale": STOP_RATIONALE}, fx.ctx)
-    assert fx.trace["acceptance_decision"]["author_action"] == "stop"
-    fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-    merge_agent_acceptance_stance(fx.trace, {"disposition": "partial", "explicit_finish": True,
-                                             "author_action": "finish",
-                                             "rationale": "Fixed the empty-input case after all."}, fx.ctx)
-    assert fx.run("revised answer") is False
-    decision = fx.trace["acceptance_decision"]
-    assert decision["reason"] == "author_finish" and decision["author_action"] == "finish"
-    assert decision["author_disposition"]["action"] == "finish"
-    assert fx.calls == ["initial answer"]
-
-
-@pytest.mark.parametrize("change", ["tools", "owner_directives", "evidence"])
-def test_the_three_freshness_facts_bind_a_finish_but_never_a_stop(tmp_path, monkeypatch, change):
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-    from ouroboros.loop_acceptance import merge_agent_acceptance_stance
-
-    fx = _finality_pass(tmp_path, monkeypatch)
-    assert fx.run("initial answer") is True
-    expose_acceptance_feedback(fx.trace, fx.messages, "author-root")
-    fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-    merge_agent_acceptance_stance(fx.trace, {"explicit_finish": True, "author_action": "stop",
-                                             "rationale": STOP_RATIONALE}, fx.ctx)
-    if change == "tools":
-        fx.trace["tool_calls"].append({"tool": "write_file", "args": {"path": "later.txt"}})
-    elif change == "owner_directives":
-        fx.ctx._owner_directives.append({"source": "owner_mailbox", "content": "any news?"})
-    else:
-        fx.trace["verification_events"] = [{"kind": "services_stopped",
-                                            "services": [{"service_id": "preview", "lifecycle": "stopped"}]}]
-    assert fx.run(STOP_TEXT) is False
-    decision = fx.trace["acceptance_decision"]
-    assert decision["reason"] == "author_stop" and decision["author_action"] == "stop"
-    assert decision["author_disposition"]["rationale"] == STOP_RATIONALE
-    assert fx.calls == ["initial answer"], "no second panel for a stop"
+    assert (run.trace.get("task_completion") or {}).get("action") != "stop"
 
 
 def test_the_row_reason_slot_carries_the_stop_rationale():
@@ -315,77 +215,25 @@ def test_the_row_reason_slot_carries_the_stop_rationale():
     assert _completion_verdict(record, {}) == TASK_CAUSE_PHRASES["author_stop"]
 
 
-def test_a_stop_after_an_earlier_panel_finishes_without_a_keep_round(tmp_path, monkeypatch):
-    """An informed stop after a FAIL panel needs no keep/replacement or new review."""
+def test_a_stop_after_an_earlier_review_finishes_without_a_keep_round(tmp_path, monkeypatch):
+    """An informed stop after a FAIL review needs no keep/replacement or new review."""
     from ouroboros.outcomes import derive_loop_outcome
 
     run = _run_stop_loop(tmp_path, monkeypatch, [
-        "The export endpoint ships.",                       # reviewed: FAIL, capsule fed back
-        _stop_tool_call(),                                  # action-only stop after the feedback
+        "The export endpoint ships.",                       # reviewed: FAIL, findings shown
+        _stop_tool_call(),                                  # action-only stop after the findings
     ], stop_services=False, produced=True)
     assert len(run.model_inputs) == 2
-    assert run.panels == ["The export endpoint ships."], "an honoured stop must never buy a second panel"
-    decision = run.trace["acceptance_decision"]
-    assert decision["reason"] == "author_stop" and decision["author_action"] == "stop"
-    assert decision["author_disposition"]["action"] == "stop"
-    assert decision["author_disposition"]["rationale"] == STOP_RATIONALE
+    assert run.panels == ["The export endpoint ships."], "an honoured stop must never buy a second review"
+    assert run.trace["task_completion"]["action"] == "stop"
+    assert run.trace["task_completion"]["rationale"] == STOP_RATIONALE
     assert run.result == STOP_TEXT
     axes = derive_loop_outcome(run.result, run.usage, run.trace)["outcome_axes"]
     assert axes["objective"]["status"] == "fail" and axes["objective"]["reason"] == "author_stop"
 
 
-def _honoured_stop_after_a_panel(tmp_path, monkeypatch):
-    """A FAIL panel, its feedback exposed, then an action-only stop the host honours."""
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-    from ouroboros.loop_acceptance import merge_agent_acceptance_stance
-
-    fx = _finality_pass(tmp_path, monkeypatch)
-    assert fx.run("initial answer") is True
-    expose_acceptance_feedback(fx.trace, fx.messages, "author-root")
-    fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-    merge_agent_acceptance_stance(fx.trace, {"explicit_finish": True, "author_action": "stop",
-                                             "rationale": STOP_RATIONALE}, fx.ctx)
-    assert fx.run(STOP_TEXT) is False
-    assert fx.trace["acceptance_decision"]["reason"] == "author_stop"
-    return fx
-
-
-def test_an_honoured_stop_holds_until_the_authors_next_decision_replaces_it(tmp_path, monkeypatch):
-    """(d) The earlier panel's reviewed subject no longer reopens review on a later
-    delivery pass (the stop binds no subject), over the same or a changed text; the
-    author's next explicit decision is still heard — a finish replaces the stop
-    without another panel."""
-    from ouroboros.loop_acceptance import merge_agent_acceptance_stance
-
-    fx = _honoured_stop_after_a_panel(tmp_path, monkeypatch)
-    for text in (STOP_TEXT, "A restated unfinished answer."):
-        assert fx.run(text) is False
-        assert fx.trace["acceptance_decision"]["reason"] == "author_stop"
-    fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-    merge_agent_acceptance_stance(fx.trace, {"disposition": "partial", "explicit_finish": True,
-                                             "author_action": "finish",
-                                             "rationale": "Fixed the empty-input case after all."}, fx.ctx)
-    assert fx.run("revised answer") is False
-    decision = fx.trace["acceptance_decision"]
-    assert decision["reason"] == "author_finish" and decision["author_disposition"]["action"] == "finish"
-    assert fx.calls == ["initial answer"], "neither the held stop nor the finish bought a panel"
-
-
-def test_owner_input_after_an_honoured_stop_takes_the_ordinary_review_path(tmp_path, monkeypatch):
-    """(e) New owner input supersedes the stop exactly as it supersedes any terminal
-    acceptance: Main answers it and that answer is reviewed normally."""
-    import ouroboros.loop as loop_mod
-
-    fx = _honoured_stop_after_a_panel(tmp_path, monkeypatch)
-    loop_mod._supersede_task_acceptance_for_owner_followup(fx.ctx, fx.trace)
-    assert fx.trace["acceptance_decision"]["reason"] == "owner_followup"
-    assert fx.run("The answer to the owner's follow-up.") is True
-    assert fx.calls == ["initial answer", "The answer to the owner's follow-up."]
-    assert fx.trace["acceptance_decision"]["reason"] != "author_stop"
-
-
 def test_a_stop_recorded_under_exhausted_rounds_keeps_its_cause_and_its_rationale():
-    """A2: when the review rounds ran out, ``_finish_advisory_author`` records the
+    """A2: when the review rounds ran out, ``_finish_advisory_author`` recorded the
     stop under its TRUE cause, ``review_cycles_exhausted``, with ``author_action``
     and the disposition's action ``stop``. The row keeps that cause's sentence and
     still carries the author's rationale; a finish, or a bare inherited stop action
@@ -412,13 +260,12 @@ def test_a_stop_recorded_under_exhausted_rounds_keeps_its_cause_and_its_rational
         TASK_CAUSE_PHRASES["review_cycles_exhausted"][:-1] + " · Not ready: the export endpoint still fails.")
 
 
-@pytest.mark.parametrize("earlier_panel", [True, False])
-def test_evidence_changing_after_an_honoured_stop_neither_reopens_nor_replaces_it(tmp_path, monkeypatch, earlier_panel):
+@pytest.mark.parametrize("earlier_review", [True, False])
+def test_evidence_changing_after_an_honoured_stop_neither_reopens_nor_replaces_it(tmp_path, monkeypatch, earlier_review):
     """(f) Evidence that changes only AFTER the stop was selected (a service seen stopped
-    at the post-acceptance evidence read) used to supersede the stop like a reviewed
-    boundary: the reviewed latch reset, a panel was bought and its host exit replaced
-    the stop. A stop binds no evidence: no second author/panel runs, and the row reads
-    the stop's cause, rationale and red objective."""
+    at the post-review evidence read) used to supersede the stop like a reviewed
+    boundary and buy a review. A stop binds no evidence: no second author round or
+    review runs, and the row reads the stop's cause, rationale and red objective."""
     import ouroboros.loop as loop
     from ouroboros.outcomes import derive_loop_outcome
     from ouroboros.project_dialogue import _completion_verdict
@@ -433,166 +280,14 @@ def test_evidence_changing_after_an_honoured_stop_neither_reopens_nor_replaces_i
         return real_project(limit_ctx, llm_trace)
 
     monkeypatch.setattr(loop, "_project_child_result_dispositions", project)
-    first = ["The export endpoint ships."] if earlier_panel else []
-    run = _run_stop_loop(tmp_path, monkeypatch, [*first, _stop_tool_call()], stop_services=False, produced=earlier_panel)
+    first = ["The export endpoint ships."] if earlier_review else []
+    run = _run_stop_loop(tmp_path, monkeypatch, [*first, _stop_tool_call()], stop_services=False, produced=earlier_review)
     assert len(run.model_inputs) == len(first) + 1
-    assert late and run.panels == first, "evidence after a stop must never buy a panel"
-    decision = run.trace["acceptance_decision"]
-    assert decision["reason"] == "author_stop" and decision["author_disposition"]["rationale"] == STOP_RATIONALE
+    assert late and run.panels == first, "evidence after a stop must never buy a review"
+    assert run.trace["task_completion"]["action"] == "stop"
+    assert run.trace["task_completion"]["rationale"] == STOP_RATIONALE
     assert run.result == STOP_TEXT
     axes = derive_loop_outcome(run.result, run.usage, run.trace)["outcome_axes"]
     assert axes["objective"]["status"] == "fail" and axes["objective"]["reason"] == "author_stop"
     verdict = _completion_verdict({"status": "completed", "reason_code": "final_message", "outcome_axes": axes}, {})
     assert verdict.startswith("Ouroboros stopped with unfinished work") and STOP_RATIONALE.rstrip(".") in verdict
-
-
-def test_owner_input_consumes_the_stop_so_a_later_exhausted_exit_is_not_read_as_one(tmp_path, monkeypatch):
-    """(g) An explicit stop under exhausted rounds keeps its TRUE cause, its act and its
-    rationale. New owner input supersedes it; the later host exit for the same exhausted
-    rounds is the host's own, so it must not inherit the stop's act and re-read as the
-    author stopping (formerly its row repeated the stale stop rationale). The historical
-    stance stays on the record. The wallet is substituted with the panel: the substituted
-    panel records no paid claim."""
-    import ouroboros.loop as loop_mod
-    import ouroboros.task_results as task_results
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-    from ouroboros.loop_acceptance import merge_agent_acceptance_stance
-    from ouroboros.outcomes import derive_loop_outcome
-    from ouroboros.project_dialogue import _completion_verdict
-    from ouroboros.review_records import recorded_author_stop
-
-    fx = _finality_pass(tmp_path, monkeypatch)
-    assert fx.run("initial answer") is True
-    expose_acceptance_feedback(fx.trace, fx.messages, "author-root")
-    monkeypatch.setattr(task_results, "project_task_acceptance_review_capacity", lambda *_a, **_k: {
-        "state": "unavailable", "reason": "review_cycles_exhausted", "claimed_cycles": 1, "cap_cycles": 1})
-
-    def row():
-        axes = derive_loop_outcome("answer", {}, fx.trace)["outcome_axes"]
-        assert axes["objective"]["reason"] == "review_cycles_exhausted"
-        return _completion_verdict({"status": "completed", "reason_code": "final_message", "outcome_axes": axes}, {})
-
-    fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-    merge_agent_acceptance_stance(fx.trace, {"explicit_finish": True, "author_action": "stop",
-                                             "rationale": STOP_RATIONALE}, fx.ctx)
-    assert fx.run(STOP_TEXT) is False
-    stop = fx.trace["acceptance_decision"]
-    assert (stop["reason"], stop["author_action"], stop["author_disposition"]["action"]) == (
-        "review_cycles_exhausted", "stop", "stop")
-    assert recorded_author_stop(stop) and STOP_RATIONALE.rstrip(".") in row()
-
-    loop_mod._supersede_task_acceptance_for_owner_followup(fx.ctx, fx.trace)
-    assert "author_action" not in fx.trace["acceptance_decision"]
-    assert fx.run("The answer to the owner's follow-up.") is False
-    later = fx.trace["acceptance_decision"]
-    assert later["reason"] == "review_cycles_exhausted" and "author_action" not in later
-    assert later["agent_rationale"] == STOP_RATIONALE  # history kept, never the act
-    assert not recorded_author_stop(later) and STOP_RATIONALE.rstrip(".") not in row()
-    assert fx.calls == ["initial answer"]
-
-
-@pytest.mark.parametrize("change", ["material", "evidence"])
-def test_a_local_preparation_stop_after_a_fail_panel_keeps_its_finality(tmp_path, monkeypatch, change):
-    """(h) FAIL panel → the next host pass cannot assemble its evidence locally → the
-    informed author stops → material (a new working-tree file) or evidence (a late
-    ``services_stopped``) changes after selection. The local-preparation stop
-    kept the FAIL panel's reviewed subject, so ``preparation_delivery_choice`` refused
-    the changed material, the stale subject cleared the reviewed latch and the host
-    bought two more panels over a stop. Like the reviewer-bound stop it binds no
-    subject: one panel, one failed assembly, the stop's local cause, act and rationale."""
-    import ouroboros.loop as loop
-    import ouroboros.loop_acceptance_review as review
-    from ouroboros.outcomes import derive_loop_outcome
-
-    real_build, builds = review._build_host_acceptance_evidence, []
-
-    def build(ctx):
-        builds.append(ctx.content)
-        if len(builds) == 2:
-            raise RuntimeError("local evidence assembly failed")
-        return real_build(ctx)
-
-    monkeypatch.setattr(review, "_build_host_acceptance_evidence", build)
-    real_project, late = loop._project_child_result_dispositions, []
-
-    def project(limit_ctx, llm_trace):
-        if (getattr(limit_ctx.tools._ctx, "_completion_selected", None) or {}).get("action") == "stop" and not late:
-            late.append(True)
-            if change == "material":
-                (tmp_path / "repo" / "late.txt").write_text("changed after the stop\n", encoding="utf-8")
-            else:
-                llm_trace.setdefault("verification_events", []).append({"kind": "services_stopped", "services": [
-                    {"service_id": "late", "name": "late", "lifecycle": "stopped"}]})
-        return real_project(limit_ctx, llm_trace)
-
-    monkeypatch.setattr(loop, "_project_child_result_dispositions", project)
-    run = _run_stop_loop(tmp_path, monkeypatch, [
-        "The export endpoint ships.",                      # reviewed: FAIL, capsule fed back
-        {"content": None, "tool_calls": [{
-            "id": "nominate-revision", "type": "function",
-            "function": {"name": "task_acceptance_review", "arguments": json.dumps({
-                "claim": "The export endpoint ships, revised.",
-            })},
-        }]},                                              # request a new review; assembly fails
-        _stop_tool_call(),                                 # the informed author stops
-    ], stop_services=False, produced=True)
-    assert len(run.model_inputs) == 3
-    assert late, "the change must land after the stop was selected"
-    assert run.panels == ["The export endpoint ships."], "a local-preparation stop must never buy a panel"
-    assert len(builds) == 2, "the stopped material is never assembled again"
-    assert run.result == STOP_TEXT
-    decision = run.trace["acceptance_decision"]
-    assert decision["origin"] == "local_acceptance_preparation"
-    assert decision["reason"] == "author_stop" and decision["author_action"] == "stop"
-    assert decision["author_disposition"]["rationale"] == STOP_RATIONALE
-    axes = derive_loop_outcome(run.result, run.usage, run.trace)["outcome_axes"]
-    assert axes["objective"]["status"] == "fail" and axes["objective"]["reason"] == "author_stop"
-
-
-@pytest.mark.parametrize("reopen", ["owner_input", "author_finish"])
-def test_owner_input_or_a_new_author_act_still_reopens_a_local_preparation_stop(tmp_path, monkeypatch, reopen):
-    """(i) The subject-free local-preparation stop holds over changed text, yet owner
-    input returns the answer to the ordinary host pass and the author's next explicit
-    act is heard: a finish replaces the stop through the same incident, without a panel."""
-    import ouroboros.loop as loop_mod
-    import ouroboros.loop_acceptance_review as review
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-    from ouroboros.loop_acceptance import merge_agent_acceptance_stance
-
-    fx = _finality_pass(tmp_path, monkeypatch)
-    assert fx.run("initial answer") is True
-    assert fx.ctx._task_acceptance_reviewed_subject, "the FAIL panel bound its subject"
-
-    def broken(_ctx):
-        raise RuntimeError("local evidence assembly failed")
-
-    monkeypatch.setattr(review, "_build_host_acceptance_evidence", broken)
-    assert fx.run("revised answer") is True
-    assert fx.trace["acceptance_decision"]["reason"] == "acceptance_preparation_failed"
-    expose_acceptance_feedback(fx.trace, fx.messages, "author-root")
-    fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-    merge_agent_acceptance_stance(fx.trace, {"explicit_finish": True, "author_action": "stop",
-                                             "rationale": STOP_RATIONALE}, fx.ctx)
-    assert fx.run(STOP_TEXT) is False
-    assert fx.trace["acceptance_decision"]["reason"] == "author_stop"
-    assert fx.ctx._task_acceptance_reviewed_subject == ""
-    assert fx.run("A restated unfinished answer.") is False
-    assert fx.trace["acceptance_decision"]["reason"] == "author_stop"
-    if reopen == "owner_input":
-        loop_mod._supersede_task_acceptance_for_owner_followup(fx.ctx, fx.trace)
-        assert fx.run("The answer to the owner's follow-up.") is False
-        # The ordinary host pass decided again: the same unrepaired material is not
-        # rebuilt, and the host's own honest ending replaced the consumed stop.
-        decision = fx.trace["acceptance_decision"]
-        assert decision["reason"] == "acceptance_preparation_failed" and "author_action" not in decision
-        assert fx.trace["acceptance_preparation"]["attempts"] == 1
-    else:
-        fx.trace["tool_calls"].append({"tool": "task_acceptance_review", "args": {}})
-        merge_agent_acceptance_stance(fx.trace, {"disposition": "partial", "explicit_finish": True,
-                                                 "author_action": "finish",
-                                                 "rationale": "Delivering the available result with its gap."}, fx.ctx)
-        assert fx.ctx._task_acceptance_reviewed is False
-        assert fx.run("A restated unfinished answer.") is False
-        decision = fx.trace["acceptance_decision"]
-        assert decision["reason"] == "author_finish" and decision["author_disposition"]["action"] == "finish"
-    assert fx.calls == ["initial answer"]

@@ -19,6 +19,7 @@ SECRET = "synthetic-ci-secret-47d5fb6c-never-sent"
 ARTIFACT_URL = "https://github.com/example/project/actions/runs/123/artifacts/456"
 RUN_FACTS = {"GITHUB_SHA": "0123456789abcdef0123456789abcdef01234567",
              "GITHUB_RUN_ID": "123456789", "GITHUB_RUN_ATTEMPT": "2"}
+_THREAD_TIMEOUT = ("-n", "2", "--dist", "loadscope", "--max-worker-restart=0", "--timeout=2", "--timeout-method=thread")
 
 
 def _producer_command(tmp_path, source, *, conftest="", broken_export=False, args=()):
@@ -55,6 +56,17 @@ def _producer(tmp_path, source, *, timeout=60, **options):
     result = subprocess.run(command, cwd=REPO, capture_output=True, text=True,
                             encoding="utf-8", timeout=timeout)
     return result, public, private
+
+
+def _retire_injected_export_fault(result, error):
+    """An injected export fault proves no process: retire only the producer's own exact marker."""
+    from tests._shared import retire_synthetic_retention
+
+    for line in result.stderr.splitlines():
+        if line.startswith("SAFE_TEST_RETAINED "):
+            root = Path(line.split(" ", 1)[1])
+            retire_synthetic_retention(root, f"test diagnostics incomplete: {error}",
+                                       f"retention marker or unreadable subtree: {root / 'OUROBOROS_RETAINED.txt'}")
 
 
 def _summary(tmp_path, public, *, producer="success", artifact="success",
@@ -262,14 +274,17 @@ def test_passing_cases_do_not_overwrite_failed_session_exit(tmp_path):
 def test_export_failure_never_changes_the_producer_exit(tmp_path, fails):
     source = "def test_producer():\n    " + (f"assert False, {SECRET!r}\n" if fails else "pass\n")
     result, public, private = _producer(tmp_path, source, broken_export=True)
-    assert result.returncode == int(fails), result.stdout + result.stderr
-    assert "CI_DIAGNOSTICS_INCOMPLETE" in result.stdout
-    assert private.is_file() and not (public / "results.json").exists()
-    summary, _ = _summary(tmp_path, public, producer="failure" if fails else "success",
-                          artifact="failure", artifact_url="")
-    assert f"Producer step: **{'failure' if fails else 'success'}**" in summary
-    assert "diagnostics_incomplete" in summary and "Case outcomes: **unknown**" in summary
-    assert SECRET not in summary
+    try:
+        assert result.returncode == int(fails), result.stdout + result.stderr
+        assert "CI_DIAGNOSTICS_INCOMPLETE" in result.stdout
+        assert private.is_file() and not (public / "results.json").exists()
+        summary, _ = _summary(tmp_path, public, producer="failure" if fails else "success",
+                              artifact="failure", artifact_url="")
+        assert f"Producer step: **{'failure' if fails else 'success'}**" in summary
+        assert "diagnostics_incomplete" in summary and "Case outcomes: **unknown**" in summary
+        assert SECRET not in summary
+    finally:
+        _retire_injected_export_fault(result, "FileExistsError")
 
 
 @pytest.mark.parametrize("payload", [None, "not-json", "[]", '{"reports":[{}]}',
@@ -353,30 +368,51 @@ def test_successful_upload_without_a_url_is_incomplete(tmp_path):
     assert "Producer step: **success**" in summary
 
 
-@pytest.mark.parametrize("body, args", [
-    ("import os; os._exit(3)", ("-n", "2")),
-    # The parallel CI pass: the thread timeout kills its worker and nothing restarts it.
-    ("import time; time.sleep(60)", ("-n", "2", "--dist", "loadscope", "--max-worker-restart=0",
-                                     "--timeout=2", "--timeout-method=thread")),
-], ids=["exit", "ci-timeout"])
-def test_dead_xdist_worker_is_a_named_crash_and_not_an_unknown_session(tmp_path, body, args):
+@pytest.mark.parametrize("body, args, conftest, cause", [
+    ("import os; os._exit(3)", ("-n", "2"), "", ""),
+    # The parallel CI pass: the thread timeout kills its worker, nothing restarts it, execnet drops its stdout banner.
+    ("import time; time.sleep(60)", _THREAD_TIMEOUT, "", "; timeout callback invoked (2s), worker subsequently lost"),
+    # In pdb the callback returns at once (its timer thread is gone), so the later exit is not its own.
+    ("import os, threading, time; time.sleep(4); assert 'test_dies' not in str(threading.enumerate()); os._exit(3)",
+     _THREAD_TIMEOUT, "def pytest_configure(config):\n    config.hook.pytest_enter_pdb(config=config, pdb=None)\n", ""),
+], ids=["exit", "ci-timeout", "suppressed-timeout-then-exit"])
+def test_dead_xdist_worker_is_a_named_crash_and_not_an_unknown_session(tmp_path, monkeypatch, body, args,
+                                                                         conftest, cause):
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")
     result, public, _ = _producer(tmp_path, f"""
         def test_dies():
+            import json, time
+            from pathlib import Path
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    rows = [json.loads(line) for line in Path({str(tmp_path / 'public/events.jsonl')!r}).read_text(encoding='utf-8').splitlines()]
+                except (OSError, ValueError):
+                    rows = []
+                if any(row.get('phase') == 'teardown' and row.get('nodeid', '').endswith('::test_survives') for row in rows):
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(.01)
             {body}
         class TestOtherScope:
             def test_survives(self, request):
                 # Only the controller owns the journal file.
                 assert hasattr(request.config, "workerinput")
                 assert request.config.pluginmanager.get_plugin("ci_safe_results").journal is None
-    """, args=args, timeout=120)
+    """, conftest=conftest, args=args, timeout=120)
     assert result.returncode == 1, result.stdout + result.stderr
     survivor = "test_specimen.py::TestOtherScope::test_survives"
     final = {row["nodeid"]: (row["phase"], row["outcome"], row["error_type"])
              for row in _results(public)["reports"] if row["phase"] != "setup"}
     assert final["test_specimen.py::test_dies"] == ("crash", "failed", "WorkerCrash")
     assert final[survivor] == ("teardown", "passed", "")
+    crashes = [row for row in _results(public)["reports"] + _events(public) if row.get("phase") == "crash"]
+    assert [(row.get("timeout_callback_seconds"), row["worker"][:2]) for row in crashes] == [(2.0 if cause else None, "gw")] * 2
+    assert ("pytest-timeout callback invoked (2s) while running 'test_specimen.py::test_dies'; "
+            "worker subsequently lost" in result.stdout) is bool(cause), result.stdout
+    assert not list(public.glob(".timeout-*"))  # Consumed; the survivor's cancelled timer wrote none.
     summary, _ = _summary(tmp_path, public, producer="failure")
-    assert "| test_specimen.py::test_dies | crash | WorkerCrash |" in summary
+    assert f"| test_specimen.py::test_dies | crash | WorkerCrash{cause} |" in summary
     assert "passed=1, failed=1" in summary and "test_survives" not in summary
     assert "Case outcomes: **unknown**" not in summary and "diagnostics_incomplete" not in summary
     # The controller re-emits worker events; a complete session never reads them back.
@@ -386,7 +422,7 @@ def test_dead_xdist_worker_is_a_named_crash_and_not_an_unknown_session(tmp_path,
     assert "test_specimen.py::test_dies" not in [row["nodeid"] for row in journal if row["event"] == "finish"]
     assert "in flight" not in summary
     assert _annotate(tmp_path, public) == [
-        "::error title=Failed test::test_specimen.py::test_dies (crash, WorkerCrash)"]
+        f"::error title=Failed test::test_specimen.py::test_dies (crash, WorkerCrash{cause})"]
 
 
 @pytest.mark.parametrize("args, unreported", [(("-x",), 2), ((), 0)], ids=["stopped", "complete"])
@@ -437,7 +473,8 @@ def test_killed_session_names_the_test_in_flight_and_earlier_failures(tmp_path):
         f"::error title=Test in flight when the session was killed::{blocked}"]
 
 
-def test_killed_xdist_session_names_every_test_in_flight(tmp_path):
+def test_killed_xdist_session_names_every_test_in_flight(tmp_path, monkeypatch):
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")
     public = _kill_when(tmp_path, _blocking(tmp_path, """
         def test_blocks_a():
             block()
@@ -509,14 +546,22 @@ def test_journal_failure_is_one_line_and_never_changes_the_producer_exit(tmp_pat
         """
     result, public, _ = _producer(tmp_path, source, conftest=conftest,
                                   broken_export=broken == "directory")
-    assert result.returncode == int(fails), result.stdout + result.stderr
-    disclosed = [line for line in result.stdout.splitlines()
-                 if line.startswith("CI_DIAGNOSTICS_INCOMPLETE: incremental journal disabled")]
-    assert len(disclosed) == 1, result.stdout
-    assert result.stdout.count("CI_DIAGNOSTICS_INCOMPLETE") == (2 if broken == "directory" else 1)
-    if broken != "directory":  # The final export does not depend on the journal.
-        assert _results(public)["session_exit_code"] == int(fails)
-        assert not _events(public)
+    try:
+        assert result.returncode == int(fails), result.stdout + result.stderr
+        disclosed = [line for line in result.stdout.splitlines()
+                     if line.startswith("CI_DIAGNOSTICS_INCOMPLETE: incremental journal disabled")]
+        assert len(disclosed) == 1, result.stdout
+        assert result.stdout.count("CI_DIAGNOSTICS_INCOMPLETE") == (2 if broken == "directory" else 1)
+        if broken != "directory":  # The final export does not depend on the journal.
+            assert _results(public)["session_exit_code"] == int(fails)
+            assert not _events(public)
+    finally:
+        # Opening the injected directory as a file raises EACCES on Windows, EISDIR on POSIX.
+        _retire_injected_export_fault(result, {
+            "directory": "FileExistsError",
+            "open": "PermissionError" if os.name == "nt" else "IsADirectoryError",
+            "write": "ValueError",
+        }[broken])
 
 
 def test_torn_and_invalid_journal_rows_are_skipped(tmp_path):

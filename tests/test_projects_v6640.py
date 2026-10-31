@@ -1,6 +1,7 @@
 """Focused v6.64 Project lifecycle, canonical-dialogue, and sidebar guards."""
 
 from __future__ import annotations
+from tests._dialogue import advance_room_revision
 
 import asyncio
 import json
@@ -10,19 +11,7 @@ import pytest
 
 
 def test_project_lifecycle_revision_binding_and_no_resurrection(tmp_path):
-    from ouroboros.projects_registry import (
-        begin_project_deletion,
-        bind_task_to_project,
-        complete_project_deletion,
-        create_project,
-        get_project,
-        get_reserved_project,
-        increment_project_visible_revision,
-        list_projects,
-        project_binding_for_task,
-        reconcile_projects,
-        reserved_project_chat_ids,
-    )
+    from ouroboros.projects_registry import begin_project_deletion, bind_task_to_project, complete_project_deletion, create_project, get_project, get_reserved_project, list_projects, project_binding_for_task, reconcile_projects, reserved_project_chat_ids
 
     project = create_project(tmp_path, "alpha", name="Alpha")
     memory_dir = tmp_path / "projects" / "alpha"
@@ -50,13 +39,13 @@ def test_project_lifecycle_revision_binding_and_no_resurrection(tmp_path):
     assert binding["source_ref"] == first_ref
     assert binding["source_text"] == owner_text
 
-    assert increment_project_visible_revision(tmp_path, project_id="alpha")["visible_revision"] == 1
-    assert increment_project_visible_revision(tmp_path, chat_id=project["chat_id"])["visible_revision"] == 2
+    assert advance_room_revision(tmp_path, project_id="alpha")["visible_revision"] == 1
+    assert advance_room_revision(tmp_path, chat_id=project["chat_id"])["visible_revision"] == 2
     deleting = begin_project_deletion(tmp_path, "alpha")
     assert deleting["lifecycle"] == "deleting"
     assert deleting["routing_generation"] == 1
     assert get_project(tmp_path, "alpha") is None  # admission is already closed
-    assert increment_project_visible_revision(tmp_path, project_id="alpha") is None
+    assert advance_room_revision(tmp_path, project_id="alpha") is None
     with pytest.raises(ValueError, match="cannot accept bindings"):
         bind_task_to_project(tmp_path, "task-after-fence", "alpha", origin={"absent": "system"})
 
@@ -281,6 +270,37 @@ def test_chat_annotation_compaction_drops_rows_after_chat_retention(tmp_path):
     assert (logs / "chat_annotations.jsonl").read_text(encoding="utf-8") == ""
 
 
+
+def test_chat_annotation_compaction_rewrites_the_journal_in_binary_mode(tmp_path, monkeypatch):
+    """The compacted journal keeps the appends' LF bytes: Windows writes CRLF through a descriptor opened
+    without ``O_BINARY``. POSIX translates nothing, so the bit is simulated as in ``test_atomic_write_v639``."""
+    import os as _os
+
+    from ouroboros import project_dialogue
+    from ouroboros.project_dialogue import append_chat_annotation
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").write_text("", encoding="utf-8")
+    (logs / "chat_annotations.jsonl").write_text(json.dumps({
+        "ts": "2026-07-13T00:00:00Z", "type": "chat_annotation", "client_message_id": "expired",
+        "action": "routed", "target": "x" * 800_000, "status": "delivered"}) + "\n", encoding="utf-8")
+    real_o_binary = getattr(_os, "O_BINARY", None)
+    fake_o_binary = real_o_binary if real_o_binary is not None else 1 << 26
+    opened, real_open = [], _os.open
+
+    def spy_open(path, flags, *args, **kwargs):
+        opened.append((str(path), flags))
+        return real_open(path, flags if real_o_binary is not None else flags & ~fake_o_binary, *args, **kwargs)
+
+    monkeypatch.setattr(_os, "O_BINARY", fake_o_binary, raising=False)
+    monkeypatch.setattr(project_dialogue.os, "open", spy_open)
+    assert append_chat_annotation(tmp_path, "also-expired", action="routed", status="delivered")
+    monkeypatch.undo()
+    rewrites = [flags for path, flags in opened if ".chat_annotations.jsonl.tmp." in path]
+    assert rewrites and all(flags & fake_o_binary for flags in rewrites)
+    assert (logs / "chat_annotations.jsonl").read_bytes() == b""
+
 def test_chat_annotation_compaction_keeps_receipts_that_address_no_message(tmp_path):
     """A steer the agent authored itself is answered by a receipt keyed on its
     routing token, and its only reader is the tool waiting on `routing_wait`.
@@ -402,8 +422,10 @@ def test_project_sidebar_and_menu_static_contracts():
     css = (root / "web" / "style.css").read_text(encoding="utf-8")
 
     assert 'class="nav-projects-header"' in html
-    assert '<svg class="nav-chevron"' in html
-    assert 'aria-label="New project"><svg' in html
+    # The header's chevron and "+" are the shell's shared glyphs, rendered from the page registry (pages.js).
+    pages = (root / "web" / "modules" / "pages.js").read_text(encoding="utf-8")
+    assert '<span class="nav-chevron" aria-hidden="true">${SHELL_ICONS.chevron}</span>' in pages
+    assert 'aria-label="New project">${SHELL_ICONS.plus}</button>' in pages
     assert ".nav-projects-header" in css
     assert ".nav-projects-header .nav-row-meta:not(:empty)" in css
     projects_css = css[css.index(".nav-projects-header"):css.index("/* New Project dialog */")]
@@ -412,11 +434,10 @@ def test_project_sidebar_and_menu_static_contracts():
     assert "project_seen_revision" in app
     assert "acknowledgeProjectAfterPaint" in app
     assert "inst.refreshHistory?.({ revision })" in app
-    assert "paint?.read" in app  # painted AND at the newest messages (DESIGN "Project unread dot")
+    assert "paint?.read" in app  # painted AND at the newest messages (DESIGN "Unread")
     assert "await markProjectViewed(project.id, revision)" in app
     assert "async function markProjectViewed" in app
     assert "await fetchJson('/api/ui/preferences'" in app
-    assert "item.append(btn, trailing)" in app
     assert "hideProjectFromSidebar" not in app
     assert "project_last_viewed" not in app
     assert "project_hidden" not in app
@@ -449,14 +470,14 @@ def test_project_activity_stays_out_of_main_static_contract():
     root = Path(__file__).resolve().parents[1]
     chat = (root / "web" / "modules" / "chat.js").read_text(encoding="utf-8")
 
-    unread_fn = chat[
-        chat.index("function incrementUnreadIfNeeded"):
-        chat.index("onWs('typing'")
-    ]
-    project_guard = unread_fn.index("if (isKnownProjectFrame(msg)) return;")
-    increment = unread_fn.index("state.unreadCount++;")
-    assert project_guard < increment
-    assert "Project visible_revision is the sole unread authority" in unread_fn
+    # Main's number is its room revision against its read cursor, the comparison a Project row makes (owner Q1 = B,
+    # 19.10.2026), less the messages the host recorded as read in full in another room (owner A, 28.10.2026); no
+    # frame of any room counts in the browser (tests/test_main_unread_counter.py: another room's message never moves
+    # Main's revision).
+    assert "incrementUnreadIfNeeded" not in chat and "unreadCount" not in chat
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+    assert "observeMainRevision(data.main_visible_revision);" in app
+    assert "unreadCount(revision, seen, readAheadFor(1))" in app
 
     # Main has its own compact host-stamped completion row. Project progress,
     # logs and ordinary summaries never enter its live fan-out.
@@ -480,12 +501,12 @@ def test_project_activity_stays_out_of_main_static_contract():
     assert "if (msg && msg.project_thread) return false;" in main_gate
     assert "projectChatIds.has(cid)" in main_gate
     assert "if (isMain) return mainThreadAccepts(msg, projectChatIds);" in shared_gate
-    assert "return Number(msg?.chat_id ?? 1) === chatId;" in shared_gate
+    # A Project instance also takes the one frame of a row it shows outside its written room (`also_rooms`).
+    assert ("return Number(msg?.chat_id ?? 1) === chatId || (Array.isArray(msg?.also_rooms) "
+            "&& msg.also_rooms.map(Number).includes(chatId));") in shared_gate
     assert "PROJECT_ROW_TYPES.has(msg.system_type)" in fanout
     assert "appendTaskSummaryToLiveCard(msg);" in fanout
     assert "updateLiveCardFromProgressMessage(msg, { grantCancelAuthority: true });" in fanout
-    assert "incrementUnreadIfNeeded(msg);" in fanout
-    assert "incrementUnreadIfNeeded();" not in chat
 
     # History replay renders the durable compact completion independently of
     # task-card reconstruction.
@@ -495,7 +516,6 @@ def test_project_activity_stays_out_of_main_static_contract():
     ]
     assert "appendTaskSummaryToLiveCard(msg" in history
     assert "PROJECT_ROW_TYPES.has(msg.system_type)" in history
-    assert "incrementUnreadIfNeeded" not in history
     # The lifecycle row points at its Project through the door, which alone decides the
     # fallback word: a missing or never-given name reads `Project`, never the raw id.
     project_answer = (root / "web" / "modules" / "project_answer.js").read_text(encoding="utf-8")
@@ -522,51 +542,47 @@ def test_project_lifecycle_rows_render_design_system_action_static_contract():
         "export const PROJECT_ROW_TYPES = new Set(['project_started', 'project_handoff', 'project_completion_summary']);"
         in render
     )
-    assert "import { appendProjectRow, decorateProjectRow, PROJECT_ROW_TYPES, syncSavedProjectContext } from './project_answer.js';" in chat
+    assert "import { appendProjectRow, decorateProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';" in chat
     assert "const PROJECT_ROW_TYPES" not in chat
-    # Compact Main entries own their shell; the remaining lifecycle rows only delegate:
-    # the lifecycle-row module puts the one Project reference (web/modules/project_reference.js)
-    # into the shared action composition.
-    assert "if (projectEntry) handoffs.mount(bubble, {" in chat
-    assert "if (!projectEntry && PROJECT_ROW_TYPES.has(systemType)) decorateProjectRow(bubble, { ...meta, ...opts, role," in chat
+    # One work, one card: a Main start/transfer row binds the work's own card (work_portal.js), never a
+    # second entry; the remaining lifecycle rows only delegate: the lifecycle-row module puts the one Project
+    # reference (web/modules/project_reference.js) into the shared action composition.
+    portal = (root / "web" / "modules" / "work_portal.js").read_text(encoding="utf-8")
+    assert "createProjectHandoffs" not in chat and "handoffs" not in chat
+    assert "if (isMain && ['project_started', 'project_handoff'].includes(msg.system_type) && msg.task_id && msg.project_id) {" in portal
+    assert ") decorateProjectRow(bubble, { ...meta, ...opts, role," in chat
     assert "completion = systemType === 'project_completion_summary'" in render
     assert "terminalTime: msg.terminal_time || null" in render
     assert "createSystemMessageActions(projectReference(" in render
     assert "row.className = 'system-message-actions'" in helpers
-    # The Main mirror of a Project question carries no system action: its Project chip is the way there.
-    assert "createSystemMessageActions(" in (root / "web/modules/chat_activity.js").read_text(encoding="utf-8")
+    # The owner's routed message names its room on its one receipt line, through the same door.
+    receipt = (root / "web" / "modules" / "routing_receipt.js").read_text(encoding="utf-8")
+    assert "projectReference({ id: annotation.project_id," in receipt
+    assert "createSystemMessageActions(" not in receipt
     assert "document.createElement('br')" not in render
 
-    # The custom pill is gone everywhere; the conversion-flow buttons moved to
-    # the shared design-system role beside their `btn btn-xs btn-danger` sibling.
+    # The custom pill is gone everywhere; the conversion-flow buttons use the shared
+    # design-system role beside their neutral Stop… sibling.
     assert "chat-live-project-btn" not in chat
     assert "chat-live-project-btn" not in style
-    # The conversion button is now built by the chrome sync from the record's
-    # facts (an HTML template could not be re-derived when a turn is direct),
-    # so the design-system role and the marker app.js queries are set on the
-    # node itself.
-    chrome = chat[chat.index("function syncBlockChrome(record) {"):chat.index("function syncCancelRunButton(record) {")]
-    assert "btn.className = 'btn btn-xs btn-default';" in chrome
+    # The conversion button is built by the card's chrome sync from the record's facts (an HTML template
+    # could not be re-derived when a turn is direct); the portal module owns it with the move it makes.
+    chrome = portal[portal.index("function syncConvert(record, wanted) {"):portal.index("function row(msg, text, opts) {")]
+    assert "btn.className = 'btn btn-sm btn-default ui-hit-area';" in chrome  # a finger's target too (audit №4)
     assert "btn.dataset.turnIntoProject = '1';" in chrome
     assert "btn.textContent = liveCardLabel.turnIntoProject();" in chrome
+    assert "portals.syncConvert(record," in chat
     # The words sit with the other live-card labels and are read through the interface-language seam.
     chip = (root / "web" / "modules" / "task_phase_chip.js").read_text(encoding="utf-8")
     assert "turnIntoProject: () => tr('task.card.turn_into_project', 'Turn into project')," in chip
-    # One owner intent, one control: the converted card (chat.js), the bound-task
-    # footer (app.js) and every row that points at a Project get it from the door,
-    # which alone knows its classes and words.
+    # One owner intent, one control: the portal's action row and every row that points at a Project get it
+    # from the door, which alone knows its classes and words (beside the work's title it decides them too).
     door = (root / "web" / "modules" / "project_reference.js").read_text(encoding="utf-8")
     assert "chat-live-project-card-btn" in door and "chat-live-project-card-btn" not in helpers
-    handoff = (root / "web" / "modules" / "project_handoff.js").read_text(encoding="utf-8")
-    # Main alone owns a handoff controller; the converted card mounts through it.
-    assert "handoffs?.mount(record.root" in chat and "isMain ? createProjectHandoffs(" in chat
-    assert "projectReference({ id: projectId, name: projectName }, { layout: 'inline', taskId })" in handoff
-    assert "state: 'background'" not in handoff
-    assert "projectReference(project, { layout: 'footer' })" in app
-    # The project pointer is a Main-root affordance: applyTaskBindings walks
-    # only Main root cards, never the Project panel's copy or nested subagents
-    # (D15; the browser flow is pinned by the marker-gated continuity smoke).
-    assert "'#page-chat .chat-live-card[data-task-id]:not(.subagent)'" in app
+    assert "projectReference(target, { layout: 'footer', taskId: record.groupId, beside: record.titleEl })" in portal
+    # The portal is a Main-root affordance: the controller binds nothing outside Main or on a nested child.
+    assert "if (!isMain || !record || record.isSubagent || !project?.id) return false;" in portal
+    assert "projectReference(" not in app and "window.__ouroTaskBindings = bindings || {};" in app
 
     # Layout-only container CSS; the page-local `Open Project` button and its rule are gone.
     assert ".system-message-actions {" in style
@@ -635,7 +651,7 @@ def test_direct_routing_keeps_annotation_and_final_in_history_projection(tmp_pat
     )
     monkeypatch.setattr(message_bus, "_send_markdown", lambda *args, **kwargs: (True, ""))
     for name in (
-        "_run_scratchpad_consolidation",
+        "_run_memory_fallback_draft",
         "_run_post_task_processing_async",
     ):
         monkeypatch.setattr(pipeline, name, lambda *args, **kwargs: None)

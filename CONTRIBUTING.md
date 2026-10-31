@@ -37,7 +37,9 @@ When in doubt whether a section is relevant, read it. Reading everything in
 full remains the strongest preparation for a large or cross-cutting change.
 
 Reuse the modules, contracts, and authorities those documents name. Do not
-invent a parallel mechanism when the repository already has one. A useful
+invent a parallel mechanism when the repository already has one. A new
+feature usually belongs in a skill: read DEVELOPMENT "Capability placement";
+a pull request that opens a seam ships its first consumer. A useful
 first instruction for a coding agent is:
 
 > Read CONTRIBUTING.md and docs/CHECKLISTS.md in full. Map BIBLE.md,
@@ -114,6 +116,9 @@ the change — then the full local battery when practical:
 python scripts/run_tests.py            # or: make test
 ```
 
+This uses `safe_test`: isolated HOME/data, scrubbed owner/provider environment,
+durable logs/source/diagnostics in `<checkout>/../.test-evidence` by default.
+
 That is the one fast recipe (node lane, then every default-lane test in a single
 xdist run); a bare `pytest tests/` runs the same tests in one process and takes
 many times longer. Like CI's default lanes it leaves out the opt-in marker
@@ -130,8 +135,10 @@ the reference-book comparison is skipped. `python scripts/run_tests.py tests/tes
 forwards a focused run. Inside Ouroboros a reviewed commit (`commit_reviewed` /
 `vcs_commit_reviewed`) runs the complete battery in its hermetic gate, or reuses
 its unsigned receipt of an identical complete run, unless `skip_tests` is set, so
-running it by hand first is optional rather than a second requirement; for a pull
-request, CI is that gate. If the full battery could
+running it by hand first is optional rather than a second requirement. Ordinary
+PR/branch cloud CI is disabled: local verification and independent review remain.
+Maintainers may dispatch CI for a reviewed candidate; review outside code before
+that secret-bearing run. Release tags retain the full gate. If the full battery could
 not finish on your machine or within your budget, say so — `NOT_RUN` with the
 reason — and deliver the focused evidence; never report it as green.
 
@@ -140,8 +147,8 @@ run, record `NOT_RUN` and the reason instead of claiming it passed.
 
 Tests that spawn a real process, bind a real port, or mutate module-level
 global state must be marked `@pytest.mark.serial`. A merely slow test must be
-made faster or split, not moved to the unbounded serial pass. See
-[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the CI split and isolation
+made faster or split: the serial pass has the same 300 s per-test timeout.
+See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the CI split and isolation
 rules.
 
 For a visible UI change, inspect at least one relevant rendered user flow and

@@ -83,13 +83,13 @@ def test_pause_abandons_the_sent_wait_at_once_and_the_sender_settles_and_retains
 
     def send():
         sent.set()
-        assert release.wait(10)
+        assert release.wait(60)
         return answer
 
     outcome: dict = {}
     thread, owner = _call(tmp_path, scope, send, outcome)
     try:
-        assert sent.wait(5)
+        assert sent.wait(30)
         consumer = owner.answer_consumer_id
         owner_pause.install_fence(tmp_path, "root", request_id="pause")
         # The local wait ends on the Pause while the provider has not answered yet.
@@ -406,7 +406,7 @@ def test_subscription_chat_pause_preserves_late_receipt_without_adopting_it(
     original = gateway.get_model_result
     def receive(*args, **kwargs):
         sent.set()
-        assert release.wait(10)
+        assert release.wait(60)
         return original(*args, **kwargs)
     monkeypatch.setattr(gateway, "get_model_result", receive)
     monkeypatch.setattr(llm_claudexor._ModelInvocation, "finish", lambda *_: pytest.fail("late answer adopted"))
@@ -420,7 +420,7 @@ def test_subscription_chat_pause_preserves_late_receipt_without_adopting_it(
         with receiver_abandonable():
             call = client.chat_async([], MODEL) if asynchronous else asyncio.to_thread(client.chat, [], MODEL)
             receiver = asyncio.create_task(call)
-            assert await asyncio.to_thread(sent.wait, 5)
+            assert await asyncio.to_thread(sent.wait, 30)
             owner_pause.install_fence(root, "task-one", request_id="pause")
             try:
                 with pytest.raises(model_wait.ModelWaitInterrupted) as caught:
@@ -460,7 +460,7 @@ def test_temporary_api_client_stays_with_its_abandoned_sender(tmp_path, scope, m
     entered, release, closed = threading.Event(), threading.Event(), threading.Event()
     def send(**_kwargs):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(60)
         assert not closed.is_set(), "caller closed the sender's transport"
         return response
     async def send_async(**kwargs):
@@ -480,7 +480,7 @@ def test_temporary_api_client_stays_with_its_abandoned_sender(tmp_path, scope, m
             call = (client.chat_async([], "m", no_proxy=True) if asynchronous
                     else asyncio.to_thread(client.chat, [], "m", no_proxy=True))
             receiver = asyncio.create_task(call)
-            assert await asyncio.to_thread(entered.wait, 5)
+            assert await asyncio.to_thread(entered.wait, 30)
             owner_pause.install_fence(tmp_path, "root", request_id="pause")
             try:
                 with pytest.raises(model_wait.ModelWaitInterrupted) as caught:

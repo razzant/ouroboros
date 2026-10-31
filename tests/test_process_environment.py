@@ -148,8 +148,9 @@ def test_tool_argument_log_redacts_nested_keys_before_projection(tmp_path):
 def test_restricted_service_refs_fail_before_settings_lookup(process_context, monkeypatch, actor):
     registry, ctx, workspace, _data = process_context
     if actor == 'presence':
-        from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-        from ouroboros.presence_capabilities import PresenceResourceTarget, PresenceToolTarget
+        from ouroboros.presence_authority import presence_ceiling_payload
+        from tests.frozen_presence_authority import build_presence_capability_ceiling
+        from tests.frozen_presence_capabilities import PresenceResourceTarget, PresenceToolTarget
         from tests.test_presence_authority import _resolution
 
         ceiling = build_presence_capability_ceiling(
@@ -242,7 +243,7 @@ def test_local_executor_finalizes_secret_log_before_forgetting_record(process_co
 
 
 @pytest.mark.parametrize('actor', ['acting_subagent', 'local_readonly_subagent'])
-def test_children_keep_the_existing_owner_configured_mcp_identity(process_context, actor):
+def test_children_keep_the_existing_owner_configured_mcp_identity(process_context, actor, monkeypatch):
     pytest.importorskip('mcp')
     registry, ctx, workspace, _data = process_context
     witness = workspace / 'mcp-witness.jsonl'
@@ -260,9 +261,12 @@ for line in sys.stdin:
 ''', encoding='utf-8')
     secret = 'synthetic-owner-mcp-identity'
     manager = mcp_client.get_manager()
-    manager.reconfigure({'MCP_ENABLED': True, 'MCP_TOOL_TIMEOUT_SEC': 5, 'CUSTOM_KEY': secret,
+    settings = {'MCP_ENABLED': True, 'MCP_TOOL_TIMEOUT_SEC': 5, 'CUSTOM_KEY': secret,
         'MCP_SERVERS': [{'id': 'configured', 'enabled': True, 'transport': 'stdio', 'command': sys.executable,
-            'args': [str(script), str(witness)], 'cwd': str(workspace), 'env_from_settings': {'TOKEN': 'CUSTOM_KEY'}}]})
+            'args': [str(script), str(witness)], 'cwd': str(workspace), 'env_from_settings': {'TOKEN': 'CUSTOM_KEY'}}]}
+    from ouroboros import config
+    monkeypatch.setattr(config, 'load_settings', lambda: settings)
+    manager.reconfigure(settings)
     assert manager.refresh_server('configured')['ok']
     tool = 'mcp_configured__probe'
     ctx.task_constraint = TaskConstraint(mode=actor, surface='external_workspace', write_root=str(workspace),
@@ -315,3 +319,9 @@ def test_replacing_exited_service_finalizes_each_environment_revision(process_co
         text = gzip.decompress(Path(result['full_log_ref']['path']).read_bytes()).decode()
         assert 'synthetic-first-environment' not in text and 'synthetic-second-environment' not in text
         assert '***' in text
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

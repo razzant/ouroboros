@@ -49,7 +49,7 @@ def _register_results(fixture, monkeypatch, outputs):
 def _observe_measurements(monkeypatch, *, minimum_unfit=False):
     observations = []
 
-    def measure(plan, messages, schemas, mode, effort, round_id):
+    def measure(plan, messages, schemas, mode, effort, round_id, usage=None):
         # A deterministic complete-candidate measurement oracle: non-result
         # input has a fixed measured cost; each character of a result envelope
         # or body costs one synthetic token. No allocator/persistence is mocked.

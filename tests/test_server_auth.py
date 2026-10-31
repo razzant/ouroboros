@@ -11,6 +11,9 @@ the real resolution order, and it asserts the pre-state it relies on by name so 
 polluted worker fails there, not as a downstream 200/404.
 """
 
+import pathlib
+import re
+
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -128,5 +131,73 @@ def test_login_next_url_is_escaped(monkeypatch):
     with _make_client(monkeypatch) as client:
         resp = client.get('/auth/login?next=/"><script>alert(1)</script>', follow_redirects=False)
         assert resp.status_code == 200
-        assert "<script>" not in resp.text
+        # The form inlines its own appearance script; the requested markup appears nowhere.
+        assert "alert(1)" not in resp.text and '"><script>' not in resp.text
         assert 'value="/"' in resp.text
+
+
+WEB = pathlib.Path(__file__).resolve().parents[1] / "web"
+
+
+def _inlined(page: str) -> tuple[str, str]:
+    """The page's inlined appearance owner and token sheet, as the browser parses them."""
+    script = re.search(r"<script>(.*?)</script>", page, re.S)
+    style = re.search(r"<style>(.*?)</style>", page, re.S)
+    return (script.group(1) if script else "", style.group(1) if style else "")
+
+
+def test_builtin_form_wears_the_interface_appearance_before_any_asset(monkeypatch):
+    """The form answers before the gate lets anything load, so it carries theme.js and ui.css itself:
+    this browser's saved Light / Dark / System, else the device's (tests/test_theme_before_interface_browser.py
+    renders it). Nothing behind the gate becomes public for it."""
+    with _make_client(monkeypatch) as client:
+        for page in (client.get("/", follow_redirects=False), client.get("/auth/login?next=/api/secret")):
+            script, style = _inlined(page.text)
+            assert script == (WEB / "theme.js").read_text(encoding="utf-8")
+            assert style == (WEB / "ui.css").read_text(encoding="utf-8")
+            assert '<html lang="en" class="ouro-ui">' in page.text
+            assert page.text.index("<script>") < page.text.index("<style>")  # the palette is chosen before any style
+            assert 'class="ui-control"' in page.text and 'class="btn btn-primary"' in page.text
+            assert page.headers["cache-control"] == "no-store"
+        assert client.get("/static/theme.js").status_code == 401
+        assert client.get("/static/ui.css").status_code == 401
+
+
+def test_wrong_password_keeps_the_appearance_and_announces_the_error(monkeypatch):
+    with _make_client(monkeypatch) as client:
+        resp = client.post("/auth/login", data={"password": "wrong", "next": "/api/secret"}, follow_redirects=False)
+        assert resp.status_code == 401
+        assert '<p class="gate-error" role="alert">Invalid password.</p>' in resp.text
+        assert _inlined(resp.text)[0] == (WEB / "theme.js").read_text(encoding="utf-8")
+        assert 'value="/api/secret"' in resp.text
+
+
+def test_builtin_form_under_a_selected_interface_wears_only_builtin_files(monkeypatch, tmp_path):
+    """A selected directory without its own login page gets the builtin form, never mixed with that
+    directory's files (docs/development/13-gateway-boundary-pattern.md)."""
+    from ouroboros.server_web import ServedUI
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (selected / "index.html").write_text("<!doctype html><title>selected</title>", encoding="utf-8")
+    (selected / "theme.js").write_text("/* SELECTED-THEME */", encoding="utf-8")
+    (selected / "ui.css").write_text("/* SELECTED-TOKENS */", encoding="utf-8")
+    served = ServedUI(pathlib.Path(__file__).resolve().parents[1])
+    app = Starlette(routes=[Route("/", endpoint=_ok)])
+    monkeypatch.setattr("ouroboros.server_process.record_applied_restart_settings", lambda settings: None)
+    assert served.apply(app, {"OUROBOROS_UI_DIR": str(selected)}).source == "directory"
+    monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: "secret")
+    with TestClient(server_auth.NetworkAuthGate(app, served_ui=served)) as client:
+        for page in (client.get("/", follow_redirects=False), client.get("/auth/login")):
+            assert page.status_code in (200, 401)
+            assert "SELECTED-" not in page.text
+            assert _inlined(page.text) == ((WEB / "theme.js").read_text(encoding="utf-8"),
+                                           (WEB / "ui.css").read_text(encoding="utf-8"))
+
+
+def test_builtin_form_without_readable_assets_stays_a_usable_form(tmp_path, caplog):
+    page = server_auth._login_page("/", "Invalid password.", web_dir=tmp_path / "missing")
+    assert "<script>" not in page and '<meta name="color-scheme" content="light dark">' in page
+    assert 'name="password"' in page and "Unlock" in page and "Invalid password." in page
+    assert "var(--bg-primary, Canvas)" in page  # the system's own colours, readable in either appearance
+    assert "was not inlined" in caplog.text

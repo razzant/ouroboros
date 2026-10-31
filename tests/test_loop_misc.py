@@ -2,8 +2,7 @@
 
 Consolidated from former ``test_loop_incoming_messages.py`` (image payload
 preservation) and ``test_loop_skill_finalization.py``, then divided by theme
-(the v7 L-B test split): the task-acceptance gate lives in
-``test_loop_acceptance_gate.py``, the self-authored skill finalization gate in
+(the v7 L-B test split): the self-authored skill finalization gate lives in
 ``test_loop_skill_finalization.py``, the ``run_llm_loop`` round/finalization
 suite in ``test_run_llm_loop.py`` and the image auto-attach seam in
 ``test_loop_image_attach.py``.
@@ -24,9 +23,10 @@ import pytest
 import ouroboros.loop as loop_mod
 from ouroboros.loop_llm_call import RETRY_WALL_EXHAUSTED_KEY
 from ouroboros.loop import (
+    _latch_final_answer_marker,
+    _server_web_allowed_by_task,
     run_llm_loop,
 )
-from ouroboros.loop_acceptance import _latch_final_answer_marker, _server_web_allowed_by_task
 from ouroboros.loop_messages import _initialize_owner_directives
 from ouroboros.loop_nudges import _inject_round_checkpoints, _maybe_inject_time_budget_milestone
 from ouroboros.loop_round_limits import _drain_incoming_messages
@@ -517,9 +517,9 @@ def test_other_forced_rails_never_skip_even_with_the_wall_marker_set(
 
 def test_quiz_answers_and_principal_messages_enter_the_directive_corpus_but_system_frames_do_not(tmp_path):
     """The premises every review reads: an owner quiz answer at a root and a parent's
-    message to a child grow ``_owner_directives`` (the count that supersedes a paid
-    acceptance verdict and binds an advisory author finish); a host system frame and a
-    descendant's escalation are delivered as before but never recorded as directives."""
+    message to a child grow ``_owner_directives`` (the owner's words a review reads and
+    the count a completion selection binds); a host system frame and a descendant's
+    escalation are delivered as before but never recorded as directives."""
     from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message, write_task_message
 
     ctx = SimpleNamespace()

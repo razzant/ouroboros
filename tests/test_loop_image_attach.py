@@ -19,9 +19,11 @@ def test_tool_results_carrying_auto_attach_image_get_the_image_same_round(tmp_pa
     from ouroboros.loop_tool_execution import process_tool_results
 
     attached = []
+    stamps = []
 
-    def fake_attach(ctx, path):
+    def fake_attach(ctx, path, *, stamp=None, observation=None):
         attached.append(path)
+        stamps.append(stamp)
         ctx.messages.append({"role": "user", "content": [{"type": "image_url"}]})
         return True, "attached"
 
@@ -54,6 +56,7 @@ def test_tool_results_carrying_auto_attach_image_get_the_image_same_round(tmp_pa
     errors = process_tool_results(rows, messages, {"tool_calls": []},
                                   emit_progress=lambda _m, *, incident=None: None, tools=tools)
     assert attached == ["/x/shot.png"], "exactly the opted-in successful result attaches"
+    assert stamps == [tools._ctx], "an eviction is stamped on the live slot, not a staged copy"
     assert errors == 1
     # Ordering: in a multi-result round the image lands AFTER the round's complete
     # tool-message block, never between two tool messages answering one assistant
@@ -63,7 +66,7 @@ def test_tool_results_carrying_auto_attach_image_get_the_image_same_round(tmp_pa
     assert roles[:first_image] == ["tool"] * 4, roles
     # Attachment failure stays non-fatal and the tool result survives untouched.
     monkeypatch.setattr(vision, "attach_local_image_to_context",
-                        lambda ctx, path: (_ for _ in ()).throw(RuntimeError("boom")))
+                        lambda ctx, path, *, stamp=None: (_ for _ in ()).throw(RuntimeError("boom")))
     messages2: list = []
     tools2 = SimpleNamespace(_ctx=SimpleNamespace(messages=messages2, drive_root=str(tmp_path)))
     errors2 = process_tool_results(

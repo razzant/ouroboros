@@ -2,17 +2,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { bridgeChunkBuffer, moduleBridgeScript, moduleResizeScript } from '../modules/widget_frame.js';
+import { FakeMessageChannel } from './helpers/fake_channel.js';
 
-// Runs the child bootstrap against a fake `window`; `deliver` plays a
-// parent → child message, `posted` records child → parent messages.
+// Runs the child bootstrap against a fake `window`; `deliver` plays a parent → child message on the channel
+// the bootstrap handed over in its hello, `posted` records child → parent messages on that channel, and
+// `windowPosted` anything posted to the parent window itself (only the hello).
 function bridgeHarness({ active = false, activationApi = true, initialTheme = '' } = {}) {
     const posted = [];
-    const parent = { postMessage(message) { posted.push(message); } };
+    const windowPosted = [];
+    let hostPort = null;
+    const parent = {
+        postMessage(message, _origin, transfer = []) {
+            windowPosted.push(message);
+            if (message?.type === 'ouro-widget-hello') {
+                hostPort = transfer[0];
+                hostPort.onmessage = (event) => posted.push(event.data);
+            }
+        },
+    };
     const listeners = new Map();
     const docListeners = new Map();
     const originalOpen = () => null;
     const window = {
         parent,
+        MessageChannel: FakeMessageChannel,
         open: originalOpen,
         navigator: activationApi ? { userActivation: { isActive: active } } : {},
         document: {
@@ -25,17 +38,23 @@ function bridgeHarness({ active = false, activationApi = true, initialTheme = ''
         },
     };
     Function('window', moduleBridgeScript('nonce-1', '', initialTheme))(window);
-    const deliver = (data, source = parent) => listeners.get('message')?.({ source, data: { nonce: 'nonce-1', ...data } });
+    // The parent speaks only on the channel; anything from another window would arrive as a window message,
+    // which the bridge does not listen to.
+    const deliver = (data, source = parent) => {
+        const message = { nonce: 'nonce-1', ...data };
+        if (source === parent) hostPort?.postMessage(message);
+        else listeners.get('message')?.({ source, data: message });
+    };
     const chunk = (id, phase, extra = {}) => deliver({ type: 'ouro-widget-fetch-chunk', id, phase, ...extra });
     const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-    return { window, posted, listeners, docListeners, originalOpen, deliver, chunk, flush };
+    return { window, posted, windowPosted, listeners, docListeners, originalOpen, deliver, chunk, flush, port: () => hostPort };
 }
 
 const bytes = (...values) => new Uint8Array(values).buffer;
 
 test('both bootstrap templates are valid scripts and the bridge opens no transport of its own', () => {
     assert.doesNotThrow(() => Function(moduleBridgeScript('n')));
-    assert.doesNotThrow(() => Function(moduleResizeScript('n', 320, 8192, 2)));
+    assert.doesNotThrow(() => Function(moduleResizeScript(320, 8192, 2)));
     const child = moduleBridgeScript('n');
     for (const forbidden of ['EventSource(', 'WebSocket(', 'setTimeout(', 'XMLHttpRequest', 'ouro-widget-fetch-result']) {
         assert.equal(child.includes(forbidden), false, forbidden);
@@ -177,7 +196,7 @@ test('events subscribe on the first listener, deliver {type, data}, unsubscribe 
     // Frames from a foreign source or with another nonce are ignored.
     window.OuroborosWidget.onEvent((event) => seen.push(['c', event]));
     deliver({ type: 'ouro-widget-event', event: 'tick', data: {} }, {});
-    listeners.get('message')({ source: window.parent, data: { nonce: 'other', type: 'ouro-widget-event', event: 'tick', data: {} } });
+    deliver({ nonce: 'other', type: 'ouro-widget-event', event: 'tick', data: {} });
     assert.equal(seen.length, 2);
 });
 
@@ -203,7 +222,7 @@ test('theme callbacks reject foreign sources, invalid values and dispose cleanly
     const seen = [];
     window.OuroborosWidget.onTheme((theme) => seen.push(theme));
     deliver({ type: 'ouro-widget-theme', theme: 'light' }, {});
-    listeners.get('message')({ source: window.parent, data: { nonce: 'wrong', type: 'ouro-widget-theme', theme: 'light' } });
+    deliver({ nonce: 'wrong', type: 'ouro-widget-theme', theme: 'light' });
     deliver({ type: 'ouro-widget-theme', theme: 'system' });
     assert.deepEqual(seen, ['dark']);
     deliver({ type: 'ouro-widget-dispose' });
@@ -385,9 +404,9 @@ test('download uses the nonce bridge and settles from the actual host outcome', 
     assert.equal(posted[0].type, 'ouro-widget-download');
     assert.equal(posted[0].source, blob);
     assert.equal(posted[0].name, 'report.txt');
-    listeners.get('message')({ source: window.parent, data: {
+    deliver({
         nonce: 'foreign', type: 'ouro-widget-download-result', id: 1, result: { ok: true },
-    } });
+    });
     await flush();
     assert.equal(settled, false);
     deliver({ type: 'ouro-widget-download-result', id: 1, result: { ok: true, native: true, filename: 'report.txt' } });
@@ -433,4 +452,36 @@ test('trusted anchors work on old hosts; synthetic, handled, download and intern
     assert.equal(click('https://example.com').defaultPrevented, true);
     assert.equal(h.posted.length, 1);
     h.deliver({ type: 'ouro-widget-open-external-result', id: 1, result: { ok: true } });
+});
+
+test('the bootstrap says hello once to its parent window with its nonce and a port, and nothing else', () => {
+    const { windowPosted, posted, port, window } = bridgeHarness();
+    assert.deepEqual(windowPosted, [{ type: 'ouro-widget-hello', nonce: 'nonce-1' }]);
+    assert.ok(port(), 'the hello carries the channel');
+    window.OuroborosWidget.onEvent(() => {});
+    window.fetch('/api/extensions/s/x');
+    assert.equal(windowPosted.length, 1, 'requests travel on the channel, never to the parent window');
+    assert.deepEqual(posted.map((m) => m.type), ['ouro-widget-events', 'ouro-widget-fetch']);
+});
+
+test('a message from any window, even the parent window, is not heard: only the channel speaks', async () => {
+    const { window, listeners, deliver, flush } = bridgeHarness();
+    const seen = [];
+    window.OuroborosWidget.onEvent((event) => seen.push(event));
+    assert.equal(listeners.has('message'), false);
+    deliver({ type: 'ouro-widget-event', event: 'tick', data: {} }, {});
+    deliver({ type: 'ouro-widget-event', event: 'tick', data: { n: 1 } });
+    await flush();
+    assert.deepEqual(seen, [{ type: 'tick', data: { n: 1 } }]);
+});
+
+test('ready resolves when the parent accepts the channel', async () => {
+    const { window, deliver } = bridgeHarness();
+    let ready = false;
+    window.OuroborosWidget.ready.then(() => { ready = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ready, false);
+    deliver({ type: 'ouro-widget-ready', routeBase: 'https://h/api/extensions/s/' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ready, true);
 });

@@ -36,9 +36,7 @@ the host speaking about the turn: it passes ``incident=None`` and keeps the
 default voice, so an ``emit_progress`` callable handed to ``run_llm_loop`` must
 accept the emitter's keyword facts (``incident``, ``narration``).
 
-Also hosts the owner-facing provider-failure text helpers and terminal salvage
-readers used by that terminal path (extracted from ``loop.py``, which is at its
-size-ratchet byte cap).
+Terminal/fallback text and salvage readers share this owner (extracted from byte-capped ``loop.py``).
 """
 
 from __future__ import annotations
@@ -73,15 +71,11 @@ _FINAL_REDIAL_MARGIN_SEC = 3.0
 
 @dataclass
 class TransportWaitEpisode:
-    """One remote outage or chosen wait for temporary primary-provider refusals.
+    """One outage or chosen wait for a temporary primary refusal.
 
-    The latch — not the mutable ``_last_llm_error_kind`` projection — carries the
-    terminal cause: later failures (a failed local fallback pass, the deadline
-    admission gate) overwrite the usage projection, and the terminal decision
-    must stay deterministic (no forced-final resend after a waited-out outage).
-    ``interactive`` is the wait-class fact (every turn stamped direct-chat);
-    ``wait_bound_sec`` is the local ceiling an interactive turn gets in place
-    of the queue rails it does not have.
+    The latched cause survives later fallback/admission errors overwriting usage;
+    exhaustion stays deterministic, without forced-final resend. Direct-chat turns
+    are ``interactive``; their local ``wait_bound_sec`` replaces absent queue rails.
     """
 
     wait_cause: str = "transport_unavailable"
@@ -279,7 +273,10 @@ def fallback_chain_allowed(
         return False
     if last_error_kind == "provider_outcome_unknown":
         return new_generation_after_unknown(ctx, accumulated_usage)
-    return last_error_kind not in ("deadline_exhausted", "llm_output_exhausted")
+    if last_error_kind == "llm_output_exhausted":
+        from ouroboros.loop_output_exhaustion import ready_for_fallback
+        return ready_for_fallback(usage) and not getattr(ctx, "route_wait_on_primary", False)
+    return last_error_kind not in ("deadline_exhausted", "output_recovery_interrupted")
 
 
 def reconcile_transport_wait(
@@ -395,7 +392,8 @@ def reconcile_transport_wait(
         unknown = unknown_again
         if msg_present or (error_kind != "transport_unavailable" and not unknown and not refused):
             return None
-        interactive = bool(getattr(ctx, "is_direct_chat", False))
+        from ouroboros.task_carrier import inline_execution
+        interactive = inline_execution(ctx)
         episode = TransportWaitEpisode(
             wait_cause=error_kind,
             outcome_custody=dict((getattr(ctx, "_accumulated_usage", {}) or {}).get("_pending_transport_outcome") or {}),
@@ -842,9 +840,17 @@ def provider_terminal_fallback_text(
                 f"after {waited_sec / 60.0:.1f} min. No new summary request was sent. "
                 "Completed work and the original attempt-cost records are preserved.")
     if is_context_overflow:
+        from ouroboros.context_anchor import REFUSED_INPUTS_KEY
+
+        refused = min((int(v) for v in (accumulated_usage.get(REFUSED_INPUTS_KEY) or {}).values() if v), default=0)
+        parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in accumulated_usage.get("_context_refusal_frame") or [])
+        facts = "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
+                                             f"largest parts: {parts}" if parts else "") if fact)
         return (
-            "⚠️ The context exceeded the selected model window; no further provider call was made. "
-            "Any files written so far are preserved in the workspace."
+            "⚠️ Context-size recovery ended without a fitting request; no further provider call was made. "
+            "The recovery passes, the configured fallback and a renewed view could not make it fit"
+            f"{f' ({facts})' if facts else ''}. The exact transcript and any files written so far are preserved."
+            + _failure_window_fact(accumulated_usage, overflow=True)
         )
     if is_transport_wait:
         if unknown:
@@ -886,13 +892,31 @@ def provider_terminal_fallback_text(
         f"{_unknown_terminal_recovery_hint(accumulated_usage) if unknown else provider_recovery_hint(accumulated_usage)}"
         f"{UNKNOWN_ATTEMPT_COST_NOTE if unknown else ''} "
         "Any files written so far are preserved in the workspace."
+        + _failure_window_fact(accumulated_usage)
     )
 
 
+def _failure_window_fact(usage, *, overflow=False):
+    if not overflow and usage.get("_last_llm_error_kind") not in {"bad_request", "request_too_large", "context_overflow"}:
+        return ""
+    from ouroboros.capability_evidence import _parse_ctx_requested
+    from ouroboros.context_view_facts import window_projection
+    from ouroboros.context_window import WindowRecord
 
-# The host's own words for a failure class when the provider left no readable
-# sentence (#1369). The typed kind stays on the record and in the llm_api_error
-# event; a person reads the class, never the exception repr.
+    input_tokens, _reply, total = _parse_ctx_requested(usage.get("_last_llm_provider_message", ""))
+    if input_tokens or total:
+        request = f"request {'input' if input_tokens else 'total'} {input_tokens or total:,} tokens (provider stated)"
+    else:
+        estimate = int(usage.get("_context_prompt_estimate") or 0)
+        request = f"request input estimated {estimate:,} tokens" if estimate else "request size unknown"
+    window = usage.get("_context_window") or window_projection(WindowRecord("", reserve=int(
+        usage.get("_context_response_reserve_tokens") or 0)))
+    return f"\n{request}; assumed {window['text']}."
+
+
+
+# Host vocabulary: terminal rows without provider words, and fallback's previous route.
+# Typed kinds stay in the record/llm_api_error; owner text never uses exception repr.
 _FAILURE_KIND_WORDS = {
     "auth_error": "an authentication or authorization refusal",
     "quota_exhausted": "a quota or billing refusal",
@@ -902,6 +926,7 @@ _FAILURE_KIND_WORDS = {
     "request_too_large": "a request the provider found too large",
     "context_overflow": "a context overflow",
     "transport_unavailable": "a request that never reached the provider",
+    "provider_policy_refusal": "a refusal before any provider was reached (a connection that is unavailable, or a policy)",
     "provider_outcome_unknown": "an attempt with no known outcome",
     "provider_transient": "a temporary provider failure",
     "provider_incomplete_response": "an incomplete response",
@@ -912,25 +937,19 @@ _FAILURE_KIND_WORDS = {
     "model_substituted": "an answer from a model other than the requested one",
     "deadline_exhausted": "the owner deadline running out before dispatch",
 }
-# Logs hold the host's record, not necessarily the provider's whole sentence: a
-# stream error frame's text reaches the durable event only as a bounded excerpt.
+# Logs may retain only a bounded stream-error excerpt, not the whole provider sentence.
 _DIAGNOSTIC_POINTER = "The task's Logs keep the host's record of this failure."
-# The owner's quote of a provider sentence passes the SSOT display bound; past it
-# the quote is shortened in words beside the Logs pointer, never silently cut.
+# Quotes past the SSOT display bound disclose shortening beside the Logs pointer.
 _OWNER_QUOTE_LIMIT = 600
 
 
 def owner_provider_message(failure: Any) -> str:
-    """The provider's OWN sentence about a failed call, whole, or "" when there is none.
+    """Whole provider sentence from a structured body/stream error or body-error dict.
 
-    ``failure`` is the raised exception — a structured error body's ``message``,
-    a stream error's provider message — or an empty response's body-error dict
-    (its ``message``). A Python exception repr is never one of those: it stays in
-    the durable ``llm_api_error`` event and ``_last_llm_error`` for diagnostics
-    (#1369). Nor is a Claudexor engine error's text: its ``display_message`` joins
-    host-side diagnostics (stage, cause, engine code, the engine's own message)
-    and its provider body stays private, so only its typed provider fields speak
-    (``owner_provider_fields``). The owner's row bounds it (``provider_failure_hint``).
+    No sentence returns "". Exception repr belongs to ``llm_api_error`` and
+    ``_last_llm_error`` diagnostics, not owner text. Claudexor's composed display
+    (stage/cause/engine/capability facts) and private body are excluded; only its
+    ``owner_provider_fields`` speak. ``_provider_quote`` bounds the owner's quote.
     """
     from ouroboros.llm_claudexor import ClaudexorModelError
     from ouroboros.utils import sanitize_tool_result_for_log
@@ -948,9 +967,7 @@ def owner_provider_message(failure: Any) -> str:
 
 
 def owner_provider_fields(failure: Any) -> Dict[str, str]:
-    """The typed fields a provider itself returned through the Claudexor engine —
-    its error ``code`` and the refused ``parameter`` — or {}. An unknown outcome
-    exposes none, as in ``ClaudexorModelError.display_message``."""
+    """Typed Claudexor provider code/parameter, or {} (also for an unknown outcome)."""
     from ouroboros.llm_claudexor import ClaudexorModelError
     from ouroboros.utils import sanitize_tool_result_for_log
 
@@ -964,13 +981,10 @@ def owner_provider_fields(failure: Any) -> Dict[str, str]:
 
 
 def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any) -> None:
-    """Replace ``_last_llm_provider_message`` with ``failure``'s own sentence and
-    ``_last_llm_provider_fields`` with its typed provider fields, or clear them.
-    ``_last_llm_provider_message_cut`` marks a sentence its producer already cut
-    (an empty response's body error keeps only a bounded ``message``).
+    """Replace/clear this call's provider sentence, fields and producer-cut marker.
 
-    Stamped by the call owner (``loop_llm_call``) at each failed call, so an
-    earlier round's sentence never speaks for this one.
+    ``loop_llm_call`` stamps each failure so older words cannot speak for it;
+    body-error messages may already be bounded (``_last_llm_provider_message_cut``).
     """
     cut = isinstance(failure, dict) and failure.get("message_truncated") is True
     for key, value in (("_last_llm_provider_message", owner_provider_message(failure)),
@@ -981,16 +995,13 @@ def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any
             accumulated_usage[key] = value
 
 
-def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
-    """The provider's own sentence (a long one shortened in words, with the Logs
-    pointer), or the host's classification with that pointer.
+def _failure_words(kind: str) -> str:
+    """The table's words for a failure class; a class it does not list is only a provider failure."""
+    return _FAILURE_KIND_WORDS.get(kind, "a provider failure")
 
-    Quotes only ``_last_llm_provider_message`` — text a provider positively
-    authored (``stamp_owner_provider_message``); typed provider fields without a
-    sentence are named as the provider's beside the host's classification. The
-    exception repr in ``_last_llm_error`` and an engine's composed display text
-    are never appended: they belong to Logs and task details.
-    """
+
+def _provider_quote(accumulated_usage: Dict[str, Any]) -> str:
+    """The provider's own sentence, a long one shortened in words beside the Logs pointer, or ""."""
     from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 
     message = " ".join(sanitize_tool_result_for_log(
@@ -1000,10 +1011,21 @@ def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
         return f" The provider said: \"{message}\""
     if message:  # its producer or the SSOT cut it (the SSOT's anti-waste floor lets a small overflow through whole)
         return f" The provider said: \"{message[:_OWNER_QUOTE_LIMIT].rstrip()}…\" (shortened). {_DIAGNOSTIC_POINTER}"
+    return ""
+
+
+def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
+    """Quote only the stamped provider sentence; disclose shortening with a Logs pointer.
+
+    Without a sentence, attribute typed provider fields beside the host's class and
+    Logs pointer. Exception repr and composed engine text stay in Logs/task details.
+    """
+    if quote := _provider_quote(accumulated_usage):
+        return quote
     kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
     if not kind and not str(accumulated_usage.get("_last_llm_error") or "").strip():
         return ""
-    words = _FAILURE_KIND_WORDS.get(kind, "a provider failure")
+    words = _failure_words(kind)
     fields = accumulated_usage.get("_last_llm_provider_fields")
     fields = fields if isinstance(fields, dict) else {}
     named = [f'{label} "{fields[key]}"' for key, label in (("code", "error code"), ("parameter", "parameter"))
@@ -1012,6 +1034,17 @@ def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
         return (f" The provider reported {' and '.join(named)} but no sentence the host can quote; "
                 f"the host classified the failure as {words}. {_DIAGNOSTIC_POINTER}")
     return f" No readable provider message is available; the host classified the failure as {words}. {_DIAGNOSTIC_POINTER}"
+
+
+def fallback_reason_text(accumulated_usage: Dict[str, Any]) -> str:
+    """Explain the previous failure and surviving facts, then quote its provider sentence.
+
+    No duplicate class/typed fields; only a shortened quote points at Logs."""
+    kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
+    after = {"auth_error": "; sign-in is still needed there",
+             "provider_outcome_unknown": "; the earlier attempt’s outcome and cost stay unknown"}.get(kind, "")
+    return (f" Trying the next model{f' after {_failure_words(kind)}' if kind else ''}{after}."
+            f"{_provider_quote(accumulated_usage)}")
 
 
 # What the host KNOWS it did. It asks again and names no account; which account
@@ -1147,6 +1180,14 @@ def provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
             " The provider refused the stored continuation of this conversation "
             "rather than the request itself. Dropping it and sending the same "
             "conversation again is the repair, and this round already spent it."
+        )
+    from ouroboros.llm_substitution import capability_refused
+
+    if kind == "bad_request" and capability_refused(accumulated_usage):
+        return (
+            " The accounts tried cannot serve this model, and this round asks no other account. "
+            "A later request may reach another one; when none can, the owner chat names them "
+            "and Accounts shows any temporary marks."
         )
     if kind in {"quota_exhausted", "auth_error", "request_too_large", "bad_request", "context_overflow"}:
         guidance = {

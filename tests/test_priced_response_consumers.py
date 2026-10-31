@@ -19,6 +19,7 @@ from tests import test_openrouter_transport_evidence as evidence_fixtures
 from tests.test_openrouter_transport_evidence import Wire, frame, run_driver, target
 
 from tests.test_transport_death_retry import _loop_kwargs, _no_chain, _presence_turn
+from tests._shared import saved_settings
 
 isolated = evidence_fixtures.isolated
 
@@ -50,7 +51,7 @@ class StreamConsumer:
 
 def presence(root, monkeypatch, consumer):
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
+    saved_settings(monkeypatch, root, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     monkeypatch.setattr(loop, "_run_cross_model_fallback_chain", _no_chain)
     monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline",

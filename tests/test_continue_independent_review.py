@@ -9,6 +9,8 @@ helper (builder A's owner); no transport, reviewer or model is involved.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from ouroboros import delegate_custody as dc
@@ -88,10 +90,12 @@ def _delegated(blockers):
     return sorted(b.get("run_id") or b.get("invocation_id") for b in blockers if b["kind"] == "delegated_run")
 
 
-def test_the_observation_carries_source_and_independence_without_filtering(tmp_path):
+def test_the_observation_carries_source_and_independence_without_filtering(tmp_path, monkeypatch):
+    from ouroboros import delegate_pending
     from ouroboros.budget_pause import observe_task_runs
 
     _rows(tmp_path, review_with_snapshot=True, review_investigation=True, pending_review=True)
+    monkeypatch.setattr(delegate_pending, "request_body", lambda *a: pytest.fail("census opened a request body"))
     observed = observe_task_runs(tmp_path, PRED, reason="continuation_writer_check", request_stop=False)
     assert observed["custody_read"] == "ok"
     by_id = {row["run_id"] or row["invocation_id"]: row for row in observed["runs"]}
@@ -141,8 +145,10 @@ def test_an_observation_without_the_independence_fact_keeps_holding(tmp_path, mo
 
 
 def _open_attempt(root, *, source, slot=None, review_skill="", request_source=None):
-    """One unresolved API attempt through the real scope merge: the bound scope
-    carries the slot attribution, the request may stamp its route's own ``source``."""
+    """One API attempt still in flight through the real scope merge: the bound scope
+    carries the slot attribution, the request may stamp its route's own ``source``.
+    Its send has not returned, so it is a model request with no result for every census
+    (an unbound send that already raised is not: tests/test_completed_model_handoff.py)."""
     from ouroboros import usage_accounting as ua
 
     slot = (SLOT if source.startswith("review_substrate") else "") if slot is None else slot
@@ -150,13 +156,11 @@ def _open_attempt(root, *, source, slot=None, review_skill="", request_source=No
                           **({"category": "task_acceptance_review", "review_slot_id": slot} if slot else {}),
                           review_skill=review_skill)
     with ua.usage_scope(scope):
-        def send():
-            raise RuntimeError("unknown send")
-        with pytest.raises(RuntimeError, match="unknown send"):
-            ua.execute_physical_attempt(ua.AttemptRequest(model="m", provider="test", reservation_usd=0.2,
-                                                          **({"source": request_source} if request_source else {})), send)
+        reservation = ua.reserve_attempt(ua.AttemptRequest(
+            model="m", provider="test", reservation_usd=0.2, **({"source": request_source} if request_source else {})))
+        ua.mark_dispatched(reservation, local_answer_owner_pid=os.getpid())
     row = ua.read_usage_records(root, final_only=True)[-1]
-    assert row["state"] == "unresolved"
+    assert row["state"] == "dispatched"
     assert (row["source"], row["review_slot_id"], row["review_skill"]) == (
         request_source or source, slot, review_skill)
     return row["attempt_id"]
@@ -181,7 +185,7 @@ def test_a_review_attributed_model_attempt_does_not_hold_continue_but_an_author_
 def test_admission_and_held_selection_both_use_the_continue_purpose(tmp_path, monkeypatch):
     from supervisor.continuation_admission import admit_continuation
     from supervisor.events_budget import observe_held_budget_selection
-    from ouroboros.budget_pause import budget_hold_fact
+    from ouroboros.work_stop import hold_fact as budget_hold_fact
 
     queue, _state, _workers = _install_queue(tmp_path, monkeypatch)
     _interrupted(tmp_path, PRED, origin={"source": "owner_restart", "reason": "owner_restart", "scope": "single"})
@@ -220,7 +224,7 @@ def test_continue_admits_unheld_when_only_independent_reviews_are_live(tmp_path,
 def test_live_held_continue_resume_selects_same_successor_and_assigns_it(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from ouroboros.budget_pause import budget_hold_fact
+    from ouroboros.work_stop import hold_fact as budget_hold_fact
     from supervisor.continuation_admission import admit_continuation, conflicting_writers
 
     queue, _state, workers = _install_queue(tmp_path, monkeypatch)
@@ -259,8 +263,8 @@ def test_live_held_continue_resume_selects_same_successor_and_assigns_it(tmp_pat
     assert billing["billing_group_id"] == PRED
     assert billing["billing_group_limit_usd"] == 20.0
     assert billing["billing_group_limit_source"] == "initial_task_admission"
-    assert sent[0]["_budget_pause_hold"]["selected"] is True
-    assert sent[0]["_budget_pause_hold"]["selected_by"] == "owner"
+    assert "_budget_pause_hold" not in sent[0] and "_resume_selection" in sent[0]
+    assert sent[0]["_resume_selection"]["selected_by"] == "owner"
     # Resume released only this successor; the independent readonly request is
     # still unresolved custody for the money/Pause census.
     assert _delegated(conflicting_writers(queue, PRED)) == ["inv-review", "run-review"]

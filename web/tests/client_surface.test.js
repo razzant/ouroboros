@@ -10,10 +10,10 @@ function mockWindow({ pywebviewApi = undefined, narrow = false, coarse = false }
         pywebview: pywebviewApi === undefined ? undefined : { api: pywebviewApi },
         innerWidth: 1234,
         innerHeight: 777,
-        matchMedia: (query) => ({
-            matches: query.includes('max-width') ? narrow : coarse,
-        }),
+        matchMedia: () => ({ matches: coarse }),
     };
+    // theme.js paints the shell's layout switch on the root; the snapshot reads that, never a query of its own.
+    globalThis.document = { documentElement: { dataset: { layout: narrow ? 'stack' : 'docked' } } };
 }
 
 if (typeof navigator === 'undefined') {
@@ -31,9 +31,11 @@ test('snapshot measures raw observables at call time', async () => {
     assert.equal(snap.coarse_pointer, false);
     assert.ok(!Number.isNaN(Date.parse(snap.captured_at)), 'captured_at must be a parseable timestamp');
     assert.equal(snap.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+    assert.equal(snap.device_pixel_ratio, 1, 'a window that reports no ratio reads as 1');
+    // interface_size joins only where the page sets the size (the desktop app, a touch screen); this is a browser.
     assert.deepEqual(
         Object.keys(snap).sort(),
-        ['captured_at', 'coarse_pointer', 'narrow_layout', 'pywebview', 'timezone', 'ua', 'viewport'],
+        ['captured_at', 'coarse_pointer', 'device_pixel_ratio', 'narrow_layout', 'pywebview', 'timezone', 'ua', 'viewport'],
         'the wire shape is a closed set — a renamed/added key breaks the backend contract silently',
     );
 });
@@ -65,6 +67,7 @@ test('field helper wraps the snapshot and stays honest on breakage', async () =>
     assert.deepEqual(Object.keys(field), ['client_surface']);
     // A broken environment yields an honest null / empty spread, never a guess.
     globalThis.window = undefined;
+    globalThis.document = undefined;
     assert.equal(clientSurfaceSnapshot(), null);
     assert.deepEqual(clientSurfaceField(), {});
 });

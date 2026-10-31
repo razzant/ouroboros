@@ -14,6 +14,8 @@ Covers the four legs of the meta-fix:
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -154,7 +156,7 @@ def _tool_ctx(tmp_path, events, metadata):
 
 
 def test_promote_tool_passes_origin_by_value_despite_rewritten_objective(tmp_path, monkeypatch):
-    from ouroboros.tools.control import _promote_chat_to_task
+    from ouroboros.tools.control import _start_task
 
     monkeypatch.setattr(
         "ouroboros.tools.control_events._wait_for_promotion_admission",
@@ -166,12 +168,12 @@ def test_promote_tool_passes_origin_by_value_despite_rewritten_objective(tmp_pat
         "origin_message_ref": _ref(),
         "origin_message_text": OWNER_TEXT,
     })
-    out = _promote_chat_to_task(
+    out = _start_task(
         ctx,
         objective="Create a standalone 3D browser game about a robot (LLM-rewritten)",
         title="Robot browser game",
         project_name="Robot City Adventure",
-        predecessor_task_id="",
+
     )
     assert out.startswith("OK: task")
     evt = events[0]
@@ -180,7 +182,7 @@ def test_promote_tool_passes_origin_by_value_despite_rewritten_objective(tmp_pat
 
 
 def test_ensure_scope_tool_attaches_task_origin(tmp_path):
-    from ouroboros.tools.control_delegation import _ensure_project_scope
+    from ouroboros.tools.control_delegation import _move_to_project
 
     events = []
     ctx = _tool_ctx(tmp_path, events, {
@@ -190,8 +192,8 @@ def test_ensure_scope_tool_attaches_task_origin(tmp_path):
     ctx.project_id = ""
     ctx.task_id = "t-run"
     ctx.task_contract = {}
-    out = _ensure_project_scope(ctx, project_name="Robot City")
-    assert out.startswith("⚠️ SCOPE_UNCONFIRMED")  # deferred transport: no bind landed yet
+    out = _move_to_project(ctx, project_name="Robot City")
+    assert out.startswith("SCOPE_UNCONFIRMED")  # deferred transport: no bind landed yet
     evt = [e for e in events if e.get("type") == "ensure_project_scope"][0]
     assert evt["source_ref"] == _ref()
     assert evt["source_text"] == OWNER_TEXT
@@ -404,7 +406,7 @@ def test_real_log_chat_honors_explicit_ts(tmp_path, monkeypatch):
         "in", 1, 1, OWNER_TEXT, ts="2026-07-19T21:10:38Z",
         client_message_id="owner-msg-1",
     )
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    row = json.loads(dialogue_test.log_text(tmp_path / "logs" / "chat.jsonl").splitlines()[0])
     assert row["ts"] == "2026-07-19T21:10:38Z"
     assert row["client_message_id"] == "owner-msg-1"
     assert entry_matches_ref_row(row)

@@ -17,41 +17,24 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_emit_checkpoint_event _extract_plain_text_from_content "
         "_append_or_merge_user_message _evict_stale_image_blocks "
         "_append_or_merge_user_content _owner_marked_content _record_owner_directive "
-        "_initialize_owner_directives _visible_round_text _emit_round_progress"
+        "_initialize_owner_directives _visible_round_text _emit_round_progress "
+        "_latch_final_answer_marker"
     ),
-    "loop_acceptance": (
-        "_task_acceptance_eligible _begin_task_acceptance_fence "
-        "_end_task_acceptance_fence _supersede_delivery_acceptance_binding "
-        "_supersede_task_acceptance_for_owner_followup "
-        "_task_acceptance_owner_generation_changed "
-        "_supersede_task_acceptance_for_evidence_change "
-        "_task_acceptance_subtree_snapshot _mark_root_acceptance_checkpoint "
-        "_latch_final_answer_marker _server_web_allowed_by_task "
-        "ACCEPTANCE_REASON_UNSPECIFIED ACCEPTANCE_DECISION_REASONS "
-        "_set_acceptance_decision _collect_acceptance_obligations _reopen_obligation_row "
-        "_open_acceptance_obligations _dispose_obligations_on_clean_pass "
-        "_format_obligations_clause _record_forced_acceptance_bypass"
-    ),
-    "loop_acceptance_review": (
-        "_ACCEPTANCE_REVIEW_CHECKLIST _TaskAcceptanceContext _acceptance_dialogue_quorum "
-        "_attach_dialogue_to_host_run _mark_agent_acceptance_runs_advisory "
-        "_latest_agent_acceptance_evidence _build_host_acceptance_evidence "
-        "_execute_task_acceptance_panel _record_host_acceptance_run "
-        "_set_applied_host_acceptance_impact _apply_task_acceptance_result "
-        "_record_acceptance_infra_failure _prior_acceptance_run "
-        "_direct_context_fence_state _run_task_acceptance_review_once"
+    # The root admission seal (born as the task-acceptance fence; its persisted names stay).
+    "delivery_seal": (
+        "FenceOutcome _begin_task_acceptance_fence _end_task_acceptance_fence "
+        "_owner_generation_changed _release_for_owner_followup"
     ),
     "loop_round_limits": (
-        "_CompactionRoundContext _drain_incoming_messages _context_reclaim_passes "
-        "_context_reclaim_materializations _context_overflow_retries "
-        "_run_round_compaction _RoundLimitContext _account_compaction_usage "
+        "_CompactionRoundContext _drain_incoming_messages _context_overflow_retries "
+        "_run_round_compaction _RoundLimitContext "
         "_handle_round_limit _handle_forced_finalization _handle_owner_stop_finalization "
         "_handle_provider_unavailable _maybe_deadline_local_finalize "
         "_maybe_early_finalize _finalize_limit_ctx"
     ),
     "loop_nudges": (
-        "_skill_names_touched_by_trace _skill_finalization_message _force_plan_decision "
-        "_force_plan_reminder _force_plan_disclosure _maybe_inject_time_budget_milestone "
+        "_skill_names_touched_by_trace _skill_finalization_message _plan_gate_decision "
+        "_plan_gate_reminder _plan_gate_disclosure _maybe_inject_time_budget_milestone "
         "_maybe_inject_cost_budget_milestone "
         "_inject_round_checkpoints _forced_delegation_note _nanny_finalization_message "
         "_maybe_inject_finalization_nudges _answer_protocol_active"
@@ -61,12 +44,12 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_run_cross_model_fallback_chain _rebind_context_fit_plan _RoundModelCallContext "
         "_context_fit_round_id _main_context_profile _remember_main_fit "
         "_measure_round_main_fit _physical_context_for_fit _dispatch_round_model "
-        "_run_main_reclaim _measure_after_reclaim _reproject_actual_overflow_low "
+        "_reproject_actual_overflow_low "
         "_failed_capture_is_comparable _strict_context_shrink_predicate "
         "_emit_overflow_retry_skipped _call_round_model"
     ),
     "loop_budget": (
-        "_check_budget_limits _resolve_task_cost_ceiling _TREE_ACCOUNTING_MAX_STALE_SEC "
+        "_server_web_allowed_by_task _check_budget_limits _resolve_task_cost_ceiling _TREE_ACCOUNTING_MAX_STALE_SEC "
         "_loop_tree_accounting _soft_land_exhausted_ceiling "
         "_service_finalization_evidence _LoopExitContext _handle_budget_exceeded "
         "_cleanup_loop_resources _service_identity_projection _finalize_task_services "
@@ -75,7 +58,7 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
     "loop_delivery": (
         "DeliveryCandidate _swarm_handoff_attempt _compute_subagent_handoff "
         "_delivery_evidence_state _unaccepted_delivery_binding "
-        "_delivery_acceptance_binding _publish_delivery_candidate "
+        "_publish_delivery_candidate "
         "_replace_delivery_candidate _ensure_explicit_acceptance_binding "
         "_forced_unaccepted_binding _live_delivery_candidate _current_delivery_candidate "
         "_degrade_retained_delivery_candidate _merge_finalization_trace "
@@ -89,7 +72,7 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_project_child_result_dispositions _record_forced_finalization "
         "_forced_orphan_note _claimed_child_dispositions _undispositioned_children "
         "_maybe_enforce_child_absorption_gate "
-        "_enforce_swarm_actions _finalize_forced_services _disclose_service_finalization "
+        "_enforce_plan_gate _finalize_forced_services _disclose_service_finalization "
         "_drain_forced_owner_directives "
         "_call_forced_model_once _publish_model_forced_candidate "
         "_publish_stale_forced_candidate _forced_fallback_result "

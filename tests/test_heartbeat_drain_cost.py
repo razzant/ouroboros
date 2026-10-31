@@ -58,18 +58,15 @@ def test_a_heartbeat_after_a_concurrent_pop_does_not_resurrect_the_task(tmp_path
 def test_a_display_projection_never_reads_the_task_result_store(root, monkeypatch):  # noqa: F811
     from ouroboros import task_results, usage_admission
 
-    reads, overlays = [], []
+    reads = []
     monkeypatch.setattr(task_results, "load_task_result",
                         lambda *a, **k: reads.append((a, k)) or None)
-    real_overlay = usage_admission.amended_projection
-    monkeypatch.setattr(usage_admission, "amended_projection",
-                        lambda *a, **k: overlays.append(a) or real_overlay(*a, **k))
 
     stale = usage_admission.current_usage_projection(root, root_task_id="root-hb", allow_stale=True)
-    assert isinstance(stale, dict) and overlays == [] and reads == []
     strict = usage_admission.current_usage_projection(root, root_task_id="root-hb")
-    assert isinstance(strict, dict) and len(overlays) == 1, "a money read keeps the owner-amendment overlay"
-    assert len(reads) >= 1, "the overlay is what reads the task-result store"
+    # The money read's owner-amendment overlay (acceptance root-cap amendments) left with the
+    # review fold: both reads are the store's own figure.
+    assert isinstance(stale, dict) and stale == strict and reads == []
 
 
 def test_a_root_heartbeat_reads_no_task_result_on_the_drain(root, monkeypatch):  # noqa: F811

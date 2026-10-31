@@ -6,6 +6,7 @@ import time
 from ouroboros.utils import read_json_dict
 
 _sleep = time.sleep  # the in-flight re-read's pause, kept apart from frozen test clocks
+_monotonic = time.monotonic
 
 
 def queue_stamp(document: dict, *, boot: bool = False) -> dict:
@@ -46,14 +47,21 @@ DISPATCH_PUBLICATION_POLL_SEC = 0.05
 class DispatchPublicationPending(RuntimeError):
     """A generated dispatch document is not certified yet; never permissive authority."""
 
+    def __init__(self, message: str, *, probe_elapsed_sec: float = 0.0):
+        super().__init__(message)
+        self.probe_elapsed_sec = probe_elapsed_sec
+
 
 def dispatch_probe(drive_root):
     """One read, with no sleep: a publication gap is distinct from a malformed document."""
+    started = _monotonic()
     document = load_queue_document(drive_root, "queue_dispatch.json")
     if not document.get("generation"):
         return None
     if not queue_stamp(document):
-        raise DispatchPublicationPending(f"root budget fence authority unavailable: {drive_root}/state/queue_dispatch.json")
+        raise DispatchPublicationPending(
+            f"root budget fence authority unavailable: {drive_root}/state/queue_dispatch.json",
+            probe_elapsed_sec=max(0.0, _monotonic() - started))
     return document
 
 

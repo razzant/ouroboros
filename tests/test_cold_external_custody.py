@@ -250,6 +250,59 @@ def test_owner_pause_routes_real_stop_for_a_cold_receipt_without_sleep_settlemen
     assert len(reads) == 1, "unknown Pause authority cannot authorize another control"
 
 
+def test_an_owner_pause_over_a_cold_sleep_is_named_when_the_sleep_wakes(tmp_path, monkeypatch):
+    """R1 #1562: the owner's Pause stopped a cold sleeper's own run. The sleep keeps its reason and
+    its own notices, and its wake also names what became of that run: the Pause's participants,
+    associated by the record the Pause wrote, not by the checkpoint's reason."""
+    from ouroboros import budget_pause as bp, owner_pause, owner_wait
+    from ouroboros.gateways import claudexor
+    from supervisor.owner_pause_control import _record_settled_member
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    env = _setup(tmp_path, monkeypatch)
+    _park(env, tmp_path, monkeypatch)
+    fence = owner_pause.install_fence(tmp_path, "sleeper", request_id="owner-pause")
+
+    class Daemon:
+        def handshake(self, **_kw):
+            return {"compatible": True}
+
+        def cancel_run(self, run_id, reason=""):
+            return {"accepted": True, "status": "accepted"}
+
+        def get_run(self, run_id, **_kw):
+            return {"lastSeq": 4, "summary": {"state": "cancelled", "spendUsd": 0.0,
+                                              "outcomeFacts": {"reason": "host_cancelled"},
+                                              "resumable": {"cause": "cancelled"}}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *a, **k: Daemon())
+    _record_settled_member(env.q, env.workers.PENDING[0])
+    row = bp.budget_pause_row(tmp_path, "sleeper")
+    assert row["reason"] == "sleep", "the sleep keeps its own reason"
+    assert [(item["run_id"], item["stop_outcome"]) for item in row["episode_runs"]] == [("run-one", "confirmed")]
+    assert "episode_runs_partial" not in row, "this Pause's own first observation starts its list"
+    owner_pause.release_fence(tmp_path, "sleeper", reason="owner_resume")
+    assert not owner_pause.fence_closed(owner_pause.read_fence(tmp_path, "sleeper")), fence
+    out = wake_ready_sleepers(env.q)
+    assert out and out[0]["ok"], out
+    ctx, _ = _loop_ctx(tmp_path, "sleeper")
+    ctx.budget_pause_resume = env.workers.PENDING[0]["_budget_pause_resume"]
+    saved = bp.load_budget_pause(ctx)
+    monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a: (None, "max"))
+    messages: list = []
+    bp.resume_paused_loop(SimpleNamespace(_ctx=ctx), saved, messages, {}, {}, set(), budget_remaining_usd=5.0)
+    texts = [str(message.get("content") or "") for message in messages]
+    assert any("body retained your exact external runs" in text for text in texts), "sleep notices stay"
+    named = [line for text in texts for line in text.splitlines() if line.startswith("- run run-one")]
+    assert len(named) == 1, f"the wake names the run the owner's Pause stopped, once: {texts}"
+    line = named[0]
+    assert "this Pause requested its stop (stop outcome: confirmed)" in line
+    assert "engine terminal: cancelled (host_cancelled)" in line
+
+
 def test_retained_lane_dependency_blocks_cold_but_unencumbered_cold_survives(tmp_path, monkeypatch):
     from ouroboros import model_sleep, delegate_custody as custody
     from ouroboros.task_results import write_task_result

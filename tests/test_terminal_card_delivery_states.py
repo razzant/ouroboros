@@ -11,6 +11,8 @@ and the registration sees "not yet", never a card without the answer.
 """
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import json
 import pathlib
 import queue as stdqueue
@@ -56,9 +58,7 @@ def _ctx(root, sent):
 
 def _chat_rows(root):
     path = root / "logs" / "chat.jsonl"
-    if not path.exists():
-        return []
-    return [row for row in map(json.loads, filter(str.strip, path.read_text(encoding="utf-8").splitlines()))]
+    return [row for row in map(json.loads, filter(str.strip, dialogue_test.log_text(path).splitlines()))]
 
 
 def _terminal_rows(root, tid):
@@ -332,7 +332,7 @@ def test_an_exhausted_delivery_is_shown_with_its_saved_copy_and_a_late_receipt_c
     # Exhaustion is a transition inside the registry: the payload stays, the copy is preserved,
     # the disclosure is supervisor-owned (this test is the supervisor), and the held card settles.
     for _ in range(td._PENDING_MAX_REPLAYS):
-        td._bump_replay_attempts(tmp_path, [event["delivery_id"]])  # five real replay enqueues, no receipt
+        assert td.record_replay_dispatch(tmp_path, event["delivery_id"])  # transport entered; receipt unknown
     (owed,) = td.pending_deliveries(tmp_path)
     td._retire_exhausted(tmp_path, [owed])
     receipts = td.terminal_answer_receipts(tmp_path, tid)

@@ -9,6 +9,8 @@ history. The saved chat row is the receipt, recorded by notice id when the
 append lands (``ouroboros/notice_receipts.py``) and dropped once the task
 acknowledges it; it is never proof of external delivery. Resume and later
 pauses retain the duty. No separate outbox or lifecycle authority exists.
+Continue, cold sleep and Resume name an unattributed damaged record with the
+same bounded fact and words (``gap_fact``, ``gap_words``).
 """
 from __future__ import annotations
 
@@ -23,14 +25,77 @@ log = logging.getLogger(__name__)
 _LOCK = threading.Lock()
 
 
-def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reason: str) -> dict:
-    """Called inside the result writer, only for a newly confirmed pause episode."""
+def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reason: str, *,
+                  fence: dict | None = None) -> dict:
+    """Called inside the result writer, only for a newly confirmed pause episode.
+
+    ``fence`` is the owner Pause this episode confirms: the author it declared
+    (``control_actor.pause_author``) is kept with the notice, so a later Pause
+    of the same task never rewords it. So are the damaged records its census
+    settled without (``membership_gaps``): the owner reads them in this row.
+    """
+    from ouroboros.control_actor import pause_author
+
     if not episode_id or reason not in {"budget", "owner", "authority"}:
         return {}
     identity = f"pause:{task_id}:{episode_id}"
     pending = dict(current.get("pause_notices") or {})
-    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso()})
+    by = {"by": pause_author(fence)} if fence is not None else {}
+    gaps = (fence or {}).get("membership_gaps")
+    gaps = {"membership_gaps": dict(gaps)} if isinstance(gaps, dict) and gaps.get("count") else {}
+    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps})
     return {"pause_notices": pending}
+
+
+_RETAINED = "Its work is retained; Resume continues it."
+GAP_ROWS = 20  # a membership gap names this many unattributed rows and counts all of them
+
+
+def gap_fact(rows: list, prior: Any = None) -> dict:
+    """The damaged rows a tree census tied to no tree, as one bounded fact (``membership_gaps``). Joined to
+    ``prior`` (a closed Pause's fact, at its Resume) each row is named once, the Pause's first, and the count
+    never drops below the Pause's own, which may count rows it could not name."""
+    prior = prior if isinstance(prior, dict) and type(prior.get("count")) is int else {}
+    named: dict = {}
+    for row in [*(prior.get("rows") or ()), *rows]:
+        if isinstance(row, dict):
+            named.setdefault(str(row.get("task_id") or ""), row)
+    count = max(prior.get("count", 0), len(named))
+    return {"rows": list(named.values())[:GAP_ROWS], "count": count} if count > 0 else {}
+
+
+def gap_words(gaps: Any, lead: str = "The Pause did not wait for") -> str:
+    """The records an action did not wait for, named; never claimed to be another task's."""
+    count = gaps.get("count") if isinstance(gaps, dict) else None
+    if type(count) is not int or count <= 0:
+        return ""
+    names = [str(row["task_id"]) for row in gaps.get("rows") or () if isinstance(row, dict) and row.get("task_id")]
+    named = ", ".join(names) + (f" and {count - len(names)} more" if count > len(names) else "")
+    one = count == 1
+    return (f" {lead} {count} saved task record{'' if one else 's'} that could not be read and "
+            f"that nothing ties to this task ({named}); whether {'it belongs' if one else 'they belong'} here is unknown.")
+
+
+def notice_text(notice: dict) -> str:
+    """The sentence one owed notice says; an owner Pause names the author its own fence declared."""
+    if notice.get("reason") == "owner":
+        by = notice.get("by") if isinstance(notice.get("by"), dict) else {}  # a notice saved before ``by``: nobody
+        said = " ".join(str(by.get("text") or "").split())
+        if by.get("actor") == "owner":
+            head = "You paused this task."
+        elif by.get("actor") == "ouroboros" and said:
+            head = "Ouroboros paused this task: " + (said if said.endswith((".", "!", "?", "…")) else f"{said}.")
+        elif by.get("actor") == "ouroboros":
+            head = "Ouroboros paused this task."
+        else:
+            head = "This task was paused."
+        return f"{head} {_RETAINED}{gap_words(notice.get('membership_gaps'))}"
+    authority = notice.get("reason") == "authority"
+    cause = ("a technical fault: its billing or control authority could not be read, which says nothing about "
+             "money left") if authority else "its budget limit"
+    resume = "Fix the cause, then use Resume on the task when available" if authority else (
+        "Use Resume on the task when available")
+    return f"The task paused because of {cause}. Its work is retained. {resume}."
 
 
 def _acknowledge(root: pathlib.Path, task_id: str, identity: str, notice: dict) -> None:
@@ -92,15 +157,10 @@ def reconcile_pause_notices(drive_root: Any, *, stop_requested=None) -> None:
                     # Read per notice: a failed send whose row DID land (a live
                     # transport error after the append) is seen on the next pass.
                     if receipt not in obligations.members(root, "pause_notice_receipts"):
-                        cause = {"owner": "the owner's Pause", "authority": (
-                            "a technical fault: its billing or control authority could not be read, which says "
-                            "nothing about money left")}.get(str(notice.get("reason")), "its budget limit")
-                        resume = ("Fix the cause, then use Resume on the task when available"
-                                  if notice.get("reason") == "authority" else "Use Resume on the task when available")
-                        text = f"The task paused because of {cause}. Its work is retained. {resume}."
                         message_bus.send_with_budget(
-                            chat_id, text, task_id=task_id, role="system", system_type="task_pause_notice",
-                            narration=False, require_write=True, ensure_record_boundary=True,
+                            chat_id, notice_text(notice), task_id=task_id, role="system",
+                            system_type="task_pause_notice", narration=False, require_write=True,
+                            ensure_record_boundary=True,
                             progress_meta={**{k: event[k] for k in ("root_task_id", "parent_task_id") if k in event},
                                            "card_row": "timeline", "card_row_id": identity},
                         )

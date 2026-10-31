@@ -9,10 +9,98 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import pathlib
 import re
 from contextlib import contextmanager
 from unittest.mock import MagicMock
+
+
+def producer_evidence_dir(fallback, name, *, env=()):
+    """Where one test producer's own diagnostics go: one destination per invocation.
+
+    A destination the operator exported explicitly for this family wins unchanged. Otherwise
+    the shared channel decides: ``diagnostic_directory`` redirects to the launcher's
+    ``OUROBOROS_TEST_EVIDENCE_ROOT`` (scripts/safe_test.py and the native preflight both
+    publish it) and falls back to ``fallback`` for a bare pytest, where nothing vouches for a
+    directory outside the disposable scratch. A variable private to one test used to fall
+    back straight into ``tmp_path``, so a released scratch took its screenshots, DOM and JSON
+    with it while the migrated destinations survived.
+    """
+    from ouroboros.test_evidence import diagnostic_directory
+
+    for key in ((env,) if isinstance(env, str) else tuple(env)):
+        explicit = os.environ.get(key, "").strip()
+        if explicit:
+            path = pathlib.Path(explicit)
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+    return diagnostic_directory(fallback, name)
+
+
+def retire_synthetic_retention(directory, *reasons, release=None) -> bool:
+    """Remove the retention marker THIS test manufactured, only when it says exactly ``reasons``.
+
+    A fixture that fakes an unproven hold or an export fault proves no surviving
+    process, yet its marker would keep the whole enclosing run. Any other line may
+    describe a real one, so it keeps the marker. True when no marker remains.
+    ``release`` frees what that marker held, only once it is proven synthetic; unless
+    it returns True, the marker stays and keeps holding it.
+    """
+    from ouroboros.test_environment import RETENTION_MARKER
+
+    marker = pathlib.Path(directory) / RETENTION_MARKER
+    if marker.is_symlink():
+        return False
+    try:
+        lines = marker.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeError):
+        return False
+    known = {line for reason in reasons for line in reason.rstrip().splitlines()}
+    if not lines or not known.issuperset(lines):
+        return False
+    if release is not None and not release():
+        return False
+    marker.unlink()
+    return True
+
+
+def retire_synthetic_gate_hold(repo, temp_root, reason) -> bool:
+    """Undo a hermetic gate's hold over a lane this test stubbed or faulted, by its exact reason.
+
+    Only a marker saying nothing but that reason (the gate's line and its release owner's)
+    lets the worktree and its registration go, and the marker goes only after they did.
+    Any other line, an unreadable marker or a failed removal keeps all three.
+    """
+    import subprocess
+
+    def remove_worktree() -> bool:
+        return subprocess.run(["git", "worktree", "remove", "--force", str(pathlib.Path(temp_root) / "repo")],
+                              cwd=str(repo), capture_output=True).returncode == 0
+
+    return retire_synthetic_retention(temp_root, reason, "hermetic preflight: " + reason, release=remove_worktree)
+
+
+def retention_left_in(directory) -> str:
+    """Name the retention markers beneath ``directory`` with each one's first reason; "" when none.
+
+    The conftest retention guard's report over release_scratch's own walk: an unreadable
+    subtree, which that walk also counts, is not a marker a test left.
+    """
+    from ouroboros.test_environment import RETENTION_MARKER, retention_markers
+
+    left = []
+    for marker in retention_markers(directory):
+        if marker.name != RETENTION_MARKER:
+            continue
+        try:
+            reason = marker.read_text(encoding="utf-8").splitlines()[0]
+        except (OSError, UnicodeError, IndexError):
+            reason = "unreadable"
+        left.append(f"{marker.parent} ({reason})")
+    return "; ".join(left[:3]) + (f" (+{len(left) - 3} more)" if len(left) > 3 else "")
 
 
 def reap_test_process_group(proc, *, timeout_sec: float = 5.0) -> None:
@@ -248,11 +336,12 @@ def write_queue_document(path, payload):
 # `test_llm_no_proxy` parameter-rejection retry then has nothing left to drop).
 _PROVIDER_CATALOG_CLASS_STATE = (
     "_SUPPORTED_PARAMS_CACHE", "_SUPPORTED_PARAMS_FETCHED",
-    "_CONTEXT_LENGTH_CACHE", "_CAPABILITIES_FETCH_OK",
+    "_CONTEXT_LENGTH_CACHE", "_CONTEXT_LENGTH_OBSERVED_AT", "_CAPABILITIES_FETCH_OK", "_CAPABILITIES_FAILED_AT",
 )
 _PROVIDER_CATALOG_PRISTINE = {
     "_SUPPORTED_PARAMS_CACHE": {}, "_SUPPORTED_PARAMS_FETCHED": False,
-    "_CONTEXT_LENGTH_CACHE": {}, "_CAPABILITIES_FETCH_OK": False,
+    "_CONTEXT_LENGTH_CACHE": {}, "_CONTEXT_LENGTH_OBSERVED_AT": "", "_CAPABILITIES_FETCH_OK": False,
+    "_CAPABILITIES_FAILED_AT": "",
 }
 
 
@@ -286,3 +375,66 @@ def offline_provider_catalog(monkeypatch):
         yield saved
     finally:
         _restore_provider_catalog(LLMClient, saved)
+
+
+def saved_settings(monkeypatch, tmp_path, **values):
+    """Point the settings document at the test's own tree and save ``values`` there (merged into a document
+    this helper already wrote at that path).
+
+    Route keys (``route_choice.ROUTE_SETTING_KEYS``: model slots, local flags, accounts, provider keys)
+    read the document as it is now, in a task or not, and an unauthored slot takes its proposal — so
+    "no fallback chain" is a SAVED blank Fallbacks, never an absent environment variable, and a model
+    the test needs is a saved slot (a saved slot beats the environment). ``tmp_path=None`` keeps the
+    path a previous call of this helper bound. Returns the document path."""
+    from ouroboros import config
+
+    path = pathlib.Path(tmp_path) / "settings.json" if tmp_path is not None else pathlib.Path(config.SETTINGS_PATH)
+    if tmp_path is not None:
+        monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    document = {}
+    if path.exists() and getattr(saved_settings, "_wrote", None) == str(path):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            document = {}
+    document = {**(document if isinstance(document, dict) else {}), **values}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    saved_settings._wrote = str(path)
+    return path
+
+
+def write_legacy_capability_rows(root, *, effort_ceilings=None, effort_floors=None, rejected_params=None):
+    """Leave model-global rows in ``root``'s capability-evidence store in the shape releases before
+    exact-route request-wire recovery learned them. The store still loads them; nothing reads them."""
+    from ouroboros import capability_evidence as ce
+    from ouroboros.utils import utc_now_iso
+
+    observed_at = utc_now_iso()
+    with ce._store_transaction(root):
+        data = ce._load(root)
+        for key, ceiling in (effort_ceilings or {}).items():
+            data["effort_ceilings"][key] = {"ceiling": ceiling, "observed_at": observed_at,
+                                            "reason": "provider_rejected", "prev": ""}
+        for key, floor in (effort_floors or {}).items():
+            data["effort_floors"][key] = {"floor": floor, "observed_at": observed_at,
+                                          "reason": "provider_required", "prev": ""}
+        for key, params in (rejected_params or {}).items():
+            data["rejected_params"][key] = {"params": sorted(params), "observed_at": observed_at,
+                                            "reason": "provider_rejected"}
+        assert ce._save(root, data)
+
+
+def current_python_env(env_root) -> None:
+    """Leave what ``isolated_deps._ensure_python_env`` leaves for THIS interpreter, without venv or pip:
+    a ``pyvenv.cfg`` naming the running base and an interpreter entry. Fakes of the package installer call
+    it, so the live reader corroborates their record (``isolated_deps.python_env_binding``)."""
+    import sys
+
+    venv = pathlib.Path(env_root) / "python"
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.touch()
+    base = os.path.dirname(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
+    version = ".".join(map(str, sys.version_info[:3]))
+    (venv / "pyvenv.cfg").write_text(f"home = {base}\nversion = {version}\n", encoding="utf-8")

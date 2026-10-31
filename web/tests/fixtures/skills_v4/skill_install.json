@@ -1,0 +1,38 @@
+{
+  "trusted": {
+    "ok": true,
+    "job_id": "job-1",
+    "name": "duckduckgo",
+    "basis": "trusted"
+  },
+  "review": {
+    "ok": true,
+    "job_id": "job-2",
+    "name": "whoop-health",
+    "basis": "review"
+  },
+  "already": {
+    "ok": true,
+    "job_id": "",
+    "name": "weather",
+    "basis": "trusted",
+    "already_installed": true
+  },
+  "conflict": {
+    "ok": false,
+    "code": "name_taken",
+    "error": "A skill named weather is already installed (Ouroboros). Keep it, or replace it.",
+    "occupant": {
+      "name": "weather",
+      "source": "Ouroboros",
+      "locations": [
+        "ouroboroshub"
+      ]
+    }
+  },
+  "withdrawn": {
+    "ok": false,
+    "code": "withdrawn",
+    "error": "old_tool was withdrawn by Ouroboros Community: Sends data to an unnamed server."
+  }
+}

@@ -199,9 +199,8 @@ def test_schedule_intent_only_room_and_unregistered_scope_keep_distinct_authorit
     assert known["_project_admission"]["project"]["id"] == "target"
 
 
-def test_strict_incoming_and_global_steering_cannot_use_display_fallback(room):  # noqa: F811
+def test_strict_incoming_routing_cannot_use_display_fallback(room):  # noqa: F811
     from ouroboros.server_routing_context import _reserved_project_for_chat
-    from supervisor.steering import _owner_lane_allows
 
     ctx = SimpleNamespace(DRIVE_ROOT=room.root)
     project_chat = registry.get_project(room.root, "target")["chat_id"]
@@ -210,10 +209,24 @@ def test_strict_incoming_and_global_steering_cannot_use_display_fallback(room): 
     assert _reserved_project_for_chat(ctx, project_chat)["id"] == "target"  # a healthy room keeps routing
     with pytest.raises(ValueError):  # the malformed room itself is unavailable, never Main
         _reserved_project_for_chat(ctx, other_chat)
-    assert not _owner_lane_allows(ctx, {"chat_id": 7}, "foreign", project_chat)
-    assert not _owner_lane_allows(ctx, {"chat_id": 7}, "foreign", other_chat)
     assert _reserved_project_for_chat(ctx, 1) == {}
-    assert _owner_lane_allows(ctx, {"chat_id": 7}, "foreign", 1)
+
+
+@pytest.mark.parametrize("sender_room", ["target", "other", None])
+def test_explicit_cross_room_relay_keeps_its_note_separate_from_owner_words(room, sender_room):  # noqa: F811
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from supervisor.steering import _handle_steer_task
+
+    target = {"id": "foreign", "chat_id": 7, "drive_root": str(room.root), "_owner_hold": True}
+    ctx = SimpleNamespace(DRIVE_ROOT=room.root, RUNNING={}, PENDING=[target])
+    chat_id = registry.get_project(room.root, sender_room)["chat_id"] if sender_room else 1
+    _handle_steer_task({"target_task_id": "foreign", "message": "Context, not an owner directive",
+                       "quotes": [], "relay_id": "cross-room", "routing_token": "cross-room",
+                       "chat_id": chat_id, "issuer": {"kind": "task", "task_id": "teller"}}, ctx)
+    [entry] = drain_owner_entries(room.root, "foreign")
+    assert entry["text"] == "Context, not an owner directive" and entry["owner_rows"] == []
+    assert entry["source_task_id"] == "teller" and ctx.PENDING == [target]
+    assert target["_owner_hold"] is True  # delivery is not Resume
 
 
 def test_real_api_derived_scope_survives_other_room_creation(room, tmp_path, monkeypatch):  # noqa: F811

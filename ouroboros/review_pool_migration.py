@@ -68,6 +68,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ouroboros.model_slots import normalize_processing_preference, resolve_processing_preference
+from ouroboros.provider_models import CONNECTIONS_KEY, READINESS_SETTING_KEYS
 from ouroboros.review_dispatch import slot_id_for_row
 from ouroboros.route_spec import (
     ROUTE_KIND_AGENT_SESSION as SHARED_ROUTE_KIND_SESSION,
@@ -824,11 +825,8 @@ def migration_applies(document: Mapping[str, Any]) -> bool:
     return bool(migration_trigger(document))
 
 
-_SHA_PRESENCE_KEYS = (
-    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY",
-    "ZAI_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GIGACHAT_CREDENTIALS", "GIGACHAT_USER",
-    "GIGACHAT_PASSWORD", "OPENAI_BASE_URL", "OPENAI_COMPATIBLE_BASE_URL",
-)
+# Whether a connection is configured decides the outcome; the digest reads presence only.
+_SHA_PRESENCE_KEYS = READINESS_SETTING_KEYS | {CONNECTIONS_KEY}
 # The factory rows follow Main's whole route, so a document without lanes of its own is also keyed by
 # its local source (and Main's and Light's account pins); a document WITH lanes never reads the factory.
 _FACTORY_PRESENCE_KEYS = ("LOCAL_MODEL_SOURCE",)

@@ -12,17 +12,25 @@ import pathlib
 import secrets
 import time
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qs
+from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlencode
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ouroboros.browser_boundary import CROSS_ORIGIN_CODE, JSON_CONTENT_TYPE_CODE, browser_request_refused, json_body_refused
 from ouroboros.config import load_settings
+from ouroboros.standalone_page import themed_page
+
+if TYPE_CHECKING:
+    from ouroboros.server_web import ServedUI
 
 NETWORK_PASSWORD_KEY = "OUROBOROS_NETWORK_PASSWORD"
 AUTH_COOKIE_NAME = "ouroboros_auth"
-_PUBLIC_HTTP_PATHS = {"/api/health", "/auth/login", "/auth/logout"}
+# The widget frame bridge is static host code a route page loads from its opaque frame, which carries no session.
+_PUBLIC_HTTP_PATHS = {"/api/health", "/auth/login", "/auth/logout", "/api/widget-bridge.js"}
+_NO_STORE = {"Cache-Control": "no-store"}
 
 
 def resolve_network_password(env_value: str | None, settings_loader) -> str:
@@ -217,38 +225,63 @@ def _sanitize_next_url(value: str) -> str:
     return text
 
 
-def _login_page(next_url: str, error: str = "") -> str:
+# The form's own layout on the interface's tokens; each has a system-colour fallback (standalone_page).
+_LOGIN_CSS = """
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--bg-primary, Canvas); color: var(--text-primary, CanvasText); font-family: var(--font-sans, system-ui); }
+.gate { box-sizing: border-box; width: min(360px, calc(100% - 32px)); padding: 24px; border-radius: var(--radius-object);
+  background: var(--surface-object); box-shadow: var(--elev-rest); }
+.gate h1 { margin: 0 0 8px; font-size: var(--type-page, 24px); font-weight: 600; line-height: var(--line-title); }
+.gate p { margin: 0 0 16px; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+.gate label { color: var(--text-primary); font-size: var(--type-body); }
+.gate .btn { width: 100%; margin-top: 16px; }
+.gate .gate-error { margin: 12px 0 0; color: var(--status-error-fg); }
+"""
+
+
+def _builtin_web_dir(served_ui: ServedUI | None) -> pathlib.Path:
+    """The builtin interface tree, whatever ``OUROBOROS_UI_DIR`` selects: the builtin form wears only its files."""
+    if served_ui is not None:
+        return served_ui.builtin_dir
+    from ouroboros.server_web import resolve_web_dir
+
+    return resolve_web_dir(pathlib.Path(__file__).resolve().parents[1])
+
+
+def _appearance_meta(served_ui: ServedUI | None, request: Request) -> str:
+    """The form names the installation's appearance scope as the interface's own pages do."""
+    return served_ui.appearance_meta(request.headers) if served_ui is not None else ""
+
+
+def _login_page(next_url: str, error: str = "", web_dir: pathlib.Path | None = None, head: str = "") -> str:
+    """The builtin form. It answers before any asset behind the gate may load, so it inlines the builtin
+    appearance owner and tokens: this browser's saved Light / Dark / System choice, else the device's."""
     safe_next = html.escape(_sanitize_next_url(next_url), quote=True)
-    error_html = (
-        f'<div style="margin-top:12px;color:#ef4444;font-size:14px">{error}</div>'
-        if error
-        else ""
-    )
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ouroboros Login</title>
-</head>
-<body style="margin:0;background:#0d0b0f;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;">
-  <form method="post" action="/auth/login" style="width:min(360px,calc(100% - 32px));padding:24px;border:1px solid rgba(255,255,255,0.08);border-radius:18px;background:rgba(255,255,255,0.04);box-shadow:0 24px 60px rgba(0,0,0,0.35);">
-    <h1 style="margin:0 0 8px;font-size:22px;">Ouroboros</h1>
-    <p style="margin:0 0 16px;color:rgba(255,255,255,0.65);line-height:1.5;">This server is exposed beyond localhost. Enter the network password to continue.</p>
-    <input type="hidden" name="next" value="{safe_next}">
-    <label for="password" style="display:block;margin-bottom:8px;font-size:14px;">Password</label>
-    <input id="password" name="password" type="password" autofocus required style="width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,0.12);background:#15121a;color:#e2e8f0;">
-    <button type="submit" style="margin-top:16px;width:100%;padding:12px 14px;border:none;border-radius:12px;background:#c93545;color:white;font-weight:600;cursor:pointer;">Unlock</button>
-    {error_html}
-  </form>
-</body>
-</html>"""
+    error_html = f'\n  <p class="gate-error" role="alert">{html.escape(error)}</p>' if error else ""
+    form = f"""<form class="gate" method="post" action="/auth/login">
+  <h1>Ouroboros</h1>
+  <p>This server is exposed beyond localhost. Enter the network password to continue.</p>
+  <input type="hidden" name="next" value="{safe_next}">
+  <div class="ui-field">
+    <label for="password">Password</label>
+    <input id="password" class="ui-control" name="password" type="password" autofocus required>
+  </div>
+  <button type="submit" class="btn btn-primary">Unlock</button>{error_html}
+</form>"""
+    return themed_page(web_dir or _builtin_web_dir(None), "Ouroboros Login", form, _LOGIN_CSS, head)
 
 
-async def _handle_login(scope: Scope, receive: Receive, send: Send, password: str) -> None:
+async def _handle_login(scope: Scope, receive: Receive, send: Send, password: str,
+                        served_ui: ServedUI | None = None) -> None:
     request = Request(scope, receive)
+    web_dir = _builtin_web_dir(served_ui)
+    head = _appearance_meta(served_ui, request)
     if request.method == "GET":
-        response = HTMLResponse(_login_page(request.query_params.get("next", "/")), status_code=200)
+        page = (served_ui.custom_page("auth/index.html")
+                if served_ui is not None and request.query_params.get("builtin") != "1" else None)
+        response = HTMLResponse(page if page is not None else _login_page(request.query_params.get("next", "/"),
+                                                                          web_dir=web_dir, head=head),
+                                headers=_NO_STORE)
         await response(scope, receive, send)
         return
     if request.method != "POST":
@@ -273,7 +306,8 @@ async def _handle_login(scope: Scope, receive: Receive, send: Send, password: st
         if is_json:
             response = JSONResponse({"error": "Invalid password."}, status_code=401)
         else:
-            response = HTMLResponse(_login_page(next_url, "Invalid password."), status_code=401)
+            response = HTMLResponse(_login_page(next_url, "Invalid password.", web_dir, head), status_code=401,
+                                    headers=_NO_STORE)
         await response(scope, receive, send)
         return
 
@@ -317,8 +351,12 @@ async def _handle_logout(scope: Scope, receive: Receive, send: Send) -> None:
 class NetworkAuthGate:
     """Require a password for non-localhost access only when configured."""
 
-    def __init__(self, app: ASGIApp):
+    def __init__(self, app: ASGIApp, *, served_ui: ServedUI | None = None):
+        from ouroboros.gateway.widget_assets import WidgetAssetLeases
+
         self.app = app
+        self.served_ui = served_ui
+        self.widget_assets = WidgetAssetLeases()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in {"http", "websocket"}:
@@ -326,23 +364,60 @@ class NetworkAuthGate:
             return
 
         password = get_configured_network_password()
-        if not password:
-            await self.app(scope, receive, send)
-            return
+        from ouroboros.gateway.widget_assets import (ASSET_PREFIX, RESOURCE_PREFIX, widget_asset_response,
+                                                     widget_resource_response)
 
-        if is_loopback_host(_scope_client_host(scope)):
-            await self.app(scope, receive, send)
-            return
-
+        epoch = hashlib.sha256(password.encode()).hexdigest()
+        self.widget_assets.password_changed(epoch)
+        scope["widget_asset_leases"] = self.widget_assets
+        scope["widget_asset_epoch"] = epoch
+        cookie = _cookie_value(scope, AUTH_COOKIE_NAME)
+        owner = cookie if cookie and _cookie_session_valid(cookie, password) else _candidate_password(scope) or "local"
+        scope["widget_asset_owner"] = hashlib.sha256(owner.encode()).hexdigest()
+        active = bool(password) and not is_loopback_host(_scope_client_host(scope))
         path = scope.get("path", "") or "/"
-        if scope["type"] == "http" and path == "/auth/login":
-            await _handle_login(scope, receive, send, password)
+        if scope["type"] == "http" and path == "/api/widgets/asset-leases":
+            scope["widget_asset_admission"] = self.widget_assets.admit(scope["widget_asset_owner"])
+        if scope["type"] == "http" and path.startswith(ASSET_PREFIX):
+            response = await widget_asset_response(Request(scope, receive), self.widget_assets)
+            await response(scope, receive, send)
             return
-        if scope["type"] == "http" and path == "/auth/logout":
-            await _handle_logout(scope, receive, send)
+        if scope["type"] == "http" and path.startswith(RESOURCE_PREFIX):
+            # The route lease is this request's whole authority: no session, boundary or password applies.
+            await widget_resource_response(scope, receive, send, self.widget_assets, self.app)
+            return
+        # The browser boundary comes before every handler, the login form and the password check.
+        if browser_request_refused(scope):
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 4403})
+            else:
+                await JSONResponse({"error": "Requests from another site's page are not accepted.",
+                                    "code": CROSS_ORIGIN_CODE}, status_code=403)(scope, receive, send)
+            return
+        if scope["type"] == "http":
+            refused, receive = await json_body_refused(scope, receive)
+            if refused:
+                await JSONResponse({"error": "Send a JSON body with Content-Type: application/json.",
+                                    "code": JSON_CONTENT_TYPE_CODE}, status_code=415)(scope, receive, send)
+                return
+        if scope["type"] == "http" and path in {"/auth/login", "/auth/logout"}:
+            # These names belong to the gate even when it is inactive: a selected
+            # asset named login/logout must not become a different operation.
+            if not active:
+                await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
+            elif path == "/auth/login":
+                await _handle_login(scope, receive, send, password, self.served_ui)
+            else:
+                self.widget_assets.revoke_owner(scope["widget_asset_owner"])
+                await _handle_logout(scope, receive, send)
             return
 
-        if scope["type"] == "http" and path in _PUBLIC_HTTP_PATHS:
+        if not active:
+            await self.app(scope, receive, send)
+            return
+
+        if scope["type"] == "http" and (path in _PUBLIC_HTTP_PATHS or (
+                (path == "/auth" or path.startswith("/auth/")) and scope.get("method") in {"GET", "HEAD"})):
             await self.app(scope, receive, send)
             return
 
@@ -355,7 +430,17 @@ class NetworkAuthGate:
             return
 
         if _request_wants_html(scope):
-            response = HTMLResponse(_login_page(_build_next_url(scope)), status_code=401)
+            builtin_setup = path == "/onboarding" and Request(scope).query_params.get("builtin") == "1"
+            custom = (self.served_ui.custom_page("auth/index.html")
+                      if self.served_ui is not None and not builtin_setup else None)
+            next_url = _sanitize_next_url(_build_next_url(scope))
+            if custom is not None:
+                response = RedirectResponse("/auth/login?" + urlencode({"next": next_url}), status_code=303,
+                                            headers=_NO_STORE)
+            else:
+                response = HTMLResponse(_login_page(next_url, web_dir=_builtin_web_dir(self.served_ui),
+                                                    head=_appearance_meta(self.served_ui, Request(scope))),
+                                        status_code=401, headers=_NO_STORE)
         else:
             response = JSONResponse({"error": "Authentication required."}, status_code=401)
         await response(scope, receive, send)

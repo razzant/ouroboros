@@ -101,6 +101,7 @@ def _run_gate(monkeypatch, tmp_path, *, mode: str, tool: str):
 
     monkeypatch.setattr(safety_mod, "_run_llm_check", _fake_llm_check)
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     # A non-whitelisted command so CONDITIONAL does not take the deterministic
     # safe-subject bypass on its own.
     allowed, msg = safety_mod.check_safety(
@@ -134,6 +135,7 @@ def test_safety_mode_light_safe_subject_emits_no_skip_audit(tmp_path, monkeypatc
 
     monkeypatch.setattr(safety_mod, "_run_llm_check", _fake_llm_check)
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     allowed, msg = safety_mod.check_safety(ctx=ctx, tool_name="run_command", arguments={"cmd": "ls -la"})
     assert allowed is True and msg == ""
     assert calls == []
@@ -191,23 +193,14 @@ def test_safety_mode_owner_post_route_decodes_percent_encoding():
 
 
 # ---------------------------------------------------------------------------
-# 1.2 — response_format is droppable request intent in LLMClient
+# 1.2 — response_format is optional intent the model catalogue may report unsupported
 
 
 def test_response_format_in_droppable_params():
-    from ouroboros.llm import _OPTIONAL_DROPPABLE_PARAMS, LLMClient
+    from ouroboros.llm import _OPTIONAL_DROPPABLE_PARAMS
 
     assert "response_format" in _OPTIONAL_DROPPABLE_PARAMS
-    assert "reasoning_effort" in _OPTIONAL_DROPPABLE_PARAMS  # round 6: rejected effort hint strips, not fails
-    exc = RuntimeError("Error code: 400 - response_format is an unsupported parameter")
-    assert LLMClient._parameter_rejection_error(exc) is True
-    payload = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}
-    retry = LLMClient()._retry_without_optional_sampling(payload, "prov/model-rf-test", exc)
-    assert retry is not None and "response_format" not in retry
-    # Remembered rejection strips it from the next payload for the same model.
-    fresh = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}
-    LLMClient._apply_rejected_param_cache(fresh, "prov/model-rf-test")
-    assert "response_format" not in fresh
+    assert "reasoning_effort" in _OPTIONAL_DROPPABLE_PARAMS  # catalogue says unsupported: dropped at send, not failed
 
 
 def test_chat_signature_accepts_response_format():
@@ -222,6 +215,9 @@ def test_chat_signature_accepts_response_format():
 # 1.3 — read-vs-write mention-scan refinement
 
 
+# The commands name their paths with forward slashes (``as_posix``): a Windows path such as
+# D:\a\_temp\...\b0\t\notes.txt inside a Python literal decodes \a, \b, \t and \n, so that
+# command would not name the file at all, and the guard rightly lets it through.
 def _guard(tmp_path, raw_cmd, *, writeish):
     from ouroboros.tools.shell_guards import runtime_data_guard_targets
 
@@ -241,7 +237,7 @@ def _guard(tmp_path, raw_cmd, *, writeish):
 
 def test_pure_read_python_mention_is_not_blocked(tmp_path):
     outside = tmp_path / "data" / "artifacts" / "attachments" / "clip.mp3"
-    cmd = f"python3 -c \"import librosa; y, sr = librosa.load('{outside}')\""
+    cmd = f"python3 -c \"import librosa; y, sr = librosa.load('{outside.as_posix()}')\""
     assert _guard(tmp_path, cmd, writeish=False) == []
 
 
@@ -258,13 +254,13 @@ def test_python_literal_write_outside_blocks_but_inside_allowed(tmp_path):
     inside = tmp_path / "data" / "task_results" / "artifacts" / "t-v655" / "out.txt"
     blocked = _guard(
         tmp_path,
-        f"python3 -c \"open('{outside}', 'w').write('x')\"",
+        f"python3 -c \"open('{outside.as_posix()}', 'w').write('x')\"",
         writeish=False,
     )
     assert blocked and str(outside) in blocked[0]
     assert _guard(
         tmp_path,
-        f"python3 -c \"open('{inside}', 'w').write('x')\"",
+        f"python3 -c \"open('{inside.as_posix()}', 'w').write('x')\"",
         writeish=False,
     ) == []
 
@@ -274,7 +270,7 @@ def test_open_based_pure_read_not_blocked_despite_coarse_writeish(tmp_path):
     read-only open() as writeish — the guard must re-judge interpreter commands
     and let the pure read through (the original GAIA class)."""
     outside = tmp_path / "data" / "logs" / "events.jsonl"
-    cmd = f"python3 -c \"print(open('{outside}').read())\""
+    cmd = f"python3 -c \"print(open('{outside.as_posix()}').read())\""
     # The registry's workspace composition now computes writeish=False for this
     # shape (interpreter_write_shape is mode-aware); this lane must keep letting
     # the pure read through even when a caller still hands it the coarse fact.
@@ -285,7 +281,7 @@ def test_interpreter_shell_redirect_still_full_scans(tmp_path):
     """A SHELL-level write signal (redirect) on an interpreter command keeps the
     conservative full mention scan."""
     outside = tmp_path / "data" / "memory" / "notes.txt"
-    cmd = f"python3 -c \"print('x')\" > {outside}"
+    cmd = f"python3 -c \"print('x')\" > {outside.as_posix()}"
     blocked = _guard(tmp_path, cmd, writeish=True)
     assert blocked and str(outside) in blocked[0]
 
@@ -294,7 +290,7 @@ def test_pure_read_of_secret_named_runtime_file_still_blocks(tmp_path):
     """Review round 2: the read-vs-write relaxation never opens secret/control
     files — a pure-read python mention of settings.json under the drive blocks."""
     secret = tmp_path / "data" / "settings.json"
-    cmd = f"python3 -c \"print(open('{secret}').read())\""
+    cmd = f"python3 -c \"print(open('{secret.as_posix()}').read())\""
     blocked = _guard(tmp_path, cmd, writeish=False)
     assert blocked and str(secret) in blocked[0]
 
@@ -304,7 +300,7 @@ def test_pure_read_of_cross_project_store_still_blocks(tmp_path):
     — a pure-read interpreter mention of another project's facts store
     (projects/<id>/...) blocks, matching the file API (no cross-project peeking)."""
     other = tmp_path / "data" / "projects" / "OTHER" / "knowledge" / "facts.md"
-    cmd = f"python3 -c \"print(open('{other}').read())\""
+    cmd = f"python3 -c \"print(open('{other.as_posix()}').read())\""
     blocked = _guard(tmp_path, cmd, writeish=False)
     assert blocked and str(other) in blocked[0]
 
@@ -315,9 +311,9 @@ def test_rmdir_and_oslink_do_not_slip_the_write_guard(tmp_path):
     previously omitted rmdir(/os.link( so they were treated as pure reads."""
     outside_dir = tmp_path / "data" / "projects" / "OTHER" / "knowledge"
     for cmd in (
-        f"python3 -c \"import os; os.rmdir('{outside_dir}')\"",
-        f"python3 -c \"import pathlib; pathlib.Path('{outside_dir}').rmdir()\"",
-        f"python3 -c \"import os; os.link('/etc/hosts', '{tmp_path / 'data' / 'memory' / 'hl'}')\"",
+        f"python3 -c \"import os; os.rmdir('{outside_dir.as_posix()}')\"",
+        f"python3 -c \"import pathlib; pathlib.Path('{outside_dir.as_posix()}').rmdir()\"",
+        f"python3 -c \"import os; os.link('/etc/hosts', '{(tmp_path / 'data' / 'memory' / 'hl').as_posix()}')\"",
     ):
         blocked = _guard(tmp_path, cmd, writeish=False)
         assert blocked, f"not blocked: {cmd}"
@@ -340,12 +336,12 @@ def test_opaque_write_primitives_do_not_slip_the_write_guard(tmp_path):
     mem = tmp_path / "data" / "memory"
     db = tmp_path / "data" / "state" / "notes.db"
     for cmd in (
-        f"python3 -c \"import subprocess; subprocess.run(['rm','-rf','{victim}'])\"",
-        f"python3 -c \"import tarfile; tarfile.open('/tmp/x.tar').extractall('{mem}')\"",
-        f"python3 -c \"import zipfile; zipfile.ZipFile('/tmp/x.zip').extractall('{mem}')\"",
-        f"python3 -c \"import shutil; shutil.unpack_archive('/tmp/x.tar','{mem}')\"",
-        f"python3 -c \"import os; os.system('rm -rf {victim}')\"",
-        f"python3 -c \"import sqlite3; sqlite3.connect('{db}')\"",
+        f"python3 -c \"import subprocess; subprocess.run(['rm','-rf','{victim.as_posix()}'])\"",
+        f"python3 -c \"import tarfile; tarfile.open('/tmp/x.tar').extractall('{mem.as_posix()}')\"",
+        f"python3 -c \"import zipfile; zipfile.ZipFile('/tmp/x.zip').extractall('{mem.as_posix()}')\"",
+        f"python3 -c \"import shutil; shutil.unpack_archive('/tmp/x.tar','{mem.as_posix()}')\"",
+        f"python3 -c \"import os; os.system('rm -rf {victim.as_posix()}')\"",
+        f"python3 -c \"import sqlite3; sqlite3.connect('{db.as_posix()}')\"",
     ):
         blocked = _guard(tmp_path, cmd, writeish=False)
         assert blocked, f"opaque write not blocked: {cmd}"
@@ -356,7 +352,7 @@ def test_opaque_exec_reading_own_root_file_still_allowed(tmp_path):
     drive mention is the task's OWN staged attachment stays allowed — the
     conservative scan exempts the task roots."""
     own = tmp_path / "data" / "task_results" / "artifacts" / "t-v655" / "clip.mp3"
-    cmd = f"python3 -c \"import subprocess; subprocess.run(['ffprobe','{own}'])\""
+    cmd = f"python3 -c \"import subprocess; subprocess.run(['ffprobe','{own.as_posix()}'])\""
     assert _guard(tmp_path, cmd, writeish=False) == []
 
 
@@ -368,8 +364,8 @@ def test_secret_named_own_root_file_read_is_allowed(tmp_path):
     (outside the task roots) still blocks (asserted separately above)."""
     own_secret = tmp_path / "data" / "task_results" / "artifacts" / "t-v655" / "secret_santa.docx"
     own_token = tmp_path / "data" / "task_drives" / "t-v655" / "token_usage.json"
-    assert _guard(tmp_path, f"python3 -c \"print(open('{own_secret}','rb').read())\"", writeish=False) == []
-    assert _guard(tmp_path, f"python3 -c \"print(open('{own_token}').read())\"", writeish=False) == []
+    assert _guard(tmp_path, f"python3 -c \"print(open('{own_secret.as_posix()}','rb').read())\"", writeish=False) == []
+    assert _guard(tmp_path, f"python3 -c \"print(open('{own_token.as_posix()}').read())\"", writeish=False) == []
 
 
 def test_any_write_regex_has_no_midpattern_global_flags():
@@ -388,7 +384,7 @@ def test_python_dynamic_write_falls_back_to_full_mention_scan(tmp_path):
     outside = tmp_path / "data" / "state" / "x.json"
     cmd = (
         "python3 -c \"import sys; p=sys.argv[1]; open(p, 'w').write('x')\" "
-        f"{outside}"
+        f"{outside.as_posix()}"
     )
     blocked = _guard(tmp_path, cmd, writeish=False)
     assert blocked and str(outside) in blocked[0]
@@ -401,10 +397,10 @@ def test_library_save_apis_do_not_slip_the_write_guard(tmp_path):
     mention scan entirely."""
     outside = tmp_path / "data" / "logs" / "events.jsonl"
     for cmd in (
-        f"python3 -c \"import pandas as pd; pd.DataFrame().to_csv('{outside}')\"",
-        f"python3 -c \"import matplotlib.pyplot as plt; plt.savefig('{outside}')\"",
-        f"python3 -c \"from openpyxl import Workbook; Workbook().save('{outside}')\"",
-        f"python3 -c \"import pathlib; pathlib.Path('{outside}').open('w')\"",
+        f"python3 -c \"import pandas as pd; pd.DataFrame().to_csv('{outside.as_posix()}')\"",
+        f"python3 -c \"import matplotlib.pyplot as plt; plt.savefig('{outside.as_posix()}')\"",
+        f"python3 -c \"from openpyxl import Workbook; Workbook().save('{outside.as_posix()}')\"",
+        f"python3 -c \"import pathlib; pathlib.Path('{outside.as_posix()}').open('w')\"",
     ):
         blocked = _guard(tmp_path, cmd, writeish=False)
         assert blocked, f"not blocked: {cmd}"
@@ -488,6 +484,7 @@ def test_shell_cwd_block_message_names_resolved_paths(tmp_path):
     from ouroboros.tool_access import shell_cwd_block_message
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     msg = shell_cwd_block_message(ctx, "/nonexistent/guessed", operation="shell")
     assert "SHELL_CWD_BLOCKED" in msg
     # Labels are rendered as label=<resolved path>, not bare labels.
@@ -522,6 +519,7 @@ def test_resolve_user_file_path_rejects_absolute_outside_home(tmp_path, monkeypa
     fake_home.mkdir()
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(fake_home))
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     outside = tmp_path / "elsewhere" / "app" / "main.go"
     # Non-external ctx: the NEW actionable early rejection (not the later
     # opaque relative_to crash class).
@@ -559,6 +557,7 @@ def test_dispatch_auto_routes_user_files_read_under_workspace(tmp_path):
     from ouroboros.tools.registry import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     target = tmp_path / "system" / "src" / "x.py"
     args = {"root": "user_files", "path": str(target)}
     note = _normalize_dispatch_path_args(ctx, "read_file", args)
@@ -570,6 +569,7 @@ def test_dispatch_redirects_user_files_write_under_workspace(tmp_path):
     from ouroboros.tools.registry import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     target = tmp_path / "system" / "src" / "x.py"
     args = {"root": "user_files", "path": str(target)}
     note = _normalize_dispatch_path_args(ctx, "write_file", args)
@@ -581,6 +581,7 @@ def test_dispatch_leaves_query_code_and_true_user_files_alone(tmp_path, monkeypa
     from ouroboros.tools.registry import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     target = tmp_path / "system" / "src" / "x.py"
     assert _normalize_dispatch_path_args(ctx, "query_code", {"root": "user_files", "path": str(target)}) == ""
     fake_home = tmp_path / "home"
@@ -603,6 +604,7 @@ def _clamp(tools_ctx, name, base):
 
 def test_deadline_clamp_is_inert_without_deadline(tmp_path):
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     assert _clamp(ctx, "web_search", 540) == 540
     assert _clamp(ctx, "run_command", 540) == 540
 
@@ -689,6 +691,7 @@ def test_subagent_slot_note_reads_snapshot(tmp_path):
     from ouroboros.tools.control import _subagent_slot_note
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     state = tmp_path / "data" / "state"
     state.mkdir(parents=True, exist_ok=True)
     snap = {
@@ -740,6 +743,7 @@ def test_list_files_hard_failure_is_first_class_error(tmp_path, monkeypatch):
     from ouroboros.tools import core_file_tools as core_mod
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     boom = tmp_path / "data" / "task_drives" / "t-v655"
     boom.mkdir(parents=True, exist_ok=True)
 

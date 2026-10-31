@@ -9,7 +9,7 @@ from hashlib import sha256
 from typing import Any, Optional
 
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID
-from ouroboros.utils import append_jsonl, emit_log_event, utc_now_iso
+from ouroboros.utils import emit_log_event, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -62,19 +62,17 @@ def _emit_review_reference(
         or getattr(ctx, "drive_root", "")
     )
     if raw_root:
-        # Existing progress JSONL is the reconnect/history rail. The row is an
-        # opaque invalidation only; the task result remains the read-side owner.
-        try:
-            written = append_jsonl(pathlib.Path(raw_root) / "logs" / "progress.jsonl", {
-                **payload,
-                "direction": "out", "is_progress": True,
-                "user_id": 0, "text": "", "content": "", "format": "",
-            })
-        except Exception:
-            log.warning("Failed to append review progress reference", exc_info=True)
-        else:
-            if not written:
-                log.warning("Failed to append review progress reference")
+        # The progress stream of the dialogue store is the reconnect/history rail. The row is
+        # an opaque invalidation only; the task result remains the read-side owner.
+        from ouroboros import dialogue_store
+
+        written = dialogue_store.append_quietly(pathlib.Path(raw_root), "progress", {
+            **payload,
+            "direction": "out", "is_progress": True,
+            "user_id": 0, "text": "", "content": "", "format": "",
+        })
+        if written is None:
+            log.warning("Failed to append review progress reference")
     emit_log_event(
         event_queue, payload, log_label=f"{surface.replace('_', '-')} state reference",
     )

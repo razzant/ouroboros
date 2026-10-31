@@ -299,3 +299,20 @@ def test_supervisor_state_atomic_write_text_lands_every_byte_on_short_writes(tmp
     payload = '{"a": 1, "b": "' + "x" * 300 + '"}\n'
     sup_state.atomic_write_text(target, payload)
     assert target.read_bytes() == payload.encode("utf-8")
+
+
+def test_an_atomic_temp_name_fits_the_filesystem_and_stays_sweepable(tmp_path):
+    """A long destination name (an upload kept under its own long name) still gets a temp sibling
+    the filesystem accepts and the stale sweep recognises; a short name keeps its readable form."""
+    import os
+    from ouroboros.temp_sweep import atomic_temp_path
+
+    for name in ("a" * 233 + ".txt", "ж" * 120 + ".txt"):
+        temp = atomic_temp_path(tmp_path / name)
+        assert len(temp.name.encode("utf-8")) <= 255
+        assert temp.name.startswith(".") and ".tmp." in temp.name
+        temp.write_bytes(b"x")  # the filesystem accepts it
+        os.replace(temp, tmp_path / name)
+        assert (tmp_path / name).read_bytes() == b"x"
+    short = atomic_temp_path(tmp_path / "state.json")
+    assert short.name.startswith(".state.json.tmp.")

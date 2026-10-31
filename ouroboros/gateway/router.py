@@ -26,10 +26,14 @@ def _ui_client_routes() -> list[BaseRoute]:
         api_ui_i18n_regenerate_post,
     )
     from ouroboros.gateway.ui_preferences import api_ui_preferences_get, api_ui_preferences_post
+    from ouroboros.gateway.contributions import api_ui_contributions
+    from ouroboros.gateway.ui_holds import api_ui_holds_post
 
     return [
+        Route("/api/ui/contributions", endpoint=api_ui_contributions, methods=["GET"]),
         Route("/api/ui/preferences", endpoint=api_ui_preferences_get, methods=["GET"]),
         Route("/api/ui/preferences", endpoint=api_ui_preferences_post, methods=["POST"]),
+        Route("/api/ui/holds", endpoint=api_ui_holds_post, methods=["POST"]),
         Route("/api/ui/i18n", endpoint=api_ui_i18n_get, methods=["GET"]),
         Route("/api/ui/i18n/language", endpoint=api_ui_i18n_language_post, methods=["POST"]),
         Route("/api/ui/i18n/missing", endpoint=api_ui_i18n_missing_post, methods=["POST"]),
@@ -37,6 +41,15 @@ def _ui_client_routes() -> list[BaseRoute]:
         Route("/api/ui/i18n/export", endpoint=api_ui_i18n_export_get, methods=["GET"]),
         Route("/api/ui/i18n/regenerate", endpoint=api_ui_i18n_regenerate_post, methods=["POST"]),
     ]
+
+
+def _owner_answer_routes() -> list[BaseRoute]:
+    """The owner's answers: decision cards (``/api/decisions``, every family) and the
+    living cards Ouroboros shows in its messages (``/api/cards/*``: reads, pins)."""
+    from ouroboros.gateway.cards import card_routes
+    from ouroboros.gateway.task_decision import api_decision_answer
+
+    return [Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]), *card_routes()]
 
 
 def collect_routes(
@@ -65,7 +78,9 @@ def collect_routes(
         api_skill_review_history_detail,
         api_skill_toggle,
     )
-    from ouroboros.gateway.widgets import api_widgets
+    from ouroboros.gateway.widgets import api_widget_fault_post, api_widgets
+    from ouroboros.gateway.widget_assets import api_widget_asset_lease, api_widget_bridge_script
+    from ouroboros.gateway.contributions import api_extension_host_asset
     from ouroboros.gateway.files import (
         api_chat_upload,
         api_chat_upload_delete,
@@ -75,6 +90,7 @@ def collect_routes(
     from ouroboros.gateway.logs import api_logs_tail
     from ouroboros.gateway.storage import storage_routes
     from ouroboros.gateway.marketplace import (
+        api_hub_installed,
         api_marketplace_info,
         api_marketplace_install,
         api_marketplace_installed,
@@ -82,14 +98,9 @@ def collect_routes(
         api_marketplace_search,
         api_marketplace_uninstall,
         api_marketplace_update,
-        api_ouroboroshub_catalog,
-        api_ouroboroshub_install,
-        api_ouroboroshub_installed,
-        api_ouroboroshub_preview,
-        api_ouroboroshub_uninstall,
-        api_ouroboroshub_update,
-        api_ouroboroshub_clear_publication,
+        api_skill_publication_clear,
     )
+    from ouroboros.gateway.skill_my_skills import skill_source_routes
     from ouroboros.gateway.claudexor_accounts import (
         api_claudexor_credential_profile,
         api_claudexor_login,
@@ -128,6 +139,7 @@ def collect_routes(
         api_reset,
         api_update_apply,
         api_update_check,
+        api_update_description,
         api_update_preflight,
         api_update_status,
     )
@@ -139,12 +151,12 @@ def collect_routes(
         api_projects_create,
         api_projects_list,
     )
-    from ouroboros.gateway.state import api_contract, api_health, api_state
+    from ouroboros.gateway.state import api_consciousness, api_contract, api_health, api_state
     from ouroboros.gateway.skill_publish import skill_publish_routes
+    from ouroboros.gateway.task_reviews import task_review_routes
     from ouroboros.gateway.tasks import (
         api_task_artifact,
         api_task_cancel,
-    api_decision_answer,
     api_task_hurry, owner_tree_control_routes,
         api_task_resume,
         api_task_events,
@@ -153,39 +165,43 @@ def collect_routes(
         api_tasks_list,
     )
     from ouroboros.gateway import desktop_autostart as desktop_host
-    from ouroboros.gateway.onboarding_host import api_onboarding_bootstrap, onboarding_page
-    from ouroboros.gateway.owner_effort import api_owner_effort_range
+    from ouroboros.gateway.onboarding_host import api_onboarding_attempt, api_onboarding_bootstrap, onboarding_page
+    from ouroboros.gateway.owner_effort import api_owner_effort_range, api_owner_subagents_mode
+    from ouroboros.gateway.safety_settings import api_owner_safety_rules, api_owner_safety_model, api_owner_safety_mode
     from ouroboros.gateway.settings import (
         api_acknowledge_capability,
         api_onboarding,
         api_owner_auto_grant,
         api_owner_context_mode,
-        api_owner_safety_mode,
         api_owner_runtime_mode,
         api_settings_get,
         api_settings_post,
     )
     from ouroboros.gateway.settings_secrets import api_settings_secret
-    from ouroboros.gateway.presence_settings import api_owner_skill_presence_runtime
+    from ouroboros.gateway.places_api import places_routes
     from ouroboros.gateway.ws import ws_endpoint
+    from ouroboros.gateway.call_ws import call_routes
     settings_handlers = settings_handlers or {}
     settings_get = settings_handlers.get("api_settings_get", api_settings_get)
     settings_post = settings_handlers.get("api_settings_post", api_settings_post)
     onboarding = settings_handlers.get("api_onboarding", api_onboarding)
 
     routes: list[BaseRoute] = [
+        *call_routes(),
         Route("/api/health", endpoint=api_health),
         Route("/api/contract", endpoint=api_contract, methods=["GET"]),
         Route("/api/state", endpoint=api_state),
+        Route("/api/consciousness", endpoint=api_consciousness, methods=["GET"]),
         Route("/api/widgets", endpoint=api_widgets, methods=["GET"]),
+        Route("/api/widgets/fault", endpoint=api_widget_fault_post, methods=["POST"]),
+        Route("/api/widget-bridge.js", endpoint=api_widget_bridge_script, methods=["GET"]),
+        Route("/api/widgets/asset-leases", endpoint=api_widget_asset_lease, methods=["POST"]),
+        Route("/api/widgets/asset-leases/{op}", endpoint=api_widget_asset_lease, methods=["POST"]),
         Route("/api/extensions", endpoint=api_extensions_index, methods=["GET"]),
         Route("/api/extensions/{skill}/manifest", endpoint=api_extension_manifest, methods=["GET"]),
         Route("/api/extensions/{skill}/module/{entry:path}", endpoint=api_extension_module, methods=["GET"]),
-        Route(
-            "/api/extensions/{skill}/settings_section",
-            endpoint=api_extension_settings_section,
-            methods=["GET"],
-        ),
+        Route("/api/extensions/{skill}/ui/{revision}/{path:path}", endpoint=api_extension_host_asset, methods=["GET"]),
+        Route("/api/extensions/{skill}/settings_section", endpoint=api_extension_settings_section, methods=["GET"]),
         Route(
             "/api/extensions/{skill}/{rest:path}",
             endpoint=api_extension_dispatch,
@@ -203,31 +219,19 @@ def collect_routes(
             methods=["GET"],
         ),
         Route("/api/owner/skills/{skill}/attest-review", endpoint=api_owner_skill_attest_review, methods=["POST"]),
-        Route("/api/owner/skills/{skill}/presence-runtime", endpoint=api_owner_skill_presence_runtime, methods=["POST"]),
+        *places_routes(),
         Route("/api/skills/{skill}/grants", endpoint=api_skill_grants, methods=["POST"]),
         Route("/api/skills/{skill}/reconcile", endpoint=api_skill_reconcile, methods=["POST"]),
         Route("/api/marketplace/clawhub/search", endpoint=api_marketplace_search, methods=["GET"]),
         Route("/api/marketplace/clawhub/installed", endpoint=api_marketplace_installed, methods=["GET"]),
+        Route("/api/marketplace/ouroboroshub/installed", endpoint=api_hub_installed, methods=["GET"]),
         Route("/api/marketplace/clawhub/info/{slug:path}", endpoint=api_marketplace_info, methods=["GET"]),
         Route("/api/marketplace/clawhub/preview/{slug:path}", endpoint=api_marketplace_preview, methods=["GET"]),
         Route("/api/marketplace/clawhub/install", endpoint=api_marketplace_install, methods=["POST"]),
         Route("/api/marketplace/clawhub/update/{name}", endpoint=api_marketplace_update, methods=["POST"]),
         Route("/api/marketplace/clawhub/uninstall/{name}", endpoint=api_marketplace_uninstall, methods=["POST"]),
-        Route("/api/marketplace/ouroboroshub/catalog", endpoint=api_ouroboroshub_catalog, methods=["GET"]),
-        Route("/api/marketplace/ouroboroshub/installed", endpoint=api_ouroboroshub_installed, methods=["GET"]),
-        Route(
-            "/api/marketplace/ouroboroshub/preview/{slug:path}",
-            endpoint=api_ouroboroshub_preview,
-            methods=["GET"],
-        ),
-        Route("/api/marketplace/ouroboroshub/install", endpoint=api_ouroboroshub_install, methods=["POST"]),
-        Route("/api/marketplace/ouroboroshub/update/{name}", endpoint=api_ouroboroshub_update, methods=["POST"]),
-        Route("/api/marketplace/ouroboroshub/publication/{name}/clear", endpoint=api_ouroboroshub_clear_publication, methods=["POST"]),
-        Route(
-            "/api/marketplace/ouroboroshub/uninstall/{name}",
-            endpoint=api_ouroboroshub_uninstall,
-            methods=["POST"],
-        ),
+        Route("/api/skills/{skill}/publication/clear", endpoint=api_skill_publication_clear, methods=["POST"]),
+        *skill_source_routes(),
         *file_browser_routes(),
         # The onboarding wizard PAGE (one host for desktop/browser/overlay); the
         # /api/onboarding sibling below stays the readiness probe + legacy body.
@@ -239,6 +243,8 @@ def collect_routes(
         # POST /api/settings + POST /api/owner/runtime-mode pair.
         Route("/api/onboarding/subagents/preview", endpoint=api_onboarding_subagents_preview, methods=["POST"]),
         Route("/api/onboarding/complete", endpoint=api_onboarding_complete, methods=["POST"]),
+        # Reads back one completion attempt by the id its client sent; writes nothing.
+        Route("/api/onboarding/complete", endpoint=api_onboarding_attempt, methods=["GET"]),
         Route("/api/settings", endpoint=settings_get, methods=["GET"]),
         Route("/api/settings", endpoint=settings_post, methods=["POST"]),
         Route("/api/settings/secret", endpoint=api_settings_secret, methods=["POST"]),
@@ -251,7 +257,10 @@ def collect_routes(
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
         Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),
         Route("/api/owner/effort-range", endpoint=api_owner_effort_range, methods=["POST"]),
+        Route("/api/owner/subagents-mode", endpoint=api_owner_subagents_mode, methods=["POST"]),
         Route("/api/owner/safety-mode", endpoint=api_owner_safety_mode, methods=["POST"]),
+        Route("/api/owner/safety-rules", endpoint=api_owner_safety_rules, methods=["POST"]),
+        Route("/api/owner/safety-model", endpoint=api_owner_safety_model, methods=["POST"]),
         Route("/api/owner/capability-ack", endpoint=api_acknowledge_capability, methods=["POST"]),
         Route("/api/model-catalog", endpoint=api_model_catalog),
         Route("/api/projects", endpoint=api_projects_list, methods=["GET"]),
@@ -268,8 +277,9 @@ def collect_routes(
         Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"]),
         Route("/api/tasks/{task_id}/hurry", endpoint=api_task_hurry, methods=["POST"]),
         *owner_tree_control_routes(),
+        *task_review_routes(),
         Route("/api/tasks/{task_id}/resume", endpoint=api_task_resume, methods=["POST"]),
-    Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]),
+        *_owner_answer_routes(),
         Route("/api/schedules", endpoint=api_schedules_list, methods=["GET"]),
         Route("/api/schedules", endpoint=api_schedules_upsert, methods=["POST"]),
         Route("/api/schedules/{schedule_id}/action", endpoint=api_schedules_action, methods=["POST"]),
@@ -282,6 +292,7 @@ def collect_routes(
         Route("/api/update/status", endpoint=api_update_status),
         Route("/api/update/check", endpoint=api_update_check, methods=["POST"]),
         Route("/api/update/preflight", endpoint=api_update_preflight, methods=["POST"]),
+        Route("/api/update/description", endpoint=api_update_description, methods=["POST"]),
         Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
         *storage_routes(data_dir),

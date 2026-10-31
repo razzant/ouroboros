@@ -691,8 +691,7 @@ def test_supervisor_rolls_back_subagent_when_scheduled_result_write_fails(
     events._handle_schedule_task(
         _schedule_event("child-1", "parent", drive_root=tmp_path), ctx,
     )
-    assert [task["id"] for task in enqueued] == ["child-1"]
-    assert ctx.PENDING == []
+    assert enqueued == [] and ctx.PENDING == []  # the receipt precedes the put: nothing was ever queued
     rejected_first = read_result(tmp_path, "child-1")
     assert rejected_first["status"] == "failed"
     assert rejected_first["reason_code"] == "scheduled_result_persist_failed"
@@ -702,7 +701,7 @@ def test_supervisor_rolls_back_subagent_when_scheduled_result_write_fails(
         _schedule_event("child-2", "parent", drive_root=tmp_path), ctx,
     )
     scheduled = read_result(tmp_path, "child-2")
-    assert [task["id"] for task in enqueued] == ["child-1", "child-2"]
+    assert [task["id"] for task in enqueued] == ["child-2"]
     assert [task["id"] for task in ctx.PENDING] == ["child-2"]
     assert scheduled["status"] == "scheduled"
     assert scheduled["delegation_admission"]["status"] == "accepted"

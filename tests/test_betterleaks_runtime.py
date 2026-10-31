@@ -243,13 +243,23 @@ def test_bundled_runtime_precedes_managed_runtime(tmp_path, monkeypatch):
     assert resolved.binary_path == bundled.binary_path
 
 
-def test_managed_resolver_rejects_binary_digest_drift(tmp_path, monkeypatch):
+@pytest.mark.parametrize("drift", ["size", "mtime"])
+def test_managed_resolver_rejects_binary_digest_drift(tmp_path, monkeypatch, drift):
     archive = _tar(tmp_path / "fixture.tar.gz")
     artifact = _artifact(archive, kind="tar.gz", binary_member="betterleaks")
     monkeypatch.setattr(runtime, "current_artifact", lambda: artifact)
     monkeypatch.setattr(runtime, "_probe_version", lambda _binary: runtime.BETTERLEAKS_VERSION)
     installed = runtime.install_betterleaks(data_root=tmp_path / "data", archive_path=archive, artifact=artifact)
-    pathlib.Path(installed.binary_path).write_bytes(b"changed executable\n")
+    binary = pathlib.Path(installed.binary_path)
+    before = binary.stat()
+    replacement = b"changed executable\n" + (b"different size\n" if drift == "size" else b"")
+    binary.write_bytes(replacement)
+    # The validation cache is stat-keyed. Exercise each invalidation dimension
+    # deterministically rather than relying on two writes landing in different ticks.
+    mtime = before.st_mtime_ns + (10_000_000_000 if drift == "mtime" else 0)
+    os.utime(binary, ns=(before.st_atime_ns, mtime))
+    assert (binary.stat().st_size != before.st_size) is (drift == "size")
+    assert (binary.stat().st_mtime_ns != before.st_mtime_ns) is (drift == "mtime")
 
     resolved = runtime.resolve_betterleaks(data_root=tmp_path / "data", bundle_bases=[])
 

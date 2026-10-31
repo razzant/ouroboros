@@ -5,13 +5,16 @@ interface a server generation serves (``StateResponse.served_ui``), the read-onl
 bootstrap a client renders onboarding from (``GET /api/onboarding/bootstrap``, whose rows
 mirror ``settings_setup_contract``), the settings writers' durable-outcome refusal, the
 auth gate's JSON login, the derived ABI document ``GET /api/contract`` publishes, and the
-bodies of the everyday journey routes (projects, files, owner controls, schedules) whose
+bodies of the everyday journey routes (projects, files, places, owner controls, schedules) whose
 handlers check their fields by hand.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+
+from ouroboros.delegate_custody_usage import CostCustody
+from ouroboros.cost_projection import CostPresentation
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -133,6 +136,8 @@ class SetupInitialState(TypedDict):
     ``contract.providerFields[].stateKey`` (a configured secret reads as ``secretPlaceholder``,
     never the secret), per ``contract.budgetFields[].stateKey`` and per ``contract.modelSlots[].stateKey``."""
 
+    connections: List[Dict[str, Any]]  # masked OUROBOROS_CONNECTIONS rows, keyed by kind/name
+    safetyModel: str
     providerProfile: str
     reviewEnforcement: str
     runtimeMode: str
@@ -220,7 +225,7 @@ class ContractHttpEntry(TypedDict):
     method: str
     path: str  # Starlette template: {name} is one segment, {name:path} the rest of the path
     path_params: List[str]
-    auth: Literal["gate", "public"]  # gate: needs a session when the core enforces its network password
+    auth: Literal["gate", "public", "asset_lease"]  # asset_lease: scoped read capability, never a session
     typed: bool  # False: the route is published without shapes (an explicit gap, not an empty schema)
     query: NotRequired[List[str]]
     headers: NotRequired[List[str]]  # request headers the handler reads; a trailing "!" marks a required one
@@ -252,6 +257,7 @@ class GatewayContractResponse(TypedDict):
     interface_paths: List[str]  # the replaceable main interface ("/" and "/static")
     http: List[ContractHttpEntry]
     ws: ContractWs
+    call_socket: NotRequired[Dict[str, Any]]  # separate PCM/media protocol, see CallSocketContract
     schemas: Dict[str, Dict[str, Any]]
 
 
@@ -264,14 +270,44 @@ class OwnerRuntimeModeRequest(TypedDict):
 
 
 class OwnerContextModeRequest(TypedDict):
-    """``POST /api/owner/context-mode``. Lowering it while work is queued or running answers 409
-    (nothing saved) unless the runtime mode is cyber_pro."""
+    """Save the room's context for future actors; existing actors retain theirs."""
 
     mode: Literal["nano", "low", "max"]
+    project_id: NotRequired[str]
+
+
+class OwnerEffortRangeRequest(TypedDict):
+    min: str
+    recommended: str
+    max: str
+    project_id: NotRequired[str]
+
+
+class OwnerSubagentsModeRequest(TypedDict):
+    mode: Literal["off", "auto", "swarm"]
+    project_id: NotRequired[str]
 
 
 class OwnerSafetyModeRequest(TypedDict):
+    kind: NotRequired[Literal["your_work", "consciousness"]]
     mode: Literal["full", "light", "off"]
+
+
+class OwnerSafetyRulesRequest(TypedDict):
+    rules: str
+
+
+class OwnerSafetyRulesResponse(TypedDict):
+    ok: bool
+    rules: str
+
+
+class OwnerSafetyModelRequest(TypedDict):
+    settings: Dict[str, Any]
+
+
+class OwnerSafetyModelResponse(TypedDict):
+    ok: bool
 
 
 class OwnerEnabledRequest(TypedDict):
@@ -282,13 +318,180 @@ class OwnerEnabledRequest(TypedDict):
     enabled: bool
 
 
+class RecentWakeCheck(TypedDict):
+    """One stored safety check, retaining both its chip and the tool it checked."""
+
+    chip: str
+    tool: str
+
+
+_RecentWakeIdentity = TypedDict("_RecentWakeIdentity", {"as": NotRequired[Dict[str, Any]]})  # {label: str, owner: bool}
+
+
+class RecentWake(_RecentWakeIdentity):
+    """GET /api/consciousness recent_wakes: ledger-selected facts, never authored by the view."""
+
+    task_id: str
+    chat_id: Optional[int]
+    cause: Literal["own", "focus"]
+    place_label: str
+    conversation: str
+    started_at: Optional[str]
+    first_reply_at: NotRequired[Optional[str]]
+    ended_at: Optional[str]
+    live: bool
+    phase: Literal["running", "waiting", "queued", "paused", "unknown", "working", "done", "warn", "error", "cancelled"]
+    quiet: bool
+    summary: NotRequired[str]
+    note: Optional[str]
+    tool_calls: NotRequired[Optional[int]]
+    rounds: NotRequired[Optional[int]]
+    checks: List[RecentWakeCheck]
+    said_owner: NotRequired[bool]
+    accounted_upper_bound_usd: NotRequired[Optional[float]]
+    accounted_upper_bound_usd_with_children: NotRequired[Optional[float]]
+    cost_presentation: NotRequired[Optional[CostPresentation]]
+    cost_accounting_status: NotRequired[Literal["available", "unavailable"]]
+    cost_accounting_error: NotRequired[str]
+    cost_final: NotRequired[bool]
+    cost_with_children_partial: NotRequired[bool]
+    cost_custody: NotRequired[Optional[CostCustody]]
+    unknown_unmetered: NotRequired[Optional[int]]
+    non_final_rows: NotRequired[Optional[int]]
+    reserved_usd: NotRequired[Optional[float]]
+    unresolved_upper_bound_usd: NotRequired[Optional[float]]
+    ledger_integrity_degraded: NotRequired[Optional[bool]]
+
+
+class RecentWakesView(TypedDict):
+    """Recent-wakes fields of /api/consciousness; status fields remain an open JSON shape."""
+
+    recent_wakes: Optional[List[RecentWake]]
+    recent_wakes_coverage: NotRequired[str]  # names the cap or the typed read failure; absent without a clock
+
+
+class PlaceConnectRequest(TypedDict):
+    """Connect Silent; ids default to empty. An instance label is prefixed with the service."""
+
+    connector: str
+    account_id: NotRequired[str]
+    conversation_id: NotRequired[str]
+    label: NotRequired[str]
+
+
+class PlaceIcon(TypedDict, total=False):
+    """Sanitized host mark or SVG geometry; an unavailable mark is {}."""
+
+    kind: Literal["host", "svg"]
+    name: str
+    svg: str
+
+
+class PlaceReadiness(TypedDict):
+    text: str
+    tone: str
+
+
+class PlaceSummary(TypedDict):
+    """One projection for list, write/conflict responses and the model's place map."""
+
+    place_id: str
+    connector: str
+    provider: str
+    account_id: str
+    conversation_id: str
+    label: str
+    state: Literal["active", "silent", "paused"]
+    wakes: List[Dict[str, str]]
+    notes: List[Dict[str, str]]
+    owner_accounts: List[Dict[str, str]]
+    working_folder: str
+    model: str
+    context_topics: List[str]
+    legacy_binding_ids: List[str]
+    revision: int
+    thread_id: str
+    destination: str
+    scope: str
+    contribution_id: str
+    reply_destination: Optional[Dict[str, str]]
+    icon: PlaceIcon
+    readiness: PlaceReadiness
+    wake_suggestions: List[str]
+    facts: NotRequired[List[Any]]
+    source: NotRequired[Dict[str, Any]]
+    settings: NotRequired[str]
+    safety_mode: Literal["off", "light", "full"]
+    labels: Dict[str, str]
+    rooms: Optional[List[Dict[str, Any]]]
+    unanswered: Optional[int]  # open focus turns, not owed replies
+    last_activity_at: str
+    activity_coverage: str
+    spent_24h_usd: Optional[float]
+    account_candidates: List[Dict[str, Any]]
+
+
+class PlaceDisconnectRequest(TypedDict, total=False):
+    expected_revision: int
+
+
+class PlaceRoomSummary(TypedDict):
+    """One captured local conversation; an unknown open-focus count stays null."""
+
+    room_chat_id: int
+    unanswered_count: Optional[int]
+    address: str
+    label: Optional[str]  # latest captured arrival's conversation title/name, absent stays null
+    last_at: str  # latest captured arrival, not latest remote message or outgoing receipt
+    conversation_id: str
+    thread_id: str
+
+
+class PlaceRoomsCoverage(TypedDict):
+    """Discovery scope and store-wide chat import/gaps, not provider completeness."""
+    discovery: Literal['arrivals']
+    importing: bool
+    gaps: bool
+
+
+class PlaceRoomsResponse(TypedDict):
+    place_id: str
+    rooms: List[PlaceRoomSummary]
+    coverage: PlaceRoomsCoverage
+
+
+class PlaceOwnerAccountRequest(TypedDict):
+    """Confirm a person; omitted account_id uses the place's account."""
+
+    platform_actor_id: str
+    label: NotRequired[str]
+    account_id: NotRequired[str]
+
+
+class PlaceUpdateRequest(TypedDict, total=False):
+    """Atomic owner choices. Send a nonempty body; expected_revision compares before writing."""
+
+    state: Literal["active", "silent", "paused"]
+    wakes: List[str]
+    add_note: str
+    remove_note: str
+    working_folder: str
+    model: str
+    confirm_owner_account: PlaceOwnerAccountRequest
+    revoke_owner_account: str
+    expected_revision: int
+
+
 class SettingsSecretRequest(TypedDict, total=False):
-    """``POST /api/settings/secret``: exactly one selector, ``{key}``, ``{mcp_server_id}`` or
-    ``{mcp_server_id, header_name}``. Reads one stored secret on purpose; writes nothing."""
+    """``POST /api/settings/secret``: exactly one selector, ``{key}``, ``{mcp_server_id}``,
+    ``{mcp_server_id, header_name}`` or ``{connection, field}`` (an added API key ``kind@name`` and
+    one of its secret fields). Reads one stored secret on purpose; writes nothing."""
 
     key: str
     mcp_server_id: str
     header_name: str
+    connection: str
+    field: str
 
 
 class SettingsSecretResponse(TypedDict):
@@ -308,8 +511,8 @@ class ChatUploadDeleteResponse(TypedDict):
 
 class ProjectListResponse(TypedDict):
     """``GET /api/projects``: active and deleting projects, at most 200, most recently active first.
-    Rows are the compact projection ``GET /api/state`` also carries: id, name, chat_id, working_dir,
-    provenance, last_active_at, lifecycle, routing_generation, visible_revision, delete_error and
+    Rows are the compact projection ``GET /api/state`` also carries: id, name, pinned, chat_id, working_dir,
+    provenance, last_active_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error and
     has_thread_activity."""
 
     projects: List[ProjectEntry]
@@ -326,10 +529,12 @@ class ProjectCreateResponse(TypedDict):
     init_git_skipped: NotRequired[List[str]]
 
 
-class ProjectUpdateRequest(TypedDict):
-    """``POST /api/projects/{project_id}/update``: rename, the one mutable field."""
+class ProjectUpdateRequest(TypedDict, total=False):
+    """``POST /api/projects/{project_id}/update``: name, pin or closure; at least one."""
 
     name: str  # 1 to 80 characters
+    pinned: bool
+    closed: bool  # true closes as owner; false removes the closure record
 
 
 class ProjectUpdateResponse(TypedDict):
@@ -501,6 +706,14 @@ class ScheduleActionRequest(TypedDict):
     relation: NotRequired[str]
 
 
+class TaskResumeRequest(TypedDict, total=False):
+    """The optional body of ``POST /api/tasks/{task_id}/resume``: the held calls whose outcome is
+    unknown (a refusal's ``acceptable_unknown``) the owner goes on past, and why. Recorded, never re-run."""
+
+    accept_unknown: List[str]
+    reason: str
+
+
 class TaskResumeResponse(TypedDict, total=False):
     """``POST /api/tasks/{task_id}/resume`` after budget, owner, sleep or technical authority pause. The other keys say which
     resume path ran (``same_generation``, ``owner_pause_released``, ``never_started``, ``warm``,
@@ -512,6 +725,9 @@ class TaskResumeResponse(TypedDict, total=False):
     task_id: Required[str]
     root_task_id: str
     late_phase: Literal["resumed", "settled"]
+    tree_only: bool
+    owner_pause_released: bool
+    snapshot_persisted: bool
     exact_continuation: bool
     grant_id: str
     grant_generation: int
@@ -520,6 +736,10 @@ class TaskResumeResponse(TypedDict, total=False):
     held_siblings: List[str]
     rebound_held_siblings: List[str]
     released_hold: str
+    # The still-closed Pause's census settled without these unreadable rows nothing ties to the task:
+    # {"rows": [{"task_id", "reason"}] (at most 20), "count"}; ``message`` words them.
+    membership_gaps: Dict[str, Any]
+    message: str
 
 
 # Last, not first: ``contracts.py`` imports ServedUiState from this module, so the shared
@@ -534,12 +754,15 @@ __all__ = [
     "SettingsReadResponse", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
-    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerSafetyModeRequest", "OwnerEnabledRequest",
+    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
+    "RecentWake", "RecentWakeCheck", "RecentWakesView",
+    "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceSummary", "PlaceDisconnectRequest",
+    "PlaceOwnerAccountRequest", "PlaceUpdateRequest",
     "SettingsSecretRequest", "SettingsSecretResponse", "ChatUploadDeleteRequest", "ChatUploadDeleteResponse",
     "ProjectListResponse", "ProjectCreateResponse", "ProjectUpdateRequest", "ProjectUpdateResponse",
     "ProjectFromTaskRequest", "ProjectTaskBinding", "ProjectFromTaskResponse",
     "FileBrowserEntry", "FileBrowserListResponse", "FileBrowserReadResponse", "FileMkdirRequest", "FileWriteRequest", "FilePathRequest",
     "FileTransferRequest", "FileChangeResponse",
     "ScheduleTriggerRequest", "ScheduleTaskTemplate", "ScheduleUpsertRequest", "ScheduleActionRequest",
-    "TaskResumeResponse",
+    "TaskResumeRequest", "TaskResumeResponse",
 ]

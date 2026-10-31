@@ -3,13 +3,13 @@ import asyncio
 import json
 import pathlib
 import shutil
-import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import store, store_import, task_status
 from ouroboros.gateway import history
+from tests.group_run import run_in_group
 from tests.test_history_tool_carriers import TS, _tool, _write
 
 
@@ -19,7 +19,7 @@ def test_history_migrating_reaches_http_and_never_imports(tmp_path, monkeypatch,
                                            "text": "Saved words", "chat_id": 1}])
     _write(tmp_path / "logs/tools.jsonl", [_tool("root")])
     _write(tmp_path / "task_results/root.json", [{"_schema_version": 1, "task_id": "root", "status": "completed"}])
-    monkeypatch.setattr("ouroboros.gateway.state._chat_activities_snapshot_safe", lambda *_: [])
+    monkeypatch.setattr("ouroboros.gateway.state._chat_activities_snapshot_safe", lambda *_, **__: [])
     endpoint = history.make_chat_history_endpoint(tmp_path)
     request = SimpleNamespace(query_params={"chat_id": "1"})
     with monkeypatch.context() as patch:
@@ -55,7 +55,6 @@ def test_migrating_client_consumers():
     node = shutil.which("node")
     assert node, "focused frontend verification requires Node"
     files = ["chat_history_loading", "dashboard_read_states", "task_card_recovery", "api_client_errors"]
-    result = subprocess.run([node, "--test", *[f"web/tests/{name}.test.js" for name in files]],
-                            cwd=root, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    result = run_in_group([node, "--test", *[f"web/tests/{name}.test.js" for name in files]], cwd=root, timeout=60)
     print(result.stdout)
     assert result.returncode == 0, result.stdout + result.stderr

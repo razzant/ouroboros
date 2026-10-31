@@ -16,13 +16,16 @@ devtools/benchmarks/terminal_bench/harbor_installed_agent.py.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import pathlib
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -42,6 +45,7 @@ from ouroboros.platform_layer import (
 )
 from ouroboros.provider_models import (
     ALL_PROVIDER_CREDENTIAL_KEYS,
+    CONNECTIONS_KEY,
     LEGACY_MODEL_SETTING_KEYS,
     provider_credential_plan,
 )
@@ -92,8 +96,8 @@ _ISO_SETTINGS_ALLOW_EXACT = frozenset({
     # The roster carries the delegation actor AND the review pool (its marked rows).
     "OUROBOROS_SUBAGENTS",
     "OUROBOROS_WEBSEARCH_MODEL",
-    # Review policy knobs (non-secret): must propagate so settings.json's task-acceptance
-    # self-review config is honored by isolated benchmark servers (else it silently
+    # Review policy knobs (non-secret): must propagate so settings.json's result-review
+    # config is honored by isolated benchmark servers (else it silently
     # falls back to the "auto" default and the end-of-task review never runs).
     "OUROBOROS_TASK_REVIEW_MODE", "OUROBOROS_REVIEW_ENFORCEMENT",
     # Shared paid review-cycle ceiling (non-secret): bench templates pin it to
@@ -179,13 +183,14 @@ def _settings_json_bytes(config: dict) -> bytes:
 
 
 def _is_secret_env_key(key: str) -> bool:
-    """A non-provider secret-shaped env var (token/secret/password/api-key/credentials)."""
+    """A non-provider secret-shaped env var (token/secret/password/api-key/credentials), or the
+    added API keys' rows (``OUROBOROS_CONNECTIONS``), whose fields carry their keys."""
     ku = str(key).upper()
     if ku in _PROVIDER_ENV_KEYS:
         return False
     return (
         "TOKEN" in ku or "SECRET" in ku or "PASSWORD" in ku
-        or ku.endswith("_API_KEY") or ku.endswith("_CREDENTIALS")
+        or ku.endswith("_API_KEY") or ku.endswith("_CREDENTIALS") or ku == CONNECTIONS_KEY
     )
 
 
@@ -426,8 +431,138 @@ def supervisor_state_is_ready(state: dict) -> bool:
     return bool(state.get("supervisor_ready")) and int(state.get("workers_total") or 0) > 0
 
 
+@contextlib.contextmanager
+def alarm_deferred():
+    """Hold a SIGALRM that lands inside the block and deliver it once the block is done.
+
+    A test's timeout alarm (pytest-timeout's signal method) raises from its handler wherever
+    the main thread is. Landing inside a server stop it would unwind the stop before the
+    forced kill and reap, and leave a live server for whatever runs next. Inside this block
+    the cleanup runs to completion first; the held alarm then reaches the handler it was
+    meant for, so the timeout still fails its test. Python runs signal handlers only in the
+    main thread, so another thread needs no hold, and a host without SIGALRM has no alarm.
+    """
+    if not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    held: list = []
+    previous = signal.signal(signal.SIGALRM, lambda _signum, frame: held.append(frame))
+    try:
+        yield
+    finally:
+        # None: a handler installed outside Python, which cannot be put back; the default stands in.
+        signal.signal(signal.SIGALRM, signal.SIG_DFL if previous is None else previous)
+        if held and callable(previous):
+            previous(signal.SIGALRM, held[0])
+        elif held and previous == signal.SIG_DFL:
+            signal.raise_signal(signal.SIGALRM)
+
+
+# ``server_control.restart_current_process`` ledgers a spawned successor (the POSIX
+# fallback after a failed exec, the normal transfer on Windows) under this purpose.
+RESTART_SUCCESSOR_PURPOSE = "server_restart_fallback"
+
+
+def stop_restart_successors(data_root: pathlib.Path, *, grace_sec: float, rounds: int = 5) -> list[str]:
+    """Stop every restart successor this run's own custody ledger proves live; return what stays unconfirmed.
+
+    The original process exits 42 once its successor runs under another PID and group.
+    Identity is the row this data root's ledger recorded, re-proved by its measured
+    birth and command (``process_custody``), never a name, a port or a bare PID; an
+    unreadable ledger or unmeasurable identity is reported, not signalled. A successor
+    that itself restarted is found by the next read; ``rounds`` only bounds a restart loop.
+    One that died before this stop is reported while its recorded group still runs.
+    """
+    from ouroboros.process_custody import process_stop_snapshot
+
+    unconfirmed: list[str] = []
+    handled: set = set()  # each successor is judged once
+    for _ in range(rounds):
+        try:
+            rows = process_stop_snapshot(pathlib.Path(data_root), {RESTART_SUCCESSOR_PURPOSE})
+        except OSError as exc:
+            return [*unconfirmed, f"restart successor custody unreadable: {exc}"]
+        fresh = [row for row in rows if _custody_key(row) not in handled]
+        if not fresh:
+            return unconfirmed + _leaderless_successor_groups(pathlib.Path(data_root), handled)
+        for row in fresh:
+            handled.add(_custody_key(row))
+            unconfirmed += _stop_restart_successor(row, grace_sec)
+    return [*unconfirmed, f"restart successors still appearing after {rounds} reads"]
+
+
+def _custody_key(row: dict) -> tuple:
+    """A ledger row's pid with its recorded birth/command."""
+    return row.get("pid"), json.dumps(row.get("fingerprint"), sort_keys=True)
+
+
+def _leaderless_successor_groups(data_root: pathlib.Path, handled: set) -> list[str]:
+    """Recorded successor groups this stop never judged that still have live members.
+
+    The live snapshot omits a successor that died first, but a child sharing its group (a
+    plain ``subprocess.run``, as ``supervisor.git_ops`` runs git) can outlive it. Nothing
+    re-proves who those members are, so they are reported and never signalled. As in the
+    reaper's ``_service_group_survives_leader``, a measured foreign process at the group's
+    own PID refutes the group: that PID could not be reused while the recorded group had
+    members.
+    """
+    from ouroboros.process_containment import process_group_has_live_members
+    from ouroboros.process_custody import _read_ledger_strict, measured_identity_mismatch
+
+    readable, rows = _read_ledger_strict(data_root)
+    if not readable:
+        return ["restart successor custody unreadable after the stop"]
+    found = []
+    for row in rows:
+        pid, pgid = int(row.get("pid") or 0), int(row.get("pgid") or 0)
+        if (row.get("purpose") == RESTART_SUCCESSOR_PURPOSE and _custody_key(row) not in handled and pgid > 0
+                and not (pgid == pid and measured_identity_mismatch(row)) and process_group_has_live_members(pgid)):
+            found.append(f"restart successor {pid}: process group {pgid} still has live members, not signalled")
+    return found
+
+
+def _stop_restart_successor(row: dict, grace_sec: float) -> list[str]:
+    """Graceful then forced stop of one ledgered successor, as ``stop`` treats the original server."""
+    from ouroboros.platform_layer import (
+        IS_WINDOWS, current_process_group_id, deliver_signal, kill_process_group_id, process_group_id,
+        terminate_process_group_id,
+    )
+    from ouroboros.process_containment import process_group_has_live_members
+    from ouroboros.process_custody import process_fingerprint_matches
+
+    pid, pgid = int(row.get("pid") or 0), int(row.get("pgid") or 0)
+    if not process_fingerprint_matches(row, require_measured=True):
+        return [f"restart successor {pid}: identity unmeasurable, not signalled"]
+    # Its own group, recorded at spawn and still led by it: the graceful signal reaches its workers too.
+    group = pgid if pgid == pid and process_group_id(pid) == pgid != current_process_group_id() else 0
+
+    def gone(within: float) -> bool:
+        deadline = time.monotonic() + within
+        while process_fingerprint_matches(row) or (group and process_group_has_live_members(group)):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
+    if not IS_WINDOWS:  # Windows has no graceful signal for a process the caller did not start
+        if group:
+            terminate_process_group_id(group)
+        else:
+            deliver_signal(pid, graceful=True)
+        if gone(grace_sec):
+            return []
+    if process_fingerprint_matches(row, require_measured=True):  # re-proved before forcing
+        kill_pid_tree(pid, include_process_group=bool(group))
+    elif group:
+        kill_process_group_id(group)  # the leader left; its live group cannot have been reused
+    return [] if gone(5.0) else [f"restart successor {pid}: exit unconfirmed after a forced stop"]
+
+
 class IsolatedServer:
     """A throwaway Ouroboros server bound to an isolated clone + data root + port."""
+
+    # How long the server's tree gets after SIGTERM before it is force-killed.
+    stop_grace_sec = 15.0
 
     def __init__(self, clone: pathlib.Path, data_root: pathlib.Path, settings_path: pathlib.Path,
                  *, host: str = "127.0.0.1", settings_authoritative_env: bool = False,
@@ -445,6 +580,7 @@ class IsolatedServer:
         self.host_service_port = free_port()
         self.base_url = f"http://{host}:{self.port}"
         self.proc: subprocess.Popen | None = None
+        self.stop_unconfirmed: list[str] = []
         # Stable per-task hurry request ids (see `hurry_task`), the driver-side mirror of
         # the UI's `hurryRequestId` map.
         self._hurry_request_ids: dict = {}
@@ -688,8 +824,8 @@ class IsolatedServer:
             {"request_id": rid}, timeout=30)
 
     def wait_for_health(self, timeout: float = 180) -> bool:
-        """Wait for /api/state to answer with supervisor ready again (after a
-        self-evolution os.execvpe re-exec the same PID restarts on new code)."""
+        """Wait for /api/state to answer with supervisor ready again after a restart: an
+        exec keeps the PID, a spawned successor does not, and only HTTP is polled here."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -741,18 +877,30 @@ class IsolatedServer:
         return {"absorbed": False, "new_sha": self.current_sha(), "cycles": absorbed_cycles_done(self.data_root),
                 "reason": "timeout", "campaign": campaign_summary(self.data_root)}
 
-    def stop(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            pid = self.proc.pid
-            terminate_process_tree(self.proc)
-            try:
-                self.proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                kill_pid_tree(pid)
+    def stop(self) -> list[str]:
+        """SIGTERM the server's tree, then force-kill and reap it, and do the same for a
+        restart successor it spawned (``stop_restart_successors``); a timeout alarm landing
+        inside is held until the trees are down (``alarm_deferred``). Returns, and keeps in
+        ``stop_unconfirmed``, every exit this stop could not prove; nothing is deleted."""
+        unconfirmed: list[str] = []
+        with alarm_deferred():
+            if self.proc is not None and self.proc.poll() is None:
+                pid = self.proc.pid
+                terminate_process_tree(self.proc)
                 try:
-                    self.proc.wait(timeout=5)
+                    self.proc.wait(timeout=self.stop_grace_sec)
                 except subprocess.TimeoutExpired:
-                    pass
+                    kill_pid_tree(pid)
+                    try:
+                        self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        unconfirmed.append(f"server {pid}: exit unconfirmed after a forced stop")
+            unconfirmed += stop_restart_successors(self.data_root, grace_sec=self.stop_grace_sec)
+        self.stop_unconfirmed = unconfirmed
+        if unconfirmed:
+            print(f"isolated server stop unconfirmed under {self.data_root}: {'; '.join(unconfirmed)}",
+                  file=sys.stderr)
+        return unconfirmed
 
     def __enter__(self) -> "IsolatedServer":
         return self.start()

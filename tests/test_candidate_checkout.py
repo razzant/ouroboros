@@ -111,6 +111,7 @@ def test_git_input_is_file_backed_with_identical_bytes_and_failure_semantics(sou
 def test_unproven_process_or_inner_marker_retains_the_copy_in_place(source, tmp_path):
     """Deletion needs a proven-gone holder; retention is marked for enclosing layers."""
     from ouroboros.test_environment import RETENTION_MARKER, retain_tree
+    from tests._shared import retire_synthetic_retention
 
     proven = tmp_path / "proven"
     with candidate.candidate_checkout(source, proven) as copy:
@@ -118,30 +119,37 @@ def test_unproven_process_or_inner_marker_retains_the_copy_in_place(source, tmp_
         copy.release()  # The holder proved its process tree gone.
     assert not proven.exists()
 
-    held = tmp_path / "held"
-    with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED.*never proven gone"):
-        with candidate.candidate_checkout(source, held) as copy:
-            copy.hold()  # Started, never proven gone: an ordinary exit is no proof.
-    assert "never proven gone" in (held / RETENTION_MARKER).read_text(encoding="utf-8")
+    held, failing, nested = tmp_path / "held", tmp_path / "failing", (tmp_path / "nested").resolve()
+    unproven = "1 process tree(s) started from this checkout were never proven gone"
+    try:
+        with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED.*never proven gone"):
+            with candidate.candidate_checkout(source, held) as copy:
+                copy.hold()  # Started, never proven gone: an ordinary exit is no proof.
+        assert "never proven gone" in (held / RETENTION_MARKER).read_text(encoding="utf-8")
 
-    failing = tmp_path / "failing"
-    with pytest.raises(RuntimeError, match="reap failed"):
-        with candidate.candidate_checkout(source, failing) as copy:
-            copy.hold()
-            raise RuntimeError("reap failed")  # The original failure stays the error.
-    assert (failing / RETENTION_MARKER).is_file()
+        with pytest.raises(RuntimeError, match="reap failed"):
+            with candidate.candidate_checkout(source, failing) as copy:
+                copy.hold()
+                raise RuntimeError("reap failed")  # The original failure stays the error.
+        assert (failing / RETENTION_MARKER).is_file()
 
-    nested = tmp_path / "nested"
-    with pytest.raises(candidate.CandidateError, match="retention marker"):
-        with candidate.candidate_checkout(source, nested) as copy:
-            (nested / "server-data").mkdir()
-            retain_tree(nested / "server-data", "inner layer could not prove its tree gone")
-    assert (nested / "server-data" / RETENTION_MARKER).is_file()
+        with pytest.raises(candidate.CandidateError, match="retention marker"):
+            with candidate.candidate_checkout(source, nested) as copy:
+                (nested / "server-data").mkdir()
+                retain_tree(nested / "server-data", "inner layer could not prove its tree gone")
+        assert (nested / "server-data" / RETENTION_MARKER).is_file()
 
-    with candidate.candidate_checkout(source, tmp_path / "unmatched") as copy:
-        with pytest.raises(candidate.CandidateError, match="release without a matching hold"):
-            copy.release()
-    assert not (tmp_path / "unmatched").exists()
+        with candidate.candidate_checkout(source, tmp_path / "unmatched") as copy:
+            with pytest.raises(candidate.CandidateError, match="release without a matching hold"):
+                copy.release()
+        assert not (tmp_path / "unmatched").exists()
+    finally:
+        # Every hold above was synthetic: no process was started from these copies.
+        retire_synthetic_retention(held, unproven)
+        retire_synthetic_retention(failing, unproven)
+        retire_synthetic_retention(nested / "server-data", "inner layer could not prove its tree gone")
+        retire_synthetic_retention(nested, "retention marker(s) beneath: "
+                                   + str(nested / "server-data" / RETENTION_MARKER))
 
 
 def test_staged_unstaged_new_binary_deleted_and_executable_bytes_survive(source, tmp_path):
@@ -342,6 +350,27 @@ def test_proof_bytes_removed_from_the_checkout_invalidate_success(source, tmp_pa
     assert not target.exists()
 
 
+def test_a_stopped_copy_takes_new_overlay_bytes_that_its_next_verification_binds(source, tmp_path):
+    (source / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    (source / "web").mkdir()
+    (source / "web" / "index.html").write_bytes(b"<!doctype html>\n")
+    target = tmp_path / "checkout"
+    with candidate.candidate_checkout(source, target, origin_proof=True) as checkout:
+        restarted = checkout.version_text.replace("9.9.9+", "9.9.10+", 1)
+        checkout.hold()  # a server started from the copy may still read it
+        with pytest.raises(candidate.CandidateError, match="CANDIDATE_CUSTODY"):
+            checkout.rewrite(candidate.VERSION_PATH, f"{restarted}\n".encode())
+        checkout.release()
+        with pytest.raises(candidate.CandidateError, match="CANDIDATE_UNSUPPORTED"):
+            checkout.rewrite("edited", b"source bytes are not per-checkout\n")
+        checkout.rewrite(candidate.VERSION_PATH, f"{restarted}\n".encode())
+        assert checkout.version_text == restarted
+        assert (target / "VERSION").read_text(encoding="utf-8") == f"{restarted}\n"
+        candidate.verify_checkout(target, checkout)
+    assert (source / "VERSION").read_text(encoding="utf-8") == "9.9.9\n"
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("suffix", [".cmd", ".bat", ".exe", ".com"])
 def test_path_execute_bits_do_not_change_handle_identity(source, monkeypatch, suffix):
     real_lstat = Path.lstat
@@ -381,3 +410,148 @@ def test_origin_proof_uses_observable_sibling_mode(source, tmp_path, monkeypatch
     with candidate.candidate_checkout(source, tmp_path / "copy", origin_proof=True) as checkout:
         for name, value in checkout.overlay.items():
             assert candidate._read(checkout.path, name)[:2] == value
+
+
+def _origin_source(source):
+    (source / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    (source / "web").mkdir()
+    (source / "web" / "index.html").write_bytes(b"<!doctype html>\n")
+
+
+def test_cases_reuse_one_copy_under_their_own_custody_and_overlay(source, tmp_path, monkeypatch):
+    """One materialization serves many cases; each gives back the overlay it rewrote."""
+    _origin_source(source)
+    with candidate.candidate_checkout(source, tmp_path / "copy", origin_proof=True) as owner:
+        monkeypatch.setattr(candidate, "_copy_candidate", lambda *args: pytest.fail("a case copied the source again"))
+        with candidate.case_checkout(source, owner) as first:
+            first.hold()
+            first.release()  # Proven gone: the stopped copy may take another VERSION.
+            first.rewrite(candidate.VERSION_PATH, b"9.9.10+restart\n")
+            candidate.verify_checkout(owner.path, first)
+        assert candidate._read(owner.path, candidate.VERSION_PATH)[:2] == owner.overlay[candidate.VERSION_PATH]
+        with candidate.case_checkout(source, owner) as second, candidate.case_checkout(source, owner) as third:
+            assert second.path == first.path and second.version_text == owner.version_text
+            second.hold()  # Its process may read the shared bytes, so no other case rewrites them now.
+            with pytest.raises(candidate.CandidateError, match="CANDIDATE_CUSTODY"):
+                third.rewrite(candidate.VERSION_PATH, b"9.9.11\n")
+            assert owner.unproven == 1
+            second.release()
+        assert owner.unproven == 0
+    assert not (tmp_path / "copy").exists()
+
+
+@pytest.mark.parametrize("when", ["between", "during"])
+def test_a_case_refuses_a_source_that_left_the_copied_content(source, tmp_path, when):
+    _origin_source(source)
+    with pytest.raises(candidate.CandidateError, match="CANDIDATE_CHANGED during browser verification"):
+        with candidate.candidate_checkout(source, tmp_path / "copy", origin_proof=True) as owner:
+            if when == "during":
+                with pytest.raises(candidate.CandidateError, match="CANDIDATE_CHANGED during browser verification"):
+                    with candidate.case_checkout(source, owner):
+                        (source / "edited").write_bytes(b"edited while the case ran\n")
+            else:
+                (source / "edited").write_bytes(b"edited between cases\n")
+            with pytest.raises(candidate.CandidateError, match=r"since the shared checkout was copied: .*'edited'"):
+                with candidate.case_checkout(source, owner):
+                    pytest.fail("a case ran bytes the source no longer holds")
+    assert not (tmp_path / "copy").exists()
+
+
+@pytest.mark.parametrize("left", ["candidate file", "ignored file"])
+def test_state_a_case_leaves_in_the_copy_fails_it_and_the_next_case(source, tmp_path, left):
+    _origin_source(source)
+    match = r"paths=\['edited'\]" if left == "candidate file" else r"ignored files in the shared checkout: \['ignored/'\]"
+    with candidate.candidate_checkout(source, tmp_path / "copy", origin_proof=True) as owner:
+        with pytest.raises(candidate.CandidateError, match=match):
+            with candidate.case_checkout(source, owner):
+                if left == "candidate file":
+                    (owner.path / "edited").write_bytes(b"written beside the code\n")
+                else:
+                    (owner.path / "ignored").mkdir()
+                    (owner.path / "ignored" / "server.log").write_bytes(b"runtime state\n")
+        with pytest.raises(candidate.CandidateError, match=match):
+            with candidate.case_checkout(source, owner):
+                pytest.fail("a case booted beside an earlier case's state")
+        if left == "candidate file":
+            (owner.path / "edited").write_bytes(owner.state.files["edited"][0])
+        else:
+            (owner.path / "ignored" / "server.log").unlink()
+            (owner.path / "ignored").rmdir()
+        with candidate.case_checkout(source, owner):
+            pass  # The owner's bytes again: cases proceed.
+    assert not (tmp_path / "copy").exists()
+
+
+def test_an_unproven_case_keeps_its_hold_on_the_owner_and_marks_retention_now(source, tmp_path, capsys):
+    from ouroboros.test_environment import RETENTION_MARKER
+    from tests._shared import retire_synthetic_retention
+
+    _origin_source(source)
+    copy, one = tmp_path / "owner" / "copy", "1 process tree(s) started from this checkout were never proven gone"
+    try:
+        with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED"):
+            with candidate.candidate_checkout(source, copy, origin_proof=True) as owner:
+                with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED.*never proven gone"):
+                    with candidate.case_checkout(source, owner) as case:
+                        case.hold()  # Started, never proven gone: an ordinary exit is no proof.
+                assert owner.unproven == 1 and one in (copy.parent / RETENTION_MARKER).read_text(encoding="utf-8")
+                with pytest.raises(candidate.CandidateError, match="CANDIDATE_CUSTODY"):
+                    with candidate.case_checkout(source, owner):
+                        pytest.fail("a later case overlapped an unproven process")
+                assert owner.unproven == 1
+        assert (copy / RETENTION_MARKER).is_file()
+    finally:
+        # Every hold above was synthetic: no process was started from this copy.
+        retire_synthetic_retention(copy.parent, one)
+        retire_synthetic_retention(copy, one)
+
+
+def test_case_restores_git_config_after_success_and_failure(source, tmp_path):
+    _origin_source(source)
+    with candidate.candidate_checkout(source, tmp_path / "copy", origin_proof=True) as owner:
+        config = owner.path / ".git" / "config"
+        before = config.read_bytes()
+        for failed in (False, True):
+            try:
+                with candidate.case_checkout(source, owner) as case:
+                    case.hold()
+                    git(owner.path, "remote", "add", "managed", "https://example.invalid/repo")
+                    case.release()
+                    if failed:
+                        raise RuntimeError("test body failed")
+            except RuntimeError as exc:
+                assert failed and str(exc) == "test body failed"
+            assert config.read_bytes() == before
+            with candidate.case_checkout(source, owner):
+                assert b"managed" not in git(owner.path, "remote")
+
+
+def test_case_rejects_ref_drift_and_does_not_restore_config_until_proven_gone(source, tmp_path):
+    from ouroboros.test_environment import RETENTION_MARKER
+    from tests._shared import retire_synthetic_retention
+
+    _origin_source(source)
+    copy = tmp_path / "copy"
+    with candidate.candidate_checkout(source, copy, origin_proof=True) as owner:
+        with pytest.raises(candidate.CandidateError, match="refs changed"):
+            with candidate.case_checkout(source, owner):
+                git(copy, "tag", "case-tag")
+        with pytest.raises(candidate.CandidateError, match="refs differ"):
+            with candidate.case_checkout(source, owner):
+                pytest.fail("a later case inherited changed refs")
+        git(copy, "tag", "-d", "case-tag")  # Synthetic test restores its own known mutation.
+        config = copy / ".git" / "config"
+        before = config.read_bytes()
+        try:
+            with pytest.raises(RuntimeError, match="reap failed"):
+                with candidate.case_checkout(source, owner) as case:
+                    case.hold()  # Synthetic: no process is launched.
+                    git(copy, "remote", "add", "managed", "https://example.invalid/repo")
+                    changed = config.read_bytes()
+                    raise RuntimeError("reap failed")
+            assert config.read_bytes() == changed != before
+            assert (copy.parent / RETENTION_MARKER).exists()
+        finally:
+            case.release()
+            config.write_bytes(before)
+            retire_synthetic_retention(copy.parent, "1 process tree(s) started from this checkout were never proven gone")

@@ -7,7 +7,7 @@ import json
 import logging
 import pathlib
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS, normalize_task_result_cost_planes
 from ouroboros.task_store import list_documents, patch_document, read_document
@@ -15,7 +15,7 @@ from ouroboros.utils import utc_now_iso
 # Projection owner retains read custody; this historical import remains compatible.
 from ouroboros.review_projection import merge_review_projection as merge_review_projection
 from ouroboros.review_records import validate_author_disposition
-from ouroboros.terminal_time import preserve_terminal_attempt, terminal_time_patch
+from ouroboros.terminal_time import preserve_terminal_attempt, task_attempt_witness, terminal_time_patch
 
 log = logging.getLogger(__name__)
 
@@ -37,226 +37,6 @@ from ouroboros.task_result_schema import (  # noqa: F401
     task_result_schema_refusal,
 )
 
-
-def review_binding_hash(
-    *, candidate_hash: str, evidence_revision: str, fence_hash: str,
-) -> str:
-    """Digest the immutable task-acceptance binding components."""
-
-    import hashlib
-
-    payload = {
-        "candidate_hash": str(candidate_hash or ""),
-        "evidence_revision": str(evidence_revision or ""),
-        "fence_hash": str(fence_hash or ""),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-
-
-def effective_task_acceptance_review_cycles(
-    profile: Dict[str, Any], *,
-    required_blocking: bool = False,
-) -> Optional[int]:
-    """Paid capacity is independent of the author's last response opportunity.
-
-    Explicit task-local pass profiles retain their established p+1 paid ceiling.
-    """
-    from ouroboros.review_cycles import review_max_cycles
-
-    passes = profile.get("max_improvement_passes")
-    return review_max_cycles() if passes is None else max(1, int(passes) + 1)
-
-
-def _root_task_acceptance_review_cap(
-    root_result: Dict[str, Any],
-) -> Optional[int]:
-    """Resolve the cap only from the canonical root result: no claimant fallback.
-    Otherwise a descendant's deadline could widen the shared wallet, or
-    process-local state could silently recreate a deleted root.
-    """
-
-    if not root_result or "task_contract" not in root_result:
-        raise ValueError(
-            "TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root cap authority is absent"
-        )
-
-    from ouroboros.contracts.task_contract import (
-        VALID_IMPROVEMENT_POLICIES,
-        normalize_budget_profile,
-    )
-    from ouroboros.deadline_utils import parse_deadline_ts
-
-    root_contract = root_result.get("task_contract")
-    if (
-        not isinstance(root_contract, dict)
-        or root_contract.get("schema_version") != 1
-        or "deadline_at" not in root_contract
-        or not isinstance(root_contract.get("budget_profile"), dict)
-    ):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root contract is malformed")
-    raw_profile = root_contract["budget_profile"]
-    policy = raw_profile.get("improvement_policy")
-    max_passes = raw_profile.get("max_improvement_passes")
-    if policy not in VALID_IMPROVEMENT_POLICIES or (
-        max_passes is not None
-        and (not isinstance(max_passes, int) or max_passes < 0)
-    ):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root budget profile is malformed")
-    deadline_at = root_contract["deadline_at"]
-    if not isinstance(deadline_at, str):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root deadline is malformed")
-    deadline = parse_deadline_ts(deadline_at)
-    if deadline_at.strip() and deadline is None:
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root deadline is malformed")
-    profile = normalize_budget_profile(raw_profile)
-    return effective_task_acceptance_review_cycles(
-        profile,
-        required_blocking=task_acceptance_required_blocking(),
-    )
-
-
-def task_acceptance_required_blocking() -> bool:
-    """Shared Required+Blocking predicate for the cap and capacity readers.
-    It matches ``loop_acceptance``: ``ctx.mode == 'required'`` (captured from
-    ``config.get_task_review_mode()`` at ``_run_task_acceptance_review_once``)
-    and ``loop.get_review_enforcement() == 'blocking'``. That getter is the
-    same config getter used here, so these projections cannot drift apart."""
-    from ouroboros import config
-
-    return bool(
-        config.get_task_review_mode() == "required"
-        and config.get_review_enforcement() == "blocking"
-    )
-
-
-def _claim_for_paid_identity(claims: Any, paid_identity: str) -> Optional[Dict[str, Any]]:
-    """The claim row this tree already bought for one A-material paid identity.
-
-    ONE answer shared by the free-refusal projection and the atomic claim, so the
-    dispatch seam can never refuse what the wallet would have allowed (or vice
-    versa). An empty identity matches nothing: a pre-A-material row keys on its
-    binding hash alone."""
-    identity = str(paid_identity or "").strip().lower()
-    if not identity:
-        return None
-    return next(
-        (
-            row for row in (claims or {}).values()
-            if isinstance(row, dict) and str(row.get("paid_identity") or "") == identity
-        ),
-        None,
-    )
-
-
-def project_task_acceptance_review_capacity(
-    ctx: Any, *, binding_hash: str = "", task_id: str = "", paid_identity: str = "", purpose: str = "",
-) -> Dict[str, Any]:
-    """Read the canonical root's paid acceptance-wallet projection.
-
-    Descendants may observe but never initialize root authority. A missing or
-    malformed canonical result is UNKNOWN for them; a live root may begin with
-    the known empty state. The atomic claim remains dispatch authority.
-
-    WALLET AND CANCELLATION ONLY (owner R52). The TIME axis is not projected:
-    the launch rule (``task_pacing.review_launch_allowed``) is evaluated once,
-    at loop admission (owner R55; the paid claim inside the dispatch stamp
-    checks cancellation and the wallet only), and a descendant reading this
-    reads its own deadline window from the adjacent coordination ``time``
-    fact. So no budget profile, no snapshot and no duration prediction is read
-    here, and the answer cannot drift from the rule it used to imitate.
-    """
-
-    from ouroboros import config
-
-    metadata = getattr(ctx, "task_metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    task_id = str(task_id or getattr(ctx, "task_id", "") or "")
-    lineage = resolve_task_lineage(
-        task_id,
-        metadata=metadata,
-        root_task_id=getattr(ctx, "root_task_id", None),
-        parent_task_id=getattr(ctx, "parent_task_id", None),
-        delegation_role=getattr(ctx, "delegation_role", None),
-        original_task_id=getattr(ctx, "original_task_id", None),
-        timeout_retry_from=getattr(ctx, "timeout_retry_from", None),
-    )
-    root_task_id = str(lineage.get("root_task_id") or task_id)
-    root = pathlib.Path(str(
-        metadata.get("budget_drive_root")
-        or getattr(ctx, "budget_drive_root", "")
-        or getattr(ctx, "drive_root", ".")
-    ))
-    base = {
-        "root_task_id": root_task_id,
-        "cap_cycles": None,
-        "claimed_cycles": None,
-        "remaining_cycles": None,
-        "binding_seen": False,
-        "dedupe": "task_acceptance_binding_sha256",
-    }
-    if config.get_task_review_mode() == "off" and purpose != "owner_historical_acceptance":
-        return {
-            **base,
-            "state": "unavailable",
-            "reason": "task_review_mode_off",
-        }
-    try:
-        state = load_task_acceptance_review_state(
-            root,
-            root_task_id,
-            require_root_result=not bool(lineage.get("is_root_task")),
-        )
-        root_result = read_document(root, root_task_id) or {}
-        cap = _root_task_acceptance_review_cap(root_result)
-        claims = state.get("claims_by_binding") or {}
-        claimed = len(claims)
-        remaining = None if cap is None else max(0, cap - claimed)
-        requested_binding = str(binding_hash or "").strip().lower()
-        # Seen = this dispatch was already PAID for, under either identity: the
-        # exact binding (as before) or the A-material paid identity, so a resubmit
-        # that only moved the evidence revision cannot buy a second panel.
-        binding_seen = bool(requested_binding and requested_binding in claims) or (
-            _claim_for_paid_identity(claims, paid_identity) is not None
-        )
-        projection = {
-            **base,
-            "state": "available",
-            "reason": "",
-            "cap_cycles": cap,
-            "claimed_cycles": claimed,
-            "remaining_cycles": remaining,
-            "binding_seen": binding_seen,
-        }
-        try:
-            from ouroboros.cancel_intents import cancel_pending
-
-            if cancel_pending(root, root_task_id, strict=True) or (
-                task_id != root_task_id
-                and cancel_pending(root, task_id, strict=True)
-            ):
-                projection.update({
-                    "state": "unavailable", "reason": "cancellation_pending",
-                })
-                return projection
-        except Exception as exc:
-            return {
-                **projection,
-                "state": "unknown",
-                "reason": f"cancellation_state_unknown:{type(exc).__name__}",
-            }
-        if remaining == 0:
-            projection.update({
-                "state": "unavailable", "reason": "review_cycles_exhausted",
-            })
-        return projection
-    except Exception as exc:
-        return {
-            **base,
-            "state": "unknown",
-            "reason": f"review_capacity_unknown:{type(exc).__name__}",
-        }
 
 # Cancel intent outranks running mirrors but not terminal states: stale progress
 # cannot resurrect the task, and the supervisor's final CANCELLED write still lands.
@@ -302,259 +82,6 @@ _PLAN_REVIEW_STATE_VERSION = 2
 _PLAN_REVIEW_STATE_MAX_BYTES = 1_000_000
 _PLAN_REVIEW_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _PLAN_REVIEW_REASON_MAX_CHARS = 2_000
-
-TASK_ACCEPTANCE_REVIEW_STATE_KEY = "task_acceptance_review_accounting"
-_TASK_ACCEPTANCE_REVIEW_STATE_VERSION = 1
-_TASK_ACCEPTANCE_REVIEW_STATE_MAX_BYTES = 1_000_000
-_TASK_ACCEPTANCE_REVIEW_CLAIM_FIELDS = frozenset({
-    "binding_hash", "candidate_hash", "evidence_revision", "fence_hash",
-    "claimed_at", "claimed_by_task_id",
-})
-# A-material (2026-08-30), additive: the identity the panel was actually PAID
-# for — candidate answer plus new obligation dispositions, evidence revision
-# deliberately excluded. Rows written before it carry no such key and stay valid;
-# new rows carry both, so the binding-keyed reads above never change meaning.
-_TASK_ACCEPTANCE_REVIEW_CLAIM_OPTIONAL_FIELDS = frozenset({"paid_identity"})
-
-
-def _empty_task_acceptance_review_state(root_task_id: str) -> Dict[str, Any]:
-    return {
-        "schema_version": _TASK_ACCEPTANCE_REVIEW_STATE_VERSION,
-        "root_task_id": str(root_task_id),
-        "claims_by_binding": {},
-    }
-
-
-def _validated_task_acceptance_review_state(
-    value: Any, root_task_id: str,
-) -> Dict[str, Any]:
-    """Strict private copy of the root tree's paid acceptance claims."""
-
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: unsupported schema")
-    if set(value) != {"schema_version", "root_task_id", "claims_by_binding"}:
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: state shape is invalid")
-    if str(value.get("root_task_id") or "") != str(root_task_id):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: root identity mismatch")
-    claims = value.get("claims_by_binding")
-    if not isinstance(claims, dict):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: claims must be an object")
-    for binding_hash, claim in claims.items():
-        if not _PLAN_REVIEW_HASH_RE.fullmatch(str(binding_hash or "")):
-            raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: claim key is invalid")
-        if not isinstance(claim, dict) or not (
-            _TASK_ACCEPTANCE_REVIEW_CLAIM_FIELDS
-            <= set(claim)
-            <= (_TASK_ACCEPTANCE_REVIEW_CLAIM_FIELDS | _TASK_ACCEPTANCE_REVIEW_CLAIM_OPTIONAL_FIELDS)
-        ):
-            raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: claim shape is invalid")
-        if str(claim.get("binding_hash") or "") != str(binding_hash):
-            raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: claim identity mismatch")
-        for key in ("binding_hash", "candidate_hash", "evidence_revision", "fence_hash"):
-            if not _PLAN_REVIEW_HASH_RE.fullmatch(str(claim.get(key) or "")):
-                raise ValueError(
-                    f"TASK_ACCEPTANCE_REVIEW_STATE_INVALID: {key} is invalid"
-                )
-        if "paid_identity" in claim and not _PLAN_REVIEW_HASH_RE.fullmatch(
-            str(claim.get("paid_identity") or "")
-        ):
-            raise ValueError(
-                "TASK_ACCEPTANCE_REVIEW_STATE_INVALID: paid_identity is invalid"
-            )
-        expected_binding = review_binding_hash(
-            candidate_hash=str(claim["candidate_hash"]),
-            evidence_revision=str(claim["evidence_revision"]),
-            fence_hash=str(claim["fence_hash"]),
-        )
-        if expected_binding != str(binding_hash):
-            raise ValueError(
-                "TASK_ACCEPTANCE_REVIEW_STATE_INVALID: binding digest mismatch"
-            )
-        for key in ("claimed_at", "claimed_by_task_id"):
-            if not isinstance(claim.get(key), str) or not str(claim.get(key) or ""):
-                raise ValueError(
-                    f"TASK_ACCEPTANCE_REVIEW_STATE_INVALID: {key} must be non-empty text"
-                )
-    copied = copy.deepcopy(value)
-    if len(json.dumps(copied, ensure_ascii=False).encode("utf-8")) > _TASK_ACCEPTANCE_REVIEW_STATE_MAX_BYTES:
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: state is too large")
-    return copied
-
-
-def load_task_acceptance_review_state(
-    results_drive_root: Any,
-    root_task_id: str,
-    *,
-    require_root_result: bool = False,
-) -> Dict[str, Any]:
-    """Read the canonical root's shared paid-review claims without mutation."""
-
-    result = read_document(results_drive_root, validate_task_id(root_task_id))
-    if result is None:
-        if require_root_result:
-            raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root result is absent")
-        return _empty_task_acceptance_review_state(root_task_id)
-    if str(result.get("task_id") or "") != str(root_task_id):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: root identity mismatch")
-    stored_root_id = str(result.get("root_task_id") or "")
-    if stored_root_id and stored_root_id != str(root_task_id):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: root identity mismatch")
-    if TASK_ACCEPTANCE_REVIEW_STATE_KEY not in result:
-        return _empty_task_acceptance_review_state(root_task_id)
-    return _validated_task_acceptance_review_state(
-        result[TASK_ACCEPTANCE_REVIEW_STATE_KEY], root_task_id,
-    )
-
-
-def _update_task_acceptance_review_state(
-    results_drive_root: Any,
-    root_task_id: str,
-    mutator: Callable[
-        [Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]
-    ],
-    *,
-    allow_create: bool,
-) -> Dict[str, Any]:
-    """Strict root-result update; the store transaction is the tree-wide claim fence."""
-
-    path = f"task:{validate_task_id(root_task_id)}"
-    observed_state: Dict[str, Any] = {}
-
-    def _merge(existing: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if not allow_create and not existing:
-            raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root result is absent")
-        require_writable_task_result_schema(existing, path)
-        if existing and str(existing.get("task_id") or "") != str(root_task_id):
-            raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: root identity mismatch")
-        stored_root_id = str(existing.get("root_task_id") or "")
-        if stored_root_id and stored_root_id != str(root_task_id):
-            raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: root identity mismatch")
-        state = (
-            _validated_task_acceptance_review_state(
-                existing[TASK_ACCEPTANCE_REVIEW_STATE_KEY], root_task_id,
-            )
-            if TASK_ACCEPTANCE_REVIEW_STATE_KEY in existing
-            else _empty_task_acceptance_review_state(root_task_id)
-        )
-        observed_state.clear()
-        observed_state.update(copy.deepcopy(state))
-        candidate = mutator(state, existing)
-        if candidate is None:
-            return None
-        updated = _validated_task_acceptance_review_state(
-            candidate, root_task_id,
-        )
-        now = utc_now_iso()
-        return stamp_task_result_schema({
-            **existing,
-            TASK_ACCEPTANCE_REVIEW_STATE_KEY: updated,
-            "task_id": str(root_task_id),
-            "status": str(existing.get("status") or STATUS_RUNNING),
-            "ts": str(existing.get("ts") or now),
-            "updated_at": now,
-        })
-
-    updated = patch_document(results_drive_root, root_task_id, _merge)
-    if TASK_ACCEPTANCE_REVIEW_STATE_KEY not in updated:
-        return _validated_task_acceptance_review_state(observed_state, root_task_id)
-    return _validated_task_acceptance_review_state(
-        updated[TASK_ACCEPTANCE_REVIEW_STATE_KEY], root_task_id,
-    )
-
-
-def claim_task_acceptance_review_cycle(
-    results_drive_root: Any,
-    root_task_id: str,
-    review_binding: Dict[str, Any],
-    *,
-    claimed_by_task_id: str,
-) -> Dict[str, Any]:
-    """Atomically claim one paid root-acceptance panel dispatch; a prior claim for the binding or paid identity answers ``unknown`` (never a second dispatch)."""
-
-    binding_fields = {
-        key: str((review_binding or {}).get(key) or "").strip().lower()
-        for key in ("binding_hash", "candidate_hash", "evidence_revision", "fence_hash")
-    }
-    if any(
-        not _PLAN_REVIEW_HASH_RE.fullmatch(value)
-        for value in binding_fields.values()
-    ):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: review binding is invalid")
-    expected_binding = review_binding_hash(
-        candidate_hash=binding_fields["candidate_hash"],
-        evidence_revision=binding_fields["evidence_revision"],
-        fence_hash=binding_fields["fence_hash"],
-    )
-    if binding_fields["binding_hash"] != expected_binding:
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: binding digest mismatch")
-    binding = binding_fields["binding_hash"]
-    # A-material: the identity the panel is PAID for. Absent (a pre-A-material
-    # caller) => the binding hash keeps being the paid identity, i.e. exactly the
-    # old behaviour; present => it also refuses a second claim for the same
-    # material under a different binding.
-    paid_identity = str((review_binding or {}).get("paid_identity") or "").strip().lower()
-    if paid_identity and not _PLAN_REVIEW_HASH_RE.fullmatch(paid_identity):
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: paid identity is invalid")
-    claimant = str(claimed_by_task_id or "").strip()
-    if not claimant:
-        raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: claimant is absent")
-    decision: Dict[str, Any] = {}
-    resolved: Dict[str, Optional[int]] = {}
-
-    def _claim(
-        state: Dict[str, Any], root_result: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        from ouroboros.cancel_intents import cancel_pending
-
-        if cancel_pending(results_drive_root, root_task_id, strict=True) or (
-            claimant != str(root_task_id)
-            and cancel_pending(results_drive_root, claimant, strict=True)
-        ):
-            decision.update({"status": "unavailable", "reason": "cancellation_pending"})
-            return None
-        cap = _root_task_acceptance_review_cap(root_result)
-        resolved["cap"] = cap
-        claims = dict(state.get("claims_by_binding") or {})
-        prior = claims.get(binding) or _claim_for_paid_identity(claims, paid_identity)
-        if prior is not None:
-            decision.update({
-                "status": "unknown",
-                "reason": "binding_dispatch_already_claimed",
-            })
-            return None
-        if cap is not None and len(claims) >= cap:
-            decision.update({"status": "unavailable", "reason": "review_cycles_exhausted"})
-            return None
-        claims[binding] = {
-            **binding_fields,
-            **({"paid_identity": paid_identity} if paid_identity else {}),
-            "claimed_at": utc_now_iso(),
-            "claimed_by_task_id": claimant,
-        }
-        state["claims_by_binding"] = claims
-        decision.update({"status": "claimed", "reason": ""})
-        return state
-
-    from ouroboros.cancel_intents import cancellation_projection_lock
-
-    with cancellation_projection_lock(results_drive_root):
-        state = _update_task_acceptance_review_state(
-            results_drive_root,
-            root_task_id,
-            _claim,
-            allow_create=False,
-        )
-    paid = len(state.get("claims_by_binding") or {})
-    cap = resolved.get("cap")
-    return {
-        **decision,
-        "binding_hash": binding,
-        "paid_identity": paid_identity,
-        "cycles_paid": paid,
-        "max_cycles": cap,
-        "remaining_cycles": None if cap is None else max(0, cap - paid),
-    }
-
 
 def cancellation_blocks_child_result(result: Any) -> bool:
     """Return whether canonical cancellation forbids child-drive promotion.
@@ -619,6 +146,20 @@ def resolve_task_lineage(
         "is_retry_root_attempt": is_retry_root,
         "is_root_task": bool(is_regular_root or is_retry_root),
     }
+
+
+def resolve_ctx_lineage(ctx: Any, task_id: str = "") -> Dict[str, Any]:
+    """``resolve_task_lineage`` over a live tool context's own lineage facts."""
+    meta = getattr(ctx, "task_metadata", {})
+    return resolve_task_lineage(
+        task_id or getattr(ctx, "task_id", ""),
+        metadata=meta if isinstance(meta, dict) else {},
+        root_task_id=getattr(ctx, "root_task_id", None),
+        parent_task_id=getattr(ctx, "parent_task_id", None),
+        delegation_role=getattr(ctx, "delegation_role", None),
+        original_task_id=getattr(ctx, "original_task_id", None),
+        timeout_retry_from=getattr(ctx, "timeout_retry_from", None),
+    )
 
 
 def _is_status_regression(existing_status: str, new_status: str) -> bool:
@@ -771,6 +312,32 @@ def load_task_result(
     return (result, stamp) if signed else result
 
 
+def admitted_results(drive_root: Any, task_ids: Iterable[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+    """``load_task_result(strict=True)`` of many ids in ONE read, keyed by the ids as given, where a
+    refusal (an invalid id, a row whose identity or status does not bind) and an absence are both
+    ``None``: what a reader that turns every refusal into "no fact" needs
+    (``dialogue_provenance.task_lineage_lookup``). A store that cannot be read still raises."""
+    from ouroboros.task_store import documents_by_ids
+
+    valid: Dict[str, str] = {}
+    for task_id in task_ids:
+        try:
+            valid[str(task_id)] = validate_task_id(task_id)
+        except ValueError:
+            valid[str(task_id)] = ""
+    documents = documents_by_ids(drive_root, sorted({tid for tid in valid.values() if tid}))
+    results: Dict[str, Optional[Dict[str, Any]]] = {}
+    for task_id, tid in valid.items():
+        data = documents.get(tid) if tid else None
+        try:
+            if data is not None:
+                _admit_stored(data, tid, strict=True, noun="task result authority")
+        except ValueError:
+            data = None
+        results[task_id] = None if data is None else _normalize_swarm_efficiency(data)
+    return results
+
+
 def _refuse_occupied(drive_root: Any, task_id: str, *, write: bool) -> None:
     """ABI-2: an identity whose file the import refused or quarantined has no row, yet a strict
     reader or a create-only writer must not readmit it as a fresh absence."""
@@ -840,18 +407,15 @@ def write_task_result(
     from ouroboros.task_store import Reprepare, prepared_write
 
     prepared: Dict[str, Any] = {}
-    transition: Dict[str, bool] = {}  # set by the reducer when THIS write turns the row truly terminal
+    transition: Dict[str, bool] = {}  # the reducer's first admission / truly terminal transition
 
     def _write(needs: set) -> Dict[str, Any]:
         # TZ-1 V10: the mailbox bytes are read BEFORE the row lock (a bounded union happens
-        # under it); a write the projector turns terminal, or a first row, asks once
+        # under it); a write the projector turns terminal asks once
         # (``Reprepare``) and the whole write repeats with that input prepared out here
         # (what an earlier round prepared is kept, not read again).
         if "mail" not in prepared and (status in _TRULY_TERMINAL_STATUSES or "mail" in needs):
             prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
-        if "rollup" not in prepared and (create_only or "rollup" in needs) and "swarm_fanout_rollup" not in fields:
-            from ouroboros.swarm_rollup import initial_swarm_rollup
-            prepared["rollup"] = initial_swarm_rollup(results_drive_root)
         return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared))
 
     def _merge(existing: Dict[str, Any], prepared: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -870,11 +434,8 @@ def write_task_result(
             return None
         prepared_fields = dict(fields)
         if not existing and "swarm_fanout_rollup" not in prepared_fields:
-            if "rollup" not in prepared:
-                raise Reprepare("rollup")
-            prepared_fields["swarm_fanout_rollup"] = prepared["rollup"]
-        from ouroboros.acceptance_history import preserve_acceptance_history
-        prepared_fields = preserve_acceptance_history(existing, prepared_fields)
+            from ouroboros.swarm_rollup import initial_swarm_rollup
+            prepared_fields["swarm_fanout_rollup"] = initial_swarm_rollup(results_drive_root)
         if "review_projection" in prepared_fields:
             prepared_fields["review_projection"] = merge_review_projection(
                 existing.get("review_projection"), prepared_fields["review_projection"],
@@ -882,6 +443,8 @@ def write_task_result(
         projected_fields = _field_projector(existing, {**prepared_fields, "status": status}) if _field_projector else prepared_fields
         if projected_fields is None:  # projector saw a terminal/stale row: no mutation
             return None
+        # The store reconciles fan-out base witnesses with addressed event union,
+        # including an independently repaired execution-root base on copy-back.
         projected_status = str(projected_fields.pop("status", status))
         projected_fields.pop("terminal_time", None)  # ordinary fields cannot manufacture clock authority
         # Monotonic lifecycle: no stale mirror may overwrite a terminal outcome.
@@ -930,9 +493,19 @@ def write_task_result(
         if projected_fields["unread_mailbox"] is None:
             projected_fields.pop("unread_mailbox")
         projected_fields = preserve_terminal_attempt(existing, projected_fields)
+        if ((existing.get("wake_summary") or existing.get("suggested_name")) and not projected_fields.get("wake_summary")
+                and (transition.get("terminal") or task_attempt_witness(existing)
+                     != task_attempt_witness({**existing, **projected_fields}))):
+            from ouroboros.task_finalization import wake_cause_title
+
+            title = wake_cause_title(projected_fields.get("metadata", existing.get("metadata")) or {})
+            if title or existing.get("wake_summary"):
+                projected_fields.update(wake_summary=None, suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if _terminal_observed else None, replica=_terminal_time_source))
+        transition["admitted"] = (existing_status in {"", STATUS_REQUESTED}
+                                  and projected_status in {STATUS_SCHEDULED, STATUS_RUNNING})
         # ABI-3: shared deep cost normalization handles both rows/nested planes; incoming values win.
         return stamp_task_result_schema(normalize_task_result_cost_planes({
             **normalize_task_result_cost_planes(existing),
@@ -944,7 +517,25 @@ def write_task_result(
         }))
 
     stored = prepared_write(_write)
+    if transition.get("admitted") and stored.get("project_id"):
+        # The first committed admission, including a schedule receipt, opens the room once. Callers may
+        # hold Q and the captured admission stays the address, so a lock-free display read only hints
+        # closure; the registry compares and writes. Replays cannot undo a later closure.
+        try:
+            from ouroboros.project_admission import display_registry_snapshot
+            from ouroboros.projects_registry import update_project
+            pid = stored["project_id"]
+            if any(row.get("id") == pid and "closed" in row
+                   for row in display_registry_snapshot(results_drive_root).get("projects") or ()):
+                update_project(results_drive_root, pid, closed=None)
+        except Exception:
+            log.warning("Admitted task %s could not reopen its project", task_id, exc_info=True)
     if transition.get("terminal"):
+        # Prior safety flags are in-process retry authority, never a durable grant.
+        # Child completion cannot clear its still-running root's history.
+        if stored and str(stored.get("root_task_id") or (stored.get("metadata") or {}).get("root_task_id") or task_id) == task_id:
+            from ouroboros.safety import clear_safety_work
+            clear_safety_work(task_id)
         # The accepted transition into a truly terminal status ends the task: processes its commands left behind are
         # ended by scope (marker + recorded groups) outside this store transaction, on positive evidence only; a pause,
         # retained hold, handoff or reopenable placeholder never reaches here (DEVELOPMENT "Process Custody Rule").
@@ -953,6 +544,8 @@ def write_task_result(
             note_task_terminal_transition(results_drive_root, task_id)
         except Exception:
             log.debug("task scope cleanup could not be started for %s; the sweep owns it", task_id, exc_info=True)
+    from ouroboros.swarm_receipt import refresh_for_task
+    refresh_for_task(results_drive_root, stored)
     return stored
 
 

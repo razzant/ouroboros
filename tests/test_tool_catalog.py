@@ -384,6 +384,9 @@ def test_acting_mcp_collisions_are_visible_only_after_exact_grant(
         def enabled_servers_without_tools(self):
             return []
 
+        def catalog_notices(self):
+            return []
+
     monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda **_kwargs: None)
     monkeypatch.setattr(mcp_client, "get_manager", lambda: FakeManager())
 
@@ -409,3 +412,9 @@ def test_acting_mcp_collisions_are_visible_only_after_exact_grant(
             if item.get("reason") == "name_collision"
         ]
         assert {item.get("kind") for item in collisions} == expected_kinds
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

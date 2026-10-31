@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
 import re
 import subprocess
 import time
@@ -27,6 +27,7 @@ def _git(args: list[str], timeout: int = 15) -> str:
             cwd=str(resolve_repo_dir()),  # per call: the serving checkout, never a home default
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=timeout,
         )
         return r.stdout if r.returncode == 0 else ""
@@ -128,64 +129,14 @@ def _collect_data() -> list[dict[str, Any]]:
     return points
 
 
-def _push_to_github(data: dict[str, Any]) -> tuple[bool, str]:
-    """Push evolution.json to the repo's docs/ folder via GitHub API."""
-    import base64
-    import requests
-
-    from ouroboros.utils import in_worker_process
-
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if not token:
-        return False, "error: GITHUB_TOKEN not found"
-
-    repo_setting = os.environ.get("GITHUB_REPO", "").strip()
-    if "/" in repo_setting:
-        repo_slug = repo_setting
-    else:
-        user = os.environ.get("GITHUB_USER", "").strip()
-        repo_slug = f"{user}/{repo_setting}" if user and repo_setting else ""
-    if not repo_slug:
-        return False, "error: GITHUB_REPO not configured (expected owner/repo)"
-    file_path = "docs/evolution.json"
-    branch = os.environ.get("GITHUB_BRANCH", "ouroboros")
-
-    url = f"https://api.github.com/repos/{repo_slug}/contents/{file_path}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-
-    with requests.Session() as session:
-        if in_worker_process():
-            session.trust_env = False  # fork-safe: skip system proxy lookup
-        sha = None
-        r = session.get(url, headers=headers, timeout=15)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
-
-        content_str = json.dumps(data, ensure_ascii=False, indent=2)
-        content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
-
-        payload = {
-            "message": f"evolution: {len(data.get('points', []))} data points",
-            "content": content_b64,
-            "branch": branch,
-        }
-        if sha:
-            payload["sha"] = sha
-
-        put_r = session.put(url, headers=headers, json=payload, timeout=15)
-    if put_r.status_code in [200, 201]:
-        return True, f"pushed {len(data.get('points', []))} points to {file_path}"
-    return False, f"error: {put_r.status_code} — {put_r.text[:200]}"
-
-
 def generate_evolution_stats(ctx: Any = None) -> str:
-    """Collect git-based evolution metrics and push to docs/evolution.json.
+    """Export the legacy commit-sample metrics as an immutable local task file."""
+    from ouroboros.artifacts import store_task_artifact_bytes, task_artifact_dir_path
 
-    Returns a human-readable summary string.
-    """
+    if not getattr(ctx, "task_id", "") or not getattr(ctx, "drive_root", None):
+        return _publish_tool_result(ctx, ToolResult(
+            status="unavailable", code="LEGACY_UNAVAILABLE",
+            text="EVOLUTION_EXPORT_UNAVAILABLE: a task artifact store is required."))
     points = _collect_data()
     if not points:
         return "No data collected (empty git history?)"
@@ -199,16 +150,21 @@ def generate_evolution_stats(ctx: Any = None) -> str:
         "points": points,
     }
 
-    published, result = _push_to_github(data)
+    content = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    name = f"evolution-{hashlib.sha256(content).hexdigest()}.json"
+    try:
+        artifact = store_task_artifact_bytes(ctx.drive_root, ctx.task_id, name, content)
+    except (OSError, ValueError) as exc:
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ERROR", text=f"EVOLUTION_EXPORT_FAILED: {exc}"))
     last = points[-1]
     text = (
-        f"evolution_stats: {result} | "
+        f"evolution_stats: saved {len(points)} points locally | "
         f"span={points[0]['ts'][:10]}…{last['ts'][:10]} | "
         f"py_lines={last['py_lines']} bible={last['bible_bytes']}B system={last['system_bytes']}B"
     )
-    if not published:
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=text))
-    return text
+    return json.dumps({"summary": text, "artifact": artifact, "publication": "local_only",
+                       "file_path": str(task_artifact_dir_path(ctx.drive_root, ctx.task_id) / name)}, ensure_ascii=False)
 
 
 def get_tools():
@@ -221,12 +177,13 @@ def get_tools():
             {
                 "name": "generate_evolution_stats",
                 "description": (
-                    "Generate Evolution Time-Lapse data from git history and push to the webapp dashboard. "
+                    "Export Evolution Time-Lapse data from the serving repository's git history to a local task file. "
                     "Collects per-commit metrics across three axes: "
                     "Technical (Python lines of code), Philosophical (BIBLE.md size), "
                     "Self-Concept (SYSTEM.md size). "
-                    "Pushes docs/evolution.json via GitHub API. "
-                    "Safe to call anytime; takes 15-30s for full history scan."
+                    "Returns an immutable artifact_store JSON reference for reading or delivery with send_file. "
+                    "No network publication, Git commit or push. The Dashboard uses its own local tag metrics. "
+                    "Sampling a large history can take time."
                 ),
                 "parameters": {
                     "type": "object",

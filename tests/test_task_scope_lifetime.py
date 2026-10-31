@@ -91,12 +91,13 @@ def _own_cleanup_threads():
 
 @pytest.mark.parametrize("task_id", ["t-end", "manual"])
 def test_a_commands_background_child_lives_until_the_task_ends_then_is_ended_by_its_group(tmp_path, task_id):
+    inherited = ps.scope_entries(os.environ, prefix=ps.TASK_SCOPE_PREFIX)
     pid = _leftover(tmp_path, task_id)
     try:
         record = ps.task_scope_record(tmp_path, task_id)
         assert record["marker"].startswith(ps.TASK_SCOPE_PREFIX)
         assert [group["pgid"] for group in record["groups"]] == [os.getpgid(pid)], "the command's own group is recorded"
-        assert not ps.scope_entries(os.environ, prefix=ps.TASK_SCOPE_PREFIX), "the worker never carries a task marker"
+        assert ps.scope_entries(os.environ, prefix=ps.TASK_SCOPE_PREFIX) == inherited, "launch leaves the worker's task markers unchanged"
         write_task_result(tmp_path, task_id, "running", result="working")
         ps.wait_for_cleanups()
         assert _alive(pid), "a running row is not an end"
@@ -111,13 +112,25 @@ def test_a_commands_background_child_lives_until_the_task_ends_then_is_ended_by_
         _end_pids(pid)
 
 
-@pytest.mark.skipif(not _pl.IS_MACOS, reason="the SIP finding is a macOS fact")
-def test_the_platform_binary_leftover_is_invisible_to_the_marker_and_still_ended(tmp_path):
+@pytest.mark.skipif(not _pl.IS_MACOS, reason="native macOS recorded-group cleanup")
+def test_the_platform_binary_leftover_is_ended_even_when_its_marker_is_hidden(tmp_path, monkeypatch):
+    from dataclasses import replace
+
     pid = _leftover(tmp_path, "t-sip")
     try:
-        marker = ps.task_scope_record(tmp_path, "t-sip")["marker"]
+        record = ps.task_scope_record(tmp_path, "t-sip")
+        marker = record["marker"]
+        census = ps.census
+        def hidden_marker(markers=()):
+            rows = census(markers)
+            if rows is not None and pid in rows:
+                rows[pid] = replace(rows[pid], markers=set())
+            return rows
+        monkeypatch.setattr(ps, "census", hidden_marker)  # only this child's environment observation
         rows = ps.census([marker])
-        assert marker not in (rows[pid].markers or set()), "/bin/sleep shows no environment under SIP"
+        assert marker not in rows[pid].markers
+        assert pid not in ps.scope_members(rows, marker=marker)["members"]
+        assert pid in ps.scope_members(rows, marker=marker, groups=record["groups"])["members"]
         write_task_result(tmp_path, "t-sip", "completed", result="done")
         ps.wait_for_cleanups()
         assert _gone(pid), "its recorded group is the source that reaches it"

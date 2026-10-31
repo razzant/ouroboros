@@ -42,19 +42,13 @@ from ouroboros.gateway.owner_settings import (
 )
 from ouroboros.onboarding_wizard import build_onboarding_html
 from ouroboros.platform_layer import is_container_env
-from ouroboros.provider_models import (
-    MINIMAX_REGION_ENDPOINTS, ZAI_PLAN_ENDPOINTS, resolve_minimax_base_url, resolve_zai_base_url,
+from ouroboros.provider_connections import connection_references, connections_meta, normalize_connections
+from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
+from ouroboros.gateway.secret_rows import (
+    ConnectionSecretIdentityAmbiguous, MCPSecretIdentityAmbiguous, mask_connections, rehydrate_connections,
+    mask_mcp_servers as _mask_mcp_servers_payload, rehydrate_mcp_servers as _rehydrate_mcp_servers_payload,
 )
-from ouroboros.secret_masking import (
-    MCP_RESPONSE_ONLY_FIELDS,
-    is_custom_secret_setting_key,
-    looks_masked_mcp_secret,
-    looks_masked_settings_secret,
-    mask_prefixed_secret,
-    mask_mcp_url,
-    rehydrate_mcp_url,
-    mask_settings_secret,
-)
+from ouroboros.secret_masking import is_custom_secret_setting_key, looks_masked_settings_secret, mask_settings_secret
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults, automatic_catalog, classify_runtime_provider_change, has_startup_ready_provider,
     repropose_unedited_catalog, repropose_unedited_slots, settings_read_catalog,
@@ -131,36 +125,6 @@ def _build_network_meta(bind_host: str, bind_port: int) -> dict:
         "recommended_url": recommended_url,
         "warning": warning,
     }
-
-
-def _mask_mcp_servers_payload(servers: Any) -> list:
-    from ouroboros.mcp_headers import mask_headers
-    if not isinstance(servers, list):
-        return []
-    try:
-        from ouroboros.mcp_client import canonical_server_id as _mcp_canonical_id
-    except Exception:
-        _mcp_canonical_id = lambda value: str(value or "").strip()  # type: ignore[assignment]
-    out = []
-    for entry in servers:
-        if not isinstance(entry, dict):
-            continue
-        clone = dict(entry)
-        if clone.get("id"):
-            clone["id"] = _mcp_canonical_id(clone.get("id"))
-        if "url" in clone:
-            clone["url"] = mask_mcp_url(clone["url"])
-        if "headers" in clone:
-            clone["headers"] = mask_headers(clone["headers"])
-        token = str(clone.get("auth_token") or "")
-        if token:
-            clone["auth_token"] = mask_prefixed_secret(token, visible_chars=8)
-            clone["auth_configured"] = True
-        else:
-            clone["auth_token"] = ""
-            clone["auth_configured"] = False
-        out.append(clone)
-    return out
 
 
 def _build_policy_state(settings: Dict[str, Any]) -> dict:
@@ -259,62 +223,6 @@ def _build_restart_state(settings: Dict[str, Any]) -> dict:
             "local_model": local, "summary": summary.strip()}
 
 
-def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
-    """Restore masked MCP tokens/URLs/header values from the ONE saved server with the same identity.
-
-    Identity is the loader's (``id``, ``slug`` or ``name``). A masked value whose
-    identity has several saved or incoming claimants raises
-    ``MCPSecretIdentityAmbiguous`` before anything is written: an equal token
-    does not make two servers the same, so a credential never moves between them.
-    """
-    if not isinstance(incoming, list):
-        return []
-    from ouroboros.mcp_client import canonical_server_id, raw_server_id
-    from ouroboros.mcp_headers import holds_placeholder, restore_headers
-
-    current_by_id: Dict[str, list] = {}
-    for entry in current if isinstance(current, list) else []:
-        if raw_server_id(entry):
-            current_by_id.setdefault(raw_server_id(entry), []).append(entry)
-    incoming_ids = [raw_server_id(entry) for entry in incoming if isinstance(entry, dict)]
-    out = []
-    for entry in incoming:
-        if not isinstance(entry, dict):
-            continue
-        clone = {key: value for key, value in entry.items() if key not in MCP_RESPONSE_ONLY_FIELDS}
-        if clone.get("id"):
-            clone["id"] = canonical_server_id(clone.get("id"))
-        server_id = raw_server_id(clone)
-        token = str(clone.get("auth_token") or "")
-        masked = holds_placeholder(clone.get("headers")) or looks_masked_mcp_secret(token) or (
-            "url" in clone and rehydrate_mcp_url(clone["url"], "") != str(clone["url"] or ""))
-        matches = current_by_id.get(server_id, []) if server_id else []
-        if masked and (len(matches) > 1 or incoming_ids.count(server_id) > 1):
-            raise MCPSecretIdentityAmbiguous(server_id)
-        existing = matches[0] if len(matches) == 1 else {}
-        if "url" in clone:
-            clone["url"] = rehydrate_mcp_url(clone["url"], existing.get("url"))
-        if looks_masked_mcp_secret(token):
-            clone["auth_token"] = str(existing.get("auth_token") or "")
-        if "headers" in clone:
-            clone["headers"] = restore_headers(clone["headers"], existing, server_id=server_id)
-        out.append(clone)
-    return out
-
-
-class MCPSecretIdentityAmbiguous(ValueError):
-    """A masked MCP secret whose server identity is claimed more than once."""
-
-    code = "MCP_ID_AMBIGUOUS_SECRET"
-
-    def __init__(self, server_id: str) -> None:
-        super().__init__(
-            f"{self.code}: several MCP servers resolve to server id {server_id!r}, so its saved "
-            "credential cannot be matched to one of them. Give each server a distinct Server ID "
-            "(or re-enter its token/URL) and save again; nothing was saved."
-        )
-
-
 from ouroboros.settings_scales import (
     IMMEDIATE_SETTINGS as _IMMEDIATE_KEYS,
     RESTART_REQUIRED_SETTINGS as _RESTART_REQUIRED_KEYS,
@@ -325,15 +233,22 @@ def _effect_buckets(all_changed: list) -> tuple:
     """Split changed keys into the honest effect buckets for the save response.
 
     Every key that reaches here applies at SOME point, so both buckets are
-    truthful claims (#285). A key a release retired cannot reach here at all:
+    truthful claims (#285). Models, accounts and keys are read live
+    (``route_choice``): work that follows them uses them at its next call, so they
+    count as immediate; a context window waits for a task's next context plan. A key a release retired cannot reach here at all:
     the merge only walks SETTINGS_DEFAULTS, and load_settings strips retired
     keys off disk — the RC auditor is what tells an upgrading install its
     stored value is gone (scripts/rc_audit.py "retired-setting").
     """
-    immediate_changed = [k for k in all_changed if k in _IMMEDIATE_KEYS]
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY
+    from ouroboros.route_choice import ROUTE_SETTING_KEYS
+
+    # A window is read when a task's context plan is built: at its start or when its route moves.
+    live = _IMMEDIATE_KEYS | (ROUTE_SETTING_KEYS - {MODEL_CONTEXT_WINDOWS_KEY})
+    immediate_changed = [k for k in all_changed if k in live]
     next_task_changed = [
         k for k in all_changed
-        if k not in _IMMEDIATE_KEYS and k not in _RESTART_REQUIRED_KEYS and k != "OUROBOROS_RUNTIME_MODE"
+        if k not in live and k not in _RESTART_REQUIRED_KEYS and k != "OUROBOROS_RUNTIME_MODE"
     ]
     return immediate_changed, next_task_changed
 
@@ -345,7 +260,8 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
 
     skipped = {"OUROBOROS_CONTEXT_MODE_AUTO_LOW"} | _ENDPOINT_AUTHORED_SETTINGS | _ENDPOINT_WRITTEN_SETTINGS
     if not runtime_mode_at_least(get_runtime_mode(), "cyber_pro"):
-        skipped |= {"OUROBOROS_CONTEXT_MODE", "OUROBOROS_RUNTIME_MODE", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "OUROBOROS_SAFETY_MODE"}
+        skipped |= {"OUROBOROS_CONTEXT_MODE", "OUROBOROS_RUNTIME_MODE", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "OUROBOROS_SAFETY_MODE",
+                    "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "OUROBOROS_MODEL_SAFETY", "OUROBOROS_SAFETY_OWNER_RULES"}
     # Cyber authors controls through the same writer. Install receipts remain facts;
     # the retired auto-Low marker is derived from an explicit context choice below.
     for key in _SETTINGS_DEFAULTS:
@@ -582,19 +498,11 @@ def _active_main_route(
     active route at point-of-use (CW2) — a per-task ``switch_model`` / model override
     or a mid-loop local-route change — rather than only the settings-derived route."""
     from ouroboros import config as _config
-    from ouroboros.provider_models import provider_for_model
+    from ouroboros.provider_models import capability_base_url, provider_for_model
 
     model = str(model_override or settings.get("OUROBOROS_MODEL") or _config.SETTINGS_DEFAULTS.get("OUROBOROS_MODEL") or "").strip()
     provider = provider_for_model(model)
-    # The settings key a provider's base URL resolves through.
-    base_url_key = {"openai": "OPENAI_BASE_URL", "openai-compatible": "OPENAI_COMPATIBLE_BASE_URL",
-                    "cloudru": "CLOUDRU_FOUNDATION_MODELS_BASE_URL", "gigachat": "GIGACHAT_BASE_URL"}.get(provider)
-    if provider == "minimax":
-        base_url = resolve_minimax_base_url(settings.get("MINIMAX_REGION") or "")
-    elif provider == "zai":
-        base_url = resolve_zai_base_url(settings.get("ZAI_PLAN") or "")
-    else:
-        base_url = str(settings.get(base_url_key) or "") if base_url_key else ""
+    base_url = capability_base_url(model, settings)
     # CW7 (v6.34.0): honour the USE_LOCAL_MAIN routing setting — a local-routed main
     # lane must report provider='local' so the Max gate consults the local n_ctx
     # (Capability Evidence local-health) instead of the remote OUROBOROS_MODEL metadata.
@@ -617,17 +525,18 @@ def _unrecognised_review_models(models: Any) -> list:
     the fetch may be unavailable, so this is a WARNING, never a save gate."""
     try:
         from ouroboros.llm import LLMClient
-        from ouroboros.provider_models import provider_for_model
+        from ouroboros.provider_models import parse_model_route
 
         candidates = [str(m or "").strip() for m in (models or []) if str(m or "").strip()]
-        openrouter = [m for m in candidates if provider_for_model(m) == "openrouter"]
+        # The catalog lists native ids; ``openrouter[@name]::`` spells the same model on a key.
+        openrouter = {m: parse_model_route(m).model for m in candidates if parse_model_route(m).kind == "openrouter"}
         if not openrouter:
             return []
-        LLMClient.openrouter_context_length(openrouter[0], allow_fetch=True)
+        LLMClient.openrouter_context_length(next(iter(openrouter.values())), allow_fetch=True)
         if not getattr(LLMClient, "_CAPABILITIES_FETCH_OK", False):
             return []  # no authoritative catalog -> cannot claim anything is unknown
         known = getattr(LLMClient, "_CONTEXT_LENGTH_CACHE", {}) or {}
-        return [m for m in openrouter if m not in known]
+        return [m for m, native in openrouter.items() if native not in known]
     except Exception:
         return []
 
@@ -672,26 +581,25 @@ def review_pool_save_judgement(raw: Any, stored: Dict[str, Any], *, allow_empty:
     return review_pool_save_error(posted, allow_empty=False)
 
 
-def _review_pool_costs(items: list, snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+def _review_pool_costs(items: list) -> Dict[str, Dict[str, Any]]:
     """The price of every catalog row. A session, or a model call through a subscription,
-    uses a seat and time; an API row's ``usd_per_review`` is ``review_row_call_usd``: one
-    full call of the row, the number ``## Review`` shows for its seat (a reading reviewer
-    makes several); a route without a tariff stays unknown — there are no price tables."""
-    from ouroboros.model_slots import resolve_processing_preference
-    from ouroboros.provider_models import provider_for_model
-    from ouroboros.tools.review_helpers import review_row_call_usd
+    uses a seat and time; an API row's price is what one review by that row actually cost
+    (``review_price``: the median of its recent reviews on its model, with their count and
+    range), the number ``## Review`` shows for its seat; a row without history stays unknown."""
+    from ouroboros.provider_models import provider_for_model, review_model_uses_local
+    from ouroboros.review_price import review_price
 
     costs: Dict[str, Dict[str, Any]] = {}
     for item in items:
         row_id, route = str(item.get("subagent_id") or ""), item.get("route") or {}
         target = str(route.get("target_id") or "")
         seat = route.get("kind") == "agent_session" or provider_for_model(target) == "claudexor"
-        usd = None if seat or not target else review_row_call_usd({
-            "slot_id": row_id, "model": target, "profile_id": str(route.get("credential_profile_id") or ""),
-            "processing_preference": resolve_processing_preference(
-                override=item.get("processing_preference") or None, settings=snapshot)})
+        if target and not seat and review_model_uses_local(target):
+            costs[row_id] = {"usd_per_review": 0.0, "basis": "local_route"}
+            continue
+        price = None if seat or not target else review_price(DATA_DIR, row_id, target)
         costs[row_id] = ({"usd_per_review": None, "basis": "subscription_seat" if seat else "unknown"}
-                         if usd is None else {"usd_per_review": float(usd), "basis": "route_tariff"})
+                         if price is None else price.as_cost())
     return costs
 
 
@@ -738,7 +646,7 @@ def review_pool_payload(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, 
     from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS, SUBAGENTS_SETTING, parse_configured_subagents, roster_handles
     from ouroboros.provider_models import model_has_credentials_in_settings
     from ouroboros.review_pool_receipts import document_as_read
-    from ouroboros.reviewer_slot_config import review_pool_slots, review_pool_state, reviewer_slot_last_executions
+    from ouroboros.reviewer_slot_config import public_slot_executions, review_pool_slots, review_pool_state, reviewer_slot_last_executions
     from ouroboros.server_maintenance import review_pool_migration_payload
     from ouroboros.settings_integrity import runtime_environ
 
@@ -755,7 +663,7 @@ def review_pool_payload(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, 
         "limits": {"rows": MAX_CONFIGURED_SUBAGENTS},
         "catalog": {"present": bool(raw.strip()), "enabled": bool(raw.strip()) and document.get("enabled") is not False,
                     "rows": len(items), "eligible": sum(1 for item in items if item.get("review_eligible") is True)},
-        "pool": [], "excluded": [], "last_executions": reviewer_slot_last_executions(), "row_costs": {},
+        "pool": [], "excluded": [], "last_executions": public_slot_executions(reviewer_slot_last_executions()), "row_costs": {},
         "config_error": "", "migration": review_pool_migration_payload(env, document=settings_document),
         "pool_without_credentials": [],
     }
@@ -769,7 +677,7 @@ def review_pool_payload(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, 
     except ValueError as exc:
         payload["config_error"] = str(exc)
         return payload
-    payload["row_costs"] = _review_pool_costs(items, env)
+    payload["row_costs"] = _review_pool_costs(items)
     payload["pool"], payload["excluded"] = review_pool_rows(
         items, slots, handles, payload["last_executions"], payload["row_costs"])
     payload["pool_without_credentials"] = [row["subagent_id"] for row in payload["pool"]  # seats log in themselves
@@ -794,23 +702,20 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
 
 def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
     from ouroboros import config as _config
-    from ouroboros.runtime_mode_policy import runtime_mode_at_least
+    from ouroboros.composer_cognition import main_cognition, request_project_id, update_project_cognition
 
+    if not isinstance(body, dict):
+        return unsaved_error("JSON body must be an object.", 400)
     raw_mode = str((body or {}).get("mode") or "").strip().lower()
     from ouroboros.context_mode_compat import VALID_CONTEXT_MODES
 
     if raw_mode not in set(VALID_CONTEXT_MODES):
         return unsaved_error("'mode' must be one of: " + ", ".join(VALID_CONTEXT_MODES), 400)
     next_mode = _config.normalize_context_mode(raw_mode)
-    digest = settings_document_digest()
-    previous_mode = _config.get_owner_context_mode()
-    cyber = runtime_mode_at_least(_config.get_runtime_mode(), "cyber_pro")
-    if not cyber and VALID_CONTEXT_MODES.index(next_mode) < VALID_CONTEXT_MODES.index(previous_mode) and _has_running_agent_tasks():
-        return unsaved_error(
-            "Context mode can only be lowered while Ouroboros is idle. "
-            "Wait until no queued or running work remains, then choose the working context.",
-            409,
-        )
+    try:
+        project_id = request_project_id(body)
+    except ValueError as exc:
+        return unsaved_error(str(exc), 400)
 
     def _set_context_mode(current: Dict[str, Any]) -> Dict[str, Any]:
         current["OUROBOROS_CONTEXT_MODE"] = next_mode
@@ -821,73 +726,26 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
         return current
 
     with settings_document_mutation():
-        # Re-prove the ordinary-mode idle policy under the lock: either the queue
-        # or the previous mode may have changed while this writer waited. The
-        # digest alone cannot attest idleness. Cyber can choose the next mode
-        # during work; existing task snapshots retain their original settings.
-        previous_mode = _config.get_owner_context_mode()
-        if not cyber and VALID_CONTEXT_MODES.index(next_mode) < VALID_CONTEXT_MODES.index(previous_mode) and _has_running_agent_tasks():
-            return unsaved_error(
-                "Context mode can only be lowered while Ouroboros is idle. "
-                "Wait until no queued or running work remains, then choose the working context.",
-                409,
-            )
-        # This endpoint IS the author of both keys, so they persist even at the shipped default.
-        # The digest binds the idle refusal above to the document this write replaces.
-        _owner_update_settings(_set_context_mode, digest,
-                               authored_keys=_CONTEXT_MODE_KEYS, allow_context_lowering=True)
-        # Same-lock projection: see api_owner_auto_grant.
-        os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
-        os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
+        if project_id:
+            try:
+                old, cognition = update_project_cognition(request_drive_root(request), project_id, context_mode=next_mode)
+            except ValueError as exc:
+                return unsaved_error(str(exc), 404, code="project_unavailable")
+            previous_mode = old["context_mode"]
+        else:
+            previous_mode = main_cognition()["context_mode"]
+            digest = settings_document_digest()
+            _owner_update_settings(_set_context_mode, digest,
+                                   authored_keys=_CONTEXT_MODE_KEYS, allow_context_lowering=True)
+            os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
+            os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
+            cognition = main_cognition()
     _owner_audit(
         request,
         "context_mode",
-        {"context_mode": next_mode, "previous_context_mode": previous_mode},
+        {"project_id": project_id, "context_mode": next_mode, "previous_context_mode": previous_mode},
     )
-    return JSONResponse({"ok": True, "context_mode": next_mode})
-
-
-@owner_write_guard
-async def api_owner_safety_mode(request: Request) -> JSONResponse:
-    """Persist the owner-selected LLM-safety-supervisor coverage (full | light | off).
-
-    This dedicated owner path is audited. Ordinary modes skip this control in
-    generic settings saves; Cyber also has audited configuration authority there.
-    Subsequent operations use the new choice; current task snapshots stay intact."""
-    body = await _json_body_or_empty(request)
-    # Off the event loop, under the document lock (held inside): a slow
-    # generic save must not be able to freeze the loop THROUGH this
-    # endpoint's synchronous lock acquisition.
-    return await _run_settings_writer(_api_owner_safety_mode_sync, request, body)
-
-
-def _api_owner_safety_mode_sync(request: Request, body: Any) -> JSONResponse:
-    from ouroboros import config as _config
-
-    raw_mode = str((body or {}).get("mode") or "").strip().lower()
-    if raw_mode not in set(_config.VALID_SAFETY_MODES):
-        return unsaved_error("'mode' must be one of: full, light, off", 400)
-
-    def _set_safety_mode(current: Dict[str, Any]) -> Dict[str, Any]:
-        current["OUROBOROS_SAFETY_MODE"] = raw_mode
-        return current
-
-    with settings_document_mutation():
-        # The previous mode is read for the audit trail only; the digest binds that
-        # read to the document the locked update replaces.
-        digest = settings_document_digest()
-        previous = _config.normalize_safety_mode(
-            _owner_read_settings_raw().get("OUROBOROS_SAFETY_MODE"))
-        _owner_update_settings(_set_safety_mode, digest,
-                               authored_keys=("OUROBOROS_SAFETY_MODE",), allow_safety_lowering=True)
-        # Same-lock projection: see api_owner_auto_grant.
-        os.environ["OUROBOROS_SAFETY_MODE"] = raw_mode
-    _owner_audit(
-        request,
-        "safety_mode",
-        {"safety_mode": raw_mode, "previous_safety_mode": previous},
-    )
-    return JSONResponse({"ok": True, "safety_mode": raw_mode})
+    return JSONResponse({"ok": True, "project_id": project_id, "context_mode": next_mode, "cognition": cognition})
 
 
 async def api_acknowledge_capability(request: Request) -> JSONResponse:
@@ -914,24 +772,28 @@ async def api_acknowledge_capability(request: Request) -> JSONResponse:
             return JSONResponse({"ok": True, "ack": record})
         except (ValueError, TypeError) as exc:
             return json_error(str(exc), 400)
+        except OSError as exc:  # a busy or unwritable store: nothing saved or audited, said as JSON
+            return json_exception(exc)
     try:
-        window_tokens = int((body or {}).get("window_tokens") or 0)
+        window_tokens = int(body.get("window_tokens", -1))
     except (TypeError, ValueError):
-        window_tokens = 0
-    if window_tokens <= 0:
-        return json_error("'window_tokens' must be a positive integer", 400)
+        window_tokens = -1
+    if window_tokens < 0:
+        return json_error("'window_tokens' must be a non-negative integer", 400)
     try:
-        from ouroboros.capability_evidence import record_owner_ack
-        record = await asyncio.to_thread(record_owner_ack,
-            request_drive_root(request),
-            provider=provider, model=model,
-            base_url=str((body or {}).get("base_url") or ""),
-            window_tokens=window_tokens,
-            headers=(body or {}).get("headers") if isinstance((body or {}).get("headers"), dict) else None,
-            options=(body or {}).get("options") if isinstance((body or {}).get("options"), dict) else None,
-            note=str((body or {}).get("note") or ""),
-            expected_route_fp=str((body or {}).get("route_fp") or ""),
-        )
+        from ouroboros.capability_evidence import record_owner_ack, revoke_owner_ack, route_fingerprint
+        route = dict(provider=provider, model=model, base_url=str(body.get("base_url") or ""),
+                     headers=body.get("headers") if isinstance(body.get("headers"), dict) else None,
+                     options=body.get("options") if isinstance(body.get("options"), dict) else None)
+        fp = route_fingerprint(**route)
+        if body.get("route_fp") and body["route_fp"] != fp:
+            raise ValueError("Capability acknowledgement route fingerprint mismatch")
+        if window_tokens == 0:
+            removed = await asyncio.to_thread(revoke_owner_ack, request_drive_root(request), fp)
+            record = {"route_fp": fp, "window_tokens": 0, "removed": removed}
+        else:
+            record = await asyncio.to_thread(record_owner_ack, request_drive_root(request), **route,
+                window_tokens=window_tokens, note=str(body.get("note") or ""), expected_route_fp=fp)
         _owner_audit(request, "capability_ack", {"route_fp": record.get("route_fp"), "window_tokens": window_tokens, "model": model})
         return JSONResponse({"ok": True, "ack": record})
     except ValueError as exc:
@@ -964,16 +826,24 @@ async def api_settings_get(request: Request) -> JSONResponse:
             backend=request.query_params.get("backend"), model=request.query_params.get("model")))
     if request.query_params.get("response_limit_preview") == "1":
         from ouroboros.response_limits import response_limit_preview
+        try:
+            window = int(request.query_params["window"]) if "window" in request.query_params else None
+            if window is not None and window < 0:
+                raise ValueError
+        except ValueError:
+            return json_error("'window' must be a non-negative integer", 400)
         model = str(request.query_params.get("model") or settings.get("OUROBOROS_MODEL") or "")
         route = _active_main_route(settings, model_override=model,
             use_local_override=request.query_params.get("local") == "true")
         return JSONResponse(await asyncio.to_thread(response_limit_preview, request_drive_root(request), route,
-            account=request.query_params.get("account", ""), settings=settings))
+            account=request.query_params.get("account", ""), settings=settings,
+            role=request.query_params.get("role", "main"), window=window))
     safe = {k: v for k, v in settings.items()}
     for key in SECRET_SETTING_KEYS:
         if safe.get(key):
             safe[key] = mask_settings_secret(key, safe[key])
     safe["MCP_SERVERS"] = _mask_mcp_servers_payload(safe.get("MCP_SERVERS") or [])
+    safe[CONNECTIONS_KEY] = mask_connections(safe.get(CONNECTIONS_KEY) or [])
     for key, value in list(safe.items()):
         if key in SECRET_SETTING_KEYS or key in _SETTINGS_DEFAULTS:
             continue
@@ -1022,8 +892,9 @@ async def api_settings_get(request: Request) -> JSONResponse:
         "candidate": (
             configured_subagents_dict(subagents.config) if subagents.config is not None else None
         ),
-        "automatic": automatic_catalog(_owner_settings_document()),
+        "automatic": automatic_catalog(document := _owner_settings_document()),
     }
+    meta["connections"] = connections_meta(settings, document)
     safe["_meta"] = meta
     return JSONResponse(safe)
 
@@ -1060,21 +931,17 @@ def _apply_settings_save_side_effects(
     immediately" without saying so (#285).
     """
     side_effect_warnings: list = []
-    if any(k in all_changed for k in ("MCP_ENABLED", "MCP_SERVERS", "MCP_TOOL_TIMEOUT_SEC")):
-        try:
-            from ouroboros.mcp_client import (
-                reconfigure_from_settings as _mcp_reconfigure,
-                refresh_all_background as _mcp_refresh_background,
-            )
-            _mcp_reconfigure(current)
-            _mcp_refresh_background(reason="settings")
-        except Exception as exc:
-            log.warning("MCP reconfigure after settings change failed", exc_info=True)
-            side_effect_warnings.append(
-                "MCP reconfigure failed in the server process: "
-                f"{type(exc).__name__}: {exc}. The saved values are on disk; "
-                "agent processes retry on their next tool-schema read."
-            )
+    try:
+        from ouroboros.mcp_client import MCPManager, configuration_changed
+        if MCPManager._fingerprint(current) != MCPManager._fingerprint(old_effective_settings):
+            configuration_changed(current, reason="settings")
+    except Exception as exc:
+        log.warning("MCP reconfigure after settings change failed", exc_info=True)
+        side_effect_warnings.append(
+            "MCP reconfigure failed in the server process: "
+            f"{type(exc).__name__}: {exc}. The saved values are on disk; "
+            "server discovery setup retries on its next tool-schema read."
+        )
 
     # Skills repo/runtime changes require extension loader reconciliation.
     try:
@@ -1355,6 +1222,14 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 return unsaved_error(str(exc), 409, code=exc.code)
             except ValueError as exc:
                 return unsaved_error(str(exc), 400, code="MCP_CONFIG_ERROR")
+        if CONNECTIONS_KEY in body:
+            rows, connections_error = normalize_connections(body.get(CONNECTIONS_KEY))
+            if connections_error:
+                return unsaved_error(connections_error, 400, code="connections_invalid")
+            try:
+                body[CONNECTIONS_KEY] = rehydrate_connections(rows, old_settings.get(CONNECTIONS_KEY))
+            except ConnectionSecretIdentityAmbiguous as exc:
+                return unsaved_error(str(exc), 409, code=exc.code)
         current = _merge_settings_payload(old_effective_settings, body)
         from ouroboros.runtime_mode_policy import runtime_mode_at_least
 
@@ -1363,14 +1238,9 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         runtime_changed = runtime_authored and requested_runtime_mode != pending_runtime_mode
         if runtime_authored:
             pending_runtime_mode = requested_runtime_mode
-        minimax_region = str(current.get("MINIMAX_REGION") or "").strip().lower()
-        if minimax_region and minimax_region not in MINIMAX_REGION_ENDPOINTS:
-            return unsaved_error("MINIMAX_REGION must be global_en or cn_zh.", 400)
-        current["MINIMAX_REGION"] = minimax_region
-        zai_plan = str(current.get("ZAI_PLAN") or "").strip().lower()
-        if zai_plan and zai_plan not in ZAI_PLAN_ENDPOINTS:
-            return unsaved_error("ZAI_PLAN must be payg or coding.", 400)
-        current["ZAI_PLAN"] = zai_plan
+        choice_error = normalize_builtin_choices(current)
+        if choice_error:
+            return unsaved_error(choice_error, 400)
         # Generic settings saves operate on the current boot baseline. A pending
         # next-boot mode written by /api/owner/runtime-mode is preserved on disk
         # below, but never hot-applied to this process/env.
@@ -1386,6 +1256,9 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         unauthored = (repropose_unedited_slots(current, document, body, shown)
                       | repropose_unedited_catalog(current, document, body, shown))
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
+        from ouroboros.safety_config import safety_configuration_requires_owner
+        if not runtime_mode_at_least(current_runtime_mode, "cyber_pro") and safety_configuration_requires_owner(document, {k: v for k, v in current.items() if k not in unauthored}, before=old_effective_settings, after=current):
+            raise PermissionError("The resolved Safety Supervisor is owner-controlled; use /api/owner/safety-model.")
         if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_startup_ready_provider(current):
             return unsaved_error("Local-only setups must route at least one model to the local runtime.", 400)
         # A catalog save retires the former review lanes: the pool replaces them.
@@ -1431,6 +1304,8 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                            if key in all_changed}
         if control_changes:
             _owner_audit(request, "settings_controls", {"changes": control_changes})
+        from ouroboros.gateway.safety_settings import audit_safety_change
+        audit_safety_change(request, old_effective_settings, current)
         boundary.at("environment projection")
         _apply_settings_to_env(current)
         boundary.at("supervisor start")
@@ -1477,17 +1352,18 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 _owner_write_settings(settings_to_save)
                 os.environ["GITHUB_REPO"] = resolved_slug
         immediate_changed, next_task_changed = _effect_buckets(all_changed)
+        # Owner decision (2026-08-05): the task-start snapshot boundary STAYS for reviewers, subagents, context and
+        # effort, said loudly so "Saved" never reads as "applied to the task you are watching". Models, accounts and
+        # keys read live (route_choice), so they are immediate and draw no warning.
         agent_task_running = bool(next_task_changed) and started_before_save
         if agent_task_running:
-            # Owner decision (2026-08-05): the task-start snapshot boundary STAYS —
-            # a running task keeps the config it started with, and the save says so
-            # loudly instead of letting "Saved" read as "applied to the task you are
-            # watching" (the reviewer-slot save at 21:56 read exactly that way).
-            # Only what the task owns waits for it: a skill reads its granted keys as saved (#1122).
             warnings.append(
-                "An agent task is running right now: it keeps the models, reviewers and "
-                "subagents it started with; those apply from the next task."
+                "An agent task is running right now: it keeps the reviewers, subagents, context and "
+                "effort it started with; those apply from the next task."
             )
+        if started_before_save and set(immediate_changed) - _IMMEDIATE_KEYS:  # a model, account or key moved
+            warnings.append("Running work that follows a model setting moves at its next call; "
+                            "a task that chose its own model keeps it.")
         resp: Dict[str, Any] = {"status": "saved"}
         # A key with its own writer is skipped here, and the save says so instead of reading as applied.
         ignored = sorted(k for k in body if k in _ENDPOINT_WRITTEN_SETTINGS)
@@ -1519,6 +1395,8 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         warnings.extend(filter(None, [review_pool_save_warning(current)]))
         if warnings:
             resp["warnings"] = warnings
+        if references := connection_references(current):  # they keep their value and refuse until changed
+            resp["connection_references"] = references
         return JSONResponse(resp)
     except Exception as e:
         if boundary.committed:

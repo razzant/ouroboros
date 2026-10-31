@@ -3,8 +3,9 @@
 // draft compilation is read-only and completion is one atomic transaction.
 
 import { apiClient } from './api_client.js';
-import { claudexorStatus, accountRows, familyLabel } from './claudexor_status_store.js';
-import { LOGIN_CARD_FULL, createLoginCardController } from './harness_login_cards.js';
+import { ACCOUNTS_UNSUPPORTED_STATUS, claudexorStatus, accountRows, familyLabel } from './claudexor_status_store.js';
+import { LOGIN_CARD_FULL, SIGN_IN_SCOPE_NOTE, createLoginCardController } from './harness_login_cards.js';
+import { familyStatus } from './harness_accounts.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import {
     availableSubagentsEditorHost,
@@ -56,10 +57,10 @@ export const VALUE_LADDER = [
 export const LADDER_FOOTNOTE =
     'Riding a plan is not free — it moves that work onto a subscription you already '
     + 'pay for instead of adding per-call API charges. What moves is exactly what you '
-    + 'route: commit, plan, skill review and task acceptance all run on the review pool '
-    + '(the rows marked Reviewer), so an all-subscription pool also puts each substantive task\'s '
-    + 'acceptance panel on the subscription: on the API it measured about 12 s and '
-    + '$0.07 per model row per task; a session spends minutes of your window per task instead.';
+    + 'route: commit, plan, skill and result reviews all take their reviewers from the review pool '
+    + '(the rows marked Reviewer), so an all-subscription pool puts each review on the subscription; '
+    + 'Settings → Agents shows what one review by each API row actually cost (a wave costs the reviewers '
+    + 'it asks), and a session spends minutes of your window per review instead.';
 
 // ---------------------------------------------------------------------------
 // Pure helpers.
@@ -68,8 +69,8 @@ export const LADDER_FOOTNOTE =
 export function connectedHarnesses(snapshot) {
     // Which preset families the daemon vouches a signed-in account for, in the
     // stable family order. `accountRows` is the SSOT projection of the status
-    // payload (native CLI session + verified credential profiles alike), so
-    // this step and the accounts panel can never disagree about "connected".
+    // payload, so this step and the accounts panel can never disagree about
+    // "connected".
     // An account the owner switched OFF is skipped however healthy its login:
     // rotation never takes it, so counting it here would declare a family
     // connected on a pool the engine will not use. Absent stays connected —
@@ -129,6 +130,7 @@ export function onboardingSettingsDraft({
 } = {}) {
     const clean = (value) => trim(value);
     return {
+        OUROBOROS_CONNECTIONS: state.connections || [],
         ...Object.fromEntries(providerFields.map(
             (field) => [field.settingKey, clean(state[field.stateKey])],
         )),
@@ -156,11 +158,20 @@ export function onboardingSettingsDraft({
 }
 
 export const UNCONFIRMED_COMPLETION_TEXT =
-    'Onboarding was not confirmed: the server answered without the completion '
-    + 'receipt. Nothing here can tell whether your settings were saved — reload '
-    + 'this page; if setup is still shown, finish it again.';
+    'Onboarding was not confirmed: the server answered without the completion receipt.';
 
 export const MALFORMED_RECEIPT_CODE = 'malformed_completion_receipt';
+export const COMPLETION_REPLY_LOST_CODE = 'completion_reply_lost';
+
+// What "Check status" says about the attempt it read back (docs/CLIENT_CONTRACT.md §4).
+export const SAVE_NOT_CONFIRMED_TEXT = 'This save is not confirmed. Your draft remains here. '
+    + 'You can check again or choose Retry save.';
+export const SAVE_STORED_TEXT = 'This save is stored. Setup completion and restart requirements are not yet confirmed.';
+// A retry refused before writing anything, while an earlier save's outcome was still open.
+export const EARLIER_SAVE_KEPT_TEXT = 'This retry was not saved. The earlier save may still be finishing; Check status reads that save.';
+// That earlier save is confirmed, but the owner changed the values since it was sent.
+export const EARLIER_SAVE_OTHER_VALUES_TEXT = 'The earlier save is confirmed, but it does not contain the values shown now. '
+    + 'Start Ouroboros to save them.';
 
 /**
  * How the wizard READS the completion endpoint's answer. Pure, so every branch
@@ -171,7 +182,9 @@ export const MALFORMED_RECEIPT_CODE = 'malformed_completion_receipt';
  * needs a restart — so a shape-blind `ok` would announce a finished setup while
  * silently discarding them. A body that will not parse is UNKNOWN, not empty:
  * substituting `{}` made a 200 carrying HTML (a proxy error page, a login
- * redirect) look like success, because `{}` is truthy.
+ * redirect) look like success, because `{}` is truthy. Neither that body nor
+ * an error page the endpoint did not write says whether the save landed:
+ * both read as `saved: null`, which only this attempt's read-back settles.
  *
  * @returns {{receipt: object}|{failure: object}}
  */
@@ -193,7 +206,7 @@ export function readCompletionAnswer({ status = 0, ok = false, parsed = false, d
                 // server past its bound, so whether the bytes landed is
                 // genuinely UNKNOWN. Collapsing it to `false` would offer a
                 // blind re-save over a transaction that may already be on disk.
-                saved: body.saved === null ? null : Boolean(body.saved),
+                saved: parsed && typeof body.saved === 'boolean' ? body.saved : null,
                 // `post_commit_failed` is what the server actually sends (see
                 // the gateway contract); `stage` was a name this reader made up,
                 // so a real post-commit envelope parsed to '' and the owner lost
@@ -215,12 +228,69 @@ export function readCompletionAnswer({ status = 0, ok = false, parsed = false, d
                 code: MALFORMED_RECEIPT_CODE,
                 detail: '',
                 canSkip: false,
-                saved: false,
+                saved: null,
                 stage: '',
             },
         };
     }
     return { receipt: body };
+}
+
+/** A fresh id for ONE explicit save, made before sending so a lost answer can still be asked about. */
+export function completionAttemptId(cryptoImpl = globalThis.crypto) {
+    const bytes = cryptoImpl.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/** POST the completion and read its answer; a request that got no answer at all is unknown, too. */
+export async function postCompletion(endpoint, payload, fetchImpl = fetch) {
+    let response;
+    try {
+        response = await fetchImpl(endpoint, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    } catch (error) {
+        return { failure: { message: `The answer to this save did not arrive (${String(error?.message || error)}).`,
+            status: 0, code: COMPLETION_REPLY_LOST_CODE, detail: '', canSkip: false, saved: null, stage: '' } };
+    }
+    let data = null;
+    try { data = await response.json(); } catch { data = null; }
+    const parsed = Boolean(data) && typeof data === 'object';
+    return readCompletionAnswer({ status: response.status, ok: response.ok, parsed, data: parsed ? data : {} });
+}
+
+/**
+ * What became of ONE attempt (`OnboardingAttemptResponse`), as the wizard acts on it: only its own
+ * receipt completes; a recorded failure is shown like the POST answer it was; stored and unconfirmed
+ * keep the draft. Readiness is never asked: a provider saved earlier already passes it.
+ */
+export function completionAttemptOutcome(data) {
+    const body = data && typeof data === 'object' ? data : {};
+    const receipt = body.saved === true && body.receipt
+        ? readCompletionAnswer({ status: 200, ok: true, parsed: true, data: body.receipt }).receipt : null;
+    if (receipt) return { state: 'completed', receipt };
+    if (body.saved === false || (body.saved === true && body.post_commit_failed)) {
+        return { state: 'failed', failure: { message: String(body.error || 'The save did not complete.'), status: 200,
+            code: String(body.code || ''), detail: '', canSkip: false, saved: body.saved, stage: String(body.post_commit_failed || '') } };
+    }
+    return body.saved === true ? { state: 'stored', text: SAVE_STORED_TEXT } : { state: 'unconfirmed', text: SAVE_NOT_CONFIRMED_TEXT };
+}
+
+/** Read back one attempt by its id; an unreadable answer stays unknown and claims nothing. */
+export async function readCompletionAttempt(attemptId, fetchImpl = fetch) {
+    let response;
+    let data = null;
+    try {
+        response = await fetchImpl(`/api/onboarding/complete?attempt=${encodeURIComponent(attemptId)}`,
+            { cache: 'no-store', headers: { Accept: 'application/json' } });
+        data = await response.json();
+    } catch (error) {
+        if (!response) return { state: 'unreadable', text: `Could not check the save status: ${String(error?.message || error)}. Try again in a moment.` };
+    }
+    if (!response.ok || !data || typeof data !== 'object') {
+        return { state: 'unreadable', text: `Could not check the save status: ${String(data?.error || `HTTP ${response.status}`)}. Try again in a moment.` };
+    }
+    return completionAttemptOutcome(data);
 }
 
 export function completionFailureNotice(error) {
@@ -241,10 +311,10 @@ export function completionFailureNotice(error) {
     // exist, "finish without agent defaults" would be a second write, not an
     // alternative to the first.
     //
-    // `saved === null` is the third state (503 `settings_save_timeout`): the
-    // save is still running in the server, so neither "written" nor "nothing
-    // saved" is true yet. The wizard offers "Check status" for that case
-    // instead of a retry, which would be a second write over an unknown first.
+    // `saved === null` is the third state (503 `settings_save_timeout`, or an
+    // answer that never arrived or was not the endpoint's): neither "written"
+    // nor "nothing saved" is known. The wizard offers "Check status" for that
+    // attempt instead of a retry, a second write over an unknown first.
     const message = String(error?.message || error || 'Failed to save onboarding settings.');
     const detail = String(error?.detail || '').trim();
     const saved = error?.saved === null ? null : Boolean(error?.saved);
@@ -255,9 +325,8 @@ export function completionFailureNotice(error) {
             + `${error?.stage ? ` — the step that failed afterwards was ${String(error.stage)}` : ''}`
             + '. Restart Ouroboros to pick them up rather than filling this in again.');
     } else if (saved === null) {
-        parts.push('Whether your settings were saved is unknown — the save is still '
-            + 'running in the server. Use "Check status" to see whether it landed '
-            + 'before finishing setup again.');
+        parts.push('The save result is unknown. Your draft has not been discarded. '
+            + 'Use "Check status" to read the result of this save.');
     }
     return {
         code: String(error?.code || ''),
@@ -270,12 +339,17 @@ export function completionFailureNotice(error) {
 
 export function agentsOutcomeText(connected = [], {
     accountsKnown = true,
+    accountsUnsupported = false,
     catalogKnown = false,
     skipPresets = false,
     snapshot,
 } = {}) {
     // What the owner is told BEFORE finishing. Every verb is conditional,
     // because the compiler can still refuse a seat no live model id satisfies.
+    if (accountsUnsupported) {
+        return 'Subscriptions can’t be connected until a newer Claudexor runs. Your draft is kept; '
+            + 'configure API access to continue.';
+    }
     if (!accountsKnown) {
         return 'Accounts could not be checked. Your draft is kept; refresh the connection '
             + 'or configure API access to continue.';
@@ -286,9 +360,9 @@ export function agentsOutcomeText(connected = [], {
     }
     const labels = joinLabels(familyLabels(connected, snapshot, { catalogKnown }));
     if (skipPresets) {
-        return `${labels} ${connected.length === 1 ? 'is' : 'are'} connected, but you chose to `
+        return `Signed in to ${labels}, but you chose to `
             + 'skip the automatic subscription preset. The Available subagents draft below '
-            + 'is still saved exactly as you edit it; other agent defaults stay unchanged.';
+            + `is still saved exactly as you edit it; other agent defaults stay unchanged. ${SIGN_IN_SCOPE_NOTE}`;
     }
     const reviewerHarnesses = connected.filter(
         (harness) => REVIEW_CAPABLE_AGENT_HARNESSES.has(harness),
@@ -297,14 +371,14 @@ export function agentsOutcomeText(connected = [], {
         (harness) => !REVIEW_CAPABLE_AGENT_HARNESSES.has(harness),
     );
     const clauses = [
-        `${labels} ${connected.length === 1 ? 'is' : 'are'} connected. When you finish, `
+        `Signed in to ${labels}. When you finish, `
             + 'Ouroboros will try to add subscription-backed choices to Available subagents '
             + `through ${connected.length === 1 ? 'it' : 'them'}.`,
     ];
     if (reviewerHarnesses.length) {
         const reviewerLabels = familyLabels(reviewerHarnesses, snapshot, { catalogKnown });
         clauses.push(`${joinLabels(reviewerLabels)} can `
-            + 'also move commit, scope, advisory, plan, skill review, and task acceptance.');
+            + 'also move commit, plan, skill and result review.');
     }
     if (taskOnlyHarnesses.length) {
         const taskOnlyLabels = familyLabels(taskOnlyHarnesses, snapshot, { catalogKnown });
@@ -315,17 +389,15 @@ export function agentsOutcomeText(connected = [], {
     clauses.push(connected.includes('codex')
         ? 'Codex can also supply your model roles without an API key.'
         : 'Main still needs Codex, an API key, or a local model.');
+    clauses.push(SIGN_IN_SCOPE_NOTE);
     return clauses.join(' ');
 }
 
-export function familyStatusText(snapshot, harness, { accountsKnown = true } = {}) {
+export function familyStatusText(snapshot, harness, { accountsKnown = true, accountsUnsupported = false } = {}) {
+    if (accountsUnsupported) return { tone: 'muted', text: ACCOUNTS_UNSUPPORTED_STATUS };
     if (!accountsKnown) return { tone: 'muted', text: 'Not checked' };
-    const count = harnessAccountCount(snapshot, harness);
-    if (!count) return { tone: 'muted', text: 'Not connected' };
-    return {
-        tone: 'ok',
-        text: count === 1 ? 'Connected' : `${count} accounts connected · they rotate`,
-    };
+    const status = familyStatus(accountRows(snapshot).filter((row) => row.harness === harness));
+    return { tone: status.tone, text: status.label };
 }
 
 export function subagentPreviewStatusSignature(view, snapshot) {
@@ -432,9 +504,11 @@ export function ladderHtml() {
     `;
 }
 
-export function familyRowHtml(family, { status, connected = false }) {
+export function familyRowHtml(family, { status, connected = false, connectable = true }) {
     // Equivalent rows (docs/DESIGN.md §6): no family gets extra weight for being
     // first or already connected — only its status text and its action change.
+    // An engine on the retired account model gets no Connect: no connection
+    // made there could be listed or confirmed.
     return `
         <div class="agent-family-row" data-agent-family="${escapeHtml(family.harness)}">
             <span class="agent-family-identity">
@@ -447,15 +521,16 @@ export function familyRowHtml(family, { status, connected = false }) {
                 </span>
                 <span class="agent-family-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</span>
             </span>
-            <button type="button" class="btn btn-secondary" data-agent-connect="${escapeHtml(family.harness)}">
+            ${connectable ? `<button type="button" class="btn btn-secondary" data-agent-connect="${escapeHtml(family.harness)}">
                 ${escapeHtml(connected ? 'Add another' : 'Connect')}
-            </button>
+            </button>` : ''}
         </div>
     `;
 }
 
 export function familyListHtml(snapshot, {
     accountsKnown = true,
+    accountsUnsupported = false,
     catalogKnown = false,
 } = {}) {
     const connected = new Set(accountsKnown ? connectedHarnesses(snapshot) : []);
@@ -463,8 +538,9 @@ export function familyListHtml(snapshot, {
         ...family,
         label: familyLabel(family.harness, snapshot, { catalogKnown }),
     }, {
-        status: familyStatusText(snapshot, family.harness, { accountsKnown }),
+        status: familyStatusText(snapshot, family.harness, { accountsKnown, accountsUnsupported }),
         connected: connected.has(family.harness),
+        connectable: !accountsUnsupported,
     })).join('');
 }
 
@@ -646,6 +722,7 @@ export function createAgentsStep({
         if (state.disposed) return;
         const snapshot = store.snapshot;
         const known = accountsKnown();
+        const unsupported = Boolean(store.accountsUnsupported);
         const list = el('agents-family-list');
         if (list) {
             // Rebuild ONLY on a real change. The status store settles every few
@@ -654,6 +731,7 @@ export function createAgentsStep({
             // is being replaced.
             const html = familyListHtml(snapshot, {
                 accountsKnown: known,
+                accountsUnsupported: unsupported,
                 catalogKnown: Boolean(store.catalogKnown),
             });
             if (html !== state.listHtml) {
@@ -673,6 +751,7 @@ export function createAgentsStep({
         if (outcome) {
             outcome.textContent = agentsOutcomeText(state.connected, {
                 accountsKnown: known,
+                accountsUnsupported: unsupported,
                 catalogKnown: Boolean(store.catalogKnown),
                 skipPresets: state.skipPresets,
                 snapshot,

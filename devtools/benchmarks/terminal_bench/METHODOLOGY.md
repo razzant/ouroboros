@@ -113,7 +113,7 @@ assumed in two places that used to hardcode TB2.1:
   prints a loud non-leaderboard-faithful warning for TB2.1 and is recorded in the manifest
   and the disclosure ledger — never a silent default.
 - **Every reviewer row the container can run is declared; the rest is disclosed (2026-09-02;
-  review-pool adapter 2026-10-08).** Task acceptance executes every review-pool row on its
+  review-pool adapter 2026-10-08).** The Required result review executes every review-pool row on its
   configured delivery (owner R2), so `metadata.yaml` declares the rows the container's panel
   actually runs — api packet rows and configured-subagent native inspection rows, by model id.
   The container roster is DERIVED from the host roster (`common/model_slots.py`,
@@ -237,8 +237,9 @@ leaderboard" for the verified mechanics. Methodology-relevant consequences:
   `trajectory.json` upload; the trial row must carry `trajectory_path`). The
   adapter emits it in-container at the end of each trial; pre-existing runs
   are backfilled with `build_atif_trajectories.py` BEFORE the first upload.
-  Trajectories are derived verbatim from the recorded logs (tool calls,
-  progress narration, final answer, token/cost totals) — no synthesis. The
+  Trajectories are derived verbatim from the recorded logs (tool calls, the
+  model's progress narration, host notes as `system` steps, final answer,
+  token/cost totals) — no synthesis. The
   maintainers run an LLM judge over these trajectories (reward-hacking
   review; flagged trials are zeroed at `/apply`).
 - Submitted jobs become **public**. Because campaign runs inject provider

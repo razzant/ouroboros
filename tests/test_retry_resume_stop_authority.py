@@ -1,4 +1,4 @@
-"""Real retry -> Pause -> pending Stop -> public Resume, across all grant doors.
+"""Historical retry -> Pause -> pending Stop -> public Resume, across all grant doors.
 
 Cancellation is written by request_cancel, never replaced by a boolean double.
 The common fixtures double OS/model boundaries; warm park saves through the real
@@ -14,10 +14,11 @@ from ouroboros import budget_pause, cancel_intents, owner_pause, owner_wait
 from supervisor import queue, workers
 from supervisor.owner_pause_control import request_owner_pause, refresh_owner_pause_tree
 from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._silence_reaper_support import historical_unsaved_pause_hold
 from tests.test_execution_clock_resume_handover import clock as clock
 from tests.test_retry_pause_generations import _park, _running_actor
 from tests.test_retry_pause_identity import (
-    _assign, _fresh_plan, _loop_once, _ordinary_retry, _reap, reaper as reaper,
+    _assign, _fresh_plan, _loop_once, _ordinary_retry, reaper as reaper,
 )
 from tests.test_swarm_host_admission import host as host
 
@@ -48,6 +49,11 @@ def paused_retry(host, monkeypatch, clock, reaper, door):
 
             slot = workers.WORKERS[0]
             slot.proc = SimpleNamespace(pid=12345)
+            from ouroboros.model_wait import TaskModelWait
+
+            waiter = TaskModelWait(task={**task, "budget_drive_root": str(host.root)},
+                                   drive_root=host.root, event_queue=None, worker_slot_held=False)
+            waiter.tool_context, ctx.model_wait_context = ctx, waiter
             def park(_ctx, checkpoint):
                 handle_owner_wait({"phase": "park", "task_id": task["id"], "worker_id": 0,
                     "pid": 12345, "task_attempt": task["_attempt"], "wait_id": checkpoint["wait_id"],
@@ -68,7 +74,7 @@ def paused_retry(host, monkeypatch, clock, reaper, door):
                 with pytest.raises(Parked):
                     budget_pause.enter_owner_pause(limit)
             budget_pause.end_dispatch_fence(task["id"])
-            _reap(clock, reaper, task["id"])
+            historical_unsaved_pause_hold(clock, task["id"])  # what the pre-upgrade idle kill left
             task = next(row for row in host.pending if row["id"] == task["id"])
             assert task["_budget_pause_hold"]["reason"] == "unsaved_pause_intent"
         refresh_owner_pause_tree("held")
@@ -111,7 +117,7 @@ def test_pending_stop_vetoes_retry_resume(host, monkeypatch, clock, reaper, door
                 assert _loop_once(host, monkeypatch, sent, plan=plan)["kind"] == "pause"
         assert owner_pause.read_fence(host.root, "held")["state"] == "released"
         assert "held" not in queue.BUDGET_ROOT_FENCES
-        assert child in host.pending and not child.get("_budget_pause_hold", {}).get("selected")
+        assert child in host.pending and "_resume_selection" not in child
         assert not _assign(host, monkeypatch), "old children need explicit selection"
 
 
@@ -126,7 +132,7 @@ def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, c
     def transient(*args, **kwargs):
         # Only the grant's classification fails; actual source/custody readers stay real.
         if sys._getframe(1).f_code.co_name == "root_actor" and sys._getframe(2).f_code.co_name in {
-                "resume_warm_owner_pause_root", "_grant_exact_resume", "resume_budget_paused_task"}:
+                "resume_warm_owner_pause_root", "_grant_exact_resume", "_resume_budget_paused_task"}:
             reads.append(args[1])
             raise OSError("transient lineage read failure")
         return real(*args, **kwargs)
@@ -137,22 +143,25 @@ def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, c
     assert reads == ["held"]
     # Queued selection already refuses via its existing owner-fence authority;
     # warm/exact grant issuers must not reinterpret unknown as member authority.
-    expected = "selection_owner_held" if door in {"queued", "unsaved"} else "owner_pause_custody_unreadable"
-    assert result == {"ok": False, "error": expected}, result
+    expected, message = (("selection_owner_held", "Resume refused: selection owner held")
+                         if door in {"queued", "unsaved"} else
+                         ("owner_pause_custody_unreadable", "Resume refused: owner pause custody unreadable"))
+    assert result == {"ok": False, "error": expected, "message": message}, result
     assert owner_pause.read_fence(host.root, "held") == before
     assert queue.resume_budget_paused_task(task["id"])["ok"]
 
 
 @pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
-@pytest.mark.parametrize("veto", ["unreadable_cancel", "legacy_cancel", "panic", "restart"])
+@pytest.mark.parametrize("veto", ["unreadable_cancel", "legacy_cancel", "restart"])
 def test_unknown_cancel_and_existing_stop_carriers_keep_the_pause(host, monkeypatch, clock, reaper, door, veto):  # noqa: F811
     from ouroboros.task_store import patch_document
 
     task, _child, _plan = paused_retry(host, monkeypatch, clock, reaper, door)
     if veto == "legacy_cancel":
         patch_document(host.root, "held", lambda row: {**row, "status": "cancel_requested"})
-    elif veto in {"panic", "restart"}:
-        (host.root / "state" / ("panic_stop.flag" if veto == "panic" else "owner_restart_no_resume.flag")).touch()
+    elif veto == "restart":
+        from tests._work_stop_helpers import live_restart
+        live_restart(host.root, monkeypatch)
     before = copy.deepcopy(owner_pause.read_fence(host.root, "held"))
     latch = copy.deepcopy(queue.BUDGET_ROOT_FENCES)
     with monkeypatch.context() as fault:

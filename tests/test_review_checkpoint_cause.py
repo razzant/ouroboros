@@ -69,7 +69,7 @@ def test_real_session_checkpoint_preserves_lock_cause_before_any_post(tmp_path, 
     from ouroboros.review_state import ReviewStateLockError
     from ouroboros.review_substrate import ReviewCoordinator
     from ouroboros.tools.review_response import parse_model_response
-    from ouroboros.triad_review import parse_model_review_results
+    from ouroboros.triad_review import parse_seat_answers
 
     def checkpoint(_invocation_id):
         if refused:
@@ -88,7 +88,7 @@ def test_real_session_checkpoint_preserves_lock_cause_before_any_post(tmp_path, 
         assert actor.transport_status == "authority_error"
         assert '"reason":"contention"' in actor.reported_cause
         envelope = parse_model_response(actor.model, asdict(actor), {})
-        durable = parse_model_review_results({"results": [envelope]}).actor_records[0]
+        durable = parse_seat_answers({"results": [envelope]}, {}).actor_records[0]
         assert durable.reported_cause == actor.reported_cause
         assert durable.transport_status == "authority_error"
         assert actor.response_ref, "the physical failure keeps its durable source"
@@ -207,7 +207,7 @@ def test_failure_facts_reach_persisted_task_history_and_actual_card(tmp_path, fa
     from ouroboros.review_state import ReviewStateLockError
     from ouroboros.review_substrate import ReviewCoordinator
     from ouroboros.tools.review_response import parse_model_response
-    from ouroboros.triad_review import parse_model_review_results
+    from ouroboros.triad_review import parse_seat_answers
     from tests.test_review_ledger import _facts
     from tests.test_review_record_card_projection import _render, _terminal
 
@@ -237,7 +237,7 @@ def test_failure_facts_reach_persisted_task_history_and_actual_card(tmp_path, fa
     envelopes = [parse_model_response(actor.model, {
         **asdict(actor), "choices": [{"message": {"content": actor.raw_text}}],
     }, {}) for actor in actors]
-    raws = [actor.to_dict() for actor in parse_model_review_results({"results": envelopes}).actor_records]
+    raws = [actor.to_dict() for actor in parse_seat_answers({"results": envelopes}, {}).actor_records]
     record = review_ledger.write_record(tmp_path, review_ledger.build_commit_gate_record(_facts(raws)))
     readback = review_ledger.load_record(tmp_path, record["record_id"])
     stored, event, history = _terminal(tmp_path, "task-1")

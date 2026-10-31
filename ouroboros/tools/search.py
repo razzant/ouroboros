@@ -184,12 +184,24 @@ def _extract_sources_from_response(resp_obj: Any) -> List[Dict[str, str]]:
     return sources
 
 
-def _resolve_openai_client_settings() -> tuple[str, str | None, str, str]:
-    """Return credentials only for official OpenAI Responses web search."""
-    official_key = (runtime_setting("OPENAI_API_KEY", "") or "").strip()
-    legacy_base_url = (runtime_setting("OPENAI_BASE_URL", "") or "").strip()
+def _search_key(kind: str, connection: str = "") -> str:
+    """The key of the search leg's connection, read through the one resolver ('' when it cannot serve)."""
+    from ouroboros.llm_routing import resolve_target
+    from ouroboros.provider_models import connection_id
 
-    if official_key and not legacy_base_url:
+    try:
+        return str(resolve_target(f"{connection_id(kind, connection)}::search").get("api_key") or "").strip()
+    except Exception:
+        return ""
+
+
+def _resolve_openai_client_settings(connection: str = "") -> tuple[str, str | None, str, str]:
+    """Return credentials only for official OpenAI Responses web search: the built-in key
+    beside the legacy compatible base URL belongs to that endpoint, not to OpenAI."""
+    from ouroboros.provider_models import legacy_openai_base
+
+    official_key = _search_key("openai", connection)
+    if official_key and (connection or not legacy_openai_base()):
         return official_key, None, "openai", "openai"
     return "", None, "openai", "openai"
 
@@ -212,6 +224,23 @@ def _anthropic_model(model: str) -> str:
 
 def _available_web_search_backends() -> list[str]:
     return [leg["backend"] for leg in resolve_web_search_route()["legs"]]
+
+
+def _web_search_unavailability() -> tuple[str, str]:
+    """``(reason, detail)`` for a route with no eligible leg, from the route's own causes.
+
+    Only a route whose every unavailable leg lacks a key is ``missing_credential``;
+    a key whose SDK is not installed keeps ``package_missing``."""
+    route = resolve_web_search_route()
+    if route.get("error"):
+        return "unsupported_selection", route["error"]
+    unavailable = route["unavailable"]
+    if not unavailable:
+        return "missing_credential", "web_search_backend"
+    reasons = dict.fromkeys("missing_credential" if leg["unavailable_reason"] == "no_credentials"
+                            else leg["unavailable_reason"] for leg in unavailable)
+    return "+".join(reasons), "web_search_backend: " + ", ".join(
+        f"{leg['source']} {leg['unavailable_reason']}" for leg in unavailable)
 
 
 def _web_search_backend_pin() -> str:
@@ -293,18 +322,19 @@ def _emit_simple_usage(
 
 
 def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search_context_size: str = "",
-                           processing_preference: Optional[str] = None) -> str:
+                           processing_preference: Optional[str] = None, connection: str = "") -> str:
     if _web_search_deadline_exhausted(ctx):
         return _web_search_deadline_result()
-    api_key = str(runtime_setting("OPENROUTER_API_KEY") or "").strip()
+    api_key = _search_key("openrouter", connection)
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is not configured")
+        raise RuntimeError(f"OpenRouter connection {connection} is not configured" if connection
+                           else "OPENROUTER_API_KEY is not configured")
     try:
         from ouroboros.llm import openrouter_web_search_server_tool
 
         active_model = _openrouter_model(model)
         if getattr(ctx, "emit_progress_fn", None):
-            ctx.emit_progress_fn(f"🔍 Searching via OpenRouter: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
+            ctx.emit_progress_fn(f"🔍 Trying OpenRouter web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
         with capture_attempt_ids() as attempt_ids:
             response = openrouter_web_search_server_tool(
                 api_key=api_key,
@@ -350,18 +380,20 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
 
 
 def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
-                          processing_preference: Optional[str] = None) -> str:
+                          processing_preference: Optional[str] = None, connection: str = "") -> str:
     if _web_search_deadline_exhausted(ctx):
         return _web_search_deadline_result()
-    api_key = str(runtime_setting("ANTHROPIC_API_KEY") or "").strip()
+    api_key = _search_key("anthropic", connection)
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+        raise RuntimeError(f"Anthropic connection {connection} is not configured" if connection
+                           else "ANTHROPIC_API_KEY is not configured")
     try:
+        import anthropic  # noqa: F401 — the SDK's own import failure precedes any attempt claim
         from ouroboros.llm import anthropic_web_search_server_tool
 
         active_model = _anthropic_model(model)
         if getattr(ctx, "emit_progress_fn", None):
-            ctx.emit_progress_fn(f"🔍 Searching via Anthropic: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
+            ctx.emit_progress_fn(f"🔍 Trying Anthropic web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
         with capture_attempt_ids() as attempt_ids:
             response = anthropic_web_search_server_tool(
                 api_key=api_key,
@@ -538,6 +570,7 @@ def _web_search_openai(
     _attempt: int = 0,
     _processing_preference: Optional[str] = None,
     _processing_submission: Optional[str] = None,
+    connection: str = "",
 ) -> str:
     from ouroboros.model_slots import resolve_processing_preference
 
@@ -548,7 +581,7 @@ def _web_search_openai(
         return json.dumps({"error": "; ".join(previous_errors or ["Official OpenAI search is unavailable"]),
                            "backend": "openai_responses", "ledger_attempt_ids": attempt_ids})
     attempt_ids = []
-    api_key, base_url, provider, api_key_type = _resolve_openai_client_settings()
+    api_key, base_url, provider, api_key_type = _resolve_openai_client_settings(*((connection,) if connection else ()))
     if not api_key:
         return _fallbacks()
     active_model = model or runtime_setting("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
@@ -582,6 +615,9 @@ def _web_search_openai(
         manifest = before_dispatch(reservation)
         mark_dispatched(reservation, candidate_manifest_ref=manifest)
         dispatched = True
+        if _attempt == 0:
+            # An attempt, not evidence that a search ran: that is the stream's own web_search_call below.
+            _search_progress(ctx, f"🔍 Trying OpenAI web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
         try:
             send_started = True
             stream = client.responses.create(**candidate)
@@ -654,7 +690,14 @@ def _web_search_openai(
                 settle_attempt(reservation, usage, cost_usd=reported_cost,
                                cost_final=reported_cost_final)
             else:
-                mark_unresolved(reservation, "Responses stream ended without response.completed")
+                from ouroboros.llm_stream import IncompleteProviderStream
+                from ouroboros.usage_accounting import _retain_physical_failure
+
+                # The read ended without terminal framing: this receive path is over,
+                # its outcome unknown — the same retained fact a raising send leaves.
+                incomplete = IncompleteProviderStream("Responses stream ended without response.completed")
+                _retain_physical_failure(reservation, exc=incomplete)
+                mark_unresolved(reservation, str(incomplete))
             dispatched = False
         except Exception as exc:
             # Preserve an already-paid result; unresolved retains its upper bound.
@@ -721,6 +764,9 @@ def _web_search_openai(
             dispatched = not proven_not_started
         was_dispatched = send_started and not proven_not_started
         if reservation is not None and dispatched:
+            from ouroboros.usage_accounting import _retain_physical_failure
+
+            _retain_physical_failure(reservation, exc=e)  # this send's receive path ended raising
             try:
                 mark_unresolved(reservation, f"{type(e).__name__}: {e}")
             except Exception:
@@ -766,6 +812,7 @@ def _web_search_openai(
                 reasoning_effort=reasoning_effort, _attempt=1,
                 _processing_preference=preference,
                 _processing_submission="standard" if processing_refused else _processing_submission,
+                **({"connection": connection} if connection else {}),
             )
         return _fallbacks([f"OpenAI web search failed ({type(e).__name__}): {detail}"])
     # An empty completed result is a soft failure. Leave this backend's
@@ -789,16 +836,22 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
         if _web_search_deadline_exhausted(ctx):
             result = json.loads(_web_search_deadline_result())
             break
+        if tried:  # only a typed failure reaches another leg; say so before it is tried
+            _search_progress(ctx, f"↪ Trying {_SOURCE_LABELS[leg['source']]} after {_SOURCE_LABELS[tried[-1]['source']]} "
+                                  "web search failed; details in Logs")
         try:
             with capture_attempt_ids() as ids:
+                # The selection's named key travels with its leg; other legs use the built-in key.
+                named = {"connection": leg["connection"]} if leg.get("connection") else {}
                 if leg["source"] == "openai":
                     raw = _web_search_openai(ctx, query, model=leg["model"], search_context_size=search_context_size,
-                                             reasoning_effort=reasoning_effort, _processing_preference=preference)
+                                             reasoning_effort=reasoning_effort, _processing_preference=preference, **named)
                 elif leg["source"] == "openrouter":
                     raw = _web_search_openrouter(ctx, query, model=leg["model"], search_context_size=search_context_size,
-                                                 processing_preference=preference)
+                                                 processing_preference=preference, **named)
                 elif leg["source"] == "anthropic":
-                    raw = _web_search_anthropic(ctx, query, model="anthropic::" + leg["model"], processing_preference=preference)
+                    raw = _web_search_anthropic(ctx, query, model="anthropic::" + leg["model"], processing_preference=preference,
+                                                **named)
                 else:
                     raw = _web_search_ddgs(query)
             result = json.loads(raw)
@@ -819,6 +872,17 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
                       **({"error": result["error"]} if "error" in result else {})})
         if "error" not in result or result.get("reason_code") in {"provider_outcome_unknown", "deadline_exhausted"}:
             break
+    last = _SOURCE_LABELS.get(tried[-1]["source"], "") if tried else ""
+    if "error" not in result and len(tried) > 1:
+        # A summary names who answered; it is no proof that a provider search ran or was billed.
+        _search_progress(ctx, f"🔍 Answer from {last} after {len(tried) - 1} failed source{'s' if len(tried) > 2 else ''}")
+    elif result.get("reason_code") == "provider_outcome_unknown":
+        _search_progress(ctx, f"⚠️ Web search outcome unknown ({last}); no further attempt or fallback was sent")
+    elif result.get("reason_code") == "deadline_exhausted":
+        _search_progress(ctx, "⚠️ Web search stopped: the owner deadline leaves no dispatch window")
+    elif "error" in result and tried:
+        # The exception text stays in the result and Logs, never in the owner's row.
+        _search_progress(ctx, f"⚠️ Web search failed ({last}); no source answered; details in Logs")
     text = json.dumps({**result, "route": route, "legs_tried": tried,
                        "backend_errors": [leg["error"] for leg in tried if "error" in leg]}, ensure_ascii=False, indent=2)
     if "error" in result:
@@ -830,21 +894,25 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
     return text
 
 
+_SOURCE_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ddgs": "DDGS"}
+
+
+def _search_progress(ctx: ToolContext, text: str) -> None:
+    if getattr(ctx, "emit_progress_fn", None):
+        ctx.emit_progress_fn(text)
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("web_search", {
             "name": "web_search",
             "description": (
-                "Search the web with the configured Source and Model. Auto uses the eligible built-in "
-                "routes listed in this task's runtime facts; a specific source is strict. "
-                "Skills, MCP and browser tools are independent choices. A per-call model override "
-                "follows the same source selection. Empty model uses the saved choice or provider defaults. "
-                "For a COMPOUND question (several distinct facts/entities/time ranges in one ask), "
-                "issue one focused web_search per sub-question instead of one broad query — "
-                "narrow queries return sharper sources. These read-only searches run in parallel. "
-                "The returned `answer` is a SUMMARY/lead (answer_type=summary), not a primary source: "
-                "confirm load-bearing facts by opening the returned sources (browse_page) before "
-                "relying on them."
+                (
+                'Search with the configured Source and Model. Returns a summary lead with sources; open them with '
+                'browse_page to verify load-bearing facts. Auto uses eligible built-in routes; a named source is '
+                'strict. A model override keeps that source selection; an empty model uses saved/provider defaults. '
+                'Split compound questions into focused searches. Skills, MCP and browser tools remain separate choices.'
+            )
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},

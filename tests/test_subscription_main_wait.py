@@ -16,10 +16,12 @@ from ouroboros.llm_claudexor import cache_key_for_model
 from ouroboros.loop_model_call import _reprepare_waiting_main
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
 from ouroboros.send_clock import CLOCK_NOTE_PREFIX
+from ouroboros.tool_capabilities import META_TOOL_NAMES
 from tests.test_context_fit_integration import _plan
 from tests.test_llm_claudexor import MODEL, ROUTE, result, ledger, setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests._usage_store_testing import dispatched_attempts
+from tests._shared import saved_settings
 
 setup = gateway_fixture
 live_wait = wait_fixture
@@ -39,8 +41,10 @@ def main_call(live_wait, monkeypatch):
                             active_model=MODEL, active_context_mode="max", messages=messages,
                             context_fit_plan=plan, event_queue=events, drive_logs=lambda: root / "logs")
     controller.tool_context = inner
+    # A Main registry: both discovery selectors are callable (``tool_policy.usable_selectors``).
+    tools = SimpleNamespace(_ctx=inner, callable_rows=lambda namespace="": [{"name": n} for n in META_TOOL_NAMES])
     ctx = loop._RoundModelCallContext(
-        llm=client, messages=messages, tools=SimpleNamespace(_ctx=inner), context_fit_plan=plan,
+        llm=client, messages=messages, tools=tools, context_fit_plan=plan,
         active_model=MODEL, tool_schemas=[], active_effort="medium", max_retries=3,
         drive_logs=root / "logs", task_id="task-one", round_idx=1, event_queue=events,
         accumulated_usage={}, task_type="task", active_use_local=False,
@@ -62,7 +66,6 @@ def main_call(live_wait, monkeypatch):
     from ouroboros import context
     monkeypatch.setattr(context, "_context_fit_route", route_evidence)
     monkeypatch.setattr(loop, "_server_web_allowed_by_task", lambda _ctx: False)
-    monkeypatch.setattr(loop, "_run_main_reclaim", lambda *_a, **_kw: pytest.fail("No completed work may be replayed"))
     return ctx, gateway, controller, events, decide, observations
 
 
@@ -124,8 +127,9 @@ def test_native_account_repair_rebinds_real_physical_candidate_before_send(main_
     assert ctx.context_fit_plan.core_sha256 == "a" * 64
 
 
-def test_quota_auto_wait_rejoins_same_round_then_repairs_changed_account(main_call):
+def test_quota_auto_wait_rejoins_same_round_then_repairs_changed_account(main_call, monkeypatch):
     ctx, gateway, _controller, events, _decide, observations = main_call
+    saved_settings(monkeypatch, ctx.drive_root, OUROBOROS_MODEL_FALLBACKS="")  # no configured route: the wait is in place
     gateway.results = [_failed("subscription_window_exhausted"),
                        _failed("invalid_continuation", ROUTE_B), result(route=ROUTE_B)]
     gateway.dispatch = ["not_started", "not_started", "response_received"]
@@ -145,6 +149,8 @@ def test_quota_auto_wait_rejoins_same_round_then_repairs_changed_account(main_ca
 @pytest.mark.parametrize("image_mode", ["off", "caption"])
 def test_wait_reprepares_vision_from_canonical_images(main_call, monkeypatch, image_mode):
     from ouroboros import vision_routing
+
+    saved_settings(monkeypatch, main_call[0].drive_root, OUROBOROS_MODEL_FALLBACKS="")  # the wait is in place
 
     ctx, gateway, _controller, _events, _decide, _observations = main_call
     image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}
@@ -175,7 +181,7 @@ def test_wait_reprepares_vision_from_canonical_images(main_call, monkeypatch, im
 
 
 def test_main_authored_checkpoint_after_a_real_projected_image_wait(main_call, monkeypatch, tmp_path):
-    from ouroboros import context_compaction, vision_routing
+    from ouroboros import vision_routing
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.tools.registry import ToolRegistry
     from tests.test_main_authored_context import call
@@ -184,9 +190,9 @@ def test_main_authored_checkpoint_after_a_real_projected_image_wait(main_call, m
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("MCP_ENABLED", "false")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a: False)
-    monkeypatch.setattr(context_compaction, "_call_summarizer", lambda *a, **kw: pytest.fail("No authored helper"))
     monkeypatch.setattr(vision_routing, "get_image_input_mode", lambda: "off")
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=ctx.drive_root)
     registry._ctx.repo_dir.mkdir()
@@ -223,6 +229,7 @@ def test_main_authored_checkpoint_after_a_real_projected_image_wait(main_call, m
 def test_reprepare_selected_vision_route_preserves_source_and_accounts_caption(main_call, monkeypatch, inline_first):
     from ouroboros import vision_routing
     from ouroboros.loop_llm_call import _prepare_main_messages
+    from ouroboros.llm_attempt import single_physical_send, single_physical_send_active
 
     ctx, _gateway, _controller, _events, _decide, _observations = main_call
     image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}
@@ -233,7 +240,7 @@ def test_reprepare_selected_vision_route_preserves_source_and_accounts_caption(m
     captions = []
     def caption(*args, **kwargs):
         assert ua.current_physical_attempt_context() is None
-        captions.append(True)
+        captions.append(single_physical_send_active())
         return "A complete caption", {"prompt_tokens": 2, "completion_tokens": 3, "cost": 0.01}
     monkeypatch.setattr(ctx.llm, "vision_query", caption)
     sent = _prepare_main_messages(ctx.messages, model=MODEL, model_role="main", model_account_override=None,
@@ -241,13 +248,14 @@ def test_reprepare_selected_vision_route_preserves_source_and_accounts_caption(m
         task_id=ctx.task_id, event_queue=ctx.event_queue, use_local=False, task_attempt=1, deadline_ts=None)
     assert (sent[-1]["content"] == [image]) is inline_first
     physical = loop._physical_context_for_fit(loop._measure_round_main_fit(ctx, automatic_pass_used=False))
-    with ua.bind_physical_attempt_context(physical):
+    with ua.bind_physical_attempt_context(physical), single_physical_send(lambda _reservation: None):
         prepared = _reprepare_waiting_main(ctx, {"messages": sent, "model": "openai::vision-route",
                                                 "model_role": "main", "tools": []})
+        assert single_physical_send_active()  # the Main claim resumes after helper preparation
     prepared_source = _without_context_facts(prepared.kwargs["messages"])
     assert (prepared_source[-1]["content"] == [image]) is not inline_first
     assert "image caption" in str(prepared_source[-1]["content"] if inline_first else sent[-1]["content"])
-    assert _without_context_facts(ctx.messages)[-1]["content"] == [image] and captions == [True]
+    assert _without_context_facts(ctx.messages)[-1]["content"] == [image] and captions == [False]
     assert ctx.accumulated_usage["cost"] == 0.01
 
 
@@ -267,6 +275,7 @@ def test_a_wait_card_switch_sends_the_list_fitted_to_the_chosen_routes_ceiling(m
     sent, notice = _names(prepared.kwargs["tools"]), "at most 128 tool schemas" in str(prepared.kwargs["messages"])
     # The switched send, its measurement and discovery carry one list: fitted on a ceiling, untouched without one.
     assert sent == _names(ctx.tool_schemas) and notice is (ceiling is not None)
+    assert ("and enable_tools loads one" in str(prepared.kwargs["messages"])) is notice  # a selector Main can call
     last_extra = catalog[-len(PINNED) - 1]
     assert sent == ([name for name in catalog if name != last_extra] if ceiling else catalog)
 
@@ -299,6 +308,7 @@ def test_manual_switch_updates_only_waiting_role_and_continues_current_main_call
     main_call, monkeypatch, destination, use_local, pin,
 ):
     ctx, gateway, controller, events, decide, _observations = main_call
+    saved_settings(monkeypatch, ctx.drive_root, OUROBOROS_MODEL_FALLBACKS="")  # the wait is in place
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-a", "light": "light-account"}))
     gateway.results = [_failed("subscription_window_exhausted"), result(route=ROUTE_B), result(route=ROUTE_B)]
     gateway.dispatch = ["not_started", "response_received", "response_received"]
@@ -469,13 +479,14 @@ def _slot(envelope=None):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_a_same_route_wait_and_reprepare_update_the_original_slot(main_call, turn_engine, asynchronous):
+def test_a_same_route_wait_and_reprepare_update_the_original_slot(main_call, turn_engine, asynchronous, monkeypatch):
     """Both real reprepare routes deep-copy their kwargs and must keep ONE owner.
 
     The synchronous case goes through the live quota wait, the asynchronous one
     through the proven-un-sent account repair and its thread offload.
     """
     ctx, gateway, controller, _events, _decide, _observations = main_call
+    saved_settings(monkeypatch, ctx.drive_root, OUROBOROS_MODEL_FALLBACKS="")  # the wait is in place
     landed = {**result(route=ROUTE_B if asynchronous else ROUTE), "nativeContinuation": deepcopy(TURN)}
     gateway.results = [_failed("invalid_continuation", ROUTE_B) if asynchronous
                        else _failed("subscription_window_exhausted"), landed]
@@ -625,6 +636,7 @@ CACHE_REPREPARE_EXECUTION = "execution-reprepare-proof"
 )
 def test_live_owner_wait_reprojects_affinity(main_call, monkeypatch, destination, use_local):
     ctx, gateway, controller, events, decide, _ = main_call
+    saved_settings(monkeypatch, ctx.drive_root, OUROBOROS_MODEL_FALLBACKS="")  # the wait is in place
     ctx.accumulated_usage["execution_id"] = CACHE_REPREPARE_EXECUTION
     gateway.results = [_failed("subscription_window_exhausted"), result(route=ROUTE_B)]
     gateway.dispatch = ["not_started", "response_received"]

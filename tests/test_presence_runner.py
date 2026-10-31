@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from tests._dialogue import chat_rows
 
 
 from ouroboros.presence_admission import PresenceAdmission
@@ -108,7 +109,7 @@ def test_runner_builds_bounded_fresh_task_and_logs_shared_dialogue(tmp_path):
     assert captured["metadata"]["inline_max_rounds"] == 10
     assert captured["metadata"]["presence"]["binding_id"] == "1" * 32
     assert captured["task_contract"]["capability_ceiling"]["digest"] == _admission().capability_ceiling.digest
-    rows = [json.loads(line) for line in (data / "logs" / "chat.jsonl").read_text().splitlines()]
+    rows = chat_rows(data)
     assert [row["direction"] for row in rows] == ["in", "out"]
     assert rows[0]["transport"]["actor"]["platform_actor_id"] == "user-7"
     assert rows[0]["presence_provenance"] == {
@@ -127,6 +128,40 @@ def test_runner_builds_bounded_fresh_task_and_logs_shared_dialogue(tmp_path):
         "actor_id": "user-7",
     }
     assert rows[1]["presence_provenance"] == rows[0]["presence_provenance"]
+
+
+def test_inbound_presence_row_waits_out_a_concurrent_dialogue_write(tmp_path):
+    """The inbound row is a required acceptance: a write already holding the dialogue store makes
+    it wait, not answer ``chat_log_unwritable`` at once (a burst of released turns hit that)."""
+    from ouroboros import dialogue_store
+
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    dialogue_store.append(data, "progress", {"ts": "2026-10-20T00:00:00+00:00", "text": "warm"})
+    holding, done = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with dialogue_store.transaction(data, write=True):
+            holding.set()
+            done.wait(0.6)
+
+    class Agent:
+        def handle_task(self, task):
+            _terminal(data, task, "Hi")
+            return [{"type": "presence_result", "outcome": "message", "text": "Hi", "work_ref": ""}]
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert holding.wait(5)
+    try:
+        result = run_presence_turn(admission=_admission(), event=_event(), repo_dir=repo, drive_root=data,
+                                   agent_factory=lambda **_kwargs: Agent(), gate=PresenceTurnGate(2))
+    finally:
+        done.set()
+        holder.join(5)
+    assert result.outcome == "message" and result.text == "Hi"
+    assert [row["direction"] for row in chat_rows(data)] == ["in", "out"]
 
 
 def test_presence_initial_attachment_rejection_defaults_to_partial_staging(tmp_path):
@@ -180,7 +215,7 @@ def test_presence_context_loads_declared_topic_and_completion_contract(tmp_path)
     )
     assert "Participate helpfully." in section
     assert "Alex prefers concise replies." in section
-    assert "presence_finish" in section
+    assert "finish_task" in section
 
 
 def test_configured_presence_parallelism_is_bounded(monkeypatch, tmp_path):
@@ -280,19 +315,22 @@ def test_presence_turn_is_live_for_liveness_readers_but_never_an_owner_target(mo
     registry.clear()
     mind = object.__new__(BackgroundConsciousness)
     mind._last_wake_task_id = ""
+    mind._own_wake, mind._in_flight = {}, ""
     main_actor = SimpleNamespace(
         _owner_message_admission_lock=threading.Lock(), _busy=True, _current_task_id="main-turn",
         _accepting_owner_messages=True, _current_task_metadata={}, _current_task_text="owner text",
         _task_started_ts=1.0, _current_chat_id=1)
     armed, seen = [], {}
+    routing_ctx = SimpleNamespace(DRIVE_ROOT=tmp_path)  # the roster now reads each root's room-reader fact
 
     def observe(task_id):
         return {
             "orphan": _is_stale_orphan_running_task(tmp_path, task_id, orphan_row),
-            "drain": workers.drain_repo_writers(timeout=0), "roots": [row["task_id"] for row in _active_direct_roots(None)],
+            "drain": workers.drain_repo_writers(timeout=0),
+            "roots": [row["task_id"] for row in _active_direct_roots(routing_ctx)],
             "turns": [turn["id"] for turn in workers.direct_chat_turns()],
             "state": [row["activity_id"] for row in _direct_turns_snapshot_safe()],
-            "busy": (_has_running_agent_tasks(), _has_started_agent_tasks()), "wakes": mind.live_turns(),
+            "busy": (_has_running_agent_tasks(), _has_started_agent_tasks()), "wakes": mind.live_wake(),
         }
 
     class Agent:  # shaped like a real native actor: only the absent census entry hides it
@@ -317,10 +355,10 @@ def test_presence_turn_is_live_for_liveness_readers_but_never_an_owner_target(mo
                                    agent_factory=lambda **_kwargs: Agent(), gate=PresenceTurnGate(1))
         assert seen["live"] is True and seen["registered"] is None and seen["armed"] is None and armed == []
         assert seen["alone"] == {"orphan": False, "drain": [], "roots": [], "turns": [], "state": [],
-                                 "busy": (False, False), "wakes": ("", False)}
+                                 "busy": (False, False), "wakes": ""}
         assert seen["with_main"] == {"orphan": False, "drain": ["main-turn"], "roots": ["main-turn"],
                                      "turns": ["main-turn"], "state": ["main-turn"], "busy": (True, True),
-                                     "wakes": ("", True)}
+                                     "wakes": ""}
         # Once the turn returns the set is empty and the same orphan evidence reconciles.
         assert presence_runner.presence_turn_is_live(result.task_id) is False
         assert (str(tmp_path.resolve()), result.task_id) not in presence_runner._LIVE_PRESENCE_TASKS
@@ -405,7 +443,10 @@ def test_previous_turn_is_per_conversation_and_never_rewritten_by_a_replay(tmp_p
 
 def test_previous_turn_shows_what_a_transport_tool_delivered(tmp_path):
     from ouroboros.presence_delivery import PresenceDeliveryRecorder
+    from ouroboros.places import connect_place
 
+    connect_place(tmp_path, place_id=_admission().binding_id, connector="telegram-bot", provider="telegram",
+                  account_id="bot-1", conversation_id="room-1")
     recorder = PresenceDeliveryRecorder(tmp_path)
 
     def send(task):

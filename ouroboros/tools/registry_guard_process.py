@@ -219,21 +219,22 @@ def _is_pure_read_inspection(text_lower: str) -> bool:
 
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
     """Worktree tripwire for light-mode shell writes, not rollback machinery."""
+    from ouroboros.git_observation import host_git_env
     try:
         repo = pathlib.Path(repo_dir)
         status = subprocess.run(
             ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-            cwd=str(repo), capture_output=True, text=True, timeout=5,
+            cwd=str(repo), capture_output=True, text=True, timeout=5, env=host_git_env(),
         )
         if status.returncode != 0:
             return None
         unstaged = subprocess.run(
             ["git", "diff", "--binary", "--no-ext-diff"],
-            cwd=str(repo), capture_output=True, text=True, timeout=10,
+            cwd=str(repo), capture_output=True, text=True, timeout=10, env=host_git_env(),
         )
         staged = subprocess.run(
             ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
-            cwd=str(repo), capture_output=True, text=True, timeout=10,
+            cwd=str(repo), capture_output=True, text=True, timeout=10, env=host_git_env(),
         )
         paths = _registry().parse_porcelain_paths(status.stdout)
         digest = hashlib.sha256()

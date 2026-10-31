@@ -75,11 +75,11 @@ def test_build_swarm_efficiency_rolls_up_fanout_events(tmp_path):
 
 
 def _swarm_task(task_id):
-    return {"id": task_id, "metadata": {"force_plan": True, "force_plan_source": "swarm"}}
+    return {"id": task_id, "metadata": {"subagents_mode": "swarm"}}
 
 
 def test_build_swarm_efficiency_zero_fanout_swarm_intent_returns_minimal_block(tmp_path):
-    # A Swarm-button task that spawned zero children must not vanish into None:
+    # A root admitted in a Swarm room that spawned zero children must not vanish into None:
     # it returns the minimal no_fanout_observed block. `planned` is null — never
     # inferred as 0 from the absence of events.
     logs = tmp_path / "logs"

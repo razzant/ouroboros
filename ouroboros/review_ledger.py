@@ -19,7 +19,10 @@ retrieves (a pool seat, a session, a native inspection episode) is asked the ``c
 question in the same brief; a ``coupling_only`` seat answers only that. ``seat_parts``
 is the one place the vector is derived, ``reduce_verdict`` the one aggregate the gate and
 the record share (order: NOT_DISPATCHED, pending, QUORUM_FAILED, coupling NOT_PERFORMED,
-FAIL, PASS).
+FAIL, PASS). A single-question wave (``SINGLE_QUESTION_PARTS``: a task result, a skill
+payload) asks its one part of every seat and reduces in the same order without the
+coupling step; a declared per-item severity policy (``apply_severity_policy``) decides
+which of its findings are critical before the verdict is read.
 """
 from __future__ import annotations
 
@@ -42,6 +45,7 @@ log = logging.getLogger(__name__)
 REVIEW_LEDGER_SCHEMA_VERSION = 1
 LEDGER_SUBDIR = "review_ledger"
 INDEX_NAME = "index.jsonl"
+PREFLIGHT_HEADS_NAME = "preflight_heads.json"  # checkout key -> its newest preflight record id ("" = any)
 LEDGER_LOCK_NAME = "review_ledger.lock"
 INDEX_MAX_BYTES = 2_000_000  # hot-index rotation threshold; segments stay beside it
 UNKNOWN = "unknown"
@@ -50,8 +54,13 @@ VERDICT_PASS, VERDICT_FAIL = "PASS", "FAIL"
 VERDICT_NOT_PERFORMED, VERDICT_QUORUM_FAILED, VERDICT_NOT_DISPATCHED = "NOT_PERFORMED", "QUORUM_FAILED", "NOT_DISPATCHED"
 AGGREGATE_VERDICTS = frozenset({VERDICT_PASS, VERDICT_FAIL, VERDICT_NOT_PERFORMED, VERDICT_QUORUM_FAILED, VERDICT_NOT_DISPATCHED})
 QUESTION_NOT_PERFORMED, QUESTION_UNANSWERED = "not_performed", "unanswered"
-PART_CHANGE, PART_COUPLING = "change", "coupling"
-PARTS = (PART_CHANGE, PART_COUPLING)
+PART_CHANGE, PART_COUPLING, PART_RESULT, PART_SKILL = "change", "coupling", "result", "skill"
+PARTS = (PART_CHANGE, PART_COUPLING)  # a change wave's two questions
+# A single-question wave asks ONE question of every seat and never the change or coupling
+# question: a result wave (``review_change(subject="result")``: does this task result do what
+# was asked) or a skill wave (``skill_review``: may this payload run, by the Skill Review Checklist).
+SINGLE_QUESTION_PARTS = (PART_RESULT, PART_SKILL)
+ALL_PARTS = (*PARTS, *SINGLE_QUESTION_PARTS)
 SURFACES = frozenset({"commit_gate", "change", "intention", "result", "skill", "system", "preflight"})
 ANSWERED_STATUSES = frozenset({"responded", "partial"})  # a readable answer arrived
 HEAVY_VERDICT_FIELDS = ("critical_findings", "advisory_findings", "additional_findings")
@@ -149,7 +158,7 @@ def index_path(drive_root: Any) -> pathlib.Path:
 
 @contextlib.contextmanager
 def _ledger_lock(drive_root: Any) -> Iterator[None]:
-    """Exclusive lock around compare-revision-then-write; fail-soft and loud."""
+    """Exclusive lock around compare-revision-then-write; failure permits no mutation."""
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
     lock_path = pathlib.Path(drive_root) / "locks" / LEDGER_LOCK_NAME
@@ -158,7 +167,7 @@ def _ledger_lock(drive_root: Any) -> Iterator[None]:
     except Exception:
         fd = None
     if fd is None:
-        log.warning("review ledger lock unavailable at %s; writing unlocked", lock_path)
+        raise OSError(f"review ledger lock unavailable at {lock_path}")
     try:
         yield
     finally:
@@ -205,6 +214,28 @@ def read_source(drive_root: Any, task_id: str, ref: Dict[str, Any]) -> bytes:
     return read_actor_source_bytes(drive_root, str(entry.get("task_id") or task_id), entry.get("ref"))
 
 
+class ReviewSourceChanged(ValueError):
+    """The exact selected source is no longer named by its owning record."""
+
+
+def read_selected_source(drive_root: Any, task_id: str, record_id: str, seat_id: str, *,
+                         role: str, part: str, sha256: str) -> bytes:
+    """Resolve an exact owned seat source, including an earlier selection after settlement."""
+    record = load_record(drive_root, record_id)
+    if not record or record.get("task_id") != task_id:
+        raise LookupError("Review does not belong to this task.")
+    seats = [row for row in record.get("rows") or [] if isinstance(row, dict) and row.get("seat_id") == seat_id]
+    if len(seats) != 1:
+        raise LookupError("Saved reviewer seat is unavailable.")
+    sources = [*seats[0].get("source_refs", []), *seats[0].get("historical_source_refs", [])]
+    selected = next((s for s in sources if isinstance(s, dict) and s.get("role") == role
+                     and str(s.get("part") or "") == part and s.get("status") == "retained"
+                     and isinstance(s.get("ref"), dict) and s["ref"].get("sha256") == sha256), None)
+    if selected is None:
+        raise ReviewSourceChanged("The selected saved review source changed or is unavailable.")
+    return read_source(drive_root, task_id, selected)
+
+
 def source_ref_resolvable(drive_root: Any, task_id: str, ref: Dict[str, Any]) -> bool:
     """Cheap existence+size check of one retained ref (the full read verifies sha)."""
     if not isinstance(ref, dict):
@@ -231,7 +262,8 @@ def record_sources_resolvable(drive_root: Any, payload: Dict[str, Any]) -> bool:
     except ValueError:
         return False
     task_id = str(payload.get("task_id") or "")
-    refs = [ref for row in payload.get("rows") or [] for ref in (row or {}).get("source_refs") or []]
+    refs = [ref for row in payload.get("rows") or [] for key in ("source_refs", "historical_source_refs")
+            for ref in (row or {}).get(key) or []]
     refs.extend([((payload.get("brief") or {}).get("dispute_input") or {}).get("rebuttal"),
                  (payload.get("author_decision") or {}).get("source_ref")])
     return all(source_ref_resolvable(drive_root, task_id, ref) for ref in refs if isinstance(ref, dict) and "role" in ref)
@@ -263,6 +295,7 @@ def _payload(record: Any) -> Dict[str, Any]:
 
 def _write_and_index(drive_root: Any, path: pathlib.Path, payload: Dict[str, Any]) -> None:
     write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    _keep_preflight_head(drive_root, payload)  # first, so a rotation cannot archive what the heads seed from
     _rotate_index_if_needed(drive_root)
     append_jsonl(index_path(drive_root), index_row(drive_root, payload))
 
@@ -315,19 +348,42 @@ def load_record(drive_root: Any, record_id: str) -> Optional[Dict[str, Any]]:
 
 
 def note_author_decision(drive_root: Any, record_id: str, decision: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Attach the author's informed decision to the record it continued from."""
+    """Attach the author's informed decision to the record it continued from.
+
+    Host facts on that decision are kept. Landing is not: a failed Git command
+    has not landed, so only ``note_commit_landing`` writes it, after success.
+    """
     def _mutate(payload: Dict[str, Any]) -> Dict[str, Any]:
+        from ouroboros.review_doctrine import decision_for_ledger
         from ouroboros.review_history import retain_author_decision
 
-        payload["author_decision"] = retain_author_decision(drive_root, payload, {"disposition": str(decision.get("disposition") or ""),
-                                      "rationale": str(decision.get("rationale") or ""),
-                                      "reused_record_id": str(decision.get("reused_record_id") or record_id)})
+        payload["author_decision"] = retain_author_decision(
+            drive_root, payload, decision_for_ledger(decision, record_id))
         return payload
 
     try:
         return revise_record(drive_root, record_id, _mutate)
     except (OSError, ValueError):
         log.warning("review ledger author decision not recorded on %s", record_id, exc_info=True)
+        return None
+
+
+def note_commit_landing(drive_root: Any, record_id: str, landing: Optional[Dict[str, Any]],
+                        commit: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Record what this record's successful Git command landed (``review_doctrine.landed_record``):
+    the commit against the reviewed tree, and the author's landing on a decision it holds. A repeat is a no-op."""
+    from ouroboros.review_doctrine import landed_record
+    from ouroboros.review_history import retain_author_decision
+
+    try:
+        current = load_record(drive_root, record_id)
+        if current is None or landed_record(current, landing, commit, recorded_at="") is None:
+            return current
+        return revise_record(drive_root, record_id, lambda payload: landed_record(
+            payload, landing, commit, recorded_at=utc_now_iso(),
+            retain=lambda body, decision: retain_author_decision(drive_root, body, decision)) or payload)
+    except (OSError, ValueError):
+        log.warning("review ledger commit landing not recorded on %s", record_id, exc_info=True)
         return None
 
 
@@ -364,7 +420,9 @@ def index_row(drive_root: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         "record_id": payload["record_id"], "revision": payload["revision"], "state": payload.get("state"),
         "ts": payload.get("ts"), "task_id": payload.get("task_id"), "root_task_id": payload.get("root_task_id"),
         "review_wave_id": payload.get("review_wave_id"), "surface": payload.get("surface"),
-        "subject": {k: subject.get(k) for k in ("root_kind", "kind", "base", "head", "tree_sha", "diff_sha")},
+        # A skill record is found by its skill name (``subject.skill``) in the hot index, never by its path.
+        "subject": {**{k: subject.get(k) for k in ("root_kind", "kind", "base", "head", "tree_sha", "diff_sha")},
+                    **({"skill": subject["skill"]} if subject.get("skill") else {})},
         "enforcement": payload.get("enforcement"),
         "verdict": {k: verdict.get(k) for k in ("aggregate", "per_question", "quorum", "degraded_reasons")},
         "panel": {k: panel.get(k) for k in ("seats", "additional_seats", "distinct_models", "distinct_engines", "single_model_panel")},
@@ -424,21 +482,42 @@ def archived_segments_exist(drive_root: Any) -> bool:
     return bool(_index_segments(drive_root))
 
 
-def recent_records(drive_root: Any, task_id: str = "", limit: int = 20, *, hot_only: bool = False,
-                   surface: str = "") -> List[Dict[str, Any]]:
-    """Newest-first index rows (junction for context assembly): the hot index, then
-    archived segments newest-first, one row per record at its highest revision.
-    ``task_id`` matches the record's task OR root task; empty matches all; ``surface``
-    keeps one surface's records. ``hot_only`` reads the bounded hot index alone
-    (``INDEX_MAX_BYTES``) and never opens an archived segment: the read a per-task
-    context capture can afford."""
-    wanted = max(1, int(limit))
+def index_stamp(drive_root: Any) -> tuple:
+    """The identity of the index's current bytes: ``(name, mtime_ns, size)`` of the hot index and of every
+    archived segment (a directory listing and stats, no row read); a written row or a rotation changes it,
+    so a reader may memoize one parse of the index under it."""
+    stamps = []
+    for path in [index_path(drive_root), *_index_segments(drive_root)]:
+        try:
+            stat = path.stat()
+            stamps.append((path.name, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            stamps.append((path.name, 0, 0))
+    return tuple(stamps)
+
+
+def newest_rotation_ts(drive_root: Any) -> str:
+    """When the hot index last rotated, read off the newest archived segment's name (``index.<stamp>.jsonl``;
+    a directory listing, no row read) as an ISO timestamp, "" when none: rows written before it may live in
+    an archived segment, rows written after it are all in the hot index."""
+    stamps = [m.group(1) for path in _index_segments(drive_root)
+              if (m := re.fullmatch(r"index\.(\d{8}T\d{6})(?:_\d+)?\.jsonl", path.name))]
+    if not stamps:
+        return ""
+    s = max(stamps)
+    return f"{s[0:4]}-{s[4:6]}-{s[6:8]}T{s[9:11]}:{s[11:13]}:{s[13:15]}+00:00"
+
+
+def _index_rows(drive_root: Any, *, task_id: str = "", surface: str = "", limit: Optional[int] = None,
+                hot_only: bool = False, exact_task: bool = False) -> List[Dict[str, Any]]:
     seen: Dict[str, int] = {}
     out: List[Dict[str, Any]] = []
     paths = [index_path(drive_root)] + ([] if hot_only else [*reversed(_index_segments(drive_root))])
     for row in _newest_rows(paths):
         record_id = str(row.get("record_id") or "")
         if not record_id or (task_id and task_id not in (row.get("task_id"), row.get("root_task_id"))):
+            continue
+        if exact_task and row.get("task_id") != task_id:
             continue
         if surface and str(row.get("surface") or "") != surface:
             continue
@@ -448,31 +527,99 @@ def recent_records(drive_root: Any, task_id: str = "", limit: int = 20, *, hot_o
             out.append(row)
         elif int(row.get("revision") or 0) > int(out[prior].get("revision") or 0):
             out[prior] = row  # a revision row appended out of order still wins by number
-        if len(out) >= wanted:
+        if limit is not None and len(out) >= limit:
             break
-    return out[:wanted]
+    return out
+
+
+def task_record_page(drive_root: Any, task_id: str, *, offset: int = 0, limit: int = 20,
+                     hot_only: bool = False) -> tuple:
+    """Exact-task index page and next offset; stop after one matching lookahead row."""
+    rows = _index_rows(drive_root, task_id=task_id, exact_task=True, limit=offset + limit + 1, hot_only=hot_only)
+    end = offset + limit
+    return rows[offset:end], end if len(rows) > end else None
+
+
+def recent_records(drive_root: Any, task_id: str = "", limit: int = 20, *, hot_only: bool = False,
+                   surface: str = "") -> List[Dict[str, Any]]:
+    """Newest-first index rows (junction for context assembly): the hot index, then
+    archived segments newest-first, one row per record at its highest revision.
+    ``task_id`` matches the record's task OR root task; empty matches all; ``surface``
+    keeps one surface's records. ``hot_only`` reads the bounded hot index alone
+    (``INDEX_MAX_BYTES``) and never opens an archived segment: the read a per-task
+    context capture can afford."""
+    wanted = max(1, int(limit))
+    return _index_rows(drive_root, task_id=task_id, surface=surface, limit=wanted, hot_only=hot_only)[:wanted]
+
+
+def surface_records(drive_root: Any, surface: str) -> List[Dict[str, Any]]:
+    """Every index row of one surface, newest first, one per record at its highest revision: the whole index
+    (hot and archived) in ONE read. A reader that answers many lookups memoizes the result under
+    ``index_stamp`` instead of reading the index once per lookup."""
+    return _index_rows(drive_root, surface=str(surface or ""))
+
+
+def _head_keys(root: str) -> tuple:
+    """The heads a preflight record of ``root`` holds: any checkout's, and its own while it is on disk."""
+    from ouroboros.review_state import make_repo_key
+
+    return ("", make_repo_key(pathlib.Path(root))) if pathlib.Path(root).exists() else ("",)
+
+
+def _preflight_heads(drive_root: Any) -> Dict[str, Any]:
+    """Current pointers, or a bounded legacy view with explicit coverage; never
+    rebuild unreadable saved heads or infer absence from a partial import."""
+    path = ledger_dir(drive_root) / PREFLIGHT_HEADS_NAME
+    if path.exists():
+        data = _read_json(path)
+        if (data is None or not isinstance(data.get("heads"), dict)
+                or not isinstance(data.get("complete"), bool)
+                or any(not isinstance(v, str) or not v for v in data["heads"].values())):
+            raise ValueError(f"review ledger preflight heads {path} are unreadable")
+        return data
+    rows = recent_records(drive_root, limit=50, hot_only=True, surface="preflight")
+    data = {"heads": {}, "complete": len(rows) < 50 and not archived_segments_exist(drive_root)}
+    for row in rows:
+        record_id = str(row.get("record_id") or "")
+        record = load_record(drive_root, record_id)
+        root = str(((record or {}).get("subject") or {}).get("root") or "")
+        if not root:
+            data["complete"] = False
+            continue
+        for key in _head_keys(root):
+            data["heads"].setdefault(key, record_id)
+    return data
+
+
+def _keep_preflight_head(drive_root: Any, payload: Dict[str, Any]) -> None:
+    """Publish under the ledger lock; pruning retains incomplete coverage."""
+    path = ledger_dir(drive_root) / PREFLIGHT_HEADS_NAME
+    root = str((payload.get("subject") or {}).get("root") or "") if payload.get("surface") == "preflight" else ""
+    if path.exists() and not root:
+        return
+    try:
+        data = _preflight_heads(drive_root)
+    except (OSError, ValueError):
+        log.warning("preflight heads not updated; source record and index retained", exc_info=True)
+        return
+    heads = data["heads"]
+    heads.update(dict.fromkeys(_head_keys(root) if root else (), payload["record_id"]))
+    kept = {key: record_id for key, record_id in heads.items() if not key or pathlib.Path(key).exists()}
+    data.update(heads=kept, complete=data["complete"] and len(kept) == len(heads))
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def latest_preflight_record(drive_root: Any, *, repo_key: str = "") -> Optional[Dict[str, Any]]:
-    """The newest ``surface=preflight`` record of one checkout — the look
-    ``review_status`` reports fresh or ``stale_from_edit`` and a worktree mutation
-    marks stale (D5-002). ``repo_key`` is ``review_state.make_repo_key`` of the
-    checkout; empty matches any. Reads the hot index only; a record that cannot be
-    read or names no root is skipped, never reported as a look."""
-    from ouroboros.review_state import make_repo_key
-
-    for row in recent_records(drive_root, limit=50, hot_only=True, surface="preflight"):
-        try:
-            record = load_record(drive_root, str(row.get("record_id") or ""))
-        except ValueError:
-            continue
-        root = str(((record or {}).get("subject") or {}).get("root") or "")
-        if not record or not root:
-            continue
-        if repo_key and make_repo_key(pathlib.Path(root)) != repo_key:
-            continue
-        return record
-    return None
+    """Read the checkout's current look (empty key: any). An incomplete imported
+    window or unreadable source raises ValueError rather than declaring no look."""
+    data = _preflight_heads(drive_root)
+    record_id = data["heads"].get(repo_key, "")
+    if not record_id and not data["complete"]:
+        raise ValueError("preflight history incomplete for this checkout; the look may be outside the retained window")
+    record = load_record(drive_root, record_id) if record_id else None
+    if record_id and record is None:
+        raise ValueError(f"review ledger preflight head {record_id} names no record")
+    return record
 
 
 def normalize_model_name(text: Any) -> str:
@@ -485,8 +632,11 @@ def normalize_model_name(text: Any) -> str:
     if not value or value == UNKNOWN:
         return UNKNOWN
     if "::" in value:
-        provider, _, value = value.partition("::")
-        if provider == "claudexor":
+        from ouroboros.provider_models import parse_model_route
+
+        claudexor = parse_model_route(value).kind == "claudexor"
+        value = value.partition("::")[2]
+        if claudexor:
             value = value.partition("=")[2] or value
     return value.rsplit("/", 1)[-1].split(":", 1)[0] or UNKNOWN
 
@@ -571,8 +721,53 @@ def seat_parts(slot: Any, *, coupling_only: bool = False) -> tuple:
     return PARTS if retrieves else (PART_CHANGE,)
 
 
+def answer_keys(parts: Iterable[str]) -> tuple:
+    """The answer block a seat carries: a single-question seat (result, skill) its one
+    question alone, every other seat both change-wave questions (one it was not asked
+    stays ``not_asked``)."""
+    asked = tuple(parts)
+    for part in SINGLE_QUESTION_PARTS:
+        if part in asked:
+            return (part,)
+    return PARTS
+
+
+def single_question_part(rows: Iterable[Dict[str, Any]]) -> str:
+    """The one question a single-question wave asks (``result`` / ``skill``), "" for a change wave."""
+    for part in SINGLE_QUESTION_PARTS:
+        if any(part in (seat.get("parts") or []) for seat in rows):
+            return part
+    return ""
+
+
 def _answered(seat: Dict[str, Any]) -> bool:
     return str(seat.get("status") or "") in ANSWERED_STATUSES
+
+
+def counted_pending(rows: List[Dict[str, Any]], *, pending: bool = False, lost_is_terminal: bool = False) -> bool:
+    """Physical adviser custody survives, but never keeps the counted wave open. ``lost_is_terminal`` (a
+    ``review_change`` wave, which no gate holds): a seat whose custody is lost is a failed seat of a settled
+    record (outcome unknown, never re-sent), never open."""
+    opened = [row for row in rows if not (lost_is_terminal and row.get("operation_state") == "custody_lost") and (
+              row.get("late_result_pending") or row.get("status") == "pending"
+              or row.get("operation_state") in {"in_flight", "custody_lost", "pending_dispatch"})]
+    return any(not (row.get("additional") or (row.get("review_plan") or {}).get("additional"))
+               for row in opened) if opened else pending
+
+
+def panel_not_reached(rows: List[Dict[str, Any]], *, lost_is_terminal: bool = False) -> List[Dict[str, str]]:
+    """Terminal absences with an observed cause; seats still awaiting are not failures (``lost_is_terminal``, as in
+    ``counted_pending``: a ``review_change`` wave's lost seat is such an absence, never awaiting)."""
+    def awaiting(row: Dict[str, Any]) -> bool:
+        if lost_is_terminal and row.get("operation_state") == "custody_lost":
+            return False
+        return bool(row.get("late_result_pending")) or row.get("operation_state") in {"in_flight", "custody_lost", "pending_dispatch"}
+
+    return [{"seat_id": str(row.get("seat_id") or row.get("slot_id") or ""),
+             "cause": str(row.get("failure_code") or row.get("error") or row.get("reported_cause") or (row.get("intention") or {}).get("error")
+                          or row.get("operation_state") or row.get("status") or "unknown")}
+            for row in rows if row.get("status") not in {*ANSWERED_STATUSES, "answered", "unparseable", "pending", "in_flight", "pending_dispatch"}
+            and not awaiting(row)]
 
 
 def _answer(seat: Dict[str, Any], part: str) -> Dict[str, Any]:
@@ -634,6 +829,11 @@ def reduce_verdict(rows: List[Dict[str, Any]], *, gate_blocked: bool = False, ga
     PASS when both parts PASS and the gate did not block for another reason (a blocked
     gate never reads PASS). ``reason`` names the branch that decided."""
     per_row = {str(seat.get("seat_id") or ""): row_verdict(seat) for seat in rows}
+    single = single_question_part(rows)
+    if single:
+        return _reduce_single_question_wave(rows, per_row, single, gate_blocked=gate_blocked, gate_reason=gate_reason,
+                                            dispatch_refusal=dispatch_refusal, pending=pending,
+                                            quorum_required=quorum_required)
     assigned_of = {part: sum(1 for s in rows if part in (s.get("parts") or [])) for part in PARTS}
     parts = {PART_CHANGE: {"required": _quorum_for(assigned_of[PART_CHANGE]), "assigned": assigned_of[PART_CHANGE],
                            "responded": sum(1 for s in rows if _part_verdict(s, PART_CHANGE))},
@@ -663,6 +863,62 @@ def reduce_verdict(rows: List[Dict[str, Any]], *, gate_blocked: bool = False, ga
     return {"aggregate": aggregate, "quorum": quorum, "per_row": per_row, "per_question": per_question, "reason": reason}
 
 
+def _reduce_single_question_wave(rows: List[Dict[str, Any]], per_row: Dict[str, str], part: str, *,
+                                 gate_blocked: bool, gate_reason: str, dispatch_refusal: Optional[Dict[str, Any]],
+                                 pending: bool, quorum_required: Optional[int]) -> Dict[str, Any]:
+    """A single-question wave (a result, a skill) in the same order as a change wave, with
+    its one question in place of the two: NOT_DISPATCHED → pending → QUORUM_FAILED → FAIL →
+    PASS. No coupling question is asked, so none can leave the wave unperformed."""
+    assigned = sum(1 for seat in rows if part in (seat.get("parts") or []))
+    required_part = _quorum_for(assigned)
+    parts = {part: {"required": required_part, "assigned": assigned,
+                    "responded": sum(1 for seat in rows if _part_verdict(seat, part))}}
+    per_question = {part: question_verdict(rows, part, required=required_part)}
+    responded = sum(1 for seat in rows if _answered(seat))
+    required = int(quorum_required) if quorum_required is not None else _quorum_for(len(rows))
+    quorum = {"required": required, "responded": responded, "assigned": len(rows), "parts": parts}
+    if dispatch_refusal is not None or not rows or all(v == VERDICT_NOT_DISPATCHED for v in per_row.values()):
+        aggregate, reason = VERDICT_NOT_DISPATCHED, "dispatch_refusal" if dispatch_refusal is not None else "nothing_dispatched"
+    elif pending:
+        aggregate, reason = VERDICT_NOT_PERFORMED, "review_late_result_pending"
+    elif responded < max(1, required):
+        aggregate, reason = VERDICT_QUORUM_FAILED, "review_quorum"
+    elif per_question[part] == VERDICT_FAIL:
+        aggregate, reason = VERDICT_FAIL, "critical_findings"
+    elif gate_blocked:
+        aggregate, reason = VERDICT_NOT_PERFORMED, f"gate_block:{gate_reason}" if gate_reason else "gate_block"
+    elif per_question[part] == VERDICT_PASS:
+        aggregate, reason = VERDICT_PASS, "pass"
+    else:
+        aggregate, reason = VERDICT_NOT_PERFORMED, f"{part}_unanswered"
+    return {"aggregate": aggregate, "quorum": quorum, "per_row": per_row, "per_question": per_question, "reason": reason}
+
+
+def apply_severity_policy(answer: Dict[str, Any], policy: Any) -> Dict[str, Any]:
+    """One answered part under a declared per-item severity policy (``brief.checklist.severity_policy``:
+    item → ``critical`` | ``advisory`` | ``seat``; the ``*`` key is the rule for an item the policy does
+    not name, else ``seat``): each finding's severity follows its item (``seat`` keeps the reviewer's own;
+    a missing or unknown severity reads ``critical``), and the answer's verdict and critical count follow
+    the findings. The policy is context of the brief, applied before the verdict is read: a reviewer
+    never decides which item blocks. Without a policy or without findings the answer is returned as it is."""
+    if not policy or not isinstance(policy, dict) or not isinstance(answer, dict) or not answer.get("findings"):
+        return answer
+    findings = []
+    for item in answer.get("findings") or []:
+        if isinstance(item, dict):
+            rule = str(policy.get(str(item.get("item") or ""), policy.get("*", "seat")) or "seat")
+            given = str(item.get("severity") or "").strip().lower()
+            severity = rule if rule in ("critical", "advisory") else (
+                "advisory" if given in ("advisory", "warning", "warn") else "critical")
+            item = {**item, "severity": severity}
+        findings.append(item)
+    critical = sum(1 for item in findings if isinstance(item, dict) and item.get("severity") == "critical")
+    changed = {**answer, "findings": findings, "critical": critical}
+    if str(answer.get("status") or "") == ANSWER_RESPONDED:
+        changed["verdict"] = VERDICT_FAIL if critical else VERDICT_PASS
+    return changed
+
+
 # The gate's own words for a wave that reduced to NOT_PERFORMED, keyed by the
 # ``reason`` above; the commit gate's block message and ``review_status``'s
 # reason line say the same thing about the same code.
@@ -670,6 +926,8 @@ NOT_PERFORMED_PHRASES: Dict[str, str] = {
     "coupling_not_performed": "the coupling question (Part 2) was answered by no seat",
     "change_unanswered": "no seat answered the change (Part 1) with a PASS/FAIL verdict",
     "review_late_result_pending": "physical review operation(s) remain unresolved",
+    "result_unanswered": "no seat answered the result question with a PASS/FAIL verdict",
+    "skill_unanswered": "no seat answered the skill question with a PASS/FAIL verdict",
 }
 
 
@@ -681,20 +939,21 @@ def _seat_from_plan(seat_id: str, parts: Iterable[str], plan: Dict[str, Any]) ->
                  "processing_preference": str(plan.get("processing_preference") or ""),
                  "subagent_id": str(plan.get("subagent_id") or "")}
     effective = {k: requested[k] for k in ("route", "model", "effort", "profile", "delivery")}
-    parts = [part for part in PARTS if part in tuple(parts)]
+    parts = [part for part in ALL_PARTS if part in tuple(parts)]
     return {"seat_id": seat_id, "subagent_id": requested["subagent_id"], "parts": parts,
             "additional": bool(plan.get("additional")),
             "requested": requested, "effective": {**effective, "verdict_method": "", "source": "requested"},
             "observed_model": UNKNOWN, "status": "not_dispatched", "operation_state": "not_dispatched",
             "answers": {part: _blank_answer(part, ANSWER_NOT_ASKED if part not in parts else "not_dispatched")
-                        for part in PARTS},
+                        for part in answer_keys(parts)},
             "parts_answered": [], "coverage": "not_asked", "capability_delta": [], "usd": None,
             "critical_count": 0, "raw_text": "", "brief_sha": str(plan.get("brief_sha") or ""), "source_refs": []}
 
 
 def _blank_answer(part: str, status: str) -> Dict[str, Any]:
     return {"status": status, "verdict": "", "findings": [], "critical": 0,
-            "coverage": "n/a" if part == PART_CHANGE else COVERAGE_NOT_ASKED if status == ANSWER_NOT_ASKED else COVERAGE_MISSING}
+            "coverage": ("n/a" if part != PART_COUPLING
+                         else COVERAGE_NOT_ASKED if status == ANSWER_NOT_ASKED else COVERAGE_MISSING)}
 
 
 def _legacy_change_answer(raw: Dict[str, Any], answered: bool, status: str) -> Dict[str, Any]:
@@ -713,11 +972,13 @@ def _legacy_change_answer(raw: Dict[str, Any], answered: bool, status: str) -> D
 
 def _apply_raw(seat: Dict[str, Any], raw: Dict[str, Any]) -> None:
     from ouroboros.review_records import TYPED_FAILURE_FACT_KEYS
+    from ouroboros.reviewer_slot_config import review_cost_facts
 
-    status = str(raw.get("status") or "") or seat["status"]
+    outcome = raw.get("outcome") or {}
+    status = str(outcome.get("status") or raw.get("status") or "") or seat["status"]
     answered = status in ANSWERED_STATUSES
-    answers = raw.get("answers") if isinstance(raw.get("answers"), dict) else {}
-    for part in PARTS:
+    answers = outcome.get("answers") or (raw.get("answers") if isinstance(raw.get("answers"), dict) else {})
+    for part in answer_keys(seat["parts"]):
         if part not in seat["parts"]:
             continue
         given = answers.get(part)
@@ -727,13 +988,29 @@ def _apply_raw(seat: Dict[str, Any], raw: Dict[str, Any]) -> None:
             seat["answers"][part] = _legacy_change_answer(raw, answered, status)
         else:
             seat["answers"][part] = _blank_answer(part, status if not answered else ANSWER_UNANSWERED)
+    seat.update({key: raw[key] for key in ("operation_id", "outcome_id", "usage_ref") if raw.get(key)})
     seat.update(status=status,
                 parts_answered=[p for p in seat["parts"] if seat["answers"][p]["status"] == ANSWER_RESPONDED],
                 usd=raw.get("cost_usd"),  # reported money and operation completion are separate facts
-                raw_text=str(raw.get("raw_text") or ""),
+                raw_text=str(raw.get("raw_text") or (raw.get("error") if not answered else "") or ""),
                 critical_count=sum(int(seat["answers"][p].get("critical") or 0) for p in seat["parts"]),
                 operation_state=str(raw.get("operation_state") or ("settled" if answered else status)))
+    seat.update(review_cost_facts(seat["usd"], route=seat["requested"]["route"], model=seat["requested"]["model"]))
+    if outcome:
+        seat["outcome"] = dict(outcome)
+    else:
+        seat.pop("outcome", None)  # A legacy terminal cannot retain an earlier pending interpretation.
+    for key in TYPED_FAILURE_FACT_KEYS:
+        seat.pop(key, None)  # A settling answer must not inherit a pending timeout's failure facts.
     seat.update({key: raw[key] for key in TYPED_FAILURE_FACT_KEYS if key in raw})
+    if not answered and not seat_open(seat) and not seat.get("reported_cause"):
+        # The row outlives the raw answer and the side files: a failed seat keeps its producer's own
+        # words here (no code or sentence is invented for a seat whose producer said nothing).
+        from ouroboros.review_records import review_failure_facts
+
+        cause = review_failure_facts({**raw, "status": status, "failure_code": "x"})["reported_cause"]
+        if cause:
+            seat["reported_cause"] = cause
     coverage = raw.get("coverage")
     if isinstance(coverage, dict):
         seat["coverage"] = str(coverage.get("status") or coverage.get("state") or "unobserved")
@@ -781,7 +1058,8 @@ def build_rows(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
     raws = [r for r in (facts.get("triad_raw") or []) if isinstance(r, dict)]
     plans = list(structured.get("rows") or []) or [
         {"slot_id": r.get("slot_id") or "", "model": r.get("model_id") or "", "route": r.get("route") or "api_chat",
-         "parts": list(r.get("parts") or (PART_CHANGE,)), "retrieves": PART_COUPLING in (r.get("parts") or ())}
+         "parts": list(r.get("parts") or (PART_CHANGE,)), "retrieves": PART_COUPLING in (r.get("parts") or ()),
+         "additional": bool(r.get("additional") or (r.get("review_plan") or {}).get("additional"))}
         for r in raws]
     rows = []
     for i, plan in enumerate(plans):
@@ -793,6 +1071,8 @@ def build_rows(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
         if raw is not None:
             _apply_raw(seat, raw)
         _apply_execution(seat, executions, since)
+        from ouroboros.reviewer_slot_config import review_cost_facts
+        seat.update(review_cost_facts(seat.get("usd"), route=seat["requested"]["route"], model=seat["requested"]["model"]))
         rows.append(seat)
     return rows
 
@@ -815,9 +1095,32 @@ def _retain_wave_sources(drive_root: Any, task_id: str, record_id: str, rows: Li
         # One retained text, named by every seat that was given it, each with ITS parts.
         seat["source_refs"].append(dict(refs[sha], seat_id=seat["seat_id"], part=",".join(seat["parts"])))
     for seat in rows:
-        if seat.get("raw_text"):
-            seat["source_refs"].append(retain_text_source(drive_root, task_id, record_id=record_id, seat_id=seat["seat_id"],
-                                                          role="response", part=",".join(seat["parts"]), text=seat["raw_text"]))
+        _retain_seat_text(drive_root, task_id, record_id, seat)
+
+
+def _retain_seat_text(drive_root: Any, task_id: str, record_id: str, seat: dict) -> None:
+    """Pending notes remain historical evidence; only terminal answers/failures are current sources."""
+    if seat.get("raw_text"):
+        pending = seat_open(seat)
+        role = "pending" if pending else "response" if seat.get("status") in ANSWERED_STATUSES else "failure"
+        seat.setdefault("historical_source_refs" if pending else "source_refs", []).append(retain_text_source(
+            drive_root, task_id, record_id=record_id, seat_id=seat["seat_id"], role=role,
+            part=",".join(seat["parts"]), text=seat["raw_text"]))
+
+
+def seat_text_source(seat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The one saved text a reader shows for a seat, selected without reading: the current ``response``,
+    else the current ``failure`` note, else the text kept in ``historical_source_refs`` (a ``pending`` note
+    or a displaced original), so an older note never replaces a received answer. Within a group the newest
+    retained source wins; a group without one yields its newest source, whose status names the gap."""
+    current = [s for s in seat.get("source_refs") or [] if isinstance(s, dict)]
+    history = [s for s in seat.get("historical_source_refs") or []
+               if isinstance(s, dict) and s.get("role") in ("response", "failure", "pending")]
+    for sources in ([s for s in current if s.get("role") == "response"],
+                    [s for s in current if s.get("role") == "failure"], history):
+        if sources:
+            return next((s for s in reversed(sources) if s.get("status") == "retained"), sources[-1])
+    return None
 
 
 def _checklist_facts(*, layer: str = "", body_fact: str = "", how: str = "") -> Dict[str, Any]:
@@ -856,26 +1159,28 @@ def _assigned_rows(assigned: Any) -> List[str]:
     return sorted(rows)
 
 
-def reuse_key_digest(*, surface: str, kind: str, root: str, diff_sha: str, tree_sha: str, rules_sha: str, layer: str,
+def reuse_key_digest(*, surface: str, kind: str, root: str, diff_sha: str, tree_sha: str, layer: str,
                      assigned: Any, enforcement: str, contract_fp: str, round_sha: str = "") -> str:
-    """sha256 of the reuse identity (§6 "Subject operation", identity a): surface,
-    subject kind/root/diff/tree, the rules source, the checklist layer, the assigned
-    composition, the enforcement and the review contract — plus the logical round
-    (``review_subject.review_round_sha``: rebuttal, author questions, goal, scope,
-    resolved base/head), so only the IDENTICAL request reuses a settled answer."""
+    """sha256 of the reuse identity (§6 "Subject operation", identity a): surface, subject
+    kind/root/diff/tree, checklist layer, assigned composition, enforcement and review contract,
+    plus the logical round (``review_subject.review_round_sha``: rebuttal, author questions, goal,
+    scope, resolved base/head), so only the IDENTICAL request reuses a settled answer. Governance
+    text never enters (DEVELOPMENT 05): the record keeps the rules it was judged by as provenance."""
     fields = {"surface": str(surface or ""), "kind": str(kind or ""), "root": str(root or ""),
-              "diff_sha": str(diff_sha or ""), "tree_sha": str(tree_sha or ""), "rules_sha": str(rules_sha or ""),
-              "layer": str(layer or ""), "assigned": _assigned_rows(assigned), "enforcement": str(enforcement or ""),
+              "diff_sha": str(diff_sha or ""), "tree_sha": str(tree_sha or ""), "layer": str(layer or ""),
+              "assigned": _assigned_rows(assigned), "enforcement": str(enforcement or ""),
               "contract_fp": str(contract_fp or ""), "round_sha": str(round_sha or "")}
     return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def round_sha_of(*, rebuttal_sha: str = "", questions: Any = (), goal: str = "", scope: str = "",
-                 base: str = "", head: str = "") -> str:
+                 base: str = "", head: str = "", since_review: str = "") -> str:
     """The logical-round digest over a record's own fields — the same bytes
-    ``review_subject.review_round_sha`` hashes from a frozen subject."""
+    ``review_subject.review_round_sha`` hashes from a frozen subject. A named
+    ``since_review`` joins only when given, so every earlier round keeps its digest."""
     fields = {"rebuttal_sha": str(rebuttal_sha or ""), "questions": [str(item) for item in (questions or [])],
-              "goal": str(goal or ""), "scope": str(scope or ""), "base": str(base or ""), "head": str(head or "")}
+              "goal": str(goal or ""), "scope": str(scope or ""), "base": str(base or ""), "head": str(head or ""),
+              **({"since_review": str(since_review)} if since_review else {})}
     return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -944,7 +1249,7 @@ def build_wave_record(facts: Dict[str, Any], *, surface: str, record_id: str = "
     if drive_root is not None:
         _retain_wave_sources(drive_root, task_id, record_id, rows, structured)
     refusal = facts.get("dispatch_refusal")
-    pending = bool(facts.get("pending")) or any(str(s.get("status") or "") == "pending" for s in rows)
+    pending = counted_pending(rows, pending=bool(facts.get("pending")), lost_is_terminal=bool(facts.get("lost_seat_terminal")))
     assigned_rows = [seat for seat in rows if not seat.get("additional")]
     verdict = reduce_verdict(assigned_rows, gate_blocked=bool(facts.get("blocked")),
                              gate_reason=str(facts.get("block_reason") or ""), dispatch_refusal=refusal, pending=pending)
@@ -978,23 +1283,26 @@ def build_wave_record(facts: Dict[str, Any], *, surface: str, record_id: str = "
     enforcement, contract_fp = str(facts.get("enforcement") or ""), str(facts.get("review_contract_fingerprint") or "")
     reuse_key = str(facts.get("reuse_key") or structured.get("reuse_key") or "") or reuse_key_digest(
         surface=surface, kind=subject["kind"], root=subject["root"], diff_sha=subject["diff_sha"], tree_sha=subject["tree_sha"],
-        rules_sha=checklist["rules_source"]["sha"], layer=checklist["layer"], assigned=rows, enforcement=enforcement,
+        layer=checklist["layer"], assigned=rows, enforcement=enforcement,
         contract_fp=contract_fp, round_sha=round_sha_of(
             rebuttal_sha=str(facts.get("rebuttal_sha256") or ""), questions=facts.get("author_questions") or [],
             goal=str(facts.get("goal") or ""), scope=str(facts.get("scope") or ""),
-            base=subject["base"], head=subject["head"]))
+            base=subject["base"], head=subject["head"], since_review=str(facts.get("since_review") or "")))
     return ReviewLedgerRecord(
         record_id=record_id, state=STATE_PENDING if pending else STATE_SETTLED, ts=utc_now_iso(), task_id=task_id,
         root_task_id=str(facts.get("root_task_id") or ""), review_wave_id=str(facts.get("review_wave_id") or ""),
         surface=surface, subject=subject,
         brief={"goal": str(facts.get("goal") or ""), "scope": str(facts.get("scope") or ""),
-               "parts": [part for part in PARTS if any(part in (seat.get("parts") or []) for seat in rows)],
+               "parts": [part for part in ALL_PARTS if any(part in (seat.get("parts") or []) for seat in rows)],
                "author_questions": list(facts.get("author_questions") or []), "checklist": checklist,
+               **({"since_review": str(facts["since_review"])} if facts.get("since_review") else {}),
                "dispute_input": dispute_input},
         enforcement=enforcement, mode=str(facts.get("mode") or ""),
         enforcement_blocks=bool(facts.get("enforcement_blocks")),
-        panel=panel_facts(rows, composition=str(facts.get("composition") or "full_pool"),
+        panel={**panel_facts(rows, composition=str(facts.get("composition") or "full_pool"),
                           reason=str(facts.get("composition_reason") or ""), chosen_by=str(facts.get("chosen_by") or "owner")),
+               **dict(facts.get("panel") or {}),
+               "not_reached": panel_not_reached(rows, lost_is_terminal=bool(facts.get("lost_seat_terminal")))},
         rows=rows, verdict=verdict,
         tests=dict(facts.get("tests") or {"policy": "NOT_RUN", "result": UNKNOWN}),
         preflight=dict(facts.get("preflight") or {"status": "not_performed", "record_id": ""}),
@@ -1022,6 +1330,27 @@ PROVENANCE_FIELDS = ("task_id", "root_task_id", "review_wave_id", "surface", "su
 ROW_PROVENANCE_FIELDS = ("subagent_id", "parts", "additional", "requested", "brief_sha")
 
 
+def _merge_evidence(*groups: Iterable[Any]) -> list:
+    """Explicit finding identities merge; otherwise only identical complete evidence deduplicates."""
+    merged = {}
+    for group in groups:
+        for value in group:
+            identity = (value.get("finding_id") or value.get("obligation_id")) if isinstance(value, dict) else None
+            key = ((str(value.get("seat_id") or ""), str(value.get("part") or ""), str(identity))
+                   if identity else json.dumps(value, sort_keys=True, default=str))
+            merged[key] = value
+    return list(merged.values())
+
+
+def _settled_sources(prior: dict, fresh: dict) -> dict:
+    """Keep dispatch prompts, replace current answer/failure refs, retain all displaced originals."""
+    current = [s for s in fresh.get("source_refs") or [] if s.get("role") != "prompt"]
+    old = [s for s in prior.get("source_refs") or [] if s.get("role") != "prompt" and s not in current]
+    return {"source_refs": [s for s in prior.get("source_refs") or [] if s.get("role") == "prompt"] + current,
+            "historical_source_refs": _merge_evidence(prior.get("historical_source_refs") or [],
+                                                     fresh.get("historical_source_refs") or [], old)}
+
+
 def settle_pending_payload(prior: Dict[str, Any], fresh: Dict[str, Any]) -> Dict[str, Any]:
     """The payload that settles a pending record: provenance is the dispatching
     attempt's (``prior`` — ``PROVENANCE_FIELDS`` and, per seat, ``ROW_PROVENANCE_FIELDS``
@@ -1030,21 +1359,143 @@ def settle_pending_payload(prior: Dict[str, Any], fresh: Dict[str, Any]) -> Dict
     status, cost, observed model and response refs, the verdict, the cost, the state —
     so a rules or brief update between dispatch and settle never rewrites what the
     seats actually read. ``revision``/``ts`` are ``revise_record``'s."""
-    settled = {**fresh, **{key: prior[key] for key in PROVENANCE_FIELDS if key in prior},
+    settled = {**prior, **fresh, **{key: prior[key] for key in PROVENANCE_FIELDS if key in prior},
                **({} if "preflight_execution" in prior else {"preflight_execution": {"status": "unobserved"}})}
-    before = {str(row.get("seat_id") or ""): row for row in prior.get("rows") or [] if isinstance(row, dict)}
+    if (prior.get("brief") or {}).get("dispute_input") is None:
+        from ouroboros.review_history import _gap
+        # Missing dispatch provenance cannot be filled from today's history.
+        settled["brief"] = {**(prior.get("brief") or {}), "dispute_input": {"previous_records": [], "gaps": [
+            _gap("paid wave has no saved dispute-input binding", record_id=prior.get("record_id"))]}}
+    before = {str(row.get("seat_id") or ""): row for row in prior.get("rows") or []}
+    incoming = {str(row.get("seat_id") or ""): row for row in fresh.get("rows") or []}
     rows = []
-    for row in fresh.get("rows") or []:
-        kept = before.get(str(row.get("seat_id") or ""))
-        if kept is None:
-            rows.append(row)
+    for key in dict.fromkeys([*before, *incoming]):
+        kept, row = before.get(key), incoming.get(key)
+        if kept is None or row is None:
+            rows.append(row if kept is None else kept)
             continue
-        prompt_refs = [ref for ref in kept.get("source_refs") or [] if str(ref.get("role") or "") != "response"]
-        response_refs = [ref for ref in row.get("source_refs") or [] if str(ref.get("role") or "") == "response"]
-        rows.append({**row, **{key: kept[key] for key in ROW_PROVENANCE_FIELDS if key in kept},
-                     "source_refs": prompt_refs + response_refs})
+        # A drain can return an old PENDING snapshot after another collector saved an answer.
+        # An operation identity is immutable; a different producer cannot replace this seat.
+        conflict = kept.get("operation_id") and row.get("operation_id") and kept["operation_id"] != row["operation_id"]
+        if conflict or (not seat_open(kept) and seat_open(row)):
+            rows.append(kept)
+            continue
+        from ouroboros.review_records import TYPED_FAILURE_FACT_KEYS
+        merged = {**{k: v for k, v in kept.items() if k not in TYPED_FAILURE_FACT_KEYS}, **row,
+                  **{field: kept[field] for field in ROW_PROVENANCE_FIELDS if field in kept}, **_settled_sources(kept, row)}
+        if not row.get("outcome"):
+            merged.pop("outcome", None)
+        rows.append(merged)
     settled["rows"] = rows
+    still_open = any(seat_open(row) for row in rows)
+    counted = [row for row in rows if not row.get("additional")]
+    gate_reason = str((fresh.get("verdict") or {}).get("reason") or "")
+    verdict = reduce_verdict(counted, gate_blocked=gate_reason.startswith("gate_block"),
+                             gate_reason=gate_reason.removeprefix("gate_block:"), dispatch_refusal=settled.get("dispatch_refusal"),
+                             pending=any(seat_open(row) for row in counted))
+    verdict["per_row"].update({str(row.get("seat_id") or ""): row_verdict(row) for row in rows})
+    for name in (*HEAVY_VERDICT_FIELDS, "degraded_reasons"):
+        values = [*((prior.get("verdict") or {}).get(name) or []), *((fresh.get("verdict") or {}).get(name) or [])]
+        verdict[name] = _merge_evidence(values)
+    settled.update(verdict=verdict, state=STATE_PENDING if still_open else STATE_SETTLED,
+                   panel={**settled.get("panel", {}), "not_reached": panel_not_reached(rows, lost_is_terminal=not still_open)})
+    known = [float(row["usd"]) for row in rows if isinstance(row.get("usd"), (int, float))]
+    settled["cost"] = {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}
     return settled
+
+
+def seat_findings(triad_raw: Iterable[Dict[str, Any]],
+                  additional: set) -> tuple:
+    """(critical, advisory, additional) FAIL items, each attributed to its seat
+    and the PART it answered (``answers`` by part; a record without ``answers``
+    is a packet seat whose ``parsed_items`` are the change's)."""
+    critical, advisory, extra = [], [], []
+
+    def _severity(item: Dict[str, Any]) -> str:
+        return "critical" if str(item.get("severity") or "").lower() == "critical" else "advisory"
+
+    for raw in triad_raw:
+        seat = str(raw.get("slot_id") or "")
+        answers = raw.get("answers") if isinstance(raw.get("answers"), dict) else None
+        if answers:
+            items = [(part, item) for part in ALL_PARTS for item in (answers.get(part) or {}).get("findings") or []
+                     if isinstance(item, dict)]
+        else:
+            items = [(PART_CHANGE, item) for item in raw.get("parsed_items") or []
+                     if isinstance(item, dict) and str(item.get("verdict") or "FAIL").upper() == "FAIL"]
+        for part, item in items:
+            severity = _severity(item)
+            finding = {**item, "seat_id": seat, "part": part, "severity": severity}
+            (extra if seat in additional else critical if severity == "critical" else advisory).append(finding)
+    return critical, advisory, extra
+
+
+_OPEN_SEAT_STATES = frozenset({"in_flight", "pending_dispatch"})
+
+
+def seat_open(seat: Dict[str, Any]) -> bool:
+    """A seat whose answer may still arrive: a live controller holds it in flight or has not
+    dispatched it yet. ``custody_lost`` is terminal ("outcome unknown, never re-sent"), so it
+    never keeps a record pending."""
+    return str(seat.get("status") or "") == "pending" or str(seat.get("operation_state") or "") in _OPEN_SEAT_STATES
+
+
+def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Settle a pending record from its seats' collected answers when its author no longer waits
+    for it (``review_pause``: a left or unwaited wave, collected at $0 from its recorded
+    assignments). ``raws`` are parsed seat rows (``triad_review.parse_seat_answers`` →
+    ``ReviewActorRecord.to_dict``) keyed by ``slot_id``; only seats the record still holds open
+    take an answer, the dispatch provenance stays, their FAIL items (``seat_findings``) join
+    the ones already recorded, and the verdict is reduced over the assigned seats. A seat still in flight keeps the record pending. ``None`` when no
+    such record exists; a settled record is returned as it is."""
+    try:
+        prior = load_record(drive_root, record_id)
+    except ValueError:
+        return None
+    if prior is None or prior.get("state") != STATE_PENDING:
+        return prior
+    by_slot = {str(raw.get("slot_id") or ""): raw for raw in raws if isinstance(raw, dict)}
+
+    def _mutate(prior: Dict[str, Any]) -> Dict[str, Any]:
+        if prior.get("state") != STATE_PENDING:
+            return prior
+        task_id = str(prior.get("task_id") or "")
+        # The record's own severity policy (a skill wave's checklist rule) decides a late answer's
+        # critical findings exactly as it decided the dispatching attempt's.
+        policy = ((prior.get("brief") or {}).get("checklist") or {}).get("severity_policy")
+        rows, applied = [], []
+        for row in prior.get("rows") or []:
+            seat = json.loads(json.dumps(row, default=str))
+            raw = by_slot.get(str(seat.get("seat_id") or ""))
+            if (raw is not None and seat_open(seat) and (not seat.get("operation_id")
+                    or not raw.get("operation_id") or seat["operation_id"] == raw["operation_id"])):
+                if not raw.get("outcome") and isinstance(policy, dict) and isinstance(raw.get("answers"), dict):
+                    raw = {**raw, "answers": {part: apply_severity_policy(answer, policy)
+                                              for part, answer in raw["answers"].items()}}
+                seat["source_refs"] = []  # the collected reply's own refs; the merge keeps dispatch and history
+                _apply_raw(seat, raw)
+                applied.append(raw)
+                _retain_seat_text(drive_root, task_id, record_id, seat)
+                seat.update(_settled_sources(row, seat))
+            seat.pop("raw_text", None)
+            rows.append(seat)
+        still_open = any(seat_open(seat) for seat in rows)
+        verdict = reduce_verdict([seat for seat in rows if not seat.get("additional")],
+                                 dispatch_refusal=prior.get("dispatch_refusal"), pending=any(seat_open(seat) for seat in rows if not seat.get("additional")))
+        verdict["per_row"].update({str(seat.get("seat_id") or ""): row_verdict(seat) for seat in rows if seat.get("additional")})
+        before = dict(prior.get("verdict") or {})
+        found = dict(zip(HEAVY_VERDICT_FIELDS, seat_findings(
+            applied, {str(seat.get("seat_id") or "") for seat in rows if seat.get("additional")})))
+        verdict.update({key: _merge_evidence(before.get(key) or [], found[key]) for key in HEAVY_VERDICT_FIELDS},
+                       degraded_reasons=list(before.get("degraded_reasons") or []))
+        known = [float(seat["usd"]) for seat in rows if isinstance(seat.get("usd"), (int, float))]
+        settled = {"rows": rows, "verdict": verdict, "state": STATE_PENDING if still_open else STATE_SETTLED,
+                   "cost": {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}}
+
+        return {**prior, **settled, "panel": {**dict(prior.get("panel") or {}),
+                                            "not_reached": panel_not_reached(rows, lost_is_terminal=not still_open)}}
+
+    return revise_record(drive_root, record_id, _mutate)
 
 
 def mark_provenance_unknown(record: ReviewLedgerRecord) -> ReviewLedgerRecord:
@@ -1122,17 +1573,22 @@ def coupling_outcome(verdict: dict, rows: list) -> CouplingOutcome:
                       "coverage": seat.get("coverage"), "matrix": answer.get("coverage"),
                       "error": answer.get("error", "")})
         for finding in answer.get("findings") or []:
-            (critical if finding.get("severity") == "critical" else advisory).append(finding)
+            (critical if finding.get("severity") == "critical" and not seat.get("additional") else advisory).append(finding)
     status = str((verdict.get("per_question") or {}).get(PART_COUPLING) or "not_performed")
     return CouplingOutcome(verdict=status, status="responded" if status in (VERDICT_PASS, VERDICT_FAIL) else status,
                            blocked=status == VERDICT_FAIL, critical_findings=critical, advisory_findings=advisory, seats=seats)
 
 
 __all__ = [
-    "REVIEW_LEDGER_SCHEMA_VERSION", "ReviewLedgerRecord", "build_commit_gate_record", "build_rows", "build_wave_record",
+    "ALL_PARTS", "PART_RESULT", "PART_SKILL", "REVIEW_LEDGER_SCHEMA_VERSION", "SINGLE_QUESTION_PARTS", "ReviewLedgerRecord",
+    "answer_keys", "apply_severity_policy", "build_commit_gate_record",
+    "newest_rotation_ts", "index_stamp", "surface_records",
+    "build_rows", "build_wave_record",
     "distinct_model_facts", "find_reusable", "index_path", "index_row", "ledger_dir", "ledger_root", "load_record",
-    "mark_provenance_unknown", "new_record_id", "normalize_model_name", "note_author_decision", "panel_facts", "read_source",
+    "mark_provenance_unknown", "new_record_id", "normalize_model_name", "note_author_decision",
+    "note_commit_landing", "panel_facts", "read_source", "read_selected_source", "task_record_page",
     "recent_records", "record_path", "record_sources_resolvable", "reduce_verdict", "retain_text_source", "reuse_key_digest",
-    "revise_record", "row_verdict", "rows_from_plan", "settle_pending_payload", "CouplingOutcome", "coupling_outcome",
-    "seat_parts", "source_ref_resolvable", "write_record",
+    "revise_record", "row_verdict", "rows_from_plan", "seat_findings", "seat_open", "settle_from_collected",
+    "seat_text_source", "settle_pending_payload", "single_question_part",
+    "CouplingOutcome", "coupling_outcome", "seat_parts", "source_ref_resolvable", "write_record",
 ]

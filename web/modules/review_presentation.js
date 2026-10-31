@@ -5,8 +5,12 @@ import { escapeHtmlAttr, sinceLocalTime } from './utils.js';
 import { isStoreMigrating, taskSourceDownloadUrl } from './api_client.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { reconcileReviewMarkup } from './review_dom_patch.js';
-import { actorAwaiting, actorUnresolved, formatReviewProjection } from './review_record_card.js';
+import {
+    actorAnswered, actorAwaiting, actorUnresolved, authorDoctrineLines, formatReviewProjection, seatAdviser, seatOwed,
+} from './review_record_card.js';
 import { planRecordEngaged, planRecordGroup } from './plan_record_presentation.js';
+import { renderOpinionReviews, reviewViews } from './review_opinions.js';
+import { getTaskReviewHistory } from './api_client.js';
 export { formatReviewProjection } from './review_record_card.js';
 
 const escapeHtmlText = escapeHtmlAttr;
@@ -48,8 +52,8 @@ const finiteCount = (value) => {
 };
 // A roster with an unanswered slot reports how far it got, never a bare verdict;
 // a slot that is neither answered nor awaited keeps the warning tone.
-const heldProgress = (lead, roster, answered) => {
-    const unavailable = roster.filter((actor) => !actorAwaiting(actor) && !answered(actor)).length;
+const heldProgress = (lead, roster, answered, awaited = actorAwaiting) => {
+    const unavailable = roster.filter((actor) => !awaited(actor) && !answered(actor)).length;
     return [`${lead} · ${roster.filter(answered).length} of ${roster.length} answered${unavailable ? ` · ${unavailable} unavailable` : ''}`, unavailable ? 'warn' : ''];
 };
 
@@ -59,13 +63,11 @@ export function setReviewAnchor(record, enabled, writePhase) {
     setInertCardPresentation(record, enabled);
     if (enabled) {
         record.titleEl.textContent = record.suggestedName || 'Reviews';
-        record.inlineTypingEl.style.display = 'none';
     } else {
         writePhase(record, 'working');
         if (!record.suggestedName && !record.lastHumanHeadline) {
             record.titleEl.textContent = '';  // the chip says Working; the title waits for a name (#1369)
         }
-        record.inlineTypingEl.style.display = '';
     }
     return true;
 }
@@ -161,6 +163,7 @@ function normalizeSkillAttempt(attempt, defaults = {}, ordinal = 0) {
     if (!attempt || typeof attempt !== 'object') return null;
     const skill = text(attempt.skill || defaults.skill);
     const jobId = text(attempt.job_id || attempt.jobId);
+    const recordId = text(attempt.record_id || attempt.recordId);
     const id = attemptIdentity(attempt, [
         text(attempt.content_hash), text(attempt.review_round),
         text(attempt.snapshot_attempt), String(ordinal + 1),
@@ -208,7 +211,7 @@ function normalizeSkillAttempt(attempt, defaults = {}, ordinal = 0) {
         executions: normalizedExecutions(attempt.executions, attempt.execution),
         execution: attempt.execution && typeof attempt.execution === 'object' ? attempt.execution : null,
         lifecycleOnly,
-        detailRef: skill && jobId ? { surface: 'skill', skill, jobId } : null,
+        detailRef: skill && jobId ? { surface: 'skill', skill, jobId, ...(recordId ? { recordId } : {}) } : null,
         detailText: '',
     };
 }
@@ -596,15 +599,8 @@ function planWaveDetail(wave) {
     }
     if (wave.findings_texts_truncated) lines.push('Some finding texts were truncated at capture.');
     if (wave.spec_body_truncated) lines.push('Spec body was truncated at capture.');
-    const author = wave.author_disposition;
-    if (author && typeof author === 'object' && text(author.disposition)) {
-        lines.push(
-            `Author ${author.action === 'stop' ? 'stop' : 'finish'}: ${text(author.disposition)}${text(author.reviewer_signal) ? ` · reviewer signal=${text(author.reviewer_signal)}` : ''}`
-            + `${text(author.rationale) ? ` · ${text(author.rationale)}` : ''}`
-            + `${text(author.subject_hash) ? ` · subject_hash=${text(author.subject_hash)}` : ''}`
-            + `${text(author.source) ? ` · source=${text(author.source)}` : ''}`,
-        );
-    }
+    const authorLine = authorDispositionText(wave.author_disposition);
+    if (authorLine) lines.push(authorLine);
     return lines.filter(Boolean).join('\n');
 }
 
@@ -780,9 +776,11 @@ function authorDispositionText(author, label = '') {
         text(author.rationale),
         text(author.subject_hash) ? `subject_hash=${text(author.subject_hash)}` : '',
         text(author.source) ? `source=${text(author.source)}` : '',
+        ...authorDoctrineLines(author),
     ].filter(Boolean).join(' · ');
 }
 
+/** Read-only: a task-acceptance record stored before the result review replaced that machine. */
 export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
     const owner = text(ownerTaskId || detail?.task_id);
     const projection = detail?.review_projection;
@@ -853,28 +851,62 @@ export function reviewRecordGroupFromTaskDetail(detail, ownerTaskId = '') {
     const owner = text(ownerTaskId || detail?.task_id);
     const projection = detail?.review_projection;
     const panels = (Array.isArray(projection?.panels) ? projection.panels : []).filter((panel) => text(panel?.record_id));
-    if (!owner || !panels.length) return null;
+    const gaps = (Array.isArray(projection?.gaps) ? projection.gaps : []).filter((gap) => gap && typeof gap === 'object');
+    // Only a record or a gap makes a group: a count of older records alone (`review_records_omitted`,
+    // unknown once the index rotated) is no review of this task.
+    if (!owner || (!panels.length && !gaps.length)) return null;
+    const live = text(detail?.status).toLowerCase() === 'running';
     const attempts = panels.map((panel, index) => {
         const verdict = text(panel.aggregate_signal) || 'UNKNOWN';
+        // A pending record whose counted seats are still owed reports how far it got, like a stored panel:
+        // in progress while its task runs, no verdict once it ended; NOT_PERFORMED stays in Record facts.
+        const counted = (Array.isArray(panel.actors) ? panel.actors : []).filter((actor) => actor && typeof actor === 'object' && !seatAdviser(actor));
+        const owed = text(panel.record_state) === 'pending' && counted.some((actor) => seatOwed(actor, panel));
+        const [progress, heldTone] = owed
+            ? heldProgress(live ? 'in progress' : 'no verdict', counted, actorAnswered, (actor) => seatOwed(actor, panel)) : ['', ''];
         return {
-            id: `record:${text(panel.record_id)}`, surface: 'review_record', state: 'terminal', progress: '',
+            id: `record:${text(panel.record_id)}`, panel, surface: 'review_record', state: owed && live ? 'running' : 'terminal', progress,
             // NOT_PERFORMED, QUORUM_FAILED and NOT_DISPATCHED reached no verdict: a warning, never a quiet neutral.
-            tone: { PASS: 'done', FAIL: 'error' }[verdict] || 'warn', verdict, timestamp: text(panel.ts), ordinal: index,
+            tone: owed ? (heldTone || (live ? 'working' : 'neutral')) : ({ PASS: 'done', FAIL: 'error' }[verdict] || 'warn'),
+            verdict, timestamp: text(panel.ts), ordinal: index, live,
             label: `${text(panel.surface) || 'review'} record ${text(panel.record_id)}`, summary: text(panel.reason),
-            superseded: false, replayed: false, revised: false, initiatorTaskId: owner, executions: [], execution: null,
-            detailRef: null,
+            superseded: false, replayed: false, revised: false, initiatorTaskId: owner,
+            executions: executionsFromReviewRecord(panel), execution: null, detailRef: null,
             detailText: [formatReviewProjection({ panels: [panel] }), text(panel.source_ref?.path) ? `Full record: ${text(panel.source_ref.path)}` : ''].filter(Boolean).join('\n'),
         };
     });
-    const latest = attempts.at(-1);
+    for (const gap of gaps) attempts.push({
+        id: `gap:${text(gap.record_id) || text(gap.review_gap)}`, surface: 'review_record', state: 'terminal', tone: 'warn', verdict: 'could not be read',
+        label: 'Review record unavailable', summary: 'This saved review could not be read. The readable reviews beside it are unaffected.',
+        gap: true, gapReason: text(gap.review_gap), detailText: formatReviewProjection({ gaps: [gap] }), executions: [],
+    });
+    const latest = attempts.at(-1) || { tone: 'neutral', verdict: '', summary: '' };
     return {
+        // Earlier records exist ('1+' or a count) or may exist in a rotated index ('unknown'); 0 says none.
+        historyTask: owner, historyMore: ![0, undefined, null, ''].includes(projection.review_records_omitted),
+        historyCertain: projection.review_records_omitted !== 'unknown',
         id: `review_record:${owner}`, surface: 'review_record', label: 'Review records', subject: '',
         presentationOwnerTaskId: owner, subjectTaskId: owner, initiatorTaskId: owner,
         state: 'terminal', progress: '', tone: latest.tone, verdict: latest.verdict, summary: latest.summary,
         warning: '', authorDecisionText: '', activeCount: 0, attemptCount: attempts.length,
         // Older records stay in the ledger: the count is exact only when the projection says none exist.
         countIsAuthoritative: projection.review_records_omitted === 0, attempts,
+        // The task's own settled adoptions, joined with each record's landed commit; a source without the
+        // field leaves what an earlier read said (absent is unknown, never "none adopted").
+        ...(Array.isArray(detail?.body_adoptions) ? { adoptions: detail.body_adoptions } : {}),
     };
+}
+
+// One row per adoption at its highest revision across two reads: a history row read before a later outcome settled
+// cannot take that adoption back, nor drop one the other read named.
+function mergeAdoptions(prior, incoming) {
+    const revision = (row) => (Number.isSafeInteger(row?.revision) ? row.revision : 0);
+    const rows = new Map();
+    for (const row of [...prior, ...incoming]) {
+        const id = text(row?.adoption_id) || JSON.stringify(row);
+        if (!(revision(rows.get(id)) > revision(row))) rows.set(id, row);
+    }
+    return [...rows.values()];
 }
 
 export function reviewGroupsFromTaskDetail(detail, ownerTaskId = '') {
@@ -998,6 +1030,7 @@ export function mergeReviewGroup(store, incoming) {
         attempts: order.map((id) => mergedById.get(id)).filter(Boolean),
         attemptCount: Math.max(prior.attemptCount || 0, incoming.attemptCount || 0, mergedById.size),
     };
+    if (Array.isArray(prior.adoptions) && Array.isArray(incoming.adoptions)) merged.adoptions = mergeAdoptions(prior.adoptions, incoming.adoptions);
     if (staleActiveRegression) {
         merged.state = prior.state;
         merged.verdict = prior.verdict;
@@ -1116,6 +1149,35 @@ function reviewRevision(value) {
     return /^[0-9a-f]{64}$/.test(revision) ? revision : null;
 }
 
+// One queue for every card's review detail on the page (issue #1771): a room with
+// many review owners otherwise opened one GET per owner at once and starved the
+// browser's few connections per host (WebKit: 6), videos included. Newest request
+// first: a room opens at its newest cards, and an expansion is the latest ask. A
+// read keeps its slot until it settles; one whose response never comes is aborted
+// at the slot's bound and fails like any lost read (its card offers Retry), so a dead
+// connection neither stalls every card's details nor stays open beside the next
+// reads. A closed owner's queued reads never start.
+export const REVIEW_DETAIL_READS = 2;
+export const REVIEW_DETAIL_SLOT_MS = 30000;
+const detailQueue = [];
+let detailReads = 0;
+function drainDetailReads() {
+    while (detailReads < REVIEW_DETAIL_READS && detailQueue.length) {
+        const job = detailQueue.pop();
+        detailReads += 1;
+        const abort = new AbortController();
+        const lost = new Promise((_resolve, reject) => abort.signal.addEventListener('abort',
+            () => reject(new Error('review detail read lost its connection')), { once: true }));
+        const timer = setTimeout(() => abort.abort(), REVIEW_DETAIL_SLOT_MS);
+        Promise.race([new Promise(resolve => resolve(job.read(abort.signal))), lost]).then(job.resolve, job.reject)
+            .finally(() => { clearTimeout(timer); detailReads -= 1; drainDetailReads(); });
+    }
+}
+const queueDetailRead = (owner, read) => new Promise((resolve, reject) => {
+    detailQueue.push({ owner, read, resolve, reject });
+    drainDetailReads();
+});
+
 // Revisions are opaque SHA-256 tokens; one distinct token may trail a live GET.
 export function createReviewHydrator({ fetchDetail, applyDetail, onState = () => {}, onSettled = () => {} } = {}) {
     const states = new Map();
@@ -1132,7 +1194,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
         const request = Promise.resolve()
             .then(() => {
                 if (!state.everApplied || state.lastStatus === 'error') notify('loading');
-                return fetchDetail(taskId);
+                return queueDetailRead(states, (signal) => fetchDetail(taskId, { signal }));
             })
             .then((detail) => {
                 // The strict seam rejects failures; null means genuinely absent (404).
@@ -1221,21 +1283,11 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
         clear() {
             for (const state of states.values()) clearTimeout(state.migrationTimer);
             states.clear();
+            for (const [index, job] of [...detailQueue.entries()].reverse()) {
+                if (job.owner === states) detailQueue.splice(index, 1)[0].reject(new Error('review detail read cancelled'));
+            }
         },
     };
-}
-
-function attemptMeta(attempt) {
-    return [
-        attempt.timestamp,
-        attempt.progress || attempt.verdict || (attempt.lifecycleOnly
-            ? (['queued', 'running'].includes(attempt.state) ? attempt.state : 'review verdict unavailable')
-            : ''),
-        lifecycleMeta(attempt.lifecycleStatus),
-        attempt.superseded ? 'superseded' : '',
-        attempt.replayed ? 'replay' : '',
-        attempt.revised ? 'revised snapshot' : '',
-    ].filter(Boolean).join(' · ');
 }
 
 /**
@@ -1300,113 +1352,16 @@ export function reviewReferenceFromRow(row) {
 }
 
 export function renderReviewsSection(groupsInput, disclosure = {}) {
-    const groups = orderedReviewGroups(groupsInput);
-    // A failed FIRST hydration has no groups to hang the error on: the shell
-    // renders anyway and stays mounted through the retry's own loading pass
-    // (hadHydrateError) so the recovery control cannot unmount mid-flight. A
-    // quiet first-load zero-group loading pass stays invisible (every card
-    // expand hydrates, most tasks have no reviews).
-    const hydrateStatus = text(disclosure.hydrateStatus);
-    const emptyShell = !groups.length && (
-        hydrateStatus === 'error'
-        || (hydrateStatus === 'loading' && disclosure.hadHydrateError === true)
-    );
-    if (!groups.length && !emptyShell) return '';
-    const expandedGroups = disclosure.expandedGroups instanceof Set ? disclosure.expandedGroups : new Set();
-    const expandedAttempts = disclosure.expandedAttempts instanceof Set ? disclosure.expandedAttempts : new Set();
-    const sectionExpanded = disclosure.sectionExpanded === true;
-    const { groupCount, activeCount } = reviewGroupCounts(groups);
-    const countText = groupCount
-        ? `${groupCount}${activeCount ? ` · ${activeCount} active` : ''}`
-        : '—';
-    const groupHtml = groups.map((group) => {
-        const groupExpanded = expandedGroups.has(group.id);
-        const shown = group.countIsAuthoritative ? `${group.attemptCount}` : `${group.attempts.length} shown`;
-        const attempts = group.attempts.map((attempt) => {
-            const attemptKey = `${group.id}:${attempt.id}`;
-            const attemptExpanded = expandedAttempts.has(attemptKey);
-            const skillRef = attempt.detailRef?.surface === 'skill' ? attempt.detailRef : null;
-            const detailAttrs = skillRef
-                ? ` data-skill-review-skill="${escapeHtmlAttr(skillRef.skill)}" data-skill-review-job="${escapeHtmlAttr(skillRef.jobId)}"`
-                : '';
-            const source = attempt.detailRef?.surface === 'task_acceptance' ? attempt.detailRef : null;
-            const fullSource = source ? (source.url
-                ? `<a class="btn btn-default" href="${escapeHtmlAttr(source.url)}" download>Download full applied review</a>`
-                : '<span>Full applied review unavailable.</span>') : '';
-            const detail = skillRef ? '' : `<span>${escapeHtmlText(attempt.detailText || attempt.summary || 'No additional detail projected.')}</span>${fullSource ? `<div>${fullSource}</div>` : ''}`;
-            const executions = reviewExecutionEvidenceList(attempt.executions, attempt.execution);
-            const executionMarkup = executions.map((execution) => (
-                harnessIdentityMarkup(execution.harness, {
-                    channel: execution.channel,
-                    label: execution.label,
-                    className: 'chat-review-execution-identity',
-                }) + (execution.model
-                    ? `<span class="chat-review-execution-model">${escapeHtmlText(execution.model)}</span>`
-                    : '')
-            )).join('');
-            const attemptInitiator = (
-                attempt.initiatorTaskId
-                && attempt.initiatorTaskId !== group.presentationOwnerTaskId
-                && attempt.initiatorTaskId !== group.initiatorTaskId
-            )
-                ? `<div class="chat-review-initiator">Initiated by task ${escapeHtmlText(attempt.initiatorTaskId)}</div>`
-                : '';
-            return `
-                <div class="chat-review-attempt ${escapeHtmlAttr(attempt.tone)}${attempt.superseded ? ' superseded' : ''}" data-review-attempt="${escapeHtmlAttr(attemptKey)}">
-                    <div class="chat-review-attempt-main">
-                        <span class="chat-review-attempt-label">${escapeHtmlText(attempt.label)}</span>
-                        <span class="chat-review-attempt-meta">${escapeHtmlText(attemptMeta(attempt))}</span>
-                        ${executionMarkup ? `<span class="chat-review-execution">${executionMarkup}</span>` : ''}
-                    </div>
-                    ${attemptInitiator}
-                    <button type="button" class="chat-review-detail-toggle" data-review-attempt-toggle="${escapeHtmlAttr(attemptKey)}" aria-expanded="${attemptExpanded ? 'true' : 'false'}">${attemptExpanded ? 'Hide details' : 'Show details'}</button>
-                    <div class="chat-review-attempt-detail" data-review-attempt-detail="${escapeHtmlAttr(attemptKey)}"${detailAttrs} aria-busy="false"${attemptExpanded ? '' : ' hidden'}>${detail}</div>
-                </div>`;
-        }).join('');
-        const initiator = group.initiatorTaskId && group.initiatorTaskId !== group.presentationOwnerTaskId
-            ? `<div class="chat-review-initiator">Initiated by task ${escapeHtmlText(group.initiatorTaskId)}</div>`
-            : '';
-        return `
-            <div class="chat-review-group ${escapeHtmlAttr(group.tone)}" data-review-group="${escapeHtmlAttr(group.id)}">
-                <button type="button" class="chat-review-group-toggle" data-review-group-toggle="${escapeHtmlAttr(group.id)}" aria-expanded="${groupExpanded ? 'true' : 'false'}">
-                    <span class="chat-review-group-main">
-                        <span class="chat-review-group-label">${escapeHtmlText(group.label)}</span>
-                        ${group.subject ? `<span class="chat-review-subject">${escapeHtmlText(group.subject)}</span>` : ''}
-                    </span>
-                    <span class="chat-review-group-meta">${escapeHtmlText([group.progress || group.verdict || (group.lifecycleOnly
-                        ? (['queued', 'running'].includes(group.state) ? group.state : 'review verdict unavailable')
-                        : group.state), lifecycleMeta(group.lifecycleStatus), shown].filter(Boolean).join(' · '))}</span>
-                </button>
-                <div class="chat-review-attempts"${groupExpanded ? '' : ' hidden'}>
-                    <div class="chat-review-group-cost">Cost unavailable</div>
-                    ${group.authorDecisionText ? `<div class="chat-review-attempt-detail" data-review-author-decision><span>${group.surface === 'plan' ? 'Plan' : 'Task'} author decision</span><br><span>${escapeHtmlText(group.authorDecisionText)}</span></div>` : ''}
-                    ${initiator}${attempts}
-                </div>
-            </div>`;
-    }).join('');
-    // Section-level hydration truth (typed controller state, no per-attempt
-    // FSM): a first load announces itself, a failed refresh names itself and
-    // offers Retry instead of silently presenting stale-or-missing detail.
-    // The message rides inside a <span>: the keyed status node is patched in
-    // place across loading↔error, and the DOM patcher syncs text only through
-    // childless-element innerHTML — a bare text node beside the Retry button
-    // would survive the transition stale.
-    const hydrateHtml = hydrateStatus === 'loading'
-        ? '<div class="skill-review-loading" data-review-hydrate-status role="status" aria-live="polite"><span>Loading review details…</span></div>'
-        : (hydrateStatus === 'error'
-            ? '<div class="skill-review-error" data-review-hydrate-status role="alert"><span>Review details failed to refresh — shown data may be incomplete. </span><button type="button" class="skill-review-retry" data-review-hydrate-retry>Retry</button></div>'
-            : '');
-    // The status node sits OUTSIDE the collapsible groups container: a failed
-    // refresh stays visible on a collapsed section and the keyed node survives
-    // loading↔error transitions. Disclosure stays user-owned — nothing expands.
-    return `
-        <section class="chat-live-reviews" data-review-section data-expanded="${sectionExpanded ? '1' : '0'}">
-            <button type="button" class="chat-review-section-toggle" data-review-section-toggle aria-expanded="${sectionExpanded ? 'true' : 'false'}">
-                <span>Reviews</span><span class="chat-review-section-count">${escapeHtmlText(countText)}</span>
-            </button>
-            ${hydrateHtml}<div class="chat-review-groups"${sectionExpanded ? '' : ' hidden'}>${groupHtml}</div>
-        </section>`;
+    return renderOpinionReviews(orderedReviewGroups(groupsInput), disclosure, {
+        executions: (attempt, { showModel = true } = {}) => reviewExecutionEvidenceList(attempt.executions, attempt.execution).map(execution =>
+            harnessIdentityMarkup(execution.harness, { channel: execution.channel, label: execution.label, className: 'chat-review-execution-identity' })
+            + (showModel && execution.model ? `<span class="chat-review-execution-model">${escapeHtmlText(execution.model)}</span>` : '')).join(''),
+    });
 }
+
+// The controls a reader can hold focus on, each named by the attribute that identifies it across updates.
+const FOCUS_KEYS = ['reviewGroupToggle', 'reviewReadUrl', 'reviewHistory', 'reviewHydrateRetry', 'reviewAttemptDetail'];
+const focusSelector = (key, value) => `[data-${key.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`)}${value === '' ? '' : `="${value}"`}]`;
 
 /**
  * Interactive Reviews renderer. Chat owns disclosure and hydration callbacks;
@@ -1417,70 +1372,88 @@ export function createReviewPresentationController({
     summary,
     disclosure,
     onHydrate = () => {},
-    onLoadSkillDetail = () => {},
+    onRead = () => {},
     onDomWrite = (mutate) => mutate(),
 } = {}) {
     const groups = new Map();
     const state = disclosure || {};
     if (!(state.expandedGroups instanceof Set)) state.expandedGroups = new Set();
-    if (!(state.expandedAttempts instanceof Set)) state.expandedAttempts = new Set();
     if (state.sectionExpanded !== true) state.sectionExpanded = false;
 
+    // Keyed reconciliation keeps a focused control in place; a node an update had to replace hands
+    // focus to its successor (the same group, source, facts or action), never to the page.
     const focusedControl = () => {
         const active = host?.ownerDocument?.activeElement;
         if (!active || !host?.contains?.(active)) return null;
-        if (active.matches?.('[data-review-section-toggle]')) return { kind: 'section', key: '' };
-        if (active.dataset?.reviewGroupToggle) return { kind: 'group', key: active.dataset.reviewGroupToggle };
-        if (active.dataset?.reviewAttemptToggle) return { kind: 'attempt', key: active.dataset.reviewAttemptToggle };
-        const detail = active.closest?.('[data-review-attempt-detail]');
-        if (detail?.dataset?.reviewAttemptDetail) {
-            return { kind: 'attempt', key: detail.dataset.reviewAttemptDetail };
-        }
-        return null;
+        const owner = active.closest?.(FOCUS_KEYS.map((key) => focusSelector(key, '')).join(',')) || active;
+        const key = FOCUS_KEYS.find((name) => Object.hasOwn(owner.dataset || {}, name));
+        if (key) return { key, value: owner.dataset[key], node: active, summary: active.matches?.('summary') === true };
+        const facts = active.closest?.('[data-review-facts]');
+        return facts ? { key: 'reviewFacts', value: facts.dataset.reviewFacts, node: active, summary: true } : null;
     };
-
     const restoreFocus = (focused) => {
-        if (!focused) return;
-        let target = null;
-        if (focused.kind === 'section') target = host.querySelector?.('[data-review-section-toggle]');
-        const attribute = focused.kind === 'group'
-            ? 'reviewGroupToggle'
-            : (focused.kind === 'attempt' ? 'reviewAttemptToggle' : '');
-        if (attribute) {
-            target = Array.from(host.querySelectorAll?.(`[data-${focused.kind === 'group' ? 'review-group-toggle' : 'review-attempt-toggle'}]`) || [])
-                .find((candidate) => candidate.dataset?.[attribute] === focused.key);
-        }
-        target?.focus?.();
+        if (!focused || focused.node?.isConnected) return;
+        const value = String(focused.value ?? '').replaceAll('"', '\\"');
+        const target = host.querySelector?.(focusSelector(focused.key, value));
+        (focused.summary ? target?.querySelector?.('summary') || target : target)?.focus?.();
     };
 
     const render = () => onDomWrite(() => {
         if (!host || !summary) return;
         const focused = focusedControl();
-        const { groupCount, activeCount } = reviewGroupCounts(groups);
+        const { activeCount } = reviewGroupCounts(groups);
+        const groupCount = reviewViews(orderedReviewGroups(groups)).length;
         const failedEmpty = groupCount === 0 && (
             state.hydrateStatus === 'error'
             || (state.hydrateStatus === 'loading' && state.hadHydrateError === true)
         );
         summary.hidden = groupCount === 0 && !failedEmpty;
-        summary.textContent = groupCount
-            ? `Reviews ${groupCount}${activeCount ? ` · ${activeCount} active` : ''}`
-            : (failedEmpty ? 'Reviews' : '');
-        const warnings = [...groups.values()].map(group => text(group.warning)).filter(Boolean);
-        summary.dataset.warning = warnings.length ? '1' : '0';
-        if (warnings.length) summary.textContent += ' · Acceptance unavailable: evidence preparation failed; no new reviewers.';
-        const reconciled = reconcileReviewMarkup(host, renderReviewsSection(groups, state));
-        const active = host?.ownerDocument?.activeElement;
-        if (!reconciled || !active || !host.contains?.(active)) restoreFocus(focused);
-        for (const detail of host.querySelectorAll?.('[data-review-attempt-detail]') || []) {
-            if (
-                !detail?.hidden
-                && detail.dataset?.skillReviewSkill
-                && detail.dataset?.skillReviewJob
-            ) onLoadSkillDetail(detail);
+        // The door's words are its one text node, before the chevron its card draws (chat.js), as a status chip's are.
+        let words = summary.firstChild;
+        if (words?.nodeType !== 3) words = summary.insertBefore(summary.ownerDocument.createTextNode(''), words || null);
+        const said = groupCount ? `Reviews ${groupCount}${activeCount ? ` · ${activeCount} active` : ''}` : (failedEmpty ? 'Reviews' : '');
+        if (words.data !== said) words.data = said;
+        summary.setAttribute?.('aria-expanded', state.sectionExpanded ? 'true' : 'false');
+        const history = [...groups.values()].find(group => group.historyTask);
+        if (history) {
+            state.historyTask = history.historyTask;
+            state.historyCertain = history.historyCertain !== false;
+            if (state.historyOffset === undefined) state.historyMore = history.historyMore;
         }
+        reconcileReviewMarkup(host, renderReviewsSection(groups, state));
+        restoreFocus(focused);
     });
 
-    host?.addEventListener('click', (event) => {
+    summary?.addEventListener?.('click', () => {
+        state.sectionExpanded = !state.sectionExpanded;
+        render();
+        if (state.sectionExpanded) onHydrate();
+    });
+    host?.addEventListener('click', async (event) => {
+        const read = event.target?.closest?.('[data-review-read-url]');
+        if (read) {
+            const url = read.dataset.reviewReadUrl;
+            // The reader names the file by the source's words, never a path a model chose. A reviewer's answer
+            // reads as Markdown (its Source view and Download keep the exact text); saved detail stays plain text.
+            const markdown = read.dataset.reviewReadKind === 'markdown';
+            const filename = `${String(read.dataset.reviewReadName || 'Saved review').replace(/[\\/:]+/g, '-')}.${markdown ? 'md' : 'txt'}`;
+            onRead({ filename, mime: markdown ? 'text/markdown' : 'text/plain', kind: markdown ? 'markdown' : 'text', source: { durable: url }, reader: { url },
+                provenance: read.dataset.reviewReadSha ? `Saved source ${read.dataset.reviewReadSha}` : 'Saved review text' }, read, event);
+            return;
+        }
+        const history = event.target?.closest?.('[data-review-history]');
+        if (history) {
+            if (state.historyLoading) return;
+            state.historyLoading = true; state.historyError = false; render();
+            try {
+                const page = await getTaskReviewHistory(state.historyTask, state.historyOffset || 0);
+                const incoming = reviewGroupsFromTaskDetail(page, state.historyTask);
+                for (const group of incoming) mergeReviewGroup(groups, group);
+                state.historyOffset = page.next_offset;
+                state.historyMore = page.next_offset !== null && page.next_offset !== undefined;
+            } catch { state.historyError = true; }
+            state.historyLoading = false; render(); return;
+        }
         const hydrateRetry = event.target?.closest?.('[data-review-hydrate-retry]');
         if (hydrateRetry) {
             // A failed pass never records an applied revision, so a plain
@@ -1493,41 +1466,14 @@ export function createReviewPresentationController({
             }
             return;
         }
-        const retry = event.target?.closest?.('[data-skill-review-retry]');
-        if (retry) {
-            const detail = retry.closest?.('[data-review-attempt-detail]');
-            if (detail?.dataset?.skillReviewSkill && detail?.dataset?.skillReviewJob) {
-                onLoadSkillDetail(detail, { retry: true });
-                detail.setAttribute?.('tabindex', '-1');
-                detail.focus?.();
-            }
-            return;
-        }
-        const sectionToggle = event.target?.closest?.('[data-review-section-toggle]');
-        if (sectionToggle) {
-            state.sectionExpanded = !state.sectionExpanded;
-            render();
-            if (state.sectionExpanded) onHydrate();
-            return;
-        }
         const groupToggle = event.target?.closest?.('[data-review-group-toggle]');
-        if (groupToggle) {
-            const groupId = groupToggle.dataset.reviewGroupToggle || '';
-            if (!groupId) return;
-            if (state.expandedGroups.has(groupId)) state.expandedGroups.delete(groupId);
-            else state.expandedGroups.add(groupId);
-            render();
-            if (state.expandedGroups.has(groupId)) onHydrate();
-            return;
-        }
-        const attemptToggle = event.target?.closest?.('[data-review-attempt-toggle]');
-        if (!attemptToggle) return;
-        const attemptKey = attemptToggle.dataset.reviewAttemptToggle || '';
-        if (!attemptKey) return;
-        const opening = !state.expandedAttempts.has(attemptKey);
-        if (opening) state.expandedAttempts.add(attemptKey);
-        else state.expandedAttempts.delete(attemptKey);
+        if (!groupToggle) return;
+        const groupId = groupToggle.dataset.reviewGroupToggle || '';
+        if (!groupId) return;
+        if (state.expandedGroups.has(groupId)) state.expandedGroups.delete(groupId);
+        else state.expandedGroups.add(groupId);
         render();
+        if (state.expandedGroups.has(groupId)) onHydrate();
     });
 
     return {

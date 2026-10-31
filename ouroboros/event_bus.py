@@ -20,9 +20,10 @@ CHAT_DOCUMENT = "chat.document"
 CHAT_LINKS = "chat.links"
 CHAT_QUIZ = "chat.quiz"
 CHAT_QUIZ_STATE = "chat.quiz_state"
+CHAT_CARD = "chat.card"
 SKILL_LIFECYCLE = "skill.lifecycle"
 VALID_TOPICS = frozenset({CHAT_OUTBOUND, CHAT_TYPING, CHAT_PHOTO, CHAT_VIDEO, CHAT_DOCUMENT, CHAT_LINKS,
-                          CHAT_QUIZ, CHAT_QUIZ_STATE, SKILL_LIFECYCLE})
+                          CHAT_QUIZ, CHAT_QUIZ_STATE, CHAT_CARD, SKILL_LIFECYCLE})
 
 
 @dataclass

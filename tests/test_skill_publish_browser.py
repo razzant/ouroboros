@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,9 @@ from tests.test_ui_smoke_playwright import (
 )
 
 direct_server_with_data = _direct_server_with_data
+# The connected sources as the gateway lists them: the destination dialog offers the hub's shared catalog.
+SOURCES = json.loads((Path(__file__).resolve().parents[1] / "web/tests/fixtures/skills_v4/skill_sources.json")
+                     .read_text(encoding="utf-8"))
 
 
 @pytest.mark.ui_browser
@@ -51,9 +55,9 @@ def test_ui_publish_stale_card_reaches_selected_preflight_and_task(
             browser = pw.chromium.launch(headless=True)
             try:
                 page = browser.new_page(viewport={"width": 1280, "height": 900})
+                page.route("**/api/skill-sources", lambda route: route.fulfill(json=SOURCES))
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                # Installed cards are usable before the optional Hub catalog
-                # settles. Its badge-only update must not close the open menu.
+                # Installed cards are usable before any source is read.
                 page.click('[data-nav-page="skills"]')
                 card = page.locator(f'.skills-card[data-skill="{skill_name}"]').first
                 card.wait_for(state="visible", timeout=30_000)
@@ -63,18 +67,24 @@ def test_ui_publish_stale_card_reaches_selected_preflight_and_task(
                 # preflight still knows the clicked leaf and can return needs_attention.
                 manifest_path.unlink()
                 card.locator("[data-skill-menu-trigger]").click()
+                page.locator(f'.skills-card-menu-dialog:not([data-leaving])[open] .skills-submit-hub[data-skill="{skill_name}"]').click()
+                # Where it goes is the owner's choice; the preflight checks the files for that destination.
+                destinations = page.locator(".skills-dialog")
+                destinations.wait_for(state="visible", timeout=30_000)
+                assert destinations.locator('[aria-checked="true"] .chat-quiz-option-label').inner_text() == (
+                    "Ouroboros Community — share with everyone")
                 with page.expect_request(
                     f"**/api/skills/{skill_name}/publish-preflight",
                     timeout=30_000,
                 ) as preflight_request:
-                    page.locator(f'.skills-card-menu-dialog[open] .skills-submit-hub[data-skill="{skill_name}"]').click()
+                    destinations.locator("[data-dialog-ok]").click()
+                destination = {"source_id": "ouroboros-community", "mode": "entry"}
                 assert preflight_request.value.method == "POST"
+                assert preflight_request.value.post_data_json == {"destination": destination}
 
                 dialog = page.locator(".confirm-dialog")
                 dialog.wait_for(state="visible", timeout=30_000)
-                assert "Ask Ouroboros to prepare this publication" in (
-                    dialog.locator("#confirm-dialog-title").inner_text() or ""
-                )
+                assert "Not ready yet" in (dialog.locator("#confirm-dialog-title").inner_text() or "")
                 dialog.locator(".confirm-dialog-details summary").click()
                 dialog_text = dialog.inner_text()
                 assert "Needs attention" in dialog_text
@@ -97,6 +107,7 @@ def test_ui_publish_stale_card_reaches_selected_preflight_and_task(
                 assert payload["metadata"]["skill_publish_target"] == {
                     "skill": skill_name,
                     "repository": "razzant/OuroborosHub",
+                    "destination": destination,
                 }
                 assert "workspace_root" not in payload
                 assert "acceptance_claims" not in payload

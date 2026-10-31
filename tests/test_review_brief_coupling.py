@@ -532,20 +532,22 @@ def _seed_evidence(monkeypatch, tmp_path, model, *, window, status, ts, use_ack=
 
 def test_stale_evidence_arrives_marked_and_dated(monkeypatch, tmp_path):
     """An EXPIRED record the probe could not re-verify is a dated impression, not a
-    measurement, and the route's resolution says so. The number still SIZES the
-    seat's first send; nothing about authority reads it."""
+    measurement, and the route's resolution says so. Layout keeps the dated
+    estimate; expired metadata supplies no current capacity."""
     from ouroboros import capability_evidence as ce
     from ouroboros.reviewer_window import resolve_reviewer_window
 
     model = "anthropic/claude-fable-5"
     old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=5)).isoformat()
     _seed_evidence(monkeypatch, tmp_path, model, window=1_000_000, status="confirmed", ts=old)
-    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 0)
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: (0, ce.utc_now_iso()))
     monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: True)
 
     resolved = resolve_reviewer_window(model)
     assert resolved.window_tokens == 1_000_000 and resolved.status == "confirmed"
     assert resolved.stale is True, "the outage-carried record must arrive marked stale"
+    assert resolved.sizing_window(200_000) == 1_000_000 and resolved.window_record.usable is None
+    assert resolved.sizing_source == "confirmed"
     assert resolved.observed_at == old, "the observation time must survive the hand-off"
 
     phrase = sw.window_provenance_phrase(
@@ -640,7 +642,7 @@ def test_expired_evidence_is_re_sourced_instead_of_wedging_the_process(monkeypat
     model = "openai/gpt-5.6-terra"
     now = datetime.datetime.now(datetime.timezone.utc)
     _seed_evidence(monkeypatch, tmp_path, model, window=1_050_000, status="confirmed", ts=now.isoformat())
-    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 1_050_000)
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: (1_050_000, ce.utc_now_iso()))
     monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: False)
 
     assert resolve_reviewer_window(model).stale is False

@@ -51,14 +51,15 @@ class UIProbe:
             [selector, prop]))
 
     def send_chat(self, text: str, *, swarm: bool = False) -> None:
-        """The owner's send path: arm Swarm (force_plan on the WS frame) when asked, then send."""
+        """The owner's send path: when asked, put this room's Subagents capsule on Swarm first (a setting of the
+        room, saved before the send and kept after it), then send."""
         if swarm:
-            self.page.click("#chat-swarm")
-            self.page.wait_for_selector('#chat-swarm[data-armed="true"]', timeout=10_000)
+            self.page.click("#chat-subagents-mode .chat-subagents-head")
+            self.page.click('#chat-subagents-mode .chat-seg[data-mode="swarm"]')
+            self.page.wait_for_selector('#chat-subagents-mode[data-mode="swarm"][data-disabled="false"]', timeout=30_000)
+            self.page.keyboard.press("Escape")
         self.page.fill("#chat-input", text)
         self.page.click("#chat-send")
-        if swarm:
-            self.page.wait_for_selector('#chat-swarm[data-armed="false"]', timeout=30_000)
 
     def screenshot(self, path: pathlib.Path) -> None:
         pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)

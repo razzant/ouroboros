@@ -10,6 +10,8 @@ is written; a write that cannot be confirmed answers one 503.
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 import pathlib
@@ -20,6 +22,9 @@ import pytest
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.host_service import create_host_service_app
+# Import the route before another test temporarily replaces its auth dependency.
+# A lazy first import during a Places fixture would retain that fixture's stub.
+from ouroboros.gateway import host_notify
 from tests.test_host_service_api import _seed_token
 
 HEADERS = {"X-Skill-Token": "tok"}
@@ -49,9 +54,7 @@ def _client(tmp_path: pathlib.Path, *, granted: bool = True):
 
 def _rows(tmp_path: pathlib.Path) -> list[dict]:
     path = tmp_path / "logs" / "chat.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return dialogue_test.log_rows(path)
 
 
 def test_identity_advertises_the_notify_route(tmp_path: pathlib.Path) -> None:
@@ -115,6 +118,7 @@ def test_notices_are_refused_before_anything_is_written(tmp_path: pathlib.Path, 
 
 
 def test_bad_bodies_and_the_rate_lane_write_nothing(tmp_path: pathlib.Path, chat) -> None:
+    assert host_notify.NOTIFY_TEXT_MAX_CHARS == 400
     client, app = _client(tmp_path)
     for request in ({"content": b"not json"}, {"json": ["x"]}, {"json": {"text": "   "}}, {"json": {"text": 5}},
                     {"json": {}}, {"json": {"text": "x" * 401}}):

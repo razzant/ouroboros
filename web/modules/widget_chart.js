@@ -6,6 +6,7 @@
    widgets.js shares with them. Moved out of widgets.js unchanged (widgets
    lifecycle phase 3; the table cell helpers in the cycle-A fix round). */
 
+import { THEME_TRANSITION, seriesColours } from './theme_palette.js';
 import { normalizeTone } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -18,13 +19,6 @@ export function getPath(root, path, fallback = '') {
     }
     return current ?? fallback;
 }
-
-const CHART_PALETTE = [
-    ['#e85d6f', 'rgba(232, 93, 111, 0.22)'],
-    ['#60a5fa', 'rgba(96, 165, 250, 0.22)'],
-    ['#34d399', 'rgba(52, 211, 153, 0.22)'],
-    ['#fbbf24', 'rgba(251, 191, 36, 0.22)'],
-];
 
 export function finiteChartValue(value) {
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -42,21 +36,23 @@ export function chartConfig(component, data) {
         type,
         data: {
             labels: Array.isArray(labels) ? labels.map((item) => String(item ?? '')) : [],
-            datasets: Array.isArray(datasets) ? datasets.map((dataset, idx) => {
-                const [borderColor, backgroundColor] = CHART_PALETTE[idx % CHART_PALETTE.length];
-                return {
-                    label: String(dataset?.label ?? 'Series'),
-                    data: Array.isArray(dataset?.data) ? dataset.data.map(finiteChartValue) : [],
-                    borderColor,
-                    backgroundColor,
-                    spanGaps: false,
-                };
-            }) : [],
+            // The host's default series in their dark values; `ouroSeries` lets theme_palette.js
+            // repaint each in the mounted chart's theme. A bar carries its colour's edge.
+            datasets: Array.isArray(datasets) ? datasets.map((dataset, idx) => ({
+                label: String(dataset?.label ?? 'Series'),
+                data: Array.isArray(dataset?.data) ? dataset.data.map(finiteChartValue) : [],
+                ...seriesColours(idx),
+                ...(type === 'bar' ? { borderWidth: 2 } : {}),
+                ouroSeries: idx,
+                spanGaps: false,
+            })) : [],
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             spanGaps: false,
+            // A theme switch repaints the series at once, as the rest of the page does.
+            transitions: { [THEME_TRANSITION]: { animation: { duration: 0 } } },
             plugins: { legend: { display: true } },
             scales: {
                 x: { grid: { color: 'rgba(255, 255, 255, 0.06)' } },

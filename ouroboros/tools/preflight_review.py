@@ -59,13 +59,14 @@ def _handle_review_status(
     ctx: ToolContext, repo_key: str = "", tool_name: str = "", task_id: str = "",
     attempt: Optional[int] = None, include_raw: bool = False,
 ) -> str:
-    from ouroboros.review_state import compute_snapshot_hash
+    from ouroboros.review_ledger import ledger_root
     from ouroboros.review_status_projection import build_review_projection, build_review_status_payload
 
+    # ledger_root is review_state_root's canonical root without its move: reading migrates nothing.
     projection = build_review_projection(
         ctx.drive_root, repo_dir=getattr(ctx, "repo_dir", ""), repo_key=repo_key, tool_name=tool_name,
-        task_id=task_id, attempt=attempt, snapshot_hash_fn=compute_snapshot_hash,
-        reader_task_id=str(getattr(ctx, "task_id", "") or ""))
+        task_id=task_id, attempt=attempt,
+        reader_task_id=str(getattr(ctx, "task_id", "") or ""), canonical_root=ledger_root(ctx))
     payload = build_review_status_payload(projection, next_step=_next_step(projection), include_raw=include_raw)
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -88,8 +89,8 @@ def _preflight_review_params() -> Dict[str, Any]:
                             items={"type": "string"}),
             "deterministic_only": _param("boolean", "Free release diagnostics and worktree book balance before "
                                                     "buying review; no reviewer, staging, tests or record; requires source.", default=False),
-            "source": _param("string", "Release metadata: worktree reads current files; index reads staged blobs. "
-                                      "Book balance is separately labelled worktree.",
+            "source": _param("string", "Release metadata: worktree reads current files; index reads staged blobs and admits neutral contributions. "
+                                      "Ordinary serving commits still require a numbered release. Book balance is labelled worktree.",
                              enum=["worktree", "index"]),
         },
         "required": [],
@@ -97,7 +98,8 @@ def _preflight_review_params() -> Dict[str, Any]:
 
 
 _PREFLIGHT_DESCRIPTION = (
-    "Optional early look by ONE named enabled catalog row, in the review pool or not. Reads the system "
+    "Optional paid early look at the system worktree by ONE named enabled catalog row, in the review pool or "
+    "not; deterministic_only is the free diagnostic form. Reads the system "
     "worktree via review_change(subject=worktree, surface=preflight, reviewers=[reviewer]), also used by "
     "commit_reviewed(preflight_reviewer=...). Informational, never a gate or an answer for the commit panel; "
     "unchanged worktree reuses its settled record free. No tests here; commit_reviewed runs them. "
@@ -111,8 +113,8 @@ _REVIEW_STATUS_DESCRIPTION = (
     "brief); open commit-readiness debt (`commit_readiness_debts`, `commit_readiness_debts_count`; a durable "
     "anti-thrashing signal that `retry_anchor` names, never an admission gate); the checkout's newest "
     "preflight look (`preflight`) and whether the worktree "
-    "moved since it (`stale_from_edit`, its editor when a tool recorded the edit); the history of legacy "
-    "advisory runs; and a next_step. Pass include_raw=true "
+    "moved since it (`stale_from_edit`, its editor when a tool recorded the edit); where this drive archives the "
+    "retired advisory lane's rows (`advisory_run_archive`, history only); and a next_step. Pass include_raw=true "
     "for the targeted attempt's full per-actor evidence (triad_raw_results, scope_raw_result)."
 )
 

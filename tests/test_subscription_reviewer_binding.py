@@ -35,7 +35,6 @@ def accounts(tmp_path, monkeypatch):
                 "models": [{"id": "exact-model", "contextWindow": current["windows"][account]}]}
 
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
-    monkeypatch.setattr(ce, "_generative_probe_window", lambda *_a, **_kw: pytest.fail("No generation probe"))
     return current
 
 
@@ -48,18 +47,10 @@ def _options(account):
     return {"source_id": "test-source", "credential_profile_id": account, "account_fingerprint": f"identity-{account}"}
 
 
-def test_same_model_slots_keep_their_actual_distinct_capacity_and_acceptance_cap(accounts):
-    from ouroboros.review_dispatch import acceptance_slot_fit
-    from ouroboros.review_evidence_sections import acceptance_packet_budget_chars
-
+def test_same_model_slots_keep_their_actual_distinct_capacity(accounts):
     slots = _slots()
     caps = per_slot_input_token_limits([MODEL, MODEL], slots=slots, output_reserve=16_000, tokenizer_margin=50_000)
     assert caps == {"review-a": 159_000, "review-b": 734_000}
-    packet = acceptance_packet_budget_chars(slots)
-    assert packet.slot_input_caps == caps
-    executor = SimpleNamespace(prompt_chars=lambda: 100_000)
-    assert acceptance_slot_fit(slots[0], executor, slot_input_caps=caps)[0] == 159_000
-    assert acceptance_slot_fit(slots[1], executor, slot_input_caps=caps)[0] == 734_000
     assert {account for _source, account in accounts["calls"]} == {"account-a", "account-b"}
 
 
@@ -105,14 +96,6 @@ def test_triad_fit_uses_the_already_frozen_rows(tmp_path, accounts, monkeypatch)
     assert {account for _source, account in accounts["calls"]} == {"account-a", "account-b"}
 
 
-def test_bound_cap_map_with_missing_slot_is_never_an_unlimited_dispatch():
-    from ouroboros.review_dispatch import acceptance_slot_fit
-
-    with pytest.raises(ValueError, match="frozen reviewer slot"):
-        acceptance_slot_fit(_slots()[0], SimpleNamespace(prompt_chars=lambda: 100_000),
-                            slot_input_caps={"different-slot": 800_000})
-
-
 @pytest.mark.parametrize("mode", ["pin", "auto"])
 def test_ack_is_reachable_after_fresh_binding_without_an_extra_fetch_and_stays_on_a(tmp_path, accounts, mode):
     ce.record_owner_ack(tmp_path, provider="claudexor", model=MODEL, window_tokens=1_200_000, options=_options("account-a"))
@@ -125,7 +108,7 @@ def test_ack_is_reachable_after_fresh_binding_without_an_extra_fetch_and_stays_o
     b = ce.probe(tmp_path, provider="claudexor", model=MODEL,
                  options={"source_id": "test-source", "credential_profile_id": "account-b" if mode == "pin" else ""})
     assert b.source == "provider_metadata" and b.window_tokens == 800_000
-    assert b.route_fp != a.route_fp and not ce.confirms_at_least(b)
+    assert b.route_fp != a.route_fp
     assert len(accounts["calls"]) == calls + 2
 
 
@@ -156,10 +139,10 @@ def test_explicit_capability_ack_passes_exact_options_through_existing_gateway(t
     assert ack["binding_evidence"]["credential_profile_id"] == "account-a"
     acked = ce.probe(tmp_path, provider="claudexor", model=MODEL,
                      options={"source_id": "test-source", "credential_profile_id": "account-a"})
-    assert acked.source == "owner_ack" and ce.confirms_at_least(acked, 1_200_000)
+    assert acked.source == "owner_ack"
     other = ce.probe(tmp_path, provider="claudexor", model=MODEL,
                      options={"source_id": "test-source", "credential_profile_id": "account-b"})
-    assert other.source != "owner_ack" and not ce.confirms_at_least(other, 1_200_000)
+    assert other.source != "owner_ack"
 
 
 @pytest.mark.parametrize("change", [{}, {"account_fingerprint": "old-identity"}, {"source_id": "other-source"}])
@@ -173,7 +156,7 @@ def test_unknown_or_changed_binding_cannot_mint_owner_ack(tmp_path, accounts, ch
 def test_manual_sizing_stays_separate_from_explicit_scope_ack(tmp_path, accounts, monkeypatch):
     monkeypatch.setenv("OUROBOROS_MODEL_CONTEXT_WINDOWS", json.dumps({"deep_review": 1_200_000}))
     window = resolve_reviewer_window(MODEL, model_role="deep_review", credential_profile_id="account-a")
-    assert window.sizing_window() == 1_200_000 and window.window_tokens == 200_000
+    assert window.sizing_window() == 1_200_000 and window.window_record.contradicted_by.tokens == 200_000
     assert window.sizing_source == "user_setting" and ce.list_owner_acks(tmp_path) == []
 
 

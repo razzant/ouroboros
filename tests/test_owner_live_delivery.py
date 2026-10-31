@@ -35,6 +35,7 @@ class TestDeliverOwnerEvent:
         ctx = _ctx(event_queue=q)
         mode = deliver_owner_event(ctx, {"type": "send_message", "chat_id": 123, "text": "hi"})
         assert mode == "live"
+        assert ctx._owner_message_sent is True
         assert ctx.pending_events == []
         assert len(q.items) == 1
         frame = q.items[0]
@@ -46,6 +47,7 @@ class TestDeliverOwnerEvent:
         ctx = _ctx(event_queue=None)
         mode = deliver_owner_event(ctx, {"type": "send_photo", "chat_id": 123})
         assert mode == "deferred"
+        assert ctx._owner_message_sent is True
         assert ctx.pending_events[0]["root_task_id"] == "t-root"
 
     def test_retry_duplicates_are_accepted_policy(self):
@@ -66,12 +68,14 @@ class TestDeliverOwnerEvent:
         mode = deliver_owner_event(ctx, {"type": "send_message", "chat_id": -5, "text": "x"})
         assert mode == "deferred"
         assert q.items == []
+        assert not getattr(ctx, "_owner_message_sent", False)
 
     def test_full_queue_goes_sticky_deferred(self):
         broken = _Queue(full=True)
         ctx = _ctx(event_queue=broken)
         first = deliver_owner_event(ctx, {"type": "send_message", "chat_id": 1, "text": "a"})
         assert first == "deferred"
+        assert ctx._owner_message_sent is True
         # The queue recovers, but ordering wins: the task stays deferred so
         # frame B cannot overtake the already-buffered frame A.
         ctx.event_queue = _Queue()
@@ -82,6 +86,15 @@ class TestDeliverOwnerEvent:
 
 
 class TestSendToolsLiveIntegration:
+    def test_a2a_message_does_not_count_as_owner_delivery(self, tmp_path):
+        from ouroboros.tools.control import _send_user_message
+
+        ctx = _ctx(chat_id=-5)
+        ctx.drive_logs = lambda: tmp_path
+        _send_user_message(ctx, "A message to the peer.")
+        assert ctx.pending_events[0]["chat_id"] == -5
+        assert not getattr(ctx, "_owner_message_sent", False)
+
     def test_send_user_message_live_and_chat_zero(self, tmp_path):
         from ouroboros.tools.control import _send_user_message
 

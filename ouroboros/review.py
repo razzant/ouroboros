@@ -654,6 +654,32 @@ def _manifest_inventory_errors(
     return errors
 
 
+def _parent_base_fabrication_errors(
+    manifest: SizeRatchetManifest,
+    inventory: SizeRatchetInventory,
+) -> list[str]:
+    """A degraded parent base is refused only for debt its manifest declares and its own tree lacks.
+
+    Debt the parent's tree holds and its manifest omits makes that parent honestly red; its manifest
+    is then stricter than the tree and lends the tip nothing (a tip that keeps the debt fails its own
+    live check, and the transition reads the debt as new), so a fix-forward of a red parent passes.
+    A band entry of a module that grew above the band is the same under-declaration."""
+    errors: list[str] = []
+    for label, live, recorded, kept in (
+        ("GIANT_PATHS", inventory.giant_paths, manifest.giant_paths, frozenset()),
+        ("FUNCTION_DEBT", inventory.function_debt, manifest.function_debt, frozenset()),
+        ("BAND_PATHS", inventory.band_paths, frozenset(manifest.band_paths),
+         inventory.above_band_paths | inventory.giant_paths),
+    ):
+        for item in sorted(recorded - live - kept):
+            errors.append(f"{label} contains stale entry: {item!r}")
+    live_bytes = dict(inventory.byte_debt)
+    for path, recorded_bytes in sorted(dict(manifest.byte_debt).items()):
+        if recorded_bytes > live_bytes.get(path, 0):
+            errors.append(f"BYTE_DEBT declares more than the tree holds: {path!r}")
+    return errors
+
+
 def _bootstrap_baseline_errors(
     manifest: SizeRatchetManifest,
     inventory: SizeRatchetInventory,
@@ -974,7 +1000,7 @@ def validate_size_ratchet_transition_against_base(
         # equality is exactly what the laundering constructs.
         try:
             parent_inventory = collect_size_ratchet_inventory_at_ref(root, parent_ref)
-            parent_errors = _manifest_inventory_errors(previous, parent_inventory)
+            parent_errors = _parent_base_fabrication_errors(previous, parent_inventory)
         except Exception as exc:
             parent_errors = [f"pairwise-parent: inventory failed: {type(exc).__name__}: {exc}"]
         if parent_errors:

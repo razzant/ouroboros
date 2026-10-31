@@ -34,7 +34,7 @@ def test_applied_hurry_and_authored_progress(direct_server_with_data, request, e
         for row in rows:
             _emit_ws_frame(page, row)
         card = page.locator('.chat-live-card[data-task-id="emoji-hurry"]')
-        card.locator('[data-live-summary-button]').click()
+        card.locator('[data-live-disclosure]').click()
         text = card.inner_text()
         host_clean = "Fallback: host route" in text and "⚡ Fallback: host route" not in text
         assert "⚡ Fallback: model quote" in text and "⚡ Fallback: narrator quote" in text, text
@@ -75,10 +75,10 @@ def test_skill_review_first_line_and_lazy_critic_quotes(direct_server_with_data,
     rows = [{"type": "chat", "role": "system", "system_type": "skill_review", "content": text, "chat_id": 1,
              "ts": f"2026-10-10T16:00:0{index}+00:00", **({"skill": "emoji-review", "job_id": "emoji-job"} if index else {})}
             for index, text in enumerate((legacy, compact))]
-    from supervisor.message_bus import append_jsonl
+    from ouroboros import dialogue_store
 
     for row in rows:
-        append_jsonl(server["data_dir"] / "logs/chat.jsonl", {
+        dialogue_store.append(server["data_dir"], "chat", {
             **{key: value for key, value in row.items() if key not in {"role", "type", "content", "system_type"}},
             "direction": "system", "type": "skill_review", "text": row["content"],
         })
@@ -194,29 +194,31 @@ def test_settings_cost_warnings_skip_review_and_authored_widget(direct_server_wi
         page.screenshot(path=str(evidence / 'costs-warning.png'))
         page.locator('[data-nav-page="skills"]').click()
         card = page.locator('.skills-card[data-skill="emoji-own"]')
-        hint = card.locator('.skills-lock-hint')
-        assert hint.inner_text().startswith('Locked:')
-        assert hint.evaluate("n => getComputedStyle(n, '::before').content") in ('none', 'normal', '""')
-        card.locator('[data-skill-menu-trigger]').click()
-        skip = page.locator('.skills-card-menu-dialog[open] .skills-attest-review')
+        # What the skill needs is one sentence in a tray, its actions beside it, no glyph prefix.
+        tray = card.locator('.skills-tray').first
+        assert tray.inner_text().startswith('Made on this computer.')
+        assert tray.evaluate("n => getComputedStyle(n, '::before').content") in ('none', 'normal', '""')
+        skip = card.locator('.skills-tray [data-skill-action="attest_review"]')
         assert skip.inner_text().strip() == 'Skip review'
         for theme in ('dark', 'light'):
             page.emulate_media(color_scheme=theme)
             page.wait_for_function("theme => document.documentElement.dataset.theme === theme", arg=theme)
             page.evaluate("() => Promise.all(document.getAnimations().filter(a => a instanceof CSSTransition).map(a => a.finished.catch(() => null)))")
-            assert skip.evaluate("""node => {
+            # A neutral capsule: its stroke glyph carries the warning, the words say what it does.
+            assert skip.locator('.skills-skip-glyph').evaluate("""node => {
                 const sample = document.createElement('span'); sample.style.color = 'var(--status-warn-fg)';
                 node.append(sample); const expected = getComputedStyle(sample).color; sample.remove();
                 return getComputedStyle(node).color === expected;
-            }"""), 'Skip review retains its warning foreground'
-            page.screenshot(path=str(evidence / f'skip-review-menu-{theme}.png'))
+            }"""), 'Skip review keeps its warning glyph'
+            assert skip.locator('svg').count() == 1, 'the glyph is a vector, never an emoji'
+            page.screenshot(path=str(evidence / f'skip-review-tray-{theme}.png'))
         skip.click()
         dialog = page.locator('.confirm-dialog')
         assert 'Skip review for emoji-own' in dialog.inner_text()
         with page.expect_response('**/api/owner/skills/emoji-own/attest-review') as response:
             dialog.locator('[data-confirm-ok]').click()
         assert response.value.ok, response.value.text()
-        page.wait_for_function("document.querySelector('.skills-card[data-skill=\"emoji-own\"]')?.textContent.includes('owner-attested')")
+        page.wait_for_function("document.querySelector('.skills-card[data-skill=\"emoji-own\"]')?.textContent.includes('review skipped by you')")
         page.screenshot(path=str(evidence / 'skip-review.png'))
         # The Widgets page consumes declared glyphs; the authored icon is not host chrome.
         tabs = [{"skill": "emoji-own", "tab_id": "authored", "title": "Authored widget", "icon": "🦊",

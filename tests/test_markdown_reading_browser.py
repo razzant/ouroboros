@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from tests.ui_console_errors import PageErrors
+
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
@@ -133,7 +135,6 @@ def reading_ui(request):
     playwright = pytest.importorskip("playwright.sync_api")
     engine = request.param
     foreign: list[str] = []
-    errors: list[str] = []
 
     class Handler(SimpleHTTPRequestHandler):
         def log_message(self, *_):
@@ -188,12 +189,12 @@ def reading_ui(request):
                         writeText: async (text) => { window.__copied = text; },
                     }});
                 })()""")
-                page.on("pageerror", lambda error: errors.append(str(error)))
+                errors = PageErrors(page, engine)
                 page.route("**/*", local_only)
                 page.route("**/api/**", respond)
                 page.route_web_socket("**/ws", lambda ws: ws.send(json.dumps({"type": "heartbeat"})))
                 yield {"page": page, "url": f"http://{origin}", "engine": engine, "foreign": foreign}
-                assert not errors
+                assert not errors.unexpected(), errors
             finally:
                 browser.close()
     finally:

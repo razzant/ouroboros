@@ -23,10 +23,10 @@ def test_ignore_warning_does_not_disable_next_thread_turn(author, tmp_path, thre
     thread_gateway.before_turn = replace_ignore
     first = _run(author, drive, source)
     receipt = first["checking_evidence"]
-    assert receipt["status"] == "retained" and receipt["refresh_safe"]
+    assert receipt["status"] == "retained"
     assert ".gitignore" in receipt["listing_warning"]
     second = _run(author, drive, source, operation="op-2", thread_id=first["thread_id"])
-    assert second["checking_evidence"]["refresh_safe"]
+    assert second["checking_evidence"]["status"] == "retained"
     assert len(thread_gateway.turn_requests) == 2
 
 
@@ -36,13 +36,13 @@ def test_trace_environment_is_not_missing_inventory(author, tmp_path, monkeypatc
     rc.prepare_seat_area(drive, "task", "op", source)
     monkeypatch.setenv("GIT_TRACE", "1")
     monkeypatch.setenv("GIT_TRACE_SETUP", "1")
-    result = rc.capture_seat_evidence(drive, "task", "op", release=True)
+    result = rc.capture_seat_evidence(drive, "task", "op")
     assert result["status"] == "retained" and not result["listing_warning"]
 
 
 @pytest.mark.parametrize("kind", ["git", "directory"])
 @pytest.mark.parametrize("output", ["file", "fifo"])
-def test_named_root_or_special_keeps_copy_with_one_gap(author, tmp_path, kind, output):  # noqa: F811
+def test_named_root_or_special_is_one_gap_and_releases_the_copy(author, tmp_path, kind, output):  # noqa: F811
     if output == "fifo" and not hasattr(os, "mkfifo"):
         pytest.skip("FIFO requires POSIX")
     drive = tmp_path / "drive"
@@ -62,11 +62,9 @@ def test_named_root_or_special_keeps_copy_with_one_gap(author, tmp_path, kind, o
         named.mkdir()
         os.mkfifo(named / "pipe")
         expected = {"path": f"{rc.EVIDENCE_DIRNAME}/pipe", "reason": "unsupported_entry_type"}
-    result = rc.capture_seat_evidence(drive, "task", "op", release=True)
+    result = rc.capture_seat_evidence(drive, "task", "op")
     assert result["status"] == "partial" and result["gaps"] == [expected]
-    assert area.is_dir() and not result["refresh_safe"]
-    if output == "file":
-        assert named.read_bytes() == b"a command redirected its log here\n"
+    assert not area.exists(), "a receipt that names its gap releases the copy"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX can open directories as raw descriptors")

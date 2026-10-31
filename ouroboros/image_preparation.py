@@ -77,6 +77,9 @@ def retain_original(directory: pathlib.Path, raw: bytes, name: str) -> pathlib.P
     else:
         from ouroboros.utils import write_bytes_atomic
         write_bytes_atomic(path, raw)
+    if directory.name == "views" and directory.parent.name == "uploads":
+        from ouroboros.maintenance_retirement import artifact_changed
+        artifact_changed(directory.parent.parent)
     return path
 
 

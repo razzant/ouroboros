@@ -20,6 +20,7 @@ import types
 import pytest
 
 from ouroboros import launcher_appearance as la
+from ouroboros import launcher_window_chrome
 
 FULL_WIDTH_HWND = 0x7FFF_0000_1234  # above 32 bits: a ToInt32 handle would not survive
 # Each page names itself by when it became the window's page (theme.js: performance.timeOrigin).
@@ -68,8 +69,9 @@ class Window:
 
 @pytest.fixture
 def windows(monkeypatch):
-    """The Windows path with its native seams replaced by recorders."""
+    """The Windows path with its native seams replaced by recorders (the macOS title bar: test_launcher_window_chrome)."""
     monkeypatch.setattr(la, "_WINDOWS", True)
+    monkeypatch.setattr(launcher_window_chrome, "_MACOS", False)
     state = types.SimpleNamespace(writes=[], refreshes=[], high_contrast=False, hresult=0)
 
     def write(hwnd, dark):
@@ -282,11 +284,12 @@ def test_each_desktop_window_owns_its_appearance_and_bridge(windows, monkeypatch
     from ouroboros import launcher_onboarding
 
     monkeypatch.setattr(lb, "indicator_class", lambda: None)
-    background = lb.Background(lambda: None, lambda: 8765, threading.Event())
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
     main = Window("#0d0b0f")
     main.events.closing, main.events.shown = Hook(), Hook()
     background.attach(main)
-    assert main.events.before_show.handlers == [background.appearance._before_show]  # no indicator hook
+    # No indicator hook: the caption tint's and the page zoom's own (launcher_page_zoom) only.
+    assert main.events.before_show.handlers == [background.appearance._before_show, background.zoom._before_show]
 
     class Api(lb.DesktopApi):
         _background = background
@@ -305,7 +308,7 @@ def test_each_desktop_window_owns_its_appearance_and_bridge(windows, monkeypatch
 
     fake.create_window, fake.start = create_window, lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "webview", fake)
-    launcher_onboarding.present_first_run_onboarding({}, 8765, open_external_url=lambda url: {"ok": False})
+    launcher_onboarding.present_first_run_onboarding({}, 1, open_external_url=lambda url: {"ok": False})
     setup = created["window"]
     assert created["js_api"].set_native_appearance("dark", PAGE_A, 1) == {"ok": True, "state": "pending"}
     setup.events.before_show.fire()

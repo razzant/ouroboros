@@ -18,9 +18,9 @@ One adapter per platform, used only where the platform path is actually there:
 * macOS: ``UNUserNotificationCenter``, inside an app bundle (a bare interpreter has no identity
   to authorize). The framework is loaded dynamically and the block signatures it needs are
   registered here, so no new PyObjC wrapper joins the frozen launcher.
-* Windows: a notification-area balloon, which Windows 10/11 present as a system notification, on
-  an icon of its own until its click (``launcher_tray.NotificationIcon``): a balloon's events name
-  no balloon, so one icon per notification is what ties a click to its own source.
+* Windows: a balloon on the app's one notification-area icon (``launcher_tray.WindowsTray``), which
+  Windows 10/11 present as a system notification. A balloon click names no balloon, so it opens the
+  newest one's source (owner decision 1A); the icon is there for the whole desktop run.
 * Linux: the freedesktop Notifications service on the session bus through ``gi``'s Gio, when a
   notification server answers. The server owns the sound; nothing else plays one.
 
@@ -141,9 +141,6 @@ class NativeNotifier:
             log.warning("Native notification failed; the page falls back.", exc_info=True)
             return refused(self.platform, FAILED, _reason(exc))
 
-    def stop(self, wait: float = 0.0) -> None:
-        """The launcher's exit or Panic: release what would outlive the process (Windows' icons)."""
-
     def _clicked(self, token: str) -> None:
         """A notification was clicked: off the platform's callback thread, which must not wait on the page."""
         threading.Thread(target=self._on_click, args=(str(token or ""),), name="ouroboros-notification-click",
@@ -170,6 +167,7 @@ _MAC_ALLOW = 2 | 4  # UNAuthorizationOptionSound | Alert: no badge (DESIGN §9)
 _MAC_PRESENT = 2 | 4 | 8 | 16  # presentation Sound | Alert | List | Banner: in front too (2A)
 _MAC_DEFAULT_ACTION = "com.apple.UNNotificationDefaultActionIdentifier"
 _MAC_STATUS = {0: NOT_DETERMINED, 1: DENIED, 2: AUTHORIZED, 3: AUTHORIZED, 4: AUTHORIZED}
+_MAC_SOUND_SETTING = {2: "enabled", 1: "disabled"}  # UNNotificationSetting; 0 is notSupported
 _MAC_CLASSES = ("UNUserNotificationCenter", "UNMutableNotificationContent", "UNNotificationRequest",
                 "UNNotificationSound")
 _mac_shared: dict = {}  # an Objective-C class is process-wide: the delegate is defined once
@@ -265,11 +263,32 @@ class MacNotifier(NativeNotifier):
             raise Unavailable(self._broken)
         return self._center
 
-    def _status(self) -> str:
+    def status(self) -> dict:
+        try:
+            return self._settings_answer()
+        except Exception as exc:
+            return {**capability(self.platform, UNAVAILABLE, _reason(exc)), "sound_setting": "unknown"}
+
+    def ask(self) -> dict:
+        answer = super().ask()
+        # Authorization alone does not mean sound is enabled in System Settings.
+        if answer["status"] in (AUTHORIZED, DENIED):
+            return self.status()
+        return {**answer, "sound_setting": "unknown"}
+
+    def _settings_answer(self) -> dict:
         center = self._ready()
         (settings,) = _await(lambda done: center.getNotificationSettingsWithCompletionHandler_(
             lambda value: done(value)), _REPLY_WAIT)
-        return _MAC_STATUS.get(int(settings.authorizationStatus()), UNAVAILABLE)
+        status = _MAC_STATUS.get(int(settings.authorizationStatus()), UNAVAILABLE)
+        try:
+            sound = _MAC_SOUND_SETTING.get(int(settings.soundSetting()), "unknown")
+        except Exception:
+            sound = "unknown"
+        return {**capability(self.platform, status), "sound_setting": sound}
+
+    def _status(self) -> str:
+        return self._settings_answer()["status"]
 
     def _request(self) -> str:
         status = self._status()
@@ -287,11 +306,10 @@ class MacNotifier(NativeNotifier):
         return AUTHORIZED if granted else DENIED
 
     def _deliver(self, title, body, sound, token):
-        # Only the owner's gesture asks (``ask``); an alert that finds the question unasked falls back.
-        status = self._status()
-        if status != AUTHORIZED:
-            # Still unasked after the system's question failed: its error stays the reason.
-            return refused(self.platform, status, self._ask_error if status == NOT_DETERMINED else "")
+        # The page checks snapshot and current preferences immediately before
+        # calling us. Do not insert a blocking permission wait after that
+        # last cancellable boundary. The OS enforces permission at submission.
+        center = self._ready()
         content = self._classes["UNMutableNotificationContent"].alloc().init()
         content.setTitle_(title)
         if body:
@@ -300,13 +318,27 @@ class MacNotifier(NativeNotifier):
             content.setSound_(self._classes["UNNotificationSound"].defaultSound())
         request = self._classes["UNNotificationRequest"].requestWithIdentifier_content_trigger_(token, content, None)
         try:
-            (error,) = _await(lambda done: self._center.addNotificationRequest_withCompletionHandler_(
+            (error,) = _await(lambda done: center.addNotificationRequest_withCompletionHandler_(
                 request, lambda value: done(value)), _REPLY_WAIT)
         except TimeoutError:
             # Added, unanswered: the center may still show it, and its click still carries the token.
             return unconfirmed(self.platform, "no_completion")
         if error is not None:
-            return refused(self.platform, FAILED, str(error.localizedDescription()))
+            try:
+                denied = str(error.domain()) == "UNErrorDomain" and int(error.code()) == 1
+            except Exception:
+                denied = False
+            if not denied:
+                return refused(self.platform, FAILED, _ns_error(error))
+            # "Not allowed" is also the answer while the question is unasked. Only after this definite
+            # refusal, one bounded read tells them apart; an unreadable answer stays a denial.
+            try:
+                unasked = self._status() == NOT_DETERMINED
+            except Exception:
+                unasked = False
+            if unasked:
+                return refused(self.platform, NOT_DETERMINED, self._ask_error)
+            return refused(self.platform, DENIED, _ns_error(error))
         return submitted(self.platform, "os" if sound else "off")
 
 
@@ -316,15 +348,18 @@ _WINDOWS_TEXT = "Open Ouroboros to see it."  # a balloon needs text; with text h
 
 
 class WindowsNotifier(NativeNotifier):
-    """Windows' notification settings decide how a balloon appears; Sound off asks it for silence
-    (``launcher_tray.show_balloon``), which only WinForms' own call, the fallback, cannot (DESIGN §9)."""
+    """Balloons on the launcher's one icon (``tray``, a ``launcher_tray.WindowsTray``), whose own click
+    opens the newest balloon's source through the same ``on_click``. The icon is never started for a
+    notification: before it is up, or once it is gone (exit, Panic), the answer is ``unavailable`` and
+    the page falls back. Windows' notification settings decide how a balloon appears; Sound off asks it
+    for silence (``launcher_tray.show_balloon``), which only WinForms' own call, the fallback, cannot
+    (DESIGN §9)."""
 
     platform = "windows"
 
-    def __init__(self, on_click) -> None:
+    def __init__(self, on_click, tray=None) -> None:
         super().__init__(on_click)
-        self._icons = None
-        self._lock = threading.Lock()
+        self._tray = tray
 
     def _status(self) -> str:
         if sys.platform != "win32":
@@ -335,27 +370,17 @@ class WindowsNotifier(NativeNotifier):
             raise Unavailable(f"no_winforms: {type(exc).__name__}") from exc
         return AUTHORIZED  # no per-app question; Windows' own notification settings still decide
 
-    def _pump(self):
-        with self._lock:
-            if self._icons is None:
-                from ouroboros.launcher_tray import NotificationIcon
-
-                self._icons = NotificationIcon(self._clicked)
-        return self._icons
-
     def _deliver(self, title, body, sound, token):
         self._status()
-        outcome = self._pump().show(title, body or _WINDOWS_TEXT, sound, token)
+        tray = self._tray
+        outcome = tray.balloon(title, body or _WINDOWS_TEXT, sound, token) if tray is not None else False
         if outcome is None:
             return unconfirmed(self.platform, "balloon_unconfirmed")
         if not outcome:
-            if not self._icons.alive.is_set():
+            if tray is None or not tray.ready.is_set():
                 return refused(self.platform, UNAVAILABLE, "notification_area_unavailable")
             return refused(self.platform, FAILED, "balloon_not_submitted")
         return submitted(self.platform, outcome)
-
-    def stop(self, wait: float = 0.0) -> None:
-        self._pump().stop(wait)  # one never started stays unstarted: no alert after the exit began
 
 
 # --------------------------------------------------------------------------------------- Linux ---
@@ -461,12 +486,13 @@ class FreedesktopNotifier(NativeNotifier):
         return submitted(self.platform, "os" if server_sound else "none")
 
 
-def native_notifier(on_click):
-    """This platform's adapter, or None (the bridge then answers ``unavailable``)."""
+def native_notifier(on_click, indicator=None):
+    """This platform's adapter, or None (the bridge then answers ``unavailable``). ``indicator``: the
+    launcher's own (Windows shows its notifications as balloons on it)."""
     if sys.platform == "darwin":
         return MacNotifier(on_click)
     if sys.platform == "win32":
-        return WindowsNotifier(on_click)
+        return WindowsNotifier(on_click, indicator)
     if sys.platform.startswith("linux"):
         return FreedesktopNotifier(on_click)
     return None

@@ -24,6 +24,7 @@ class Node {
     }
     async emit(type) { await Promise.all((this.listeners.get(type) || []).map((handler) => handler())); }
     append(...nodes) { this.children.push(...nodes); }
+    after(...nodes) { this.following = nodes; }
 }
 
 function fixture({ value = 'sk-ant-a...', applied = value, savedSelector = () => ({ key: 'ANTHROPIC_API_KEY' }), ...options } = {}) {
@@ -40,7 +41,8 @@ function fixture({ value = 'sk-ant-a...', applied = value, savedSelector = () =>
     const button = new Node(doc);
     const root = { querySelectorAll: () => [input] };
     const controller = bindSecretReveal(input, button, { savedSelector, ...options });
-    const [source, preview, status] = row.children;
+    const [source, status] = row.children;
+    const [preview] = input.following;
     return { input, button, root, label, source, preview, status, controller,
         snapshot: () => JSON.stringify({ value: input.value, type: input.type, dataset: input.dataset }) };
 }
@@ -59,6 +61,7 @@ test('selected saved reveal is complete plain text and leaves the draft byte-ide
     assert.deepEqual(selectors, [{ key: 'ANTHROPIC_API_KEY' }]);
     assert.equal(f.preview.textContent, longValue);
     assert.equal(f.preview.hidden, false);
+    assert.equal(f.input.hidden, true, 'the value stands in the masked input\'s own place');
     assert.equal(f.snapshot(), before);
     assert.equal(f.button.textContent, 'Hide');
     assert.equal(f.button.getAttribute('aria-expanded'), 'true');
@@ -68,6 +71,7 @@ test('selected saved reveal is complete plain text and leaves the draft byte-ide
     await f.button.emit('click');
     assert.equal(f.preview.textContent, '');
     assert.equal(f.preview.hidden, true);
+    assert.equal(f.input.hidden, false);
     assert.equal(f.button.getAttribute('aria-expanded'), 'false');
     assert.equal(f.snapshot(), before);
     assert.equal(selectors.length, 1);
@@ -116,6 +120,7 @@ for (const action of ['hide', 'type', 'clear', 'identity', 'reload', 'detach']) 
         const f = fixture({ savedSelector: () => ({ mcp_server_id: 'saved-server' }), identityInputs: [identity] });
         const pending = f.button.emit('click');
         assert.equal(f.button.getAttribute('aria-busy'), 'true');
+        assert.equal(f.input.hidden, false, 'a pending read keeps the masked input in place');
         if (action === 'hide') await f.button.emit('click');
         if (action === 'type' || action === 'clear') {
             f.input.value = action === 'type' ? 'newly typed value' : '';
@@ -128,6 +133,7 @@ for (const action of ['hide', 'type', 'clear', 'identity', 'reload', 'detach']) 
         await pending;
         assert.equal(f.preview.textContent, '');
         assert.equal(f.preview.hidden, true);
+        assert.equal(f.input.hidden, false);
         assert.notEqual(f.input.value, longValue);
         if (action !== 'detach') {
             assert.equal(f.button.textContent, 'Show');
@@ -163,6 +169,7 @@ test('failure and malformed success remain retryable, never a partial Show or a 
     for (let attempt = 0; attempt < 2; attempt += 1) {
         await f.button.emit('click');
         assert.equal(f.preview.textContent, '');
+        assert.equal(f.input.hidden, false);
         assert.equal(f.button.textContent, 'Show');
         assert.equal(f.status.hidden, false);
         assert.match(f.status.textContent, /Could not show this value/);

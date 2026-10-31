@@ -206,7 +206,7 @@ def validate_ingress(payload: Any, typed_dict: Any) -> List[str]:
 
 # Body words of ``endpoint_index.Shape``: anything else names a contract TypedDict (JSON).
 _BODY_MEDIA = {
-    "json": "application/json", "html": "text/html", "sse": "text/event-stream",
+    "json": "application/json", "html": "text/html", "text": "text/plain", "sse": "text/event-stream",
     "file": "application/octet-stream", "zip": "application/zip", "js": "application/javascript",
     "empty": "", "any": "*/*", "multipart": "multipart/form-data",
     "form": "application/x-www-form-urlencoded",
@@ -215,7 +215,9 @@ CONTRACT_MODULES = (
     "ouroboros.gateway.contracts", "ouroboros.gateway.client_contracts",
     "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts",
     "ouroboros.gateway.ui_i18n_contracts", "ouroboros.gateway.mcp_import_contracts",
-    "ouroboros.gateway.model_route_contracts",
+    "ouroboros.gateway.model_route_contracts", "ouroboros.gateway.card_contracts",
+    "ouroboros.gateway.skill_source_contracts",
+    "ouroboros.gateway.call_contracts",
 )
 _CONTRACT_CACHE: Dict[str, Any] = {}
 
@@ -249,7 +251,9 @@ def _contract_http_entry(token: str, shape: Any, public_paths: frozenset, names:
     entry: Dict[str, Any] = {
         "method": method, "path": path,
         "path_params": re.findall(r"\{([^}:]+)(?::[^}]*)?\}", path),
-        "auth": "public" if path in public_paths else "gate",
+        "auth": ("asset_lease" if path in {"/api/widget-assets/{token}/{path:path}",
+                                           "/api/widget-resources/{token}/{path:path}"} else
+                 "public" if path in public_paths else "gate"),
         "typed": shape is not None,
     }
     if shape is None:
@@ -300,6 +304,11 @@ def contract_document() -> Dict[str, Any]:
         names.update(name for name in (inbound, outbound) if name)
         messages.append({"type": ws_type, **({"inbound": inbound} if inbound else {}),
                          **({"outbound": outbound} if outbound else {})})
+    from ouroboros.gateway.call_contracts import socket_contract
+    call = socket_contract()
+    names.update(call["peer_messages"].values())
+    names.update(call["server_messages"].values())
+    names.update(("CallSocketContract", "HostCallOpenRequest", "HostCallOpenResponse"))
     document = {
         "abi_version": GATEWAY_ABI_VERSION,
         "runtime_version": get_version(),
@@ -307,6 +316,7 @@ def contract_document() -> Dict[str, Any]:
         "interface_paths": list(index.INTERFACE_PATHS),
         "http": http,
         "ws": {"path": "/ws", "messages": messages, "extension_namespace": index.EXTENSION_WS_NAMESPACE},
+        "call_socket": call,
         "schemas": {name: _described_schema(name) for name in sorted(names)},
     }
     _CONTRACT_CACHE["document"] = document

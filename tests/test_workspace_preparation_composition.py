@@ -100,15 +100,17 @@ def test_readonly_admission_between_preparation_checks_and_enqueue_keeps_caps(en
                                  for i in range(schedule.MAX_ACTIVE_SUBAGENTS_HARD_CAP - 1))
 
     checked, release = threading.Event(), threading.Event()
-    original = task_admission.enqueue_subagent_with_scheduled_result
+    original = prep.PreparationClaim.admit
 
-    def before_interlock(ctx, task, **kwargs):
-        if task["id"] == "acting":
+    def before_handover(claim, step):
+        # The copy lane's checks are done; the final admission step is about to be handed to the
+        # admission lane, where every admission step is FIFO: a sibling admitted meanwhile lands first.
+        if claim.task_id == "acting":
             checked.set()
             assert release.wait(_WAIT_SEC), "test did not release final admission"
-        return original(ctx, task, **kwargs)
+        return original(claim, step)
 
-    monkeypatch.setattr(task_admission, "enqueue_subagent_with_scheduled_result", before_interlock)
+    monkeypatch.setattr(prep.PreparationClaim, "admit", before_handover)
     event = env.request("acting")
     assert env.dispatch_returns(event)
     try:
@@ -117,6 +119,11 @@ def test_readonly_admission_between_preparation_checks_and_enqueue_keeps_caps(en
         sibling["parent_task_id"] = "parent"
         write_task_result(env.data, "readonly", "requested", parent_task_id="parent")
         assert env.dispatch_returns(sibling)
+        deadline = threading.Event()
+        for _ in range(int(_WAIT_SEC * 100)):
+            if env.row("readonly")["status"] == "scheduled":
+                break
+            deadline.wait(0.01)
         assert env.row("readonly")["status"] == "scheduled"
     finally:
         release.set()
@@ -168,7 +175,8 @@ def test_prepared_child_sql_contention_releases_q_and_keeps_exact_marker(env, mo
                     constraints="", task_context="", preparation=claim,
                 )
         elif seam == "final":
-            with pytest.raises(store.StoreBusy):
+            # Off a lane the gate waits only the caller's budget: zero here, so the held store refuses at once.
+            with pytest.raises(store.StoreBusy), store.acquisition_budget(0):
                 task_admission.enqueue_subagent_with_scheduled_result(
                     env.ctx, {"id": "busy"}, result_fields={}, admitted_task_contract={},
                     admitted_depth_provenance={}, direct_child_count=0, pending_ref=queue.PENDING, preparation=claim,
@@ -178,13 +186,14 @@ def test_prepared_child_sql_contention_releases_q_and_keeps_exact_marker(env, mo
                 claim.refuse("preparation ended", prep.INTERRUPTED_BY_GENERATION_EXIT)
 
     probed, controlled = threading.Event(), threading.Event()
-    waits = []
+    under_q = []
     real_connect, real_snapshot = store.connect, env.ctx.persist_queue_snapshot
 
     def connecting(path, tier, **kwargs):
+        # The moved paths open storage only OFF Q; a connection while Q is owned is the old defect.
         if queue._queue_lock._is_owned():
-            waits.append(kwargs.get("wait_sec", 0))
-            probed.set()
+            under_q.append(kwargs.get("wait_sec", 0))
+        probed.set()
         return real_connect(path, tier, **kwargs)
 
     def snapshot(reason=""):
@@ -199,15 +208,15 @@ def test_prepared_child_sql_contention_releases_q_and_keeps_exact_marker(env, mo
             future = pool.submit(invoke)
             try:
                 assert probed.wait(3), "prepared-child read never reached the held SQLite store"
-                assert waits == [0], "a prepared-child owner borrowed SQLite waiting while holding Q"
+                assert under_q == [], "a prepared-child owner opened SQLite while holding Q"
                 control = pool.submit(dispatch_event, {
                     "type": "budget_root_fence", "task_id": "independent",
                     "resource_limit": {"scope": "root", "root_task_id": "other-root"},
                 }, env.ctx)
                 assert controlled.wait(3), "the contended preparation held Q against a real control"
+                future.result(timeout=_WAIT_SEC)  # refused at once off Q, while the store is still held
             finally:
                 release_database()
-            future.result(timeout=_WAIT_SEC)
             control.result(timeout=_WAIT_SEC)
     assert env.row("busy") == before  # no invented never-admitted receipt or newer-owner overwrite
     assert env.pending_ids() == []

@@ -56,10 +56,11 @@ def _readiness(q: Any, task: Dict[str, Any], row: Dict[str, Any]) -> str:
 def _vetoed(q: Any, task: Dict[str, Any]) -> str:
     """Why a ready sleeper may not wake now (``""`` = it may)."""
     from ouroboros.owner_pause import member_fence
-    from supervisor.events_budget import budget_hold_fact
+    from ouroboros.work_stop import continuation_refusal, current_stop, writer_wait
 
-    if budget_hold_fact(task) is not None:
-        return str(budget_hold_fact(task).get("reason") or "held")
+    stop = current_stop(task, {"budget": q.BUDGET_ROOT_FENCES})
+    if stop or writer_wait(task) or continuation_refusal(task):
+        return str(stop.get("reason") or stop.get("cause") or "continuation_unavailable")
     fence = member_fence(SimpleNamespace(
         task_id=str(task.get("id") or ""), root_task_id=str(task.get("root_task_id") or task.get("id") or ""),
         budget_drive_root=str(task.get("budget_drive_root") or q.DRIVE_ROOT)))

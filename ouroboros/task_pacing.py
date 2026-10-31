@@ -1,8 +1,7 @@
-"""Task pacing SSOT: threshold crossings, the finalization reserve and review-budget inputs.
+"""Task pacing SSOT: threshold crossings, the finalization reserve and budget snapshots.
 
-Owns the time/cost threshold notices, the finalization reserve, budget snapshots and
-improvement-pass gates driven by ``task_contract.budget_profile`` (``improvement_policy``
-fixed | adaptive).
+Owns the time/cost threshold notices, the finalization reserve and the budget snapshots
+read from ``task_contract.budget_profile``.
 
 Design contract:
 - A threshold notice states the crossing once per threshold (owner 13 Oct: keep the
@@ -14,9 +13,7 @@ Design contract:
   against what remained when this execution started (#1129) — so other tasks'
   spending moves the wallet crossing, and this task's spend is never presented as
   the wallet's.
-- The gates are ADVISORY inputs to the host's review machinery; the model's own
-  finalization stays P5 judgment. Forced-finalization escape hatches bypass the
-  obligation gate unconditionally — a deadline never hangs on review passes.
+- The model's own finalization stays P5 judgment.
 - ``loop.py`` keeps only transport (message append + checkpoint emit); every
   threshold, text, and time computation lives here.
 - Threshold notices carry ``resource_facts`` (``with_resource_facts``): per-tool
@@ -35,28 +32,10 @@ import pathlib
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
-from ouroboros.config import (
-    get_acceptance_reserve_pct,
-    get_acceptance_review_est_sec,
-    get_finalization_grace_sec,
-)
+from ouroboros.config import get_finalization_grace_sec
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
-from ouroboros.review_cycles import get_acceptance_max_improvement_passes
 
-
-# The host never predicts how long a review takes (owner R52, 2026-09-03). A
-# task has three host-owned rails: a deadline, a paid-cycle cap and a wallet —
-# and the time rail is this ONE number, the minimum spendable window (remaining
-# time above the finalization reserve) an acceptance panel needs in order to
-# START. `OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC` configures it and never lowers it
-# below this floor. Author work uses the ordinary task reserve, not another
-# review-sized window. Once launched a
-# review is an ordinary operation, clamped to the owner deadline and the task
-# ceiling with the per-send money fence, and a deadline-cut review is a typed
-# degraded outcome. Panel durations are recorded as telemetry
-# (`task_acceptance_review_timing`) and nothing decides on them.
-_ACCEPTANCE_REVIEW_RESERVE_FLOOR_SEC = 200.0
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +51,7 @@ class PacingNote:
 @dataclass(frozen=True)
 class BudgetSnapshot:
     """Time-budget facts in seconds: the narrower explicit calendar deadline or execution
-    budget. ``has_deadline=False`` (neither) leaves only pass-COUNT gates (default 1)."""
+    budget. ``has_deadline=False`` (neither) means the task has no time axis."""
 
     has_deadline: bool
     total_sec: float = 0.0
@@ -116,13 +95,11 @@ def observe_budget_profile(ctx: Any) -> Dict[str, Any]:
 resolve_budget_profile = observe_budget_profile
 
 
-def _acceptance_floor_sec() -> float:
-    """The time rail: the configured floor, never below 200 s."""
-    return max(_ACCEPTANCE_REVIEW_RESERVE_FLOOR_SEC, float(get_acceptance_review_est_sec()))
-
-
 def acceptance_timing_events_path(ctx: Any) -> pathlib.Path:
-    """Return the canonical event stream shared across split task drives."""
+    """Return the canonical event stream shared across split task drives.
+
+    The root admission seal and the owner-source acknowledgement write their durable
+    rows here; the name is the one the stream had when task acceptance owned it."""
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
     root = pathlib.Path(str(
@@ -134,21 +111,21 @@ def acceptance_timing_events_path(ctx: Any) -> pathlib.Path:
 
 
 def _reserve_sec(total_sec: float, profile: Dict[str, Any]) -> float:
-    """Finalization reserve = max(grace window, reserve_pct × total)."""
+    """Finalization reserve = the grace window, or max(grace, reserve_pct × total) when the
+    task's budget profile states ``reserve_finalization_pct``."""
     grace = float(get_finalization_grace_sec())
     pct = profile.get("reserve_finalization_pct")
     if pct is None:
-        pct = get_acceptance_reserve_pct()
+        return grace
     return max(grace, total_sec * (float(pct) / 100.0))
 
 
 def effective_finalization_reserve_sec(ctx: Any) -> float:
     """The EMIT window before a real deadline (v6.55.0): the plain finalization grace to
     emit one best-effort answer or let a network tool return; read by the local
-    deadline-finalize trigger and the network-tool clamp. NOT the percentage reserve
-    (``BudgetSnapshot.reserve_sec`` = max(grace, pct×total)): that is a review-admission
-    gate (don't START a review you cannot finish), and applying it here force-finalized
-    a 6h task ~54 min early on the 15% profile (adversarial review r1)."""
+    deadline-finalize trigger and the network-tool clamp. NOT a profile's percentage
+    reserve (``BudgetSnapshot.reserve_sec``): applying it here force-finalized a 6h task
+    ~54 min early on the 15% profile (adversarial review r1)."""
     return float(get_finalization_grace_sec())
 
 
@@ -208,76 +185,9 @@ def _budget_snapshot(
     if execution is None:
         return calendar
     # The earlier cutoff owns remaining time; either bound's proportional reserve can
-    # still close review/author admission first, so both gates survive.
+    # still end the spendable window first, so both reserves survive.
     nearest = execution if execution.remaining_sec < calendar.remaining_sec else calendar
     return replace(nearest, reserve_sec=nearest.remaining_sec - min(execution.spendable_sec, calendar.spendable_sec))
-
-
-def review_launch_allowed(snapshot: BudgetSnapshot) -> Tuple[bool, str]:
-    """Gate 1: run an acceptance review only when it fits ABOVE the reserve.
-
-    Historically a review could start two minutes before the deadline and kill
-    the task; skipping inside the reserve is a strict improvement. No deadline →
-    always allowed (the pass counter is the only axis). The host does not
-    predict the panel's duration (owner R52): the configured floor
-    (``_acceptance_floor_sec``) is the whole time rail, and a spendable window
-    at or below it is refused ``review_skipped_deadline_reserve``. PURE — a
-    read-only observer may ask; nothing is recorded here."""
-    if not snapshot.has_deadline:
-        return True, ""
-    if snapshot.spendable_sec > _acceptance_floor_sec():
-        return True, ""
-    return False, "review_skipped_deadline_reserve"
-
-
-def effective_max_improvement_passes(
-    profile: Dict[str, Any], *,
-    required_blocking: bool = False,
-) -> Optional[int]:
-    """The COUNT axis for improvement passes.
-
-    An explicit task-local cap always binds (owner "Hurry up" overlays 0).
-    Without one there is no separate author-response count: paid reviewer
-    admission owns N. Deadline and global lifecycle rails still apply.
-    """
-    cap = profile.get("max_improvement_passes")
-    # An explicit task-local cap is authoritative under every policy.
-    if cap is not None:
-        return max(0, int(cap))
-    cap = get_acceptance_max_improvement_passes()
-    return None if cap is None else max(0, int(cap))
-
-
-from ouroboros.task_results import (  # noqa: E402,F401 - compatibility re-export
-    effective_task_acceptance_review_cycles,
-    project_task_acceptance_review_capacity,
-)
-
-
-def improvement_pass_allowed(
-    snapshot: BudgetSnapshot,
-    passes_done: int,
-    profile: Dict[str, Any],
-    *,
-    required_blocking: bool = False,
-    ctx: Any = None,
-) -> Tuple[bool, str]:
-    """Gate 2: one more improvement/obligation pass?
-
-    Only the explicit task-local count and ordinary finalization reserve bind
-    author work. The reviewer-sized time floor belongs to new critic admission.
-    """
-    cap = effective_max_improvement_passes(
-        profile,
-        required_blocking=required_blocking,
-    )
-    if cap is not None and passes_done >= cap:
-        return False, "improvement_passes_exhausted"
-    if not snapshot.has_deadline:
-        return True, ""
-    if snapshot.spendable_sec > 0:
-        return True, ""
-    return False, "improvement_window_inside_reserve"
 
 
 # ---------------------------------------------------------------------------
@@ -837,7 +747,15 @@ def prospective_wrapup_attempt_request(
 
     processing_preference = resolve_processing_preference(model_role, override=processing_preference)
 
-    if not callable(getattr(llm, "_resolve_remote_target", None)):
+    resolved = None
+    if callable(getattr(llm, "_resolve_remote_target", None)):
+        from ouroboros.llm_attempt import ConnectionUnavailable
+
+        try:
+            resolved = llm._resolve_remote_target(model)
+        except ConnectionUnavailable:  # the send refuses it ($0) and walks the configured routes; the probe estimates
+            resolved = None
+    if resolved is None:
         return _merge_scope(AttemptRequest(
             model=model, provider=infer_provider_from_model(model),
             prompt_tokens_estimate=prompt_tokens,
@@ -846,7 +764,7 @@ def prospective_wrapup_attempt_request(
             force_unknown_reservation=bool(processing_preference),
         ))[0]
 
-    target = {**llm._resolve_remote_target(model), "processing_preference": processing_preference}
+    target = {**resolved, "processing_preference": processing_preference}
     if target.get("provider") == "claudexor":
         from ouroboros.llm_claudexor import _request, prepare_processing_target
 
@@ -888,6 +806,7 @@ def prepared_wrapup_candidate(
     from ouroboros.model_slots import task_model_binding, task_processing_preference
     from ouroboros.model_wait import current_model_wait
     from ouroboros.send_clock import MainSendClock, main_clock_policy
+    from ouroboros.transcript_prefix import append_reasoning_retirement_fact, retire_main_reasoning
 
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     waiter = current_model_wait()
@@ -896,6 +815,8 @@ def prepared_wrapup_candidate(
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)
 
+    retire_main_reasoning(ctx, messages)
+    append_reasoning_retirement_fact(ctx.accumulated_usage, getattr(ctx, "round_idx", None), messages)
     # Named residual: reads the task's refused-image memory, never recovers a first refusal (vision_routing).
     send_messages = _prepare_main_messages(
         messages, model=ctx.active_model, llm=ctx.llm,
@@ -1020,11 +941,9 @@ def _cost_checkpoint(
     """The tree-axis cost checkpoint payload, with ONE meaning per key name.
 
     ``task_cost_usd`` has meant THIS task's own accumulated cost since v6.56.0
-    and still does — ``loop.py``'s ``_acceptance_loop_rails`` publishes the same
-    name with the same meaning, and the rails line renders it as "$X spent this
-    task". v6.91 briefly published the tree-accounted DECIDING number under that
-    name, so the same key silently changed axis across a version boundary and
-    every historical log reader would have been quietly re-pointed. The deciding
+    and still does. v6.91 briefly published the tree-accounted DECIDING number
+    under that name, so the same key silently changed axis across a version
+    boundary and every historical log reader would have been quietly re-pointed. The deciding
     number now rides its own honest name instead, and both are always present so
     no reader has to infer which axis a value came from (``spend_basis`` says
     which one the crossing used; ``budget_axis`` which bound it was measured on)."""
@@ -1246,147 +1165,6 @@ def _workspace_delivery(ctx: Any) -> bool:
     return bool(getattr(ctx, "workspace_root", None))
 
 
-def acceptance_rails_line(
-    budget_snapshot: Any,
-    budget_profile: Dict[str, Any],
-    passes_done: int,
-    loop_rails: Optional[Dict[str, Any]],
-    *,
-    required_blocking: bool,
-    workspace: bool = False,
-) -> str:
-    """Fail-soft wrapper: the rails line is advisory context; it must never
-    take down the acceptance path (fable review r2 #3). Extracted from
-    ``loop.py`` (S3 byte offset) — pacing display belongs to the pacing SSOT."""
-    try:
-        return _acceptance_rails_line_inner(
-            budget_snapshot, budget_profile, passes_done, loop_rails,
-            required_blocking=required_blocking, workspace=workspace,
-        )
-    except Exception:
-        log.debug("acceptance rails line failed soft", exc_info=True)
-        return ""
-
-
-def _headroom_phrase(
-    remaining_known_usd: Optional[float],
-    cost_ceiling_usd: Optional[float],
-    task_cost_usd: Optional[float],
-) -> str:
-    """Money headroom to the bound that actually binds first, and which one it is.
-
-    The wallet remainder alone reads as more room than the task has: the
-    in-task ceiling usually stops it earlier. Both are shown as one number so
-    the mind plans against the real limit, with the binding bound named."""
-    wallet = None if remaining_known_usd is None else float(remaining_known_usd)
-    ceiling_room = None
-    if cost_ceiling_usd is not None and task_cost_usd is not None:
-        ceiling_room = max(0.0, float(cost_ceiling_usd) - float(task_cost_usd))
-    if wallet is None and ceiling_room is None:
-        return "budget left unknown"
-    if ceiling_room is None:
-        return f"${wallet:.2f} unreserved shared budget left (wallet binds)"
-    if wallet is None or ceiling_room <= wallet:
-        return f"${ceiling_room:.2f} unreserved budget left (in-task cost ceiling binds)"
-    return f"${wallet:.2f} unreserved shared budget left (wallet binds)"
-
-
-def _acceptance_rails_line_inner(
-    budget_snapshot: Any,
-    budget_profile: Dict[str, Any],
-    passes_done: int,
-    loop_rails: Optional[Dict[str, Any]],
-    *,
-    required_blocking: bool,
-    workspace: bool = False,
-) -> str:
-    """One line naming every active termination source with its remaining
-    headroom (v6.74.0 A1, owner Q6): money, time, rounds, review passes. Each
-    rail comes from its real source — the usage ledger projection, the
-    BudgetSnapshot, the loop's round counter, and the pacing pass cap — and an
-    unavailable rail is omitted rather than guessed. For workspace deliveries
-    the line also carries the tree directive (v6.74.4) — a delivery-state
-    instruction, not a termination source. Fail-soft: never raises."""
-    parts: list[str] = []
-    rails = loop_rails if isinstance(loop_rails, dict) else {}
-    try:
-        money_bits: list[str] = []
-        cost = rails.get("task_cost_usd")
-        if cost is not None:
-            money_bits.append(f"${float(cost):.2f} spent this task")
-        try:
-            from ouroboros.usage_accounting import current_usage_scope, usage_projection
-
-            scope = current_usage_scope()
-            if scope is not None and scope.root_task_id:
-                projection = usage_projection(
-                    scope.drive_root, global_limit_usd=scope.global_limit_usd,
-                )
-                root = usage_projection(scope.drive_root, root_task_id=scope.root_task_id)
-                remaining = projection.get("remaining_known_usd")
-                money_bits.append(_headroom_phrase(remaining, rails.get("cost_ceiling_usd"), root.get("settled_usd")))
-        except Exception:
-            log.debug("rails: budget projection unavailable", exc_info=True)
-        if money_bits:
-            parts.append("money: " + ", ".join(money_bits))
-    except (TypeError, ValueError):
-        pass
-    try:
-        if getattr(budget_snapshot, "has_deadline", False):
-            parts.append(
-                f"time: {max(0.0, budget_snapshot.remaining_sec) / 60:.0f} min left "
-                f"({budget_snapshot.reserve_sec / 60:.0f} min finalization reserve)"
-            )
-    except (TypeError, ValueError):
-        pass
-    try:
-        round_idx = rails.get("round_idx")
-        max_rounds = rails.get("max_rounds")
-        if round_idx is not None and max_rounds:
-            parts.append(f"rounds: {int(round_idx)}/{int(max_rounds)}")
-    except (TypeError, ValueError):
-        pass
-    try:
-        cap = effective_max_improvement_passes(
-            budget_profile,
-            required_blocking=required_blocking,
-        )
-        if cap is None:
-            parts.append(
-                f"author response passes: {int(passes_done)} done, no local count cap "
-                "(deadline/budget rails bind)"
-            )
-        else:
-            passes_part = f"author passes: {int(passes_done)}/{int(cap)}"
-            # v6.74.4 freeze directive (count axis): the pass launched at
-            # cap-1 is the last one improvement_pass_allowed will admit, so
-            # say so. cap==0 never feeds a capsule back; skip the clause, and
-            # passes_done >= cap (supersede-reset re-review) is not a launch.
-            if 0 <= int(passes_done) < int(cap) and int(passes_done) + 1 >= int(cap):
-                passes_part += " — FINAL improvement pass, no further passes will run"
-            parts.append(passes_part)
-        paid_cap = effective_task_acceptance_review_cycles(budget_profile)
-        parts.append(f"paid reviewer cycles: {'unlimited' if paid_cap is None else paid_cap} maximum; "
-                     "receiving feedback does not buy another panel")
-    except (TypeError, ValueError):
-        pass
-    try:
-        # v6.74.4: EVERY workspace improvement capsule carries the tree
-        # directive, not just the provably-final one — a deadline/cost rail
-        # can end the loop between capsules (commit triad r1, sol), and the
-        # tree ships as-is on any forced end.
-        if workspace:
-            parts.append(
-                "workspace delivery: the deliverable is your working tree as "
-                "it stands when the task ends — keep it in a VERIFIED state "
-                "(rebuild, verify, and commit if the task calls for a commit) "
-                "and revert unverified edits rather than shipping them"
-            )
-    except (TypeError, ValueError):
-        pass
-    return "; ".join(parts)
-
-
 def build_time_budget_note(ctx: Any) -> Optional[PacingNote]:
     """One notice per crossing of 50/25/10% remaining on the nearer explicit time bound.
 
@@ -1457,6 +1235,8 @@ def record_tool_activity(ctx: Any, result: Dict[str, Any]) -> None:
     })
     row["calls"] += 1
     row["error_calls"] += int(bool(result.get("is_error")))
+    from ouroboros.task_activity_facts import record_tool_count
+    record_tool_count(ctx, activity)
     duration = (result.get("result_meta") or {}).get("duration_ms")
     if (isinstance(duration, (int, float)) and not isinstance(duration, bool)
             and math.isfinite(duration) and duration >= 0):

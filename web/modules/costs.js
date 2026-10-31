@@ -34,6 +34,26 @@ export function costBucketPresentation(info) {
     return details ? `${formatUsd2(cost)} (pending, ${details})` : `${formatUsd2(cost)} (pending)`;
 }
 
+// A plain "saved" is an acknowledgement of what the owner just did and ends by itself; anything the owner may still
+// need to act on or read (a restart still required, a warning, an error) stays until the next save replaces it.
+const SAVE_ACK_MS = 4000;
+
+/** What one budget save says and whether that saying may end by itself: `{ text, tone, transient }`. */
+export function budgetSavePresentation(data = {}) {
+    let text;
+    // `restart_required` is the server's whole restart state, so with nothing changed it is a setting saved earlier.
+    if (data.no_changes) text = data.restart_required ? 'No changes. Restart still required.' : 'No changes.';
+    else if (data.restart_required) text = 'Saved. Restart required.';
+    else if (data.immediate_changed && data.next_task_changed) {
+        text = 'Saved. Some changes took effect immediately; others apply on the next task.';
+    } else if (data.immediate_changed) text = 'Saved. Took effect immediately.';
+    else text = 'Saved. Applies on the next task.';
+    const warned = Boolean(data.warnings?.length);
+    if (warned) text += ' Warnings: ' + data.warnings.join(' | ');
+    const standing = warned || Boolean(data.restart_required);
+    return { text, tone: standing ? 'warn' : 'ok', transient: !standing };
+}
+
 /** Pure cost-dashboard projection: null/unavailable never renders as $0.
  * The limit is set against KNOWN spend (settled: confirmed + estimated), the number
  * that refuses new paid calls (#1487); reservations and unresolved upper bounds are
@@ -80,12 +100,32 @@ export function initCosts({ state, mount }) {
     const page = document.createElement('div');
     page.id = 'page-costs';
     page.className = 'settings-embedded-content settings-costs-panel';
+    // The known spend leads, and what leaves it incomplete stands in the same card (DESIGN §2, one primary thing); the
+    // composition, the open hold and the technical facts follow, then the limit it is set against, then the tables.
     page.innerHTML = `
         <div class="costs-scroll">
+            <section class="costs-lead stat-card" aria-label="Known spend">
+                <div class="costs-lead-head">
+                    <div class="label">Known spend / Limit</div>
+                    <button class="btn btn-default btn-sm costs-budget-refresh" id="btn-refresh-costs">Refresh</button>
+                </div>
+                <div class="value" id="cost-known-limit">Loading…</div>
+                <div class="costs-lead-facts">
+                    <div class="costs-fact"><div class="label">Cost final</div><div class="value" id="cost-final">Loading…</div></div>
+                    <div class="costs-fact"><div class="label">Unresolved upper bound</div><div class="value" id="cost-unresolved">—</div></div>
+                    <div class="costs-fact"><div class="label">Unknown / unmetered</div><div class="value" id="cost-unknown">—</div></div>
+                </div>
+            </section>
+            <div class="costs-stats-grid">
+                <div class="stat-card"><div class="label">Confirmed</div><div class="value" id="cost-confirmed">—</div></div>
+                <div class="stat-card"><div class="label">Estimated</div><div class="value" id="cost-estimated">—</div></div>
+                <div class="stat-card"><div class="label">Reserved</div><div class="value" id="cost-reserved">—</div></div>
+                <div class="stat-card costs-technical"><div class="label">Physical attempts</div><div class="value" id="cost-calls">—</div></div>
+                <div class="stat-card costs-technical"><div class="label">Top Model</div><div class="value cost-top-model" id="cost-top-model">-</div></div>
+            </div>
             <div class="costs-budget-card">
                 <div class="costs-budget-head">
                     <h3 class="costs-budget-title">Budget</h3>
-                    <button class="btn btn-default btn-sm costs-budget-refresh" id="btn-refresh-costs">Refresh</button>
                 </div>
                 <div class="costs-budget-fields">
                     <div class="form-field ui-field">
@@ -100,17 +140,6 @@ export function initCosts({ state, mount }) {
                 </div>
                 <button class="btn btn-save costs-budget-save" id="btn-save-budget">Save Budget</button>
                 <div id="budget-save-status" class="settings-inline-status"></div>
-            </div>
-            <div class="costs-stats-grid">
-                <div class="stat-card"><div class="label">Known spend / Limit</div><div class="value" id="cost-known-limit">Loading…</div></div>
-                <div class="stat-card"><div class="label">Confirmed</div><div class="value" id="cost-confirmed">—</div></div>
-                <div class="stat-card"><div class="label">Estimated</div><div class="value" id="cost-estimated">—</div></div>
-                <div class="stat-card"><div class="label">Reserved</div><div class="value" id="cost-reserved">—</div></div>
-                <div class="stat-card"><div class="label">Unresolved upper bound</div><div class="value" id="cost-unresolved">—</div></div>
-                <div class="stat-card"><div class="label">Unknown / unmetered</div><div class="value" id="cost-unknown">—</div></div>
-                <div class="stat-card"><div class="label">Cost final</div><div class="value" id="cost-final">Loading…</div></div>
-                <div class="stat-card"><div class="label">Physical attempts</div><div class="value" id="cost-calls">—</div></div>
-                <div class="stat-card"><div class="label">Top Model</div><div class="value cost-top-model" id="cost-top-model">-</div></div>
             </div>
             <div class="costs-tables-grid">
                 <div>
@@ -230,12 +259,17 @@ export function initCosts({ state, mount }) {
 
     document.getElementById('btn-refresh-costs').addEventListener('click', loadCosts);
 
+    // One timer owner for the save feedback: every new save, valid or not, cancels the pending clear first, so an
+    // older acknowledgement can never erase what a newer save is saying.
+    let ackTimer = 0;
     document.getElementById('btn-save-budget').addEventListener('click', async (event) => {
         const statusEl = document.getElementById('budget-save-status');
+        clearTimeout(ackTimer);
         const budget = readPositiveBudget('s-budget');
         const perTask = readPositiveBudget('s-per-task-cost');
         if (budget === null || perTask === null) {
             statusEl.textContent = 'Budget values must be at least 0.01.';
+            statusEl.dataset.tone = 'error';
             return;
         }
         const saveButton = event.currentTarget;
@@ -251,21 +285,12 @@ export function initCosts({ state, mount }) {
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-            let msg;
-            if (data.no_changes) {
-                msg = 'No changes.';
-            } else if (data.restart_required) {
-                msg = 'Saved. Restart required.';
-            } else if (data.immediate_changed && data.next_task_changed) {
-                msg = 'Saved. Some changes took effect immediately; others apply on the next task.';
-            } else if (data.immediate_changed) {
-                msg = 'Saved. Took effect immediately.';
-            } else {
-                msg = 'Saved. Applies on the next task.';
+            const saved = budgetSavePresentation(data);
+            statusEl.textContent = saved.text;
+            statusEl.dataset.tone = saved.tone;
+            if (saved.transient) {
+                ackTimer = setTimeout(() => { statusEl.textContent = ''; delete statusEl.dataset.tone; }, SAVE_ACK_MS);
             }
-            if (data.warnings && data.warnings.length) msg += ' Warnings: ' + data.warnings.join(' | ');
-            statusEl.textContent = msg;
-            statusEl.dataset.tone = (data.warnings?.length || data.restart_required) ? 'warn' : 'ok';
             window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'budget saved', source: 'costs' } }));
         } catch (e) {
             statusEl.textContent = 'Error: ' + e.message;
@@ -274,7 +299,6 @@ export function initCosts({ state, mount }) {
             saveButton.disabled = false;
             saveButton.removeAttribute('aria-busy');
         }
-        setTimeout(() => { statusEl.textContent = ''; }, 4000);
     });
 
     function refreshCostsPanel() {

@@ -79,6 +79,7 @@ class ToolContext:
     current_chat_id: Optional[int] = None
     current_task_type: Optional[str] = None
     pending_restart_reason: Optional[str] = None
+    pending_restart_request: Optional[Dict[str, Any]] = None
     last_push_succeeded: bool = False
     last_reviewed_commit_sha: str = ""
     # The real binder accepts keyword facts (``narration=True`` for a tool that relays

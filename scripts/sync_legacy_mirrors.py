@@ -4,10 +4,10 @@
 Before 2026-05-31 Ouroboros lived at ``joi-lab/ouroboros`` (a fork of this
 repository) and ``joi-lab/ouroboros-desktop``. Both stay archived with a
 "moved" notice, yet old posts, clones, Colab links and installed builds still
-reach them. After every stable release (``main`` advances to the release tag
-only once the release is published) this script checks that the source commit
-carries that published, non-prerelease tag, then briefly unarchives each mirror
-and:
+reach them. After every stable release (``main`` takes a release only once it is
+published, as a promotion commit over its tag) this script reads the source
+commit through to that tag, checks that it is the published, non-prerelease
+release, then briefly unarchives each mirror and:
 
 - fast-forwards its update branches to the stable commit (never a force push:
   a branch that is not an ancestor of the stable commit is reported and left);
@@ -295,6 +295,22 @@ def refresh(gh: GitHub, token: str, mirror: Mirror, source: str, version: str, s
         log.append(f"{mirror.repo}: {'would mark' if gh.dry_run else 'marked'} {marked} outdated releases")
 
 
+def released_commit(source: str) -> str:
+    """The tagged commit a Stable promotion projected onto main (scripts/promote_stable.py).
+
+    A promotion commit's tree is its tag's tree plus ``Casks/``; the tag is its last
+    parent. Any other commit is returned as it is."""
+    for _ in range(20):
+        parents = git("rev-list", "--parents", "-n", "1", source).split()[1:]
+        below = next((parent for parent in reversed(parents)
+                      if (changed := git("diff", "--name-only", parent, source).splitlines())
+                      and all(path.startswith("Casks/") for path in changed)), None)
+        if below is None:
+            return source
+        source = below
+    return source
+
+
 def published_stable_problem(gh: GitHub, source: str, version: str) -> str:
     """Empty when ``source`` is the commit of the published, non-prerelease ``v<VERSION>``."""
     tag = f"v{version}"
@@ -342,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     gh = GitHub(token, args.dry_run)
     if args.archive_only:
         return archive_all(gh, [m for m in MIRRORS if not args.only or m.repo in args.only])
-    source = git("rev-parse", f"{args.source_ref}^{{commit}}")
+    source = released_commit(git("rev-parse", f"{args.source_ref}^{{commit}}"))
     version = git("show", f"{source}:VERSION").strip()
     try:
         reason = published_stable_problem(gh, source, version)

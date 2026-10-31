@@ -110,6 +110,8 @@ def test_legacy_30_second_cadence_loads_as_valid_settings_form(subscription_ui, 
     legacy["OUROBOROS_SUBAGENTS"] = json.dumps(legacy["OUROBOROS_SUBAGENTS"])
     legacy.pop("_meta")
     legacy["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
+    # The independent one-time Safety upgrade has already run; cadence is still legacy.
+    legacy["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] = "full"
     path = tmp_path / "settings.json"
     path.write_text(json.dumps(legacy), encoding="utf-8")
     before = path.read_bytes()

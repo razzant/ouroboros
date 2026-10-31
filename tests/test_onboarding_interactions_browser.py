@@ -166,6 +166,41 @@ def test_wizard_local_stop_failure_preserves_edit_and_retry_feedback(subscriptio
     capture(page, "wizard-local-stop-retried")
 
 
+@pytest.mark.parametrize("viewport", [(980, 780), (390, 844)])
+def test_wizard_steps_taller_than_the_window_scroll_by_wheel_and_keyboard(subscription_ui, viewport):
+    # A wizard step is a document. The app shell's fixed body must not reach it, or its footer
+    # is reachable only by the automatic scroll-into-view of a test, never by an owner.
+    page = subscription_ui["page"]
+    width, height = viewport
+    page.set_viewport_size({"width": width, "height": height})
+    _open_wizard(subscription_ui)
+    page.click("#next-btn")
+    page.wait_for_selector('[data-model-role="main"]')
+    assert page.evaluate("document.scrollingElement.scrollHeight") > height
+    footer_seen = "() => document.querySelector('#next-btn').getBoundingClientRect().bottom <= innerHeight"
+    page.mouse.move(width / 2, height / 2)
+    page.mouse.wheel(0, 20000)
+    page.wait_for_function(footer_seen, timeout=5000)
+    page.evaluate("window.scrollTo(0, 0)")
+    page.locator(".step-title").focus()
+    page.keyboard.press("End")
+    page.wait_for_function(footer_seen, timeout=5000)
+
+
+def test_wizard_saved_server_rows_bind_their_secret_controls_once(subscription_ui):
+    # The shared editor binds the rows it mounts; the card's own pass must not bind them again.
+    subscription_ui["bootstrap"]["initialState"].update(connections=[{
+        "kind": "openai-compatible", "name": "beta", "label": "Beta", "base_url": "http://127.0.0.1:1/v1",
+        "api_key": "***"}])
+    page = _open_wizard(subscription_ui)
+    row = page.locator("[data-connection-row][data-uid]")
+    key = row.locator('[data-connection-field="api_key"]')
+    assert row.locator(".secret-toggle").get_attribute("aria-controls") == key.get_attribute("id") + "-reveal"
+    edits = key.evaluate("""el => { let n = 0; el.addEventListener('input', (e) => { if (!e.isTrusted) n += 1; });
+        el.closest('[data-connection-row]').querySelector('.secret-clear').click(); return n; }""")
+    assert edits == 1
+
+
 def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_ui):
     page = _open_wizard(subscription_ui)
     page.locator('[data-collapse="api-access"] > summary').click()

@@ -35,12 +35,6 @@ def _read(rel: str) -> str:
 # ────────── Bug 1 (polish): the retired loop's rows replay honestly ──────────
 
 
-def test_log_events_has_no_background_loop_projector():
-    src = _read("web/modules/log_events.js")
-    assert "consciousness_state" not in src
-    assert "bg-consciousness" not in src
-
-
 def test_history_never_fabricates_a_terminal_status_for_legacy_bg_rows(tmp_path):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -81,13 +75,14 @@ def test_live_card_disclosure_is_explicit_user_owned_state():
 def test_live_card_timeline_only_follows_when_pinned():
     src = _read("web/modules/chat_render_batch.js")
     renderer = src[
-        src.index("export function createLiveCardTimelineRenderer"):
+        src.index("export function timelineScroll"):
         src.index("export function createTimelineAnchors")
     ]
-    assert renderer.count("const pinned =") == 2
-    assert "const prevTop = el.scrollTop, newest = el.lastElementChild;" in renderer
-    # Only a new newest line follows; a disclosure or late full output keeps its place.
-    assert "el.scrollTop = pinned && el.lastElementChild !== newest ? el.scrollHeight : prevTop;" in renderer
+    # The place is read before the write: pinned within 24px of the end, the top, the newest line.
+    assert ("pinned: el.scrollHeight - el.scrollTop - el.clientHeight <= 24, top: el.scrollTop, "
+            "newest: el.lastElementChild") in renderer
+    # Only a new newest line follows; a disclosure or late full output keeps its place (history_timeline_dom.test.js).
+    assert "scroll.pinned && el.lastElementChild !== scroll.newest ? el.scrollHeight : scroll.top" in renderer
     assert "record.root.dataset.expanded === '1' && pinned" in renderer
 
 
@@ -101,10 +96,9 @@ def test_reconnect_merges_user_rows_without_clearing_visible_history():
     # Reconnect still fetches the canonical source and includes owner dialogue.
     assert "await fetchHistory(null)" in sync
     assert "apiClient.chatHistory({ chatId, cursor, ...options })" in src
-    assert "historyPager.acceptRecent(data)" in sync
+    assert "historyPager.acceptRecent(data, rechainRecent && { fromReconnect })" in sync
     assert "if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect });" in sync
-    assert "includeUser = true, archived = false" in replay
-    assert "if (!includeUser && msg.role === 'user') continue;" in replay
+    assert "includeUser" not in replay  # every read applies the owner's rows
     # Keyed reconciliation replaces the former clear-and-rebuild requirement:
     # physical rows dedupe and an offline/local echo is adopted in place.
     assert "opts.historyId ? `history:${opts.historyId}` : legacyKey" in add

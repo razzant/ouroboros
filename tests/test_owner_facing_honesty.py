@@ -1,14 +1,13 @@
 """v6.70.0 honesty & reliability tests: full owner-facing review rationale,
-truncation floor, acceptance format repair, self-locating tool errors,
-scout skill_payload access, secret-redacting logs, stray-process invariant
-(startup + TTL-cached live), project-thread pointers, tool-trace arg width,
-ground-truth probe guidance, and the decision-turn outcome contract."""
+truncation floor, self-locating tool errors, scout skill_payload access,
+secret-redacting logs, stray-process invariant (startup + TTL-cached live),
+project-thread pointers, tool-trace arg width, ground-truth probe guidance,
+and the decision-turn outcome contract. (The acceptance panel's format-repair
+resend and owner cause line left with the acceptance machine.)"""
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -77,13 +76,7 @@ def test_truncation_floor_skips_marker_longer_than_savings():
 
 
 def test_task_contract_preserves_complete_authority_fields():
-    import inspect
-
     from ouroboros.contracts import task_contract
-
-    source = inspect.getsource(task_contract)
-    assert "chars omitted)" not in source  # legacy marker retired
-    assert "OMISSION NOTE" not in source  # no hand-rolled marker copies remain
 
     intent = "intent-" + ("i" * 900) + "-tail"
     claim = "claim-" + ("c" * 700) + "-tail"
@@ -95,52 +88,6 @@ def test_task_contract_preserves_complete_authority_fields():
     assert contract["delegation_budget"]["intent_note"] == intent
     assert contract["acceptance_claims"][0]["claim"] == claim
     assert contract["acceptance_claims"][0]["support"] == support
-
-
-# ---------------------------------------------------------------------------
-# 2.6 Acceptance format repair uses the second permitted physical send
-# ---------------------------------------------------------------------------
-
-def test_acceptance_malformed_response_gets_one_repair_resend(tmp_path):
-    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-
-    calls = {"n": 0}
-
-    class _FlakyJson:
-        def chat(self, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return {"content": "sorry, here are my thoughts in prose (no JSON)"}, {}
-            return {"content": '{"verdict": "PASS", "findings": [], "summary": "ok"}'}, {}
-
-    result = run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="g", task_id="t",
-                      policy={"min_successful_slots": 1}),
-        slots=[ReviewSlot(slot_id="s1", model="m")],
-        drive_root=tmp_path, llm=_FlakyJson(),
-    )
-    assert calls["n"] == 2  # extraction/format repair used the second send
-    assert result.aggregate_signal == "PASS"
-
-
-def test_acceptance_repair_does_not_third_send(tmp_path):
-    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-
-    calls = {"n": 0}
-
-    class _AlwaysProse:
-        def chat(self, **kwargs):
-            calls["n"] += 1
-            return {"content": "still prose"}, {}
-
-    result = run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="g", task_id="t",
-                      policy={"min_successful_slots": 1}),
-        slots=[ReviewSlot(slot_id="s1", model="m")],
-        drive_root=tmp_path, llm=_AlwaysProse(),
-    )
-    assert calls["n"] == 2  # hard two-physical-send rail
-    assert result.aggregate_signal == "DEGRADED"
 
 
 # ---------------------------------------------------------------------------
@@ -218,12 +165,10 @@ def test_stray_server_check_reports_foreign_pid(tmp_path, monkeypatch):
     env = SimpleNamespace(drive_root=str(tmp_path))
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
 
-    real_run = subprocess.run
-
     def fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "pgrep":
             return SimpleNamespace(stdout="424242\n", returncode=0)
-        return real_run(cmd, **kwargs)
+        return SimpleNamespace(stdout="", returncode=1)  # the batch reads nothing: a live 424242 elsewhere is not this pid
 
     monkeypatch.setattr("subprocess.run", fake_run)
     monkeypatch.setattr(
@@ -293,6 +238,63 @@ def test_stray_server_check_annotates_same_install_scope(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pgrep/getuid semantics")
+def test_stray_scan_reads_every_command_line_with_one_ps(tmp_path, monkeypatch):
+    """A machine full of test workers and editors whose argv names ouroboros: one ps for all of them,
+    and only a pid that exited between pgrep and ps is read on its own."""
+    from ouroboros import agent_startup_checks as checks
+
+    env = SimpleNamespace(drive_root=str(tmp_path))
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    rows = {101: "/usr/bin/python3 -m pytest /w/ouroboros/tests/test_x.py",
+            102: "/opt/o/python/bin/python3 /opt/o/Ouroboros/repo/server.py", 103: "vim /w/ouroboros/notes.md"}
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[0])
+        if cmd[0] == "pgrep":
+            return SimpleNamespace(stdout="101\n102\n103\n104\n", returncode=0)
+        assert cmd[:4] == ["ps", "-ww", "-o", "pid=,command="]
+        asked = [int(pid) for pid in cmd[-1].split(",")]
+        return SimpleNamespace(stdout="".join(f"{pid:>6} {rows[pid]}\n" for pid in asked if pid in rows), returncode=1)
+
+    alone = []
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("ouroboros.platform_layer.process_command", lambda pid: alone.append(pid) or "")
+    monkeypatch.setattr("ouroboros.platform_layer.process_group_id", lambda pid: pid)
+    result, issues = checks.check_stray_server_processes(env)
+    assert issues == 1 and [row["pid"] for row in result["processes"]] == [102]
+    assert calls == ["pgrep", "ps"] and alone == [104]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pgrep/getuid semantics")
+def test_stray_scan_reads_the_known_groups_once(tmp_path, monkeypatch):
+    import json
+
+    from ouroboros import agent_startup_checks as checks
+
+    env = SimpleNamespace(drive_root=str(tmp_path))
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "process_ledger.jsonl").write_text(
+        "".join(json.dumps({"pid": pid}) + "\n" for pid in (7001, 7002, 7003)), encoding="utf-8")
+    server = "/opt/o/python/bin/python3 /opt/o/Ouroboros/repo/server.py"
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "pgrep":
+            return SimpleNamespace(stdout="201\n202\n203\n", returncode=0)
+        return SimpleNamespace(stdout="".join(f"{pid} {server}\n" for pid in (201, 202, 203)), returncode=0)
+
+    looked = []
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("ouroboros.platform_layer.process_group_id",
+                        lambda pid: looked.append(pid) or (7002 if pid == 202 else pid))
+    result, issues = checks.check_stray_server_processes(env)
+    # 202 shares a known pid's process group and stays out; the other two servers are reported.
+    assert issues == 1 and [row["pid"] for row in result["processes"]] == [201, 203]
+    known_reads = [pid for pid in looked if pid not in (201, 202, 203)]
+    assert known_reads and len(known_reads) == len(set(known_reads))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pgrep/getuid semantics")
 def test_stray_server_check_ok_when_clean(tmp_path, monkeypatch):
     from ouroboros import agent_startup_checks as checks
 
@@ -340,20 +342,6 @@ def test_runtime_has_no_disappeared_routing_actor_rules(tmp_path, obsolete_marke
     assert "promoted_task_toolset" not in section
 
 
-
-def test_system_prompt_separates_routing_annotation_from_final_reply():
-    system_prompt = (
-        Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md"
-    ).read_text(encoding="utf-8")
-    normalized = " ".join(system_prompt.split())
-    assert "exactly ONE routing decision" in normalized
-    assert "A typed routing annotation is metadata" in normalized
-    assert "one self-contained final response" in normalized
-    assert "Requests to me get exactly ONE routing decision" in normalized
-    assert "host-admitted Presence observation may end silently" in normalized
-    assert "exactly ONE owner-visible outcome" not in normalized
-
-
 # ---------------------------------------------------------------------------
 # Round-1 adversarial-review fixes (v6.70.0)
 # ---------------------------------------------------------------------------
@@ -379,115 +367,6 @@ def test_response_ref_projection_never_leaks_host_paths(tmp_path):
     assert all("/" not in str(v) for v in projected.values())
 
 
-def test_repair_resend_blocked_by_rail_keeps_first_answer(tmp_path):
-    """When the physical-attempt rail blocks the format-repair resend, the
-    malformed FIRST answer must survive as forensics (not a bare error actor)."""
-    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-    from ouroboros.usage_accounting import PhysicalAttemptLimitExceeded
-
-    calls = {"n": 0}
-
-    class _RailBlocked:
-        def chat(self, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return {"content": "prose answer, no JSON — but substantive"}, {}
-            raise PhysicalAttemptLimitExceeded("physical attempt limit reached")
-
-    result = run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="g", task_id="t",
-                      policy={"min_successful_slots": 1}),
-        slots=[ReviewSlot(slot_id="s1", model="m")],
-        drive_root=tmp_path, llm=_RailBlocked(),
-    )
-    actor = result.actors[0]
-    status = actor["status"] if isinstance(actor, dict) else actor.status
-    raw = (actor.get("raw_text") if isinstance(actor, dict) else actor.raw_text) or ""
-    assert status != "error"
-    assert "prose answer" in raw
-
-
-def test_repair_resend_empty_keeps_first_answer(tmp_path):
-    """An EMPTY repair resend keeps the substantive malformed first answer
-    instead of landing an empty actor (forensics symmetry with the
-    exception paths)."""
-    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-
-    calls = {"n": 0}
-
-    class _ResendEmpty:
-        def chat(self, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return {"content": "prose answer, no JSON — but substantive"}, {}
-            return {"content": ""}, {}
-
-    result = run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="g", task_id="t",
-                      policy={"min_successful_slots": 1}),
-        slots=[ReviewSlot(slot_id="s1", model="m")],
-        drive_root=tmp_path, llm=_ResendEmpty(),
-    )
-    actor = result.actors[0]
-    status = actor["status"] if isinstance(actor, dict) else actor.status
-    raw = (actor.get("raw_text") if isinstance(actor, dict) else actor.raw_text) or ""
-    assert calls["n"] == 2
-    assert status != "empty"
-    assert "prose answer" in raw
-
-
-def test_repair_first_attempt_is_persisted(tmp_path):
-    """P1 forensics: a SUCCESSFUL repair must not make the malformed first
-    answer unreconstructible — attempt 1 gets its own persisted call record."""
-    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-
-    calls = {"n": 0}
-
-    class _FlakyJson:
-        def chat(self, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return {"content": "sorry, prose thoughts (no JSON)"}, {}
-            return {"content": '{"verdict": "PASS", "findings": [], "summary": "ok"}'}, {}
-
-    run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="g", task_id="t",
-                      policy={"min_successful_slots": 1}),
-        slots=[ReviewSlot(slot_id="s1", model="m")],
-        drive_root=tmp_path, llm=_FlakyJson(),
-    )
-    attempt1 = list(tmp_path.rglob("*attempt1_response*"))
-    assert attempt1, "first malformed attempt must be persisted as its own call record"
-
-
-def test_repair_resend_transport_failure_keeps_first_answer(tmp_path):
-    """Symmetric forensics: a TRANSPORT failure on the repair resend also falls
-    back to the preserved first malformed answer, not an error actor."""
-    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-
-    calls = {"n": 0}
-
-    class _ResendDies:
-        def chat(self, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return {"content": "prose answer, no JSON — but substantive"}, {}
-            raise RuntimeError("upstream 500")
-
-    result = run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="g", task_id="t",
-                      policy={"min_successful_slots": 1}),
-        slots=[ReviewSlot(slot_id="s1", model="m")],
-        drive_root=tmp_path, llm=_ResendDies(),
-    )
-    actor = result.actors[0]
-    status = actor["status"] if isinstance(actor, dict) else actor.status
-    raw = (actor.get("raw_text") if isinstance(actor, dict) else actor.raw_text) or ""
-    assert calls["n"] == 2
-    assert status != "error"
-    assert "prose answer" in raw
-
-
 def test_tool_trace_arg_width_is_200():
     from ouroboros.agent_task_pipeline import build_trace_summary
 
@@ -505,9 +384,9 @@ def test_not_found_error_self_locates_without_ancestor_hint(tmp_path):
     ctx = _ctx(tmp_path)
     out = tools_core._read_file(ctx, path="definitely/missing/file.py", root="system_repo")
     assert "NOT_FOUND" in out
-    # Owner decision 22a: resolved-path hint yes, nearest-ancestor walk no.
-    src = __import__("inspect").getsource(tools_core)
-    assert "nearest existing ancestor" not in src
+    # Owner decision 22a: the error names the resolved path and never walks to an existing ancestor.
+    assert "definitely/missing/file.py" in out.replace("\\", "/")
+    assert "ancestor" not in out.lower()
 
 
 def test_access_blocked_message_has_single_period(tmp_path):
@@ -518,25 +397,11 @@ def test_access_blocked_message_has_single_period(tmp_path):
     assert ".." not in error.replace("…", "")
 
 
-def test_promote_chat_description_carries_ground_truth_probe():
-    from ouroboros.tools.control import _PROMOTE_CHAT_DESCRIPTION
+def test_start_task_description_carries_ground_truth_probe():
+    from ouroboros.tools.control import _START_TASK_DESCRIPTION
 
-    assert "ground-truth its existence with one cheap probe" in _PROMOTE_CHAT_DESCRIPTION
-    assert "memory of past work is not evidence" in _PROMOTE_CHAT_DESCRIPTION
-
-
-def test_degraded_owner_line_bounds_each_reason():
-    import inspect
-
-    # v7 L-B split: the degraded-owner-line writer lives with the host
-    # acceptance review owner; loop.py re-exports it.
-    from ouroboros import loop_acceptance_review as accept_mod
-
-    src = inspect.getsource(accept_mod)
-    assert "more in the task result" in src  # overflow disclosure, not silence
-    # Bounded preview per cause via the shared primitive; full causes live in
-    # the structured decision record.
-    assert "truncate_review_artifact(str(r), limit=300)" in src
+    assert "ground-truth its existence with one cheap probe" in _START_TASK_DESCRIPTION
+    assert "memory of past work is not evidence" in _START_TASK_DESCRIPTION
 
 
 def test_redaction_filter_ssot_is_observability():
@@ -597,7 +462,6 @@ def test_native_chat_lane_has_no_ephemeral_entry_point():
     assert "ephemeral" not in inspect.signature(worker_chat_lane._run_chat_task).parameters
 
 
-
 def test_actor_records_carry_response_ref_end_to_end(tmp_path):
     """The substrate's own persistence path populates response_ref on actor
     records, and the projection surfaces its flat hash anchors."""
@@ -643,11 +507,3 @@ def test_affordance_map_carries_label_path_pairs(tmp_path):
     # The read-only orchestrator root is resolvable when visible to the profile.
     if "subagent_projects" in result.get("readonly_roots", []):
         assert paths.get("subagent_projects")
-
-
-def test_provider_terminal_notice_never_claims_unsupported_reroute():
-    import inspect
-    from ouroboros.loop_transport import provider_terminal_fallback_text
-
-    source = inspect.getsource(provider_terminal_fallback_text)
-    assert "same-model reroute" not in source

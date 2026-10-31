@@ -1,6 +1,6 @@
 """Unknown-provider hold: wait for the LEAF, not the provider (nanny-leaf D1-min).
 
-A configured-session nanny exists to supervise one physical delegated leaf. When
+A configured-session nanny supervises its physical delegated leaves. When
 one of its metered rounds dies ``provider_outcome_unknown`` (dispatched request,
 no terminal provider fact — never resent, per custody doctrine) while that leaf
 is alive and healthy, terminalizing the nanny used to cancel the leaf through
@@ -14,15 +14,10 @@ doctrine revision; see docs/ARCHITECTURE.md). Control wakes (Stop, deadline,
 finalize_now) exit through the existing unknown no-resend terminal with zero
 further provider calls.
 
-Eligibility is deliberately narrow (owner Q8=A): configured-session/exact
-actor routes with EXACTLY one open, non-terminal delegated run and no pending
-invocations. The liveness probe is a READ-ONLY engine poll requiring a
-positive non-terminal engine state — a refusal, fault, empty state, or open
-containment fault is not evidence of a live leaf. When no hold applies, the
-supervising model uses ordinary managed transport recovery; external custody
-remains unchanged. A terminal-but-unsettled leaf must not hold, since an
-instant terminal wake would buy repeated model calls. A successful hold takes
-over any existing transport episode, so its wake alone permits the next round.
+Eligibility is per run: a configured-session nanny may hold on any owned
+ordinary leaves with a positive non-terminal read and no containment fault.
+Pending invocations remain independent custody obligations. A terminal run
+alone cannot buy a fresh paid round from an unknown provider outcome.
 """
 
 from __future__ import annotations
@@ -59,7 +54,7 @@ _CONTROL_WAKE_KINDS = frozenset({"finalize_now"})
 _NON_WAKE_STATUSES = frozenset({"refused", "fault"})
 # Inter-cycle backoff floor: repeated unknown outcomes on resume rounds must not
 # tighten into a paid dispatch loop. Deliberately BELOW the 60s idle-rail floor
-# so this plain bounded sleep can never race the idle reaper (the interruptible
+# so this plain bounded sleep can never outlast the silence window (the interruptible
 # owner surface is the supervised_wait right after it).
 _HOLD_BACKOFF_CAP_SEC = 15.0
 _ACK_ATTEMPTS = 3
@@ -108,43 +103,19 @@ def _leaf_probe_live(ctx: Any, run_id: str) -> bool:
     return bool(state) and state not in custody.TERMINAL_STATES
 
 
-def _single_live_run(ctx: Any) -> str:
-    """Return the run id iff custody holds EXACTLY one open run, no pending
-    invocations, no open containment fault, a readable log, and the read-only
-    probe reads a positive non-terminal engine state.
-
-    The cardinality is over the task's OWN delegation: a run a review panel owns
-    is not a leaf this nanny may hold on, and it never makes the task's one real
-    leaf look like two (issue #1006)."""
+def _eligible_live_runs(ctx: Any) -> list[str]:
+    """Every owned ordinary run with positive live evidence; no cardinality ceiling."""
     mine = str(getattr(ctx, "task_id", "") or "")
     try:
         root = custody.custody_root(ctx)
         if custody.custody_log_unreadable(root):
-            return ""
-        open_rows = [row for row in custody.open_runs(root)
-                     if row.task_id == mine and not row.review_owned]
-        if len(open_rows) != 1:
-            return ""
-        if any(
-            str(row.get("task_id") or "") == mine
-            and not custody.review_owned_source(row.get("source"))
-            for row in custody.pending_invocations(root)
-        ):
-            return ""
-        run_id = str(open_rows[0].run_id or "")
-        if not run_id:
-            return ""
-        if any(
-            str(row.get("run_id") or "") == run_id
-            for row in custody.open_containment_faults(root)
-        ):
-            return ""
+            return []
+        faults = {str(row.get("run_id") or "") for row in custody.open_containment_faults(root)}
+        return [row.run_id for row in custody.open_runs(root) if row.task_id == mine and not row.review_owned
+                and row.run_id and row.run_id not in faults and _leaf_probe_live(ctx, row.run_id)]
     except Exception:
         log.debug("Hold eligibility custody audit failed", exc_info=True)
-        return ""
-    if not _leaf_probe_live(ctx, run_id):
-        return ""
-    return run_id
+        return []
 
 
 def _unknown_attempt_id() -> str:
@@ -171,15 +142,17 @@ def latch_after_unknown(
     ctx = getattr(tools, "_ctx", None)
     if ctx is None or not _configured_session(ctx):
         return False
-    run_id = _single_live_run(ctx)
-    if not run_id:
+    run_ids = _eligible_live_runs(ctx)
+    if not run_ids:
         return False
+    run_id = run_ids[0]
     try:
         prior = read_unknown_hold(ctx)
     except UnknownHoldUnreadable:
-        prior = {}  # the fresh write below replaces the unreadable file
+        return False  # Unknown checkpoints cannot be replaced with an empty run map.
     attempt_id = _unknown_attempt_id()
     hold = {
+        "run_ids": run_ids,
         "run_id": run_id,
         "entered_at": utc_now_iso(),
         "hold_cycles": int(prior.get("hold_cycles") or 0) + 1,
@@ -268,8 +241,8 @@ def _append_wake_receipt(
             "(it was never resent and stays billed at its reserved upper bound). The "
             f"task held on the live leaf run {run_id} instead of dying; this wake is "
             "the new material input for THIS round — judge it (read results, wait "
-            "again, cancel, or integrate). Never rebuild the leaf's work on metered "
-            "tokens and never start a duplicate leaf.\n" + body
+            "again, cancel, or integrate). Never rebuild the leaf's work. "
+            "Use retry_of to resolve an unknown start; a new prompt is independent work.\n" + body
         ),
     })
 
@@ -299,9 +272,10 @@ def hold_step(
             hold_cycles=0, detail="latch_unreadable",
         )
         return "terminal"
-    if not hold.get("run_id"):
+    run_ids = list(hold.get("run_ids") or ([hold["run_id"]] if hold.get("run_id") else []))
+    if not run_ids:
         return ""
-    run_id = str(hold.get("run_id") or "")
+    run_id = run_ids[0]
     cycles = int(hold.get("hold_cycles") or 1)
     attempt_id = str(hold.get("unknown_attempt_id") or "")
 
@@ -341,7 +315,7 @@ def hold_step(
     # payload is what the hold judges. A shape this cannot read leaves the payload
     # empty, which fails the acknowledgement below into the honest no-resend
     # terminal — never an escape that would let the cleanup cancel a healthy leaf.
-    wake = supervised_wait(ctx, run_id)
+    wake = supervised_wait(ctx, run_ids if len(run_ids) > 1 else run_id)
     try:
         payload = delegate_payload(wake)
     except (AttributeError, TypeError, ValueError):
@@ -351,7 +325,9 @@ def hold_step(
     # unrendered pending-wake payload (covers finalize_now, which the
     # cancel/deadline source check cannot see) — final-pair sol #3.
     try:
-        pend = supervision_checkpoint(ctx).get("pending_wake")
+        state = supervision_checkpoint(ctx)
+        selected = str(payload.get("run_id") or run_id)
+        pend = state.get("runs", {}).get(selected, {}).get("pending_wake")
         pend_payload = pend.get("payload") if isinstance(pend, dict) else None
     except Exception:
         pend_payload = None

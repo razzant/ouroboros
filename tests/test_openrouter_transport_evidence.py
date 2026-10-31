@@ -292,7 +292,8 @@ def test_public_chat_invalid_price_stays_unknown_with_available_tariff(
 
     client = LLMClient()
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=async_create if asynchronous else create)))
-    for owner in ("ouroboros.pricing", "ouroboros.usage_accounting", "ouroboros.loop_llm_call"):
+    # These are the module-level tariff bindings the chat path reads.
+    for owner in ("ouroboros.pricing", "ouroboros.usage_accounting"):
         monkeypatch.setattr(f"{owner}.estimate_cost_optional", tariff)
     monkeypatch.setattr(requests, "get", lambda *a, **kw: pytest.fail("chat made a metadata GET"))
     monkeypatch.setattr(client, "_resolve_remote_target", lambda model: target())
@@ -456,35 +457,58 @@ def test_raised_json_error_binds_explicit_reservation_without_ambient_capture(is
 def test_async_first_binding_is_off_loop_joined_and_not_repeated(isolated, monkeypatch, cancel):
     import threading
 
-    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
-    original, observed = ua.bind_provider_generation, []
+    from ouroboros import _usage_wait, usage_store
+
+    usage_store.migrate_from_journal(isolated)  # the lifecycle job the server runs before any worker (#1933)
+    release, finished = threading.Event(), threading.Event()
+    original, observed, errors, order = ua.bind_provider_generation, [], [], []
+    run = SimpleNamespace()  # the controlling loop, its thread and the binding's entry future
 
     def held_binding(generation, **kwargs):
         observed.append(generation)
-        entered.set()
-        assert release.wait(2), "binding blocked the event loop"
-        original(generation, **kwargs)
+        try:
+            # Identity first: an inline binding fails here instead of blocking the loop that releases it.
+            held = (threading.get_ident(), _usage_wait._CANCEL.get())
+            run.loop.call_soon_threadsafe(lambda: run.entry.done() or run.entry.set_result(held))
+            if held[0] == run.thread:
+                raise AssertionError("the binding ran on the event-loop thread")
+            if not release.wait(30):  # a hang guard: the controller always releases
+                raise AssertionError("the controller never released the binding")
+            original(generation, **kwargs)
+        except BaseException as exc:
+            errors.append(exc)  # the stream keeps only its type name
+            raise
         finished.set()
+
+    class Recorded(Wire):
+        def close(self):
+            order.append(("closed", finished.is_set()))
+            super().close()
 
     monkeypatch.setattr(ua, "bind_provider_generation", held_binding)
 
     async def exercise():
         from ouroboros.openrouter_cost import binding_for_target
 
+        run.loop, run.thread = asyncio.get_running_loop(), threading.get_ident()
+        run.entry = run.loop.create_future()
         request = ua.AttemptRequest(model="vendor/fixture", provider="openrouter", reservation_usd=2,
                                     drive_root=isolated, provider_receipt_binding=binding_for_target(target()))
-        wire = Wire([frame(usage={"cost": 0.25}, finish="stop"), b"data: [DONE]\n\n"], header="gen-fixture")
+        wire = Recorded([frame(usage={"cost": 0.25}, finish="stop"), b"data: [DONE]\n\n"], header="gen-fixture")
         task = asyncio.create_task(ua.execute_physical_attempt_async(request, lambda: consume_stream_async(wire)))
-        for _ in range(200):
-            if entered.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert entered.is_set()
-        if cancel:
-            task.cancel()
-            await asyncio.sleep(0.02)
-            assert not task.done()  # The in-flight binding remains owned.
-        release.set()
+        task.add_done_callback(lambda _task: order.append(("done", finished.is_set())))
+        try:
+            await asyncio.wait({task, run.entry}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+            assert run.entry.done(), f"the binding was not entered: {task!r}"
+            thread, cancelled = run.entry.result()
+            assert thread != run.thread and cancelled is not None, "off the loop, under its owner's cancellation"
+            if cancel:
+                task.cancel()
+                # Received while held: the owner's own cancellation event, set before it joins the binding.
+                assert await asyncio.to_thread(cancelled.wait, 2), "the cancellation never reached the binding's owner"
+                assert not task.done()  # The in-flight binding remains owned.
+        finally:
+            release.set()
         if cancel:
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -493,5 +517,6 @@ def test_async_first_binding_is_off_loop_joined_and_not_repeated(isolated, monke
         assert finished.is_set()
 
     asyncio.run(exercise())
+    assert errors == [] and order == [("closed", True), ("done", True)], (errors, order)
     assert observed == ["gen-fixture"]
     assert ledger_rows(isolated)[0]["provider_receipt_binding"]["generation_id"] == "gen-fixture"

@@ -18,7 +18,8 @@ migration in ``config.py``).
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 GC_RETENTION_HARD_MAX = 365
 GC_RETENTION_FALLBACK_DEFAULT = 7
@@ -109,3 +110,46 @@ def get_gc_retention_days() -> int:
     if seed is not None and str(seed).strip():
         return clamp_retention_days(seed)
     return clamp_retention_days(_default_gc_days())
+
+
+def keep_until(report: dict, timestamp: float, days: int) -> None:
+    """Record the first age eligibility observed by this prune, in epoch seconds."""
+    due = float(timestamp) + max(0, int(days)) * 86400
+    report["next_due"] = min(report.get("next_due", due), due)
+
+
+def task_result_timestamp(result: Dict[str, Any], fallback: Optional[float] = None) -> Optional[float]:
+    """The effective task-drive retention date, else the caller's layout-local fallback.
+
+    Precedence is the first PARSEABLE value, not the earliest date. A naive date
+    means UTC. Directory mtime is deliberately not persisted in a task projection:
+    one task may occupy both layouts, with different directory mtimes.
+    """
+    for key in ("artifact_finalized_at", "completed_at", "finished_at", "ts"):
+        raw = str(result.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return float(parsed.timestamp())
+        except ValueError:
+            continue
+    return fallback
+
+
+def task_result_retention_at(result: Dict[str, Any]) -> Optional[str]:
+    """A task body's cheap drive-retention projection.
+
+    NULL means unclassified/unbindable, '' means no parseable body date, and
+    other text is normalized epoch seconds. The caller compares it numerically,
+    never lexically. It selects work; it never authorizes removal.
+    """
+    from ouroboros.task_result_schema import task_result_schema_refusal
+
+    status = result.get("status")
+    if task_result_schema_refusal(result) or not isinstance(status, str) or not status.strip():
+        return None
+    timestamp = task_result_timestamp(result)
+    return "" if timestamp is None else repr(timestamp)

@@ -10,6 +10,7 @@ only on positive contention. No provider, engine or live data is reached.
 
 from __future__ import annotations
 
+import os
 import queue as queue_mod
 import time
 from contextlib import contextmanager, nullcontext
@@ -18,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import usage_accounting as ua
+from ouroboros.settings_integrity import task_settings_snapshot
 from tests._store_shared import unreadable_result
 from tests._usage_store_testing import ledger_rows
 from tests.test_billing_group import _scope, _spend
@@ -69,7 +71,8 @@ def test_a_startup_read_failure_binds_no_stand_in_and_every_send_rereads(data_ro
         return real_read(*args, **kwargs)
 
     monkeypatch.setattr(task_results, "load_task_result", reader)
-    monkeypatch.setattr("ouroboros.subagent_runtime.apply_task_start_settings_or_disclose", lambda *_a, **_k: None)
+    monkeypatch.setattr("ouroboros.subagent_runtime.apply_task_start_settings_or_disclose",
+                        lambda *_a, **_k: task_settings_snapshot({}, os.environ))
     monkeypatch.setattr("ouroboros.model_wait.task_model_wait_scope", lambda **_k: nullcontext())
     outcomes = []
 
@@ -86,8 +89,9 @@ def test_a_startup_read_failure_binds_no_stand_in_and_every_send_rereads(data_ro
                 outcomes.append(("reserved", reservation.scope.billing_group_id, len(calls) > 1))
         return scope
 
-    host = SimpleNamespace(env=SimpleNamespace(drive_root=data_root), _emit_live_log=lambda *_a, **_k: None,
-                           _event_queue=None, _handle_task_scoped=scoped)
+    from tests._agent_entry_helpers import task_entry_agent
+
+    host = task_entry_agent(data_root, scoped)
     scope = OuroborosAgent.handle_task(host, {"id": "S", "type": "task"})
     assert scope.billing_group_id == "" and scope.billing_group_limit_usd is None  # nothing stands in
     assert outcomes == [("refused", "unreadable", 0), ("reserved", "P", True)]
@@ -168,7 +172,7 @@ def test_no_delegated_session_starts_under_an_unreadable_bucket(data_root):
         custody.record_start_requested(data_root, task_id="S", root_task_id="S", invocation_id="i-1",
                                        request={"prompt": "x"}, idempotency_key="i-1")
     requested, refusal = claimed_start_request(
-        data_root, claim_target="", payload_busy=lambda *_a: "", run_id="", task_id="S", root_task_id="S",
+        data_root, run_id="", task_id="S", root_task_id="S",
         invocation_id="i-2", request={"prompt": "x"}, idempotency_key="i-2")
     assert requested is False and refusal["reason"] == "billing_authority_unavailable"
     assert refusal["billing_authority"] == "unreadable" and "budget" not in refusal["detail"]
@@ -178,36 +182,6 @@ def test_no_delegated_session_starts_under_an_unreadable_bucket(data_root):
                                           request={"prompt": "x"}, idempotency_key="i-3")
     assert len(task_snapshot(data_root, "S")["pending"]) == 1
     assert tree_billing_group(data_root, "S")["billing_group_id"] == "P"  # the bucket its receipt will use
-
-
-@pytest.mark.parametrize("fault", ["read_error", "amendment_error"])
-def test_delegated_start_rereads_the_continuation_original_group_before_start(data_root, monkeypatch, fault):
-    from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_custody_current import task_snapshot, tree_billing_group
-    from ouroboros.task_results import write_task_result
-    from ouroboros.task_store import patch_document
-
-    write_task_result(data_root, "P", "completed", billing_group=BINDING)
-    write_task_result(data_root, "S", "running", root_task_id="S", billing_group=BINDING,
-                      metadata={"continuation": {"billing_group_id": "P"}})
-    payload = dict(task_id="S", root_task_id="S", invocation_id="original-group",
-                   request={"prompt": "continue the same work"}, idempotency_key="original-group")
-    sends = []
-    with monkeypatch.context() as broken:
-        if fault == "read_error":
-            unreadable_result(broken, "P")
-        else:
-            patch_document(data_root, "P", lambda row: {**row, "acceptance_root_cap_amendments": ["broken"]})
-        with ua.usage_scope(_task_scope(data_root, "S", "S")), pytest.raises(ua.BillingAuthorityUnavailable):
-            ua.execute_physical_attempt(_request(), lambda: sends.append(True))
-        with pytest.raises(ua.BillingAuthorityUnavailable) as refused:
-            custody.record_start_requested(data_root, **payload)
-        assert refused.value.kind == "unreadable" and refused.value.root_task_id == "P"
-        assert task_snapshot(data_root, "S")["pending"] == [] and sends == []
-    patch_document(data_root, "P", lambda row: {**row, "acceptance_root_cap_amendments": []})
-    assert custody.record_start_requested(data_root, **payload)
-    assert len(task_snapshot(data_root, "S")["pending"]) == 1
-    assert tree_billing_group(data_root, "S")["billing_group_id"] == "P"
 
 
 # ------------------------------------------------------------- the real loop and its pause

@@ -10,6 +10,7 @@ private identifiers while every unrelated byte of the body survives.
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,8 @@ from ouroboros import merge_receipts
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, load_task_result, write_task_result
 from ouroboros.tools import github
 from tests._cancel_intents_shared import DeliveryBus
+
+REAL_GH_RUN = github._gh_run
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -41,6 +44,7 @@ class FakeGh:
         self.fail_view_after_merge = False
         self.fail_edit = False
         self.intent_seen_at_merge = None
+        self.merge_inputs = []
 
     def __call__(self, args, ctx, timeout=30, input_data=None, *, repo=github._GENERIC_TRANSPORT):
         self.calls.append(list(args))
@@ -49,6 +53,7 @@ class FakeGh:
                 return github.GhResult(False, "⚠️ GH_ERROR: boom", 1, 502, "exit")
             return github.GhResult(True, json.dumps(self.pr), 0, None, "")
         if args[:2] == ["pr", "merge"]:
+            self.merge_inputs.append(input_data)
             row = load_task_result(self.drive_root, "merge-task") or {}
             self.intent_seen_at_merge = [r.get("state") for r in row.get("merge_receipts") or []]
             if self.merge == "ok":
@@ -63,6 +68,9 @@ class FakeGh:
                 self.pr.update(state="MERGED", mergeCommit={"oid": MERGE})
                 return github.GhResult(False, "⚠️ GH_TIMEOUT: exceeded 120s.", None, None, "timeout")
             if self.merge == "timeout_open":
+                return github.GhResult(False, "⚠️ GH_TIMEOUT: exceeded 120s.", None, None, "timeout")
+            if self.merge == "timeout_queued":  # auto-merge took the request; its answer was lost
+                self.pr.update(autoMergeRequest={"enabledAt": "now"})
                 return github.GhResult(False, "⚠️ GH_TIMEOUT: exceeded 120s.", None, None, "timeout")
             return github.GhResult(False, "⚠️ GH_ERROR: pre-effect refusal", 1, None, "pre_effect")
         if args[:2] == ["pr", "edit"]:
@@ -104,7 +112,9 @@ def test_a_reviewed_merge_records_intent_first_and_publishes_one_receipt(world):
     out = _merge(world, review_task_ids=["review-1"], reviewed_head_sha=HEAD, reviewed_base_sha=BASE,
                  review_verdict="PASS")
     assert world.gh.intent_seen_at_merge == ["intent_recorded"]  # written before the effect
-    assert ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD] in world.gh.calls
+    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
+    assert call[:6] == ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD]
+    assert call[6:] == ["--body-file", "-"] and "Ouroboros-Qualification:" in world.gh.merge_inputs[0]
     assert not any("--auto" in c or "--admin" in c for c in world.gh.calls)
     (receipt,) = _receipts(world)
     assert receipt["outcome"] == {**receipt["outcome"], "status": "merged", "merge_sha": MERGE, "merge_tree": TREE,
@@ -157,6 +167,117 @@ def test_queued_is_not_merged(world, merge, reason):
     assert outcome == {"status": "queued", "reason": reason}
 
 
+QUEUED_CLOSED = "queued earlier; PR now CLOSED, auto-merge off; request accepted, outcome unresolved"
+
+
+def _merges(world):
+    return sum(c[:2] == ["pr", "merge"] for c in world.gh.calls)
+
+
+@pytest.mark.parametrize(("merge", "reason"), [("queued", "auto_merge_pending"), ("accepted_open", "accepted_still_open")])
+def test_a_closed_pr_is_the_latest_readback_beside_the_earlier_queued_request(world, merge, reason):
+    """GitHub's newest answer (CLOSED, head and base moved) is the observation and the coverage
+    subject; the queued request stays the outcome, observation-only, worded as earlier."""
+    world.gh.merge = merge
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (queued,) = _receipts(world)
+    moved_head, moved_base = "e" * 40, "f" * 40
+    world.gh.pr.update(state="CLOSED", autoMergeRequest=None, headRefOid=moved_head, baseRefOid=moved_base)
+    out = _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (receipt,) = _receipts(world)
+    assert receipt["receipt_id"] == queued["receipt_id"] and receipt["outcome"] == {"status": "queued", "reason": reason}
+    assert receipt["observed_after"] == {**queued["observed_after"], "state": "CLOSED", "auto_merge": False,
+                                         "head_sha": moved_head, "base_sha": moved_base}
+    assert receipt["coverage"]["status"] == "changes_after_review"
+    assert "base_changed_since_review" in receipt["coverage"]["gaps"]
+    assert receipt["revision"] == queued["revision"] + 1
+    assert out.startswith(f"⚠️ PR #7 merge: {QUEUED_CLOSED}; review coverage changes_after_review")
+    assert f"Earlier GitHub readback: {reason}." in out and "\nGitHub readback:" not in out
+    assert "sent no new merge request" in out
+    body = world.gh.pr["body"]
+    assert f"- Outcome: **queued** {QUEUED_CLOSED.removeprefix('queued ')}\n" in body
+    assert f"- Observed PR head `{moved_head}`, base `{moved_base}`" in body
+    assert world.ctx.pending_events[-1]["text"] == merge_receipts.card_row_text(receipt)
+    assert _merges(world) == 1
+
+
+def test_the_same_closed_readback_again_changes_no_fact_revision_or_delivery(world):
+    world.gh.merge = "queued"
+    _merge(world)
+    world.gh.pr.update(state="CLOSED", autoMergeRequest=None)
+    _merge(world)
+    (closed,) = _receipts(world)
+    patches = sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls)
+    assert _merge(world).startswith(f"⚠️ PR #7 merge: {QUEUED_CLOSED};")
+    (again,) = _receipts(world)
+    assert {k: v for k, v in again.items() if k != "updated_at"} == {k: v for k, v in closed.items() if k != "updated_at"}
+    assert sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls) == patches
+    assert _merges(world) == 1
+
+
+def test_an_unconfirmed_request_whose_auto_merge_went_away_reads_as_earlier(world):
+    world.gh.merge = "timeout_queued"
+    _merge(world)
+    assert _receipts(world)[0]["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    world.gh.pr.update(autoMergeRequest=None)
+    out = _merge(world)
+    (receipt,) = _receipts(world)
+    assert receipt["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    assert (receipt["observed_after"]["state"], receipt["observed_after"]["auto_merge"]) == ("OPEN", False)
+    assert out.startswith("⚠️ PR #7 merge: queued earlier; PR now OPEN, auto-merge off; effect unconfirmed;")
+    assert "Earlier GitHub readback: auto_merge_pending." in out and "Earlier merge request: failure=timeout" in out
+    assert "- Outcome: **queued** earlier; PR now OPEN, auto-merge off; effect unconfirmed\n" in world.gh.pr["body"]
+    assert _merges(world) == 1
+
+
+def test_a_reopened_pr_reads_queued_again_without_a_resend(world):
+    world.gh.merge = "accepted_open"
+    _merge(world)
+    world.gh.pr.update(state="CLOSED")
+    assert QUEUED_CLOSED in _merge(world)
+    world.gh.pr.update(state="OPEN")
+    out = _merge(world)
+    (receipt,) = _receipts(world)
+    assert receipt["outcome"] == {"status": "queued", "reason": "accepted_still_open"}
+    assert receipt["observed_after"]["state"] == "OPEN"
+    assert out.startswith("⚠️ PR #7 merge: queued; review coverage") and "\nGitHub readback: accepted_still_open." in out
+    assert "- Outcome: **queued**\n" in world.gh.pr["body"]
+    assert _merges(world) == 1
+
+
+def test_a_confirmed_merge_keeps_its_readback_against_a_later_closed_answer(world):
+    """MERGED is terminal on GitHub, so a later CLOSED answer is a lagging replica."""
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (merged,) = _receipts(world)
+    world.gh.pr.update(state="CLOSED", mergeCommit=None, mergedAt=None)
+    out = _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (receipt,) = _receipts(world)
+    assert all(receipt[key] == merged[key] for key in (
+        "outcome", "observed_after", "coverage", "effect", "revision", "publication"))
+    assert out.startswith(f"⚠️ PR #7 merge: merged as {MERGE[:12]}") and "already recorded" in out
+    assert "PR_MERGE" not in out and "earlier" not in out
+    assert f"- Outcome: **merged** — merge commit `{MERGE}`" in world.gh.pr["body"]
+    assert _merges(world) == 1
+
+
+def test_an_unreadable_pr_leaves_a_queued_receipt_untouched(world, monkeypatch):
+    world.gh.merge = "queued"
+    _merge(world)
+    (before,) = _receipts(world)
+    original = world.gh
+    world.gh.pr.update(state="CLOSED", autoMergeRequest=None)
+
+    def unreadable(args, *a, **kw):
+        if args[:2] == ["pr", "view"]:
+            return github.GhResult(False, "⚠️ GH_ERROR: HTTP 502", 1, 502, "exit")
+        return original(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", unreadable)
+    out = _merge(world)
+    assert "pr_unreadable" in out and f"(receipt_id={before['receipt_id']}, outcome queued)" in out
+    assert _receipts(world) == [before] and _merges(world) == 1
+
+
 def test_an_unknown_outcome_is_always_read_back_without_a_retry_escape(world):
     world.gh.merge = "timeout_open"
     assert "PR_MERGE_UNKNOWN" in _merge(world)
@@ -184,6 +305,106 @@ def test_a_failed_readback_is_unknown(world):
     world.gh.fail_view_after_merge = True
     assert "PR_MERGE_UNKNOWN" in _merge(world)
     assert _receipts(world)[0]["outcome"] == {"status": "unknown", "reason": "readback_failed"}
+
+
+def test_a_failed_merge_request_shows_its_retained_diagnostic_on_every_call(world, monkeypatch):
+    """#1555: the bounded, redacted gh facts the receipt keeps reach the local response on the
+    first call and on the observation-only repeat; the outcome stays unknown, never 'rejected'."""
+    original = world.gh
+    denial = ("⚠️ GH_ERROR: GraphQL: demo-user does not have the correct permissions to execute "
+              "`MergePullRequest` (mergePullRequest)")
+
+    def gh(args, *a, **kw):
+        if args[:2] == ["pr", "merge"]:
+            original.calls.append(list(args))
+            return github.GhResult(False, denial, 1, None, "exit")
+        return original(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", gh)
+    first = _merge(world)
+    assert "PR_MERGE_UNKNOWN" in first and f"Merge request: failure=exit, exit_code=1: {denial}" in first
+    assert "GitHub readback: pr_state_open_after_unconfirmed_effect." in first
+    again = _merge(world)
+    assert "had no confirmed outcome" in again and "sent no new merge request" in again
+    assert f"Earlier merge request: failure=exit, exit_code=1: {denial}" in again
+    assert sum(c[:2] == ["pr", "merge"] for c in original.calls) == 1
+
+
+@pytest.mark.parametrize(("merge", "fact"), [
+    ("timeout_open", "failure=timeout: ⚠️ GH_TIMEOUT: exceeded 120s."),
+    ("refused", "failure=pre_effect, exit_code=1: ⚠️ GH_ERROR: pre-effect refusal"),
+])
+def test_different_merge_failures_read_differently(world, merge, fact):
+    world.gh.merge = merge
+    assert f"Merge request: {fact}" in _merge(world)
+
+
+def test_the_public_pr_body_never_carries_the_local_diagnostic(world):
+    world.gh.merge = "timeout_merged"
+    assert "Merge request: failure=timeout" in _merge(world, reviewed_head_sha=HEAD)
+    assert _receipts(world)[0]["publication"]["body"] == {"status": "published"}
+    assert "GH_TIMEOUT" not in world.gh.pr["body"] and "failure=" not in world.gh.pr["body"]
+
+
+def test_a_repeat_after_a_confirmed_merge_does_not_call_it_unconfirmed(world):
+    _merge(world, reviewed_head_sha=HEAD)
+    again = _merge(world, reviewed_head_sha=HEAD)
+    assert "merge: merged" in again and "sent no new merge request" in again
+    assert "already recorded" in again and "had no confirmed outcome" not in again
+    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+
+
+def test_an_unreadable_pr_keeps_the_earlier_request_in_view_by_its_real_status(world, monkeypatch):
+    """#1555: this call's no-effect fact must not read as the resolution of the earlier one."""
+    original = world.gh
+
+    def unreadable(args, *a, **kw):
+        if args[:2] == ["pr", "view"]:
+            return github.GhResult(False, "⚠️ GH_ERROR: HTTP 502", 1, 502, "exit")
+        return original(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", unreadable)
+    assert "could not be read; nothing was merged" in _merge(world)  # no earlier request: unchanged
+    monkeypatch.setattr(github, "_gh_run", original)
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (earlier,) = _receipts(world)
+    monkeypatch.setattr(github, "_gh_run", unreadable)
+    out = _merge(world)
+    assert "pr_unreadable" in out and "nothing was merged" not in out and "sent no new merge request" in out
+    assert (f"the earlier merge request for {URL} is still unresolved "
+            f"(receipt_id={earlier['receipt_id']}, outcome unknown)") in out
+    assert _receipts(world) == [earlier]
+    assert sum(c[:2] == ["pr", "merge"] for c in original.calls) == 1
+
+    monkeypatch.setattr(github, "_gh_run", original)
+    world.gh.pr.update(state="MERGED", mergeCommit={"oid": MERGE})
+    _merge(world)  # observes the merge on the same receipt
+    monkeypatch.setattr(github, "_gh_run", unreadable)
+    out = _merge(world)
+    assert f"a merge of {URL} was already confirmed (receipt_id={earlier['receipt_id']})" in out
+    assert "nothing was merged" not in out and "still unresolved" not in out
+    assert sum(c[:2] == ["pr", "merge"] for c in original.calls) == 1
+
+
+def test_an_intent_without_any_outcome_is_only_read_back(world, monkeypatch):
+    """A claim another (or a crashed) call holds has no outcome yet; it is not called unconfirmed."""
+    original = world.gh
+
+    def crash_at_effect(args, *a, **kw):
+        if args[:2] == ["pr", "merge"]:
+            raise RuntimeError("worker died between intent and effect")
+        return original(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", crash_at_effect)
+    with pytest.raises(RuntimeError):
+        _merge(world)
+    assert [r["state"] for r in _receipts(world)] == ["intent_recorded"]
+    monkeypatch.setattr(github, "_gh_run", original)
+    out = _merge(world)
+    assert "holds its merge intent with no recorded outcome yet" in out and "sent no new merge request" in out
+    assert "had no confirmed outcome" not in out
+    assert not any(c[:2] == ["pr", "merge"] for c in original.calls)
 
 
 def test_an_unwritable_intent_refuses_before_any_effect(world, monkeypatch):
@@ -340,7 +561,8 @@ def test_parallel_callers_share_one_atomic_intent(world, monkeypatch):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize(("mode", "status"), [("ok", "merged"), ("accepted_open", "queued"), ("refused", "refused")])
+@pytest.mark.parametrize(("mode", "status"), [("ok", "merged"), ("accepted_open", "queued"), ("queued", "queued"),
+                                              ("refused", "refused")])
 def test_losing_claim_cannot_erase_the_winners_effect_or_settled_outcome(world, monkeypatch, mode, status):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier, Event, local
@@ -389,6 +611,9 @@ def test_losing_claim_cannot_erase_the_winners_effect_or_settled_outcome(world, 
     assert stored["effect"] == winner["effect"]
     assert stored["outcome"] == winner["outcome"]
     assert stored["coverage"] == winner["coverage"]
+    # The loser's readback predates the winner's effect: the winner's (auto-merge) snapshot stays.
+    assert stored["observed_after"] == winner["observed_after"]
+    assert stored["observed_after"]["auto_merge"] is (mode == "queued")
     assert stored["outcome"]["status"] == status and stored["state"] == "settled"
     assert all(f"merge: {status}" in text for text in outputs)
     assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
@@ -505,3 +730,34 @@ def test_body_uses_fresh_publication_view_and_confirms_a_lost_edit_reply(world, 
     assert _receipts(world)[0]["publication"]["body"]["status"] == "published"
     _merge(world)
     assert sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls) == 1
+
+
+@pytest.mark.parametrize("method", ["merge", "squash", "rebase"])
+@pytest.mark.parametrize("body_size", [80, 65536])
+def test_merge_body_uses_stdin_at_github_body_limit(world, monkeypatch, method, body_size):
+    from ouroboros import update_qualification as qualification
+
+    body = ("Owner's `code` and Unicode →\n" * 3000)[:body_size]
+    world.gh.pr["body"] = body
+    merges = []
+
+    def transport(argv, **kwargs):
+        args = argv[1:]
+        if args[:2] == ["pr", "merge"]:
+            merges.append((args, kwargs.get("input")))
+            assert len(subprocess.list2cmdline(argv)) < 32767
+        result = world.gh(args, world.ctx, input_data=kwargs.get("input"))
+        return subprocess.CompletedProcess(argv, result.exit_code, result.text if result.ok else "",
+                                           "" if result.ok else result.text)
+
+    monkeypatch.setattr(github, "_gh_run", REAL_GH_RUN)
+    monkeypatch.setattr(github.subprocess, "run", transport)
+    monkeypatch.setattr(github, "_gh_env", lambda ctx: {})
+    assert "merge: merged" in github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method=method)
+    args, stdin = merges[0]
+    prefix = ["pr", "merge", "7", f"--{method}", "--match-head-commit", HEAD]
+    if method == "rebase":
+        assert args == prefix and stdin is None
+    else:
+        assert args == [*prefix, "--body-file", "-"]
+        assert stdin == body.rstrip() + "\n\n" + qualification.commit_summary(_receipts(world)[0]["qualification"])

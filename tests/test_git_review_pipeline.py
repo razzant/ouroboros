@@ -37,8 +37,6 @@ from tests._git_review_pipeline_shared import (
 )
 
 
-
-
 @pytest.fixture
 def git_ctx(tmp_path):
     """Yield ``(git_module, ToolContext)`` — the canonical git pipeline setup."""
@@ -204,11 +202,6 @@ class TestAutoPushBehavior:
         assert hasattr(git_mod, "_auto_push")
         assert callable(git_mod._auto_push)
 
-    def test_auto_push_is_best_effort(self):
-        git_mod = _get_git_module()
-        source = inspect.getsource(git_mod._auto_push)
-        assert "except Exception" in source
-        assert "non-fatal" in source.lower() or "non_fatal" in source.lower()
 
     def test_managed_tests_gate_before_tag_and_ordinary_tests_keep_prior_order(self):
         git_mod = _get_git_module()
@@ -261,12 +254,6 @@ class TestRemoteConfigSurfacing:
         source = (pathlib.Path(REPO) / "ouroboros" / "gateway" / "settings.py").read_text(encoding="utf-8")
         assert '"warnings"' in source
 
-    def test_remote_credentials_migration_not_wired_at_startup(self):
-        """Legacy token-in-URL migration is no longer run on startup."""
-        server_path = pathlib.Path(REPO) / "server.py"
-        source = server_path.read_text(encoding="utf-8")
-        assert "migrate_remote_credentials" not in source
-
 
 # --- credential helper safety (legacy migration retired) ---
 
@@ -275,17 +262,10 @@ class TestRemoteCredentialConfiguration:
         git_ops = _get_git_ops_module()
         assert not hasattr(git_ops, "migrate_remote_credentials")
 
-    def test_configure_remote_uses_local_credential_helper(self):
-        git_ops = _get_git_ops_module()
-        configure_source = inspect.getsource(git_ops.configure_remote)
-        helper_source = inspect.getsource(git_ops._configure_credential_helper)
-        assert "_configure_credential_helper" in configure_source
-        assert ".git/credentials" in helper_source
 
     def test_startup_setup_only_configures_current_settings_token(self):
         server_runtime = importlib.import_module("ouroboros.server_runtime")
         source = inspect.getsource(server_runtime.setup_remote_if_configured)
-        assert "migrate_remote_credentials" not in source
         assert "configure_personal_remote" in source
 
 
@@ -322,16 +302,6 @@ class TestSandboxCoversRepoWrite:
             "write_file",
             {"files": [{"path": "BIBLE.md", "content": "x"}]},
         ) == ["BIBLE.md"]
-
-
-# --- index-full instruction fix ---
-
-class TestIndexFullInstruction:
-    def test_system_md_warns_against_index_full(self):
-        system_md = pathlib.Path(REPO) / "prompts" / "SYSTEM.md"
-        content = system_md.read_text(encoding="utf-8")
-        assert "Do NOT call" in content or "reserved internal name" in content
-        assert "knowledge_list" in content
 
 
 # ---------------------------------------------------------------------------

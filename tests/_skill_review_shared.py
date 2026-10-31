@@ -23,6 +23,7 @@ _NEW_SKILL_REVIEW_PASS_ITEMS = [
     {"item": "integration_preflight", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
     {"item": "bug_hunting", "verdict": "PASS", "severity": "critical", "reason": "ok"},
     {"item": "completion_notification", "verdict": "PASS", "severity": "advisory", "reason": "Not applicable"},
+    {"item": "context_snapshot_discipline", "verdict": "PASS", "severity": "advisory", "reason": "Not applicable"},
 ]
 
 
@@ -118,3 +119,18 @@ def _patch_review(return_value: str):
         "ouroboros.tools.review._handle_multi_model_review",
         return_value=return_value,
     )
+
+
+def _mark_self_authored(skill_dir: pathlib.Path, drive_root: pathlib.Path) -> None:
+    """Mark a skill as made here (the payload marker and the owner-state marker)."""
+    payload = {
+        "schema_version": 1,
+        "origin": "self_authored",
+        "task_id": "task-1",
+        "created_at": "2026-05-13T00:00:00+00:00",
+    }
+    body = json.dumps(payload) + "\n"
+    (skill_dir / ".self_authored.json").write_text(body, encoding="utf-8")
+    state_dir = drive_root / "state" / "skills" / skill_dir.name
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "self_authored.json").write_text(body, encoding="utf-8")

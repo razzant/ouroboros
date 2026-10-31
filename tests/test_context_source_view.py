@@ -9,13 +9,13 @@ import json
 import pytest
 
 from ouroboros import context_compaction as cc
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.context_source_view import _EMERGENCY_LABELS, emergency_address_view
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME
 from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
-from tests.test_context_reclaim_materializer import _request, _SPEC
+from tests.test_context_reclaim_materializer import _request
 from tests.test_main_authored_context import main_loop as _main_loop
 
 main_loop = _main_loop
@@ -74,20 +74,19 @@ def _assert_exact_restore(tmp_path, original, request, receipt):
         assert row["role"] == "user" and not row.get("tool_calls")  # source, never live protocol replay
 
 
-def test_only_producer_labelled_replaced_host_snapshots_become_addresses(tmp_path, monkeypatch):
-    monkeypatch.setattr(cc, "_call_summarizer", lambda *_a, **_kw: pytest.fail("No helper for an address view"))
-    old_facts = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "Past exact facts. " * 1600}
-    old_roster = {"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_SNAPSHOT_NAME, "content": "Past full roster. " * 1600}
-    old_delta = {"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_UPDATE_NAME, "content": "Past delta. " * 1600}
+def test_only_producer_labelled_replaced_host_snapshots_become_addresses(tmp_path):
+    old_facts = bound_host_row(CONTEXT_FACTS_NAME, "Past exact facts. " * 1600)
+    old_roster = bound_host_row(ROSTER_SNAPSHOT_NAME, "Past full roster. " * 1600)
+    old_delta = bound_host_row(ROSTER_UPDATE_NAME, "Past delta. " * 1600)
     warning = {"role": "user", "content": "A warning that remains operative. " * 600}
-    latest_facts = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "Current full facts"}
-    latest_roster = {"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_SNAPSHOT_NAME, "content": "Current full roster"}
-    latest_delta = {"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_UPDATE_NAME, "content": "Current later change. " * 1000}
+    latest_facts = bound_host_row(CONTEXT_FACTS_NAME, "Current full facts")
+    latest_roster = bound_host_row(ROSTER_SNAPSHOT_NAME, "Current full roster")
+    latest_delta = bound_host_row(ROSTER_UPDATE_NAME, "Current later change. " * 1000)
     messages = [*_prefix(), old_facts, warning, old_roster, old_delta,
                 {"role": "user", "content": OWNER}, latest_facts, latest_roster, latest_delta]
     before = deepcopy(messages)
     request = _request(messages, 1)
-    rebuilt, receipt = emergency_address_view(messages, request, rung="host_copies", protected_texts=(OWNER,),
+    rebuilt, receipt = emergency_address_view(messages, request, rung="host_copies",
                                              drive_root=tmp_path, task_id="source-view")
     assert receipt.status == "applied" and receipt.reclaimed_tokens > 0
     assert messages == before
@@ -105,9 +104,9 @@ def test_only_producer_labelled_replaced_host_snapshots_become_addresses(tmp_pat
 
 def test_latest_delta_and_unlabelled_host_prose_do_not_replace_a_full_snapshot(tmp_path):
     messages = [*_prefix(),
-        {"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_SNAPSHOT_NAME, "content": "Full roster. " * 1600},
-        {"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_UPDATE_NAME, "content": "Later delta. " * 1600},
-        {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "Only facts row. " * 1600},
+        bound_host_row(ROSTER_SNAPSHOT_NAME, "Full roster. " * 1600),
+        bound_host_row(ROSTER_UPDATE_NAME, "Later delta. " * 1600),
+        bound_host_row(CONTEXT_FACTS_NAME, "Only facts row. " * 1600),
         {"role": "user", "content": "[CONTEXT_FACTS] unlabelled legacy text " * 1600},
         {"role": "user", "content": "[INDEPENDENT_ROOTS] unlabelled legacy roster " * 1600},
         {"role": "user", "content": "[Context view receipt] still relevant warning " * 1600}]
@@ -133,7 +132,8 @@ def test_reused_call_id_and_identical_text_keep_both_visible_outcomes(tmp_path):
     for row, invocation, exit_code, is_error in zip(records, ("failed-attempt", "successful-attempt"), (17, 0), (True, False)):
         text = _visible(row)
         assert f'"exit_code":{exit_code}' in text and f'"is_error":{json.dumps(is_error)}' in text
-        assert f"invocation {invocation}" in text and f"trace/{invocation}.json" in text and f"source/{invocation}.txt" in text
+        assert f"invocation {invocation}" in text and f"source/{invocation}.txt" in text
+        assert f"trace/{invocation}.json" not in text  # the exact checkpoint retains the bulky diagnostic receipt
         assert "outcome binding unknown" not in text and "CONSEQUENTIAL-TAIL" not in text
         assert "WRONG-global-most-recent" not in json.dumps(row)
     _assert_exact_restore(tmp_path, messages, request, receipt)
@@ -179,7 +179,7 @@ def test_dialogue_question_quiz_warning_and_opaque_protocol_survive_body_relocat
     fixed = [question, answer, quiz, warning, {"role": "user", "content": OWNER}, opaque]
     messages = [*_prefix(), *fixed, *_tool(), *active_call]
     request = _request(messages, 1)
-    rebuilt, receipt = emergency_address_view(messages, request, rung="unseen_bodies", protected_texts=(OWNER, quiz["content"]),
+    rebuilt, receipt = emergency_address_view(messages, request, rung="unseen_bodies",
                                              drive_root=tmp_path, task_id="source-view")
     assert receipt.status == "applied"
     assert all(row in rebuilt for row in fixed) and rebuilt[-1] == active_call[0]
@@ -195,10 +195,10 @@ def test_short_unit_stays_raw_while_an_independent_large_unit_shrinks(tmp_path, 
         large = _tool("large")
         tail = []
     else:
-        small = [{"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "small"}]
-        large = [{"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_SNAPSHOT_NAME, "content": "Large old roster. " * 2000}]
-        tail = [{"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "current facts"},
-                {"role": "user", HOST_CONTEXT_KIND_KEY: ROSTER_SNAPSHOT_NAME, "content": "current roster"}]
+        small = [bound_host_row(CONTEXT_FACTS_NAME, "small")]
+        large = [bound_host_row(ROSTER_SNAPSHOT_NAME, "Large old roster. " * 2000)]
+        tail = [bound_host_row(CONTEXT_FACTS_NAME, "current facts"),
+                bound_host_row(ROSTER_SNAPSHOT_NAME, "current roster")]
     messages = [*_prefix(), *small, divider, *large, *tail]
     rebuilt, receipt = emergency_address_view(messages, _request(messages, 1), rung=rung,
                                              drive_root=tmp_path, task_id="source-view")
@@ -208,9 +208,7 @@ def test_short_unit_stays_raw_while_an_independent_large_unit_shrinks(tmp_path, 
     assert all(row in rebuilt for row in tail)
 
 
-def test_address_recovery_does_not_relax_authored_or_automatic_helper_exposure(tmp_path, monkeypatch):
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
-    monkeypatch.setattr(cc, "_call_summarizer", lambda *_a, **_kw: pytest.fail("Unseen bodies do not earn a helper summary"))
+def test_address_recovery_does_not_relax_authored_exposure(tmp_path):
     messages = [*_prefix(), *_tool()]
     request = _request(messages, 1)
     unchanged, ordinary = emergency_address_view(messages, request, rung="bodies", drive_root=tmp_path, task_id="source-view")
@@ -219,30 +217,10 @@ def test_address_recovery_does_not_relax_authored_or_automatic_helper_exposure(t
     assert receipt.status == "applied" and relocated != messages
     # A successful source relocation is not evidence that the actor understood it.
     authored = replace(request, working_note="", expected_view_revision=request.transcript_sha256, keep_unit_ids=())
-    unchanged, receipt, usage = cc.compact_tool_history_llm(messages, request=authored, observed_messages=messages,
+    unchanged, receipt = cc.compact_tool_history_llm(messages, request=authored, observed_messages=messages,
         exposed_units=[], tool_schemas=[], fit_candidate=lambda *_: {"accepted": True},
         drive_root=tmp_path, task_id="source-view")
-    assert unchanged == messages and receipt.status == "no_op" and usage is None
-    unchanged, receipt, _ = cc.compact_tool_history_llm(messages, request=request, exposed_units=[],
-        automatic_deficit_tokens=0, provider_refused=True, drive_root=tmp_path, task_id="source-view")
-    assert unchanged == messages and receipt.status == "no_eligible"
-
-
-def test_explicit_count_only_helper_still_reads_complete_sources(tmp_path, monkeypatch):
-    calls = []
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
-
-    def summarize(parts, **_kwargs):
-        calls.extend(part.text for part in parts)
-        return {part.source_id: "The helper retained the trailing conclusion." for part in parts}
-
-    monkeypatch.setattr(cc, "_call_summarizer", summarize)
-    messages = [*_prefix(), *_tool()]
-    rebuilt, receipt, _ = cc.compact_tool_history_llm(messages, keep_recent=0, drive_root=tmp_path, task_id="source-view")
-    assert calls and "CONSEQUENTIAL-TAIL" in "".join(calls)
-    assert receipt.status == "applied" and rebuilt != messages
-    assert cc._capsule_metadata(_records(rebuilt)[0])[1]["retention"] == "summarized"
-    assert _checkpoint(tmp_path, receipt)["messages"] == messages
+    assert unchanged == messages and receipt.status == "no_op"
 
 
 def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(main_loop, monkeypatch):
@@ -255,13 +233,13 @@ def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(ma
     f.messages.extend([*_tool(), {"role": "user", "content": OWNER}])
     before_observation = []
     rungs = []
-    apply_rung = loop_model_call._apply_overflow_rung
+    apply_step = loop_model_call._apply_refusal_step
 
-    def apply(ctx, rung, fit):
-        rungs.append(rung)
-        return apply_rung(ctx, rung, fit)
+    def apply(ctx, step, fit, target, slack=None):
+        rungs.append(step)
+        return apply_step(ctx, step, fit, target)
 
-    monkeypatch.setattr(loop_model_call, "_apply_overflow_rung", apply)
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_step", apply)
 
     def refuse(kwargs):
         if any(_EMERGENCY_LABELS["unseen_bodies"] in str(row.get("content")) for row in kwargs["messages"]):
@@ -278,10 +256,9 @@ def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(ma
             response=httpx.Response(400, json={"error": {"code": "context_length_exceeded", "message": "Input exceeds context window"}}))
 
     monkeypatch.setattr("ouroboros.loop_llm_call._sleep_within_deadline", lambda *_a, **_kw: True)
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
     answer, _, _ = f.run([refuse] * 8)
     assert answer == "Recovered from the exact address." and len(f.inputs) >= 2
-    assert rungs == ["host_copies", "bodies", "helper", "memory", "low", "unseen_bodies"]
+    assert rungs == ["host_copies", "bodies", "floor", "books", "unseen_bodies"]  # books already navigation
     assert before_observation and all(observation is None for observation in before_observation)
     assert len({entry["model"] for entry in f.inputs}) == 1
     assert len({entry["reasoning_effort"] for entry in f.inputs}) == 1
@@ -297,7 +274,10 @@ def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(ma
     assert "exposure is UNCONFIRMED" in _visible(record)
     checkpoint_ref = cc._capsule_metadata(record)[1]["checkpoint_ref"]
     checkpoint = json.loads(read_actor_source_bytes(f.ctx.drive_root, "authored-main", checkpoint_ref))
-    assert checkpoint["messages"] == f.inputs[-2]["messages"]
+    # The late rescue runs in the second pass after the floor lowered the view: its checkpoint holds the
+    # refused send's turns under the floor's system row, never a row the floor rewrote.
+    assert checkpoint["messages"][1:] == f.inputs[-2]["messages"][1:]
+    assert (checkpoint["messages"][0]["content"], f.inputs[-2]["messages"][0]["content"]) == ("LOW_SYSTEM", "MAX_SYSTEM")
     assert next(row["content"] for row in checkpoint["messages"] if row.get("tool_call_id") == "reused") == BODY
     assert {"role": "user", "content": OWNER} in f.ctx.messages
 
@@ -305,8 +285,8 @@ def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(ma
 def test_short_obsolete_host_rows_and_review_indexes_share_one_exact_source(tmp_path):
     from ouroboros.review_history_view import _index_message
 
-    obsolete = [{"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME,
-                 "content": f"round {n}: input 90000, reply 16000, window 128000, quota unknown"} for n in range(199)]
+    obsolete = [bound_host_row(CONTEXT_FACTS_NAME, f"round {n}: input 90000, reply 16000, window 128000, quota unknown")
+                for n in range(199)]
     old_index = _index_message({"closed": "Prior exact review state. " * 60}, "plan")
     latest_index = _index_message({"open": "Current obligation remains."}, "plan")
     foreign = _index_message({"open": "Another repository's current obligation."}, "commit", "/other")
@@ -317,7 +297,7 @@ def test_short_obsolete_host_rows_and_review_indexes_share_one_exact_source(tmp_
     messages = [*_prefix(), old_index]
     for n, row in enumerate(obsolete):
         messages.extend([row, {"role": "assistant", "content": f"Retained narration {n}."}])
-    latest = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "Current complete facts."}
+    latest = bound_host_row(CONTEXT_FACTS_NAME, "Current complete facts.")
     messages.extend([latest, latest_index, foreign, malformed, opaque, *_tool(invocation="still-raw")])
     rebuilt, receipt = emergency_address_view(messages, _request(messages, 1), rung="host_copies",
                                               drive_root=tmp_path, task_id="source-view")
@@ -330,11 +310,11 @@ def test_short_obsolete_host_rows_and_review_indexes_share_one_exact_source(tmp_
 
 
 def test_exposure_matches_shifted_cache_wrapped_occurrence_but_not_a_new_equal_body(tmp_path):
-    old_facts = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "Old facts. " * 600}
+    old_facts = bound_host_row(CONTEXT_FACTS_NAME, "Old facts. " * 600)
     old = _tool(invocation="old-occurrence", facts={"status": "ok", "exit_code": 0})
     observed = [*_prefix(), old_facts, *old]
     observation = _observation(observed)
-    latest = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "Current facts."}
+    latest = bound_host_row(CONTEXT_FACTS_NAME, "Current facts.")
     fresh = _tool(invocation="new-occurrence", facts={"status": "ok", "exit_code": 0})
     current = [*observed, latest, *fresh]
     compacted, host_receipt = emergency_address_view(current, _request(current, 1), rung="host_copies",
@@ -391,7 +371,7 @@ def test_body_prefix_stops_at_final_measured_goal_and_checkpoints_once(tmp_path,
         # keep going when an intermediate materializer alone would meet the goal.
         actual = deepcopy(rows)
         if _records(actual):
-            actual.append({"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "f" * 30_000})
+            actual.append(bound_host_row(CONTEXT_FACTS_NAME, "f" * 30_000))
         return cc._context_tokens_for_messages(actual, 1.0)
 
     monkeypatch.setattr(cc, "_persist_reclaim_checkpoint", save)

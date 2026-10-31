@@ -24,6 +24,7 @@ def isolated_custody(monkeypatch):
     monkeypatch.setattr(custody, "_CUSTODY", {})
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
 
 
 def _call(ctx, run_id, decision="apply", **options):
@@ -121,6 +122,9 @@ def test_directory_selector_keeps_its_engine_contract(tmp_path, monkeypatch, opt
     ctx, target = context(tmp_path, monkeypatch)
     engine, held = DirectoryEngine(target), entry(ctx, target, "copy")
     custody._CUSTODY[held.run_id] = held
+    from ouroboros.delegate_directory import capture_directory_result
+
+    capture_directory_result(ctx.drive_root, held, engine)  # the body's capture, before the decision (#1969)
     requests = []
     apply_run, get_run = engine.apply_run, engine.get_run
 

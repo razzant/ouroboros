@@ -65,6 +65,9 @@ const html = (value) => renderReviewsSection([value], {
     expandedGroups: new Set([value.id]),
     expandedAttempts: new Set([`${value.id}:${value.attempts.at(-1).id}`]),
 });
+// The rows the owner reads, without the Record facts that keep the recorded tokens.
+const rows = (markup) => markup.replace(/<details class="review-facts"[\s\S]*?<\/details>/g, '');
+const attemptRow = (markup) => markup.match(/<div class="review-seat" data-review-opinion="[^"]+">[\s\S]*?<\/div><\/div>/)?.[0] || '';
 const allAwaiting = () => panel([actor('s1', AWAITING), actor('s2', AWAITING), actor('s3', AWAITING)]);
 const passWithHole = () => panel([actor('s1'), actor('s2'), actor('s3', AWAITING)], { aggregate_signal: 'PASS' });
 const failWithHole = () => panel(
@@ -81,10 +84,10 @@ test('an awaited panel of a running task reads as work in progress', () => {
     assert.match(text, /^Reviewer s1: .* · transport=awaiting · parse=awaiting · verdict=none · quorum=abstains/m);
     assert.doesNotMatch(text, /provider_transport_error|malformed|Pending dispatch/);
     const markup = html(live);
-    assert.match(markup, /chat-review-group working/);
-    assert.match(markup, /chat-review-group-meta">in progress · 0 of 3 answered/);
-    assert.match(markup, /chat-review-attempt-meta">[^<]*in progress · 0 of 3 answered/);
-    assert.doesNotMatch(markup, /-meta">[^<]*DEGRADED/);
+    // Live work is the moving status mark beside its words, on the group row and on the panel's row.
+    assert.match(markup, /class="review-state" data-tone="working"><span class="status-mark" aria-hidden="true" data-shape="moving"[^>]*>(?:<i><\/i>){3}<\/span><span class="review-state-word">in progress · 0 of 3 answered</);
+    assert.match(attemptRow(markup), /review-state-word">in progress · 0 of 3 answered</);
+    assert.doesNotMatch(rows(markup), /DEGRADED/);
 });
 
 test('the same panel of a task that is not running is a recorded gap, never a running review', () => {
@@ -96,8 +99,7 @@ test('the same panel of a task that is not running is a recorded gap, never a ru
         assert.deepEqual(facts(group([allAwaiting()], status)), expected, String(status));
     }
     const markup = html(group([allAwaiting()], 'completed'));
-    assert.match(markup, /chat-review-group neutral/);
-    assert.match(markup, /chat-review-group-meta">no verdict · 0 of 3 answered/);
+    assert.match(markup, /class="review-state ui-status" data-tone="neutral">no verdict · 0 of 3 answered</);
     assert.doesNotMatch(markup, /in progress/);
 });
 
@@ -123,9 +125,9 @@ test('a settled failure without a verdict reads in words and keeps its warning a
             ...reviewer('s1'), ...reviewer('s2'), ...reviewer('s3'),
             'Cost unavailable',
         ].join('\n'));
-        assert.match(html(value), /chat-review-group-meta">no verdict · 0 of 3 answered · 3 unavailable/);
-        assert.match(html(value), /chat-review-group warn/);
-        assert.doesNotMatch(html(value), /-meta">[^<]*DEGRADED/);
+        assert.match(html(value), /class="review-state ui-status" data-tone="warn">no verdict · 0 of 3 answered · 3 unavailable</);
+        assert.doesNotMatch(rows(html(value)), /DEGRADED/);
+        assert.match(html(value), /<dd>task_acceptance · authority=host_root · verdict=DEGRADED · /);
     }
     // A reviewer's own DEGRADED answer is an answer: the panel still has no verdict, and nothing is unavailable.
     const judged = group([panel([actor('s1', SAID_DEGRADED), actor('s2', SAID_DEGRADED), actor('s3', FAILED)], {
@@ -158,7 +160,8 @@ test('a reviewer FAIL keeps its word and its tone while other slots are awaited'
         state: 'running', tone: 'error', progress: 'FAIL · 1 of 3 answered', verdict: 'FAIL', activeCount: 1,
     });
     assert.match(live.attempts[0].detailText, /· verdict=FAIL \(2 awaiting\) ·/);
-    assert.match(html(live), /chat-review-group error/);
+    assert.match(html(live), /class="review-state ui-status" data-tone="error">rejected · 1 of 3 answered</);
+    assert.doesNotMatch(rows(html(live)), /FAIL/);
     assert.deepEqual(facts(group([failWithHole()], 'completed')), {
         state: 'terminal', tone: 'error', progress: 'FAIL · 1 of 3 answered', verdict: 'FAIL', activeCount: 0,
     });
@@ -175,13 +178,13 @@ test('a quorum PASS with an awaited slot never reads as a bare PASS', () => {
         assert.deepEqual(facts(ended), {
             state: 'terminal', tone: 'done', progress: 'PASS · 2 of 3 answered', verdict: 'PASS', activeCount: 0,
         });
-        assert.match(html(ended), /chat-review-group-meta">PASS · 2 of 3 answered/);
-        assert.match(html(ended), /chat-review-attempt-meta">[^<]*PASS · 2 of 3 answered/);
+        assert.match(html(ended), /class="review-state ui-status" data-tone="ok">passed · 2 of 3 answered</);
+        assert.match(attemptRow(html(ended)), /data-tone="ok">passed · 2 of 3 answered</);
     }
     // The settled panel is the only one that speaks with the verdict alone.
     const settled = group([panel([actor('s1'), actor('s2'), actor('s3')], { aggregate_signal: 'PASS' })], 'running');
     assert.deepEqual(facts(settled), { state: 'terminal', tone: 'done', progress: '', verdict: 'PASS', activeCount: 0 });
-    assert.match(html(settled), /chat-review-group-meta">PASS · 1</);
+    assert.match(html(settled), /data-tone="ok">passed<\/span><svg class="review-chevron"[\s\S]*?<\/svg><span class="review-check-meta">1 attempt<\/span>/);
 });
 
 test('a slot that is neither answered nor awaited keeps the panel loud beside a wait', () => {
@@ -195,7 +198,7 @@ test('a slot that is neither answered nor awaited keeps the panel loud beside a 
         assert.deepEqual(facts(group([mixed()], 'completed')), {
             state: 'terminal', tone: 'warn', progress: 'no verdict · 0 of 3 answered · 1 unavailable', verdict: 'DEGRADED', activeCount: 0,
         }, broken.operation_state);
-        assert.match(html(group([mixed()], 'running')), /chat-review-group warn/);
+        assert.match(html(group([mixed()], 'running')), /class="review-state ui-status" data-tone="warn">in progress · 0 of 3 answered · 1 unavailable</);
     }
     // A FAIL outranks the warning; a quorum PASS beside a dead slot is still a warning.
     const failed = panel([actor('s1', SAID_FAIL), actor('s2', FAILED), actor('s3', AWAITING)], { aggregate_signal: 'FAIL' });

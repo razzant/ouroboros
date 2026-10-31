@@ -51,15 +51,25 @@ def _result(ctx: Any, code: str, text: str, *, details: dict | None = None) -> s
 
 
 def _route(model: str) -> tuple[str, str]:
-    source, sep, name = str(model or "").strip().partition("::")
-    if not sep or source not in {*image_api.IMAGE_API_SOURCES, "claudexor"} or not name.strip():
+    """``(source, model)`` of an image route; ``source@name::`` picks that API connection's key."""
+    from ouroboros.provider_models import parse_model_route
+
+    text = str(model or "").strip()
+    route = parse_model_route(text)
+    if ("::" not in text or not text.startswith(route.kind) or not route.valid
+            or route.kind not in {*image_api.IMAGE_API_SOURCES, "claudexor"} or not route.model.strip()):
         raise ValueError("model must select an image route: openai::<model>, openrouter::<model>, zai::<model>, or claudexor::<source>=<model>. Use list_image_models; no default is chosen.")
-    return source, name.strip()
+    return route.kind, route.model.strip()
 
 
-def _targets() -> dict[str, dict]:
-    """Shared-layer route facts per source; a missing credential is an empty api_key."""
-    return {source: image_api.resolve_image_target(f"{source}::probe") for source in image_api.IMAGE_API_SOURCES}
+def _sources() -> dict[str, str]:
+    """``{source: kind}`` of every image connection that can serve now, built-in (``openai``) and
+    added (``openai@pictures``), in owner order; each lists its models on its own spelling."""
+    from ouroboros.provider_connections import configured_connections
+    from ouroboros.provider_models import connection_id
+
+    return {connection_id(kind, name): kind for kind, name in configured_connections()
+            if kind in image_api.IMAGE_API_SOURCES}
 
 
 def _catalog_entry(source: str, model: str, *, editing: bool | None, evidence: str,
@@ -126,22 +136,25 @@ def _image_capability(source: Any) -> dict | None:
 
 def _list_image_models(ctx: ToolContext, model: str = "") -> str:
     """Expose capability evidence without selecting a model or testing an account."""
-    targets = _targets()
+    sources = _sources()
     rows, errors = [], []
-    for source, doc in _DOCUMENTED.items():
-        if targets[source]["api_key"]:
-            for name in doc["models"]:
-                rows.append(_catalog_entry(source, name, editing=doc["editing"], evidence=doc["evidence"],
-                                           parameters=doc["parameters"]))
-    if targets["openrouter"]["api_key"]:
-        catalog_url = targets["openrouter"]["base_url"] + "/images/models"
+    for source, kind in sources.items():
+        doc = _DOCUMENTED.get(kind)
+        for name in doc["models"] if doc else ():
+            rows.append(_catalog_entry(source, name, editing=doc["editing"], evidence=doc["evidence"],
+                                       parameters=doc["parameters"]))
+    routers = [source for source, kind in sources.items() if kind == "openrouter"]
+    if routers:
+        base_url = image_api.resolve_image_target(f"{routers[0]}::probe")["base_url"]
+        catalog_url = base_url + "/images/models"
         try:
-            for item in image_api.fetch_image_models(targets["openrouter"]["base_url"]):
+            items = image_api.fetch_image_models(base_url)
+            for source, item in ((source, item) for source in routers for item in items):
                 name = str(item.get("id") or "")
                 if not name:
                     continue
                 params = item.get("supported_parameters")
-                row = _catalog_entry("openrouter", name,
+                row = _catalog_entry(source, name,
                     editing=("input_references" in params) if isinstance(params, (dict, list)) else None,
                     evidence=catalog_url, parameters=params, pricing=item.get("pricing"))
                 row["endpoints"] = item.get("endpoints")
@@ -158,9 +171,13 @@ def _list_image_models(ctx: ToolContext, model: str = "") -> str:
             source, name = _route(model)
         except ValueError as exc:
             return _result(ctx, "TOOL_ARG_ERROR", str(exc))
-        rows = [row for row in rows if row["model"] == model]
-        if not rows and source in targets and targets[source]["api_key"]:
-            row = _catalog_entry(source, name, editing=False if source == "zai" else None,
+        from ouroboros.provider_models import connection_id, parse_model_route
+
+        route = parse_model_route(model)
+        spelled = connection_id(route.kind, route.connection)  # the connection the request names
+        rows = [row for row in rows if row["model"] == f"{spelled}::{name}"]
+        if not rows and spelled in sources:
+            row = _catalog_entry(spelled, name, editing=False if source == "zai" else None,
                                  evidence=_ZAI_DOC if source == "zai" else "not_observed")
             row["generation"] = None
             rows.append(row)

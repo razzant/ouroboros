@@ -51,7 +51,7 @@ def test_explicit_rg_list_is_filtered_before_read(tmp_path, monkeypatch):
     assert result.files_selected == 1
 
 
-def test_vcs_diff_explicit_trees_index_and_worktree(tmp_path, monkeypatch):
+def test_vcs_read_diff_explicit_trees_index_and_worktree(tmp_path, monkeypatch):
     registry, _ctx, _system, project = _registry(tmp_path)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     base = _git(project, "rev-parse", "HEAD")
@@ -69,7 +69,7 @@ def test_vcs_diff_explicit_trees_index_and_worktree(tmp_path, monkeypatch):
         "working": {"base": base},
         "default": {},
     }.items():
-        result = registry.execute_result("vcs_diff", args)
+        result = registry.execute_result("vcs_read", {**args, "action": "diff"})
         assert result.status == "ok", result.text
         observed[name] = result.text
         if args.get("base"):
@@ -79,8 +79,8 @@ def test_vcs_diff_explicit_trees_index_and_worktree(tmp_path, monkeypatch):
     assert "+working" in observed["working"]
     assert "-indexed" in observed["default"] and "Comparison:" not in observed["default"]
     for args in ({"head": head}, {"base": base, "head": head, "staged": True}):
-        assert registry.execute_result("vcs_diff", args).code == "TOOL_ARG_ERROR"
-    assert "GIT_ERROR" in registry.execute("vcs_diff", {"base": "missing-ref"})
+        assert registry.execute_result("vcs_read", {**args, "action": "diff"}).code == "TOOL_ARG_ERROR"
+    assert "GIT_ERROR" in registry.execute("vcs_read", {"action": "diff", "base": "missing-ref"})
 
 
 def test_patch_provenance_does_not_change_application_bytes(tmp_path):
@@ -102,7 +102,7 @@ def test_patch_provenance_does_not_change_application_bytes(tmp_path):
     assert manifest["current_branch"] == "task-branch"
     assert manifest["tracking_upstream"] == ""
     assert "does not attribute authorship" in manifest["base_explanation"]
-    assert "vcs_diff" in manifest["comparison_note"]
+    assert "vcs_read" in manifest["comparison_note"]
     assert manifest["sha256"] == hashlib.sha256(patch).hexdigest()
     expected = subprocess.check_output(["git", "diff", "--binary", "--no-ext-diff", "--no-color", base, "--", "project.txt"], cwd=project)
     assert patch == expected

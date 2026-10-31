@@ -11,7 +11,6 @@ import subprocess
 import time
 import zipfile
 
-
 # Capability deltas are disclosures, not a second verdict vocabulary. Most
 # describe a supported fallback (strict parsing, transcript extraction, or a
 # route-resolved model). Only this delta carries an otherwise-unprojected fact
@@ -168,7 +167,7 @@ def _call_payload(call_ref: dict, drive_root: pathlib.Path) -> dict:
 def _api_model_identity(model: str) -> str:
     from ouroboros.provider_models import normalize_model_identity
 
-    return normalize_model_identity(str(model or "").removeprefix("openrouter::"))
+    return normalize_model_identity(str(model or ""))  # one identity across route spellings
 
 
 def _receipt_payloads(
@@ -244,6 +243,7 @@ def _session_evidence(
     receipt: dict,
     mismatches: list[str],
 ) -> None:
+    from ouroboros.gateways.claudexor_identity import validated_catalog_match
     from ouroboros.subagents import parse_subagent_harness
 
     expected = parse_subagent_harness(str(route.get("target_id") or ""))
@@ -255,10 +255,23 @@ def _session_evidence(
             f"{expected_harness or 'invalid'}->{delegated_route or 'absent'}"
         )
     expected_model = str(getattr(expected, "model", "") or "")
+    attempt = usage.get("observed_attempt")
+    attempt = attempt if isinstance(attempt, dict) else {}
+    match = validated_catalog_match(attempt.get("observed_model_catalog_match"), attempt)
+    if any(attempt.get(key) != actual for key, actual in (
+        ("model", observed_model), ("harness_id", delegated_route),
+        ("profile_id", usage.get("applied_profile")),
+    )):
+        match = None
+    if match:
+        receipt["observed"]["observed_model_catalog_match"] = match
+    compared_model = match["id"] if match else observed_model
     if expected_model and observed_model:
-        if _api_model_identity(expected_model) == _api_model_identity(observed_model):
-            receipt["model_verification"] = "exact"
-        elif any(char.isspace() for char in observed_model):
+        exact = (expected_model == compared_model if match else
+                 _api_model_identity(expected_model) == _api_model_identity(observed_model))
+        if exact:
+            receipt["model_verification"] = "catalog_match" if match else "exact"
+        elif not match and any(char.isspace() for char in observed_model):
             receipt["model_verification"] = "observed_display_label"
             mismatches.append(
                 f"model_identity_unverified:{surface}:{slot_id}:"
@@ -267,7 +280,7 @@ def _session_evidence(
         else:
             receipt["model_verification"] = "mismatch"
             mismatches.append(
-                f"model_mismatch:{surface}:{slot_id}:{expected_model}->{observed_model}"
+                f"model_mismatch:{surface}:{slot_id}:{expected_model}->{compared_model}"
             )
     elif expected_model:
         receipt["model_verification"] = "absent"
@@ -505,7 +518,18 @@ def finalize_contributor_outcome(
     Nothing about WHICH files the proposal touches is consulted: the lane always
     executes the installed body's review flow and rules, never the proposal's
     copy (D31), so there is no per-proposal trust downgrade left to apply.
+
+    Drift fails an otherwise-passing run closed. A run that is already blocked
+    keeps its own cause, message and exit code as the headline — a stop before
+    or during dispatch always leaves seats without receipts, a symptom of that
+    cause — and carries the mismatches beside it (#1568).
     """
+    if mismatches and outcome.get("status") == "blocked" and str(outcome.get("block_reason") or ""):
+        note = (f"{len(mismatches)} execution-receipt mismatch(es) are recorded beside this "
+                "result (execution_receipt_mismatches).")
+        message = str(outcome.get("message") or "")
+        return exit_code or 3, {**outcome, "message": f"{message} {note}" if message else note,
+                                "execution_receipt_mismatches": mismatches}
     if mismatches:
         original_block_reason = str(outcome.get("block_reason") or "")
         original_message = str(outcome.get("message") or "")

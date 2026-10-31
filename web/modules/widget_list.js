@@ -26,6 +26,12 @@ function stableStringify(value) {
     return JSON.stringify(value) ?? 'null';
 }
 
+/** The publication a mount is bound to: an ESM entry's file lease ends with its `generation`, while a classic
+ * frame follows `revision` alone, so a same-bytes republication or server restart keeps it running. */
+export function widgetPublication(tab) {
+    return tab?.render?.entry_type === 'module' ? String(tab.generation ?? '') : '';
+}
+
 /** Everything a card's mount consumes, plus the owning skill's `revision`. */
 export function widgetCardSignature(tab) {
     return stableStringify({
@@ -36,6 +42,7 @@ export function widgetCardSignature(tab) {
         ws_prefix: tab.ws_prefix ?? '',
         render: tab.render ?? null,
         revision: tab.revision ?? '',
+        generation: widgetPublication(tab),
     });
 }
 

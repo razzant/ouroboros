@@ -255,6 +255,24 @@ class _FinishesOnTheSecondPoll(_StreamingStub):
         return detail
 
 
+@pytest.fixture
+def wait_clock(monkeypatch):
+    """Only the wait owner advances; custody/settlement keep their real clocks."""
+    from types import SimpleNamespace
+
+    import ouroboros.tools.delegate as delegate
+
+    clock = SimpleNamespace(now=0.0, sleeps=[])
+
+    def sleep(seconds):
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(delegate, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=sleep))
+    return clock
+
+
 def _wait_against_a_streaming_run(ctx, tmp_path, monkeypatch, *, wait_sec, stub=None, since_seq=0):
     """Drive `_delegate_wait` against a run that keeps advancing. Returns
     (payload, elapsed_sec)."""
@@ -364,19 +382,24 @@ def test_a_progress_emit_failure_never_aborts_the_wait(tmp_path, monkeypatch):
     assert elapsed >= 1.5, elapsed
 
 
-def test_a_terminal_state_still_returns_immediately_mid_window(tmp_path, monkeypatch):
+def test_a_terminal_state_still_returns_immediately_mid_window(tmp_path, monkeypatch, wait_clock):
     """The terminal check runs FIRST on every poll, so holding the window costs nothing
     when the run finishes: a 120s window returns the moment the state goes terminal."""
     import ouroboros.delegate_custody as dc
+    import ouroboros.tools.delegate as delegate
 
     dc._CUSTODY.clear()
-    out, elapsed = _wait_against_a_streaming_run(
+    stub = _FinishesOnTheSecondPoll()
+    out, _ = _wait_against_a_streaming_run(
         _nanny_ctx(tmp_path), tmp_path, monkeypatch,
-        wait_sec=120, stub=_FinishesOnTheSecondPoll())
+        wait_sec=120, stub=stub)
     dc._CUSTODY.clear()
 
     assert out["status"] == "terminal", out
-    assert elapsed < 10.0, elapsed
+    assert out["state"] == "succeeded" and out["settlement"]["settled"] is True, out
+    assert stub.seq == 2, "terminal observation must return without another poll"
+    assert wait_clock.sleeps == [delegate._POLL_INTERVAL_SEC], wait_clock.sleeps
+    assert wait_clock.now < 120, "terminal must win over holding the remaining window"
 
 
 def test_a_containment_breach_still_halts_mid_window(tmp_path, monkeypatch):
@@ -425,6 +448,7 @@ class _SlowPollStub(_StreamingStub):
         super().__init__(**kwargs)
         self.read_sec, self.reads, self._clock = read_sec, [], time.monotonic
         self.read_spans = []
+        self.requested_bounds, self.timed_out = [], []
 
     def get_run(self, rid, *, timeout_sec=None):
         import time
@@ -432,13 +456,14 @@ class _SlowPollStub(_StreamingStub):
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
         self.reads.append(self._clock())
+        self.requested_bounds.append(timeout_sec)
         bound = self.read_sec if timeout_sec is None else min(self.read_sec, float(timeout_sec))
         time.sleep(bound)
-        # The span is recorded STUB-side so "the bound is what ended this read" is
-        # judged on the read's own clock, deterministically — not reconstructed
-        # through the caller's noisy end-to-end wall clock.
+        # Diagnostic wall span only: even this sleep may resume late under contention.
+        # The requested bound and timeout branch below establish the timeout contract.
         self.read_spans.append(self._clock() - self.reads[-1])
         if bound < self.read_sec:
+            self.timed_out.append(len(self.reads))
             raise ClaudexorUnavailable("daemon_unreachable",
                                        "Claudexor daemon unreachable: ReadTimeout")
         return super().get_run(rid)
@@ -593,22 +618,8 @@ def test_a_daemon_that_dies_mid_window_is_refused_not_reported_as_a_quiet_wait(
 
 
 def test_a_daemon_that_dies_only_at_the_spent_window_poll_still_expires_gracefully(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, wait_clock):
     """A failed final poll expires a spent window instead of refusing the wait, and preserves prior progress too."""
-    from types import SimpleNamespace
-
-    import ouroboros.tools.delegate as delegate
-
-    clock = {"now": 0.0}
-
-    def sleep(seconds):
-        clock["now"] += seconds
-
-    monkeypatch.setattr(
-        delegate,
-        "time",
-        SimpleNamespace(monotonic=lambda: clock["now"], sleep=sleep),
-    )
     stub = _DiesAfter(answers=1)
 
     out, _ = _wait_against_a_streaming_run(
@@ -617,7 +628,7 @@ def test_a_daemon_that_dies_only_at_the_spent_window_poll_still_expires_graceful
     assert out["status"] == "progress", out
     assert out["waited_sec"] == 1, out
     assert stub.seq == 2, f"the spent window still owes its last poll: {stub.seq}"
-    assert clock["now"] == pytest.approx(1.0)
+    assert wait_clock.now == pytest.approx(1.0)
 
 
 def test_the_last_poll_of_a_spent_window_is_bounded_not_skipped(tmp_path, monkeypatch):
@@ -681,15 +692,13 @@ def test_the_last_poll_of_a_spent_window_is_bounded_not_skipped(tmp_path, monkey
     # (the stub's own read span, and the expiring_poll recorder above — an unbounded
     # final read would answer instead of raising and never pass through it twice).
     assert elapsed < window + 0.4 + 3.0, elapsed
-    # The BOUND is what ended that read, not the daemon: it cost the 0.4s bound, not
-    # the 1.2s the daemon wanted — judged on the stub's own span, so caller-side
-    # scheduler noise cannot inflate it (the previous reconstruction through
-    # `elapsed` could).
-    last_read_sec = slower.read_spans[-1]
-    assert last_read_sec < 0.4 + 0.4, last_read_sec
+    # The transport received the short bound, and the final read took its timeout
+    # branch. A late OS wakeup cannot change either fact.
+    assert slower.requested_bounds[-1] == pytest.approx(0.4), slower.requested_bounds
+    assert slower.timed_out == [2], slower.timed_out
 
 
-def test_a_run_that_finishes_during_the_last_sleep_is_reported_terminal(tmp_path, monkeypatch):
+def test_a_run_that_finishes_during_the_last_sleep_is_reported_terminal(tmp_path, monkeypatch, wait_clock):
     """The cost of the OTHER half of that trade, and the reason the last poll is bounded
     rather than dropped. Returning straight after the sleep judged terminal state and
     containment breach on data read BEFORE it, so a run that succeeded during that sleep
@@ -701,18 +710,17 @@ def test_a_run_that_finishes_during_the_last_sleep_is_reported_terminal(tmp_path
     import ouroboros.delegate_custody as dc
 
     dc._CUSTODY.clear()
-    out, elapsed = _wait_against_a_streaming_run(
+    stub = _FinishesOnTheSecondPoll()
+    out, _ = _wait_against_a_streaming_run(
         _nanny_ctx(tmp_path), tmp_path, monkeypatch,
-        wait_sec=1, stub=_FinishesOnTheSecondPoll())
+        wait_sec=1, stub=stub)
     dc._CUSTODY.clear()
 
     assert out["status"] == "terminal", out
     assert out["state"] == "succeeded", out
     assert out["settlement"]["settled"] is True, out["settlement"]
-    # Promptness smoke only — the terminal facts above are the contract.  10s keeps
-    # the honest ~1.5s path clear of the observed ~2s loaded-runner noise (6s left
-    # ~2.5s of headroom over it).
-    assert elapsed < 10.0, elapsed
+    assert stub.seq == 2, "the spent window still owes exactly one final poll"
+    assert wait_clock.sleeps == [1] and wait_clock.now == 1
 
 
 def test_bounded_poll_retries_the_git_atomic_object_race_once():

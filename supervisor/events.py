@@ -60,8 +60,12 @@ def _routing_attachments(value: Any) -> Optional[list]:
     return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else None
 
 
-def _parent_delegation_budget(ctx: Any, parent_task_id: Any, drive_root: Any) -> Dict[str, Any]:
-    """Read the parent's canonical budget for supervisor-side admission."""
+def _parent_delegation_budget(ctx: Any, parent_task_id: Any, drive_root: Any, *, strict: bool = False) -> Dict[str, Any]:
+    """Read the parent's canonical budget for supervisor-side admission.
+
+    ``{}`` is the omitted legacy budget. A ``strict`` caller freezing rights gets a
+    durable read failure raised instead, so unreadable authority never reads as it.
+    """
     parent = str(parent_task_id or "").strip()
     if not parent:
         return {}
@@ -80,8 +84,10 @@ def _parent_delegation_budget(ctx: Any, parent_task_id: Any, drive_root: Any) ->
         roots.append(canonical)
     for root in roots:
         try:
-            row = load_task_result(root, parent)
+            row = load_task_result(root, parent, strict=strict)
         except Exception:
+            if strict:
+                raise
             row = None
         if isinstance(row, dict):
             contract = row.get("task_contract")
@@ -133,6 +139,20 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         return
     if task_attempt < 1 or call_attempt < 1:
         return
+    # The turn's observer stamps dispatch on this frame or an earlier one (a send observed, or an
+    # unobserved call finished), so any frame of the call publishes what is pending; nothing pending is free.
+    from ouroboros.update_generation_facts import publish_pending_dispatch
+
+    publish_pending_dispatch()
+    receipt = evt.get("direct_turn")
+    if isinstance(receipt, dict):  # the owner turn's receipt rides its first dispatch frame by value
+        from supervisor.active_activity import record_direct_turn
+
+        census = dict(receipt.get("census") or {})
+        for name, rows in (("running", getattr(ctx, "RUNNING", None)), ("pending", getattr(ctx, "PENDING", None))):
+            if hasattr(rows, "__len__"):
+                census[f"{name}_when_handled"] = len(rows)
+        record_direct_turn({**receipt, "census": census}, drive_root=getattr(ctx, "DRIVE_ROOT", None))
     running = getattr(ctx, "RUNNING", None)
     meta = running.get(task_id) if isinstance(running, dict) else None
     direct = None
@@ -220,7 +240,6 @@ from supervisor.events_project_routing import (  # noqa: E402, F401 -- intention
     _handle_ensure_project_scope,
     _handle_project_digest,
     _handle_promote_chat_to_task,
-    _handle_routing_manual_target,
     _notify_host_initiated_refusal,
     _persist_promote_rejection,
     _prepare_promote_source_off_loop,
@@ -278,12 +297,16 @@ from supervisor.events_worker_reports import (  # noqa: E402, F401 -- intentiona
     _handle_task_focus_updated,
     _handle_task_heartbeat,
     _handle_task_metrics,
+    _handle_ui_i18n_updated,
+    _handle_update_progress_changed,
 )
 from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional public re-exports
     _close_campaign_after_owner_stop,
 )
 from supervisor.worker_owner_wait import handle_owner_wait  # noqa: E402
 from supervisor.worker_pool_lifecycle import handle_worker_quiescent  # noqa: E402
+
+from supervisor.events_mind_controls import handle_mind_task_control
 
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
@@ -297,9 +320,12 @@ EVENT_HANDLERS = {
     "budget_pause": _handle_budget_pause,
     "budget_root_fence": _handle_budget_root_fence,
     "budget_resume_child": _handle_budget_resume_child,
+    "mind_task_control": handle_mind_task_control,
     "task_heartbeat": _handle_task_heartbeat,
     "task_dispatch_resolved": _handle_task_dispatch_resolved,
     "task_focus_updated": _handle_task_focus_updated,
+    "ui_i18n_updated": _handle_ui_i18n_updated,
+    "update_progress_changed": _handle_update_progress_changed,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
     "task_done": _handle_task_done,
@@ -315,7 +341,6 @@ EVENT_HANDLERS = {
     "schedule_subagent": _handle_schedule_task,
     "promote_chat_to_task": _handle_promote_chat_to_task,
     "ensure_project_scope": _handle_ensure_project_scope,
-    "routing_manual_target": _handle_routing_manual_target,
     "steer_task": _handle_steer_task,
     "project_digest": _handle_project_digest,
     "cancel_task": _handle_cancel_task,

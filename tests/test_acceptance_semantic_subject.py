@@ -1,4 +1,12 @@
-"""Main's explicit subject decision separates source acknowledgement from meaning."""
+"""Main's explicit subject decision separates source acknowledgement from meaning.
+
+The owner-source observation and acknowledgement (``loop_messages``) and the root
+admission seal's generation checks (``delivery_seal``) are the shared completion
+protocol of ``finish_task`` / ``presence_finish``. A task-acceptance verdict once
+rode beside them as an authoritative binding; that machinery is gone, so a
+retained answer's binding is never authoritative and a review run in the trace is
+evidence only.
+"""
 from __future__ import annotations
 
 import copy
@@ -10,17 +18,13 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import loop
-from ouroboros.loop_acceptance import (
+from ouroboros.delivery_seal import (
     _end_task_acceptance_fence,
-    _supersede_task_acceptance_for_owner_followup,
-    _task_acceptance_owner_generation_changed,
-    acceptance_observation_prompt,
-    acknowledge_acceptance_observation,
-    capture_acceptance_observation,
+    _owner_generation_changed,
+    _release_for_owner_followup,
 )
 from ouroboros.loop_delivery import (
     _current_delivery_candidate,
-    _delivery_acceptance_binding,
     _no_tool_final_answer,
     _replace_delivery_candidate,
     completion_observation,
@@ -29,7 +33,13 @@ from ouroboros.loop_delivery import (
     delivery_subject_hash,
     delivery_subject_projection,
 )
-from ouroboros.loop_messages import _record_owner_directive, owner_source_sha256
+from ouroboros.loop_messages import (
+    _record_owner_directive,
+    acceptance_observation_prompt,
+    acknowledge_acceptance_observation,
+    capture_acceptance_observation,
+    owner_source_sha256,
+)
 
 
 @pytest.fixture
@@ -55,7 +65,6 @@ def case(tmp_path):
            "panel_id": "panel", "binding_hash": "binding", "aggregate_signal": "PASS"}
     trace["review_runs"].append(run)
     trace["review_decision"] = {"panel_id": "panel", "binding_hash": "binding"}
-    candidate.acceptance_binding = _delivery_acceptance_binding(tools, trace, candidate.content_sha256)
     return tool_ctx, tools, ctx, trace, candidate, run
 
 
@@ -77,12 +86,12 @@ def _select_retained(tools, ctx, trace, **subject):
 
 
 @pytest.mark.parametrize("text", ["Как дела?", "То есть мне нужен тот же полный отчёт."])
-def test_consumed_status_or_rephrasing_keeps_subject_and_paid_binding(case, text):
+def test_consumed_status_or_rephrasing_keeps_subject_and_review_evidence(case, text):
     tool_ctx, tools, ctx, trace, candidate, run = case
     before = delivery_subject_hash(tool_ctx, trace)
     original = copy.deepcopy(tool_ctx._owner_directives)
     _followup(tool_ctx, text)
-    assert _task_acceptance_owner_generation_changed(tool_ctx)
+    assert _owner_generation_changed(tool_ctx)
     assert delivery_subject_hash(tool_ctx, trace) == before
     assert _current_delivery_candidate(ctx, trace) is None
     observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
@@ -92,14 +101,13 @@ def test_consumed_status_or_rephrasing_keeps_subject_and_paid_binding(case, text
     assert answer == "The complete report."
     assert delivery_subject_hash(tool_ctx, trace) == before
     assert not run.get("superseded_by_revision")
-    assert candidate.acceptance_binding["authoritative"] is True
     assert _current_delivery_candidate(ctx, trace) is candidate
     assert tool_ctx._owner_directives[:1] == original
     assert tool_ctx._owner_directives[-1]["content"] == text
 
 
 def test_changed_criteria_keeps_answer_but_creates_new_subject(case):
-    tool_ctx, tools, ctx, trace, candidate, run = case
+    tool_ctx, tools, ctx, trace, candidate, _run = case
     before, text_hash = delivery_subject_hash(tool_ctx, trace), candidate.content_sha256
     _followup(tool_ctx, "Include the budget as a separate section.")
     observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
@@ -110,13 +118,12 @@ def test_changed_criteria_keeps_answer_but_creates_new_subject(case):
     assert answer == candidate.full_text
     assert candidate.content_sha256 == text_hash
     assert delivery_subject_hash(tool_ctx, trace) != before
-    assert run["superseded_by_revision"] is True
     assert candidate.acceptance_binding["authoritative"] is False
     assert trace["delivery_candidate"]["effective_criteria"].endswith("budget section.")
 
 
 def test_selected_read_observation_is_material_and_not_classified_by_tool_name(case):
-    tool_ctx, tools, ctx, trace, candidate, run = case
+    tool_ctx, tools, ctx, trace, _candidate, _run = case
     before = delivery_subject_hash(tool_ctx, trace)
     trace["tool_calls"].append({"tool": "read_file", "args": {"path": "report.json"},
                                "status": "ok", "result": '{"valid": false}'})
@@ -126,7 +133,7 @@ def test_selected_read_observation_is_material_and_not_classified_by_tool_name(c
     })
     assert ok and not error
     selected = delivery_subject_hash(tool_ctx, trace)
-    assert selected != before and run["superseded_by_revision"]
+    assert selected != before
     trace["tool_calls"][0]["duration_sec"] = 200
     assert delivery_subject_hash(tool_ctx, trace) == selected
     trace["tool_calls"][0]["result"] = '{"valid": true}'
@@ -179,7 +186,7 @@ def test_queue_generation_cas_and_retained_source_both_prevent_blind_seal(case):
     observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
     assert acknowledge_acceptance_observation(tool_ctx, observed["owner_source_sha256"])
     _followup(tool_ctx, "Actually add another requirement.")
-    assert _end_task_acceptance_fence(tool_ctx, outcome="terminal")
+    assert _end_task_acceptance_fence(tool_ctx, outcome="author_stop")
     assert calls[-1]["outcome"] == "revision"
     assert tool_ctx._task_acceptance_fence_generation_mismatch is True
 
@@ -195,13 +202,22 @@ def test_queue_arrival_after_snapshot_refuses_source_ack(case):
 
 
 def test_arrival_retains_old_paid_review_instead_of_declaring_semantic_change(case):
+    """An owner follow-up reopens a sealed root for Main: the selected completion is
+    void and the seal is released as a revision, while the paid review and its
+    decision stay exactly as they were — arrival is unread input, not a judgment."""
     tool_ctx, _tools, _ctx, trace, _candidate, run = case
+    trace["task_completion"] = {"action": "stop", "rationale": "Waiting for the owner.", "answer_sha256": "a" * 64}
+    tool_ctx._task_acceptance_sealed_fence_token = "sealed-root"
+    calls = []
+    tool_ctx.end_acceptance_fence = lambda **kwargs: calls.append(kwargs) or {"ok": True, "status": "released"}
     _followup(tool_ctx, "Status?")
-    assert _supersede_task_acceptance_for_owner_followup(tool_ctx, trace)
+    assert _release_for_owner_followup(tool_ctx, trace)
+    assert [call["outcome"] for call in calls] == ["revision"]
+    assert tool_ctx._task_acceptance_fence_generation_mismatch is False
+    assert "task_completion" not in trace
     assert not run.get("superseded_by_revision")
-    assert trace["review_decision"]["panel_id"] == "panel"
-    assert trace["review_decision"]["eligibility"] == "pending_owner_followup"
-    assert trace["acceptance_decision"]["status"] == "revision_requested"
+    assert trace["review_decision"] == {"panel_id": "panel", "binding_hash": "binding"}
+    assert "acceptance_decision" not in trace
 
 
 def test_invalid_subject_is_atomic_and_cannot_select_future_tool_results(case):
@@ -225,55 +241,41 @@ def test_before_send_observation_is_not_itself_owner_ack(case):
     assert owner_source_sha256(tool_ctx) == observed["owner_source_sha256"]
 
 
-@pytest.mark.parametrize("review_only", [True, False])
-def test_review_only_entry_reuses_complete_readiness_without_delivering_or_closing_ingress(case, monkeypatch, review_only):
+def test_a_selected_finish_delivers_without_opening_the_seal_and_closes_ingress(case, monkeypatch):
+    """A plain finish never opens the root admission seal (only an author stop does);
+    delivery finalizes services, passes the result review step, and closes owner
+    ingress under the admission lock."""
     tool_ctx, tools, ctx, trace, candidate, _run = case
     tool_ctx._delivery_control_required = True
     seen = []
     monkeypatch.setattr(loop, "_project_child_result_dispositions", lambda *_args: None)
-    monkeypatch.setattr(loop, "_enforce_swarm_actions", lambda *_args: False)
+    monkeypatch.setattr(loop, "_enforce_plan_gate", lambda *_args: False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_args: "")
     monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_args: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
     monkeypatch.setattr(loop, "_finalize_task_services", lambda *_args: seen.append("services") or False)
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_args: "")
+    monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_args: "")
     monkeypatch.setattr(loop, "_forced_orphan_note", lambda *_args, **_kwargs: "")
-    tool_ctx._acceptance_review_only = review_only
     fences = []
-    tool_ctx.begin_acceptance_fence = lambda **_kwargs: {"token": "new-final-fence", "owner_message_generation": 0}
+    tool_ctx.begin_acceptance_fence = lambda **kwargs: fences.append(kwargs) or {"token": "never", "owner_message_generation": 0}
     tool_ctx.end_acceptance_fence = lambda **kwargs: fences.append(kwargs) or {"ok": True, "status": "sealed"}
-    def review(**kwargs):
-        seen.append(kwargs["content"])
-        tool_ctx._task_acceptance_reviewed = True
+
+    def review(_ctx, content, _trace, _hold):
+        seen.append(content)
         return False
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", review)
+
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
     monkeypatch.setattr(loop, "_handle_text_response", lambda text, *_args: (text, {}, trace))
     selected = _select_retained(tools, ctx, trace)
     returned = _no_tool_final_answer(
         selected, ctx, trace, tools, ctx.incoming_messages,
-        set(), lambda *_args: None, review_only=review_only, explicit_candidate=True,
+        set(), lambda *_args: None, explicit_candidate=True,
     )
     assert seen == ["services", candidate.full_text]
-    if review_only:
-        assert returned is None and fences == []
-        assert tool_ctx.owner_message_admission_agent._accepting_owner_messages is True
-    else:
-        assert returned[0] == candidate.full_text
-        assert fences[-1]["outcome"] == "terminal"
-        assert tool_ctx._task_acceptance_sealed_fence_token == "new-final-fence"
-        assert tool_ctx.owner_message_admission_agent._accepting_owner_messages is False
-
-
-@pytest.mark.parametrize("outcome", ["terminal", "degraded"])
-def test_feedback_end_releases_fence_without_sealing(case, outcome):
-    tool_ctx, _tools, _ctx, _trace, _candidate, _run = case
-    tool_ctx._acceptance_review_only = True
-    tool_ctx._task_acceptance_fence_token = "early-review"
-    called = []
-    tool_ctx.end_acceptance_fence = lambda **kwargs: called.append(kwargs) or {"ok": True, "status": "released"}
-    assert _end_task_acceptance_fence(tool_ctx, outcome=outcome)
-    assert called[-1]["outcome"] == "revision"
-    assert tool_ctx._task_acceptance_sealed_fence_token is None
+    assert returned[0] == candidate.full_text
+    assert fences == []
+    assert not getattr(tool_ctx, "_task_acceptance_sealed_fence_token", None)
+    assert tool_ctx.owner_message_admission_agent._accepting_owner_messages is False
 
 
 def test_pending_ingress_cannot_be_hidden_by_a_new_final_fence(case):
@@ -284,12 +286,12 @@ def test_pending_ingress_cannot_be_hidden_by_a_new_final_fence(case):
     called = []
     tool_ctx.end_acceptance_fence = lambda **kwargs: called.append(kwargs) or {"ok": True, "status": "released"}
     ctx.incoming_messages.put("Not yet delivered to Main")
-    assert _end_task_acceptance_fence(tool_ctx, outcome="terminal")
+    assert _end_task_acceptance_fence(tool_ctx, outcome="author_stop")
     assert called[-1]["outcome"] == "revision"
     assert tool_ctx._task_acceptance_fence_generation_mismatch is True
 
 
-def test_observation_prompt_is_available_for_first_explicit_nomination(case):
+def test_observation_prompt_is_available_before_any_retained_answer(case):
     tool_ctx, _tools, ctx, trace, _candidate, _run = case
     del tool_ctx._delivery_candidate
     observation = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)

@@ -1,6 +1,7 @@
 /** Shared frontend utilities. */
 
-import { apiFetch } from './api_client.js';
+import { apiClient } from './api_client.js';
+import { currentLanguage, fmt, isEnglish, tr } from './i18n.js';
 export { fetchJson } from './api_client.js';
 
 export function escapeHtmlText(text) {
@@ -52,34 +53,87 @@ export function sinceLocalTime(value, now = Date.now()) {
     return ` · since ${at.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${clock}`;
 }
 
-const absoluteTime = (value, zone = false) => {
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const hhmm = date => `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+// English keeps this hand format byte for byte; an install language takes its month
+// names from Intl and its two words from the catalog (web/modules/i18n.js).
+function monthName(date) {
+    if (!isEnglish()) {
+        try { return new Intl.DateTimeFormat(currentLanguage(), { month: 'short' }).format(date); } catch { /* hand list below */ }
+    }
+    return MONTHS[date.getMonth()];
+}
+// The chat's one compact clock: the local time, the day only off today (`18:46`, `Oct 16, 18:46`).
+const clockOf = (date, now) => (date.toDateString() === now.toDateString()
+    ? hhmm(date) : `${monthName(date)} ${date.getDate()}, ${hhmm(date)}`);
+function msgTimeOf(date, now) {
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const short = date.toDateString() === yesterday.toDateString()
+        ? `${tr('time.yesterday', 'Yesterday')}, ${hhmm(date)}` : clockOf(date, now);
+    return { short, full: `${monthName(date)} ${date.getDate()}, ${date.getFullYear()} ${tr('time.at', 'at')} ${hhmm(date)}` };
+}
+
+/** {short, full} presentation of a message timestamp, or null when unreadable. */
+export function formatMsgTime(isoStr) {
+    if (!isoStr) return null;
+    try {
+        const date = new Date(isoStr);
+        return Number.isNaN(date.getTime()) ? null : msgTimeOf(date, new Date());
+    } catch {
+        return null;
+    }
+}
+
+const readDate = (value) => {
     const date = value ? new Date(value) : null;
-    return date && !Number.isNaN(date.getTime()) ? date.toLocaleString(undefined, {
-        year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-        ...(zone ? { timeZoneName: 'short' } : {}),
-    }) : '';
+    return date && !Number.isNaN(date.getTime()) ? date : null;
+};
+const absoluteTime = (value, zone = false) => readDate(value)?.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    ...(zone ? { timeZoneName: 'short' } : {}),
+}) || '';
+const zoneName = (date) => {
+    try {
+        return new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(date)
+            .find((part) => part.type === 'timeZoneName')?.value || '';
+    } catch { return ''; }
 };
 // The instant's own minute: local clock text repeats across a DST fallback hour.
 const minuteOf = value => Math.floor(new Date(value).getTime() / 60000);
 
 /** A task's host-observed end and the time its notification was added are two
- * facts (#1347); an unknown end says so rather than borrowing the second. Two
- * different minutes that read alike locally carry their zone names. */
-export function terminalTimeNote(terminalTime, addedAt) {
-    const known = terminalTime?.source === 'executor_terminal' && absoluteTime(terminalTime.occurred_at);
-    const zone = Boolean(known) && known === absoluteTime(addedAt) && minuteOf(terminalTime.occurred_at) !== minuteOf(addedAt);
-    const occurred = known ? absoluteTime(terminalTime.occurred_at, zone) : '';
-    return `${occurred ? `Task ended ${occurred}` : 'Task end time not recorded'} · Notification added ${absoluteTime(addedAt, zone)}`;
+ * facts (#1347); an unknown end says so rather than borrowing the second.
+ * `full` states both as absolute local dates (two different minutes that read
+ * alike carry their zone names): the tooltip, what a screen reader hears, and a
+ * details line. `short` is the row's one compact time line (owner 17.10, Q7 A):
+ * the row's own time alone when its task ended in that minute, both facts only
+ * when the minutes differ, a day only off today. */
+export function terminalTimeNote(terminalTime, addedAt, now = new Date()) {
+    const ended = terminalTime?.source === 'executor_terminal' ? readDate(terminalTime.occurred_at) : null;
+    const added = readDate(addedAt);
+    const zone = Boolean(ended && added) && absoluteTime(ended) === absoluteTime(added) && minuteOf(ended) !== minuteOf(added);
+    const endFact = ended ? `Task ended ${absoluteTime(ended, zone)}` : 'Task end time not recorded';
+    const full = added ? `${endFact} · Notification added ${absoluteTime(added, zone)}` : endFact;
+    if (ended && added && minuteOf(ended) === minuteOf(added)) return { short: msgTimeOf(added, now).short, full };
+    const clocks = [ended, added].map((date) => (date ? clockOf(date, now) : ''));
+    const [end, at] = ended && clocks[0] === clocks[1] ? clocks.map((clock, i) => `${clock} ${zoneName([ended, added][i])}`) : clocks;
+    const short = ended
+        ? (at ? fmt('Ended {end} · added {added}', { end, added: at }) : fmt('Ended {end}', { end }))
+        : (at ? fmt('End time not recorded · added {added}', { added: at }) : fmt('End time not recorded'));
+    return { short, full };
 }
 
 /** A saved end row may be published long after its task ended. Its line keeps the
  * row's own time and adds the note when the end falls in another minute or is
- * unknown; live frames and rows saved before the host fact existed stay as they were. */
+ * unknown; live frames and rows saved before the host fact existed stay as they were.
+ * The room's expanded timeline is a details surface whose own line time is the log's
+ * long form, so the note there is the full one. */
 export function savedTerminalRowNote(row) {
     const fact = row?.system_type === 'task_summary' ? row.terminal_time : null;
     if (!fact || typeof fact !== 'object' || !absoluteTime(row.ts)) return '';
     const known = fact.source === 'executor_terminal' && absoluteTime(fact.occurred_at);
-    return known && minuteOf(fact.occurred_at) === minuteOf(row.ts) ? '' : terminalTimeNote(fact, row.ts);
+    return known && minuteOf(fact.occurred_at) === minuteOf(row.ts) ? '' : terminalTimeNote(fact, row.ts).full;
 }
 
 /** Bound untrusted text with a visible marker before it reaches DOM surfaces. */
@@ -168,79 +222,18 @@ export function preflightFindingText(finding) {
     return `Preflight failed — ${shown}${parts.length > 3 ? ` (+${parts.length - 3} more)` : ''}`;
 }
 
-export function topReviewFinding(entity) {
-    const findings = Array.isArray(entity?.review_findings) ? entity.review_findings : [];
-    if (!findings.length) return '';
-    const first = findings[0] || {};
-    const more = findings.length > 1 ? ` (+${findings.length - 1} more)` : '';
-    const preflight = preflightFindingText(first);
-    if (preflight) return `${preflight}${more}`;
-    const label = first.item || first.check || first.title || 'finding';
-    const verdict = first.verdict || first.severity || '';
-    const reason = first.reason || first.message || '';
-    return `${`${verdict ? `${verdict} ` : ''}${label}: ${reason}`.trim()}${more}`;
-}
-
-export function renderHubCard(item, {
-    pending = null,
-    installed = null,
-    lifecycle,
-    primaryHtml = '',
-    secondaryHtml = '',
-    badgesHtml = '',
-    metaHtml = '',
-    official = false,
-} = {}) {
-    const slug = item.slug;
-    const working = Boolean(pending) && pending.failed !== true;
-    const spinner = working ? '<span class="marketplace-working-spinner" aria-hidden="true"></span>' : '';
-    const lifecycleHint = lifecycle?.hint
-        ? `<div class="marketplace-card-state-hint">${escapeHtmlAttr(lifecycle.hint)}</div>`
-        : '';
-    // The local copy's own version only; the catalog version is the title's fact.
-    const status = installed
-        ? `<span class="skills-status-chip skills-status-ok">Installed${installed.version ? ` v${escapeHtmlAttr(installed.version)}` : ''}</span>`
-        : '';
-    return `
-        <article class="${working ? 'marketplace-card is-working' : 'marketplace-card'}" data-slug="${escapeHtmlAttr(slug)}">
-            <div class="marketplace-card-head">
-                <div class="marketplace-card-title">
-                    <strong>${escapeHtmlAttr(item.display_name || slug)}</strong>
-                    <span class="muted">${escapeHtmlAttr(slug)} · v${escapeHtmlAttr(item.latest_version || '—')}</span>
-                </div>
-                <div class="marketplace-card-badges">
-                    ${official ? '<span class="skills-badge skills-badge-ok">official</span>' : ''}
-                    ${status}
-                    ${badgesHtml}
-                </div>
-            </div>
-            <div class="marketplace-card-body">${escapeHtmlAttr(item.summary || item.description || '')}</div>
-            <div class="marketplace-card-state marketplace-state-${escapeHtmlAttr(lifecycle?.tone || 'muted')}">
-                <strong>${spinner}${escapeHtmlAttr(lifecycle?.label || '')}</strong>
-                ${lifecycleHint}
-            </div>
-            ${metaHtml ? `<div class="marketplace-card-meta muted">${metaHtml}</div>` : ''}
-            <div class="marketplace-card-actions">
-                <div class="marketplace-primary-action">${primaryHtml}</div>
-                ${secondaryHtml ? `<div class="marketplace-secondary-actions">${secondaryHtml}</div>` : ''}
-            </div>
-        </article>
-    `;
-}
-
 /**
- * One quiet line of OuroborosHub submission history (the hub_sync
- * `submission` facts), shared by the installed card's details and the hub
- * card's disclosure. It states what this installation submitted — never
- * ownership, a merge or an open pull request — and an unsafe receipt URL
- * stays plain text without hiding the other facts.
+ * One quiet line of publication history (what this installation sent), shown
+ * in an installed card's details. It states what was submitted — never
+ * ownership, a merge or an open pull request — and an unsafe receipt URL stays
+ * plain text without hiding the other facts.
  */
 export function renderSubmissionHistory(submission) {
     if (!submission || typeof submission !== 'object') return '';
     const parts = [submission.version ? `Submitted v${escapeHtmlAttr(submission.version)}` : 'Submitted'];
     const pr = submission.pr_number !== null ? `PR #${escapeHtmlAttr(String(submission.pr_number))}` : 'Pull request';
     const href = safeExternalHrefAttr(submission.pr_url);
-    if (href) parts.push(`<a href="${href}" target="_blank" rel="noopener noreferrer">${pr}</a>`);
+    if (href) parts.push(`<a href="${href}" target="_blank" rel="noopener noreferrer" data-skill-external>${pr} ↗</a>`);
     else if (submission.pr_number !== null) parts.push(pr);
     if (submission.local_differs) parts.push('Local files differ from the submitted copy');
     return parts.join(' · ');
@@ -519,16 +512,19 @@ export const MARKDOWN_FENCED_CODE = new RegExp(FENCE_START + '\\n([\\s\\S]*?)```
 const FENCE_CLOSE = /```/;
 
 /**
- * Plain-text projection of ATX headings for one-line previews: the markers go,
- * and a heading (by the renderer's own visible-length rule) followed by text keeps
- * ` — ` as its separator, so a collapsed preview reads `summary — …` rather than
- * gluing the label to the sentence. A marker-led line the renderer treats as prose
- * loses only its markers; a heading already ending in a dash or colon gets no
- * second one; lines inside a code fence are code and stay untouched. CRLF and
+ * Plain-text projection of the line-anchored markers for one-line previews, run
+ * while the newlines still exist (a flattened preview can no longer tell a line
+ * start from prose). ATX headings lose their markers, and a heading (by the
+ * renderer's own visible-length rule) followed by text keeps ` — ` as its
+ * separator, so a collapsed preview reads `summary — …` rather than gluing the
+ * label to the sentence. A marker-led line the renderer treats as prose loses only
+ * its markers; a heading already ending in a dash or colon gets no second one.
+ * Bullets lose their `- `, a table row reads as its cells and a divider row
+ * disappears. Lines inside a code fence are code and stay untouched. CRLF and
  * trailing blanks are normalized. Line-by-line on purpose: a regex over the whole
  * text with a lazy or trailing-blank tail is quadratic on long whitespace runs.
  */
-export function joinMarkdownHeadings(text) {
+export function projectMarkdownLines(text) {
     const raw = String(text || '').split('\n');
     const lines = raw.map((line) => line.trimEnd());
     // Index of the next non-blank line and "a closer exists below" for every line:
@@ -546,7 +542,13 @@ export function joinMarkdownHeadings(text) {
         if (fenced) { if (FENCE_CLOSE.test(raw[index])) fenced = false; return line; }
         if (opensFence(index)) { fenced = true; return line; }
         const heading = /^#{1,6} (.*\S)$/.exec(line);
-        if (!heading) return line;
+        if (!heading) {
+            const bullet = /^- (.+)$/.exec(line);
+            if (bullet) return bullet[1];
+            const row = /^\|(.+)\|$/.exec(line);
+            const cells = row ? row[1].split('|').map((cell) => cell.trim()).join(' ') : line;
+            return /^[\s\-:|]+$/.test(cells) ? '' : cells;
+        }
         const next = nextIndex[index];
         // A visibly dash- or colon-terminated heading (`**Steps:**` included) needs no second separator.
         const visible = visibleHeadingText(heading[1], false);
@@ -659,72 +661,39 @@ export function formatDualVersion(data) {
     return `app ${appVersion} | rt ${runtimeVersion}`;
 }
 
-export async function loadVersion() {
-    try {
-        const resp = await apiFetch('/api/health');
-        const data = await resp.json();
-        const { runtimeVersion } = extractVersions(data);
-        const navVer = document.getElementById('nav-version');
-        if (navVer) navVer.textContent = `v${runtimeVersion}`;
-    } catch {}
+const versionField = (value) => (typeof value === 'string' ? value.trim() : '');
+let versionRead = 0;
+let appVersionRead = '';
+const appVersionWatchers = new Set();
+
+/** The app version the newest landed health read reported (`loadVersion`); '' while none did. */
+export const lastAppVersion = () => appVersionRead;
+
+/** Call `watcher` when a landed health read changes `lastAppVersion()`; returns its disposer. */
+export function watchAppVersion(watcher) {
+    appVersionWatchers.add(watcher);
+    return () => appVersionWatchers.delete(watcher);
 }
 
-export function initMatrixRain() {
-    const canvas = document.createElement('canvas');
-    canvas.id = 'matrix-rain';
-    document.getElementById('app').prepend(canvas);
-
-    const ctx = canvas.getContext('2d');
-    const chars = '\u30A2\u30A4\u30A6\u30A8\u30AA\u30AB\u30AD\u30AF\u30B1\u30B3\u30B5\u30B7\u30B9\u30BB\u30BD\u30BF\u30C1\u30C4\u30C6\u30C8\u30CA\u30CB\u30CC\u30CD\u30CE\u30CF\u30D2\u30D5\u30D8\u30DB\u30DE\u30DF\u30E0\u30E1\u30E2\u30E4\u30E6\u30E8\u30E9\u30EA\u30EB\u30EC\u30ED\u30EF\u30F2\u30F3ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\u03A8\u03A9\u03A6\u0394\u039B\u039E\u03A3\u0398\u0430\u0431\u0432\u0433\u0434\u0435\u0436\u0437\u0438\u043A\u043B\u043C\u043D\u043E\u043F\u0440\u0441\u0442\u0443\u0444\u0445\u0446\u0447\u0448\u0449\u044D\u044E\u044F'.split('');
-    const fontSize = 14;
-    const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    let timer = null;
-    let columns = [];
-    let w = 0, h = 0;
-
-    function resize() {
-        w = canvas.width = window.innerWidth;
-        h = canvas.height = window.innerHeight;
-        const colCount = Math.floor(w / fontSize);
-        while (columns.length < colCount) columns.push(Math.random() * h / fontSize | 0);
-        columns.length = colCount;
-        if (motion.matches) draw();
+/**
+ * The sidebar's runtime version and About's app/runtime pair, from one `/api/health` read. app.js
+ * reads at startup and on every socket open, because a kept page outlives the core that served it.
+ * The newest read started owns both labels: an older answer is dropped even when the newer read
+ * fails, and a failed, refused or versionless answer leaves the text they already show.
+ */
+export async function loadVersion() {
+    const read = ++versionRead;
+    let data = null;
+    try { data = await apiClient.health(); } catch { /* keep the labels */ }
+    const runtime = versionField(data?.runtime_version) || versionField(data?.version);
+    if (read !== versionRead || !runtime) return;
+    const versions = { runtime_version: runtime, app_version: versionField(data.app_version) };
+    if (appVersionRead !== versions.app_version) {  // the Updates page's App chip
+        appVersionRead = versions.app_version;
+        appVersionWatchers.forEach((watcher) => watcher());
     }
-    resize();
-    window.addEventListener('resize', resize);
-
-    function draw() {
-        ctx.fillStyle = 'rgba(13, 11, 15, 0.06)';
-        ctx.fillRect(0, 0, w, h);
-        ctx.fillStyle = '#ee3344';
-        ctx.font = fontSize + 'px monospace';
-
-        for (let i = 0; i < columns.length; i++) {
-            const ch = chars[Math.random() * chars.length | 0];
-            ctx.fillText(ch, i * fontSize, columns[i] * fontSize);
-            if (columns[i] * fontSize > h && Math.random() > 0.975) {
-                columns[i] = 0;
-            }
-            columns[i]++;
-        }
-    }
-
-    function syncMotion() {
-        if (timer !== null) clearInterval(timer);
-        timer = null;
-        if (document.documentElement.dataset.theme === 'light') return;
-        if (motion.matches) draw();
-        else timer = setInterval(draw, 66);
-    }
-    motion.addEventListener('change', syncMotion);
-    window.addEventListener('ouro:theme-changed', syncMotion);
-    syncMotion();
-    return () => {
-        if (timer !== null) clearInterval(timer);
-        timer = null;
-        motion.removeEventListener('change', syncMotion);
-        window.removeEventListener('ouro:theme-changed', syncMotion);
-        window.removeEventListener('resize', resize);
-        canvas.remove();
-    };
+    const nav = document.getElementById('nav-version');
+    if (nav) nav.textContent = `v${runtime}`;
+    const about = document.getElementById('about-version');
+    if (about) about.textContent = formatDualVersion(versions);
 }

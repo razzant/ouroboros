@@ -92,6 +92,60 @@ def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(monke
         key: getattr(prospective, key) for key in _IDENTITY}
 
 
+@pytest.mark.parametrize("model,env", _ROUTES)
+def test_the_sealed_boundary_is_one_marker_in_the_priced_copy_and_the_send_alike(monkeypatch, tmp_path, model, env):
+    """A re-seal after this round's facts row puts the boundary on it: the forced final's priced
+    copy and the real send render the same marker, and their candidate identity includes it."""
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.context_fit import seal_task_transcript
+    from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+    from tests.test_message_cache_boundary import _marked_texts
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    messages = [*copy.deepcopy(_MESSAGES), {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "probe-1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "probe-1", "content": "probe output"},
+        bound_host_row(CONTEXT_FACTS_NAME, "[facts] this round")]
+    seal_task_transcript(messages, min_prefix_tokens=0)
+    assert "cache_control" in messages[-1]
+    finalized, captured = [], {}
+    real_finalize = LLMClient._normalize_payload_cache_ttl
+
+    def finalize(self, target, payload):
+        applied = real_finalize(self, target, payload)
+        finalized.append(copy.deepcopy(payload))
+        return applied
+
+    monkeypatch.setattr(LLMClient, "_normalize_payload_cache_ttl", finalize)
+
+    def execute(request, send, before_dispatch):
+        captured["request"] = request
+        raise _Captured()
+
+    _patch_execute_candidate(monkeypatch, llm_module, execute)
+    client = LLMClient(api_key="unused")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(
+        drive_root=tmp_path, task_id="parity", root_task_id="parity",
+    )):
+        prospective = task_pacing.prospective_wrapup_attempt_request(
+            llm=client, messages=messages, model=model, reasoning_effort="high",
+            tools=_TOOLS, cache_affinity=cache_key_for_model(model),
+        )
+        try:
+            call_llm_with_retry(client, messages, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                queue.Queue(), {}, initial_messages=messages)
+        except _Captured:
+            pass
+    assert "request" in captured, "the real send never reached the physical executor"
+    assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
+        key: getattr(prospective, key) for key in _IDENTITY}
+    marked = [] if model.startswith("openai::") else ["[facts] this round"]
+    assert len(finalized) == 2 and [_marked_texts(payload) for payload in finalized] == [marked, marked]
+
+
 @pytest.mark.parametrize("model,env", _OPENAI_FAMILY_ROUTES)
 def test_declared_system_prefix_split_is_projected_once_inside_the_candidate_builder(monkeypatch, tmp_path, model, env):
     """The prospective wrap-up candidate and the real send agree on the SPLIT copy, and

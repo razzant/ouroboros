@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.context import _canonical_runtime_reader
+from ouroboros.tool_access_reads import canonical_runtime_reader as _canonical_runtime_reader
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tool_access import build_resolved_resource_binding, filesystem_affordance_map
 from ouroboros.tools.registry import ToolContext, ToolRegistry
@@ -109,7 +109,7 @@ def test_emitted_reader_keeps_disabled_tools_resource_policy_and_network_restric
 
 
 def test_presence_keeps_its_selected_physical_runtime_root(world):
-    from ouroboros.presence_capabilities import PresenceResourceTarget, PresenceToolTarget
+    from tests.frozen_presence_capabilities import PresenceResourceTarget, PresenceToolTarget
 
     for prefix in ("memory", "."):
         ctx = _speaker(world, "speaker", PresenceToolTarget("builtin", "read_file"),
@@ -123,8 +123,12 @@ def test_presence_keeps_its_selected_physical_runtime_root(world):
             ctx, "read_file(root='runtime_data', path='memory/deep_review.md')")
 
 
+def _project_reflections_reader(_ctx, project_id: str) -> str:
+    """The scoped journal reader of a project's historical reflection log."""
+    return f"journal_read(project_id={project_id!r}, source='reflections')"
+
+
 def test_project_store_stays_behind_the_scoped_reader(world):
-    from ouroboros.context import _project_reflections_reader
     from ouroboros.project_facts import project_reflections_path
 
     for pid in ("p1", "p2"):

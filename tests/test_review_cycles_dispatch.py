@@ -535,3 +535,29 @@ def test_strict_api_stamp_veto_releases_sync_and_async_attempts(tmp_path):
     with pytest.raises(ua.PhysicalAttemptPreparationFailed):
         asyncio.run(run())
     assert ua.usage_projection(async_root)["attempt_counts"] == {"released": 1}
+
+
+def test_late_strict_stamp_failure_is_logged_and_still_refuses_later_canonical_sends(tmp_path, caplog):
+    """#1652: after a send already left, a strict stamp's failure is logged, never raised over that
+    send's own failure. The stamp keeps it, so the canonical boundary refuses any later physical
+    send of the wave before its claim; a fail-open stamp reports nothing."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros.review_dispatch import ReviewPaidStamp, bind_api_review_paid_stamp, invoke_late_review_paid_stamp
+
+    writes, sent = [], []
+
+    def refuse():
+        writes.append("attempted")
+        raise RuntimeError("wallet unavailable")
+
+    stamp = ReviewPaidStamp(refuse, fail_closed=True)
+    assert invoke_late_review_paid_stamp(stamp) is True and stamp.fired
+    assert "wallet unavailable" in caplog.text
+    with bind_api_review_paid_stamp(stamp):
+        with pytest.raises(ua.PhysicalAttemptPreparationFailed):
+            ua.execute_physical_attempt(ua.AttemptRequest(model="local", provider="local", reservation_usd=1.0,
+                                                          drive_root=tmp_path, task_id="t", root_task_id="t"),
+                                        lambda: sent.append("send"))
+    assert sent == [] and writes == ["attempted"]
+    assert ua.usage_projection(tmp_path)["attempt_counts"] == {"released": 1}
+    assert invoke_late_review_paid_stamp(ReviewPaidStamp(refuse)) is False

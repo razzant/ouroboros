@@ -99,19 +99,20 @@ def test_tool_set_matches(registry):
 
 
 EXPECTED_TOOLS = [
+    "continue_in_background", "pause_task", "resume_task", "continue_task",
     "browse_page", "browser_action",
     "preflight_review", "review_change", "review_status",
     "compact_context", "set_tool_timeout", "request_restart", "prepare_self_change",
-    "inspect_harness", "maintain_harness",
+    "inspect_harness", "maintain_harness", "inspect_subagent",
     "promote_to_stable", "schedule_subagent", "schedule_followup", "manage_schedules",
-    "configure_presence", "initiate_presence",
+    "configure_presence",
     "integrate_subagent_patch", "compare_subagent_patches",
     # C1: the explicit acceptance seam for a delegated run's captured patch —
     # a first-class tool, so the registry contract must name it.
-    "integrate_delegated_patch", "cancel_task", "resume_child_task",
+    "integrate_delegated_patch", "cancel_task", "resume_child_task", "set_task_retention",
     "peek_task", "discard_child_result", "override_delegation_constraint",
     "request_deep_self_review", "chat_history", "update_scratchpad",
-    "send_user_message", "update_identity", "toggle_evolution",
+    "send_user_message", "update_identity", "update_world", "toggle_evolution",
     "toggle_consciousness",
     "set_next_wakeup", "switch_model", "get_task_result",
     "wait_task", "wait_tasks", "await_messages", "tree_note", "tree_read",
@@ -119,31 +120,31 @@ EXPECTED_TOOLS = [
     "delegate_message",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
-    "send_photo", "send_video", "send_file", "send_links", "search_code", "query_code", "query_data", "escalate",
+    "send_photo", "send_video", "send_file", "send_links", "show_card", "search_code", "query_code", "query_data", "escalate",
         "forward_to_worker",
     "generate_image", "list_image_models", "recover_image", "generate_evolution_stats",
-    "commit_reviewed", "vcs_commit_reviewed", "vcs_status", "vcs_diff",
+    "commit_reviewed", "vcs_read",
     "vcs_pull_ff", "vcs_restore", "vcs_revert",
     "fetch_pr_ref", "create_integration_branch", "cherry_pick_pr_commits",
     "stage_adaptations", "stage_pr_merge", "vcs_rollback",
-    "list_github_prs", "get_github_pr", "get_github_checks", "comment_on_pr", "pr_merge",
-    "list_github_issues", "get_github_issue", "comment_on_issue",
-    "close_github_issue", "create_github_issue",
+    "github_read", "github_write", "pr_merge",
     "codebase_health", "knowledge_read", "knowledge_write", "knowledge_list",
     "chronicle_write", "memory_read", "memory_mark",
     "journal_read", "journal_write", "workpad_read", "workpad_write",
-    "promote_chat_to_task", "route_to_project", "list_projects", "steer_task",
-    "ensure_project_scope", "schedule_followup",
+    "start_task", "list_projects", "tell_task",
+    "move_to_project", "close_project", "schedule_followup",
     "memory_map", "memory_update_registry",
     "plan_task", "recent_tasks", "live_roots", "update_focus",
-    "task_acceptance_review", "finish_task", "verify_and_record", "web_search",
+    "search_ui_translations", "pin_ui_translation", "record_update_description",
+    "finish_task", "verify_and_record", "web_search",
     "start_service", "service_status", "service_logs", "stop_service",
     "run_command", "run_script",
     "list_skills", "skill_review", "skill_exec", "toggle_skill", "skill_owner_action",
     "skill_preflight", "submit_skill_to_hub",
+    "skill_sources", "skill_search", "skill_install", "skill_update",
     "list_available_tools", "enable_tools",
     "analyze_screenshot", "vlm_query", "view_image",
-    "ocr_pdf", "youtube_transcript", "extract_video_frames",
+    "extract_pdf_text", "youtube_transcript", "extract_video_frames",
 ]
 
 
@@ -199,15 +200,16 @@ def test_tool_schemas_have_no_empty_enum_values(registry):
         _walk(schema.get("function", {}).get("parameters", {}), schema.get("function", {}).get("name", "?"))
 
 
-def test_github_create_issue_schema_fields(registry):
-    schema = registry.get_schema_by_name("create_github_issue")["function"]
+def test_github_write_schema_fields(registry):
+    schema = registry.get_schema_by_name("github_write")["function"]
     props = schema["parameters"]["properties"]
-    assert schema["parameters"]["required"] == ["title"]
+    assert schema["parameters"]["required"] == ["method"]
+    assert {"create_issue", "create_pr"} <= set(props["method"]["enum"])
     assert props["title"]["type"] == "string"
     assert props["body"]["type"] == "string"
-    assert props["body"]["default"] == ""
-    assert props["labels"]["type"] == "string"
-    assert props["labels"]["default"] == ""
+    assert "default" not in props["body"]  # Omitted keeps the PR body; only an explicit "" clears it.
+    assert props["labels"]["type"] == "array"
+    assert "default" not in props["labels"]  # Omitted keeps labels; only an explicit [] clears them.
 
 
 def test_tool_execute_basic(registry):
@@ -232,11 +234,10 @@ def test_frozen_registry_includes_packaged_tool_modules(monkeypatch):
         "review_status",
         "plan_task",
         "vcs_rollback",
-        # github.py is in _FROZEN_TOOL_MODULES — PR inspection tools must work in frozen builds
-        "list_github_prs",
-        "get_github_pr",
-        "get_github_checks",
-        "comment_on_pr",
+        # github.py is in _FROZEN_TOOL_MODULES — the GitHub tools must work in frozen builds
+        "github_read",
+        "github_write",
+        "pr_merge",
         "query_code",
     }
     missing = expected_subset - available
@@ -343,7 +344,7 @@ def test_memory_persistence():
 
 def test_no_hardcoded_replies():
     """Principle 5 (LLM-First): no hardcoded reply strings in code.
-    
+
     Checks for suspicious patterns like:
     - reply = "Fixed string"
     - return "Sorry, I can't..."
@@ -505,7 +506,7 @@ def test_js_module_gate_buckets_and_grandfathering():
 
 def test_no_bare_except_pass():
     """No bare `except: pass` (not even except Exception: pass with just pass).
-    
+
     v4.9.0 hardened exceptions — but checks the STRICTEST form:
     bare except (no Exception class) followed by pass.
     """
@@ -639,8 +640,6 @@ class TestPrePushGate:
                 _os.environ["OUROBOROS_PREFLIGHT_TIMEOUT_SEC"] = prev
 
 
-
-
 def test_no_module_defines_the_same_top_level_name_twice():
     """A redefinition is invisible at import: the later one silently wins.
 
@@ -658,7 +657,7 @@ def test_no_module_defines_the_same_top_level_name_twice():
     root = pathlib.Path(__file__).resolve().parents[1]
     offenders = []
     for path in sorted(root.rglob("*.py")):
-        parts = set(path.parts)
+        parts = set(path.relative_to(root).parts)
         if parts & {".git", "node_modules", "venv", ".venv", "build", "dist"}:
             continue
         try:
@@ -680,3 +679,21 @@ def test_no_module_defines_the_same_top_level_name_twice():
             if count > 1 and not name.startswith("__"):
                 offenders.append(f"{path.relative_to(root)}: {name} defined {count}x")
     assert not offenders, "Top-level names defined more than once:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize("ancestor, relative, detected", [
+    *[(name, "dup.py", True) for name in (".git", "node_modules", "venv", ".venv", "build", "dist")],
+    *[("checkout", f"{name}/dup.py", False) for name in (".git", "node_modules", "venv", ".venv", "build", "dist")],
+    ("build", "Build/dup.py", True),
+])
+def test_duplicate_scan_exclusions_are_relative_to_checkout(tmp_path, monkeypatch, ancestor, relative, detected):
+    root = tmp_path / ancestor / "source"
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    path.write_text("x = 1\nx = 2\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "__file__", str(root / "tests" / "test_smoke.py"))
+    if detected:
+        with pytest.raises(AssertionError, match="dup.py: x defined 2x"):
+            test_no_module_defines_the_same_top_level_name_twice()
+    else:
+        test_no_module_defines_the_same_top_level_name_twice()

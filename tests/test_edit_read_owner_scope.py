@@ -18,6 +18,7 @@ def file_tools(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace,
                       workspace_mode="external", task_id="edit-owner-scope")
     registry = ToolRegistry(repo_dir=system, drive_root=data)
@@ -929,7 +930,8 @@ def test_repeated_anchor_is_a_lower_bound_and_repeated_context_is_refused():
     repeated = "def f():\n    a = 1\ndef f():\n    a = 1\n"
     same = _parse_patch("*** Update File: f.py\n@@ def f():\n-    a = 1\n+    a = 9\n")[0][0].hunks
     changed, _notes, failure = _apply_hunks_to_text(repeated, same, "f.py")
-    assert changed is None and "ambiguous" in failure and "line 2, line 4" in failure
+    assert changed is None and "ambiguous" in failure and "2 placements" in failure
+    assert "line 2: before 'def f():'" in failure and "line 4: before 'def f():'" in failure
 
 
 def test_repo_lane_delete_keeps_exact_dirty_tracked_and_binary_bytes(file_tools):

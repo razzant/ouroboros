@@ -109,7 +109,7 @@ def test_slash_messages_are_not_injected(tmp_path, monkeypatch):
     # Explicitly strict (the default is now full_access); strict must still block slashes.
     (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_MAX_UPDATES_PER_POLL": 20, "TELEGRAM_COMMAND_MODE": "strict"}), encoding="utf-8")
     FakeTelegramClient.updates = [
-        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/panic"}}
+        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/restart"}}
     ]
     monkeypatch.setattr(plugin, "TelegramClient", FakeTelegramClient)
     injected = []
@@ -137,7 +137,7 @@ def test_full_access_injects_raw_slash_commands(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     FakeTelegramClient.updates = [
-        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/panic"}}
+        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/panic", "date": int(plugin._POLL_GENERATION_STARTED) + 1}}
     ]
     monkeypatch.setattr(plugin, "TelegramClient", FakeTelegramClient)
     injected = []
@@ -170,7 +170,7 @@ def test_full_access_first_chat_pins_silently_and_forwards(tmp_path, monkeypatch
         encoding="utf-8",
     )
     FakeTelegramClient.updates = [
-        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/panic"}}
+        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/panic", "date": int(plugin._POLL_GENERATION_STARTED) + 1}}
     ]
     monkeypatch.setattr(plugin, "TelegramClient", FakeTelegramClient)
     injected = []

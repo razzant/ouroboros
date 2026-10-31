@@ -39,9 +39,11 @@ import time
 
 import pytest
 
+from ouroboros import dialogue_store
 from tests import test_ui_smoke_playwright as smoke
 from tests.test_room_work_browser import ROOM_FACTS
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
+from tests.ui_console_errors import PageErrors
 
 direct_server_with_data = smoke.direct_server_with_data
 
@@ -154,7 +156,6 @@ def _seed_roots(data_dir, task_ids, filler=0):
 
     now = _dt.datetime.now(_dt.timezone.utc)
     (data_dir / "state").mkdir(parents=True, exist_ok=True)
-    (data_dir / "logs").mkdir(parents=True, exist_ok=True)
     chat, progress, pending = [], [], []
     for index in range(filler):
         ts = (now - _dt.timedelta(minutes=filler - index)).isoformat()
@@ -182,9 +183,9 @@ def _seed_roots(data_dir, task_ids, filler=0):
         "pending_count": len(pending), "running_count": 0, "reaping_count": 0,
         "acceptance_fences": [], "budget_root_fences": [], "pending": pending, "running": [],
     }), encoding="utf-8")
-    (data_dir / "logs" / "chat.jsonl").write_text("".join(json.dumps(row) + "\n" for row in chat), encoding="utf-8")
-    (data_dir / "logs" / "progress.jsonl").write_text("".join(json.dumps(row) + "\n" for row in progress),
-                                                      encoding="utf-8")
+    for stream, rows in (("chat", chat), ("progress", progress)):
+        for row in rows:
+            dialogue_store.append(data_dir, stream, row)
 
 
 def _http(url, method, path, body=None):
@@ -256,8 +257,7 @@ class Evidence:
 def _launch(pw, engine, *, width=1100, height=722, theme="dark"):
     browser = getattr(pw, engine).launch(headless=True)
     page = browser.new_page(viewport={"width": width, "height": height})
-    log = {"pageerrors": [], "console": [], "requests": []}
-    page.on("pageerror", lambda error: log["pageerrors"].append(str(error)))
+    log = {"pageerrors": PageErrors(page, engine), "console": [], "requests": []}
     page.on("console", lambda msg: log["console"].append(f"{msg.type}: {msg.text}")
             if msg.type in {"error", "warning"} else None)
     page.on("request", lambda request: log["requests"].append((request.method, request.url))
@@ -330,7 +330,8 @@ def test_main_sheet_follows_real_roots_through_pause_resume_and_finish(direct_se
 
                 trigger.click()
                 opened = _wait_facts(page, "main", lambda f: f["surfaceHidden"] is False and len(f["rows"]) == 3
-                                     and all(r["name"] for r in f["rows"]), "the sheet with three named roots")
+                                     and all(r["name"] and r["target"] == "card" for r in f["rows"]),
+                                     "the sheet with three named roots, each on its card")
                 evidence.record("opened", opened)
                 ids = [row["id"] for row in opened["rows"]]
                 assert sorted(ids) == sorted([ALPHA, BRAVO, CHARLIE]), opened
@@ -346,9 +347,11 @@ def test_main_sheet_follows_real_roots_through_pause_resume_and_finish(direct_se
                 for task_id in ids:
                     row = _row(opened, task_id)
                     assert row["target"] == "card", row
-                    assert cards[task_id] and row["name"] == cards[task_id], ("a row names its card", row, cards)
+                    # A row names its work by the request's title; its card shows the same work.
+                    assert row["name"] == TITLE[task_id] and TITLE[task_id] in cards[task_id], ("a row names its work", row, cards)
                 assert alpha["more"] and alpha["moreId"] == ALPHA, alpha
-                assert page.locator("#page-chat .ui-chrome-group[data-disclosure='open']").count() == 1
+                # One Shade unfolds under Main's bar, which marks itself open (DESIGN "Room work status").
+                assert page.locator("#page-chat .chat-page-header[data-rw-open] .rw-shade:not([hidden])").count() == 1
                 assert opened["active"]["inSurface"], "a pointer open lands in the list"
                 evidence.shot(page, "02-main-open-1100")
 
@@ -376,7 +379,10 @@ def test_main_sheet_follows_real_roots_through_pause_resume_and_finish(direct_se
                 evidence.record("paused", paused_facts)
                 assert [row["id"] for row in paused_facts["rows"]] == ids, "order holds while open"
                 alpha = _row(paused_facts, ALPHA)
-                assert alpha["tone"] == "wait" and alpha["word"].startswith("Paused"), alpha
+                # The owner's own Pause: neutral ink (amber is only what waits for the owner), the word alone, and
+                # its line says who paused and when (the owner's client declares the press).
+                assert (alpha["tone"], alpha["word"]) == ("held", "Paused"), alpha
+                assert alpha["secondary"].startswith("You paused it · "), alpha
                 assert alpha["more"], "a paused root keeps its shared controls"
                 evidence.shot(page, "04-main-paused-open")
 
@@ -402,7 +408,7 @@ def test_main_sheet_follows_real_roots_through_pause_resume_and_finish(direct_se
                 evidence.record("finished_open", finished)
                 assert [row["id"] for row in finished["rows"]] == ids
                 for row in finished["rows"]:
-                    assert row["name"] == cards[row["id"]], row
+                    assert row["name"] == TITLE[row["id"]], row
                     assert not (row["more"] or row["resume"] or row["question"]), row
                     assert row["tone"] == "done" and row["target"] == "card", row
                 assert not finished["surfaceHidden"], "work that ends never closes the list"
@@ -533,7 +539,7 @@ def test_main_view_question_goes_to_the_exact_waited_question(direct_server_with
                             and u.endswith(f"/api/tasks/{task_id}")]) > reads, "the reveal read the real detail"
                 assert _decision_posts(log) == [], "View question answers nothing"
                 assert _waiting_turn(url)["activity_id"] == task_id, "the turn still waits for the owner"
-                assert log["pageerrors"] == [], log["pageerrors"]
+                assert log["pageerrors"].unexpected() == [], log["pageerrors"]
             except Exception:
                 evidence.shot(page, "failure")
                 raise
@@ -550,7 +556,7 @@ _SHADE_RECORDER = """(ms) => {
     window.__rwShade = [];
     const start = performance.now();
     const tick = () => {
-        const shade = document.querySelector('#project-panel .rw-shade');
+        const shade = document.querySelector('#project-panel .rw-shade:not(.cx-shade)');
         const note = shade?.querySelector('.rw-note');
         window.__rwShade.push({ t: Math.round(performance.now() - start),
             note: note && !note.hidden ? note.textContent : '',

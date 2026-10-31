@@ -143,7 +143,7 @@ def test_partial_numeric_context_blocks_save_and_preserves_auto(role_ui):
     assert field.get_attribute('aria-invalid') == 'false'
     with page.expect_response('**/api/settings'):
         page.locator('#btn-save-settings').click()
-    saved = [payload for path, payload in role_ui['posts'] if path == '/api/settings'][-1]
+    saved = roles.settings_saves(role_ui)[-1]
     assert saved['OUROBOROS_MODEL_CONTEXT_WINDOWS']['main'] == 16384
     page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
     row.locator('summary').click()
@@ -151,7 +151,7 @@ def test_partial_numeric_context_blocks_save_and_preserves_auto(role_ui):
     assert not field.evaluate('e => e.validity.badInput')
     with page.expect_response('**/api/settings'):
         page.locator('#btn-save-settings').click()
-    saved = [payload for path, payload in role_ui['posts'] if path == '/api/settings'][-1]
+    saved = roles.settings_saves(role_ui)[-1]
     assert saved['OUROBOROS_MODEL_CONTEXT_WINDOWS']['main'] == 0
     roles.capture(page, 'numeric-context-corrected-auto')
     page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")

@@ -5,8 +5,8 @@ queue publication; the page loads the production Activity module and stylesheets
 against routes that call the gateway's own queue and census readers. Control POSTs
 are answered at the route (Stop and Resume keep their own server suites): what is
 checked here is that a click or key on a row reaches that row's endpoint with the
-same arguments it always sent, and that partial or failed reads keep the queue's own
-words. Screenshots (light and dark, desktop and narrow, per engine) go to
+same arguments it always sent, and that partial or failed reads keep the queue's rows
+without inventing activity. Screenshots (light and dark, desktop and narrow, per engine) go to
 ``OUROBOROS_UI_EVIDENCE_DIR`` before anything is asserted, so a failing run still
 leaves its picture.
 """
@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._work_projection_shared import state_fields, with_work_fields
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -60,8 +61,9 @@ def _seed(root, monkeypatch):
         # The real terminal writer: the answer is stored, root post-task work is still owed.
         _store_task_result(env, task, text, usage, {"tool_calls": [], "reasoning_notes": []}, review_evidence={})
         workers.RUNNING[task_id] = {"task": task, "started_at": time.time() - 42, "attempt": 1}
-    # A warm model sleep is a queue fact the census does not carry: it must stay beside the answer.
-    workers.RUNNING["sleep-root"]["owner_wait"] = {"state": "waiting", "reason": "sleep", "sleep": {"mode": "warm"}}
+    # A warm model sleep is a physical queue fact: the work projection must keep it beside the answer.
+    workers.RUNNING["sleep-root"]["owner_wait"] = {
+        "state": "waiting", "reason": "sleep", "sleep": {"mode": "warm"}, "task_attempt": 1}
     child = {"id": "child-1", "type": "task", "chat_id": 1, "root_task_id": "failed-root",
              "parent_task_id": "failed-root", "delegation_role": "subagent", "title": "Collect figures"}
     write_task_result(root, "child-1", "running", root_task_id="failed-root", parent_task_id="failed-root",
@@ -76,7 +78,6 @@ def _seed(root, monkeypatch):
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, monkeypatch, engine):
     from playwright.sync_api import expect, sync_playwright
-    from ouroboros.gateway.state import _chat_activities_snapshot_safe
     from ouroboros.gateway.tasks import _queue_snapshot
     from ouroboros.outcomes import public_task_result
     from ouroboros.task_results import load_task_result
@@ -98,11 +99,14 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
         elif path == "state":
             if reads["state"] == "failed":
                 return route.fulfill(status=503, content_type="application/json", body='{"error": "offline"}')
+            # The real census and the server's own work projection of it (its Resume controls included).
             availability = {"complete": True}
-            rows = _chat_activities_snapshot_safe(tmp_path, availability=availability)
+            fields = state_fields(tmp_path, availability=availability)
             if reads["state"] == "partial":  # one readable row; the rest of the census is unknown
-                rows, availability["complete"] = [r for r in rows if r["activity_id"] == "failed-root"], False
-            body = {"bg_consciousness_enabled": False, "active_chat_activities": rows,
+                fields = with_work_fields({"active_chat_activities_complete": False, "active_chat_activities": [
+                    r for r in fields["active_chat_activities"] if r["activity_id"] == "failed-root"]})
+                availability["complete"] = False
+            body = {"bg_consciousness_enabled": False, **fields,
                     "active_chat_activities_complete": availability["complete"]}
         elif path == "schedules":
             body = {"tasks": []}
@@ -155,30 +159,41 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                     expect(failed).to_have_attribute("role", "status")
                     expect(failed).to_have_attribute("aria-label", "Task status: Failed, Finalizing…")
                     expect(row("failed-root").locator(".chat-live-phase-secondary")).to_have_text("Finalizing…")
+                    assert row("failed-root").inner_text().count("Finalizing…") == 1
+                    expect(row("failed-root")).to_contain_text("1 helper still working")
                     expect(row("done-root").locator("[data-activity-phase]")).to_have_text("Done")
                     # The queue's own wait outranks the census's generic finalization.
-                    expect(row("sleep-root").locator(".chat-live-phase-secondary")).to_have_text("sleeping")
+                    expect(row("sleep-root").locator(".chat-live-phase-secondary")).to_have_text("Waiting")
+                    expect(row("sleep-root")).to_contain_text("Sleeping until it is woken")
                     # Its own row has no result yet: the child keeps its occupancy word.
                     expect(row("child-1").locator("[data-activity-phase]")).to_have_count(0)
-                    expect(row("child-1")).to_contain_text("running")
-                    expect(row("paused-root")).to_contain_text("paused (budget)")
-                    # The outcome chip is drawn in the error pair, the second fact in the quiet meta ink.
+                    expect(row("child-1")).to_contain_text("Working")
+                    expect(row("paused-root")).to_contain_text("Paused")
+                    expect(row("paused-root")).to_contain_text("Spending limit reached")
+                    # The outcome chip is drawn in the error pair with the failed dot, the second fact in the quiet
+                    # meta ink; Stop… is the neutral shared trigger, never a danger button.
                     colours = page.evaluate("""() => {
                         const probe = document.createElement('span');
                         document.body.append(probe);
                         const ink = (value) => { probe.style.color = value; return getComputedStyle(probe).color; };
                         const chip = document.querySelector('[data-id="failed-root"]').closest('.activity-row')
                             .querySelector('[data-activity-phase]');
+                        const mark = chip.querySelector(':scope > .status-mark');
+                        const stop = document.querySelector('[data-act="task-control"][data-id="failed-root"]');
                         const scroll = document.querySelector('.activity-scroll');
                         const out = {chip: getComputedStyle(chip).color, chipBg: getComputedStyle(chip).backgroundColor,
                             second: getComputedStyle(chip.nextElementSibling).color, error: ink('var(--status-error-fg)'),
                             errorBg: ink('var(--status-error-bg)'), meta: ink('var(--text-meta)'),
+                            mark: `${mark.dataset.shape}/${mark.dataset.hue}`, markInk: getComputedStyle(mark).color,
+                            red: ink('var(--red)'), stop: stop.className,
                             overflow: scroll.scrollWidth - scroll.clientWidth};
                         probe.remove();
                         return out;
                     }""")
                     assert colours["chip"] == colours["error"] and colours["second"] == colours["meta"], colours
                     assert colours["chipBg"] == colours["errorBg"], colours
+                    assert (colours["mark"], colours["markInk"]) == ("dot/failed", colours["red"]), colours
+                    assert colours["stop"] == "btn btn-xs btn-default", colours
                     assert colours["overflow"] <= 0, colours
                     page.close()
 
@@ -232,12 +247,12 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                     "[data-activity-phase]")).to_have_text("Failed")
 
                 queue = page.locator('[data-activity-section="queue"]')
-                # A partial census still describes its own rows; every other row keeps its queue word.
+                # A partial census describes its own rows; missing work projections stay unconfirmed.
                 reads["state"] = "partial"
                 load()
                 expect(queue.locator("[data-activity-phase]")).to_have_count(1)
                 expect(queue.locator("[data-activity-phase]")).to_have_text("Failed")
-                expect(page.locator('[data-id="done-root"]').locator("xpath=../..")).to_contain_text("running")
+                expect(page.locator('[data-id="done-root"]').locator("xpath=../..")).to_contain_text("Activity unconfirmed")
                 expect(queue).not_to_contain_text("Nothing running")
                 # An unreadable census proves nothing: no outcome chip, every queue row and control stays.
                 reads["state"] = "failed"

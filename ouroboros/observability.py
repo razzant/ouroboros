@@ -240,17 +240,24 @@ def new_execution_id() -> str:
     return f"exec_{uuid.uuid4().hex}"
 
 
-def new_call_id(prefix: str) -> str:
+def new_call_id(prefix: str, unique: str = "") -> str:
+    """``<prefix>_<32 hex>``; a 32-hex ``unique`` (a tool invocation id) is that suffix, so
+    the record of one invocation has one address its readers can derive (#1376)."""
     safe = re.sub(r"[^a-zA-Z0-9_]+", "_", str(prefix or "call")).strip("_").lower()
     safe = safe or "call"
-    return f"{safe}_{uuid.uuid4().hex}"
+    return f"{safe}_{unique if re.fullmatch(r'[0-9a-f]{32}', str(unique)) else uuid.uuid4().hex}"
 
 
-def _observability_root(drive_root: pathlib.Path) -> pathlib.Path:
+def _observability_dir(drive_root: pathlib.Path) -> pathlib.Path:
+    """The drive's observability root as its writers spell it; a pure read creates nothing."""
     base = pathlib.Path(drive_root)
     if not base.is_absolute():
         raise ValueError("observability drive_root must be an absolute path")
-    root = (base / OBSERVABILITY_DIR).resolve(strict=False)
+    return (base / OBSERVABILITY_DIR).resolve(strict=False)
+
+
+def _observability_root(drive_root: pathlib.Path) -> pathlib.Path:
+    root = _observability_dir(drive_root)
     root.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(root)
     return root
@@ -403,8 +410,23 @@ def _blob_ref_path(drive_root: pathlib.Path, ref: dict) -> pathlib.Path:
     return _ref_path(drive_root, ref, blob_relative)
 
 
-def read_call_manifest_ref(drive_root: pathlib.Path, ref: dict, *, task_id: str) -> dict:
-    """Read one exact task/call manifest, including a retired store alias."""
+def read_call_manifest_ref(
+    drive_root: pathlib.Path,
+    ref: dict,
+    *,
+    task_id: str,
+    admit: Callable[[pathlib.Path], None] | None = None,
+    max_bytes: int | None = None,
+    call_types: Tuple[str, ...] | None = None,
+) -> dict:
+    """Read one exact task/call manifest, including a retired store alias.
+
+    Existing callers retain the historical unbounded/no-admission default.
+    Source-facing readers can additionally bound every physical read, apply
+    their own resource admission before a loose file or pack is opened, and
+    constrain the decoded call family.  An admission refusal propagates and is
+    never reinterpreted as a missing placement.
+    """
     call_id = str(ref.get("call_id") or "")
     # System scopes (system:ui_translation, system:update_letter) use the
     # same writer, whose filename is sanitized but whose identity stays exact.
@@ -415,21 +437,44 @@ def read_call_manifest_ref(drive_root: pathlib.Path, ref: dict, *, task_id: str)
     expected_sha = str(ref.get("sha256") or "")
     if not expected_sha:
         raise ValueError("observability call manifest ref has no sha256")
+    admission_refused = False
     try:
         path = _ref_path(drive_root, ref, pathlib.Path("calls") / safe_task / f"{call_id}.json")
-        raw = path.read_bytes()
+        if admit is not None:
+            try:
+                admit(path)
+            except PermissionError:
+                admission_refused = True
+                raise
+        if max_bytes is None:
+            raw = path.read_bytes()
+        else:
+            with path.open("rb") as stream:
+                raw = stream.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise ValueError("observability call manifest exceeds byte limit")
         if hashlib.sha256(raw).hexdigest() != expected_sha:
             raise ValueError("observability call manifest ref failed sha256 verification")
     except (OSError, ValueError) as original_error:
-        from ouroboros.source_retention import read_manifest_version
+        if admission_refused:
+            raise
+        from ouroboros.evidence_packs import blob_bytes
+        from ouroboros.source_retention import manifest_version_ref
 
         try:
-            raw = read_manifest_version(pathlib.Path(drive_root), expected_sha)
+            raw = blob_bytes(
+                pathlib.Path(drive_root), manifest_version_ref(pathlib.Path(drive_root), expected_sha),
+                expected_kind="txt", max_bytes=max_bytes, admit=admit,
+            )
+        except PermissionError:
+            raise
         except FileNotFoundError:
             raise original_error
     manifest = json.loads(raw.decode("utf-8"))
     if not isinstance(manifest, dict) or str(manifest.get("task_id") or "") != str(task_id) or str(manifest.get("call_id") or "") != call_id:
         raise ValueError("observability call manifest task/call identity mismatch")
+    if call_types is not None and str(manifest.get("call_type") or "") not in frozenset(call_types):
+        raise ValueError("observability call manifest family mismatch")
     return manifest
 
 
@@ -493,7 +538,6 @@ _PUBLISHED_CHILD_REF_FIELDS = (
     "review_evidence",
     "review_projection",
     "completion_observations",
-    "acceptance_debt",
     "owner_wait",
     "verification_ledger",
     "root_phase_checkpoint",
@@ -761,7 +805,7 @@ def _rewrite_child_ref_tree(
                 value = placed  # Only the mutable request projection rebinds addresses.
         return {
             key: _rewrite_child_ref_tree(item, parent_root, child_root,
-                source_owner(key, item, task_id), state, carrier=role)
+                source_owner(key, item, task_id, carrier=carrier, root=parent_root), state, carrier=role)
             if (role := source_carrier(value, key, carrier)) else item
             for key, item in value.items()
         }
@@ -891,27 +935,26 @@ def _retry_pending_child_ref_promotion(parent: pathlib.Path, child: pathlib.Path
     return settled
 
 
-def retry_pending_child_ref_promotions(
-    parent_drive_root: pathlib.Path,
-    *, stop: Any = None, generation: Any = None,
-) -> Dict[str, Any]:
-    """Retry only newly ledgered pending refs, never the stale child result. ``stop()`` is
-    the maintenance generation's close, asked before every item and again at each
-    publication's commit: a closed generation leaves the rest ``deferred``."""
+def retry_pending_child_ref_promotions(parent_drive_root: pathlib.Path, *, stop: Any = None) -> Dict[str, Any]:
+    """Retry only newly ledgered pending refs, never the stale child result. A member whose
+    deterministic refusal was observed with unchanged inputs is left without reading its result
+    (``source_retention.RetentionMemo``, durable in the ``child_ref_promotion`` job row: a
+    restart neither forgets nor rewalks it). ``stop()`` closes the run, asked before every item
+    and again at each publication's commit: a closed run leaves the rest ``deferred``."""
 
     from ouroboros.obligations import members
     from ouroboros.task_custody import own_child_drives
     from ouroboros.task_status import SETTLED_STATUSES
     from ouroboros.task_results import load_task_result, validate_task_id
     from ouroboros.source_retention import (
-        begin_retention_retries, forget_retention_retry, unchanged_unavailable_retry,
-        remember_unavailable_retry, log_retention_change,
+        forget_retention_retry, log_retention_change, remember_unavailable_retry, retention_logged,
+        retention_memo, unchanged_unavailable_retry,
     )
 
     parent = pathlib.Path(parent_drive_root)
     report: Dict[str, Any] = {"scanned": 0, "retried": [], "completed": [], "pending": [], "errors": [], "deferred": [], "unchanged": []}
     candidates = members(parent, "promotions")
-    begin_retention_retries(parent, set(candidates), generation)
+    memo = retention_memo(parent, candidates)
     for task_id, facts in candidates.items():
         child_root = next((pathlib.Path(facts[key]) for key in ("headless_child_drive_root", "child_drive_root")
                            if facts.get(key)), None)
@@ -926,17 +969,18 @@ def retry_pending_child_ref_promotions(
             if stop is not None and stop():
                 report["deferred"].append(task_id)
                 continue
-            result = load_task_result(parent, task_id) or {}
-            if str(result.get("status") or "").lower() not in SETTLED_STATUSES:
-                forget_retention_retry(parent, child_root, task_id)
-                continue
-            if not _has_pending_ref_promotion(result.get("child_ref_promotion")):
-                forget_retention_retry(parent, child_root, task_id)
-                continue
-            if unchanged_unavailable_retry(parent, child_root, task_id, result, generation=generation):
+            if unchanged_unavailable_retry(memo, child_root, task_id):
                 report["unchanged"].append(task_id)
                 report["pending"].append(task_id)
-                log_retention_change(parent, task_id, result, stop=stop)
+                if not retention_logged(memo, task_id):  # a failed diagnostic append is attempted again
+                    log_retention_change(parent, task_id, load_task_result(parent, task_id) or {}, memo=memo, stop=stop)
+                continue
+            result = load_task_result(parent, task_id) or {}
+            if str(result.get("status") or "").lower() not in SETTLED_STATUSES:
+                forget_retention_retry(memo, task_id)
+                continue
+            if not _has_pending_ref_promotion(result.get("child_ref_promotion")):
+                forget_retention_retry(memo, task_id)
                 continue
             settled = _retry_pending_child_ref_promotion(
                 parent, child_root, task_id, result, stop=stop,
@@ -951,8 +995,8 @@ def retry_pending_child_ref_promotions(
             report[destination].append(task_id)
             if stop is not None and stop():
                 continue  # An attempted publication is not permission to log/cache after close.
-            remember_unavailable_retry(parent, child_root, task_id, settled, generation=generation)
-            log_retention_change(parent, task_id, settled, stop=stop)
+            remember_unavailable_retry(memo, child_root, task_id, settled)
+            log_retention_change(parent, task_id, settled, memo=memo, stop=stop)
         except Exception as exc:
             from ouroboros.task_custody import PublicationClosed
 
@@ -1033,6 +1077,9 @@ def write_call_manifest(
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         digest = hashlib.sha256(_json_bytes(payload)).hexdigest()
+    if payload.get("producer_complete") and payload.get("surface") == "plan_review":
+        from ouroboros.plan_collection_job import producer_published
+        producer_published(drive_root, [str(task_id), safe_call, digest])
     return {
         "path": str(path),
         "call_id": safe_call,
@@ -1368,11 +1415,12 @@ def preserve_salvaged_output(preserve_root: pathlib.Path, task_id: str, text: st
 
 
 def preserved_salvage_path(preserve_root: pathlib.Path, task_id: str) -> str:
-    """The durable full-salvage copy path for a task, or "" when none exists."""
+    """The durable full-salvage copy path for a task, or "" when none exists. A pure read: no
+    directory is created and no mode re-applied (``preserve_salvaged_output`` owns both)."""
     safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id or "")).strip("_")
     if not safe_task:
         return ""
-    path = _observability_root(pathlib.Path(preserve_root)) / SALVAGED_OUTPUT_DIR / f"{safe_task}.txt"
+    path = _observability_dir(pathlib.Path(preserve_root)) / SALVAGED_OUTPUT_DIR / f"{safe_task}.txt"
     return str(path) if path.is_file() else ""
 
 

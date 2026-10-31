@@ -1,0 +1,16 @@
+{
+  "public": {
+    "ok": true,
+    "created": false,
+    "private": false,
+    "repository": "owner/ouroboros-skills",
+    "source": {"id": "my-skills", "name": "My renamed skills", "kind": "git", "url": "https://github.com/owner/ouroboros-skills", "trust": "review", "confirmed": false}
+  },
+  "private": {
+    "ok": true,
+    "created": true,
+    "private": true,
+    "repository": "owner/ouroboros-skills",
+    "source": {"id": "my-skills", "name": "My skills", "kind": "git", "url": "https://github.com/owner/ouroboros-skills", "trust": "trusted", "confirmed": true}
+  }
+}

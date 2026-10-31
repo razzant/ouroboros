@@ -155,7 +155,7 @@ def test_tracked_pin_names_a_cli_capable_release():
     of this proposal converged on while the pin was still pre-CLI 3.6.0)."""
     pin = runtime.load_runtime_pin()
     assert pin is not None
-    assert pin.version == "4.1.1"
+    assert pin.version == "4.8.2"
     assert pin.cli_entrypoint == "claudexor.bundle.cjs"
 
 
@@ -271,7 +271,7 @@ def test_seed_install_uses_bundled_node_and_records_real_source(tmp_path, monkey
     monkeypatch.setattr(
         platform,
         "probe_node_version",
-        lambda candidate: NODE_VERSION if candidate == str(node) else "",
+        lambda candidate: NODE_VERSION if pathlib.Path(candidate).is_file() else "",
     )
     manager = runtime.ClaudexorRuntimeManager(pin)
     probes = []
@@ -283,7 +283,9 @@ def test_seed_install_uses_bundled_node_and_records_real_source(tmp_path, monkey
 
     command = manager.ensure()
     target = runtime.managed_runtime_dir(pin)
-    assert command == [str(node), str(target / pin.entrypoint)]
+    kept = pathlib.Path(command[0])  # the bundle's Node copied in once: the daemon outlives the app
+    assert command == [str(kept), str(target / pin.entrypoint)] and kept.read_bytes() == node.read_bytes()
+    assert kept.parents[2].parent == runtime.managed_runtime_root() / "node"
     assert probes and all(probe_pin == pin for _, probe_pin in probes)
     metadata = json.loads((target / "managed-runtime.json").read_text(encoding="utf-8"))
     assert metadata["archive_source"] == "bundle_seed"
@@ -345,7 +347,7 @@ def test_clean_source_install_fetches_exact_managed_node_in_the_same_ensure(
     assert not (source_root / "node-standalone").exists()
     metadata = json.loads(
         (
-            runtime.managed_node_dir(pin, "linux-x64")
+            pathlib.Path(command[0]).parents[2]
             / "managed-node.json"
         ).read_text(encoding="utf-8")
     )
@@ -509,7 +511,8 @@ def test_cli_command_installs_exact_closure_and_managed_node_npm_tree(tmp_path, 
     monkeypatch.setattr(manager, "_probe", lambda _command, _pin: NODE_VERSION)
 
     command = manager.ensure_cli_command()
-    node_root = runtime.managed_node_dir(pin, "linux-x64") / "node-standalone"
+    node_root = pathlib.Path(command[0]).parents[1]
+    assert node_root.parent.name.startswith(runtime.managed_node_dir(pin, "linux-x64").name + ".g-")
     assert command == [str(node_root / "bin" / "node"),
                        str(runtime.managed_runtime_dir(pin) / "claudexor.bundle.cjs")]
     assert (node_root / "lib/node_modules/npm/bin/npm-cli.js").read_bytes() == b"npm cli\n"
@@ -568,7 +571,8 @@ def test_windows_cli_command_installs_exact_closure_and_managed_node_npm_tree(tm
     monkeypatch.setattr(manager, "_probe", lambda _command, _pin: NODE_VERSION)
 
     command = manager.ensure_cli_command()
-    node_root = runtime.managed_node_dir(pin, "win32-x64") / "node-standalone"
+    node_root = pathlib.Path(command[0]).parent
+    assert node_root.parent.name.startswith(runtime.managed_node_dir(pin, "win32-x64").name + ".g-")
     assert command == [str(node_root / "node.exe"), str(runtime.managed_runtime_dir(pin) / "claudexor.bundle.cjs")]
     assert (node_root / "node_modules/npm/bin/npm-cli.js").read_bytes() == b"npm cli\n"
     assert (node_root / "node_modules/npm/package.json").read_bytes() == b"{}\n"
@@ -837,6 +841,78 @@ def test_status_is_read_only_and_exposes_update_before_and_after_staging(
         engine_build_sha=pin.build_sha,
     )
     assert ready["state"] == "ready"
+
+
+def test_status_never_stages_a_lower_pin_under_a_newer_engine(tmp_path, monkeypatch):
+    """Planned restarts keep a newer engine (server_restart), so its lower pin never 'activates'."""
+    _data_plane(monkeypatch, tmp_path)
+    archive = _archive(tmp_path / "runtime.tar.gz")
+    pin = _pin(archive)
+    manager = runtime.ClaudexorRuntimeManager(pin)
+
+    def serving(version, *, running=True):
+        return manager.status(running=running, engine_version=version, engine_build_sha=OLD_BUILD_SHA)
+
+    assert serving("3.5.0")["state"] == "newer_serving"  # not installed yet: no update either
+    target = runtime.managed_runtime_dir(pin)
+    target.mkdir(parents=True)
+    (target / "managed-runtime.json").write_text("{broken", encoding="utf-8")
+    assert serving("3.5.0")["state"] == "error"  # a damaged target still asks for repair
+    _metadata(target, version=pin.version, build_sha=pin.build_sha, source="download")
+    target_meta = json.loads((target / "managed-runtime.json").read_text(encoding="utf-8"))
+    target_meta.update(archive_sha256=pin.sha256, archive_size=pin.size_bytes)
+    (target / "managed-runtime.json").write_text(json.dumps(target_meta), encoding="utf-8")
+
+    for newer in ("3.4.1", "3.5.0", "10.0.0"):
+        status = serving(newer)
+        assert (status["state"], status["staged_version"], status["target_version"]) == (
+            "newer_serving", "", pin.version), newer
+    # Same release on another build, an older engine and unordered spellings keep the staged update.
+    for other in (pin.version, "3.3.9", "v3.5.0", "3.5.0-rc.1", ""):
+        status = serving(other)
+        assert (status["state"], status["staged_version"]) == ("update_staged", pin.version), other
+    assert serving("3.5.0", running=False)["state"] == "ready"  # no live handshake, no serving claim
+    override = tmp_path / "claudexord-override"
+    override.write_text("fixture\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_CLAUDEXOR_BIN", str(override))
+    assert serving("3.5.0")["state"] == "ready"  # an explicit override keeps its own answer
+
+
+def test_status_names_a_newer_engine_before_the_lower_pin_is_installed(tmp_path, monkeypatch):
+    """A successor reads status before the ensure that installs its lower tree: no 'Update & connect'."""
+    _data_plane(monkeypatch, tmp_path)
+    pin = _pin(_archive(tmp_path / "runtime.tar.gz"))
+    manager = runtime.ClaudexorRuntimeManager(pin)
+
+    def serving(version, *, running=True):
+        return manager.status(running=running, engine_version=version, engine_build_sha=OLD_BUILD_SHA)
+
+    _metadata(runtime.managed_runtime_root() / f"3.5.0-{OLD_BUILD_SHA[:12]}", version="3.5.0",
+              build_sha=OLD_BUILD_SHA)  # the outgoing generation's tree; the target is absent
+    status = serving("3.5.0")
+    assert [status[key] for key in ("state", "version", "target_version", "staged_version", "source")] == [
+        "newer_serving", "3.5.0", pin.version, "", "cache"]
+    assert not runtime.managed_runtime_dir(pin).exists()
+    # No handshake, unordered spellings, the pin's release on another build and an older engine keep the update.
+    for version, running in (("3.5.0", False), ("v3.5.0", True), ("3.5.0-rc.1", True), ("", True),
+                             (pin.version, True), ("3.3.9", True)):
+        assert serving(version, running=running)["state"] == "update_available", version
+    lock = runtime.managed_runtime_root() / "install.lock"
+    lock.write_text("", encoding="utf-8")  # another process is installing the lower tree
+    assert serving("3.5.0")["state"] == "installing"
+    lock.unlink()
+
+    def offline(*_args, **_kwargs):
+        raise runtime.ClaudexorRuntimeError("runtime_download_failed", "offline")
+
+    monkeypatch.setattr(manager, "_install", offline)
+    with pytest.raises(runtime.ClaudexorRuntimeError):
+        manager.ensure()
+    assert serving("3.5.0")["state"] == "error"  # a failed install still asks for repair
+    override = tmp_path / "claudexord-override"
+    override.write_text("fixture\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_CLAUDEXOR_BIN", str(override))
+    assert serving("3.5.0")["state"] == "ready"
 
 
 def test_status_distinguishes_fresh_missing_from_a_corrupt_target(tmp_path, monkeypatch):

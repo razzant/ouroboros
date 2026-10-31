@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import queue
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +29,7 @@ def _run_loop(
     tmp_path,
     monkeypatch,
     responses,
-    acceptance_results=None,
+    review_holds=None,
     *,
     child=False,
     bind_child_before_second=False,
@@ -63,26 +62,19 @@ def _run_loop(
             return {"role": "assistant", **answer}, 0.0
         return {"role": "assistant", "content": answer}, 0.0
 
-    review_states = iter(acceptance_results or [])
+    holds = iter(review_holds or [])
 
-    def fake_acceptance(**kwargs):
-        outcome = next(review_states, False)
-        if outcome:
-            # A substantive host continuation retains the first answer and
-            # requires an explicit completion selection through the real door.
-            ctx_shim = SimpleNamespace(
-                messages=kwargs["messages"],
-                task_id=kwargs["task_id"],
-                drive_root=kwargs["drive_root"],
-                status_drive_root=kwargs["drive_root"],
-                drive_logs=Path(str(kwargs["drive_root"])) / "logs",
-                root_task_id=kwargs["task_id"],
-            )
-            loop._arm_delivery_control(kwargs["tools"], ctx_shim, kwargs["llm_trace"])
-        return outcome
+    def fake_review_at_delivery(_ctx, _content, _llm_trace, hold):
+        # The result review's host step at delivery: a hold shows its outcome to the
+        # author and retains the first answer, so the next complete answer is selected
+        # explicitly through the real completion door.
+        held = next(holds, False)
+        if held:
+            hold("[Result review] The review's findings were shown before delivery.")
+        return held
 
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", fake_acceptance)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", fake_review_at_delivery)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_metadata = {
@@ -124,7 +116,7 @@ def test_mutating_tool_acknowledgements_cannot_erase_full_candidate(tmp_path, mo
         "name": "write_file", "arguments": json.dumps({"path": "effect.txt", "content": "durable tool effect"})}}]}
     result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch,
         [original, write, "Review completed.", "Everything is done now.", _finish_response(original, by_hash=True)],
-        acceptance_results=[True, False])
+        review_holds=[True, False])
     assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "durable tool effect"
     assert result == original and len(calls) == 5
     assert trace["delivery_candidate"]["degraded"] is False
@@ -137,7 +129,7 @@ def test_completion_tool_rejects_non_string_answer_without_erasing_retained_byte
     original = "Complete original answer."
     invalid = _finish_response({"text": "not complete"})
     result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch,
-        [original, invalid, _finish_response(original, by_hash=True)], acceptance_results=[True, False])
+        [original, invalid, _finish_response(original, by_hash=True)], review_holds=[True, False])
     assert result == original and len(calls) == 3
     assert trace["tool_calls"][0]["is_error"] is True
     assert "COMPLETION_ARGUMENT" in trace["tool_calls"][0]["result"]
@@ -150,7 +142,7 @@ def test_duplicate_legacy_control_is_held_privately_until_explicit_selection(tmp
     duplicate = '{"delivery_control":"keep","delivery_control":"replace","full_answer":"Ambiguous replacement."}'
     progress = []
     result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch,
-        [original, duplicate, _finish_response(original, by_hash=True)], acceptance_results=[True, False], progress=progress)
+        [original, duplicate, _finish_response(original, by_hash=True)], review_holds=[True, False], progress=progress)
     assert result == original and len(calls) == 3
     assert any(row.get("role") == "assistant" and row.get("content") == duplicate for row in calls[-1])
     assert "latest whole held response" not in str(calls[-1][-1]["content"])
@@ -163,7 +155,7 @@ def test_repeated_duplicate_legacy_answers_neither_repair_nor_force_termination(
     original = "Complete original answer."
     duplicate = '{"delivery_control":"replace","full_answer":"First answer.","full_answer":"Second answer."}'
     result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch,
-        [original, duplicate, duplicate, duplicate, _finish_response(original, by_hash=True)], acceptance_results=[True, False])
+        [original, duplicate, duplicate, duplicate, _finish_response(original, by_hash=True)], review_holds=[True, False])
     assert result == original and len(calls) == 5
     assert trace["delivery_candidate"]["degraded"] is False
     for before, after in zip(calls[2:], calls[3:]):
@@ -175,11 +167,11 @@ def test_repeated_duplicate_legacy_answers_neither_repair_nor_force_termination(
 def test_service_round_explicitly_selects_retained_or_shorter_complete_answer(tmp_path, monkeypatch):
     original = "Complete original answer with a long explanation and its supporting evidence."
     result, _usage, trace, _calls = _run_loop(tmp_path, monkeypatch,
-        [original, _finish_response(original, by_hash=True)], acceptance_results=[True, False])
+        [original, _finish_response(original, by_hash=True)], review_holds=[True, False])
     assert result == original and trace["delivery_candidate"]["revision"] == 1
     replacement = "Corrected answer."
     result2, _usage2, trace2, _calls2 = _run_loop(tmp_path / "replace", monkeypatch,
-        [original, _finish_response(replacement)], acceptance_results=[True, False])
+        [original, _finish_response(replacement)], review_holds=[True, False])
     assert result2 == replacement and trace2["delivery_candidate"]["revision"] == 2
     assert trace2["delivery_candidate"]["acceptance_binding"]["authoritative"] is False
 
@@ -259,7 +251,7 @@ def test_delivery_evidence_ignores_service_and_read_only_but_tracks_effects(tmp_
     assert revision4 == revision3 + 1 and fingerprint4 != fingerprint3
 
 
-def test_service_outputs_finalize_before_acceptance_and_require_replacement(tmp_path, monkeypatch):
+def test_service_outputs_finalize_before_the_result_review_and_require_replacement(tmp_path, monkeypatch):
     from ouroboros.outcomes import derive_loop_outcome
     from ouroboros.tools import services as services_mod
 
@@ -367,79 +359,6 @@ def test_deferred_child_suffix_is_not_misclassified_as_delivery_control_failure(
     assert invalid_control["degraded_reason"] == "invalid_delivery_control_after_repair"
 
 
-def test_delivery_acceptance_binding_uses_exact_active_host_verdict(tmp_path):
-    import hashlib
-
-    import ouroboros.loop as loop
-    from ouroboros.tools.registry import ToolRegistry
-
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx._delivery_evidence_revision = 7
-    registry._ctx._task_acceptance_sealed_fence_token = "current-fence"
-    answer_hash = hashlib.sha256(b"exact answer").hexdigest()
-
-    incomplete = loop._delivery_acceptance_binding(
-        registry,
-        {
-            "review_runs": [{
-                "authority": "host_root",
-                "candidate_hash": answer_hash,
-                "aggregate_signal": "PASS",
-            }],
-        },
-        answer_hash,
-    )
-    assert incomplete["acceptance_status"] == "unaccepted"
-    assert incomplete["authoritative"] is False
-
-    complete_but_historical = loop._delivery_acceptance_binding(
-        registry,
-        {
-            "review_runs": [{
-                "authority": "host_root",
-                "candidate_hash": answer_hash,
-                "panel_id": "old-panel",
-                "binding_hash": "old-binding",
-                "evidence_revision": "old-evidence",
-                "aggregate_signal": "PASS",
-            }],
-            "review_decision": {"eligibility": "not_eligible"},
-        },
-        answer_hash,
-    )
-    assert complete_but_historical["acceptance_status"] == "unaccepted"
-    assert complete_but_historical["authoritative"] is False
-
-    for verdict in ("PASS", "FAIL", "DEGRADED"):
-        suffix = verdict.lower()
-        trace = {
-            "review_decision": {
-                "panel_id": f"panel-{suffix}",
-                "binding_hash": f"binding-{suffix}",
-            },
-            "review_runs": [{
-                "authority": "host_root",
-                "candidate_hash": answer_hash,
-                "panel_id": f"panel-{suffix}",
-                "binding_hash": f"binding-{suffix}",
-                "evidence_revision": f"review-evidence-{suffix}",
-                "fence_hash": f"review-fence-{suffix}",
-                "aggregate_signal": verdict,
-            }],
-        }
-
-        binding = loop._delivery_acceptance_binding(registry, trace, answer_hash)
-
-        assert binding["candidate_sha256"] == answer_hash
-        assert binding["evidence_revision"] == 7
-        assert binding["review_evidence_revision"] == f"review-evidence-{suffix}"
-        assert binding["acceptance_status"] == suffix
-        assert binding["authoritative"] is True
-        assert binding["panel_id"] == f"panel-{suffix}"
-        assert binding["binding_hash"] == f"binding-{suffix}"
-        assert binding["fence_hash"] == f"review-fence-{suffix}"
-
-
 def test_new_delivery_replacement_does_not_inherit_old_host_pass(tmp_path):
     import hashlib
 
@@ -545,10 +464,14 @@ def test_same_text_replacement_after_evidence_change_does_not_inherit_old_pass(
             "aggregate_signal": "PASS",
         }],
     })
-    original.acceptance_binding = loop._delivery_acceptance_binding(
-        registry, trace, answer_hash,
-    )
-    assert original.acceptance_binding["authoritative"] is True
+    # The authoritative binding the retired acceptance binder wrote for that panel, as a
+    # candidate restored from a pre-fold record still carries it.
+    original.acceptance_binding = {
+        **original.acceptance_binding, "acceptance_status": "pass", "authoritative": True,
+        "panel_id": "old-panel", "binding_hash": "old-binding", "fence_hash": "old-fence",
+        "review_evidence_revision": "old-review-evidence",
+    }
+    assert original.acceptance_binding["candidate_sha256"] == answer_hash
 
     trace["tool_calls"].append({
         "tool": "write_file",
@@ -570,7 +493,10 @@ def test_same_text_replacement_after_evidence_change_does_not_inherit_old_pass(
     assert "review_evidence_revision" not in replacement.acceptance_binding
 
 
-def test_production_final_candidate_binds_exact_host_panel(tmp_path, monkeypatch):
+def test_production_final_candidate_reaches_the_result_review_as_its_exact_bytes(tmp_path, monkeypatch):
+    """The answer is the author's semantic reply (owner, 29.10): the result review, the candidate, its
+    identity and the loop's return carry it as written; only the trace note behind the stored summary
+    is redacted."""
     import hashlib
 
     import ouroboros.loop as loop
@@ -579,8 +505,8 @@ def test_production_final_candidate_binds_exact_host_panel(tmp_path, monkeypatch
 
     answer = "Complete answer; removed ghp_abcdefghijklmnopqrstuvwxyz1234567890AB."
     safe_answer = sanitize_tool_result_for_log(answer)
-    panel_contents = []
-    panel_candidates = []
+    reviewed_contents = []
+    reviewed_candidates = []
 
     class FakeLLM:
         def default_model(self):
@@ -592,26 +518,12 @@ def test_production_final_candidate_binds_exact_host_panel(tmp_path, monkeypatch
         lambda *_args, **_kwargs: ({"role": "assistant", "content": answer}, 0.0),
     )
 
-    def record_exact_host_panel(*, content, llm_trace, tools, **_kwargs):
-        panel_contents.append(content)
-        panel_candidates.append(tools._ctx._delivery_candidate)
-        candidate_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        llm_trace["review_decision"] = {
-            "panel_id": "panel-production",
-            "binding_hash": "binding-production",
-        }
-        llm_trace.setdefault("review_runs", []).append({
-            "authority": "host_root",
-            "candidate_hash": candidate_hash,
-            "panel_id": "panel-production",
-            "binding_hash": "binding-production",
-            "evidence_revision": "review-evidence-production",
-            "fence_hash": "fence-production",
-            "aggregate_signal": "PASS",
-        })
+    def record_the_reviewed_result(ctx, content, _llm_trace, _hold):
+        reviewed_contents.append(content)
+        reviewed_candidates.append(ctx._delivery_candidate)
         return False
 
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", record_exact_host_panel)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", record_the_reviewed_result)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_metadata = {
@@ -630,21 +542,19 @@ def test_production_final_candidate_binds_exact_host_panel(tmp_path, monkeypatch
         drive_root=tmp_path,
     )
 
-    candidate = panel_candidates[0]
+    candidate = reviewed_candidates[0]
     binding = trace["delivery_candidate"]["acceptance_binding"]
     assert safe_answer != answer
-    assert panel_contents == [safe_answer]
-    assert candidate.full_text == safe_answer
-    assert result == safe_answer
+    assert reviewed_contents == [answer]
+    assert candidate.full_text == answer
+    assert result == answer
+    assert trace["reasoning_notes"][-1] == safe_answer
     assert trace["delivery_candidate"]["content_sha256"] == hashlib.sha256(
-        safe_answer.encode("utf-8")
+        answer.encode("utf-8")
     ).hexdigest()
     assert binding["candidate_sha256"] == trace["delivery_candidate"]["content_sha256"]
-    assert binding["acceptance_status"] == "pass"
-    assert binding["authoritative"] is True
-    assert binding["panel_id"] == "panel-production"
-    assert binding["binding_hash"] == "binding-production"
-    assert binding["review_evidence_revision"] == "review-evidence-production"
+    assert binding["acceptance_status"] == "unaccepted"
+    assert binding["authoritative"] is False
 
 
 def test_budget_dispatch_rail_preserves_current_candidate_and_exact_binding(
@@ -681,16 +591,17 @@ def test_budget_dispatch_rail_preserves_current_candidate_and_exact_binding(
         "root_task_id": "parent1",
     }
 
-    def request_another_round(**_kwargs):
+    def request_another_round(ctx, _content, llm_trace, hold):
         from tests.test_delivery_forced_finalization import _bind_host_pass
 
-        candidate = registry._ctx._delivery_candidate
-        _bind_host_pass(loop, registry, _kwargs["llm_trace"], candidate)
+        candidate = ctx._delivery_candidate
+        _bind_host_pass(loop, registry, llm_trace, candidate)
         historical_binding.update(candidate.acceptance_binding)
+        hold("[Result review] The review's findings were shown before delivery.")
         return True
 
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", request_another_round)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", request_another_round)
     monkeypatch.setattr(
         accounting,
         "usage_breakdown",
@@ -739,7 +650,7 @@ def test_round_limit_model_answer_replaces_candidate_with_unaccepted_binding(
         tmp_path,
         monkeypatch,
         [original, forced],
-        acceptance_results=[True],
+        review_holds=[True],
     )
 
     forced_sha = hashlib.sha256(forced.encode("utf-8")).hexdigest()
@@ -781,7 +692,7 @@ def test_round_limit_caller_merges_distinct_returned_trace(tmp_path, monkeypatch
         tmp_path,
         monkeypatch,
         ["candidate"],
-        acceptance_results=[True],
+        review_holds=[True],
     )
 
     assert result == "forced"
@@ -793,7 +704,6 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
 
     import ouroboros.loop as loop
     from ouroboros.tools.registry import ToolRegistry
-    from ouroboros.utils import sanitize_tool_result_for_log
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = "parent1"
@@ -830,8 +740,9 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
     })
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_args, **_kwargs: (None, 0.0))
 
+    # The rail publishes the bytes it is given; a host notice quoting a provider sanitized that
+    # quote where it was composed (``loop_transport``).
     fallback = "host fallback after ghp_abcdefghijklmnopqrstuvwxyz1234567890AB"
-    safe_fallback = sanitize_tool_result_for_log(fallback)
     text, usage, returned_trace = loop._forced_final_answer(
         ctx,
         prompt="finalize",
@@ -840,9 +751,8 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
     )
 
     rebound = ctx.delivery_candidate
-    assert safe_fallback != fallback
-    assert text == safe_fallback
-    assert rebound.full_text == safe_fallback
+    assert text == fallback
+    assert rebound.full_text == fallback
     assert text != candidate.full_text
     assert usage["reason_code"] == "provider_unavailable"
     assert not usage.get("_best_effort_extracted")
@@ -890,26 +800,26 @@ def test_short_and_long_held_prose_never_select_themselves(tmp_path, monkeypatch
     _assert_no_repair_round(calls)
 
 
-def test_quiz_answer_and_parent_message_supersede_a_paid_acceptance_verdict(tmp_path, monkeypatch):
+def test_quiz_answer_and_parent_message_reopen_a_sealed_root_for_owner_follow_up(tmp_path, monkeypatch):
     """P1-6(g), pinned at the production seam (loop_delivery's post-answer admission
     drain): an owner quiz answer at a root and a parent's task message to a child grow
-    the directive corpus, so a paid acceptance verdict is superseded for owner follow-up;
-    a host system frame (a settled plan wave) changes nothing."""
+    the directive corpus, so a sealed root (``_release_for_owner_followup``) is reopened
+    and another round runs; a host system frame (a settled plan wave) changes nothing."""
     import threading
 
     from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message, write_task_message
     from tests.test_delivery_forced_finalization import _forced_test_context
 
     def run(write_followups):
-        loop, registry, ctx, trace = _forced_test_context(tmp_path / str(len(superseded_runs)))
+        loop, registry, ctx, trace = _forced_test_context(tmp_path / str(len(released_runs)))
         drive = ctx.drive_root
         monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
         monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-        monkeypatch.setattr(loop, "_run_task_acceptance_review_once", lambda **_k: False)
-        superseded = []
-        monkeypatch.setattr(loop, "_supersede_task_acceptance_for_owner_followup",
-                            lambda *a, **k: superseded.append((a, k)))
-        registry._ctx._task_acceptance_reviewed = True
+        monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
+        released = []
+        monkeypatch.setattr(loop, "_release_for_owner_followup",
+                            lambda *a, **k: released.append((a, k)))
+        registry._ctx._task_acceptance_sealed_fence_token = "sealed-root"
         registry._ctx.owner_message_admission_lock = threading.Lock()
         registry._ctx.owner_message_admission_agent = SimpleNamespace(
             _accepting_owner_messages=True, _busy=True, _current_task_id="parent1")
@@ -917,11 +827,11 @@ def test_quiz_answer_and_parent_message_supersede_a_paid_acceptance_verdict(tmp_
         registry._ctx.task_attempt = 1
         write_followups(drive)
         result = loop._no_tool_final_answer("Final answer.", ctx, trace, registry, queue.Queue(), set(), lambda _m: None)
-        superseded_runs.append(superseded)
+        released_runs.append(released)
         # A grown corpus forces another round (None); an unchanged one delivers the answer.
-        return superseded, [row["source"] for row in getattr(registry._ctx, "_owner_directives", [])], result
+        return released, [row["source"] for row in getattr(registry._ctx, "_owner_directives", [])], result
 
-    superseded_runs: list = []
+    released_runs: list = []
     quiz = "[Owner quiz answer] quiz q1 — asked t0, answered t1.\nThe owner chose option 2: postgres"
     calls, sources, result = run(lambda drive: write_owner_message(drive, quiz, task_id="parent1", msg_id="qa-1", kind=KIND_QUIZ_ANSWER))
     assert len(calls) == 1 and sources == ["owner_quiz_answer"] and result is None

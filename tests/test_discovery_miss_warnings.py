@@ -216,9 +216,12 @@ def test_host_auto_attach_of_an_absent_image_attaches_nothing(tmp_path, monkeypa
     exec_result = {"fn_name": "ext_demo_screenshot", "is_error": False,
                    "result": json.dumps({"ok": True, "auto_attach_image": str(uploads / "missing.png")})}
 
-    assert _maybe_auto_attach_image(exec_result, registry) == {"status": "unavailable"}
+    observation = _maybe_auto_attach_image(exec_result, registry)
+    assert observation["status"] == "unavailable" and "FILE_NOT_FOUND" in observation["reason"]
     assert registry._ctx.messages == [] and not (tmp_path / "uploads" / "views").exists()
     (uploads / "shot.png").write_bytes(_real_png_bytes())
     exec_result["result"] = json.dumps({"ok": True, "auto_attach_image": str(pathlib.Path(uploads / "shot.png"))})
-    assert _maybe_auto_attach_image(exec_result, registry) == {"status": "attached"}
+    observation = _maybe_auto_attach_image(exec_result, registry)
+    assert observation["status"] == "attached" and "reason" not in observation
+    assert pathlib.Path(observation["source_path"]).read_bytes() == _real_png_bytes()
     assert len(_blocks(registry)) == 1

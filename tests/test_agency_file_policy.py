@@ -29,6 +29,7 @@ def files(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=work,
                       workspace_mode="external", task_id="agency-files")
     registry = ToolRegistry(repo_dir=system, drive_root=data)

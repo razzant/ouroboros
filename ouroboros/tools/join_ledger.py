@@ -475,11 +475,15 @@ def _peek_task(ctx: ToolContext, task_id: str, view: str = "summary") -> str:
     # SSOT cost projection (C2): a missing/unknown cost says "unknown", never a
     # confident $0.00, and an open amount is labelled as the upper bound it is.
     from ouroboros.cost_projection import cost_display
+    from ouroboros.work_stop import stop_for_reader
 
     parts = [
         f"Task {tid} [{status}] cost={cost_display(data)} (peek — NOT absorbed)",
         f"child_result_sha256={_child_result_sha256(data)}",
     ]
+    # A queued status is no permission to run: what holds the task now, and who may release it.
+    if stop := stop_for_reader(data.get("current_stop") or {}, data, str(getattr(ctx, "task_id", "") or "")):
+        parts.append("current_stop=" + json.dumps(stop, ensure_ascii=False, sort_keys=True))
     # Latest beacons this child posted to the shared ledger (partial_finding / blocker /
     # question / milestone), newest last.
     try:
@@ -639,10 +643,12 @@ def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
     return (
         f"Resume requested for {tid}{note}. This is a REQUEST: the supervisor validates money, "
         "Stop/cancel intent, deadline, finite lifetime and the child's checkpoint through the same "
-        "seam the owner's Resume uses, then records a budget_resume_child_outcome event. When granted, "
-        "the child's status changes from paused to scheduled under its SAME task id; a refusal "
-        "(budget_still_exhausted, cancel_intent_active, deadline_passed, lifetime_exhausted, "
-        "root_still_paused, pause_record_missing, ...) leaves it paused. Check with peek_task."
+        "seam the owner's Resume uses, then records a budget_resume_child_outcome event. A grant "
+        "removes the child's current_stop: its SAME task id then waits in the queue for a worker "
+        "(status stays scheduled, execution_observation.dispatch=queued) and reads running once a "
+        "worker takes it. A refusal (budget_still_exhausted, cancel_intent_active, deadline_passed, "
+        "lifetime_exhausted, root_still_paused, pause_record_missing, ...) leaves its current_stop in "
+        "place. Check with peek_task or get_task_result."
     )
 
 
@@ -704,9 +710,10 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
     # no-op as ``already_settled`` over it. Worker-side, the queue snapshot is
     # the ownership projection (the live maps belong to the supervisor).
     live_ownership = False
+    live_helpers = False
     try:
-        from ouroboros.cancel_intents import _validated_single_cancel_target
-        from ouroboros.task_status import task_has_live_queue_ownership
+        from ouroboros.cancel_intents import _validated_single_cancel_target, settled_status
+        from ouroboros.task_status import task_has_live_queue_ownership, task_subtree_has_live_queue_rows
 
         live_ownership = task_has_live_queue_ownership(status_drive_root, tid)
         # This pre-read is only a fail-open liveness hint. request_cancel
@@ -716,6 +723,14 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
             live_ownership = live_ownership or task_has_live_queue_ownership(
                 status_drive_root, retry_hint,
             )
+        elif settled_status(status_drive_root, tid):
+            # A settled root whose helpers or delegated runs still work is still
+            # owned: the owner's Stop cascades over that tree, and so does this one.
+            from ouroboros.delegate_custody_reconcile import tree_open_runs
+
+            live_helpers = (task_subtree_has_live_queue_rows(status_drive_root, tid)
+                            or bool(tree_open_runs(status_drive_root, tid)))
+            live_ownership = live_ownership or live_helpers
     except Exception:
         live_ownership = True
         log.debug("cancel_task live-ownership read failed for %s", tid, exc_info=True)
@@ -769,6 +784,21 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
             f"Nothing to cancel: {tid} had already finished ({intent.get('status')}). "
             "Its result is preserved — use discard_child_result if you want to drop it." + observed_note
         )
+    helpers_note = ""
+    if live_helpers and str(intent.get("task_id") or tid) == tid:
+        # The tool's request names no scope, so an exact retry replays it whatever the
+        # helpers did since; the host records the shape it runs, as a cascade records
+        # its own (widen-only), and custody's cascade stops the live members.
+        from ouroboros.cancel_intents import SCOPE_CASCADE, mark_intent_scope
+
+        try:
+            widened = mark_intent_scope(status_drive_root, tid, SCOPE_CASCADE) or intent.get("scope") == SCOPE_CASCADE
+        except Exception:
+            widened = False
+            log.warning("cancel_task could not extend %s to its live helpers", tid, exc_info=True)
+        helpers_note = (" It had already finished: its result stays and its still-running helpers and external runs"
+                        " stop with it." if widened else " Its still-running helpers and external runs could not be"
+                        " added to this Stop; they may keep running.")
     if own:
         _record_child_decision_beacon(
             ctx, tid,
@@ -790,7 +820,7 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
     already = (" (same Stop action replayed)" if intent.get("stop_action_replayed") else
                " (existing cancellation custody retained)" if intent.get("already_requested") else "")
     return (
-        f"Cancel requested: {tid}{(' — ' + reason_preview) if reason_preview else ''}{note}{already}. "
+        f"Cancel requested: {tid}{(' — ' + reason_preview) if reason_preview else ''}{note}{already}.{helpers_note} "
         "cancel_state=pending until the supervisor confirms teardown; a child that "
         "already finished keeps its completed result (use discard_child_result to drop it)." + observed_note
     )
@@ -800,15 +830,16 @@ def get_tools() -> list[ToolEntry]:
     return [
         ToolEntry("resume_child_task", {
             "name": "resume_child_task",
-            "description": "After the owner resumes your root from a budget pause, select ONE paused task: "
+            "description": "After the owner resumes your root from a pause or saved application-stop hold, select ONE held task: "
                            "a root may select any of its descendants; an intermediate parent may select its "
                            "own direct children. Continuation keeps the same task id. "
                            "Nothing resumes automatically and no fan-out happens: you name each child you still "
                            "need, with a reason. The supervisor validates money, Stop/cancel intent, deadline and "
                            "finite lifetime through the same seam the owner's Resume uses; the typed outcome is "
-                           "recorded as a budget_resume_child_outcome event and the child's status changes from "
-                           "paused to scheduled when granted. Cancelled, completed or otherwise-stopped children "
-                           "are never revived; a child under a root that is itself still paused is refused.",
+                           "recorded as a budget_resume_child_outcome event. A held child reads status scheduled "
+                           "with a current_stop whose door is this tool; a grant removes that current_stop, so "
+                           "the child waits for a worker, then runs. Cancelled, completed or otherwise-stopped "
+                           "children are never revived; a child under a root that is itself still paused is refused.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "reason": {"type": "string", "default": "", "description": "Why this child is still needed (recorded)."},
@@ -832,7 +863,8 @@ def get_tools() -> list[ToolEntry]:
         }, _cancel_task),
         ToolEntry("peek_task", {
             "name": "peek_task",
-            "description": "Look at a child task's CURRENT status, its latest coordination beacons "
+            "description": "Look at a child task's CURRENT status (with the current_stop that holds it, if any), "
+                           "its latest coordination beacons "
                            "(partial_finding/blocker/question/milestone) and a tail of its result — "
                            "a PURE READ. Use this to check intermediate findings or decide whether to keep "
                            "waiting / steer / cancel, without committing to a finalization decision. It "

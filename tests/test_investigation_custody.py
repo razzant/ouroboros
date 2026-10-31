@@ -94,10 +94,11 @@ def test_schedule_schema_distinguishes_native_authority_from_checking_access(tmp
 
     schema = next(tool.schema for tool in get_tools() if tool.name == "schedule_subagent")
     props = schema["parameters"]["properties"]
-    assert "native child/nanny" in props["write_surface"]["description"]
-    assert "access='readonly'" in props["write_surface"]["description"]
-    assert "evidence-only" in props["access"]["description"]
-    assert "do not call integrate_delegated_patch" in schema["description"]
+    emitted = "\n".join([schema["description"], *(prop.get("description", "") for prop in props.values())])
+    for condition in ("native child/nanny", "Select readonly for read-only session execution",
+                      "no task or product-write authority", "evidence-only private checking copy",
+                      "do not call integrate_delegated_patch"):
+        assert condition in emitted
     ctx = SimpleNamespace(repo_dir=str(tmp_path), workspace_root=None, workspace_mode="",
                           task_constraint=None, is_workspace_mode=lambda: False,
                           active_repo_dir=lambda: tmp_path)
@@ -199,8 +200,9 @@ def test_a_directory_investigation_discards_its_engine_copy_with_a_receipt(tmp_p
 
 
 def _real_investigation(tmp_path, monkeypatch):
-    """A settled investigation in a real independent snapshot whose checks left named evidence
-    the patch may not carry (``coverage.xml`` is a junk-rule exclusion) beside an ordinary edit."""
+    """A settled investigation in a real private copy (a linked worktree) whose checks left named
+    evidence the patch never carries (``.review-evidence/`` stays out of the result commit) beside
+    an ordinary edit."""
     from pathlib import Path
 
     from ouroboros.subagent_worktrees import provision_execution_snapshot
@@ -208,8 +210,7 @@ def _real_investigation(tmp_path, monkeypatch):
 
     target = _seed_target(tmp_path)
     ctx = _nanny_ctx(tmp_path, target, monkeypatch)
-    handle = provision_execution_snapshot(target_root=target, task_id="t-nanny", snapshot_id="inv-snap",
-                                          independent=True)
+    handle = provision_execution_snapshot(target_root=target, task_id="t-nanny", snapshot_id="inv-snap")
     copy = Path(handle.path)
     (copy / ".review-evidence").mkdir()
     (copy / ".review-evidence" / "coverage.xml").write_bytes(b"<coverage line-rate='0.91'/>\n" * 64)
@@ -236,6 +237,7 @@ def test_a_real_capture_retains_named_evidence_the_patch_excludes_then_releases(
 
     from ouroboros.subagent_worktrees import find_execution_snapshot
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+    from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
 
     target, drive, entry, copy, handle = _real_investigation(tmp_path, monkeypatch)
     expected = {name: (copy / name).read_bytes() for name in (".review-evidence/coverage.xml",
@@ -243,7 +245,10 @@ def test_a_real_capture_retains_named_evidence_the_patch_excludes_then_releases(
     try:
         block = capture_terminal_patch_for_drive(drive, entry)
         manifest = json.loads(Path(block["manifest_artifact"]).read_text())
-        assert ".review-evidence/coverage.xml" in {row["path"] for row in manifest["untracked_excluded"]}
+        assert {row["path"]: row["reason"] for row in manifest["untracked_excluded"]} == dict.fromkeys(
+            (".review-evidence/coverage.xml", ".review-evidence/notes.txt"), NAMED_EVIDENCE_EXCLUSION)
+        patch = Path(block["patch_artifact"]).read_text()
+        assert "tracked.txt" in patch and ".review-evidence" not in patch
         assert block["disposition"] == custody.EVIDENCE_RETAINED == entry.patch_disposed
         assert block["named_evidence"]["status"] == "retained" and _retained_files(block) == expected
         assert not copy.exists() and find_execution_snapshot(handle.snapshot_id) is None
@@ -254,24 +259,61 @@ def test_a_real_capture_retains_named_evidence_the_patch_excludes_then_releases(
         custody._CUSTODY.clear()
 
 
-def test_named_evidence_over_the_bound_keeps_the_copy_until_a_reentry_retains_it(tmp_path, monkeypatch):
+def test_a_named_link_is_a_recorded_gap_and_the_copy_is_still_released(tmp_path, monkeypatch):
+    """Evidence is retained whole (no size bound); a link is recorded with its reason, never
+    followed, and no longer keeps the copy: nothing more could ever be retained from it."""
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
 
     target, drive, entry, copy, _handle = _real_investigation(tmp_path, monkeypatch)
-    from ouroboros import review_checking
-
-    bound = review_checking.EVIDENCE_RETAIN_BYTES
+    (copy / ".review-evidence" / "outside").symlink_to(target / "tracked.txt")
+    expected = {name: (copy / name).read_bytes() for name in (".review-evidence/coverage.xml",
+                                                               ".review-evidence/notes.txt")}
     try:
-        monkeypatch.setattr(review_checking, "EVIDENCE_RETAIN_BYTES", 64)
         block = capture_terminal_patch_for_drive(drive, entry)
-        assert "disposition" not in block and entry.patch_captured and not entry.patch_disposed
-        assert block["named_evidence"]["status"] == "partial"
-        assert ".review-evidence/coverage.xml" in {gap["path"] for gap in block["named_evidence"]["gaps"]}
-        assert copy.is_dir() and str(copy) in block["note"]  # the only bytes are kept, never cut
-        monkeypatch.setattr(review_checking, "EVIDENCE_RETAIN_BYTES", bound)
-        block = capture_terminal_patch_for_drive(drive, entry)  # the cached capture finishes retention
-        assert block["disposition"] == custody.EVIDENCE_RETAINED and block["named_evidence"]["status"] == "retained"
-        assert ".review-evidence/coverage.xml" in _retained_files(block) and not copy.exists()
+        named = block["named_evidence"]
+        assert named["status"] == "retained" and _retained_files(block) == expected
+        assert {"path": ".review-evidence/outside", "reason": "evidence_symlink"} in named["gaps"]
+        assert block["disposition"] == custody.EVIDENCE_RETAINED and not copy.exists()
+        assert (target / "tracked.txt").read_text() == "one\ntwo\n"  # the link's target was never read or moved
+    finally:
+        custody._CUSTODY.clear()
+
+
+def test_a_named_output_over_the_old_bound_is_retained_whole_and_the_copy_is_released(tmp_path, monkeypatch):
+    """Investigations are no longer bounded at 64 MiB: an output past that old bound is retained
+    whole, byte-exact and streamed, and the copy is released at once (nothing stays only there)."""
+    import hashlib
+    import tracemalloc
+    from pathlib import Path
+
+    from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+
+    target, drive, entry, copy, _handle = _real_investigation(tmp_path, monkeypatch)
+    big = copy / ".review-evidence" / "run" / "results.bin"
+    big.parent.mkdir(parents=True)
+    size = 65 * 1024 * 1024  # past the retired 64 MiB investigation bound
+    with big.open("wb") as stream:
+        stream.truncate(size)  # sparse on the source side; the retained copy is whole
+    digest = hashlib.sha256()
+    with big.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    try:
+        tracemalloc.start()
+        try:
+            block = capture_terminal_patch_for_drive(drive, entry)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        named = block["named_evidence"]
+        assert named["status"] == "retained" and named["gaps"] == [], named
+        assert {row["path"]: (row["size"], row["sha256"]) for row in named["files"]}[
+            ".review-evidence/run/results.bin"] == (size, digest.hexdigest())
+        assert not (named.get("inputs") or {}).get("limit_bytes")  # no bound is part of the receipt
+        assert peak < 16 * 1024 * 1024, peak  # streamed, never held in memory whole
+        kept = Path(named["evidence_dir"]) / "files" / ".review-evidence" / "run" / "results.bin"
+        assert kept.stat().st_size == size
+        assert block["disposition"] == custody.EVIDENCE_RETAINED and not copy.exists()
     finally:
         custody._CUSTODY.clear()
 
@@ -285,7 +327,7 @@ def test_a_capture_interrupted_before_retention_is_finished_by_the_next_capture(
     try:
         # A crash after PATCH_CAPTURED landed and before the evidence was retained.
         monkeypatch.setattr(subagent_integration_delegated, "retain_investigation_evidence",
-                            lambda drive, entry, block, gateway=None: block)
+                            lambda drive, entry, block, gateway=None, **kwargs: block)
         capture_terminal_patch_for_drive(drive, entry)
         assert entry.patch_captured and not entry.patch_disposed and copy.is_dir()
         monkeypatch.setattr(subagent_integration_delegated, "retain_investigation_evidence", retain)
@@ -333,11 +375,11 @@ def _fresh_start_consumer(monkeypatch, drive, target, task_id, access="readonly"
 
 
 @pytest.mark.parametrize("access", ["full", "workspace_write", "readonly"])
-def test_fresh_public_start_after_partial_investigation_capture_keeps_evidence(tmp_path, monkeypatch, access):
+def test_fresh_public_start_after_an_unretained_investigation_capture_keeps_evidence(tmp_path, monkeypatch, access):
     import json
 
-    from ouroboros import review_checking
     from ouroboros.subagent_worktrees import find_execution_snapshot
+    from ouroboros.tools import subagent_integration_delegated
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
     from ouroboros.tools.subagent_integration import _integrate_delegated_patch
 
@@ -348,9 +390,10 @@ def test_fresh_public_start_after_partial_investigation_capture_keeps_evidence(t
     expected = {name: (copy / name).read_bytes() for name in (
         ".review-evidence/coverage.xml", ".review-evidence/notes.txt", "tracked.txt")}
     try:
-        monkeypatch.setattr(review_checking, "EVIDENCE_RETAIN_BYTES", 64)
-        block = capture_terminal_patch_for_drive(drive, entry)
-        assert block["named_evidence"]["status"] == "partial"
+        with monkeypatch.context() as crashed:  # the capture row landed; retention never ran
+            crashed.setattr(subagent_integration_delegated, "retain_investigation_evidence",
+                            lambda drive, entry, block, gateway=None, **kwargs: block)
+            block = capture_terminal_patch_for_drive(drive, entry)
         assert entry.patch_captured and not entry.patch_disposed and "disposition" not in block
         custody._CUSTODY.clear()  # admission must read the durable facts, not this worker's memo
         ctx, start, starts = _fresh_start_consumer(monkeypatch, drive, target, entry.task_id, access)
@@ -383,7 +426,7 @@ def test_fresh_public_start_after_partial_investigation_capture_keeps_evidence(t
     ("readonly", False, False, "open_run_ids"),
     (INVESTIGATION_AUTHORITY, False, True, "pending_invocation_ids"),
 ])
-def test_fresh_public_start_still_refuses_candidate_unknown_open_and_pending(
+def test_fresh_public_start_keeps_other_candidate_open_and_pending_obligations(
         tmp_path, monkeypatch, authority, settled, pending, blocker):
     import json
 
@@ -403,14 +446,11 @@ def test_fresh_public_start_still_refuses_candidate_unknown_open_and_pending(
     try:
         custody._CUSTODY.clear()
         result = json.loads(start(ctx, prompt="Check again", subagent_id="investigation-fixture"))
-        assert result["reason"] == "replacement_requires_settlement" and result[blocker] == ["prior"]
-        assert starts == []  # before any physical POST
-        # The atomic claim repeats the same reading if debt appears after early admission.
+        assert result["status"] == "started" and starts
         claimed, refusal = claimed_start_request(
-            tmp_path, claim_target="", payload_busy=lambda *_args: "", actor_ctx=ctx,
-            enforce_actor_idle=True, task_id=ctx.task_id, invocation_id="must-not-land",
-            request={"prompt": "Check again"})
-        assert not claimed and refusal["reason"] == result["reason"] and refusal[blocker] == ["prior"]
-        assert custody.invocation_record(tmp_path, "must-not-land") is None
+            tmp_path, actor_ctx=ctx, task_id=ctx.task_id, invocation_id="new-independent",
+            request={"prompt": "Check independently"})
+        assert claimed and not refusal
+        assert custody.invocation_record(tmp_path, "new-independent")["state"] == "pending"
     finally:
         custody._CUSTODY.clear()

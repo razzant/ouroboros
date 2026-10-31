@@ -113,9 +113,10 @@ def test_gc_owes_unreferenced_physical_calls_including_old_and_cancelled_rows(tm
 
 
 def test_public_exact_review_reader_works_while_history_is_deferred(tmp_path):
+    """An old host acceptance record (nothing writes one any more) stays readable through
+    ``get_task_result(review_source_sha256=...)`` before and after deferred history placement."""
     from pathlib import Path
     from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
-    from ouroboros.task_finalization import review_source_reader
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     parent, task_id = tmp_path / "parent", "source-author"
@@ -134,7 +135,7 @@ def test_public_exact_review_reader_works_while_history_is_deferred(tmp_path):
     registry.set_context(ToolContext(repo_dir=Path.cwd(), drive_root=parent, task_id="next-owner",
                                     task_metadata={"budget_drive_root": str(parent)}))
     write_task_result(parent, "next-owner", "running", root_task_id="next-owner")
-    selector = review_source_reader(task_id, ref)
+    selector = {"tool": "get_task_result", "arguments": {"task_id": task_id, "review_source_sha256": ref["sha256"]}}
     result = registry.execute_result(selector["tool"], selector["arguments"])
     assert result.status == "ok"
     before = json.loads(result.text)["review_source"]
@@ -172,6 +173,46 @@ def test_gc_rechecks_call_inventory_after_preparation(tmp_path, monkeypatch):
     assert settle_child_drive(parent, task_id, child, live=lambda _: False)["status"] == "removed"
     stored = observability.read_call_manifest_ref(parent, late[0], task_id=task_id)
     assert observability.read_blob_ref(parent, stored["full_payload_ref"]) == {"data": "late physical result"}
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_a_direct_drive_beside_a_helper_drive_is_judged_by_its_own_call_inventory(tmp_path, late):
+    """A root task's calls lived in its helper drive, so its row records THAT drive's call-inventory
+    revision; its direct drive has no calls folder. The direct drive is compared with its own (absent)
+    inventory and settles; a calls folder that appears there between preparation and the move keeps
+    it, and it settles once that inventory is promoted."""
+    import contextlib
+
+    parent, task_id = tmp_path / "parent", "two-drives"
+    helper = headless.prepare_task_drive(parent, task_id, "empty")
+    write_task_result(helper, task_id, "completed", result="saved", artifact_status="ready")
+    observability.persist_call(helper, task_id=task_id, call_id="first", call_type="tool_call", payload={"data": "first"})
+    headless.copy_child_task_result(parent, {"id": task_id, "drive_root": str(helper)})
+    headless.retry_child_task_refs(parent, helper, task_id)
+    promotion = load_task_result(parent, task_id)["child_ref_promotion"]
+    assert promotion["call_inventory_preserved"] is True and promotion["call_inventory_mtime_ns"]
+    assert settle_child_drive(parent, task_id, helper, live=lambda _: False)["status"] == "removed"
+    direct = parent / headless.TASK_DRIVES_DIR / task_id
+    (direct / "tmp_scripts").mkdir(parents=True)
+    calls = []
+
+    @contextlib.contextmanager
+    def interlock():
+        if late:  # a call recorded after preparation, before the move
+            calls.append(observability.persist_call(direct, task_id=task_id, call_id="late", call_type="tool_call",
+                                                    payload={"data": "late"})["manifest_ref"])
+        yield True
+
+    outcome = settle_child_drive(parent, task_id, direct, live=lambda _: False, guard=interlock)
+    if not late:
+        assert outcome["status"] == "removed" and not direct.exists(), outcome
+        return
+    assert (outcome["status"], outcome["reason"]) == ("retained", "call_inventory_changed") and direct.exists()
+    assert settle_child_drive(parent, task_id, direct, live=lambda _: False)["reason"] == "call_inventory_pending"
+    headless.retry_child_task_refs(parent, direct, task_id)
+    assert settle_child_drive(parent, task_id, direct, live=lambda _: False)["status"] == "removed"
+    stored = observability.read_call_manifest_ref(parent, calls[0], task_id=task_id)
+    assert observability.read_blob_ref(parent, stored["full_payload_ref"]) == {"data": "late"}
 
 
 def _shared_drive(parent, layout):

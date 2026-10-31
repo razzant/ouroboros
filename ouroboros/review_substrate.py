@@ -26,7 +26,6 @@ from ouroboros.review_execution_projection import (
     MAX_PROJECTED_ACTOR_FINDINGS, projected_finding_row,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
     review_executions_from_actor_usage,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 )
-from ouroboros.task_results import review_binding_hash  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 # Everything below the seam. Re-exported here because the substrate is the
 # historical import site for the api_chat prompt renderers; `review_execution`
 # owns them now and must never import this module back.
@@ -51,10 +50,7 @@ from ouroboros.review_custody import (
     _ReviewAttemptHistory, _review_exception_projection,
     review_retry_cancelled, finalize_review_actor,
 )
-# Reviewer-output JSON extraction lives in ONE place beside the array
-# extractor it falls back to (the fenced-object and verdict parsers were
-# split across two modules for no reason).
-from ouroboros.triad_review import emit_review_run_errors, parse_review_findings
+from ouroboros.triad_review import emit_review_run_errors
 from ouroboros.usage_accounting import (
     PhysicalAttemptLimitExceeded,
     UsageAccountingError,
@@ -63,7 +59,8 @@ from ouroboros.usage_accounting import (
     last_physical_attempt_capture,
     usage_scope,
 )
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
+from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.utils import truncate_review_artifact  # noqa: F401 -- facade: review_verdict reads this at call time
 from ouroboros._outcome_receipts import disclosed_list_projection  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 
 
@@ -117,20 +114,17 @@ from ouroboros.outcomes import OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED, O
 
 # Historical dispatch names remain re-exported for existing consumers.
 from ouroboros.review_dispatch import (  # noqa: E402,F401 — re-exports
-    acceptance_slot_fit,
     PLAN_SLOT_ID_PREFIX,
     ReviewPaidStamp,
     SCOPE_SLOT_ID_PREFIX,
     SLOT_ID_PREFIX,
     slot_id_for_row,
     stamp_review_paid_on_dispatch,
-    task_acceptance_row_refusal,
-    task_acceptance_zero_physical_refusal,
 )
 
 
 # triad_delivery_slots() (the pool under its historical name) lives in reviewer_slot_config (altitude, P7);
-# re-exported for the acceptance callers and their tests here.
+# re-exported for its historical callers and their tests here.
 from ouroboros.reviewer_slot_config import triad_delivery_slots  # noqa: F401,E402
 
 
@@ -184,11 +178,7 @@ class ReviewCoordinator:
 
         waiter = current_model_wait()
         if waiter and not request.reconcile_only:
-            effective_slots = [apply_review_model_override(slot, waiter.overrides) for slot in slots]
-            if effective_slots != slots and request.surface == "task_acceptance":
-                from ouroboros.review_evidence_sections import acceptance_packet_budget_chars
-                request.policy = {**request.policy, "slot_input_caps": acceptance_packet_budget_chars(effective_slots).slot_input_caps}
-            slots = effective_slots
+            slots = [apply_review_model_override(slot, waiter.overrides) for slot in slots]
         if not slots:
             return ReviewRunResult(
                 request=asdict(request),
@@ -308,7 +298,6 @@ class ReviewCoordinator:
             "scope_review",
             "plan_review",
             "skill_review",
-            "task_acceptance",
         }
         route_owned_executor = (
             str(getattr(getattr(self._run_slot, "__func__", None), "__module__", ""))
@@ -324,29 +313,14 @@ class ReviewCoordinator:
             )
             else self.usage_ctx
         )
-        source_error = ''
-        if request.surface == 'task_acceptance' and request.policy.get('native_data_root') and not request.reconcile_only:
-            try:
-                from ouroboros.review_source_closure import retain_review_request_sources
-                from ouroboros.acceptance_retrieving import acceptance_retrieving_work_order, retain_review_source
-
-                retain_review_request_sources(request, source_root=request.policy['native_data_root'],
-                                              custody_root=self._custody_drive_root())
-                acceptance_retrieving_work_order(request, [slot for slot in slots if slot.retrieves],
-                    session_root=request.session_root, data_root=pathlib.Path(request.policy['native_data_root']))
-                for slot in slots:
-                    if slot.retrieves:
-                        retain_review_source(request, slot.slot_id, self._custody_drive_root())
-            except Exception as exc:
-                source_error = f'review_source_closure_unavailable: {type(exc).__name__}: {exc}'
-        actors = [self._error_actor(request, slot, source_error, operation_state='not_dispatched')
-                  for slot in slots] if source_error else run_custodied_review_slots(
+        actors = run_custodied_review_slots(
             request=request, slots=slots,
             usage_ctx=custody_usage_ctx,
             task_id=task_id,
             usage_meta=usage_meta,
             review_usage_scope=review_usage_scope,
             run_slot=_run_slot_with_usage,
+            settle_actor=lambda slot, actor: self._settle_actor(request, slot, actor),
             error_actor=lambda slot, error, operation_id="", operation_state="settled": self._error_actor(
                 request, slot, error, operation_id=operation_id,
                 operation_state=operation_state,
@@ -355,29 +329,11 @@ class ReviewCoordinator:
         slot_order = {slot.slot_id: idx for idx, slot in enumerate(slots)}
         slots_by_id = {slot.slot_id: slot for slot in slots}
         actors.sort(key=lambda actor: slot_order.get(actor.slot_id, len(slot_order)))
-        try:
-            # «Выполняется как» (D22): beside each saved row the UI shows what
-            # the row REALLY ran as last time. Disclosure only; best-effort.
-            from ouroboros.reviewer_slot_config import record_reviewer_slot_executions
+        from ouroboros.review_seat_outcome import aggregate_outcomes
 
-            # The wave keeps its OWN rows on its ctx for its ledger record (``keep_on``).
-            record_reviewer_slot_executions(request.surface, actors, slots_by_id, keep_on=self.usage_ctx)
-        except Exception:
-            log.debug("reviewer-slot last-execution write failed", exc_info=True)
-
-        from ouroboros.review_actor_aggregation import aggregate_review_actors
-
-        aggregate = aggregate_review_actors(
-            request=request,
-            slots=slots,
-            actors=actors,
-            slots_by_id=slots_by_id,
-            actor_projection=_review_actor_projection,
-            criteria_shape_valid=_criteria_shape_valid,
-            advisory_hardness=HARDNESS_ADVISORY_VISIBLE,
-        )
-        # #1578: every surface's reviewer failures reach the canonical log once.
-        emit_review_run_errors(self.usage_ctx, request, actors, drive_root=self.drive_root)
+        for actor in actors:
+            self._settle_actor(request, slots_by_id[actor.slot_id], actor, producer=False)
+        aggregate = aggregate_outcomes(request, slots, actors)
         return ReviewRunResult(
             request=asdict(request),
             actors=[asdict(actor) for actor in actors],
@@ -424,6 +380,13 @@ class ReviewCoordinator:
         except Exception:
             prompt_projection = {}
         response_ref: Dict[str, Any] = {}
+        if prompt_ref is None and operation_id:
+            from ouroboros.observability import read_call_payload
+            try:
+                prompt_ref = read_call_payload(self._custody_drive_root(), task_id=request.task_id or "review",
+                                               call_id=f"{operation_id}_prompt")[2]
+            except (OSError, ValueError):
+                pass  # No retained assignment: disclose only the synthetic failure prompt.
         if prompt_ref is None:
             prompt_ref = {}
             try:
@@ -475,14 +438,15 @@ class ReviewCoordinator:
         base_call_type = request.call_type or f"{request.surface}_review"
         from ouroboros.review_dispatch import review_operation_binding
         binding = review_operation_binding(request, slot, str(operation_id or call_id))
-        from ouroboros.acceptance_retrieving import retain_review_source
-        retain_review_source(request, slot.slot_id, self._custody_drive_root())
         assignment = ReviewAssignment(
             request=request, slot=slot, call_id=call_id, call_type=base_call_type,
             custody_root=self._custody_drive_root(),
             dispatch_stamp=self._review_paid_stamp,
         )
         executor = _review_route_executor(assignment, llm=self.llm)
+        from ouroboros.review_seat_outcome import answer_received
+
+        executor.answer_observer = lambda: answer_received(self.usage_ctx, request, slot)
         executor.usage_observer = lambda usage: self._emit_usage(request, slot, usage, prompt_chars=executor.prompt_chars())
         executor._logical_deadline_monotonic = logical_deadline_monotonic
         # The physical session and the logical waiter must share this exact
@@ -520,36 +484,7 @@ class ReviewCoordinator:
                           "review_operation_binding": binding},
             )
         except Exception:
-            if request.slot_source_delivery.get(slot.slot_id) and not exact_recovery:
-                # A sourced review must retain its canonical identity before
-                # dispatch, not only in a post-run result or a worker buffer.
-                raise
             prompt_ref = {}
-        free_refusal = (
-            task_acceptance_row_refusal(request, slot)
-            if request.surface == "task_acceptance"
-            else {}
-        )
-        if free_refusal:
-            # Nothing was sent, so the row must not wear a verdict: it is a
-            # typed $0 ``not_dispatched`` actor whose refusal token rides into
-            # ``error`` so the aggregate names the real blocker.
-            return self._error_actor(
-                request, slot, f"{free_refusal['status']}: {free_refusal['summary']}",
-                operation_id=call_id, operation_state="not_dispatched", prompt_ref=prompt_ref,
-            )
-        # Backstop for the quorum-sized packet ceiling: a narrower slot in the
-        # same panel can still be handed more than it holds, and refusing it
-        # costs nothing while the rest of the panel reviews.
-        if request.surface == "task_acceptance" and not slot.retrieves:
-            cap, estimated = acceptance_slot_fit(slot, executor, slot_input_caps=request.policy.get("slot_input_caps"))
-            if cap and estimated > cap:
-                return self._error_actor(
-                    request, slot,
-                    f"preflight_oversize: assembled acceptance prompt ~{estimated:,} tokens "
-                    f"exceeds this slot's calibrated input cap {cap:,}",
-                    operation_id=call_id, operation_state="not_dispatched", prompt_ref=prompt_ref,
-                )
         owner_deadline = str(getattr(request, "deadline_at", "") or "")
         from ouroboros.config import get_finalization_grace_sec
         from ouroboros.deadline_utils import owner_deadline_exhausted
@@ -572,23 +507,19 @@ class ReviewCoordinator:
             )
         try:
             p3_actor = request.surface in {"multi_model_review", "scope_review"}
-            acceptance_actor = request.surface == "task_acceptance"
-            actor_attempts = 2 if (p3_actor or acceptance_actor) else 1
-            # Acceptance and P3 share one two-send rail: transport/empty retry
-            # or same-route format repair for PACKET rows; a retrieving row
-            # (native episode, agent session) carries no send count — its
-            # executor canonicalizes its own answer, so no repair resend below.
+            actor_attempts = 2 if p3_actor else 1
+            # P3 PACKET rows share one two-send rail: one transport/empty retry;
+            # a retrieving row (native episode, agent session) carries no send
+            # count — its executor canonicalizes its own answer.
             from ouroboros.review_native_episode import native_or_packet_attempt_rail
 
-            attempt_rail = native_or_packet_attempt_rail(
-                slot, acceptance_actor or p3_actor)
+            attempt_rail = native_or_packet_attempt_rail(slot, p3_actor)
             with attempt_rail:
-                _prior_msg, _prior_usage, _prior_text = None, None, ""
                 _last_msg, _last_usage, _last_text, _has_prior = None, None, "", False
                 for actor_attempt in range(actor_attempts):
                     if actor_attempt and review_retry_cancelled(self.usage_ctx):
-                        # Every retry shape (transport, malformed output, and
-                        # empty output) shares this durable stop fence. The
+                        # Every retry shape (transport and empty output)
+                        # shares this durable stop fence. The
                         # first response remains the forensic answer; no new
                         # paid physical attempt is authorized after cancel.
                         if _has_prior:
@@ -623,9 +554,7 @@ class ReviewCoordinator:
                         # retain a prior response, including an empty response,
                         # as forensic evidence.
                         if _has_prior:
-                            msg, usage, raw_text = _prior_msg, _prior_usage, _prior_text
-                            if _prior_msg is None:
-                                msg, usage, raw_text = _last_msg, _last_usage, _last_text
+                            msg, usage, raw_text = _last_msg, _last_usage, _last_text
                             break
                         raise
                     except Exception as exc:
@@ -641,49 +570,18 @@ class ReviewCoordinator:
                                 raise
                             continue
                         if _has_prior:
-                            # The repair RESEND failed (transport, timeout): keep the
-                            # first answer, including an empty response, as forensics.
+                            # The empty-answer RESEND failed (transport, timeout): keep
+                            # the first answer, including an empty response, as forensics.
                             msg, usage, raw_text = _last_msg, _last_usage, _last_text
                             break
                         raise
                     _last_msg, _last_usage, _last_text, _has_prior = msg, usage, raw_text, True
                     if raw_text.strip():
-                        if (
-                            acceptance_actor and not slot.retrieves
-                            and actor_attempt + 1 < actor_attempts
-                            and parse_review_findings(raw_text)[0] is None
-                        ):
-                            _prior_msg, _prior_usage, _prior_text = msg, usage, raw_text
-                            try:
-                                # P1 forensics: a successful repair must not make the
-                                # malformed first answer unreconstructible.
-                                persist_call(
-                                    self._custody_drive_root(),
-                                    task_id=request.task_id or "review",
-                                    call_id=f"{call_id}_attempt1_response",
-                                    call_type=f"{base_call_type}_attempt1_response",
-                                    payload={"message": msg, "usage": usage},
-                                    manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model, "repair_attempt": 1},
-                                )
-                            except Exception:
-                                log.warning(
-                                    "Failed to persist malformed first acceptance attempt for %s/%s — the repair resend will overwrite it",
-                                    request.surface, slot.slot_id, exc_info=True,
-                                )
-                            if review_retry_cancelled(self.usage_ctx):
-                                # Cancellation is a durable owner decision,
-                                # not a transport-only concern. Do not issue a
-                                # format-repair resend after it linearizes.
-                                break
-                            continue  # extraction/format repair: one same-route resend
-                        break
-                    if _prior_text:
-                        # Empty repair resend: keep the substantive malformed first
-                        # answer instead of degrading to an empty actor.
-                        msg, usage, raw_text = _prior_msg, _prior_usage, _prior_text
                         break
                     if actor_attempt + 1 >= actor_attempts:
                         break
+            if raw_text.strip() and not slot.retrieves:
+                executor.answer_observer()
             actor = ReviewActorRecord(
                 slot_id=slot.slot_id, model=slot.model,
                 status="ok" if raw_text.strip() else "empty", raw_text=raw_text,
@@ -692,11 +590,14 @@ class ReviewCoordinator:
                 recovery_binding={**binding, "pending_invocation_id": invocation["id"]},
             )
             finalize_review_actor(actor, operation_id=call_id)
+            self._finalize_outcome(request, slot, actor)
             actor.response_ref = self._persist_producer_outcome(
                 request, actor, call_id, base_call_type, {"message": msg, "usage": usage})
             return actor
         except Exception as exc:
-            error_msg = truncate_review_artifact(str(exc), limit=4000)
+            # Preserve the complete safe cause before any presentation bound.
+            # A measurement after a long engine sentence must remain recoverable.
+            error_msg = sanitize_tool_result_for_log(str(exc))
             (
                 failure_custody, _capture_state, http_status,
                 operation_state, failure_code,
@@ -713,6 +614,7 @@ class ReviewCoordinator:
                 failure_code=failure_code,
                 reset_at=str(getattr(exc, "reset_at", "") or ""),
                 reported_cause=str(getattr(exc, "reported_cause", "") or ""),
+                failure_details=redact_projection(getattr(exc, "failure_details", {}) or {}).value,
                 http_status=http_status if isinstance(http_status, int) and http_status else None,
                 usage=failure_custody,
                 prompt_ref=prompt_ref,
@@ -722,13 +624,43 @@ class ReviewCoordinator:
                 recovery_binding={**binding, "pending_invocation_id": invocation["id"]},
             )
             finalize_review_actor(actor, operation_id=call_id)
+            self._finalize_outcome(request, slot, actor)
             actor.response_ref = self._persist_producer_outcome(
                 request, actor, call_id, base_call_type,
                 {"error_type": type(exc).__name__, "error": actor.error})
             return actor
 
+    def _finalize_outcome(self, request, slot, actor):
+        from ouroboros.review_seat_outcome import finalize_seat_outcome
+
+        finalize_seat_outcome(request, slot, actor)
+        emit_review_run_errors(self.usage_ctx, request, [actor], drive_root=self.drive_root)
+
+    def _settle_actor(self, request, slot, actor, *, producer=True):
+        """Outer worker failures take the same durable path before custody advertises readiness."""
+        from ouroboros.review_seat_outcome import ensure_producer_prompt, publish_seat_execution
+
+        complete = bool(actor.outcome and actor.response_ref)
+        self._finalize_outcome(request, slot, actor)
+        if producer and not complete:
+            actor.prompt_ref = ensure_producer_prompt(self._custody_drive_root(), request, slot, actor)
+            actor.response_ref = self._persist_producer_outcome(
+                request, actor, actor.operation_id, request.call_type or f"{request.surface}_review",
+                getattr(actor, "_producer_payload", {"message": {"content": actor.raw_text}, "error": actor.error}))
+            if not actor.response_ref:
+                raise OSError(f"Review producer outcome is not durable: {actor.operation_id}")
+        if producer or not actor.late_result_pending:
+            publish_seat_execution(request, slot, actor, self.usage_ctx, fallback_root=self._custody_drive_root())
+        else:
+            from ouroboros.subagent_metric_events import review_execution
+            try:  # a measurement never decides a pending drain
+                review_execution(request, slot, actor, self.usage_ctx, fallback_root=self._custody_drive_root())
+            except Exception:
+                log.debug("review measurement unavailable", exc_info=True)
+
     def _persist_producer_outcome(self, request, actor, call_id, call_type, payload):
         """Stamp the completed producer beside its existing full response body."""
+        actor._producer_payload = payload
         outcome = {key: value for key, value in asdict(actor).items()
                    if key not in {"raw_text", "usage", "prompt_ref", "response_ref"}}
         try:
@@ -786,17 +718,7 @@ def run_review_request(
     (``review_pool_slots`` / ``triad_delivery_slots``) or composed for its wave;
     the substrate never picks reviewers itself."""
     coordinator = ReviewCoordinator(llm=llm, drive_root=drive_root, usage_ctx=usage_ctx)
-    result = coordinator.run(request, slots)
-    if request.surface == "task_acceptance":
-        # D-Q5 annotation-only pass: feeds the clean bit + disclosure, never parse
-        # validity/quorum/verdicts. Called UNGUARDED on purpose — the annotator is
-        # total and fail-CLOSED (a resolver failure stamps the non-clean row), and
-        # `review_evidence` already built this packet, so swallowing an error here
-        # could only turn "the host never checked the refs" into a clean PASS.
-        from ouroboros.review_evidence import annotate_criteria_evidence_resolution
-
-        annotate_criteria_evidence_resolution(result.actors, request.evidence)
-    return result
+    return coordinator.run(request, slots)
 
 
 # v7next F2.3a (D06): moved spans live in their owner leaves; re-exported
@@ -814,26 +736,11 @@ from ouroboros.review_records import (  # noqa: E402, F401 -- intentional public
 )
 
 from ouroboros.review_verdict import (  # noqa: E402, F401 -- intentional public re-exports
-    DIALOGUE_CONTINUE,
-    DIALOGUE_INCONCLUSIVE,
-    DIALOGUE_STABLE_DISAGREEMENT,
     DIALOGUE_STATUS_VALUES,
-    DIALOGUE_TERMINAL_STATUSES,
-    DIALOGUE_UNREACHABLE,
-    DIALOGUE_VOTE_ABSTAIN_INVALID,
-    DIALOGUE_VOTE_CONTINUE_WITHOUT_FINDINGS,
-    _CRITERION_STATUSES,
     _TIER_ORDER,
     _contributing_actors,
-    _criteria_have_supported_evidence,
-    _criteria_shape_valid,
-    _unresolved_evidence_ref_labels,
-    aggregate_dialogue_status,
     aggregate_outcome_tier,
-    build_improvement_capsule,
-    dissent_findings,
     panel_reason,
-    task_acceptance_is_clean,
 )
 
 from ouroboros.review_projection import (  # noqa: E402, F401 -- intentional public re-exports
@@ -843,6 +750,5 @@ from ouroboros.review_projection import (  # noqa: E402, F401 -- intentional pub
     _review_enforcement_impact,
     _review_panel_id,
     _transport_error_status,
-    build_review_binding,
     compact_review_projection,
 )

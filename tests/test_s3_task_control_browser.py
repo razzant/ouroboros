@@ -22,6 +22,9 @@ import json
 
 import pytest
 
+from ouroboros import dialogue_store
+from ouroboros.test_evidence import diagnostic_directory
+
 from tests.test_ui_smoke_playwright import (
     direct_server_with_data as _direct_server_with_data,
 )
@@ -202,18 +205,12 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
-    logs_dir = data_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
     # Seed while no server runs (the live loop rewrites the queue snapshot every tick).
     direct_server_with_data["stop_server"]()
-    (logs_dir / "chat.jsonl").write_text("", encoding="utf-8")
-    (logs_dir / "progress.jsonl").write_text(
-        json.dumps({
-            "ts": "2026-08-15T10:00:00+00:00", "chat_id": 1, "task_id": "live-root",
-            "content": "Working on the big thing", "cancelable": True,
-        }) + "\n",
-        encoding="utf-8",
-    )
+    dialogue_store.append(data_dir, "progress", {
+        "ts": "2026-08-15T10:00:00+00:00", "chat_id": 1, "task_id": "live-root",
+        "content": "Working on the big thing", "cancelable": True,
+    })
     _hold_live_root(data_dir, "live-root")
     direct_server_with_data["start_server"]()
 
@@ -250,6 +247,17 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 trigger = live.locator("[data-cancel-run]")
                 trigger.wait_for(state="attached", timeout=30_000)
                 assert trigger.inner_text().strip() == "Stop…"
+                # Wrap up and Hurry are a running root's controls: the server starts the root first, then the
+                # page reads that state (its controls come from the server's work, never a queued snapshot).
+                import time
+                import urllib.request
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline and not any(
+                        w.get("work_id") == "live-root" and w.get("activity") == "working"
+                        for w in json.load(urllib.request.urlopen(url + "/api/state", timeout=10))["works"]):
+                    time.sleep(0.25)
+                with page.expect_response("**/api/state*", timeout=15_000):
+                    pass
                 page.evaluate(_FETCH_STUB_JS, "live-root")
                 bubbles_before = _chat_bubble_count(page)
 
@@ -261,7 +269,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 assert _menu_labels(menu) == EXPECTED_ACTIONS
                 _assert_menu_geometry(_menu_metrics(page, menu, trigger), placement="below")
                 page.screenshot(
-                    path=str(data_dir.parent / "s3-chat-control-open.png"), full_page=False,
+                    path=str(diagnostic_directory(data_dir.parent, "task-control") / "s3-chat-control-open.png"), full_page=False,
                 )
                 page.keyboard.press("Escape")
                 menu.wait_for(state="detached", timeout=10_000)
@@ -342,7 +350,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 menu.wait_for(state="visible", timeout=10_000)
                 _assert_menu_geometry(_menu_metrics(page, menu, trigger), placement="above")
                 page.screenshot(
-                    path=str(data_dir.parent / "s3-chat-control-flipped.png"), full_page=False,
+                    path=str(diagnostic_directory(data_dir.parent, "task-control") / "s3-chat-control-flipped.png"), full_page=False,
                 )
                 page.keyboard.press("Escape")
                 menu.wait_for(state="detached", timeout=10_000)
@@ -383,7 +391,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 menu.wait_for(state="visible", timeout=10_000)
                 _assert_menu_geometry(_menu_metrics(page, menu, trigger))
                 page.screenshot(
-                    path=str(data_dir.parent / "s3-chat-control-narrow.png"), full_page=False,
+                    path=str(diagnostic_directory(data_dir.parent, "task-control") / "s3-chat-control-narrow.png"), full_page=False,
                 )
                 page.keyboard.press("Escape")
                 menu.wait_for(state="detached", timeout=10_000)
@@ -452,7 +460,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                     ) is True
                 assert menu.evaluate("node => node.scrollTop") > 0
                 page.screenshot(
-                    path=str(data_dir.parent / "s3-chat-control-short-scroll.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "task-control") / "s3-chat-control-short-scroll.png"),
                     full_page=False,
                 )
                 page.keyboard.press("Escape")
@@ -528,7 +536,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 menu.wait_for(state="detached", timeout=10_000)
                 assert _chat_bubble_count(page) == bubbles_before
                 page.screenshot(
-                    path=str(data_dir.parent / "s3-chat-control.png"), full_page=True,
+                    path=str(diagnostic_directory(data_dir.parent, "task-control") / "s3-chat-control.png"), full_page=True,
                 )
             finally:
                 browser.close()
@@ -549,10 +557,6 @@ def test_s3_activity_tab_dropdown_parity_and_no_chat_hurry(direct_server_with_da
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
-    logs_dir = data_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    (logs_dir / "chat.jsonl").write_text("", encoding="utf-8")
-    (logs_dir / "progress.jsonl").write_text("", encoding="utf-8")
 
     # The activity queue view is fed by GET /api/tasks?queue_only=1; stub it at
     # the same fetch seam (no real queue mutation from a UI test).
@@ -609,7 +613,7 @@ def test_s3_activity_tab_dropdown_parity_and_no_chat_hurry(direct_server_with_da
                 assert menu.evaluate("(node) => node.parentElement === document.body") is True
                 assert menu.evaluate("(node) => getComputedStyle(node).position") == "fixed"
                 page.screenshot(
-                    path=str(data_dir.parent / "s3-activity-control-open.png"), full_page=True,
+                    path=str(diagnostic_directory(data_dir.parent, "task-control") / "s3-activity-control-open.png"), full_page=True,
                 )
 
                 # Activity refresh replaces its subtree before awaiting network
@@ -642,7 +646,7 @@ def test_s3_activity_tab_dropdown_parity_and_no_chat_hurry(direct_server_with_da
                 # Belt-and-suspenders: no bubble anywhere mentions the control.
                 assert page.locator(".chat-bubble", has_text="Hurry up").count() == 0
                 page.screenshot(
-                    path=str(data_dir.parent / "s3-activity-control.png"), full_page=True,
+                    path=str(diagnostic_directory(data_dir.parent, "task-control") / "s3-activity-control.png"), full_page=True,
                 )
             finally:
                 browser.close()

@@ -10,6 +10,8 @@ real chat, state and chronicle writers.
 """
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import json
 import os
 from types import SimpleNamespace
@@ -18,7 +20,7 @@ import pytest
 
 from ouroboros import upgrade_notices as notices
 from ouroboros.chronicle_store import ChronicleStore
-from ouroboros.utils import iter_jsonl_chain_objects, jsonl_generation_signature
+from ouroboros.utils import jsonl_generation_signature
 
 NOTICE = "legacy_memory_notice"
 
@@ -72,7 +74,7 @@ def boot(monkeypatch, tmp_path):
     ss.save_state({"owner_chat_id": 7, "owner_id": 1, notices.OPTIONAL_BOUNDS_NOTICE_KEY: "already"})
 
     def rows():
-        return [row for row in iter_jsonl_chain_objects(tmp_path / "logs" / "chat.jsonl") if row.get("type") == NOTICE]
+        return [row for row in dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl") if row.get("type") == NOTICE]
 
     return SimpleNamespace(root=tmp_path, state=ss, bus=bus, rows=rows, delivered=delivered,
                            run=lambda: notices.startup_upgrade_notices({}))
@@ -116,17 +118,19 @@ def test_a_written_row_without_its_marker_is_recovered_without_a_second_row(boot
 
 
 def test_a_failed_chat_write_leaves_the_notice_owed(boot, monkeypatch):
+    from ouroboros import dialogue_store as ds
+
     _old_memory(boot.root)
-    real_append = boot.bus.append_jsonl
+    real_append = ds.append
     failed = []
 
     def append(*a, **kw):
         if not failed:
             failed.append(True)
-            raise OSError("injected chat write failure")
+            raise ds.StoreError("injected chat write failure")
         return real_append(*a, **kw)
 
-    monkeypatch.setattr(boot.bus, "append_jsonl", append)
+    monkeypatch.setattr(ds, "append", append)
     boot.run()
     assert boot.rows() == [] and not boot.state.load_state().get(notices.LEGACY_MEMORY_NOTICE_KEY)
     boot.run()
@@ -225,7 +229,7 @@ def test_an_unreadable_journal_leaves_only_this_notice_owed(boot, monkeypatch):
 
     monkeypatch.setattr(ChronicleStore, "legacy_pointer_rows", pointers)
     boot.run()
-    sent = [row.get("type") for row in iter_jsonl_chain_objects(boot.root / "logs" / "chat.jsonl")
+    sent = [row.get("type") for row in dialogue_test.log_rows(boot.root / "logs" / "chat.jsonl")
             if row.get("direction") == "system"]
     assert sent == ["optional_bounds_notice"]
     assert notices.LEGACY_MEMORY_NOTICE_KEY not in boot.state.load_state()

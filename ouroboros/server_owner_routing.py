@@ -18,8 +18,9 @@ from typing import Any, Dict, Optional
 
 from ouroboros.server_process import log
 from ouroboros.server_routing_context import (
-    _addressable_root_tasks,
+    RootSnapshot,
     _decision_turn_metadata,
+    addressable_roots,
     _project_id_for_registered_chat,
     _reserved_project_for_chat,
     _scoped_task_metadata,
@@ -78,6 +79,15 @@ def _stage_mailbox_attachments(
                 log.debug("Unable to remove routed attachment staging source", exc_info=True)
 
 
+def _start_order(row: Dict[str, Any]) -> tuple:
+    """Heads of one thread in start order; the task id breaks an equal start."""
+    try:
+        started = float(row.get("started_at") or 0.0)
+    except (TypeError, ValueError):
+        started = 0.0
+    return started, str(row.get("task_id") or "")
+
+
 def _route_project_chat_to_running_task(
     ctx: Any,
     chat_id: int,
@@ -86,29 +96,29 @@ def _route_project_chat_to_running_task(
     *,
     task_metadata: Any = None,
     image_data: Any = None,
+    thread_of: str = "",
+    roots: Optional[RootSnapshot] = None,
 ) -> str:
-    """Deliver a Project follow-up to the sole RUNNING/PENDING root mailbox.
+    """Deliver ordinary room input to its sole live reader, under admission locks.
 
-    Multi-project (v6.32.0): a focused project room with exactly ONE active pooled
-    task IS that task's context, so a follow-up is delivered to it as a TRANSPORT
-    invariant (the loop drains the mailbox every round) — there is no routing CHOICE
-    to make. But when the room has ZERO or MORE THAN ONE steerable task, picking a
-    target is a JUDGMENT, and code must never make it mechanically (BIBLE P5 LLM-first,
-    v6.34.0 WS1): this returns "" so the message flows to the decision turn, where the
-    agent sees `current_chat.running_tasks` and chooses `steer_task` / `promote_chat_to_task`.
-    Returns the delivered task id, or "" (no delivery — fall through to the decision lane).
-
-    A chat is a project thread by REGISTRY membership, not a bare numeric range —
-    large external-transport (Telegram-style) chat ids must not be misclassified and
-    have their owner messages swallowed.
+    Queued or paused roots remain explicit tell_task targets, never implicit
+    readers. Zero or several readers starts a fresh head in this room; the
+    model chooses whether to relay, move, detach, answer or start work. A late
+    answer or a press on a finished author's card (``thread_of``: that author)
+    reads only a head that a late answer or press of the same author started,
+    in a Project or Main, the earliest of several: one author's late input is
+    one thread. No other reader receives it. ``roots``: the message's one root snapshot.
     """
     try:
-        if not _project_id_for_registered_chat(ctx, chat_id):
+        if not thread_of and not _project_id_for_registered_chat(ctx, chat_id):
             return ""
     except Exception:
         return ""
     try:
-        steerable = _addressable_root_tasks(ctx, chat_id)
+        steerable = [row for row in (roots if roots is not None else addressable_roots(ctx)).rows(chat_id)
+                     if row.get("room_reader") and (not thread_of or row.get("late_input_of") == thread_of)]
+        if thread_of:
+            steerable = sorted(steerable, key=_start_order)[:1]
         # Exactly one candidate => unambiguous transport. Zero or many => a routing
         # decision the AGENT must make (P5/WS1), so do not deliver here.
         if len(steerable) != 1:
@@ -205,6 +215,10 @@ def _route_project_chat_to_running_task(
                 ctx, task_drive, tid, task_metadata, image_data,
             )
             if direct_lock_held:
+                from ouroboros.room_reader import is_reading
+                if not is_reading(task_drive, tid, task_obj or candidate, running=True):
+                    _drop_staged_inputs()
+                    return ""
                 # AR2-6 (fable): the direct-agent lane used to skip the
                 # cancel-pending admission check the queue lane makes below — a
                 # direct turn whose cancellation is pending must not accept a
@@ -218,11 +232,11 @@ def _route_project_chat_to_running_task(
                 _queue_lock.acquire()
                 queue_lock_held = True
                 live_meta = getattr(ctx, "RUNNING", {}).get(tid)
-                still_pending = any(
-                    isinstance(row, dict) and str(row.get("id") or "") == tid
-                    for row in list(getattr(ctx, "PENDING", []) or [])
-                )
-                if live_meta is None and not still_pending:
+                if isinstance(live_meta, dict):
+                    task_obj = live_meta.get("task") if isinstance(live_meta.get("task"), dict) else live_meta
+                from ouroboros.room_reader import is_reading
+                if not is_reading(task_drive, tid, task_obj, running=live_meta is not None,
+                                  fences=getattr(ctx, "BUDGET_ROOT_FENCES", None)):
                     return ""
                 # A worker may remain RUNNING to finish paid post-work after its
                 # answer/result settled. Its solve loop no longer drains this
@@ -260,6 +274,7 @@ def _route_project_chat_to_running_task(
                 late_answer=(
                     task_metadata.get("late_answer") if isinstance(task_metadata, dict) else None
                 ),
+                card_press=task_metadata.get("card_press") if isinstance(task_metadata, dict) else None,
             ):
                 return ""
             message_written = True
@@ -293,6 +308,7 @@ def _route_project_chat_to_running_task(
             task_metadata["_attachment_report"] = attachment_report
         if isinstance(task_metadata, dict):
             task_metadata["_routing_target_label"] = target_label
+            task_metadata["_routing_target"] = task_obj or candidate  # the receipt names this work and its room
         # A landed delivery publishes no row: the receipt the caller records
         # from this stash carries the manifest; the task's mailbox carries the block.
         return tid
@@ -379,76 +395,46 @@ def _record_routing_receipt(
     reason: str = "",
     detail: str = "",
     attachment_manifest: Optional[list] = None,
+    task: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Emit a typed bubble-free ack and optionally persist its presentation state."""
-    from ouroboros.project_dialogue import routing_refusal_cause
+    """Emit a typed bubble-free ack and optionally persist its presentation state.
 
-    if target and not str(target_label or "").strip():
-        from ouroboros.project_dialogue import routing_target_label
+    The fields are the supervisor receipts' own (``_routing_receipt_fields``, #968),
+    read once, written then sent; ``task`` is the live work the words reached, as a
+    relay names it. The send does not wait on the row: a landed delivery's authority
+    is the mailbox it already wrote, so a lost annotation still reaches the owner
+    live instead of leaving the message undelivered or Sending.
+    """
+    from ouroboros.project_dialogue import ROUTING_RECEIPT_FIELDS
+    from supervisor.events_project_routing import _routing_receipt_fields
 
-        target_label = routing_target_label(ctx.DRIVE_ROOT, action, target)
-    # Q3=A: this parallel producer reads the SAME host table, so a refusal it
-    # writes carries the owner's sentence instead of leaning on a client label.
-    cause = routing_refusal_cause(action, status, reason, options)
+    fields = _routing_receipt_fields(
+        ctx, {"relay_target": task}, action=action, target=target, target_label=target_label, status=status,
+        reason=reason, options=options, attachment_manifest=attachment_manifest,
+    )
     if persist:
         try:
             from ouroboros.project_dialogue import append_chat_annotation
 
             append_chat_annotation(
-                ctx.DRIVE_ROOT,
-                client_message_id,
-                action=action,
-                target=target,
-                target_label=target_label,
-                status=status,
-                reason=reason,
-                cause=cause,
-                detail=detail,
-                attachment_manifest=attachment_manifest,
+                ctx.DRIVE_ROOT, client_message_id, reason=reason, detail=detail,
+                **{key: value for key, value in fields.items() if key in ROUTING_RECEIPT_FIELDS},
             )
         except Exception:
             log.debug("Routing annotation append failed", exc_info=True)
     try:
         ack = getattr(bridge, "send_routing_ack", None)
         if callable(ack):
-            ack_kwargs = {
-                "client_message_id": client_message_id,
-                "action": action,
-                "target": target,
-                "target_label": target_label,
-                "status": status,
-            }
-            if options is not None:
-                ack_kwargs["options"] = options
-            if attachment_manifest is not None:
-                ack_kwargs["attachment_manifest"] = attachment_manifest
-            if cause:
-                ack_kwargs["cause"] = cause
-            ack(
-                chat_id,
-                **ack_kwargs,
-            )
+            from supervisor.events_project_routing import _routing_notice_ack_fields
+
+            # The same carrier fact the supervisor's receipt writer states (#966).
+            notice = _routing_notice_ack_fields(ctx, {"chat_id": chat_id, "client_message_id": client_message_id}, fields)
+            ack(chat_id, client_message_id=client_message_id, **fields, **notice)
         else:
             broadcast = getattr(bridge, "broadcast", None)
             if callable(broadcast):
-                payload = {
-                    "type": "message_annotation",
-                    "annotation_type": "routing_ack",
-                    "chat_id": int(chat_id or 0),
-                    "client_message_id": str(client_message_id or ""),
-                    "action": action,
-                    "target": target,
-                    "target_label": target_label,
-                    "status": status,
-                    "suppress_bubble": True,
-                }
-                if options is not None:
-                    payload["options"] = options
-                if attachment_manifest is not None:
-                    payload["attachment_manifest"] = attachment_manifest
-                if cause:
-                    payload["cause"] = cause
-                broadcast(payload)
+                broadcast({"type": "message_annotation", "annotation_type": "routing_ack", "chat_id": int(chat_id or 0),
+                           "client_message_id": str(client_message_id or ""), **fields, "suppress_bubble": True})
     except Exception:
         log.debug("Routing receipt broadcast failed", exc_info=True)
 
@@ -462,6 +448,15 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     image_data = incoming.get("image_data")
     task_constraint = incoming.get("task_constraint")
     task_metadata = incoming.get("task_metadata")
+    # A process-local value minted by the authenticated call door, after
+    # canonical message acceptance. JSON/API metadata cannot construct it.
+    task_metadata = dict(task_metadata or {})
+    realtime_turn = task_metadata.pop("_realtime_turn", None)
+    if realtime_turn is not None:
+        from ouroboros.live_conversation import LiveConversationTurn
+
+        if not isinstance(realtime_turn, LiveConversationTurn):
+            raise ValueError("invalid call authority")
     from ouroboros.contracts.task_constraint import normalize_task_constraint
 
     normalized_constraint = normalize_task_constraint(task_constraint)
@@ -542,7 +537,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         return
     # An owner message never wakes consciousness (owner decision В13): Main answers it itself.
     task_metadata = _scoped_task_metadata(project_id, task_metadata)
-    task_metadata = {**(task_metadata or {}), "client_message_id": client_message_id}
+    task_metadata = {**(task_metadata or {}), "client_message_id": client_message_id, "work_kind": "owner"}
     # The turn's origin identity rides UNCONDITIONALLY (not only when the
     # decision lane runs): a bare direct turn with no projects/roots yet — the
     # first-ever project creation — must still carry it so promote/route/bind
@@ -575,56 +570,16 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     ):
         received = {"received_at": str(incoming["received_at"])} if incoming.get("received_at") else {}
         task_metadata = {**task_metadata, "client_surface": {"channel": _ingress_source, **received}}
-    if task_metadata.get("force_plan"):
-        from supervisor.worker_chat_lane import owner_conversation_admitted
-        from supervisor.state import budget_remaining, load_state
-        from supervisor.events import _handle_promote_chat_to_task
-        from ouroboros.gateway.routing_decision import _derived_identity
+    from ouroboros.card_store import late_press_ref
+    from ouroboros.owner_quiz import late_answer_ref
 
-        from ouroboros.task_finalization import host_operation_reply_kwargs
-
-        if not owner_conversation_admitted(chat_id, client_message_id):
-            return
-        answers = host_operation_reply_kwargs(None, "", client_message_id)  # the refusal settles only this Sending
-        try:  # bridge intake runs on the supervisor loop: same pre-check contract as assignment
-            remaining = budget_remaining(load_state(), strict=True, allow_stale=True)
-        except Exception:
-            ctx.send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.", **answers, role="system", system_type="task_admission_notice")
-            return
-        if remaining <= 0:
-            try:
-                ctx.send_with_budget(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.", **answers, role="system", system_type="task_admission_notice")
-            except Exception:
-                pass
-            return
-        routing_token, task_id = (
-            _derived_identity(client_message_id, "swarm", 0)
-            if client_message_id else (uuid.uuid4().hex, uuid.uuid4().hex[:16])
-        )
-        event = {
-            "type": "promote_chat_to_task", "task_id": task_id,
-            # A wordless attachment message takes its canonical row's placeholder as
-            # the objective, the same text a direct turn receives; attachments ride below.
-            "routing_token": routing_token,
-            "objective": text or image_caption or str(incoming.get("log_text") or ""),
-            "chat_id": chat_id, "project_id": project_id,
-            "client_message_id": client_message_id, "task_constraint": task_constraint,
-            "force_plan": True, "force_plan_source": task_metadata.get("force_plan_source"),
-            "attachment_uploads": list(task_metadata.get("chat_attachment_uploads") or []),
-            # Swarm: the host promotes with no model turn waiting on the receipt,
-            # so a refusal reaches the owner as the handler's typed System row.
-            "host_initiated": True,
-        }
-        if isinstance(task_metadata.get("client_surface"), dict):
-            event["client_surface"] = dict(task_metadata["client_surface"])
-        if isinstance(origin_ref, dict) and origin_ref:
-            event["source_ref"] = dict(origin_ref)
-            event["source_text"] = task_metadata["origin_message_text"]
-        else:
-            event["origin_suppressed"] = True
-        _handle_promote_chat_to_task(event, ctx)
-        return
-    if project_id:
+    late = task_metadata.get("late_answer")
+    thread_of = (late_answer_ref(late) or late_press_ref(task_metadata.get("card_press")) or {}).get("task_id", "")
+    # ONE read of the addressable roots for this message: the room's reader, Main's
+    # manifest and the decision metadata all see the same projection.
+    roots = addressable_roots(ctx)
+    # A live call's admitted turn keeps the room it was opened in; it never re-routes.
+    if realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
             ctx,
             chat_id,
@@ -632,6 +587,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             client_message_id,
             task_metadata=task_metadata,
             image_data=image_data,
+            thread_of=thread_of,
+            roots=roots,
         )
         if routed_to_task:
             _record_routing_receipt(
@@ -654,10 +611,10 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
                     list(task_metadata.get("_attachment_manifest") or [])
                     if isinstance(task_metadata, dict) else None
                 ),
+                task=task_metadata.get("_routing_target") if isinstance(task_metadata, dict) else None,
             )
             return
 
-    global_roots = _addressable_root_tasks(ctx, None)
     try:
         from ouroboros.projects_registry import list_projects
 
@@ -665,18 +622,19 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     except Exception:
         log.warning("Unable to inspect Projects for owner routing", exc_info=True)
         has_projects = True
-    needs_decision_lane = bool(project_id) or has_projects or bool(global_roots)
+    # Unknown roots, like unknown Projects, go to the decision lane, which is told so.
+    needs_decision_lane = bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
     if needs_decision_lane:
-        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata)
+        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots)
 
     def _run_direct() -> None:
-        # The alarm clock reads the direct-activity census itself; nothing pauses it here.
         ctx.handle_chat_direct(
             chat_id,
             text or image_caption,
             image_data,
             task_constraint=task_constraint,
             task_metadata=task_metadata,
+            **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
         )
 
     threading.Thread(target=_run_direct, daemon=True).start()

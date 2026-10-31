@@ -5,7 +5,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
-import time
+import threading
 
 import pytest
 
@@ -64,7 +64,7 @@ def test_panic_kill_all_clears_runtime_table(tmp_path: pathlib.Path) -> None:
     assert supervisor.snapshot() == {}
 
 
-def test_exhausted_companion_remains_in_durable_runtime_health(tmp_path: pathlib.Path) -> None:
+def test_exhausted_companion_remains_in_durable_runtime_health(tmp_path: pathlib.Path, monkeypatch) -> None:
     init_server_process_pid()
     drive_root = tmp_path / "drive"
     repo_root = tmp_path / "skills"
@@ -87,6 +87,19 @@ def test_exhausted_companion_remains_in_durable_runtime_health(tmp_path: pathlib
     )
     loaded = find_skill(drive_root, loaded.name, repo_path=str(repo_root))
     assert loaded is not None
+    # Hold the monitor's terminal health writer at entry: until it writes, the exited
+    # companion must stay visible. Then join that monitor, whose real writer may wait
+    # seconds for its lock (#985); 60 s is only a hang bound.
+    real_writer = extension_health.record_companion_restart_exhausted
+    writer_entered, release_writer, monitors = threading.Event(), threading.Event(), []
+
+    def held_writer(*args, **kwargs):
+        monitors.append(threading.current_thread())
+        writer_entered.set()
+        release_writer.wait()
+        return real_writer(*args, **kwargs)
+
+    monkeypatch.setattr(extension_health, "record_companion_restart_exhausted", held_writer)
     try:
         assert extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root) is None
         supervisor = CompanionSupervisor(drive_root)
@@ -100,9 +113,11 @@ def test_exhausted_companion_remains_in_durable_runtime_health(tmp_path: pathlib
         )
 
         assert supervisor.start(descriptor)
-        deadline = time.monotonic() + 3
-        while supervisor.snapshot() and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert writer_entered.wait(60), "the monitor never reached the terminal health writer"
+        assert supervisor.snapshot()["connector:bridge"]["returncode"] == 7
+        release_writer.set()
+        monitors[0].join(60)
+        assert not monitors[0].is_alive(), "the companion monitor did not finish its terminal lifecycle"
 
         assert supervisor.snapshot() == {}
         health = extension_health.read_extension_health(drive_root, loaded.name) or {}
@@ -118,6 +133,7 @@ def test_exhausted_companion_remains_in_durable_runtime_health(tmp_path: pathlib
         assert "exhausting its restart budget" in state["load_error"]
         assert extension_health.status_for_runtime_state(state) == extension_health.BROKEN
     finally:
+        release_writer.set()
         extension_loader.unload_extension(loaded.name)
 
 
@@ -625,7 +641,7 @@ def test_stale_recovery_with_env_from_settings_has_zero_filesystem_effects(
     )
     # An isolated-dep site dir so the spawn env must carry PYTHONPATH
     # (.ouroboros_env is outside the content hash by construction).
-    site_dir = loaded.skill_dir / ".ouroboros_env" / "python" / "lib" / "python3.12" / "site-packages"
+    site_dir = loaded.skill_dir / ".ouroboros_env" / "python" / "lib" / "python{}.{}".format(*sys.version_info[:2]) / "site-packages"
     site_dir.mkdir(parents=True)
     # EXT_DEMO_VALUE present in settings = custom secret; grant it.
     from ouroboros.skill_loader import save_skill_grants

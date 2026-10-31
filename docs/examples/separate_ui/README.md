@@ -43,6 +43,14 @@ It answers `/` with `index.html`, `/static/*` with the files and everything else
 code, settings or data. The core's setup wizard (`/onboarding/static/*`) and the author kit always come from
 the core, whatever the interface host serves.
 
+With `OUROBOROS_UI_DIR=none`, `/onboarding` and `/auth/login` keep the builtin pages.
+Your interface host may provide its own setup/sign-in at interface addresses and use
+`/api/onboarding/bootstrap`, `/api/onboarding/complete` and JSON `POST /auth/login`.
+The core does not read optional pages from that other host. To have the core itself
+serve a complete client, select its local build directory instead; optional setup/login
+files and recovery are described in [CLIENT_CONTRACT §2–4](../../CLIENT_CONTRACT.md)
+and the [minimal client example](../client_views/README.md).
+
 ## The front proxy
 
 ```bash

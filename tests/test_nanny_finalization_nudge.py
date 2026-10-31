@@ -535,9 +535,10 @@ def test_unreadable_custody_surfaces_the_configured_unknown_nudge(tmp_path):
     assert custody.emit(root, custody.STARTED, {
         "run_id": "run-x", "task_id": "child-x", "route": "claude", "max_seconds": 300,
     })
-    from ouroboros.store import STORE_REL
+    from ouroboros.store import STORE_REL, close_connections
 
     store_path = root / STORE_REL  # the custody rows: unreadable is a typed unknown, never zero
+    close_connections()  # a thread keeps its open handle; the next read opens the file again
     os.chmod(store_path, 0)
     try:
         message = _nanny_finalization_message(

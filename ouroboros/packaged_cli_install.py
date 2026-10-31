@@ -79,6 +79,11 @@ def plan_posix_install(
     target_dir: pathlib.Path | None = None,
     force: bool = False,
 ) -> InstallPlan:
+    from ouroboros.desktop_autostart import own_appimage
+
+    appimage = own_appimage(bundle_root)  # one inherited from another AppImage app's terminal is not this app's
+    if appimage:  # its files live in a mount that goes away when the app quits: a link into it would die
+        raise PackagedCLIError(f'an AppImage runs from a temporary mount; use "{appimage}" --cli instead of an installed command')
     source = _packaged_wrapper_source(bundle_root, windows=False)
     if not source.is_file():
         raise PackagedCLIError(f"packaged wrapper is missing: {source}")
@@ -227,6 +232,19 @@ def _packaged_wrapper_source(bundle_root: pathlib.Path, *, windows: bool) -> pat
     return bundle_root / "bin" / name
 
 
+def _dead_own_link(target: pathlib.Path, source: pathlib.Path) -> bool:
+    """A dead link Install CLI made from some copy of this app: its target ends with this source's path below
+    its app copy (``Contents/.../bin/ouroboros`` under an ``.app``, ``bin/ouroboros`` under a bundle root).
+    A dead link to anything else still needs ``--force``."""
+    from ouroboros.desktop_autostart import app_copy
+
+    try:
+        tail = source.relative_to(app_copy(source.parent.parent)).parts
+        return not target.exists() and pathlib.Path(os.readlink(target)).parts[-len(tail):] == tail
+    except (OSError, ValueError):
+        return False
+
+
 def _existing_action(target: pathlib.Path, source: pathlib.Path, *, force: bool) -> str:
     if not target.exists() and not target.is_symlink():
         return "create"
@@ -236,7 +254,7 @@ def _existing_action(target: pathlib.Path, source: pathlib.Path, *, force: bool)
                 return "refresh"
         except OSError:
             pass
-        if force:
+        if force or _dead_own_link(target, source):  # its app copy moved or was removed: it runs nothing
             return "replace"
     else:
         try:
@@ -245,7 +263,7 @@ def _existing_action(target: pathlib.Path, source: pathlib.Path, *, force: bool)
             text = ""
         if text == _windows_shim_text(source):
             return "refresh"
-        if force:
+        if force or _dead_own_shim(text):
             return "replace"
     raise PackagedCLIError(
         f"refusing to overwrite existing non-Ouroboros command: {target}; "
@@ -269,6 +287,13 @@ def _print_plan(plan: InstallPlan, *, dry_run: bool) -> None:
 
 def _windows_shim_text(source: pathlib.Path) -> str:
     return f"@echo off\r\nrem {MARKER}\r\ncall \"{source}\" %*\r\n"
+
+
+def _dead_own_shim(text: str) -> bool:
+    """A ``.cmd`` this installer wrote whose ``call`` target is gone: like a dead link, it runs nothing."""
+    lines = text.splitlines()
+    called = [line[len('call "'):].split('"', 1)[0] for line in lines if line.startswith('call "')]
+    return f"rem {MARKER}" in lines and len(called) == 1 and not pathlib.Path(called[0]).exists()
 
 
 def _resolve_for_compare(path: pathlib.Path) -> pathlib.Path:

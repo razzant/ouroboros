@@ -78,17 +78,25 @@ def _bind_worker_repo_root(repo_dir: str, drive_root: str = "") -> None:
 def write_bytecode_to_prefix_only(drive_root: str) -> None:
     """Let this worker cache its bytecode, only into a prefix inside its data dir.
 
-    The launcher points the prefix at ``data/state/pycache``, and with a prefix Python
+    The launcher points the prefix at ``data/state/pycache.noindex``, and with a prefix Python
     writes bytecode only there, never beside a source and so never into a signed bundle
     (WA6, the reason the launcher sets ``PYTHONDONTWRITEBYTECODE``); the next worker then
     loads its import graph instead of recompiling it on every boot. No prefix, or one
     outside the data dir (a developer's, a test harness's), changes nothing, and the
     inherited environment still keeps every other child this process starts from writing.
+    An older launcher's legacy ``state/pycache`` (this prefix, and the one children inherit)
+    moves to the unindexed tree before any write (``unindexed.bytecode_prefix``).
     """
+    import os
     import sys
+
+    from ouroboros.unindexed import bytecode_prefix
 
     if not sys.pycache_prefix:
         return
+    sys.pycache_prefix = bytecode_prefix(drive_root, sys.pycache_prefix)
+    if os.environ.get("PYTHONPYCACHEPREFIX"):
+        os.environ["PYTHONPYCACHEPREFIX"] = bytecode_prefix(drive_root, os.environ["PYTHONPYCACHEPREFIX"])
     try:
         inside = pathlib.Path(sys.pycache_prefix).resolve().is_relative_to(pathlib.Path(drive_root).resolve())
     except (OSError, RuntimeError, ValueError):
@@ -117,6 +125,21 @@ def local_work_settled() -> bool:
     from ouroboros.tool_custody import local_producers_settled
 
     return local_producers_settled() and local_reviews_settled() and local_producers_settled()
+
+
+def _retained_rows_after_drain() -> int:
+    """The best-effort dialogue rows this idle worker still holds after one drain: a retirement kills
+    without finalizers, so the server counts them lost (``worker_retired``) only if it really retires
+    this worker; a kept one retries them at its next append or task end."""
+    try:
+        from ouroboros import dialogue_retry
+
+        if dialogue_retry.snapshot()["rows"]:
+            dialogue_retry.drain()
+        return int(dialogue_retry.snapshot()["rows"])
+    except Exception:
+        log.debug("Dialogue retry state unreadable at the idle probe", exc_info=True)
+        return 0
 
 
 def _adopt_published_extensions(pool_drive_root: str) -> None:
@@ -446,13 +469,15 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     except Exception as _e:
         _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())
         return
-    # The birth is measured first, in its own try: a failing checkout read must
-    # neither leave it unbound for the idle probe nor suppress readiness. An empty
+    # The births are measured first, in their own try: a failing checkout read must
+    # neither leave them unbound for the idle probe nor suppress readiness. An empty
     # birth is honest; the parent then matches this child by its own Process pid.
-    birth = ""
+    birth = kernel_birth = ""
     try:
         from ouroboros.platform_layer import process_start_time
+        from ouroboros.process_identity import process_kernel_birth
 
+        kernel_birth = process_kernel_birth(_os.getpid()) or ""  # never raises
         birth = str(process_start_time(_os.getpid()) or "")
     except Exception:
         log.warning("Worker %s could not measure its own process birth", wid, exc_info=True)
@@ -465,20 +490,32 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
         _branch, _sha = _get_git_info(_pathlib.Path(repo_dir))  # best-effort, diagnostic only
         _append_jsonl(_drive / "logs" / "events.jsonl", {
             "ts": _utc_now_iso(), "type": "worker_ready", "worker_id": wid,
-            "pid": _os.getpid(), "process_birth": birth, "git_branch": _branch, "git_sha": _sha,
+            "pid": _os.getpid(), "process_birth": birth, "kernel_birth": kernel_birth,
+            "git_branch": _branch, "git_sha": _sha,
         })
     except Exception as _e:
         _log_worker_crash(wid, _drive, "worker_ready", _e, _tb.format_exc())
     import queue as _queue
     from ouroboros.budget_pause import _HOLD_POLL_SEC
 
+    from ouroboros import custody_owed
+
+    # A fact owed later (a late tool or review callback on another thread) wakes this wait
+    # through its own queue; the last spare worker gets no probe at all.
+    custody_owed.bind_wake(lambda: in_q.put({"type": "custody_owed_wake"}))
     probe = None  # an idle-retirement token, answered only once no local producer is owed
     while True:
         try:
             try:
-                # Only an outstanding probe is rechecked, at the hold cadence: never an idle timer.
-                task = in_q.get(timeout=_HOLD_POLL_SEC) if probe else in_q.get()
+                # Only an outstanding probe or an owed custody write is rechecked, at the hold
+                # cadence: never an idle timer.
+                task = in_q.get(timeout=_HOLD_POLL_SEC) if probe or custody_owed.pending() else in_q.get()
+                if task is not None and task.get("type") == "custody_owed_wake":
+                    raise _queue.Empty  # the owed write is this wake's only duty
             except _queue.Empty:
+                custody_owed.drain()
+                if probe is None:
+                    continue  # nothing to answer: the owed write was this wake's only duty
                 task = probe
             if task is None or task.get("type") == "shutdown":
                 break
@@ -490,7 +527,9 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                     log.warning("Idle probe could not prove local quiescence", exc_info=True)
                 if probe is None:
                     out_q.put({"type": "worker_quiescent", "worker_id": wid, "pid": _os.getpid(),
-                               "process_birth": birth, "token": str(task.get("token") or "")})
+                               "process_birth": birth, "kernel_birth": kernel_birth,
+                               "token": str(task.get("token") or ""),
+                               "retained_rows": _retained_rows_after_drain()})
                 continue
             probe = None
             task_drive_root = str(task.get("drive_root") or drive_root)
@@ -540,9 +579,36 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                         log.exception("Terminal file preparation failed for %s", task.get("id"))
                     e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
                 task_queue.put(stamp_finalization_enqueue(e2))
+            _drain_dialogue_retry()
+            if task_drive_root != str(drive_root):
+                _release_drive_stores(task_drive_root)
         except Exception as _e:
             _log_worker_crash(wid, _drive, "handle_task", _e, _tb.format_exc())
             return
+
+
+def _drain_dialogue_retry() -> None:
+    """The reusable worker's task boundary: best-effort rows it retained land before the next task
+    (a retired worker is killed without finalizers, so its exit drain never runs)."""
+    try:
+        from ouroboros import dialogue_retry
+
+        dialogue_retry.drain()
+    except Exception:
+        log.debug("Dialogue retry drain at the task boundary failed", exc_info=True)
+
+
+def _release_drive_stores(drive: Any) -> None:
+    """A task's own drive is the server's to settle and move once the task ends. This process
+    read its stores through the per-thread cache, and Windows moves no folder with an open
+    file below it, so the worker releases its idle handles; the server can only close its
+    own, and a late thread still leasing one closes it when that thread ends."""
+    from ouroboros.store import close_connections_under
+
+    try:
+        close_connections_under(pathlib.Path(drive), idle_only=True)
+    except Exception:
+        log.warning("Could not release the store handles under %s", drive, exc_info=True)
 
 
 def _record_task_exception(runner: Any, task: dict, exc: Exception, pool_drive_root: Any) -> None:

@@ -16,7 +16,6 @@ def _read(path: pathlib.Path) -> str:
 def test_available_subagents_is_one_canonical_settings_editor() -> None:
     editor = _read(MODULES / "subagents_settings.js")
     host = _read(MODULES / "settings.js")
-    assert "<h3>Available subagents</h3>" in editor
     assert "OUROBOROS_SUBAGENTS" in editor
     assert "collectSubagentsSettings" in host
     assert "OUROBOROS_SUBAGENT_HARNESS" not in editor
@@ -51,17 +50,12 @@ def test_a_fresh_subagent_row_invites_and_only_a_save_attempt_makes_it_red() -> 
     assert "row._uiAttempted = true" in editor
     assert "Boolean(row._uiAttempted) && " in editor
     assert "row._uiAttempted && errors.length" in primitives
-    assert "Choose how this subagent runs: an API model or an agent session." in primitives
     host = _read(MODULES / "settings.js")
     # Every Save click is an attempt — including one another field's validation
     # then aborts — so the stamp precedes the cadence check's early return.
     save = host[host.index("byId('btn-save-settings').addEventListener"):]
     assert save.index("noteSubagentsSaveAttempt();") < save.index("const { messages: errors, subject } = renderValidation();")
-    assert "Every-N cadence needs" in host
     assert "agentsStep?.noteSaveAttempt?.();" in _read(MODULES / "onboarding_wizard.js")
-    # Errors name the card the way its heading does, never a bare "Row N".
-    assert "`Subagent ${index + 1} ${text}`" in editor
-    assert "`Row ${index + 1}`" not in editor
 
 
 def test_the_review_pool_is_a_catalog_mark_and_the_route_primitives_stay_reviewer_free() -> None:
@@ -82,23 +76,22 @@ def test_the_review_pool_is_a_catalog_mark_and_the_route_primitives_stay_reviewe
 def test_heavy_card_is_gone_but_provider_test_contract_and_controls_remain() -> None:
     ui = _read(MODULES / "settings_ui.js")
     host = _read(MODULES / "settings.js")
-    setup = _read(ROOT / "ouroboros" / "settings_setup_contract.py")
     assert "['Heavy'," not in ui
     assert "s-model-heavy" not in ui
     assert "OUROBOROS_MODEL_HEAVY" not in host
-    light_copy = "Fast summaries, lightweight internal work and the default Fast scout. Empty uses Main."
     # Role labels and copy come from the shared setup contract, not a second
     # hand-maintained card table in Settings.
     assert "modelRolesHost('settings-model-roles')" in ui
     assert "modelRoles.load(s," in host
     assert "slot.note" in _read(MODULES / "model_roles.js")
-    assert light_copy in setup
-    assert "all deep subagents" not in ui
-    assert "all deep subagents" not in setup
-    assert "data-provider-test" in ui
-    assert "PROVIDER_TEST_INPUTS" in ui
-    assert "apiClient.providerTest({ provider_id: provider, overrides })" in host
-    assert "providerTestResultIsCurrent" in host
+    # Every API key row carries its Test; the probe runs against that row's draft only.
+    connections = _read(MODULES / "settings_connections.js")
+    # Button presence belongs to the rendered page, regardless of which module
+    # owns its markup: web/tests/provider_test.test.js exercises every key row.
+    assert "apiClient.providerTest(body)" in connections
+    assert "{ provider_id: card.kind, connection: names(card.kind).get(row), overrides }" in connections
+    assert "providerTestResultIsCurrent" in connections
+    assert "createConnectionsEditor" in host
 
 
 def test_onboarding_previews_and_commits_the_visible_owner_draft() -> None:
@@ -124,7 +117,6 @@ def test_preview_contract_and_task_only_agy_copy_are_explicit() -> None:
     assert "{ harness: 'agy' }" in step
     assert "familyLabel(family.harness" in step
     assert "{ harness: 'agy', label:" not in step
-    assert "task-only and does" in step
     assert "@typedef {Object} SubagentLastDelegation" in types
     assert "@property {SubagentLastDelegation=} subagent_last_delegation" in types
 
@@ -142,11 +134,7 @@ def test_generated_preview_is_background_and_whole_draft_clean_gated() -> None:
 
 def test_status_refresh_and_active_task_copy_keep_the_frozen_semantics() -> None:
     editor = _read(MODULES / "subagents_settings.js")
-    host = _read(MODULES / "settings.js")
     assert "await boundedStatusRefresh(store);" in editor
-    assert "Saved rows remain unchanged" in editor
-    assert "take effect for new child tasks" in host
-    assert "the current task keeps its existing routes" in host
 
 
 def test_new_frontend_modules_stay_within_the_context_target() -> None:

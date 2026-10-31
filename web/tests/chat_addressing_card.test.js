@@ -67,6 +67,8 @@ function fixture(history = [], chatId = 1) {
         card: () => walkCard(messages, TASK),
         rows: () => nodes(walkCard(messages, TASK)).filter((n) => n.classList?.contains('chat-live-line')),
         meta: () => walkCard(messages, TASK)?.querySelector('[data-live-meta]')?.innerHTML || '',
+        // The labelled facts beyond the compact line (tool calls among them): the card's own details list.
+        facts: () => walkCard(messages, TASK)?.querySelector('[data-live-facts]')?.innerHTML || '',
         owner: () => messages.children.find((node) => node.dataset.clientMessageId === 'owner-message'),
         answerVisible: () => messages.children.some((node) => /The task is scheduled/.test(node.innerHTML)),
         emit: (type, row) => handlers.get(type)({ chat_id: chatId, ts: TS, ...row }),
@@ -103,24 +105,31 @@ for (const [room, chatId, destination, visible] of [
             f.emit('message_annotation', receipt);
             const owner = f.owner();
             const note = owner.querySelector('.msg-routing-annotation');
-            const actions = owner.querySelector('.msg-routing-actions');
-            assert.equal(note.textContent, 'Started task · Requested Project › Requested work');
-            assert.equal(Boolean(actions), visible);
+            // A receipt that names another room is ONE line: the owner's words, then the Project reference. In the destination
+            // room itself it keeps its text and offers nothing.
+            const references = () => note.children.filter((node) => node.classList?.contains('chat-quiz-project'));
+            const reference = references()[0];
+            assert.equal(note.classList.contains('has-reference'), visible);
+            if (visible) assert.equal(note.children[0].textContent, 'Started as a task in');
+            else assert.equal(note.textContent, 'Started task · Requested Project › Requested work');
+            assert.equal(Boolean(reference), visible);
+            assert.equal(owner.querySelector('.msg-routing-actions'), null, 'no second padded row');
             f.emit('message_annotation', receipt);
-            assert.equal(owner.querySelector('.msg-routing-actions'), actions, 'same receipt keeps the same action row');
+            assert.equal(references()[0], reference, 'same receipt keeps the same reference');
             for (const revision of [1, 2]) {
                 await f.instance.refreshHistory({ revision });
                 assert.equal(f.owner(), owner, 'history updates the canonical bubble in place');
                 assert.equal(owner.querySelector('.msg-routing-annotation'), note);
-                assert.equal(owner.querySelectorAll('.msg-routing-actions').length, visible ? 1 : 0);
+                assert.equal(references().length, visible ? 1 : 0);
             }
         } finally { f.close(); }
         const replay = fixture(history, chatId);
         try {
             await replay.instance.refreshHistory({ revision: 1 });
-            assert.equal(Boolean(replay.owner().querySelector('.msg-routing-actions')), visible, 'cold history uses its own room');
-            assert.equal(replay.owner().querySelector('.msg-routing-annotation').textContent,
-                'Started task · Requested Project › Requested work');
+            const cold = replay.owner().querySelector('.msg-routing-annotation');
+            assert.equal(cold.children.some((node) => node.classList?.contains('chat-quiz-project')), visible, 'cold history uses its own room');
+            if (visible) assert.equal(cold.children[0].textContent, 'Started as a task in');
+            else assert.equal(cold.textContent, 'Started task · Requested Project › Requested work');
         } finally { replay.close(); }
     });
 }
@@ -429,6 +438,55 @@ for (const [room, chatId] of [['Main', 1], ['Project', 42]]) {
                 assert.ok(cold.answerVisible());
             } finally { cold.close(); }
         });
+    }
+}
+
+// A read inside the post-task window projects the turn's answer and summary as still finalizing
+// (`task_phase`, `outcome_final: false`); a later read projects them settled. Either projection is
+// the turn's one outcome line, as it is live, never a line of work of its own: a receipt-only turn
+// keeps no block, and a turn with work keeps its fold and one outcome line, whether the read lands
+// before or after task_done.
+for (const [room, chatId] of [['Main', 1], ['Project', 42]]) {
+    for (const [kind, tool, completion] of [['receipt', 'finish_task', true], ['work', 'read_file', undefined]]) {
+        for (const doneFirst of [false, true]) {
+            test(`${room}: a ${kind} turn read while finalizing ${doneFirst ? 'after' : 'before'} task_done keeps its outcome one line`, async () => {
+                const counts = { tool_calls: 1, tool_errors: 0, routing_tool_calls: 0,
+                    completion_tool_calls: completion ? 1 : 0, tool_call_counts: { [tool]: 1 } };
+                const answer = { ...final, chat_id: chatId, ...counts };
+                const finalizing = { task_phase: 'finalizing', outcome_final: false, outcome_phase: 'working' };
+                const at = (offset, second) => ({ history_id: `chat:${offset}`,
+                    history_position: { source: 'chat', offset }, ts: `2026-09-12T12:00:0${second}Z` });
+                const rows = (projection) => [{ ...answer, ...projection, ...at(924, 1) },
+                    { ...answer, ...projection, role: 'system', system_type: 'task_summary', text: '', ...at(1904, 2) }];
+                const history = rows(finalizing);
+                const f = fixture(history, chatId);
+                const settledShape = () => {
+                    // Booleans only: a failing assertion on a DOM stub hangs the reporter.
+                    if (kind === 'receipt') return assert.equal(Boolean(f.card()), false, 'a receipt-only turn keeps no block');
+                    assert.equal(Boolean(f.card()), true, 'work keeps its block');
+                    // Read by line keys (the stub cannot patch a line in place): no line is a history row's own.
+                    const keys = f.rows().map((row) => row.dataset.liveLineKey || '');
+                    assert.deepEqual([keys.length, keys.filter((key) => key.startsWith('history-')).length], [2, 0],
+                        'the fold and one outcome line');
+                };
+                try {
+                    const stamp = { tool, invocation_id: 'call-1', completion_control: completion, cancelable: true };
+                    f.log({ type: 'tool_call_started', ...stamp });
+                    f.log({ type: 'tool_call_finished', ...stamp, is_error: false, status: 'ok' });
+                    f.emit('chat', { ...answer, ...finalizing, ts: at(924, 1).ts });
+                    f.log({ type: 'task_metrics_event', ...counts });
+                    const done = () => f.log({ type: 'task_done', status: 'completed', ...counts,
+                        outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } } });
+                    if (doneFirst) done();
+                    await f.instance.refreshHistory({ revision: 1 });
+                    if (!doneFirst) done();
+                    settledShape();
+                    history.splice(0, history.length, ...rows({ outcome_final: true, outcome_phase: 'done' }));
+                    await f.instance.refreshHistory({ revision: 2 });
+                    settledShape();
+                } finally { f.close(); }
+            });
+        }
     }
 }
 

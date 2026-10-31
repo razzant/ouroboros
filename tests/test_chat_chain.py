@@ -1,19 +1,9 @@
-"""The chat-generation chain: moved helpers, index-free row addresses and the row stream.
-
-The behavior cases pin the outputs the helpers produced in ``consolidator`` on the
-same inputs (archive ordering, cursor-segment resolution in every branch, the
-A2A-free row stream, signatures, immutable source retention). The structural
-cases pin the move itself: one definition in ``chat_chain``, the legacy writer
-binding the same objects, and ``retain_memory_source`` reached as a module
-attribute so a single substitution reaches every caller. The address cases pin
-``{chat_id, ts, row_sha256}`` resolution (hint, then the rotation-time search)
-and its typed refusals; the stream cases pin positions to the legacy cursor and
-room rows to ``dialogue_evidence.read_room_source``.
-"""
+"""SQL dialogue identities and the imported cursor/position contract."""
 from __future__ import annotations
 
 import ast
 import hashlib
+import itertools
 import json
 import pathlib
 import shutil
@@ -21,12 +11,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import chat_chain as cc
+from ouroboros import chat_chain as cc, dialogue_store as ds
+from tests._dialogue import import_all
 from ouroboros.utils import jsonl_generation_signature
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-MOVED = ("retain_memory_source", "_ordered_chat_generation_paths", "_resolve_generation_segments",
-         "_chat_log_signature", "_read_chat_entries")
+MOVED = ("retain_memory_source", "generation_cursor", "iter_rows", "resolve_row")
 
 
 def _layout(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
@@ -46,76 +36,31 @@ def _first_sha(path: pathlib.Path) -> str:
 
 # --- behavior on fixed inputs ------------------------------------------------------------------
 
-def test_ordered_chain_is_sorted_archives_then_live(tmp_path):
+def test_imported_generation_cursors_keep_their_absolute_positions(tmp_path):
     live, archive = _layout(tmp_path)
-    for name in ("chat_20260902T000000.jsonl", "chat_20260901T000000_1.jsonl", "chat_20260901T000000.jsonl"):
-        (archive / name).write_text(_rows(name), encoding="utf-8")
-    (archive / "chat_20260903T000000.txt").write_text("x", encoding="utf-8")
-    (archive / "other_20260901.jsonl").write_text("x", encoding="utf-8")
-    chain = cc._ordered_chat_generation_paths(live)
-    assert [p.name for p in chain] == ["chat_20260901T000000.jsonl", "chat_20260901T000000_1.jsonl",
-                                       "chat_20260902T000000.jsonl", "chat.jsonl"]
-    assert chain[-1] == live  # the live file closes the chain even before it exists
-
-
-def test_ordered_chain_without_archive_dir_is_live_only(tmp_path):
-    live = tmp_path / "logs" / "chat.jsonl"
-    assert cc._ordered_chat_generation_paths(live) == [live]
-
-
-def test_uninitialized_cursor_takes_every_archive_but_legacy_offset_stays_live_only(tmp_path):
-    live, archive = _layout(tmp_path)
-    live.write_text(_rows("live"), encoding="utf-8")
-    assert cc._resolve_generation_segments({}, live) == ([live], 0, False)
     old = archive / "chat_20260901T000000.jsonl"
     old.write_text(_rows("old"), encoding="utf-8")
-    assert cc._resolve_generation_segments({}, live) == ([old, live], 0, False)
-    # A nonzero offset without a signature is the pre-signature legacy shape: live only.
-    assert cc._resolve_generation_segments({"last_consolidated_offset": 7}, live) == ([live], 7, False)
-    # A signature that is not a mapping counts as absent.
-    assert cc._resolve_generation_segments({"chat_log_signature": "junk"}, live) == ([old, live], 0, False)
-
-
-def test_stored_signature_locates_its_generation_or_reports_a_gap(tmp_path):
-    live, archive = _layout(tmp_path)
-    gens = []
-    for stamp in ("20260901T000000", "20260902T000000", "20260903T000000"):
-        path = archive / f"chat_{stamp}.jsonl"
-        path.write_text(_rows(stamp), encoding="utf-8")
-        gens.append(path)
     live.write_text(_rows("live"), encoding="utf-8")
-
-    def meta(path, offset=5):
-        return {"last_consolidated_offset": offset, "chat_log_signature": {"first_line_sha256": _first_sha(path)}}
-
-    assert cc._resolve_generation_segments(meta(live), live) == ([live], 5, False)
-    assert cc._resolve_generation_segments(meta(gens[1]), live) == ([gens[1], gens[2], live], 5, False)
-    assert cc._resolve_generation_segments(meta(gens[0], 0), live) == ([*gens, live], 0, False)
-    missing = {"last_consolidated_offset": 5, "chat_log_signature": {"first_line_sha256": "f" * 64}}
-    assert cc._resolve_generation_segments(missing, live) == ([live], 0, True)
+    old_gen, live_gen = _first_sha(old), _first_sha(live)
+    import_all(tmp_path)
+    assert cc.generation_cursor(tmp_path, {}) == (0, False)
+    assert cc.generation_cursor(tmp_path, {"last_consolidated_offset": 7}) == (0, True)
+    assert cc.generation_cursor(tmp_path, {"chat_log_signature": "junk"}) == (0, False)
+    for gen, base in ((old_gen, 0), (live_gen, 2)):
+        assert cc.generation_cursor(tmp_path, {"chat_log_signature": {"first_line_sha256": gen},
+                                             "last_consolidated_offset": 1}) == (base + 1, False)
+    assert cc.generation_cursor(tmp_path, {"chat_log_signature": {"first_line_sha256": "f" * 64}}) == (0, True)
+    assert [r["text"] for _a, r, _p in cc.iter_rows(tmp_path)] == ["old-0", "old-1", "live-0", "live-1"]
 
 
 def test_row_stream_skips_blank_broken_and_a2a_rows_only(tmp_path):
     live, _archive = _layout(tmp_path)
-    assert cc._read_chat_entries(live) == []
     rows = [{"chat_id": 1, "text": "main"}, {"chat_id": 1001, "text": "project"},
             {"chat_id": -1, "text": "a2a"}, {"chat_id": "-3999", "text": "a2a-text-id"},
             {"text": "no chat id"}, {"chat_id": "main", "text": "non-numeric id"}]
-    body = "\n".join(json.dumps(row) for row in rows[:3]) + "\n\n   \n{broken json\n" + \
-        "\n".join(json.dumps(row) for row in rows[3:]) + "\n"
-    live.write_text(body, encoding="utf-8")
-    assert [row["text"] for row in cc._read_chat_entries(live)] == [
+    live.write_text("\n".join(json.dumps(row) for row in rows) + "\n\n{broken json\n", encoding="utf-8")
+    assert [row["text"] for _a, row, _p in cc.iter_rows(tmp_path)] == [
         "main", "project", "no chat id", "non-numeric id"]
-
-
-def test_generation_signature_is_the_shared_utils_signature(tmp_path):
-    live, _archive = _layout(tmp_path)
-    assert cc._chat_log_signature is jsonl_generation_signature
-    assert cc._chat_log_signature(live) == {}
-    live.write_text("\n  \n" + _rows("first", 1) + _rows("second", 1), encoding="utf-8")
-    first = json.dumps({"chat_id": 1, "direction": "in", "text": "first-0"})
-    assert cc._chat_log_signature(live) == {
-        "first_line_sha256": hashlib.sha256(first.encode("utf-8")).hexdigest(), "size": live.stat().st_size}
 
 
 def test_retained_source_is_exact_and_readable_after_the_task(tmp_path):
@@ -167,7 +112,8 @@ def test_consolidator_keeps_no_chain_helper_after_the_writer_is_retired():
     assert imported == []
     for name in ("_chat_log_signature", "_read_chat_entries", "_resolve_generation_segments",
                  "retain_memory_source", "_ordered_chat_generation_paths"):
-        assert not hasattr(cons, name) and hasattr(cc, name)
+        assert not hasattr(cons, name)
+        assert hasattr(cc, name) == (name == "retain_memory_source")
     assert cons.chat_chain is cc
 
 
@@ -210,6 +156,10 @@ def test_retain_memory_source_is_reached_as_a_module_attribute_everywhere():
 
 def _append(path: pathlib.Path, *rows) -> None:
     """Append rows (dicts) or raw physical lines (strings, newline included)."""
+    if ds.present(path.parent.parent):
+        for row in rows:
+            ds.append(path.parent.parent, "chat", row)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         for row in rows:
@@ -237,6 +187,7 @@ def _chain(tmp_path: pathlib.Path) -> pathlib.Path:
             _msg("2026-09-01T12:00:00+00:00", "fifth"))
     _append(live, _msg("2026-09-02T10:00:00+00:00", "sixth"), _msg("2026-09-02T11:00:00+00:00", "a2a-2", chat_id=-1),
             _msg("2026-09-02T12:00:00+00:00", "seventh", client_message_id="c7"))
+    import_all(tmp_path)
     return live
 
 
@@ -301,6 +252,7 @@ def test_the_hint_is_used_and_a_row_stamped_during_rotation_resolves_from_the_ea
             _msg("2026-10-01T12:00:01.200000+00:00", "appended while the rotation waited"))
     _append(archive / "chat_20261001T130000.jsonl", _msg("2026-10-01T12:30:00+00:00", "next archive"))
     _append(live, _msg("2026-10-02T00:00:00+00:00", "live"))
+    import_all(tmp_path)
     (same, _row, _pos), (late, late_row, late_pos), _next, _live = list(cc.iter_rows(tmp_path))
     _ok(tmp_path, cc.format_address(same))
     assert cc.resolve_row(tmp_path, late)[0] == late_row  # the hint
@@ -354,7 +306,7 @@ def test_substituted_row_is_a_mismatch_and_an_absent_row_is_missing(tmp_path):
     _append(live, _msg("2026-09-01T00:00:00+00:00", "what was said"), _msg("2026-09-01T00:00:01+00:00", "next"))
     (address, _row, _pos), _next = list(cc.iter_rows(tmp_path))
     _ok(tmp_path, address)
-    live.write_text(live.read_text(encoding="utf-8").replace("what was said", "what was never said"), encoding="utf-8")
+    address = cc.row_address({**_row, "text": "what was never said"})
     for form in (address, cc.format_address(address)):
         row, found = cc.resolve_row(tmp_path, form)
         assert row is None and found["status"] == "row_mismatch"
@@ -388,9 +340,27 @@ def test_a_torn_line_holding_the_timestamp_is_unreadable_not_missing(tmp_path):
     address = cc.row_address(_msg(ts, "lost words"))
     _append(live, _msg("2026-09-01T00:00:00+00:00", "intact"), '{"ts": "%s", "chat_id": 1, "text": "lost wo\n' % ts)
     row, found = cc.resolve_row(tmp_path, address)
-    assert row is None and found == {"status": "row_unreadable", "unreadable": [{"path": "logs/chat.jsonl", "line": 2}]}
+    assert row is None and found["status"] == "row_unreadable"
+    assert found["unreadable"][0]["path"] == "state/dialog.sqlite"
+    assert found["unreadable"][0]["length"] > 0
     live.write_text(json.dumps(_msg("2026-09-01T00:00:00+00:00", "intact")) + "\n", encoding="utf-8")
-    assert cc.resolve_row(tmp_path, address) == (None, {"status": "row_missing"})
+    assert cc.resolve_row(tmp_path, address)[1] == found  # frozen files cannot erase an imported gap
+
+
+def test_a_torn_line_elsewhere_keeps_a_substituted_rows_mismatch_candidates(tmp_path):
+    # Generic readers (chronicle marks, iter_rows bounds) name the same-time rows a stale address
+    # meant; navigation applies its own gap rule (chat_references.resolve_history_row).
+    live, _archive = _layout(tmp_path)
+    said = _msg("2026-09-01T00:00:00+00:00", "what was said")
+    _append(live, said, '{"ts": "2026-09-01T00:00:09+00:00", "chat_id": 1, "text": "torn\n')
+    stale = cc.row_address({**said, "text": "what was never said"})
+    row, found = cc.resolve_row(tmp_path, stale)
+    assert row is None and found["status"] == "row_mismatch", found
+    assert [candidate["row_sha256"] for candidate in found["candidates"]] == [
+        address["row_sha256"] for address, _row, _pos in cc.iter_rows(tmp_path)]
+    with pytest.raises(cc.RowAddressError) as refused:
+        list(cc.iter_rows(tmp_path, from_addr=stale))
+    assert refused.value.resolution["status"] == "row_mismatch"
 
 
 def test_chat_chain_keeps_no_index_and_no_physical_locator():
@@ -402,22 +372,15 @@ def test_chat_chain_keeps_no_index_and_no_physical_locator():
 # --- the row stream ----------------------------------------------------------------------------
 
 def test_stream_positions_are_the_legacy_cursor_positions(tmp_path):
-    live = _chain(tmp_path)
-    paths = cc._ordered_chat_generation_paths(live)
-    entries = [entry for path in paths for entry in cc._read_chat_entries(path)]
+    _chain(tmp_path)
     streamed = list(cc.iter_rows(tmp_path))
-    assert [row for _a, row, _p in streamed] == entries
-    assert [pos for _a, _r, pos in streamed] == list(range(len(entries)))
-    # The legacy cursor names a generation by its first line plus an offset into
-    # the rows from there on; its absolute position is the rows before plus offset.
-    for generation in range(len(paths)):
-        for offset in range(len(cc._read_chat_entries(paths[generation]))):
-            meta = {"chat_log_signature": jsonl_generation_signature(paths[generation]),
-                    "last_consolidated_offset": offset}
-            segments, cursor, gap = cc._resolve_generation_segments(meta, live)
-            pending = [entry for path in segments for entry in cc._read_chat_entries(path)]
-            absolute = len(entries) - len(pending) + cursor
-            assert not gap and streamed[absolute][1] == pending[cursor]
+    assert [pos for _a, _r, pos in streamed] == list(range(7))
+    for unit in ds.generation_metadata(tmp_path, "chat"):
+        for offset in range(unit["stream_rows"] or 0):
+            absolute, gap = cc.generation_cursor(tmp_path, {
+                "chat_log_signature": {"first_line_sha256": unit["gen"]},
+                "last_consolidated_offset": offset})
+            assert not gap and absolute == unit["pos_base"] + offset
     for address, _row, pos in streamed:
         assert cc.stream_position_of(tmp_path, address) == pos
         assert cc.stream_position_of(tmp_path, cc.format_address(address)) == pos
@@ -431,7 +394,7 @@ def test_rows_start_at_the_addressed_row_and_an_unresolved_bound_is_typed(tmp_pa
     absent = cc.row_address(_msg("2026-09-02T10:30:00+00:00", "never written"))
     with pytest.raises(cc.RowAddressError) as refused:
         cc.iter_rows(tmp_path, from_addr=absent)
-    assert refused.value.resolution == {"status": "row_missing"}
+    assert refused.value.resolution["status"] == "row_unreadable"
     with pytest.raises(cc.RowAddressError):
         cc.iter_room_rows(tmp_path, "1", to_addr=absent)
 
@@ -461,6 +424,7 @@ def _room_fixture(root: pathlib.Path) -> int:
             _msg("2026-09-03T00:02:00+00:00", "Project message", chat_id=chat, client_message_id="p1"),
             _msg("2026-09-03T00:03:00+00:00", "Room started", type="project_started", direction="system"),
             {"chat_id": 1, "direction": "out", "text": "No timestamp"})
+    import_all(root)
     return chat
 
 
@@ -500,6 +464,35 @@ def test_room_rows_are_the_room_evidence_rows_by_room_task_and_period(tmp_path):
     assert list(cc.iter_room_rows(tmp_path, "1", task_ids=[])) == []
 
 
+def test_a_projects_task_reach_reaches_python_in_one_step_whatever_its_size():
+    """The tasks under a project's bound tasks, by parent or by root, as the recursive query names them row by row,
+    handed to Python in one step (each ``sqlite3_step`` releases the GIL)."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tasks (task_id TEXT PRIMARY KEY, parent_task_id TEXT, root_task_id TEXT)")
+    tree = [(f"c{i}", f"c{i - 1}" if i else "bound", "bound" if i % 3 else None) for i in range(300)]
+    conn.executemany("INSERT INTO tasks VALUES (?,?,?)", tree + [("x1", "elsewhere", "elsewhere"), ("x2", None, None)])
+    rows_by_row = {str(row[0]) for row in conn.execute(cc._REACH.replace("json_group_array(id)", "id"), ('["bound"]',))}
+    stepped = []
+
+    class Rows(list):
+        def fetchone(self):
+            return self[0] if self else None
+
+        def fetchall(self):
+            return list(self)
+
+    class Stepped:  # counts the result rows each statement hands to Python: one ``sqlite3_step`` each
+        def execute(self, *args):
+            rows = Rows(conn.execute(*args).fetchall())
+            stepped.append(len(rows))
+            return rows
+
+    assert cc._reached(Stepped(), {"bound"}) == rows_by_row == {"bound", *(f"c{i}" for i in range(300))}
+    assert stepped == [1]
+
+
 def test_room_rows_between_two_addresses_keep_stream_positions(tmp_path):
     _room_fixture(tmp_path)
     room = list(cc.iter_room_rows(tmp_path, "1"))
@@ -520,3 +513,107 @@ def test_a_redelivered_message_stays_two_addressable_rows(tmp_path):
     assert [pos for _a, _r, pos in ours] == [0, 1] and ours[0][0]["row_sha256"] != ours[1][0]["row_sha256"]
     # The evidence view folds a repeated client id into its first copy; the stream does not.
     assert [row["text"] for row in read_room_source(tmp_path, 1)["rows"]] == ["same words"]
+
+
+def _paged_chain(tmp_path: pathlib.Path) -> pathlib.Path:
+    """1,300 chat rows of three kinds (an archive and the live file imported with their legacy
+    hints, rows appended to the store after the import) and the A2A rows the stream skips."""
+    live, archive = _layout(tmp_path)
+    lines = [json.dumps({"chat_id": 1 if i % 3 else 1001, "direction": "in", "text": f"old-{i}"}) + "\n"
+             for i in range(700)]
+    lines[350:350] = [json.dumps({"chat_id": -1, "text": "a2a"}) + "\n"]
+    (archive / "chat_20260901T000000.jsonl").write_text("".join(lines), encoding="utf-8")
+    live.write_text(_rows("live", 300), encoding="utf-8")
+    import_all(tmp_path)
+    _append(live, *(_msg(f"2026-09-02T00:{i // 60:02d}:{i % 60:02d}+00:00", f"new-{i}") for i in range(300)))
+    return live
+
+
+def _one_by_one(root: pathlib.Path) -> list:
+    from ouroboros import dialogue_positions as dp
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+
+    return [(cc.stored_address(root, entry), entry.row, dp.ordinal_at(root, "chat", entry.seq).pos)
+            for entry in ds.iter_rows(root, "chat") if not is_a2a_chat_id(entry.row.get("chat_id", 1))]
+
+
+def test_addressed_reads_look_rows_up_a_page_at_a_time(tmp_path, monkeypatch):
+    """The stream and a room answer each row's address (its legacy hint or its SQL coordinate) and
+    position exactly as the one-row lookups do, from a few reads per page of rows: on 24.10 two read
+    transactions per open row of 241 rooms kept a server core busy for a quarter hour."""
+    _paged_chain(tmp_path)
+    expected = _one_by_one(tmp_path)
+    kinds = {"legacy" if address["hint"].get("gen") else "sql" for address, _row, _pos in expected}
+    assert len(expected) == 1_300 and kinds == {"legacy", "sql"}
+    opened, real = [], ds.transaction
+
+    def counted(*args, **kwargs):
+        opened.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ds, "transaction", counted)
+    assert list(cc.iter_rows(tmp_path)) == expected
+    pages = -(-len(expected) // cc._ADDRESS_PAGE)
+    assert len(opened) <= 3 * pages + 3, len(opened)  # the reader's pages, two lookups a page, the stream's end and import check
+    opened.clear()
+    room = list(cc.iter_room_rows(tmp_path, "1001"))
+    assert room == [entry for entry in expected if entry[1].get("chat_id") == 1001] and len(room) == 234
+    assert len(opened) <= 3 * pages + 3, len(opened)
+    opened.clear()  # the rows behind the addresses: the coordinates in one read, the legacy hints in another
+    assert cc.rows_by_address(tmp_path, [entry[0] for entry in expected]) == {a["row_sha256"]: r for a, r, _p in expected}
+    assert len(opened) == 2, len(opened)
+
+
+def test_an_unsettled_unit_still_answers_the_rows_before_it_and_a_busy_store_stops_the_page(tmp_path, monkeypatch):
+    from ouroboros import dialogue_positions as dp
+    from ouroboros.store import StoreBusy, StoreMigrating
+
+    _chain(tmp_path)
+    streamed = list(cc.iter_rows(tmp_path))
+    real, unsettled = dp.ordinals_of, [entry.seq for entry in ds.iter_rows(tmp_path, "chat")][4]
+
+    def counts(root, stream, seqs):
+        seqs = list(seqs)
+        if len(seqs) > 1 or unsettled in seqs:
+            raise StoreMigrating("Dialogue history is still importing")
+        return real(root, stream, seqs)
+
+    monkeypatch.setattr(dp, "ordinals_of", counts)
+    answered = []
+    with pytest.raises(StoreMigrating):
+        for item in cc.iter_rows(tmp_path):
+            answered.append(item)
+    assert answered == streamed[:3]  # the A2A row before the unsettled one is no stream row
+
+    asked = []
+    monkeypatch.setattr(dp, "ordinals_of", lambda *_a, **_k: (_ for _ in ()).throw(StoreBusy("held")))
+    monkeypatch.setattr(dp, "ordinal_at", lambda *args: asked.append(args))
+    with pytest.raises(StoreBusy):
+        list(cc.iter_rows(tmp_path))
+    assert asked == []  # contention never turns a page into one wait per row
+
+
+def test_a_source_that_fails_mid_page_still_answers_the_rows_it_read_first(tmp_path, monkeypatch):
+    """A busy store between the source's own pages ends the reader where the one-row lookups ended it:
+    after every row read before the failure, with the same failure. A room's candidate union pages
+    unaligned with the reader's pages, so the failure can land inside one."""
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+    from ouroboros.store import StoreBusy
+
+    _paged_chain(tmp_path)
+    expected, real = _one_by_one(tmp_path), ds.iter_rows
+    read_first = sum(1 for entry in itertools.islice(real(tmp_path, "chat"), 620)
+                     if not is_a2a_chat_id(entry.row.get("chat_id", 1)))
+
+    def failing(*args, **kwargs):
+        for count, entry in enumerate(real(*args, **kwargs)):
+            if count == 620:  # inside the reader's second page
+                raise StoreBusy("held")
+            yield entry
+
+    monkeypatch.setattr(ds, "iter_rows", failing)
+    answered = []
+    with pytest.raises(StoreBusy):
+        for item in cc.iter_rows(tmp_path):
+            answered.append(item)
+    assert answered == expected[:read_first] and read_first > cc._ADDRESS_PAGE

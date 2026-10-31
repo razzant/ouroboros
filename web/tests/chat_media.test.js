@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { bindComposerFileTargets, safeHttpUrl } from '../modules/chat_media.js';
+import { bindComposerFileTargets, decorateContactSource, safeHttpUrl } from '../modules/chat_media.js';
 import { createComposerAttachments } from '../modules/chat_attachments.js';
 import { uploadView } from './helpers/attachment_views.js';
 import { NodeStub, fixture } from './helpers/media_dom.js';
@@ -15,6 +15,50 @@ test('safeHttpUrl accepts only absolute HTTP(S) URLs', () => {
     assert.equal(safeHttpUrl('/relative'), '');
     assert.equal(safeHttpUrl('javascript:alert(1)'), '');
     assert.equal(safeHttpUrl('data:text/plain,no'), '');
+});
+
+test('a framed question joins its Project to the voice and ends on its time alone', () => {
+    const fx = fixture({ formatMsgTime: () => ({ short: '15:18', full: '19 Oct 2026, 15:18' }) });
+    try {
+        const part = (className) => { const node = document.createElement('span'); node.className = className; return node; };
+        const card = part('chat-quiz-card');
+        const reference = part('chat-quiz-project');
+        const msg = { role: 'assistant', ts: '2026-10-19T15:18:00Z' };
+        const bubble = fx.controller.bubbleFrameNode(msg, card, { voice: [reference] });
+        const classes = (node) => node.children.map((child) => child.className);
+        assert.deepEqual(classes(bubble), ['chat-bubble-voice', 'chat-quiz-card', 'msg-time']);
+        assert.deepEqual(classes(bubble.children[0]), ['sender', 'chat-quiz-project']);
+        // Without parts the frame is the one every other delivery gets.
+        const plain = fx.controller.bubbleFrameNode(msg, part('chat-quiz-card'));
+        assert.deepEqual(classes(plain), ['sender', 'chat-quiz-card', 'msg-time']);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('private contact source stays in the voice line, separate from authored words', () => {
+    const fx = fixture();
+    try {
+        const body = document.createElement('div');
+        body.className = 'message';
+        body.textContent = 'Exact authored words';
+        const origin = { task_id: 'source-work', binding_id: 'place', source_event_id: 'event',
+            label: '<script>external label</script>', url: 'https://example.test/source' };
+        const bubble = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: origin }, body);
+        const link = bubble.querySelector('.sender').querySelector('.md-link');
+        assert.equal(link.textContent, origin.label);
+        assert.equal(link.href, origin.url);
+        assert.equal(link.title, 'Source work: source-work');
+        assert.equal(body.textContent, 'Exact authored words');
+        const replay = fx.controller.bubbleFrameNode({ role: 'assistant', quiz: { presence_contact: origin } }, document.createElement('div'));
+        assert.equal(replay.querySelector('.sender').querySelector('.md-link').href, origin.url);
+        const plain = fx.controller.bubbleFrameNode({ role: 'assistant' }, document.createElement('div'));
+        decorateContactSource(plain, { ...origin, url: 'javascript:alert(1)' });
+        assert.equal(plain.querySelector('.md-link'), null);
+        const unknown = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { label: 'unbound' } }, document.createElement('div'));
+        assert.equal(unknown.querySelector('.sender').children.length, 0);
+    } finally { fx.controller.destroy(); fx.restore(); }
 });
 
 test('photo grouping is keyed by role and task without cross-task merging', () => {
@@ -118,14 +162,12 @@ test('live media and quiz-state writes use the injected content boundary', () =>
     const handlers = new Map();
     const seen = new Set();
     let mutations = 0;
-    let unread = 0;
     try {
         fx.controller.wireDeliveries({
             onWs(type, handler) { handlers.set(type, handler); },
             isMyThread: () => true,
             hideTypingIndicatorOnly() {},
             syncChatStatus() {},
-            incrementUnreadIfNeeded() { unread += 1; },
             seenMessageKeys: seen,
             rememberMessageKey(key) { seen.add(key); },
             chatMediaMessageKey: (msg) => `media:${msg.task_id}:${msg.ts}`,
@@ -146,7 +188,6 @@ test('live media and quiz-state writes use the injected content boundary', () =>
         handlers.get('quiz_state')({ quiz_id: 'q1', changed: false });
         handlers.get('quiz_state')({ quiz_id: 'q1', changed: true });
         assert.equal(mutations, 4);
-        assert.equal(unread, 2);
         assert.equal(fx.inserted.length, 1);
         assert.equal(fx.inserted[0].querySelectorAll('.chat-gallery-item').length, 2);
     } finally {
@@ -207,7 +248,7 @@ test('media and document builders render upgraded DOM shapes with type-anchored 
             file_base64: 'aGVsbG8=', size_bytes: 5,
         });
         assert.match(document.innerHTML, /class="chat-file-grid"/);
-        assert.match(document.innerHTML, /class="chat-file-card"/);
+        assert.ok(document.querySelector('.chat-file-card'));
         assert.match(document.innerHTML, /PDF · 5 B/);
         const actions = Array.from({ length: 13 }, (_value, index) => ({
             label: `Link ${index}`,
@@ -386,15 +427,18 @@ test('copy control is an always-visible icon button that marks the bubble (D12)'
 test('stylesheet pins the always-visible copy icon and the timestamp reserve (D12)', () => {
     // (a) The copy control is anchored bottom-right and PERMANENTLY visible:
     // a non-zero base opacity, never the old hover-reveal opacity 0.
+    // Offsets are a pixel length or a spacing token (Copy shares its recipe with Reply: `.chat-message-copy,
+    // .chat-message-reply { ... }`, so the visible-at-rest opacity may live in that shared rule).
+    const length = String.raw`(?:\d+px|var\(--space-\d\))`;
     assert.match(styleCss, /\.chat-message-copy\s*\{[^}]*position:\s*absolute/);
-    assert.match(styleCss, /\.chat-message-copy\s*\{[^}]*right:\s*\d+px/);
-    assert.match(styleCss, /\.chat-message-copy\s*\{[^}]*bottom:\s*\d+px/);
+    assert.match(styleCss, new RegExp(String.raw`\.chat-message-copy\s*\{[^}]*right:\s*${length}`));
+    assert.match(styleCss, new RegExp(String.raw`\.chat-message-copy\s*\{[^}]*bottom:\s*${length}`));
     // The fractional part must carry a non-zero digit: 0.0 / .0 are invisible.
-    assert.match(styleCss, /\.chat-message-copy\s*\{[^}]*opacity:\s*0?\.\d*[1-9]/);
-    assert.doesNotMatch(styleCss, /\.chat-message-copy\s*\{[^}]*opacity:\s*0\s*;/);
+    assert.match(styleCss, /\.chat-message-copy(?:,\s*\.chat-message-reply)?\s*\{[^}]*opacity:\s*0?\.\d*[1-9]/);
+    assert.doesNotMatch(styleCss, /\.chat-message-copy(?:,\s*\.chat-message-reply)?\s*\{[^}]*opacity:\s*0\s*;/);
     // (b) has-copy bubbles reserve a right gutter so the timestamp can never
     // sit under the icon (the structural overlap fix); 0px is no reserve.
-    assert.match(styleCss, /\.chat-bubble\.has-copy\s+\.msg-time\s*\{[^}]*margin-right:\s*[1-9]\d*px/);
+    assert.match(styleCss, new RegExp(String.raw`\.chat-bubble\.has-copy\s+\.msg-time\s*\{[^}]*margin-right:\s*(?:[1-9]\d*px|var\(--space-[1-9]\))`));
 });
 
 test('reset disposes listeners, stops players, clears groups, and destroy is final', () => {
@@ -471,7 +515,7 @@ test('live gallery items adopt separate history identities and older photos do n
         const seen = new Set();
         const delivery = fx.controller.wireDeliveries({
             onWs() {}, isMyThread: () => true, hideTypingIndicatorOnly() {}, syncChatStatus() {},
-            incrementUnreadIfNeeded() {}, seenMessageKeys: seen,
+            seenMessageKeys: seen,
             rememberMessageKey: (key) => seen.add(key),
             chatMediaMessageKey: (msg) => `photo:${msg.task_id}:${msg.ts}`,
             documentMessageKey: (msg) => `file:${msg.task_id}:${msg.ts}`,
@@ -743,8 +787,8 @@ test('owner attachments mount above the caption from the shared atoms and releas
         assert.ok(block.querySelectorAll('.chat-file-item')[1].classList.contains('is-unavailable'));
         assert.ok(block.innerHTML.includes('ZIP · Unavailable'),
             'an unavailable card says so in words, not only by its dimmed style');
-        assert.equal(block.innerHTML.match(/aria-haspopup="dialog"/g)?.length, 1,
-            'the live card announces the file dialog it opens, as a delivered card does; the inert one opens nothing');
+        assert.equal(block.innerHTML.match(/aria-haspopup="dialog"/g)?.length, 3,
+            'each photo tile and the live card announce the dialog they open, as delivered ones do; the inert card opens nothing');
         assert.ok(fx.tracker.adds > adds, 'listeners belong to the media controller');
         const single = new NodeStub('div', fx.tracker);
         single.innerHTML = '<div class="sender">You</div><div class="message"></div>';

@@ -1,18 +1,19 @@
 """Focused #1660 Main consumer regressions against an attested real candidate.
 
 Only provider judgments, producer inputs and deliberate client disconnection are
-fixtures. Every browser consumes the actual gateway and SPA. Artifact evidence
-is opt-in via OUROBOROS_BROWSER_EVIDENCE_OUT and is retained on failure.
+fixtures. Every browser consumes the actual gateway and SPA. Diagnostics use the
+managed evidence channel; OUROBOROS_BROWSER_EVIDENCE_OUT overrides the destination.
 """
+
+from tests import _dialogue as dialogue_test
 
 
 import json
-import os
 import uuid
-from pathlib import Path
 
 import pytest
 
+from tests._shared import producer_evidence_dir
 from devtools.benchmarks.common.server_runner import _api
 from tests.test_native_owner_wait_browser import chat_connection
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
@@ -26,7 +27,8 @@ pytestmark = [pytest.mark.serial, pytest.mark.browser]
 
 
 def _controls_evidence(tmp_path, name):
-    destination = Path(os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT") or tmp_path / "screenshots") / name
+    destination = producer_evidence_dir(tmp_path / "screenshots", "main-consumer-journeys",
+                                        env="OUROBOROS_BROWSER_EVIDENCE_OUT") / name
     destination.mkdir(parents=True, exist_ok=True)
     return destination
 
@@ -36,20 +38,13 @@ def _controls_capture(page, destination, name):
         page.screenshot(path=str(destination / (name + ".png")), animations="disabled", full_page=True)
 
 
-def _controls_open_attention(page):
-    page.locator('.main-attention-summary').wait_for(timeout=30000)
-    if page.locator('.main-attention').get_attribute('open') is None:
-        page.locator('.main-attention-summary').click()
+def _controls_owner_action(page, task_id):
+    """The one System message in Main's feed through which a task that needs the owner is acted on."""
+    return page.locator(f'#chat-messages .chat-bubble.owner-action[data-owner-action="{task_id}"]')
 
 
 def _controls_project_closed(page):
     assert not page.locator('#project-panel').is_visible(), "The action must be usable from Main with Project closed"
-
-
-async def _controls_open_attention_async(page):
-    await page.locator('.main-attention-summary').wait_for(timeout=30000)
-    if await page.locator('.main-attention').get_attribute('open') is None:
-        await page.locator('.main-attention-summary').click()
 
 
 async def _controls_capture_async(page, destination, name):
@@ -71,17 +66,19 @@ def test_main_close_wakes_same_author_without_approval_and_reconnects_second_cli
     """
     import asyncio
     from playwright.async_api import async_playwright, expect
+    from ouroboros.owner_quiz import OWNER_CLOSE_REASON
 
     destination = _controls_evidence(tmp_path, "main-close-reconnect" if interrupt_second_client else "main-close-two-clients")
     data_root = tmp_path / "instance" / "data"
     data_root.mkdir(parents=True)
-    reason = "This decision is no longer needed. Keep the draft for a future edition."
+    # One tap closes without the owner's words: the closure records the standard sentence.
+    reason = OWNER_CLOSE_REASON
     resumed_inputs = []
 
     def after_close(body):
         text = body_text(body)
         resumed_inputs.append(text)
-        assert reason in text, "The waiting author must receive the owner's exact closing reason"
+        assert reason in text, "The waiting author must receive the recorded closing reason"
         assert any(phrase in text.lower() for phrase in ("not owner approval", "not approval", "without approval", "no approval")), "Closure must deny approval to the resumed author"
         return {"final": "The question was closed without approval; the draft remains unsubmitted."}
 
@@ -129,13 +126,14 @@ def test_main_close_wakes_same_author_without_approval_and_reconnects_second_cli
                     assert wait, oracle.task_result(task_id)
                     quiz_id = wait["quiz_id"]
                     receipt.update(task_id=task_id, quiz_id=quiz_id, initial_wait=wait)
-                    selector = f'.main-attention .project-question-card[data-task-id="{task_id}"][data-quiz-id="{quiz_id}"]'
+                    selector = f'#chat-messages .project-question-card[data-task-id="{task_id}"][data-quiz-id="{quiz_id}"]'
                     for client in (page, second):
-                        await _controls_open_attention_async(client)
                         await client.locator(selector).get_by_text("Waiting for your answer", exact=True).wait_for(timeout=30000)
                         await _controls_project_closed_async(client)
                     stale = second.locator(selector)
                     await stale.locator('.chat-quiz-comment').fill("This unsent draft must not become an answer")
+                    # A typed answer holds the card's quiet Close: a mis-tap never discards the owner's words.
+                    await expect(stale.locator('.chat-quiz-close')).to_be_disabled()
                     await _controls_capture_async(second, destination, "second-client-before-disconnect")
                     if interrupt_second_client:
                         network["offline"] = True
@@ -149,17 +147,33 @@ def test_main_close_wakes_same_author_without_approval_and_reconnects_second_cli
                         await _controls_capture_async(second, destination, "second-client-disconnected-controls-disabled")
 
                     card = page.locator(selector)
-                    await card.get_by_text("Close without answering", exact=True).click()
-                    await expect(card.get_by_role("button", name="Close question", exact=True)).to_be_disabled()
-                    await card.get_by_role("textbox", name="Reason for closing", exact=True).fill(reason)
+                    close = card.get_by_role("button", name="Close question without answering", exact=True)
+                    await expect(close).to_be_enabled()
+                    await card.locator('.chat-quiz-comment').fill("Typed, then taken back")
+                    await expect(close).to_be_disabled()
+                    await card.locator('.chat-quiz-comment').fill("")
+                    await expect(close).to_be_enabled()
                     await _controls_capture_async(page, destination, "main-before-close")
                     async with page.expect_response(lambda response: response.url.endswith('/api/decisions')
                                                     and response.request.method == 'POST') as close_response:
-                        await card.get_by_role("button", name="Close question", exact=True).click()
+                        await close.click()
                     response = await close_response.value
                     confirmation = await response.json()
-                    receipt["close_response"] = {"status": response.status, "body": confirmation}
+                    receipt["close_response"] = {"status": response.status, "body": confirmation,
+                                                 "request": response.request.post_data_json}
                     assert response.ok and confirmation.get("ok"), confirmation
+                    sent = response.request.post_data_json
+                    assert sent == {"request_id": sent["request_id"], "decision_id": f"quiz:{task_id}:{quiz_id}",
+                                    "action": "close", "reason": ""}, sent
+                    # The copy reads the closure for five seconds, then only the Main copy goes.
+                    await expect(card.locator('.chat-quiz-status-text')).to_have_text("Question closed", timeout=30000)
+                    shown = await page.evaluate("performance.now()")
+                    await expect(card.locator('.chat-quiz-closed-reason')).to_have_text(reason)
+                    await expect(card.locator('.chat-quiz-close, .chat-quiz-comment')).to_have_count(0)
+                    await _controls_capture_async(page, destination, "main-closed-result")
+                    await expect(card).to_have_count(0, timeout=15000)
+                    receipt["closed_copy_ms"] = await page.evaluate("performance.now()") - shown
+                    assert 4000 <= receipt["closed_copy_ms"] <= 8000, receipt["closed_copy_ms"]
                     final = await asyncio.to_thread(wait_durable_result, oracle, task_id, timeout=90)
                     receipt["final"] = final
                     block = final["owner_quiz"][quiz_id]
@@ -263,9 +277,11 @@ def test_main_resume_uses_same_paused_project_task_without_opening_project(wait_
                 page = browser.new_page(viewport={"width": 1100, "height": 900}, reduced_motion="reduce")
                 try:
                     page.goto(server.base_url, wait_until="domcontentloaded")
-                    _controls_open_attention(page)
-                    card = page.locator(f'.main-attention-task[data-task-id="{task_id}"]')
+                    card = _controls_owner_action(page, task_id)
                     card.get_by_role("button", name="Resume", exact=True).wait_for(timeout=30000)
+                    expect(card.locator('.sender')).to_have_text("System")
+                    expect(card.locator('.owner-action-reason')).to_have_text(
+                        "Paused at the spending limit. Change the limit if needed, then Resume.")
                     _controls_project_closed(page)
                     _controls_capture(page, destination, "main-budget-paused")
                     # A click cannot silently raise money. With the wallet still
@@ -306,7 +322,7 @@ def test_main_resume_uses_same_paused_project_task_without_opening_project(wait_
                     _controls_project_closed(page)
                     _controls_capture(page, destination, "main-resume-complete")
                     page.reload(wait_until="domcontentloaded")
-                    expect(page.locator(f'.main-attention-task[data-task-id="{task_id}"]')).to_have_count(0)
+                    expect(_controls_owner_action(page, task_id)).to_have_count(0)
                     receipt["state_after_resume"] = _api(server.base_url, "GET", "/api/state")
                     assert not any(row.get("task_id") == task_id for row in receipt["state_after_resume"]["main_attention"])
                 finally:
@@ -409,11 +425,11 @@ def test_main_modelwait_try_again_resumes_same_project_author(wait_clone, tmp_pa
                         assert len(stub.refused_requests) == 1
                         assert not resumed_inputs
                         calls_at_wait = len(stub.kinds())
-                        _controls_open_attention(page)
-                        card = page.locator(f'.main-attention-task[data-task-id="{task_id}"]')
+                        card = _controls_owner_action(page, task_id)
                         control = card.locator(f'.model-wait-row[data-wait-id="{wait_id}"]')
                         retry = control.get_by_role("button", name="Try again", exact=True)
                         expect(retry).to_be_enabled(timeout=30000)
+                        expect(card.locator('.owner-action-reason')).to_have_text("Needs you to restore model access.")
                         _controls_project_closed(page)
                         _controls_capture(page, destination, "main-waiting-for-model-access")
                         page.wait_for_timeout(1500)
@@ -453,7 +469,7 @@ def test_main_modelwait_try_again_resumes_same_project_author(wait_clone, tmp_pa
                         _controls_project_closed(page)
                         _controls_capture(page, destination, "main-after-model-retry")
                         page.reload(wait_until="domcontentloaded")
-                        expect(page.locator(f'.main-attention-task[data-task-id="{task_id}"]')).to_have_count(0)
+                        expect(_controls_owner_action(page, task_id)).to_have_count(0)
                 finally:
                     _controls_capture(page, destination, "final")
                     receipt["refused_provider_requests"] = stub.refused_requests
@@ -473,7 +489,7 @@ def test_main_closed_question_stays_closed_after_canonical_gc_across_pages_and_c
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright, expect
     from ouroboros.gateway.history import _DEFAULT_N_HUMAN
     from ouroboros.owner_quiz import (
-        _QUIZ_CAP, mark_discharged, mark_published, mark_quiz_history_written,
+        _QUIZ_CAP, OWNER_CLOSE_REASON, mark_discharged, mark_published, mark_quiz_history_written,
         question_delivery_settled, quiz_states, reconcile_terminal,
         record_asked, record_closed, record_publication,
     )
@@ -486,7 +502,7 @@ def test_main_closed_question_stays_closed_after_canonical_gc_across_pages_and_c
     data_root.mkdir(parents=True)
     task_id, quiz_id = "main-closed-history-author", "old-edition-question"
     question = "Which edition should the next report use?"
-    reason = "The next edition was cancelled; this question is no longer needed."
+    reason = OWNER_CLOSE_REASON  # one tap, no words: the standard sentence
     write_task_result(data_root, task_id, "completed", chat_id=1,
                       result="The current report is complete while the future-edition question remains open.")
     record_asked(data_root, task_id, quiz_id=quiz_id, question=question,
@@ -534,11 +550,9 @@ def test_main_closed_question_stays_closed_after_canonical_gc_across_pages_and_c
                         log_chat("in", 1, 1, f"Later retained Main note {index:03d}",
                                  client_message_id=f"gc-history-gap-{index}", drive_root=data_root, require_write=True)
                     first = pages[0].locator(selector)
-                    first.get_by_text("Close without answering", exact=True).click()
-                    first.get_by_role("textbox", name="Reason for closing", exact=True).fill(reason)
                     with pages[0].expect_response(lambda response: response.url.endswith('/api/decisions')
                                                  and response.request.method == 'POST') as closed:
-                        first.get_by_role("button", name="Close question", exact=True).click()
+                        first.get_by_role("button", name="Close question without answering", exact=True).click()
                     receipt["close_response"] = {"status": closed.value.status, "body": closed.value.json()}
                     assert closed.value.ok and receipt["close_response"]["body"]["state"] == "closed"
                     assert wait_until(lambda: question_delivery_settled(quiz_states(data_root, task_id).get(quiz_id)), 30)
@@ -622,7 +636,7 @@ def test_main_closed_question_stays_closed_after_canonical_gc_across_pages_and_c
                         observations.append({"client": index + 1, "state": target.get_attribute('data-state'),
                             "text": target.inner_text(), "enabled_answers": target.locator('.chat-quiz-option:enabled').count(),
                             "comment_fields": target.locator('.chat-quiz-comment').count(),
-                            "close_controls": target.locator('.chat-quiz-close-submit').count()})
+                            "close_controls": target.locator('.chat-quiz-close').count()})
                         _controls_project_closed(page)
                         _controls_capture(page, destination, f"client-{index + 1}-cold-older-question")
                     receipt["cold_observations"] = observations
@@ -778,11 +792,9 @@ def test_main_child_modelwait_try_again_uses_same_delegated_author(wait_clone, t
                     # no hand-authored state or socket frame can supply the row.
                     page.reload(wait_until="domcontentloaded")
                     page.locator("#chat-input").wait_for(state="visible", timeout=30000)
-                    # The collapsed Needs you section is populated by the actual /api/state
-                    # snapshot: wait for the child's own card, then open the section.
-                    card = page.locator(f'.main-attention-task[data-task-id="{child_id}"]')
+                    # The actual /api/state snapshot posts the child's own System message in Main's feed.
+                    card = _controls_owner_action(page, child_id)
                     card.wait_for(state="attached", timeout=30000)
-                    _controls_open_attention(page)
                     _controls_capture(page, destination, "main-child-wait-before-control")
                     retry = card.locator(f'.model-wait-row[data-wait-id="{wait_id}"]').get_by_role(
                         "button", name="Try again", exact=True)
@@ -834,7 +846,8 @@ def test_main_child_modelwait_try_again_uses_same_delegated_author(wait_clone, t
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_main_removes_an_unknown_late_answer_across_clients_without_resend(wait_clone, tmp_path, engine):
     """Owner 2026-10-12: an accepted late answer whose dispatch witness died with the previous
-    process leaves Needs you only by the owner's removal; nothing is resent or marked delivered."""
+    process stops counting as pending only by the owner's removal, and its Main copy leaves;
+    nothing is resent or marked delivered."""
     from playwright.sync_api import sync_playwright, expect
     from ouroboros.owner_quiz import (
         mark_published, mark_quiz_history_written, quiz_answer_frame, quiz_states, reconcile_terminal,
@@ -869,15 +882,15 @@ def test_main_removes_an_unknown_late_answer_across_clients_without_resend(wait_
              drive_root=data_root, require_write=True)
     record_quiz_delivery_failure(data_root, task_id, quiz_id, "late_answer_delivery_unknown")
     def own_rows():
-        rows = [json.loads(line) for line in (data_root / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines() if line]
+        rows = dialogue_test.log_rows(data_root / "logs" / "chat.jsonl")
         # This question's rows (its ask, answer, the owner's message), not the task's own terminal summary.
         return [row for row in rows if (row.get("quiz") or {}).get("quiz_id") == quiz_id
                 or quiz_id in str(row.get("client_message_id") or "")]
 
     before = own_rows()
     receipt = {"engine": engine, "task_id": task_id, "quiz_id": quiz_id,
-               "journey": "Remove an unknown late answer from Needs you: two clients, duplicate and stale actions, reload"}
-    selector = f'.main-attention .chat-quiz-card[data-task-id="{task_id}"][data-quiz-id="{quiz_id}"]'
+               "journey": "Remove an unknown late answer from pending: two clients, duplicate and stale actions, reload"}
+    selector = f'#chat-messages .chat-quiz-card[data-task-id="{task_id}"][data-quiz-id="{quiz_id}"]'
     with ScriptedStubModel([]) as stub:
         settings_path = data_root / "settings.json"
         write_settings_file(settings_path, keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
@@ -896,11 +909,10 @@ def test_main_removes_an_unknown_late_answer_across_clients_without_resend(wait_
                     pages[0].on("request", lambda request: posts.append(request.post_data_json)
                                 if request.url.endswith('/api/decisions') and request.method == 'POST' else None)
                     for index, page in enumerate(pages):
-                        _controls_open_attention(page)
                         card = page.locator(selector)
                         expect(card.locator('.chat-quiz-status-text')).to_have_text(
                             'Answer recorded · delivery unknown', timeout=30000)
-                        expect(card.locator('.chat-quiz-dismiss')).to_have_text('Remove from Needs you')
+                        expect(card.locator('.chat-quiz-dismiss')).to_have_text('Remove from pending')
                         _controls_project_closed(page)
                         _controls_capture(page, destination, f"client-{index + 1}-pending")
                     with pages[0].expect_response(lambda response: response.url.endswith('/api/decisions')

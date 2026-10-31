@@ -55,13 +55,18 @@ python-standalone/bin/python3 -m ouroboros.betterleaks_runtime install \
 
 echo "--- Installing launcher dependencies ---"
 BUILD_REQUIREMENTS="$(mktemp "${TMPDIR:-/tmp}/ouroboros-build-requirements.XXXXXX")"
-trap 'rm -f "$BUILD_REQUIREMENTS"' EXIT
+DESKTOP_REQUIREMENTS="$(mktemp "${TMPDIR:-/tmp}/ouroboros-desktop-requirements.XXXXXX")"
+trap 'rm -f "$BUILD_REQUIREMENTS" "$DESKTOP_REQUIREMENTS"' EXIT
 uv export --locked --no-dev --extra browser --extra desktop --extra build \
     --no-emit-project --no-hashes --no-annotate --output-file "$BUILD_REQUIREMENTS"
 uv pip install --python python3 -q -r "$BUILD_REQUIREMENTS"
 
 echo "--- Installing agent dependencies into python-standalone ---"
 uv pip install --python python-standalone/bin/python3 -q -r requirements-runtime.lock
+# The source-launcher handoff cannot import the frozen launcher's private PYZ.
+uv export --locked --no-dev --extra desktop \
+    --no-emit-project --no-hashes --no-annotate --output-file "$DESKTOP_REQUIREMENTS"
+uv pip install --python python-standalone/bin/python3 -q -r "$DESKTOP_REQUIREMENTS"
 
 echo "--- Fetching exact Claudexor runtime seed ---"
 python-standalone/bin/python3 scripts/fetch_claudexor_runtime.py --output-dir claudexor-runtime
@@ -76,13 +81,14 @@ echo "--- Skipping bundled WebKit on macOS ---"
 # simple embedded payload. WebKit remains available through browser.py's managed
 # Playwright cache on first engine=webkit use; Chromium stays bundled.
 
-echo "--- Removing stale bundled WebKit payloads from macOS package tree ---"
+echo "--- Removing stale WebKit, debug-symbol and test payloads from macOS package tree ---"
 python3 - <<'PY'
 import pathlib
 import shutil
 
+root = pathlib.Path("python-standalone")
 removed = 0
-for local_browsers in pathlib.Path("python-standalone").rglob(".local-browsers"):
+for local_browsers in root.rglob(".local-browsers"):
     for webkit_payload in local_browsers.glob("webkit-*"):
         if webkit_payload.is_dir():
             shutil.rmtree(webkit_payload)
@@ -90,6 +96,16 @@ for local_browsers in pathlib.Path("python-standalone").rglob(".local-browsers")
             webkit_payload.unlink(missing_ok=True)
         removed += 1
 print(f"Removed {removed} stale WebKit browser payload(s) from python-standalone")
+
+# pyobjc's own test suite: test extensions nothing imports at runtime.
+tests = list(root.glob("lib/python*/site-packages/PyObjCTest"))
+# Debug symbols are not runtime code, yet their Mach-O companions get sealed
+# as nested code and Apple's notary never tickets them, so Gatekeeper rejects
+# the whole app (v7.7.0 shipped 142 of them from pyobjc).
+dsyms = [path for path in root.rglob("*.dSYM") if path.is_dir()]
+for payload in tests + dsyms:
+    shutil.rmtree(payload, ignore_errors=True)
+print(f"Removed {len(tests)} test package(s) and {len(dsyms)} debug-symbol bundle(s)")
 PY
 
 echo "--- Normalizing python-standalone symlinks for PyInstaller ---"
@@ -136,8 +152,29 @@ python3 scripts/build_repo_bundle.py --source-branch "$MANAGED_SOURCE_BRANCH"
 
 rm -rf build dist
 
+# Compile before Ouroboros.spec prunes the standalone headers. Both the ABI and
+# library must come from the interpreter this entry will host, not build Python.
+echo "--- Compiling the macOS source-launcher entry ---"
+SHELL_PY_VERSION="$(python-standalone/bin/python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+SHELL_PY_LIB="libpython${SHELL_PY_VERSION}.dylib"
+if [ ! -f "python-standalone/include/python${SHELL_PY_VERSION}/Python.h" ]; then
+    echo "ERROR: matching standalone Python headers are missing; fetch a fresh python-standalone before building." >&2
+    exit 1
+fi
+mkdir -p build/macos
+xcrun clang -std=c11 -Wall -Wextra -Werror -mmacosx-version-min=12.0 \
+    -I "python-standalone/include/python${SHELL_PY_VERSION}" \
+    packaging/macos/ouroboros_shell.c "python-standalone/lib/$SHELL_PY_LIB" \
+    -Wl,-rpath,@executable_path/../Frameworks/python-standalone/lib -o build/macos/ouroboros-shell
+
 echo "--- Running PyInstaller ---"
 python3 -m PyInstaller Ouroboros.spec --clean --noconfirm
+
+echo "--- Installing the macOS source-launcher entry ---"
+cp build/macos/ouroboros-shell "$APP_PATH/Contents/MacOS/ouroboros-shell"
+# The standalone executable may be static (3.10.22). Use its explicitly bundled
+# library, matching the headers and stdlib, not an incidental top-level dependency.
+test -f "$APP_PATH/Contents/Frameworks/python-standalone/lib/$SHELL_PY_LIB"
 
 echo "--- Installing packaged CLI wrappers ---"
 CLI_BIN_DIR="$APP_PATH/Contents/Resources/bin"
@@ -226,6 +263,19 @@ if [ "$SIGN_MODE" != "0" ]; then
     codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime --deep \
         --entitlements "$ENTITLEMENTS" "$APP_PATH"
 
+    # --deep overwrites a helper's explicit identifier. Restore the app identity
+    # on the source entry, then seal the outer bundle without walking its code.
+    codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
+        --identifier com.ouroboros.agent --entitlements "$ENTITLEMENTS" \
+        "$APP_PATH/Contents/MacOS/ouroboros-shell"
+    codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
+        --entitlements "$ENTITLEMENTS" "$APP_PATH"
+    SHELL_SIGN_ID="$(codesign -dv "$APP_PATH/Contents/MacOS/ouroboros-shell" 2>&1 | sed -n 's/^Identifier=//p')"
+    if [ "$SHELL_SIGN_ID" != "com.ouroboros.agent" ]; then
+        echo "ERROR: source entry lost its application signing identity: $SHELL_SIGN_ID" >&2
+        exit 1
+    fi
+
     echo "--- Verifying signature ---"
     codesign -dvv "$APP_PATH"
     codesign --verify --strict --deep "$APP_PATH"
@@ -235,13 +285,76 @@ else
     echo "=== Skipping signing (OUROBOROS_SIGN=0) ==="
 fi
 
+# Notarization runs only with signing and complete Apple credentials, and then it
+# is fail-closed: a DMG whose app Gatekeeper rejects is not a release (v7.7.0).
+NOTARIZE=0
+if [ "$SIGN_MODE" != "0" ] \
+        && [ -n "${APPLE_ID:-}" ] \
+        && [ -n "${APPLE_TEAM_ID:-}" ] \
+        && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+    NOTARIZE=1
+fi
+
+# Submit one file and require Apple's "Accepted" (notarytool can exit 0 on
+# "Invalid"); the developer log is printed either way because it lists issues.
+notarize() {
+    local target="$1" result id status
+    echo "--- Notarizing $(basename "$target") (Apple ID: $APPLE_ID) ---"
+    result="$(xcrun notarytool submit "$target" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait --output-format json)" || true
+    echo "$result"
+    id="$(printf '%s' "$result" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("id", ""))' 2>/dev/null || true)"
+    status="$(printf '%s' "$result" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("status", ""))' 2>/dev/null || true)"
+    if [ -n "$id" ]; then
+        xcrun notarytool log "$id" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" || true
+    fi
+    if [ "$status" != "Accepted" ]; then
+        echo "ERROR: notarization of $target ended with status '${status:-unknown}'." >&2
+        exit 1
+    fi
+}
+
+# A fresh ticket can take a moment to reach Apple's CDN, so retry briefly.
+staple() {
+    local attempt
+    for attempt in 1 2 3; do
+        if xcrun stapler staple "$1" && xcrun stapler validate "$1"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            echo "WARNING: stapling $1 failed (attempt $attempt/3); retrying."
+            sleep 30
+        fi
+    done
+    echo "ERROR: no validated notarization ticket could be stapled to $1." >&2
+    exit 1
+}
+
+if [ "$NOTARIZE" = "1" ]; then
+    echo ""
+    echo "=== Notarizing Ouroboros.app ==="
+    # The app carries its own ticket so a copy dragged out of the DMG opens
+    # offline and on another Mac; the DMG submission below covers the image.
+    APP_ZIP="dist/Ouroboros-notarize.zip"
+    ditto -c -k --keepParent "$APP_PATH" "$APP_ZIP"
+    notarize "$APP_ZIP"
+    rm -f "$APP_ZIP"
+    staple "$APP_PATH"
+fi
+
 echo ""
 echo "=== Creating DMG ==="
 rm -f "$DMG_PATH"
 DMG_STAGE_DIR="dist/dmg-stage"
 rm -rf "$DMG_STAGE_DIR"
 mkdir -p "$DMG_STAGE_DIR"
-cp -R "$APP_PATH" "$DMG_STAGE_DIR/Ouroboros.app"
+ditto "$APP_PATH" "$DMG_STAGE_DIR/Ouroboros.app"
 ln -s /Applications "$DMG_STAGE_DIR/Applications"
 cp packaging/cli/install-ouroboros-cli-macos.command "$DMG_STAGE_DIR/Install CLI.command"
 chmod +x "$DMG_STAGE_DIR/Install CLI.command"
@@ -264,33 +377,11 @@ if [ "$SIGN_MODE" != "0" ]; then
     codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
 fi
 
-# Optional notarization only after signing and complete Apple credentials.
-# Outcome enum keeps final summary honest: success/staple_failed/submit_failed/unconfigured.
-NOTARIZE_OUTCOME="unconfigured"
-if [ "$SIGN_MODE" != "0" ] \
-        && [ -n "${APPLE_ID:-}" ] \
-        && [ -n "${APPLE_TEAM_ID:-}" ] \
-        && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+if [ "$NOTARIZE" = "1" ]; then
     echo ""
-    echo "=== Notarizing DMG (Apple ID: $APPLE_ID) ==="
-    # Submit failures warn, not abort; signed DMG still ships with clear logs.
-    if xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --wait; then
-        echo "--- Stapling notarization ticket ---"
-        # Stapler can fail after successful notarization; Gatekeeper can fetch online.
-        if xcrun stapler staple "$DMG_PATH"; then
-            NOTARIZE_OUTCOME="success"
-        else
-            NOTARIZE_OUTCOME="staple_failed"
-            echo "WARNING: stapler staple failed — DMG is notarized but ticket not embedded; receivers may briefly need right-click → Open until Apple's ticket propagates."
-        fi
-    else
-        NOTARIZE_OUTCOME="submit_failed"
-        echo "WARNING: notarytool submit failed — DMG is signed but not notarized; verify APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD are correct or check the notarytool log above."
-    fi
+    echo "=== Notarizing DMG ==="
+    notarize "$DMG_PATH"
+    staple "$DMG_PATH"
 fi
 
 echo ""
@@ -302,25 +393,10 @@ else
     echo "Unsigned app: $APP_PATH"
     echo "Unsigned DMG: $DMG_PATH"
 fi
-case "$NOTARIZE_OUTCOME" in
-    success)
-        echo "(Notarized + stapled — no right-click → Open required on first launch)"
-        ;;
-    staple_failed)
-        echo "(Notarized but ticket not stapled — Gatekeeper will fetch the ticket online; receivers need internet on first launch)"
-        ;;
-    submit_failed)
-        echo "(Signed but notarytool submit failed — DMG was not accepted by Apple; check the WARNING above for details)"
-        ;;
-    unconfigured)
-        if [ "$SIGN_MODE" != "0" ]; then
-            echo "(Signed but not notarized — set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD to enable notarization)"
-        else
-            echo "(Not notarized — users need right-click → Open on first launch)"
-        fi
-        ;;
-    *)
-        # Surface future enum drift instead of omitting the summary.
-        echo "(Unknown notarization outcome: '$NOTARIZE_OUTCOME' — please report; likely a missing case arm in build.sh)"
-        ;;
-esac
+if [ "$NOTARIZE" = "1" ]; then
+    echo "(Notarized: the app and the DMG each carry a validated stapled ticket)"
+elif [ "$SIGN_MODE" != "0" ]; then
+    echo "(Signed but not notarized — set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD to enable notarization; macOS 15+ users must choose Open Anyway in System Settings → Privacy & Security)"
+else
+    echo "(Not signed or notarized — macOS 15+ users must choose Open Anyway in System Settings → Privacy & Security)"
+fi

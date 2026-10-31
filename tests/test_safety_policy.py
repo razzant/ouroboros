@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import pathlib
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,7 +119,7 @@ def test_policy_check_calls_llm(monkeypatch):
     stub = _StubLLMClient('{"status":"SAFE","reason":"ok"}')
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("comment_on_pr", {"pr_number": 1, "body": "hi"})
+    ok, msg = check_safety("github_write", {"method": "comment", "target": 1, "body": "hi"})
 
     assert ok is True
     assert msg == ""
@@ -223,7 +224,7 @@ def test_llm_verdict_safe_proceeds_silently(monkeypatch):
     stub = _StubLLMClient('{"status":"SAFE","reason":"all good"}')
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is True
     assert msg == ""
@@ -240,7 +241,7 @@ def test_safety_calls_request_low_effort(monkeypatch):
     stub = _StubLLMClient(["not json at all", '{"status":"SAFE","reason":"ok"}'])
     _patch_llm_client(monkeypatch, stub)
 
-    ok, _ = check_safety("create_github_issue", {"title": "x"})
+    ok, _ = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is True
     assert len(stub.calls) == 2
@@ -253,7 +254,7 @@ def test_llm_verdict_suspicious_proceeds_with_warning(monkeypatch):
     stub = _StubLLMClient('{"status":"SUSPICIOUS","reason":"odd but fine"}')
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is True
     assert "SAFETY_WARNING" in msg
@@ -266,7 +267,7 @@ def test_llm_verdict_dangerous_blocks(monkeypatch):
     stub = _StubLLMClient('{"status":"DANGEROUS","reason":"would leak secrets"}')
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is False
     assert "SAFETY_VIOLATION" in msg
@@ -280,10 +281,10 @@ def test_llm_unparseable_response_blocks(monkeypatch):
     stub = _StubLLMClient("this is not json at all")
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is False
-    assert "SAFETY_VIOLATION" in msg
+    assert "SAFETY_UNAVAILABLE" in msg
     assert "repair retry" in msg
     assert len(stub.calls) == 2
 
@@ -294,7 +295,7 @@ def test_llm_json_embedded_in_prose_is_accepted(monkeypatch):
     stub = _StubLLMClient('Sure. {"status":"SAFE","reason":"benign"}')
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is True
     assert msg == ""
@@ -310,7 +311,7 @@ def test_llm_embedded_safe_before_dangerous_uses_stricter_verdict(monkeypatch):
     )
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is False
     assert "would leak secrets" in msg
@@ -325,7 +326,7 @@ def test_llm_unparseable_response_retries_once(monkeypatch):
     ])
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is True
     assert msg == ""
@@ -340,10 +341,10 @@ def test_llm_api_failure_blocks(monkeypatch):
     stub = _StubLLMClient("unused", raise_exc=RuntimeError("network down"))
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("create_github_issue", {"title": "x"})
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is False
-    assert "SAFETY_VIOLATION" in msg
+    assert "SAFETY_UNAVAILABLE" in msg
     assert "network down" in msg
 
 
@@ -635,13 +636,13 @@ def test_unknown_tool_under_local_only_config_uses_local_light(monkeypatch):
 
 
 def test_minimax_key_enables_remote_safety_routing(monkeypatch):
+    from ouroboros.provider_models import ROUTE_CREDENTIAL_SETTING_KEYS
     from ouroboros.safety import (
-        _REMOTE_PROVIDER_KEYS,
         _any_remote_provider_configured,
         _light_model_has_reachable_provider,
     )
 
-    for key in _REMOTE_PROVIDER_KEYS:
+    for key in ROUTE_CREDENTIAL_SETTING_KEYS:
         monkeypatch.delenv(key, raising=False)
 
     assert not _any_remote_provider_configured()
@@ -680,7 +681,7 @@ def test_unknown_tool_with_no_safety_backend_fails_open_with_warning(monkeypatch
     stub = _StubLLMClient('{"status":"DANGEROUS","reason":"should not be called"}')
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("totally_new_tool_misconfigured", {"arg": 1})
+    ok, msg = check_safety("totally_new_tool_misconfigured", {"arg": 1}, ctx=SimpleNamespace(task_metadata={"work_kind": "owner"}))
     assert ok is True
     assert "SAFETY_WARNING" in msg
     assert "not configured" in msg
@@ -714,7 +715,7 @@ def test_openrouter_only_with_direct_provider_light_model_fails_open(monkeypatch
     stub = _StubLLMClient('{"status":"DANGEROUS","reason":"should not reach here"}')
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("totally_new_tool_mismatch", {"arg": 1})
+    ok, msg = check_safety("totally_new_tool_mismatch", {"arg": 1}, ctx=SimpleNamespace(task_metadata={"work_kind": "owner"}))
     assert ok is True
     assert "SAFETY_WARNING" in msg
     assert "provider key missing" in msg or "not configured" in msg
@@ -750,7 +751,7 @@ def test_mixed_remote_local_provider_mismatch_local_failure_fails_open(monkeypat
     stub = _StubLLMClient("unused", raise_exc=RuntimeError("local server down"))
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("totally_new_tool_mixed_config", {"arg": 1})
+    ok, msg = check_safety("totally_new_tool_mixed_config", {"arg": 1}, ctx=SimpleNamespace(task_metadata={"work_kind": "owner"}))
     assert ok is True
     assert "SAFETY_WARNING" in msg
     assert "Local safety runtime unreachable" in msg
@@ -779,7 +780,7 @@ def test_explicit_local_light_failure_still_blocks(monkeypatch):
 
     ok, msg = check_safety("some_tool", {"arg": 1})
     assert ok is False
-    assert "SAFETY_VIOLATION" in msg
+    assert "SAFETY_UNAVAILABLE" in msg
 
 
 def test_local_fallback_runtime_error_fails_open_with_warning(monkeypatch):
@@ -805,7 +806,7 @@ def test_local_fallback_runtime_error_fails_open_with_warning(monkeypatch):
     stub = _StubLLMClient("unused", raise_exc=RuntimeError("local server down"))
     _patch_llm_client(monkeypatch, stub)
 
-    ok, msg = check_safety("totally_new_tool_local_down", {"arg": 1})
+    ok, msg = check_safety("totally_new_tool_local_down", {"arg": 1}, ctx=SimpleNamespace(task_metadata={"work_kind": "owner"}))
     assert ok is True
     assert "SAFETY_WARNING" in msg
     assert "Local safety runtime unreachable" in msg
@@ -920,22 +921,14 @@ def test_non_secret_keys_are_not_redacted(key):
     assert not _is_secret_key(key), f"{key!r} should NOT be classified as secret"
 
 
-def test_secret_crossing_truncation_boundary_is_still_redacted():
-    """Redaction must run BEFORE the 500-char message truncation so a
-    Bearer-style token that straddles the cutoff can't evade the regex."""
-    from ouroboros.safety import _format_messages_for_safety
+def test_complete_prompt_sources_are_redacted_without_truncation():
+    from ouroboros.safety import _build_check_prompt
 
     secret = "sk-crossingboundary1234567890ABCDEF"
-    # Place the secret so it starts well before the 500-char cutoff but
-    # extends past it; the pre-truncation redaction must catch the whole shape.
-    prefix = "A" * 480
-    long_text = prefix + secret + "B" * 200
-    output = _format_messages_for_safety([
-        {"role": "user", "content": long_text},
-    ])
-
-    assert "sk-crossingboundary" not in output
-    assert "REDACTED" in output
+    text = "A" * 480 + secret + "B" * 200 + "\nSOURCE_END"
+    prompt = _build_check_prompt("remote_write", {"text": "SUBJECT"}, [{"role": "user", "content": text}])
+    assert secret not in prompt and "REDACTED" in prompt
+    assert "SOURCE_END" in prompt and "SUBJECT" in prompt
 
 
 def test_check_safety_tolerates_none_arguments(monkeypatch):
@@ -1040,7 +1033,7 @@ def test_usage_event_uses_resolved_model_and_inferred_provider_on_openrouter(mon
         event_queue = object()
         task_id = "t-openrouter"
 
-    ok, _ = check_safety("create_github_issue", {"title": "x"}, ctx=_Ctx())
+    ok, _ = check_safety("github_write", {"method": "create_issue", "title": "x"}, ctx=_Ctx())
     assert ok is True
     assert captured["provider"] == "openrouter"
     assert captured["source"] == "safety_check"
@@ -1076,7 +1069,7 @@ def test_usage_event_uses_direct_provider_when_resolved_by_client(monkeypatch):
         event_queue = object()
         task_id = "t-anthropic"
 
-    ok, _ = check_safety("create_github_issue", {"title": "x"}, ctx=_Ctx())
+    ok, _ = check_safety("github_write", {"method": "create_issue", "title": "x"}, ctx=_Ctx())
     assert ok is True
     assert captured["provider"] == "anthropic"
     assert captured["model_name"] == "anthropic/claude-sonnet-4-6"
@@ -1117,7 +1110,7 @@ def test_no_event_queue_preserves_unknown_cost_in_budget_fallback(monkeypatch):
     monkeypatch.setattr("supervisor.state.update_budget_from_usage", _record)
 
     # ctx=None path
-    ok, _ = check_safety("create_github_issue", {"title": "x"}, ctx=None)
+    ok, _ = check_safety("github_write", {"method": "create_issue", "title": "x"}, ctx=None)
     assert ok is True
     assert len(captured) == 1
     # Direct Anthropic has no automatic catalog. The fallback must preserve
@@ -1131,7 +1124,7 @@ def test_no_event_queue_preserves_unknown_cost_in_budget_fallback(monkeypatch):
 
     captured.clear()
     stub.calls.clear()
-    ok2, _ = check_safety("create_github_issue", {"title": "y"}, ctx=_CtxNoQueue())
+    ok2, _ = check_safety("github_write", {"method": "create_issue", "title": "y"}, ctx=_CtxNoQueue())
     assert ok2 is True
     assert len(captured) == 1
 
@@ -1167,7 +1160,7 @@ def test_usage_event_uses_local_provider_when_use_local_light(monkeypatch):
         event_queue = object()
         task_id = "t-local"
 
-    ok, _ = check_safety("create_github_issue", {"title": "x"}, ctx=_Ctx())
+    ok, _ = check_safety("github_write", {"method": "create_issue", "title": "x"}, ctx=_Ctx())
     assert ok is True
     assert captured["provider"] == "local"
     assert "(local)" in captured["model_name"]

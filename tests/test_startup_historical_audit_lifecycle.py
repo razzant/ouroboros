@@ -19,6 +19,7 @@ import pytest
 
 from ouroboros import usage_store
 from ouroboros.startup_historical_audit import HistoricalAudit, _report_fields
+from tests._store_journal_shared import store_state
 from tests._usage_store_testing import ledger_rows
 from tests.fixtures_usage_store import (  # noqa: F401  (pytest fixtures)
     ARCHIVE_SEGMENT_REL,
@@ -92,8 +93,11 @@ def archived_root(data_root, monkeypatch):
 
 
 def _money_bytes(root: pathlib.Path) -> list:
-    paths = [root / usage_store.STORE_REL, root / usage_store.LEDGER_REL, root / ARCHIVE_SEGMENT_REL]
-    return [(path.name, path.read_bytes()) for path in paths]
+    """The money's bytes; the store stands as its rows and any write's trace (``store_state``), the
+    header fields a first WAL open rewrites aside."""
+    store = root / usage_store.STORE_REL
+    return [(store.name, store_state(store))] + [
+        (path.name, path.read_bytes()) for path in (root / usage_store.LEDGER_REL, root / ARCHIVE_SEGMENT_REL)]
 
 
 # --------------------------------------------------------------------------
@@ -304,14 +308,17 @@ def test_the_child_gets_a_dedicated_process_group(tmp_path, monkeypatch):
     assert kwargs["purpose"] == "startup_historical_audit"
     assert kwargs["scope"] == "session"
     assert cmd[1:3] == ["-m", "ouroboros.startup_historical_audit"]
-    # Only ordinary runtime environment, explicit roots and the inherited
-    # containment token reach the child.
+    # Only ordinary runtime environment, explicit roots (the app, data, program and settings
+    # paths, the three configured work roots the storage count walks and the host's work-root
+    # basis) and the inherited containment token reach the child.
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
 
     assert {key for key in kwargs["env"] if not key.startswith(CONTAINMENT_ENV_PREFIX)} <= {
         "PATH", "HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR",
-        "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH",
+        "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH", "OUROBOROS_APP_ROOT",
         "OUROBOROS_DATA_DIR", "OUROBOROS_REPO_DIR", "OUROBOROS_SETTINGS_PATH", "OUROBOROS_PARENT_PID",
+        "OUROBOROS_SUBAGENT_WORKTREE_ROOT", "OUROBOROS_SUBAGENT_PROJECTS_ROOT", "OUROBOROS_DELIVERABLES_ROOT",
+        "OUROBOROS_WORK_ROOT_BASIS",
     }, kwargs["env"]
     assert kwargs["env"]["OUROBOROS_PARENT_PID"] == str(os.getpid())
 

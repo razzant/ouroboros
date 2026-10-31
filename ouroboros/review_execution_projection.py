@@ -148,13 +148,19 @@ def _reviewer_verb(surface: str, phase: str, actor: Any) -> str:
     states = {str(getattr(actor, "operation_state", "") or ""), str(getattr(actor, "status", "") or "")}
     if "not_dispatched" in states:  # a $0 refusal is never "didn't answer" (06 invariant 25)
         return "wasn't sent " + ("the plan" if surface == "plan_review" else "its request")
+    if phase == "answer_received":
+        return "answer received, verdict being read"
+    if getattr(actor, "transport_status", "") == "interrupted":
+        return "was interrupted; its answer may be lost"
     if actor is None or phase == "started":
         return "started"
     if getattr(actor, "status", "") == "empty":
         return "gave an empty answer"
     if getattr(actor, "status", "") == "error" or getattr(actor, "ok", None) is False:
         return "didn't answer"
-    return "answered"
+    if getattr(actor, "parse_status", "") == "valid":
+        return "answered"
+    return "returned an unreadable verdict" if getattr(actor, "parse_status", "") == "malformed" else "answer received, verdict being read"
 
 
 def review_actor_progress_text(surface: str, phase: str, slot: Any, actor: Any = None) -> str:

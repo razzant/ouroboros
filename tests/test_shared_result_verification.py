@@ -42,6 +42,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setattr("ouroboros.tool_access._user_files_root", lambda: tmp_path)
     parent = ToolContext(repo_dir=system, drive_root=drive, task_id="parent",
                          workspace_root=a, workspace_mode="external")
@@ -376,8 +377,9 @@ def test_ambient_git_locations_cannot_redirect_b_verification(env, monkeypatch):
 
 
 def dispositions(drive):
-    from ouroboros.delegate_evidence import acceptance_patch_dispositions
-    return acceptance_patch_dispositions(drive, "parent").get("rows", [])
+    """The parent's patch decisions as the canonical custody marks hold them (the rows the decision gate replays)."""
+    from ouroboros.delegate_custody_current import marks
+    return marks(drive, "parent").get("patch_verdicts", [])
 
 
 @pytest.mark.parametrize("refusal", ["missing_assignment", "conflicting_assignment", "presence_root",
@@ -438,8 +440,9 @@ def test_early_refusals_keep_verdict_and_custody_without_absorption(env, refusal
 
 def presence(parent, root, prefix):
     """Real Presence assembly: the profile selects this tool and one read resource."""
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceResourceTarget, PresenceToolTarget
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceResourceTarget, PresenceToolTarget
     from tests.test_presence_authority import _resolution
     assembled = build_presence_capability_ceiling(
         skill_name="fixture", skill_content_hash="c" * 64, state_fingerprint="d" * 64,
@@ -509,7 +512,7 @@ def test_registered_output_must_keep_its_recorded_type(env, change):
     assert_unabsorbed(drive)
 
 
-def test_verdict_target_reaches_acceptance_dispositions_and_absence_stays_absent(env):
+def test_verdict_target_reaches_the_custody_disposition_rows_and_absence_stays_absent(env):
     from ouroboros import delegate_custody
     parent, _, b, drive = env
     capture(parent, b, drive)
@@ -519,7 +522,7 @@ def test_verdict_target_reaches_acceptance_dispositions_and_absence_stays_absent
         "disposition": "verified_shared_workspace", "applied": False, "reason": "",
         "patch_sha256": "", "verdict_artifact_write_failed": False})
     assert "Rejected" in invoke(parent, decision="reject")
-    rows = {(row["child"], row["disposition"]): row for row in dispositions(drive)}
+    rows = {(row["child_task_id"], row["disposition"]): row for row in dispositions(drive)}
     assert rows[("child", "verified_shared_workspace")]["target_root"] == str(b.resolve())
     assert "target_root" not in rows[("legacy", "verified_shared_workspace")]
     assert "target_root" not in rows[("child", "rejected")]

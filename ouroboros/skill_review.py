@@ -1,110 +1,57 @@
-"""Tri-model review for one external skill package.
+"""Skill review — the lifecycle verb around ONE wave of the shared review mechanism.
 
-Uses the Skill Review Checklist and persists verdicts in skill state, siloed
-from repo commit obligations. Tool registration lives in ``tools/skill_exec.py``.
+``review_skill`` admits one skill payload: it loads and hashes the payload, runs the deterministic
+preflight (a failure persists as ``pending``, non-executable outside Cyber Pro), refuses an
+extension the PluginAPI admission cannot ever PASS, freezes the payload as the skill subject
+(``tools/review_skill.skill_subject``) and hands it to ``review_change`` — the one wave: panel
+composition by strictness, custody, the paid stamp, $0 reuse of an identical subject, a rejoin,
+leaving on an addressed message, settlement and the ledger record (``surface="skill"``). The record
+is projected into ``state/skills/<name>/review.json``, the gate's cache (``skill_loader``,
+``skill_review_status.skill_review_gate``), and the grants follow. Tool registration lives in
+``tools/skill_exec.py``; the Skills-page job and the post-review reconciliation (dependencies,
+enablement, extension reload, update settlement) in ``skill_review_runner.py``.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import pathlib
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.config import adaptive_quorum, get_auto_grant_enabled
-from ouroboros.reviewer_slot_config import commit_triad_delivery, reviewer_slot_config_error
+from ouroboros.config import get_auto_grant_enabled
 from ouroboros.skill_loader import (
     SkillReviewState,
     auto_grant_if_enabled,
     compute_content_hash,
+    load_review_state,
     save_review_state,
+)
+from ouroboros.skill_review_output import render_skill_review_block  # noqa: F401 — the tool's rendering, imported from here
+from ouroboros.skill_review_status import (  # noqa: F401 — the status vocabulary, imported from here
+    STATUS_BLOCKERS,
+    STATUS_CLEAN,
+    STATUS_PENDING,
+    STATUS_WARNINGS,
+    review_status_grandfatherable,
 )
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     build_resolved_resource_binding,
     load_bound_skill,
 )
-from ouroboros.skill_review_history import (
-    append_history as _append_skill_review_history,
-    count_attempts as _count_attempts_for_content,  # noqa: F401 — split facade re-export
-    finding_signature as _finding_signature,  # noqa: F401 — split facade re-export
-    load_history as _load_skill_review_history,
-    review_history_path,  # noqa: F401 — split facade re-export
-)
-from ouroboros.skill_review_status import (
-    CRITICAL_ITEMS,  # noqa: F401 — split facade re-export
-    STATUS_BLOCKERS,  # noqa: F401 — split facade re-export
-    STATUS_CLEAN,  # noqa: F401 — split facade re-export
-    STATUS_PENDING,
-    STATUS_WARNINGS,  # noqa: F401 — split facade re-export
-    WARNINGS_CONVERGENCE_ROUNDS,  # noqa: F401 — split facade re-export
-    aggregate_skill_review_status,  # noqa: F401 — split facade re-export
-    count_trailing_warnings_rounds,  # noqa: F401 — split facade re-export
-)
-from ouroboros.tools.review_helpers import (
-    REVIEW_PROMPT_TOKEN_BUDGET,  # noqa: F401 — split facade re-export
-    build_anti_thrashing_rules_section,  # noqa: F401 — split facade re-export
-    build_rebuttal_section,  # noqa: F401 — split facade re-export
-    build_self_verification_template,  # noqa: F401 — split facade re-export
-    build_skill_host_context,  # noqa: F401 — split facade re-export
-    format_obligation_excerpt,  # noqa: F401 — split facade re-export
-    format_prompt_code_block,  # noqa: F401 — split facade re-export
-    load_checklist_section,  # noqa: F401 — split facade re-export
-)
-from ouroboros.triad_review import emit_review_model_error_events, extract_json_array, parse_model_review_results  # noqa: F401 — split facade re-export
-from ouroboros.utils import (
-    append_jsonl,  # noqa: F401 — split facade re-export
-    estimate_tokens,  # noqa: F401 — split facade re-export
-    sanitize_tool_result_for_log,
-    utc_now_iso,
-)
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
-
-from ouroboros.skill_review_packs import (  # noqa: F401 — split facade re-exports
-    _LOADABLE_BINARY_EXTENSIONS,
-    _SKILL_PACK_TOKEN_HEADROOM,
-    _SkillBinaryPayload,
-    _SkillFileOverBudget,
-    _SkillFileUnreadable,
-    _build_skill_file_packs,
-    _read_skill_file,
-    _skill_pack_token_budget,
-)
-from ouroboros.skill_review_rebuttals import (  # noqa: F401 — split facade re-exports
-    _build_skill_review_history_section,
-    _convergence_hint,
-    _render_accepted_rebuttals_section,
-    _review_history_path,
-)
-from ouroboros.skill_review_prompt import (  # noqa: F401 — split facade re-exports
-    _CRITICAL_ITEMS,
-    _REPO_ROOT,
-    _SKILL_CHECKLIST_SECTION,
-    _SKILL_REVIEW_ITEMS,
-    _build_review_prompt,
-    _build_review_prompt_for_attempt,
-    _load_governance_artifact,
-)
-from ouroboros.skill_review_output import (  # noqa: F401 — split facade re-exports
-    _aggregate_status,
-    _extract_actor_findings,
-    _parse_json_array,
-    render_skill_review_block,
-)
-
-
-def _truncate_raw_result(text: str) -> str:
-    """Return full raw review text; actor records are the structured SSOT."""
-    return str(text or "")
+SUBSTANTIVE_STATUSES = frozenset({STATUS_CLEAN, STATUS_WARNINGS, STATUS_BLOCKERS})
 
 
 @dataclass
 class SkillReviewOutcome:
-    """Return payload from ``review_skill``."""
+    """Return payload from ``review_skill``: the gate's status for one content hash, the findings behind
+    it, and the wave's facts (its ledger record, whether it was paid or reused, who sat)."""
 
     skill_name: str
     status: str  # "clean" | "warnings" | "blockers" | "pending"
@@ -116,33 +63,30 @@ class SkillReviewOutcome:
     raw_result: str = ""
     raw_actor_records: List[Dict[str, Any]] = field(default_factory=list)
     advisory_result: Dict[str, Any] = field(default_factory=dict)
-    convergence_hint: str = ""
     error: str = ""
     auto_flow: bool = False
     # Bible P3: a single configured reviewer is honored on this executable TRUST
-    # gate but the lost cross-model diversity is recorded loudly + DURABLY (in the
-    # outcome and review history), so a one-slot skill review can never later look
-    # like an ordinary clean/warnings multi-reviewer review.
+    # gate but the lost cross-model diversity is recorded loudly and durably.
     single_reviewer_no_diversity: bool = False
     requested_keys: List[str] = field(default_factory=list)
     auto_granted_keys: List[str] = field(default_factory=list)
     requested_permissions: List[str] = field(default_factory=list)
     auto_granted_permissions: List[str] = field(default_factory=list)
     review_profile: str = ""
-    # Max-Review-Cycles facts (Q17/Q23): ``paid`` = a reviewer panel was
-    # physically dispatched for this outcome (recorded WRITE-AHEAD at dispatch
-    # via the durable dispatch marker; one chunked wave = ONE cycle) with
-    # ``wave_id`` naming that dispatch; the contract fingerprint the panel ran
-    # under; the content hash of the rebuttal supplied; and, for a $0 free
-    # replay, the ts of the recorded verdict it quotes. All land on the
-    # terminal history row.
+    # The wave's facts: ``paid`` = a panel was physically dispatched for this outcome (the shared paid
+    # stamp); ``record_id`` names its ledger record; ``reused`` = a settled record of the same subject
+    # answered at $0; ``pending`` = the record is still open (the author left, or a seat still answers).
     paid: bool = False
-    wave_id: str = ""
-    review_contract_fingerprint: str = ""
-    rebuttal_sha256: str = ""
+    record_id: str = ""
+    reused: bool = False
+    pending: bool = False
     replayed_from_ts: str = ""
-    # Foreground call outcome, not the skill's pending status or recorded history.
+    rebuttal_sha256: str = ""
+    # Foreground call outcome, not the skill's pending status.
     dispatch_refusal_code: str = ""
+    panel: Dict[str, Any] = field(default_factory=dict)
+    seats: List[Dict[str, Any]] = field(default_factory=list)
+    governance: Dict[str, Any] = field(default_factory=dict)
 
 
 def _apply_auto_grant_outcome(outcome: SkillReviewOutcome, skill: Any, auto_grant: Any) -> None:
@@ -150,34 +94,12 @@ def _apply_auto_grant_outcome(outcome: SkillReviewOutcome, skill: Any, auto_gran
     outcome.auto_granted_keys = list(getattr(auto_grant, "granted_keys", []) or [])
     outcome.requested_permissions = list(getattr(auto_grant, "requested_permissions", []) or [])
     outcome.auto_granted_permissions = list(getattr(auto_grant, "granted_permissions", []) or [])
-    # Refresh the policy even on free replay; explicit task-authorized toggles
+    # Refresh the policy even on a reused record; explicit task-authorized toggles
     # follow their own lifecycle path rather than this automatic first enable.
     outcome.auto_flow = bool(getattr(skill, "is_self_authored", False) and get_auto_grant_enabled())
 
 
-# The accepted-rebuttal ledger and the Max-Review-Cycles machinery moved whole
-# to ouroboros/skill_review_cycles.py (module-size gate; same split shape as
-# phase 0's update_candidate.py). Historical names stay importable from here.
-from ouroboros.skill_review_cycles import (  # noqa: E402
-    accepted_rebuttals_path as _accepted_rebuttals_path,  # noqa: F401 — re-export
-    load_accepted_rebuttals as _load_accepted_rebuttals,  # noqa: F401 — split facade re-export
-    fail_items_from_history_entry as _fail_items_from_history_entry,  # noqa: F401 — re-export
-    install_skill_dispatch_stamp as _install_skill_dispatch_stamp,
-    persist_rebuttal_flips as _persist_rebuttal_flips,
-    plugin_api_admission_refusal_outcome as _admission_refusal_outcome,
-    record_accepted_rebuttal as _record_accepted_rebuttal,  # noqa: F401 — re-export
-    review_wave_budget_block as _review_wave_budget_block,
-    skill_wave_purchased as _wave_purchased,
-)
-
-
-def _is_module_widget_skill(skill: Any) -> bool:
-    return (
-        skill.manifest.is_extension()
-        and isinstance(skill.manifest.ui_tab, dict)
-        and str(((skill.manifest.ui_tab or {}).get("render") or {}).get("kind") or "") == "module"
-    )
-
+# --- Before the wave: the deterministic preflight and the PluginAPI admission ------------------
 
 def _run_deterministic_preflight(
     ctx: Any,
@@ -188,7 +110,7 @@ def _run_deterministic_preflight(
     persist: bool,
     binding: ResolvedResourceBinding | None = None,
 ) -> Optional[SkillReviewOutcome]:
-    """Run deterministic checks before spending tri-model review tokens.
+    """Run deterministic checks before spending panel review tokens.
 
     FAIL-CLOSED (ABI-1): an exception or unparseable output from the
     preflight machinery is a structural failure of the gate itself, never a
@@ -224,7 +146,7 @@ def _run_deterministic_preflight(
         "item": "skill_preflight",
         "verdict": "FAIL",
         "severity": "critical",
-        "reason": _truncate_raw_result(json.dumps(preflight, ensure_ascii=False)),
+        "reason": json.dumps(preflight, ensure_ascii=False),
         "model": "deterministic_preflight",
     }]
     # A deterministic preflight failure is a structural fact, not an LLM verdict,
@@ -253,648 +175,276 @@ def _run_deterministic_preflight(
             raw_result=outcome.raw_result,
             raw_actor_records=[],
         )
-        save_review_state(
-            drive_root,
-            skill.name,
-            review_state,
-        )
-        if not getattr(ctx, "_skill_review_lifecycle_guard", False):
-            _append_skill_review_history(
-                drive_root,
-                skill.name,
-                status=outcome.status,
-                content_hash=content_hash,
-                findings=findings,
-            )
+        save_review_state(drive_root, skill.name, review_state)
         skill.review = review_state
         # Record what the skill requests (transparency in the review block) but
         # NEVER auto-grant a skill that FAILED the deterministic preflight gate
         # (invalid manifest, sensitive-shaped file, binary payload, path escape).
-        # The PENDING status already makes it non-executable outside Cyber Pro; recording
-        # the requested keys/permissions just keeps the review block honest about
-        # what the skill wanted.
-        from ouroboros.skill_loader import (
-            requested_core_setting_keys,
-            requested_skill_permissions,
-        )
+        from ouroboros.skill_loader import requested_core_setting_keys, requested_skill_permissions
+
         manifest = getattr(skill, "manifest", None)
-        outcome.requested_keys = requested_core_setting_keys(
-            list(getattr(manifest, "env_from_settings", []) or [])
-        )
+        outcome.requested_keys = requested_core_setting_keys(list(getattr(manifest, "env_from_settings", []) or []))
         outcome.requested_permissions = requested_skill_permissions(
-            list(getattr(manifest, "permissions", []) or []),
-            list(getattr(manifest, "subscribe_events", []) or []),
-        )
+            list(getattr(manifest, "permissions", []) or []), list(getattr(manifest, "subscribe_events", []) or []))
     return outcome
 
 
-def _admission_gate(
-    ctx: Any, skill: Any, drive_root: pathlib.Path, content_hash: str, persist: bool,
-) -> Optional[SkillReviewOutcome]:
-    """ABI-1 admission at NEW-PASS issuance, checked BEFORE dispatching a paid
-    panel that could never mint a PASS for these bytes ($0 typed refusal; the
-    byte-identical free replay in the cycles gate still serves a grandfathered
-    PASS first)."""
+def run_acceptance_preflight(ctx: Any, drive_root: pathlib.Path, skill_name: str) -> Dict[str, Any]:
+    """The deterministic floor for bytes a source's trust accepts without a review.
+
+    Installers call it after landing a trusted release, inside their lifecycle job.
+    A payload failure persists the ordinary PENDING preflight record for these bytes,
+    which the gate honours before the install basis; an infrastructure failure persists
+    nothing and returns ``ok: False`` so the installer keeps the release off.
+    """
+    from ouroboros.skill_loader import find_skill
+
+    skill = find_skill(pathlib.Path(drive_root), skill_name)
+    if skill is None or skill.load_error or not skill.content_hash:
+        return {"ok": False, "error": getattr(skill, "load_error", "") or f"skill {skill_name!r} not found"}
+    outcome = _run_deterministic_preflight(ctx, pathlib.Path(drive_root), skill, skill.content_hash, persist=True)
+    if outcome is not None:
+        return {"ok": False, "error": outcome.error, "content_hash": skill.content_hash}
+    return {"ok": True, "content_hash": skill.content_hash}
+
+
+def plugin_api_admission_refusal_outcome(skill: Any, drive_root: pathlib.Path, *, content_hash: str,
+                                         admission_error: str, persist: bool) -> SkillReviewOutcome:
+    """ABI-1: typed $0 refusal at NEW-PASS issuance for an inadmissible extension.
+
+    The predicate (``extension_new_pass_admission_error``) is common to every
+    PASS-minting path and lives OUTSIDE the deterministic preflight. Clobber
+    guard: when the SAME bytes already hold a live executable verdict (the
+    grandfather), nothing is persisted — a repeat review must never destroy
+    the hash-bound PASS the grandfather construction depends on.
+    """
+    findings = [{"item": "plugin_api_admission", "verdict": "FAIL", "severity": "critical",
+                 "reason": admission_error, "model": "plugin_api_admission"}]
+    live = getattr(skill, "review", None)
+    live_pass = bool(live is not None and not live.is_stale_for(content_hash) and review_status_grandfatherable(live.status))
+    outcome = SkillReviewOutcome(
+        skill_name=skill.name, status=STATUS_PENDING, findings=findings, reviewer_models=["plugin_api_admission"],
+        content_hash=content_hash,
+        error="new review PASS refused (PluginAPI 2.0 admission): " + admission_error + (
+            "; the existing hash-bound PASS for these bytes is preserved (grandfather) and nothing was persisted"
+            if live_pass else ""))
+    if persist and not live_pass:
+        review_state = SkillReviewState(status=outcome.status, content_hash=content_hash, findings=findings,
+                                        reviewer_models=outcome.reviewer_models, timestamp=utc_now_iso())
+        save_review_state(drive_root, skill.name, review_state)
+        skill.review = review_state
+    return outcome
+
+
+def _admission_gate(skill: Any, drive_root: pathlib.Path, content_hash: str, persist: bool) -> Optional[SkillReviewOutcome]:
+    """ABI-1 admission at NEW-PASS issuance, checked BEFORE a paid panel that could never mint a
+    PASS for these bytes ($0 typed refusal; a settled record of the same subject still answers first)."""
     from ouroboros.contracts.plugin_api import extension_new_pass_admission_error
 
     admission_error = extension_new_pass_admission_error(skill.manifest)
     if not admission_error:
         return None
-    return _admission_refusal_outcome(
-        ctx, skill, drive_root,
-        content_hash=content_hash,
-        admission_error=admission_error,
-        persist=persist,
-    )
+    return plugin_api_admission_refusal_outcome(skill, drive_root, content_hash=content_hash,
+                                                admission_error=admission_error, persist=persist)
 
 
-def _hub_file_hashes(files: Any) -> Dict[str, str]:
-    return {str(item.get("path") or ""): str(item.get("sha256") or "").strip().lower()
-            for item in (files or []) if isinstance(item, dict)}
+# --- The wave and its projection -----------------------------------------------------------------
+
+def _pending(skill_name: str, error: str, *, content_hash: str = "", code: str = "") -> SkillReviewOutcome:
+    return SkillReviewOutcome(skill_name=skill_name, status=STATUS_PENDING, content_hash=content_hash, error=error,
+                              dispatch_refusal_code=code)
 
 
-def _official_hub_review_profile(skill: Any) -> str:
-    """Return official_hub only when the payload matches the LIVE catalog (fresh read)."""
-    from ouroboros.marketplace import ouroboroshub
+def _compose(ctx: Any, reviewers: Any, reason: str) -> Tuple[Any, List[str], str]:
+    """``(panel, reviewers, reason)`` of this call: the lifecycle job's panel (composed by its source, in
+    force on the context); the request the job could NOT compose (``_skill_review_panel_request``), handed
+    to the wave as it is — the wave collects an open paid wave of these bytes under its recorded panel or
+    refuses the same way, typed and at $0; or, for a direct call, one composed here by strictness."""
+    # The request is handed on as the caller wrote it: a value of the wrong type is the panel's own typed
+    # REVIEW_PANEL_ARGUMENT refusal, never a string split into one-letter reviewer names.
+    prior = getattr(ctx, "_skill_review_composed_panel", None)
+    if prior is not None:
+        return prior, _as_given(reviewers), reason
+    from ouroboros.reviewer_slot_config import compose_review_panel
 
-    fresh = lambda slug: ouroboroshub.info(slug).files  # noqa: E731
-    return "official_hub" if hub_payload_matches(skill, fresh) else ""
+    request = getattr(ctx, "_skill_review_panel_request", None)
+    if request:
+        named, why = _as_given(request[0]), request[1]
+        if not isinstance(named, list) or not isinstance(why, str):
+            compose_review_panel(named, why, surface="skill")  # the panel's own typed REVIEW_PANEL_ARGUMENT
+        return None, named, why
 
-
-def hub_payload_matches(skill: Any, catalog_files_for: Callable[[str], Any]) -> bool:
-    """Sidecar, catalog row and local files agree on every path and SHA-256.
-
-    ``catalog_files_for(slug)`` supplies the catalog row's ``files``: review and
-    owner attestation pass a fresh read; the listing hint passes a display view."""
-    if str(getattr(skill, "source", "") or "") != "ouroboroshub":
-        return False
-    marker = pathlib.Path(skill.skill_dir) / ".ouroboroshub.json"
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if not isinstance(data, dict) or str(data.get("source") or "") != "ouroboroshub":
-        return False
-    marker_name = str(data.get("sanitized_name") or data.get("slug") or "").strip()
-    if marker_name and marker_name != str(getattr(skill, "name", "") or ""):
-        return False
-    slug = str(data.get("slug") or marker_name or getattr(skill, "name", "") or "").strip()
-    try:
-        catalog_files = _hub_file_hashes(catalog_files_for(slug))
-    except Exception:
-        return False
-    files = data.get("files") if isinstance(data.get("files"), list) else []
-    if not files or _hub_file_hashes(files) != catalog_files:
-        return False
-    root = pathlib.Path(skill.skill_dir).resolve()
-    for item in files:
-        if not isinstance(item, dict):
-            return False
-        rel = pathlib.PurePosixPath(str(item.get("path") or ""))
-        expected = str(item.get("sha256") or "").strip().lower()
-        if not rel.parts or rel.is_absolute() or ".." in rel.parts or not expected:
-            return False
-        path = (root / pathlib.Path(*rel.parts)).resolve(strict=False)
-        try:
-            path.relative_to(root)
-        except ValueError:
-            return False
-        if not path.is_file():
-            return False
-        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-            return False
-    # Reject any EXTRA local runtime-reachable file not covered by the catalog.
-    # Without this, a locally-added file (e.g. evil.py) would still earn the
-    # official_hub fast-path. Provenance/control sidecars are install-time
-    # artifacts, never catalog entries, so they are excluded from the compare.
-    from ouroboros.skill_loader import _iter_payload_files  # pylint: disable=W0212
-    from ouroboros.contracts.skill_payload_policy import SKILL_PAYLOAD_CONTROL_FILENAMES
-
-    manifest = getattr(skill, "manifest", None)
-    try:
-        local_files = _iter_payload_files(
-            root,
-            manifest_entry=str(getattr(manifest, "entry", "") or ""),
-            manifest_scripts=list(getattr(manifest, "scripts", []) or []),
-        )
-    except Exception:
-        return False
-    local_relset = set()
-    for path in local_files:
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            return False
-        if rel in SKILL_PAYLOAD_CONTROL_FILENAMES:
-            continue
-        local_relset.add(rel)
-    return local_relset == set(catalog_files)
+    return compose_review_panel(_as_given(reviewers), reason if reason is not None else "", surface="skill"), \
+        _as_given(reviewers), reason
 
 
-def is_official_hub_payload_verified(skill: Any) -> bool:
-    """Return whether a local OuroborosHub payload still matches the live catalog."""
-    return _official_hub_review_profile(skill) == "official_hub"
+def _as_given(reviewers: Any) -> Any:
+    """The reviewers argument as the caller gave it (a copy of a list or tuple; ``None`` → no names)."""
+    if reviewers is None:
+        return []
+    return list(reviewers) if isinstance(reviewers, (list, tuple)) else reviewers
 
 
-# Public entry point
+def _outcome_from_result(skill: Any, subject: Any, result: Dict[str, Any], *, rebuttal_sha: str) -> SkillReviewOutcome:
+    """One wave result (``review_change.review_result``) → the gate's outcome (``tools/review_skill.outcome_status``)."""
+    from ouroboros.tools.review_skill import legacy_actor_records, outcome_status, reviewer_models, seat_facts
+
+    status, findings, error = outcome_status(result)
+    refusal = result.get("dispatch_refusal") or {}
+    seats = seat_facts(result, subject.delivery)
+    packet_chars = [int(seat.get("brief_chars") or 0) for seat in seats if seat.get("delivery") == "packet"]
+    cost = dict(result.get("cost") or {})
+    return SkillReviewOutcome(
+        skill_name=skill.name, status=status, findings=findings, reviewer_models=reviewer_models(result),
+        content_hash=subject.tree_sha, prompt_chars=max(packet_chars) if packet_chars else 0,
+        cost_usd=float(cost.get("usd") or 0.0), raw_actor_records=legacy_actor_records(result), error=error,
+        single_reviewer_no_diversity=int((result.get("panel") or {}).get("seats") or 0) < 2,
+        paid=not result.get("reused") and not refusal, record_id=str(result.get("record_id") or ""),
+        reused=bool(result.get("reused")), pending=str(result.get("state") or "") == "pending",
+        replayed_from_ts=str(result.get("reused_ts") or ""), rebuttal_sha256=rebuttal_sha,
+        dispatch_refusal_code="LEGACY_BLOCKED" if str(refusal.get("kind") or "") == "review_cycles_exhausted" else "",
+        panel=dict(result.get("panel") or {}), seats=seats,
+        governance=dict((subject.delivery or {}).get("governance") or {}))
 
 
-def _skill_cycles_gate(
-    ctx: Any,
-    skill: Any,
-    drive_root: pathlib.Path,
-    models: List[str],
-    delivery: Dict[str, Any],
-    review_rebuttal: str,
-    content_hash: str,
-    *,
-    persist: bool = True,
-    file_packs: Optional[List[str]] = None,
-    resume_only: bool = False,
-    previous: Optional[Dict[str, Any]] = None,
-) -> tuple[Optional["SkillReviewOutcome"], str, str, str]:
-    """Select exact late reconciliation or free substantive replay before paid
-    admission. The shared cap counts per root task, or per manual content hash.
-    Return (early outcome, contract fingerprint, rebuttal hash, shared profile)."""
-    from ouroboros.skill_review_cycles import (
-        free_replay_outcome,
-        skill_review_contract_fingerprint,
-        skill_review_cycles_refusal,
-        skill_review_wave_binding, select_skill_review_resume,
-    )
-    from ouroboros.tools.commit_gate import compute_rebuttal_sha256
-
-    review_profile = _official_hub_review_profile(skill)
-    contract_fp = skill_review_contract_fingerprint(
-        models, required_items=_SKILL_REVIEW_ITEMS, review_profile=review_profile,
-        delivery=delivery,
-    )
-    rebuttal_sha = compute_rebuttal_sha256(review_rebuttal)
-    group_id = str(getattr(ctx, "_skill_review_group_id", "") or "") or f"manual:{skill.name}"
-    if file_packs is not None and select_skill_review_resume(ctx, skill, drive_root,
-            skill_review_wave_binding(ctx, skill, drive_root, content_hash, contract_fp,
-                                      rebuttal_sha, file_packs), previous):
-        return None, ctx._skill_review_resume["binding"]["review_contract_fingerprint"], rebuttal_sha, review_profile
-    if resume_only:  # failed current preflight or settings may still collect the paid wave
-        return None, contract_fp, rebuttal_sha, review_profile
-    replayed = free_replay_outcome(
-        skill, drive_root=drive_root, group_id=group_id, content_hash=content_hash,
-        contract_fingerprint=contract_fp, rebuttal_sha256=rebuttal_sha,
-    )
-    if replayed is not None:
-        allowed = persist
-        if allowed and getattr(ctx, "_skill_review_lifecycle_guard", False):
-            from ouroboros.skill_review_runner import _can_persist_review_outcome
-
-            allowed = _can_persist_review_outcome(
-                drive_root, skill.name, content_hash,
-                expected_job_id=str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or ""),
-            )
-        if allowed:
-            # Reuse the existing verdict while reconciling current grant policy
-            # and authored-work eligibility; no new panel or review-state write.
-            _apply_auto_grant_outcome(replayed, skill, auto_grant_if_enabled(drive_root, skill))
-        return replayed, contract_fp, rebuttal_sha, review_profile
-    refusal = skill_review_cycles_refusal(
-        ctx, skill.name, drive_root=drive_root, group_id=group_id, models=models,
-        content_hash=content_hash, contract_fingerprint=contract_fp,
-    )
-    return refusal, contract_fp, rebuttal_sha, review_profile
-
-
-def _stamp_paid_facts(
-    outcome: "SkillReviewOutcome",
-    contract_fp: str,
-    rebuttal_sha: str,
-    stamp: Any = None,
-) -> "SkillReviewOutcome":
-    """Max-Review-Cycles facts for a post-panel outcome: the contract and
-    rebuttal and wave identities always ride it; ``paid`` only when the wave
-    PHYSICALLY dispatched — ``stamp.fired`` mirrors the durable
-    write-ahead dispatch marker recorded before the first transport call
-    (plan-review precedent), so a crash cannot launder the spend and an
-    assembly-refused $0 wave never counts."""
-    outcome.paid = _wave_purchased(stamp)
-    outcome.review_contract_fingerprint = contract_fp
-    outcome.rebuttal_sha256 = rebuttal_sha
-    if stamp is not None:
-        outcome.wave_id = str(getattr(stamp, "wave_id", "") or "")
-    return outcome
-
-
-def _skill_quorum_failure_outcome(
-    skill: Any,
-    *,
-    findings: List[Dict[str, Any]],
-    models: List[str],
-    content_hash: str,
-    required_quorum: int,
-    result_json_text: str,
-    parsed_review: Any,
-    advisory_evidence: Dict[str, Any],
-    single_reviewer_no_diversity: bool,
-    drive_root: pathlib.Path,
-    persist: bool,
-    lifecycle_owns_history: bool = False,
-    paid: bool = False,
-    review_contract_fingerprint: str = "",
-    rebuttal_sha256: str = "",
-    wave_id: str = "",
-) -> SkillReviewOutcome:
-    """PENDING outcome for a skill review that missed the adaptive reviewer quorum,
-    preserving the single-reviewer degraded marker on the outcome AND the durable
-    history (extracted to keep ``review_skill`` under the function-size gate).
-    The caller passes the Max-Review-Cycles paid facts (F3): the internal
-    history append must carry them — a dispatched quorum failure spent
-    reviewer money, and an unpaid row here would let the direct
-    ``review_skill(persist=True)`` path (marketplace install) launder it."""
-    outcome = SkillReviewOutcome(
-        skill_name=skill.name,
-        status=STATUS_PENDING,
-        findings=findings,
-        reviewer_models=models,
-        content_hash=content_hash,
-        single_reviewer_no_diversity=single_reviewer_no_diversity,
-        error=(
-            f"Skill review quorum failure: fewer than {required_quorum} reviewers "
-            "returned parseable findings. Raw result preserved."
-        ),
-        raw_result=_truncate_raw_result(result_json_text),
-        raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
-        advisory_result=advisory_evidence,
-    )
-    if persist and not lifecycle_owns_history:
-        _append_skill_review_history(
-            drive_root,
-            skill.name,
-            status=outcome.status,
-            content_hash=content_hash,
-            findings=findings,
-            raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
-            single_reviewer_no_diversity=single_reviewer_no_diversity,
-            paid=paid,
-            review_contract_fingerprint=review_contract_fingerprint,
-            rebuttal_sha256=rebuttal_sha256,
-            wave_id=wave_id,
-        )
-    return outcome
-
-
-def _skill_payload_packs(skill: Any, binding: ResolvedResourceBinding, content_hash: str, *, split: bool,
-                         packet_seats: List[str]) -> tuple[List[str], Any, Optional[SkillReviewOutcome]]:
-    """``(packs, skill, refusal)``: the hashed payload's review packs in one layout (``split``: packet-budget
-    chunks) with the skill re-bound to the same manifest and bytes, or the typed pending refusal."""
+def review_skill(ctx: Any, skill_name: str, *, persist: bool = True, review_rebuttal: str = "",
+                 _resolved_binding: ResolvedResourceBinding | None = None,
+                 reviewers: Optional[List[str]] = None, reason: str = "") -> SkillReviewOutcome:
+    """Admit one skill payload: preflight, admission, then the one review wave; persist its projection."""
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.reviewer_slot_config import PanelCompositionError
     from ouroboros.skill_loader import SkillPayloadUnreadable
-    code = ""  # only the live over-budget refusal is a typed no-dispatch refusal (SkillReviewOutcome)
-    try:
-        packs = _build_skill_file_packs(skill.skill_dir, manifest_entry=skill.manifest.entry,
-                                        manifest_scripts=skill.manifest.scripts,
-                                        expected_content_hash=content_hash, split=split)
-        rebound = load_bound_skill(binding)
-        if rebound is None or rebound.load_error:
-            raise _SkillFileUnreadable("(payload snapshot)", RuntimeError("skill manifest changed after hashing"))
-        if compute_content_hash(rebound.skill_dir, manifest_entry=rebound.manifest.entry,
-                                manifest_scripts=rebound.manifest.scripts) != content_hash:
-            raise _SkillFileUnreadable("(payload snapshot)", RuntimeError("skill payload changed after hashing"))
-        return packs, rebound, None
-    except _SkillFileOverBudget as exc:
-        code = "LEGACY_BLOCKED"
-        error = (f"Skill file {exc.relpath!r} alone is ~{exc.tokens} tokens, over the {exc.budget}-token "
-                 f"packet budget: packet seat(s) {', '.join(packet_seats) or '(unresolved panel)'} cannot "
-                 "receive it untruncated in any chunk, so no reviewer was dispatched and review stays "
-                 "pending (it never truncates the executable surface). Shrink or split that one file.")
-    except _SkillBinaryPayload as exc:
-        error = (f"Skill file {exc.relpath!r} ({exc.size_bytes} bytes) is a loadable executable "
-                 f"({exc.kind or 'native magic bytes'}); review hard-blocks native code the subprocess could load "
-                 "via ctypes/import without reviewer inspection. Remove it or store it outside the hashed surface.")
-    except (_SkillFileUnreadable, SkillPayloadUnreadable) as exc:
-        error = (f"Skill file {exc.relpath!r} is unreadable ({type(exc.err).__name__}: {exc.err}). Review refuses "
-                 "to fail open — fix the file permissions or remove the file before re-running skill_review.")
-    return [], skill, SkillReviewOutcome(skill_name=skill.name, status=STATUS_PENDING, content_hash=content_hash,
-                                         error=error, dispatch_refusal_code=code)
+    from ouroboros.skill_lifecycle_queue import lend_lifecycle_lane
+    from ouroboros.tools.commit_gate import compute_rebuttal_sha256
+    from ouroboros.tools.review_change import ReviewChangeArgumentError, run_review_change
+    from ouroboros.tools.review_skill import skill_subject
+    from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
-
-def review_skill(
-    ctx: Any,
-    skill_name: str,
-    *,
-    persist: bool = True,
-    review_rebuttal: str = "",
-    _resolved_binding: ResolvedResourceBinding | None = None,
-) -> SkillReviewOutcome:
-    """Run tri-model review on one skill, optionally persisting the verdict."""
-    from ouroboros.tools.review import _handle_multi_model_review
     try:
         binding = _resolved_binding or build_resolved_resource_binding(
-            ctx, root="skill_payload", operation="review", path=".", skill_name=skill_name,
-        )
+            ctx, root="skill_payload", operation="review", path=".", skill_name=skill_name)
     except Exception as exc:
-        return SkillReviewOutcome(skill_name=skill_name, status=STATUS_PENDING, error=str(exc))
+        return _pending(skill_name, str(exc))
     drive_root = binding.state_drive_root
     skill = load_bound_skill(binding)
     if skill is None:
-        return SkillReviewOutcome(skill_name=skill_name, status=STATUS_PENDING, error=f"Skill {skill_name!r} not found")
+        return _pending(skill_name, f"Skill {skill_name!r} not found")
     if skill.load_error:
-        return SkillReviewOutcome(skill_name=skill_name, status=STATUS_PENDING, error=f"Skill manifest could not be parsed: {skill.load_error}")
-    from ouroboros.skill_loader import SkillPayloadUnreadable
+        return _pending(skill_name, f"Skill manifest could not be parsed: {skill.load_error}")
     try:
-        content_hash = compute_content_hash(
-            skill.skill_dir,
-            manifest_entry=skill.manifest.entry,
-            manifest_scripts=skill.manifest.scripts,
-        )
+        content_hash = compute_content_hash(skill.skill_dir, manifest_entry=skill.manifest.entry,
+                                            manifest_scripts=skill.manifest.scripts)
     except SkillPayloadUnreadable as exc:
-        return SkillReviewOutcome(
-            skill_name=skill.name,
-            status=STATUS_PENDING,
-            error=(
-                f"Skill payload {exc.relpath!r} is unreadable "
-                f"({type(exc.err).__name__}: {exc.err}). Review refuses "
-                "to emit a PASS over a partial hash — fix file "
-                "permissions or remove the unreadable file and re-run."
-            ),
-        )
-    slot_err = reviewer_slot_config_error()
+        return _pending(skill.name, f"Skill payload {exc.relpath!r} is unreadable ({type(exc.err).__name__}: {exc.err}). "
+                                    "Review refuses to emit a PASS over a partial hash — fix file permissions or remove "
+                                    "the unreadable file and re-run.")
     try:
-        delivery = {} if slot_err else commit_triad_delivery()
-    except ValueError as exc:
-        slot_err, delivery = str(exc), {}
-    models = list(delivery.get("models") or [])
-    from ouroboros.skill_review_cycles import preceding_review_row
-    from ouroboros.skill_review_passes import panel_delivery_classes
-    packet_seats, packet_api_models, native_models = panel_delivery_classes(delivery)
-    split = bool(packet_seats) or not models
-    # A paid wave of these bytes is collected in the layout it was bought in, whatever today's pool says.
-    previous = preceding_review_row(ctx, drive_root, skill.name)
-    recorded = ((previous or {}).get("review_wave") or {}).get("binding") or {}
-    layout = len(recorded.get("chunks") or ()) > 1 if recorded.get("content_hash") == content_hash else split
-    file_packs, skill, refused = _skill_payload_packs(skill, binding, content_hash, split=layout,
-                                                      packet_seats=packet_seats)
-    if refused is not None:
-        return refused
-    manifest_dump = json.dumps({
-        "name": skill.manifest.name, "description": skill.manifest.description,
-        "version": skill.manifest.version, "type": skill.manifest.type,
-        "runtime": skill.manifest.runtime, "timeout_sec": skill.manifest.timeout_sec,
-        "permissions": list(skill.manifest.permissions), "conflicts": list(skill.manifest.conflicts),
-        "env_from_settings": list(skill.manifest.env_from_settings),
-        "requires": list(skill.manifest.requires), "scripts": list(skill.manifest.scripts),
-        "scheduled_tasks": list(getattr(skill.manifest, "scheduled_tasks", []) or []), "entry": skill.manifest.entry,
-    }, ensure_ascii=False, indent=2)
-    history = _load_skill_review_history(drive_root, skill.name, group_id=str(
-        getattr(ctx, "_skill_review_group_id", "") or ""))
-    preflight_outcome = _run_deterministic_preflight(
-        ctx, drive_root, skill, content_hash, persist=persist, binding=binding)
+        panel, reviewers, reason = _compose(ctx, reviewers, reason)
+    except PanelCompositionError as exc:
+        return _pending(skill_name, str(exc), content_hash=content_hash, code="TOOL_ARG_ERROR")
+    except ValueError as exc:  # an invalid pool is the wave's own typed configuration refusal
+        return _pending(skill.name, f"invalid review pool configuration blocks skill review: {exc}", content_hash=content_hash)
+    preflight = _run_deterministic_preflight(ctx, drive_root, skill, content_hash, persist=persist, binding=binding)
     try:
-        current_hash = compute_content_hash(
-            skill.skill_dir, manifest_entry=skill.manifest.entry,
-            manifest_scripts=skill.manifest.scripts)
+        current_hash = compute_content_hash(skill.skill_dir, manifest_entry=skill.manifest.entry,
+                                            manifest_scripts=skill.manifest.scripts)
     except SkillPayloadUnreadable as exc:
-        return SkillReviewOutcome(skill_name=skill.name, status=STATUS_PENDING,
-                                  content_hash=content_hash, error=str(exc))
+        return _pending(skill.name, str(exc), content_hash=content_hash)
     if current_hash != content_hash:
-        return SkillReviewOutcome(skill_name=skill.name, status=STATUS_PENDING, content_hash=content_hash,
-            error="Skill payload changed during deterministic preflight; review did not dispatch.")
-    early_outcome, contract_fp, rebuttal_sha, review_profile = _skill_cycles_gate(
-        ctx, skill, drive_root, models, delivery, review_rebuttal, content_hash, persist=persist,
-        file_packs=file_packs, resume_only=preflight_outcome is not None or bool(slot_err), previous=previous)
-    if early_outcome is not None or (preflight_outcome is not None and not getattr(ctx, "_skill_review_resume", None)):
-        return early_outcome or preflight_outcome
-    if slot_err and not getattr(ctx, "_skill_review_resume", None):
-        return SkillReviewOutcome(skill_name=skill.name, status=STATUS_PENDING, content_hash=content_hash,
-            error=f"invalid review pool configuration blocks skill review: {slot_err}")
-    if layout != split and not getattr(ctx, "_skill_review_resume", None):
-        # That wave did not resume: a new one is laid out for today's pool and bound to its own packs.
-        file_packs, skill, refused = _skill_payload_packs(skill, binding, content_hash, split=split,
-                                                          packet_seats=packet_seats)
-        if refused is not None:
-            return refused
-        from ouroboros.skill_review_cycles import skill_review_wave_binding
-        ctx._skill_review_wave_binding = skill_review_wave_binding(
-            ctx, skill, drive_root, content_hash, contract_fp, rebuttal_sha, file_packs)
-    admission_outcome = _admission_gate(ctx, skill, drive_root, content_hash, persist)
-    if admission_outcome is not None:
-        return admission_outcome
-
-    if len(file_packs) > 1:
-        log.warning(
-            "Skill %s exceeds the reviewer token budget; reviewing in %d chunked passes.",
-            skill.name,
-            len(file_packs),
-        )
-    # Budget admission for the WHOLE review wave (v6.69.0): a wave that cannot
-    # fit the remaining root budget is declined up front (typed event, $0 spent,
-    # skill honestly pending) instead of dying mid-wave. Fail-open on unknowns.
-    budget_block = (
-        # A native seat reads the whole payload once; a packet seat is priced per pack.
-        _review_wave_budget_block(ctx, skill.name, file_packs, packet_api_models,
-                                  **({"whole_models": native_models} if native_models else {}))
-        if (packet_api_models or native_models) and not getattr(ctx, "_skill_review_resume", None) else None
-    )
-    if budget_block is not None:
-        return SkillReviewOutcome(skill_name=skill.name, status=STATUS_PENDING,
-                                  reviewer_models=models, content_hash=content_hash,
-                                  error=budget_block)
-    from ouroboros.skill_review_passes import retained_beside_preflight, run_skill_review_passes
-
-    # F3 write-ahead seam: the durable dispatch marker lands immediately
-    # before the panel's first transport call (assembly failures inside the
-    # pass runner stay $0); every post-panel outcome below derives its paid
-    # fact from whether the stamp actually fired.
-    stamp, _prior_stamp = _install_skill_dispatch_stamp(
-        ctx, drive_root, skill.name,
-        group_id=str(getattr(ctx, "_skill_review_group_id", "") or "") or f"manual:{skill.name}",
-        content_hash=content_hash, contract_fp=contract_fp, rebuttal_sha=rebuttal_sha,
-    )
-
-    def _paid_facts(outcome: SkillReviewOutcome) -> SkillReviewOutcome:
-        return _stamp_paid_facts(outcome, contract_fp, rebuttal_sha, stamp)
-
+        return _pending(skill.name, "Skill payload changed during deterministic preflight; review did not dispatch.",
+                        content_hash=content_hash)
+    if preflight is not None:
+        return preflight
+    admission = _admission_gate(skill, drive_root, content_hash, persist)
+    if admission is not None:
+        return admission
     try:
-        prompt, advisory_evidence, result_json_text, infra_error = run_skill_review_passes(
-            ctx,
-            drive_root,
-            skill,
-            evidence={
-                "manifest_dump": manifest_dump,
-                "content_hash": content_hash,
-                "history": history,
-                "review_rebuttal": review_rebuttal,
-                "required_items": _SKILL_REVIEW_ITEMS,
-            },
-            file_packs=file_packs,
-            models=models,
-            row_plan=delivery,
-            session_root=str(_REPO_ROOT),
-            usage_attribution={"review_skill": skill.name, "review_wave_id": stamp.wave_id}, review_contract_fingerprint=contract_fp, rebuttal_sha256=rebuttal_sha,
-            build_prompt=_build_review_prompt_for_attempt,
-            run_review=_handle_multi_model_review,
-        )
-    finally:
-        ctx._review_paid_stamp = _prior_stamp
-    if infra_error:
-        log.warning("Skill review infrastructure failure for %s: %s", skill.name, infra_error)
-        return _paid_facts(SkillReviewOutcome(
-            skill_name=skill.name,
-            status=STATUS_PENDING,
-            reviewer_models=models,
-            content_hash=content_hash,
-            error=f"infrastructure failure: {sanitize_tool_result_for_log(infra_error)}",
-        ))
-
-    try:
-        result_json = json.loads(result_json_text)
-    except json.JSONDecodeError:
-        return _paid_facts(SkillReviewOutcome(
-            skill_name=skill.name,
-            status=STATUS_PENDING,
-            reviewer_models=models,
-            content_hash=content_hash,
-            error="review returned non-JSON top-level response",
-            raw_result=_truncate_raw_result(result_json_text),
-        ))
-
-    if "error" in result_json:
-        return _paid_facts(SkillReviewOutcome(
-            skill_name=skill.name,
-            status=STATUS_PENDING,
-            reviewer_models=models,
-            content_hash=content_hash,
-            error=f"review service error: {result_json['error']}",
-        ))
-
-    models = list(result_json["recorded_models"]) if getattr(ctx, "_skill_review_resume", None) else models
-    parsed_review = parse_model_review_results(result_json, required_items=_SKILL_REVIEW_ITEMS)
-    emit_review_model_error_events(ctx, parsed_review, source="skill_review", skill_name=skill.name)
-    findings, responded_models = parsed_review.findings, parsed_review.responsive_models
-    required_quorum = adaptive_quorum(len(models))
-    single_reviewer_no_diversity = len(models) < 2
-    if single_reviewer_no_diversity:
-        # Skill review is an executable TRUST gate; a single configured reviewer
-        # is honored but the lost diversity is recorded loudly AND durably (Bible
-        # P3) — in the outcome + review history below, not just this log line.
-        log.warning("Skill review (trust gate) ran with a single reviewer (single_reviewer_no_diversity).")
-    if len(responded_models) < required_quorum or result_json.get("collection_pending"):
-        return _paid_facts(_skill_quorum_failure_outcome(
-            skill,
-            findings=findings,
-            models=models,
-            content_hash=content_hash,
-            required_quorum=required_quorum,
-            result_json_text=result_json_text,
-            parsed_review=parsed_review,
-            advisory_evidence=advisory_evidence,
-            single_reviewer_no_diversity=single_reviewer_no_diversity,
-            drive_root=drive_root,
-            persist=persist,
-            lifecycle_owns_history=bool(getattr(ctx, "_skill_review_lifecycle_guard", False)),
-            # F3(a): the internal history append must carry the paid facts —
-            # a dispatched quorum failure spent reviewer money.
-            paid=_wave_purchased(stamp),
-            review_contract_fingerprint=contract_fp,
-            rebuttal_sha256=rebuttal_sha,
-            wave_id=str(getattr(stamp, "wave_id", "") or ""),
-        ))
-
-    # review_profile was resolved ONCE in _skill_cycles_gate (it is part of
-    # the panel-contract fingerprint) and rides down to aggregation here.
-    status = _aggregate_status(
-        findings,
-        skill_type=skill.manifest.type,
-        is_module_widget=_is_module_widget_skill(skill),
-        review_profile=review_profile,
-    )
-    outcome = _paid_facts(SkillReviewOutcome(
-        skill_name=skill.name,
-        status=status,
-        findings=findings,
-        reviewer_models=responded_models,
-        content_hash=content_hash,
-        prompt_chars=len(prompt),
-        single_reviewer_no_diversity=single_reviewer_no_diversity,
-        raw_result=_truncate_raw_result(result_json_text),
-        raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
-        advisory_result=advisory_evidence,
-        convergence_hint=_convergence_hint(history, findings, current_status=status),
-        review_profile=review_profile,
-    ))
-    retained_beside_preflight(outcome, preflight_outcome)
-
-    if persist:
-        return _persist_reviewed_outcome(
-            ctx, skill, drive_root, outcome,
-            history=history, review_rebuttal=review_rebuttal,
-            contract_fp=contract_fp, rebuttal_sha=rebuttal_sha,
-        )
+        subject = skill_subject(ctx, skill, content_hash, drive_root=drive_root, governance_root=serving_repo_dir_for(ctx))
+        # The panel reads the frozen copy bound to content_hash and mutates no skill state, so other
+        # lifecycle work runs meanwhile; the lane is back before anything below persists. Every send of the
+        # wave names this skill (its attempt, its llm_usage row, a session seat's start custody a late
+        # collection reads), as ``_usage_rows.REVIEW_CUSTODY_KEYS`` says; the caller's own scope stays.
+        scope = replace(current_usage_scope() or UsageScope(), review_skill=skill.name)
+        with lend_lifecycle_lane(), usage_scope(scope):
+            result = run_review_change(ctx, subject="skill", reviewers=reviewers, reason=reason if reason is not None else "",
+                                       review_rebuttal=str(review_rebuttal or ""), _frozen_skill=subject, _panel=panel)
+    except ReviewChangeArgumentError as exc:
+        return _pending(skill.name, str(exc), content_hash=content_hash, code="TOOL_ARG_ERROR")
+    outcome = _outcome_from_result(skill, subject, result, rebuttal_sha=str(compute_rebuttal_sha256(review_rebuttal) or ""))
+    if not outcome.panel and panel is not None:
+        outcome.panel = dict(panel.facts)
+    if persist and not outcome.pending:
+        _persist_projection(ctx, skill, drive_root, outcome)
     return outcome
 
 
-def _persist_reviewed_outcome(
-    ctx: Any,
-    skill: Any,
-    drive_root: pathlib.Path,
-    outcome: SkillReviewOutcome,
-    *,
-    history: List[Dict[str, Any]],
-    review_rebuttal: str,
-    contract_fp: str,
-    rebuttal_sha: str,
-) -> SkillReviewOutcome:
-    """Persist one reviewed verdict (state, history, rebuttal flips, auto-grant)
-    — extracted whole from ``review_skill`` at the function-size gate."""
-    content_hash = outcome.content_hash
+def _persist_projection(ctx: Any, skill: Any, drive_root: pathlib.Path, outcome: SkillReviewOutcome) -> None:
+    """The record's projection into ``review.json`` (the gate's cache) and the grants that follow.
+
+    The wave ran with the lifecycle lane lent out, so the payload may have moved on (an update, an edit, an
+    uninstall): the verdict lands only while the installed bytes are still the reviewed bytes, and only while
+    the lifecycle job that owns this review still does. A wave without a verdict (quorum failed, not
+    dispatched, not performed) never overwrites what already admits the same bytes: a substantive verdict,
+    the owner's attestation, or an author acceptance bound to them."""
+    from ouroboros.skill_loader import SkillPayloadUnreadable
+
+    try:
+        current_hash = compute_content_hash(skill.skill_dir, manifest_entry=skill.manifest.entry,
+                                            manifest_scripts=skill.manifest.scripts)
+    except (OSError, SkillPayloadUnreadable):
+        current_hash = ""
+    if current_hash != outcome.content_hash:
+        outcome.status = STATUS_PENDING
+        outcome.error = ("review outcome was not persisted because the skill payload changed while the review ran; "
+                         "review the current bytes")
+        return
     if getattr(ctx, "_skill_review_lifecycle_guard", False):
         from ouroboros.skill_review_runner import _can_persist_review_outcome
 
-        if not _can_persist_review_outcome(
-            drive_root,
-            skill.name,
-            content_hash,
-            expected_job_id=str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or ""),
-        ):
+        if not _can_persist_review_outcome(drive_root, skill.name, outcome.content_hash,
+                                           expected_job_id=str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or "")):
             outcome.status = STATUS_PENDING
-            outcome.error = (
-                "review outcome was not persisted because the lifecycle job "
-                "is already terminal or no longer matches this content hash"
-            )
-            return outcome
-    persisted_state = SkillReviewState(
-        status=outcome.status,
-        content_hash=content_hash,
-        findings=outcome.findings,
-        reviewer_models=outcome.reviewer_models,
-        timestamp=utc_now_iso(),
-        prompt_chars=outcome.prompt_chars,
-        cost_usd=outcome.cost_usd,
-        raw_result=outcome.raw_result,
-        raw_actor_records=list(outcome.raw_actor_records or []),
-        advisory_result=dict(outcome.advisory_result or {}),
-        review_profile=outcome.review_profile,
-    )
-    save_review_state(drive_root, skill.name, persisted_state)
-    if not getattr(ctx, "_skill_review_lifecycle_guard", False):
-        _append_skill_review_history(
-            drive_root, skill.name,
-            status=outcome.status, content_hash=content_hash, findings=outcome.findings,
-            raw_actor_records=list(outcome.raw_actor_records or []),
-            single_reviewer_no_diversity=outcome.single_reviewer_no_diversity,
-            paid=outcome.paid, review_contract_fingerprint=contract_fp,
-            rebuttal_sha256=rebuttal_sha, wave_id=outcome.wave_id,
-        )
-    _persist_rebuttal_flips(
-        drive_root, skill.name,
-        history=history, findings=outcome.findings,
-        review_rebuttal=review_rebuttal, content_hash=content_hash,
-        responded_models=list(outcome.reviewer_models),
-    )
-    skill.review = persisted_state
-    auto_grant = auto_grant_if_enabled(drive_root, skill)
-    _apply_auto_grant_outcome(outcome, skill, auto_grant)
-    return outcome
+            outcome.error = ("review outcome was not persisted because the lifecycle job is already terminal or no "
+                             "longer matches this content hash")
+            return
+    existing = load_review_state(drive_root, skill.name, skill_type=skill.manifest.type, skill_dir=skill.skill_dir)
+    same_bytes = existing.content_hash == outcome.content_hash and existing.status in SUBSTANTIVE_STATUSES
+    attested = same_bytes and existing.review_profile == "owner_attested"
+    held = same_bytes and not attested
+    # An author acceptance (Advisory finish) is bound to the bytes it accepted, not to the reviewer's hash.
+    accepted = str((existing.author_disposition or {}).get("subject_hash") or "") == outcome.content_hash
+    if outcome.status == STATUS_PENDING and (held or attested or accepted):
+        # A wave that formed no verdict never erases what already admits these exact bytes: the owner's
+        # Skip, the author's acceptance, or an earlier substantive verdict (opus R1-1). A substantive
+        # outcome below still replaces each of them.
+        stands = ("the owner's attestation" if attested else f"the earlier {existing.status} verdict" if held
+                  else "the author's acceptance")
+        outcome.error = (f"{outcome.error}; {stands} for these bytes stands"
+                         + (f" (record {outcome.record_id} formed no verdict)" if outcome.record_id else "")).strip("; ")
+        skill.review = existing
+        return
+    if outcome.reused and held and existing.record_id == outcome.record_id:
+        skill.review = existing  # the same record is already projected: nothing to write
+    else:
+        state = SkillReviewState(
+            status=outcome.status, content_hash=outcome.content_hash, findings=list(outcome.findings),
+            reviewer_models=list(outcome.reviewer_models), timestamp=utc_now_iso(), prompt_chars=outcome.prompt_chars,
+            cost_usd=outcome.cost_usd, raw_result="", raw_actor_records=list(outcome.raw_actor_records),
+            review_profile=outcome.review_profile, panel=dict(outcome.panel), record_id=outcome.record_id,
+            governance=dict(outcome.governance), seats=list(outcome.seats))
+        try:
+            save_review_state(drive_root, skill.name, state)
+        except OSError as exc:  # recoverable by record identity: the next call finds the settled record and re-projects
+            log.warning("review.json of %s not written for record %s: %s", skill.name, outcome.record_id, exc)
+            outcome.error = f"{outcome.error}; the projection into review.json failed ({exc}); record {outcome.record_id} stands".strip("; ")
+            return
+        skill.review = state
+    _apply_auto_grant_outcome(outcome, skill, auto_grant_if_enabled(drive_root, skill))
 
 
 __all__ = [
     "SkillReviewOutcome",
     "render_skill_review_block",
     "review_skill",
+    "run_acceptance_preflight",
 ]

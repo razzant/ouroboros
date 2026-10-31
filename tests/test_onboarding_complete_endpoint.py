@@ -30,11 +30,13 @@ _PROVIDER_ENV = (
 )
 
 # Shapes copied from the LIVE daemon (GET /v2/credential-profiles, GET
-# /v2/agent-capabilities, 2026-08-09) through the same projection the accounts
-# panel uses: a per-harness accounts row carrying the engine's own `next_up`
-# routing pointer, and credential profiles carrying `credential_kind` +
-# availability. A fake without `next_up` is a fake of an engine that does not
-# exist.
+# /v2/agent-capabilities) through the same projection the accounts panel uses:
+# the unified roster (Claudexor 3.6.0+) — every account a named registry row
+# carrying `credential_kind` + availability, and per harness the engine's own
+# routing pointer in `accountPools[].next_up`. A fake without `next_up` is a
+# fake of an engine that does not exist. A pre-unified roster never reaches the
+# preset (the status read refuses it): its native row below serves only the
+# negative tests that prove it is never read.
 def _native_account(harness, *, route="local_session", detected=True, enabled=True):
     return {
         "harness_id": harness,
@@ -45,14 +47,8 @@ def _native_account(harness, *, route="local_session", detected=True, enabled=Tr
     }
 
 
-def _profile_account(harness, profile_id):
-    return {
-        "harness_id": harness,
-        "native_credentials_enabled": True,
-        "native_login_detected": False,
-        "identity": None,
-        "next_up": {"kind": "profile", "profileId": profile_id},
-    }
+def _pool(harness, next_up):
+    return {"harness_id": harness, "next_up": next_up}
 
 
 def _profile(harness, profile_id, *, kind="config_dir_login", enabled=True,
@@ -66,6 +62,14 @@ def _profile(harness, profile_id, *, kind="config_dir_login", enabled=True,
                    "verification_source": "vendor"},
         "identity": {"email": "owner@example.com", "plan": "pro"},
     }
+
+
+def _routed(*harnesses):
+    """Each harness's migrated default login, next up for its own pool."""
+    return {"profiles": [_profile(harness, f"{harness}-default") for harness in harnesses],
+            "harnessAccounts": [],
+            "accountPools": [_pool(harness, {"kind": "profile", "profileId": f"{harness}-default"})
+                             for harness in harnesses]}
 
 
 LIVE_SNAPSHOT = {
@@ -82,10 +86,7 @@ LIVE_SNAPSHOT = {
             "models": [{"id": "gpt-5.6-sol"}, {"id": "gpt-5.6-terra"}, {"id": "gpt-5.5"}],
         },
     ],
-    "profiles": {
-        "harnessAccounts": [_native_account("claude"), _native_account("codex")],
-        "profiles": [],
-    },
+    "profiles": _routed("claude", "codex"),
 }
 
 WIZARD_PAYLOAD = {
@@ -135,8 +136,14 @@ def onboarding(monkeypatch, tmp_path):
         return payload
 
     monkeypatch.setattr(gw_onboarding, "_read_harness_snapshot", _snapshot)
-    monkeypatch.setattr(config, "apply_settings_to_env",
-                        lambda settings: calls["env"].append(dict(settings)))
+    original_apply_settings = config.apply_settings_to_env
+
+    def apply_settings(settings, *, environ=None):
+        if environ is not None:
+            return original_apply_settings(settings, environ=environ)
+        calls["env"].append(dict(settings))
+
+    monkeypatch.setattr(config, "apply_settings_to_env", apply_settings)
 
     def _supervisor(_request, _settings):
         calls["supervisor"] += 1
@@ -147,6 +154,9 @@ def onboarding(monkeypatch, tmp_path):
 
     monkeypatch.setattr(gw_settings, "_start_supervisor_if_needed_for_request", _supervisor)
     monkeypatch.setattr(gw_settings, "_apply_settings_save_side_effects", _side_effects)
+    # The starter installer runs in the background after a completed save (tests below).
+    monkeypatch.setattr(gw_onboarding, "after_onboarding",
+                        lambda drive_root, ids: calls.setdefault("starter", []).append((drive_root, ids)))
 
     app = Starlette(routes=[
         Route("/api/onboarding/subagents/preview",
@@ -213,8 +223,8 @@ def test_antigravity_install_succeeds_without_inventing_reviewer_seats(onboardin
             ],
         }],
         "profiles": {
-            "harnessAccounts": [_profile_account("agy", "google-owner")],
-            "profiles": [_profile("agy", "google-owner", kind="oauth_token")],
+            "profiles": [_profile("agy", "google-owner", kind="oauth_token")], "harnessAccounts": [],
+            "accountPools": [_pool("agy", {"kind": "profile", "profileId": "google-owner"})],
         },
     }
 
@@ -423,7 +433,7 @@ def test_unresolvable_model_refuses_before_any_write(onboarding):
         "daemon": {"state": "running"},
         "harnesses": [{"id": "claude", "status": "ok", "enabled": True,
                        "models": [{"id": "claude-sonnet-5"}]}],
-        "profiles": {"harnessAccounts": [_native_account("claude")]},
+        "profiles": _routed("claude"),
     }
 
     response = onboarding.client.post(
@@ -441,7 +451,7 @@ def test_a_signed_in_account_without_discovery_is_a_typed_failure(onboarding):
         "daemon": {"state": "running"},
         "harnesses": [{"id": "claude", "status": "ok", "enabled": True,
                        "models": [], "models_error": "harness_unavailable"}],
-        "profiles": {"harnessAccounts": [_native_account("claude")]},
+        "profiles": _routed("claude"),
     }
 
     response = onboarding.client.post(
@@ -1051,7 +1061,10 @@ def test_running_process_keeps_its_boot_runtime_mode(onboarding):
 # ---------------------------------------------------------------------------
 
 
-def _routable_snapshot(accounts, profiles=(), harnesses=None):
+def _routable_snapshot(pools=(), profiles=(), harnesses=None, *, legacy_accounts=()):
+    roster = {"profiles": list(profiles), "harnessAccounts": list(legacy_accounts)}
+    if pools is not None:  # None: a pre-unified body, which carries no pool key at all
+        roster["accountPools"] = list(pools)
     return {
         "daemon": {"state": "running"},
         "harnesses": harnesses if harnesses is not None else [
@@ -1060,7 +1073,7 @@ def _routable_snapshot(accounts, profiles=(), harnesses=None):
             {"id": "cursor", "status": "ok", "enabled": True,
              "models": [{"id": "cursor-grok-4.6-high"}]},
         ],
-        "profiles": {"harnessAccounts": list(accounts), "profiles": list(profiles)},
+        "profiles": roster,
     }
 
 
@@ -1070,14 +1083,13 @@ def test_only_daemon_routable_accounts_become_discoveries():
     from ouroboros.gateway.onboarding import verified_harness_discoveries
 
     snapshot = _routable_snapshot(
-        # claude: the live CLI session. codex: the engine would rotate onto a
-        # verified subscription profile. cursor: signed in nowhere.
-        [_native_account("claude"),
-         _profile_account("codex", "koshak"),
-         {"harness_id": "cursor", "native_credentials_enabled": True,
-          "native_login_detected": False, "identity": None,
-          "next_up": {"kind": "none", "reason": "the default credential is not ready"}}],
-        [_profile("codex", "koshak")],
+        # claude: its migrated default login is next up. codex: the engine
+        # would rotate onto a verified subscription profile. cursor: signed in
+        # nowhere.
+        [_pool("claude", {"kind": "profile", "profileId": "claude-default"}),
+         _pool("codex", {"kind": "profile", "profileId": "koshak"}),
+         _pool("cursor", {"kind": "none", "reason": "the default credential is not ready"})],
+        [_profile("claude", "claude-default"), _profile("codex", "koshak")],
     )
 
     discoveries, failure = verified_harness_discoveries(snapshot)
@@ -1093,7 +1105,7 @@ def test_an_api_key_profile_is_never_counted_as_a_subscription():
     from ouroboros.gateway.onboarding import subscription_routable_harnesses
 
     routable, refused = subscription_routable_harnesses(_routable_snapshot(
-        [_profile_account("claude", "byok")],
+        [_pool("claude", {"kind": "profile", "profileId": "byok"})],
         [_profile("claude", "byok", kind="api_key", availability="unavailable")],
     ))
 
@@ -1101,50 +1113,44 @@ def test_an_api_key_profile_is_never_counted_as_a_subscription():
     assert "API credential" in refused["claude"]
 
 
-def test_a_native_api_key_route_is_never_counted_as_a_subscription():
-    """Same class on the OTHER seat: the default account of an API-key-only
-    harness is a detected login too — the engine names its route `api_key`."""
-    from ouroboros.gateway.onboarding import subscription_routable_harnesses
-
-    routable, refused = subscription_routable_harnesses(
-        _routable_snapshot([_native_account("codex", route="api_key")]))
-
-    assert routable == {}
-    assert "API key" in refused["codex"]
-
-
-def test_a_disabled_or_unavailable_harness_is_refused_even_when_signed_in():
+def test_a_disabled_harness_is_refused_and_an_unavailable_row_needs_a_vouched_seat():
     """The other half of the reviewer's probe: the harness row itself. An
-    engine that cannot run the harness cannot run a subscription session on it,
-    however healthy the account looks."""
+    engine that has the harness disabled runs nothing on it, however healthy
+    the account looks; an unavailable row runs only a named seat its own
+    doctor probe vouches (the agy shape, Claudexor INV-135)."""
     from ouroboros.gateway.onboarding import subscription_routable_harnesses
 
     routable, refused = subscription_routable_harnesses(_routable_snapshot(
-        [_native_account("claude"), _native_account("codex")],
+        [_pool("claude", {"kind": "profile", "profileId": "claude-default"}),
+         _pool("codex", {"kind": "profile", "profileId": "codex-default"}),
+         _pool("cursor", {"kind": "none", "reason": "nothing routable"})],
+        [_profile("claude", "claude-default"), _profile("codex", "codex-default")],
         harnesses=[
             {"id": "claude", "status": "ok", "enabled": False, "models": [{"id": "claude-opus-5"}]},
             {"id": "codex", "status": "unavailable", "enabled": True,
              "models": [{"id": "gpt-5.6-sol"}]},
+            {"id": "cursor", "status": "unavailable", "enabled": True, "models": []},
         ],
     ))
 
-    assert routable == {}
     assert refused == {"claude": "the engine has this harness disabled",
-                       "codex": "the engine reports it unavailable"}
+                       "cursor": "the engine reports it unavailable"}
+    assert routable["codex"].startswith(
+        "account 'codex-default' (config_dir_login) (the harness row reads unavailable")
 
 
 def test_an_unverified_or_disabled_profile_seat_is_refused():
     from ouroboros.gateway.onboarding import subscription_routable_harnesses
 
     unverified = subscription_routable_harnesses(_routable_snapshot(
-        [_profile_account("cursor", "koshakcot-ultra")],
+        [_pool("cursor", {"kind": "profile", "profileId": "koshakcot-ultra"})],
         [_profile("cursor", "koshakcot-ultra", availability="unavailable",
                   verification="not_run")]))
     disabled = subscription_routable_harnesses(_routable_snapshot(
-        [_profile_account("cursor", "sol-validator")],
+        [_pool("cursor", {"kind": "profile", "profileId": "sol-validator"})],
         [_profile("cursor", "sol-validator", enabled=False)]))
     missing = subscription_routable_harnesses(
-        _routable_snapshot([_profile_account("cursor", "ghost")]))
+        _routable_snapshot([_pool("cursor", {"kind": "profile", "profileId": "ghost"})]))
 
     assert unverified[0] == {} and "unavailable" in unverified[1]["cursor"]
     assert disabled[0] == {} and "disabled" in disabled[1]["cursor"]
@@ -1159,15 +1165,10 @@ _ROUTE_UNKNOWN_NOW = ("the default credential route is unknown; refresh Accounts
                       "`claudexor doctor`")
 
 
-def _no_capacity_now(harness, *, native_login):
+def _no_capacity_now(harness, reason):
     """A harness whose subscription IS configured and whose CURRENT routing answer
     is a refusal — the shape of a spent window at the moment of onboarding."""
-    return {"harness_id": harness, "native_credentials_enabled": True,
-            "native_login_detected": native_login,
-            "identity": {"email": "owner@example.com", "plan": "claude_max"}
-                        if native_login else None,
-            "next_up": {"kind": "none",
-                        "reason": _NOT_READY_NOW if native_login else _ROUTE_UNKNOWN_NOW}}
+    return _pool(harness, {"kind": "none", "reason": reason})
 
 
 def test_a_routing_refusal_now_does_not_delete_a_subscription_from_the_preset():
@@ -1180,23 +1181,23 @@ def test_a_routing_refusal_now_does_not_delete_a_subscription_from_the_preset():
     got a Codex-only preset PERMANENTLY, with no seam left to revisit it. D-3
     says an exhausted subscription row stays CONFIGURED and waits for capacity.
 
-    Two shapes, both with the engine's verbatim reason strings: a signed-in
-    default session the engine will not route this minute, and a harness whose
-    only seat is a named subscription profile (the default `limit_action: fail`
-    policy never names a profile in `next_up`, so this is the ordinary Cursor
-    account shape)."""
+    Two shapes, both with the engine's verbatim reason strings: the migrated
+    default login the engine will not route this minute, and a harness whose
+    only seat is another named subscription profile (the default `limit_action:
+    fail` policy never names a profile in `next_up`, so this is the ordinary
+    Cursor account shape)."""
     from ouroboros.gateway.onboarding import subscription_routable_harnesses
 
     routable, refused = subscription_routable_harnesses(_routable_snapshot(
-        [_no_capacity_now("claude", native_login=True),
-         _no_capacity_now("cursor", native_login=False)],
-        [_profile("cursor", "sol-validator")],
+        [_no_capacity_now("claude", _NOT_READY_NOW), _no_capacity_now("cursor", _ROUTE_UNKNOWN_NOW)],
+        [_profile("claude", "claude-default"), _profile("cursor", "sol-validator")],
     ))
 
     assert refused == {}
     assert set(routable) == {"claude", "cursor"}
     # The evidence stays honest: the seat, and the engine's own reason beside it.
-    assert routable["claude"] == f"signed-in default session; no capacity right now ({_NOT_READY_NOW})"
+    assert routable["claude"] == (
+        f"account 'claude-default' (config_dir_login); no capacity right now ({_NOT_READY_NOW})")
     assert routable["cursor"] == (
         f"account 'sol-validator' (config_dir_login); no capacity right now ({_ROUTE_UNKNOWN_NOW})")
 
@@ -1208,7 +1209,9 @@ def test_a_seat_with_no_capacity_still_reaches_the_compiled_preset_with_its_mode
     from ouroboros.gateway.onboarding import verified_harness_discoveries
 
     snapshot = _routable_snapshot(
-        [_no_capacity_now("claude", native_login=True), _native_account("codex")],
+        [_no_capacity_now("claude", _NOT_READY_NOW),
+         _pool("codex", {"kind": "profile", "profileId": "codex-default"})],
+        [_profile("claude", "claude-default"), _profile("codex", "codex-default")],
         harnesses=[
             {"id": "claude", "status": "ok", "enabled": True,
              "models": [{"id": "claude-opus-5-5"}, {"id": "claude-opus-5"}, {"id": "claude-sonnet-5"},
@@ -1226,27 +1229,20 @@ def test_a_seat_with_no_capacity_still_reaches_the_compiled_preset_with_its_mode
 
 
 # ---------------------------------------------------------------------------
-# The UNIFIED account model's wire (sprint plan §K.7 + frozen contract §L):
-# `harnessAccounts` arrives EMPTY (every account a named registry row) and the
-# routing verdict rides the additive `accountPools: [{harness_id, next_up}]`.
+# The pool verdicts of the unified roster: `harnessAccounts` arrives EMPTY
+# (every account a named registry row) and is never read; the routing verdict
+# rides `accountPools: [{harness_id, next_up}]`.
 # ---------------------------------------------------------------------------
 
 
 def _unified_snapshot(pools, profiles=(), harnesses=None, legacy_accounts=()):
-    snapshot = _routable_snapshot(list(legacy_accounts), profiles, harnesses)
-    snapshot["profiles"]["accountPools"] = list(pools)
-    return snapshot
-
-
-def _pool(harness, next_up):
-    return {"harness_id": harness, "next_up": next_up}
+    return _routable_snapshot(pools, profiles, harnesses, legacy_accounts=legacy_accounts)
 
 
 def test_a_unified_engine_routes_through_account_pools_not_the_empty_legacy_key():
-    """The dual-read's load-bearing half: on a unified engine the legacy
-    `harnessAccounts` is `[]`, so the old accounts.get(harness) authority is
-    absent — skipping there would silently drop EVERY unified harness from the
-    preset. The pool row is the accounts authority on that wire."""
+    """The pool row is the routing authority: `harnessAccounts` is `[]` on this
+    wire, and a harness skipped for lacking a row there would silently drop
+    EVERY harness from the preset."""
     from ouroboros.gateway.onboarding import subscription_routable_harnesses
 
     routable, refused = subscription_routable_harnesses(_unified_snapshot(
@@ -1256,10 +1252,9 @@ def test_a_unified_engine_routes_through_account_pools_not_the_empty_legacy_key(
     ))
 
     assert routable == {"claude": "account 'claude-default' (config_dir_login)"}
-    # The pool union's explicit API-key verdict is a refusal, same wording
-    # class as the legacy native api_key route.
+    # The pool union's explicit API-key verdict is a refusal.
     assert "API key" in refused["codex"]
-    # No pool row and no legacy row: silent absence, exactly as before.
+    # No pool row: silent absence.
     assert "cursor" not in routable and "cursor" not in refused
 
 
@@ -1283,7 +1278,7 @@ def test_a_unified_refusal_still_keeps_a_configured_named_seat_in_the_preset():
 
 
 def test_an_unknown_pool_kind_is_fail_safe_and_the_seat_scan_still_answers():
-    """Either wire may grow a spelling this reader predates (plan §E: degrade
+    """The pool union may grow a spelling this reader predates (plan §E: degrade
     honestly). An unknown kind is never a subscription verdict; a configured
     named profile still counts through the seat scan, and a harness with none
     is refused with the unknown state named."""
@@ -1300,35 +1295,20 @@ def test_an_unknown_pool_kind_is_fail_safe_and_the_seat_scan_still_answers():
     assert "unknown routing state 'quantum_pool'" in refused["codex"]
 
 
-def test_when_both_wires_carry_a_verdict_the_pool_wins():
-    """A transitional payload may carry both. Profiles own account facts, the
-    pool owns routing facts — one authority, or the two could disagree about
-    the same harness."""
-    from ouroboros.gateway.onboarding import subscription_routable_harnesses
-
-    routable, refused = subscription_routable_harnesses(_unified_snapshot(
-        [_pool("codex", {"kind": "api_key_route"})],
-        legacy_accounts=[_native_account("codex")],  # legacy says: healthy session
-    ))
-
-    assert routable == {}
-    assert "API key" in refused["codex"]
-
-
 def test_out_of_capacity_never_launders_an_api_key_or_an_unusable_seat():
     """The round-one finding must not regress through the new fallback: being out
     of capacity is not evidence of being a subscription. A harness whose only
     seats are API credentials, disabled or unverified stays refused."""
     from ouroboros.gateway.onboarding import subscription_routable_harnesses
 
-    # The default login exists, but the harness's auth_preference puts an API key
-    # ahead of it — durable, and exactly what D-3 forbids.
+    # An unpinned run takes an API key and the only named seat is an API
+    # credential: billing the owner's key is exactly what D-3 forbids.
     api_route = subscription_routable_harnesses(
-        _routable_snapshot([_native_account("codex", route="api_key")],
+        _routable_snapshot([_pool("codex", {"kind": "api_key_route"})],
                            [_profile("codex", "koshak", kind="api_key")]))
-    # No native login at all; the only named seats are unusable.
+    # The engine names a seat it does not list; the named seats are unusable.
     only_bad_profiles = subscription_routable_harnesses(_routable_snapshot(
-        [_profile_account("cursor", "ghost")],
+        [_pool("cursor", {"kind": "profile", "profileId": "ghost"})],
         [_profile("cursor", "byok", kind="api_key"),
          _profile("cursor", "off", enabled=False),
          _profile("cursor", "new", verification="not_run")]))
@@ -1341,7 +1321,7 @@ def test_no_routable_account_is_a_typed_failure_that_names_the_reason():
     from ouroboros.gateway.onboarding import verified_harness_discoveries
 
     discoveries, failure = verified_harness_discoveries(_routable_snapshot(
-        [_native_account("claude", detected=False)]))
+        [_pool("claude", {"kind": "none", "reason": "no signed-in session is detected"})]))
 
     assert discoveries == ()
     assert failure is not None and failure.code == "no_verified_account"
@@ -1398,7 +1378,7 @@ def test_get_onboarding_read_writes_nothing(monkeypatch, tmp_path):
     assert not settings_path.exists(), "GET /api/onboarding created settings.json"
 
     # And with a settings file present, its bytes and mtime are untouched.
-    settings_path.write_text(json.dumps({"OUROBOROS_MODEL": "openai/gpt-5.6-luna"}),
+    settings_path.write_text(json.dumps({"OUROBOROS_MODEL": "openai/gpt-5.6-luna", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}),
                              encoding="utf-8")
     before_bytes = settings_path.read_bytes()
     before_mtime = settings_path.stat().st_mtime_ns
@@ -1523,13 +1503,10 @@ def test_a_connected_agy_account_composes_with_core_reviewers(onboarding):
             # DEFAULT credential is not ready, which is agy's permanent state —
             # the routable verdict must come from the configured-profile
             # fallback, not from a profile-kind next_up.
-            "harnessAccounts": [
-                _native_account("claude"),
-                {"harness_id": "agy", "native_credentials_enabled": True,
-                 "native_login_detected": False, "identity": None,
-                 "next_up": {"kind": "none", "reason": "no default credential store"}},
-            ],
-            "profiles": [_profile("agy", "work")],
+            "profiles": [_profile("claude", "claude-default"), _profile("agy", "work")],
+            "harnessAccounts": [],
+            "accountPools": [_pool("claude", {"kind": "profile", "profileId": "claude-default"}),
+                             _pool("agy", {"kind": "none", "reason": "no default credential store"})],
         },
     }
 
@@ -1559,20 +1536,19 @@ def test_an_unavailable_harness_row_with_a_verified_named_profile_is_routable():
 
     snapshot = {
         "harnesses": [{"id": "agy", "status": "unavailable", "enabled": True}],
-        "profiles": {
-            "harnessAccounts": [_profile_account("agy", "work")],
-            "profiles": [_profile("agy", "work")],
-        },
+        "profiles": {"profiles": [_profile("agy", "work")], "harnessAccounts": [],
+                     "accountPools": [_pool("agy", {"kind": "profile", "profileId": "work"})]},
     }
     routable, refused = subscription_routable_harnesses(snapshot)
     assert "agy" in routable, refused
     assert "no default credential store" in routable["agy"]
 
-    # Same row, but only a signed-in DEFAULT session: still refused — the
-    # harness row is that seat's only runnability signal.
+    # Same row with no vouched named seat: refused — nothing else can vouch a
+    # seat on a row that reads unavailable.
     snapshot = {
         "harnesses": [{"id": "agy", "status": "unavailable", "enabled": True}],
-        "profiles": {"harnessAccounts": [_native_account("agy")], "profiles": []},
+        "profiles": {"profiles": [], "harnessAccounts": [],
+                     "accountPools": [_pool("agy", {"kind": "none", "reason": "no default credential store"})]},
     }
     routable, refused = subscription_routable_harnesses(snapshot)
     assert "agy" not in routable

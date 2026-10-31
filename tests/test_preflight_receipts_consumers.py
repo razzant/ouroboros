@@ -22,6 +22,7 @@ from ouroboros import preflight_receipts as receipts
 from ouroboros import preflight_runner as pr
 from ouroboros import review_ledger
 from ouroboros.commit_admission import run_tests_preflight_with_proof
+from ouroboros.test_evidence import diagnostic_directory
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
 from tests import _contributor_packet_shared as shared
 from tests.test_preflight_receipts import (  # noqa: F401 -- gate_env: the shared autouse gate environment
@@ -35,6 +36,9 @@ from tests.test_preflight_receipts import (  # noqa: F401 -- gate_env: the share
     receipt_python,
 )
 from tests.test_review_change_end_to_end import _brief_text
+from tests.test_review_change_end_to_end import staged_body as _staged_body
+
+staged_body = _staged_body
 
 pytestmark = pytest.mark.serial
 
@@ -407,7 +411,8 @@ def test_a_contributor_rerun_on_the_same_review_drive_reuses_the_proposals_run(t
     head, head_tree = _git(repo, "rev-parse", "HEAD"), _git(repo, "rev-parse", "HEAD^{tree}")
     _git(repo, "checkout", "-q", "--detach", base)
     monkeypatch.setattr(module, "REPO", repo)
-    drive = tmp_path / "review-drive"
+    # The wrapper's persistent review drive lives outside this test's disposable scratch.
+    drive = diagnostic_directory(tmp_path / "review-drive", "contributor-rerun")
     proposal = {"base_sha": base, "head_sha": head}
 
     first, refusal = module._contributor_tests_preflight(ToolContext(repo_dir=repo, drive_root=drive), proposal,
@@ -489,3 +494,406 @@ def test_a_standalone_review_is_unobserved_a_foreign_fact_is_not_run_and_the_too
 
     with pytest.raises(TypeError):
         review_change._handle_review_change(ctx, subject="index", goal="Bump", _preflight_execution=exhibit)
+
+
+# --------------------------------------------------------------- observed, never proof
+
+
+# The decisive failure is reported after another failure's long captured output, so
+# only the whole runner diagnosis names it; a preview-sized prefix would not.
+_NOISY_RED_SUITE = ("def test_a_noisy_failure():\n"
+                    "    print('progress of an unrelated failure\\n' * 90)\n"
+                    "    assert False\n\n\n"
+                    "def test_z_decisive_failure():\n"
+                    "    assert 2 + 2 == 5\n")
+
+
+def _whole_diagnosis(run: dict) -> str:
+    """The runner's own diagnosis of ``run`` (its result.json), checked to name the decisive
+    failure only past a preview-sized prefix, as delivered: credentials redacted."""
+    from ouroboros.observability import redact_projection
+
+    verdict = json.loads((pathlib.Path(run["evidence"]) / "result.json").read_text(encoding="utf-8"))["verdict"]
+    assert verdict.index("test_z_decisive_failure") > 2000, verdict
+    return str(redact_projection(verdict).value)
+
+
+def _red_body(tmp_path):
+    """The installed body with a red suite (``_NOISY_RED_SUITE``), its proposal staged."""
+    fixture = shared.init_installed_body(tmp_path)
+    repo = pathlib.Path(fixture["repo"])
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (repo / "pytest.ini").write_text("[pytest]\nmarkers =\n    serial: serial lane\n", encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_body.py").write_text(_NOISY_RED_SUITE, encoding="utf-8")
+    shared.git(repo, "add", "-A")
+    shared.git(repo, "commit", "-q", "-m", "suite")
+    shared.git(repo, "cherry-pick", "--no-commit", fixture["head_sha"])
+    return repo
+
+
+def test_a_red_suite_reaches_every_gate_seat_as_an_observation_and_the_tests_fact_stays_not_run(
+        tmp_path, monkeypatch):
+    """Cyber Pro continues past a red hermetic run to the panel. What the runner observed
+    (a red lane on these bytes and its whole diagnosis, which names the decisive failing
+    test past a preview-sized prefix) reaches every seat of the wave, packet, native and
+    session alike, inside the frozen exhibit; the proof status and the record's tests
+    fact stay NOT_RUN."""
+    import ouroboros.review_substrate as substrate
+    from ouroboros.tools.git_review_cycle import _run_non_committing_review_cycle
+    from ouroboros.tools.registry import ToolContext
+    from tests.review_pool_rosters import set_review_pool
+
+    repo = _red_body(tmp_path)
+    head = shared.git(repo, "rev-parse", "HEAD")
+    set_review_pool(monkeypatch, shared.golden_pool())
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    briefs, evidence = [], []
+    monkeypatch.setattr(substrate, "run_review_request", _recording(shared.golden_substrate(briefs), evidence))
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive")
+
+    outcome = _run_non_committing_review_cycle(ctx, "fix: proposal", skip_advisory_review=True,
+                                               goal="Ship the proposal", scope="the proposal files")
+
+    record_id = outcome.get("review_record_id") or (outcome.get("review_reference") or {}).get("review_record_id")
+    record = review_ledger.load_record(ctx.drive_root, record_id)
+    exhibit = record["preflight_execution"]
+    assert (exhibit["status"], exhibit["reason"]) == ("not_run", "tests preflight did not pass")
+    assert record["tests"] == {"policy": "NOT_RUN", "result": "unknown"}
+    [run] = exhibit["observed"]
+    assert (run["outcome"], run["tier"], run["relation"], run["tested"]["head"]) == ("failed", "full", "same_bytes", head)
+    assert run["terminal"] == "read" and run["diagnosis"] == _whole_diagnosis(run)
+    assert any(lane.get("returncode") not in (0, None) for lane in run["lanes"])
+    section = receipts.execution_section(exhibit)
+    assert "FAILED: a lane exited red, on the bytes of this candidate" in section
+    assert "test_z_decisive_failure" in section and "Runner diagnosis (whole" in section
+    assert "running" not in json.dumps(exhibit)
+    assert sorted(brief["slot_id"] for brief in briefs) == ["s1", "t1", "t2"]
+    assert all(_brief_text(brief).count(section) == 1 for brief in briefs)
+    # The run's evidence directory stays the author's: no seat is handed a path it was not granted.
+    assert run["evidence"] and not any(run["evidence"] in _brief_text(brief) for brief in briefs)
+    assert len(evidence) == 3 and all(item["preflight_execution"] == exhibit for item in evidence)
+
+
+def test_a_selected_red_run_of_earlier_bytes_reaches_a_public_review_as_their_history_never_this_subjects(
+        tmp_path, monkeypatch):
+    """The author's selected run failed on A; the author fixed it to B and asked the public
+    review_change about B. The seats are shown that run as what it was: red on other bytes,
+    with its failing test and source. Nothing claims B failed, and no PASS appears."""
+    import ouroboros.review_substrate as substrate
+    from ouroboros import test_selection
+    from ouroboros.tools import review_change
+    from tests.test_review_change_end_to_end import _foreign_project
+
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(test_selection, "FLOOR_TESTS", {"tests/test_floor.py": "floor witness"})
+    for name, text in {".gitignore": "__pycache__/\n.pytest_cache/\n",
+                       "pytest.ini": "[pytest]\nmarkers =\n    serial: serial lane\n",
+                       "tests/test_floor.py": "def test_floor():\n    assert True\n",
+                       "tests/test_lib.py": "from lib import LIB\n\n\ndef test_lib():\n    assert LIB == 'base'\n"}.items():
+        (project / name).parent.mkdir(parents=True, exist_ok=True)
+        (project / name).write_text(text, encoding="utf-8")
+    shared.git(project, "add", "-A")
+    shared.git(project, "commit", "-q", "-m", "suite")
+    ctx.repo_dir = project  # the checkout the author's tests ran in
+    (project / "lib.py").write_text("LIB = 'broken'\n", encoding="utf-8")  # A
+    assert pr.run_hermetic_pytest(project, ctx=ctx, selected=True, phase=pr.PRE_COMMIT_PHASE)
+    tested_a = ctx._preflight_test_disclosure["candidate"]
+    (project / "lib.py").write_text("LIB = 'base'  # restored\n", encoding="utf-8")  # B
+    briefs: list = []
+    monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(briefs))
+
+    text = review_change._handle_review_change(ctx, subject="worktree", goal="Restore lib", scope="lib.py")
+
+    record = review_ledger.load_record(ctx.drive_root, json.loads(text[text.index("{"):])["record_id"])
+    exhibit = record["preflight_execution"]
+    assert (exhibit["status"], exhibit["reason"]) == ("not_run", "no green hermetic run covers this candidate")
+    [run] = exhibit["observed"]
+    assert (run["outcome"], run["tier"], run["relation"], run["differs"]) == ("failed", "selected", "other_bytes", ["tree"])
+    assert run["tested"]["tree"] == tested_a != record["subject"]["tree_sha"]
+    assert run["failed_tests"] == ["tests/test_lib.py::test_lib"] and run["selected_modules"] == 2
+    assert record["tests"]["policy"] == "NOT_RUN"
+    section = receipts.execution_section(exhibit)
+    assert "FAILED: a lane exited red, on OTHER bytes (differs: tree)" in section
+    assert "not a result of this candidate" in section and "PASS" not in section
+    assert sorted(brief["slot_id"] for brief in briefs) == ["s1", "t1", "t2"]
+    assert all(_brief_text(brief).count(section) == 1 for brief in briefs)
+
+
+def test_an_observation_of_another_repository_is_left_out_and_a_public_one_stays_unobserved(tmp_path, monkeypatch):
+    from tests.test_review_change_end_to_end import _foreign_project
+
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    system_head = shared.git(pathlib.Path(ctx.repo_dir), "rev-parse", "HEAD")  # no commit of the project
+    project_head, project_tree = shared.git(project, "rev-parse", "HEAD"), shared.git(project, "rev-parse", "HEAD^{tree}")
+    frozen = SimpleNamespace(parent_sha=project_head, tree_sha="1" * 40, spec=SimpleNamespace(root=str(project)))
+    foreign = {"source": "hermetic_tests", "outcome": "failed", "tested": {"head": system_head, "tree": "2" * 40}}
+    earlier = {"source": "hermetic_tests", "outcome": "failed", "tested": {"head": project_head, "tree": project_tree}}
+    exhibit = {"status": "not_run", "reason": "tests preflight did not pass", "observed": [foreign]}
+
+    assert receipts.bind_execution_exhibit(exhibit, frozen, public=True) == receipts.UNOBSERVED
+    assert receipts.bind_execution_exhibit(exhibit, frozen) == {"status": "not_run", "reason": "tests preflight did not pass"}
+    bound = receipts.bind_execution_exhibit({**exhibit, "observed": [foreign, earlier]}, frozen, public=True)
+    assert [(entry["tested"]["head"], entry["relation"], entry["differs"]) for entry in bound["observed"]] == [
+        (project_head, "other_bytes", ["tree"])]
+
+
+@pytest.mark.parametrize("stop", ["plugins_missing", "lane_never_returned", "terminal_lost", "terminal_only",
+                                  "nothing_left"])
+def test_a_run_that_minted_no_proof_states_what_its_runner_observed_and_never_running(tmp_path, monkeypatch, stop):
+    """Setup failed before any lane (not started), a lane started and never returned
+    (interrupted), the run's result.json then lost (the row still speaks, the terminal is
+    named unavailable), only the terminal left (it speaks), or neither (no terminal)."""
+    from tests.test_preflight_receipts import _ctx
+
+    repo = _tiny_repo(tmp_path)
+    ctx = _ctx(repo, tmp_path / "canonical")
+    if stop == "plugins_missing":
+        monkeypatch.setattr(pr, "_verify_preflight_plugins", lambda *_args: ["pytest-xdist: not importable"])
+    else:
+        monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *_args: (None, "partial output", ""))
+    assert pr.run_hermetic_pytest(repo, ctx=ctx)
+    result = pathlib.Path(ctx._preflight_test_evidence) / "result.json"
+    if stop in ("terminal_lost", "nothing_left"):
+        result.unlink()
+    if stop in ("terminal_only", "nothing_left"):
+        ctx._preflight_test_disclosure = None  # a run whose attempt row this process no longer holds
+
+    exhibit = receipts.execution_exhibit(ctx, otherwise="tests preflight did not pass")
+
+    [run] = exhibit["observed"]
+    assert run["outcome"] == {"plugins_missing": "not_started", "lane_never_returned": "interrupted",
+                              "terminal_lost": "interrupted", "terminal_only": "interrupted",
+                              "nothing_left": "no_terminal"}[stop]
+    assert run["evidence"] == ctx._preflight_test_evidence
+    assert run["terminal"] == "read" if result.exists() else run["terminal"].startswith("unavailable")
+    assert (run["relation"] == "unknown") is (stop in ("plugins_missing", "terminal_only", "nothing_left"))
+    assert ("diagnosis" in run) is result.exists()
+    assert "running" not in json.dumps(exhibit) and exhibit["status"] == "not_run"
+    section = receipts.execution_section(exhibit)
+    assert "NOT_RUN names the missing proof only" in section and "test gate passed" not in section
+    # The record keeps its path, which no seat is given; the seats read the whole diagnosis,
+    # or that the result.json holding it could not be read, named by its error type alone.
+    assert run["evidence"] not in section
+    assert ("Runner diagnosis (whole" in section) is result.exists()
+    assert ("Runner diagnosis: none shown, its result.json is unavailable (FileNotFoundError)." in section) is (
+        not result.exists())
+
+
+def test_a_lane_start_is_claimed_only_from_the_runners_record_of_an_acquired_process():
+    """``attempt_outcome`` reads the runner's phase and the lanes that returned: no process
+    created, a launch the runner could not settle (alone, or after a lane that did run), a
+    returned lane that timed out, a red one."""
+    from ouroboros.preflight_inventory import attempt_outcome
+
+    node_green, timed_out = {"lane": "node", "returncode": 0}, {"lane": "pytest", "pass": "parallel", "returncode": None}
+    assert attempt_outcome({"execution": "not_run", "lanes": []}) == "not_started"
+    assert attempt_outcome({"execution": "attempted", "lanes": []}) == "start_unknown"
+    assert attempt_outcome({"execution": "attempted", "lanes": [node_green]}) == "interrupted"
+    assert attempt_outcome({"execution": "executed", "lanes": [timed_out]}) == "interrupted"
+    assert attempt_outcome({"execution": "executed", "lanes": [{**timed_out, "returncode": 1}]}) == "failed"
+
+
+def _tier_run(repo, ctx, monkeypatch, tier, **kwargs):
+    """``run_hermetic_pytest`` at ``tier``: the selected one runs ``tests/test_parallel.py`` as its floor."""
+    if tier == "selected":
+        from ouroboros import test_selection
+
+        monkeypatch.setattr(test_selection, "FLOOR_TESTS", {"tests/test_parallel.py": "floor witness"})
+        kwargs.update(selected=True, phase=pr.PRE_COMMIT_PHASE)
+    return pr.run_hermetic_pytest(repo, ctx=ctx, **kwargs)
+
+
+@pytest.mark.parametrize("failure", ["no_process", "custody_failed"])
+@pytest.mark.parametrize("lane,tier", [("pytest", "full"), ("pytest", "selected"), ("node", "full")])
+def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tmp_path, monkeypatch, lane, tier,
+                                                                             failure):
+    """The first lane's launch fails: the OS refuses its process (EAGAIN: none is created),
+    or the process is created but the container cannot take custody of it and stops it
+    at launch. The first is NOT STARTED, the second START UNKNOWN; neither claims a lane
+    started (INTERRUPTED), and neither is ever proof."""
+    import errno
+
+    from ouroboros import preflight_node, process_containment
+    from ouroboros.process_overload import OverloadWatch
+    from tests.test_preflight_receipts import _ctx
+    from tests.test_preflight_runner import _pin_preflight_root
+
+    repo = _tiny_repo(tmp_path, web=lane == "node")
+    ctx = _ctx(repo, tmp_path / "canonical")
+    if lane == "node":  # no working Node is needed: this lane never gets past its launch
+        monkeypatch.setattr(preflight_node, "resolve_node", lambda: sys.executable)
+        monkeypatch.setattr(preflight_node, "probe_node_version", lambda _node: "99.0.0")
+    if failure == "no_process":
+        lane_argv = {"pytest": ("-m", "pytest"), "node": ("--test",)}[lane]
+
+        def popen(argv, *args, **kwargs):
+            if all(part in argv for part in lane_argv):
+                raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+            return subprocess.Popen(argv, *args, **kwargs)
+
+        # Only the container's own view of subprocess refuses: git and every probe keep the real one.
+        monkeypatch.setattr(process_containment, "subprocess", SimpleNamespace(**{
+            **{name: getattr(subprocess, name) for name in dir(subprocess) if not name.startswith("__")}, "Popen": popen}))
+    else:
+        def refused(_watch):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(OverloadWatch, "start", refused)
+
+    # Nothing here is retired: only a real, unproven teardown could hold this tree, and that fails the test.
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+
+    verdict = _tier_run(repo, ctx, monkeypatch, tier)
+
+    assert verdict and "hermetic preflight failed" in verdict, verdict
+    terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    execution, outcome = {"no_process": ("not_run", "not_started"), "custody_failed": ("attempted", "start_unknown")}[failure]
+    assert (terminal["execution"], terminal["lanes"], ctx._preflight_test_disclosure["outcome"]) == (execution, [], outcome)
+    assert (terminal["cleanup"], terminal["retention_reason"]) == ("released", "") and not temp_root.exists()
+    assert getattr(ctx, "_preflight_tests_passed", None) is not True and getattr(ctx, "_preflight_test_proof", None) is None
+    exhibit = receipts.execution_exhibit(ctx, otherwise="tests preflight did not pass")
+    [run] = exhibit["observed"]
+    assert (exhibit["status"], run["outcome"], run["tier"]) == ("not_run", outcome, tier)
+    section = receipts.execution_section(exhibit)
+    assert ("NOT STARTED" if failure == "no_process" else "START UNKNOWN") in section
+    assert "INTERRUPTED" not in section and "a lane process started" not in section and "PASSED" not in section
+
+
+@pytest.mark.parametrize("lane,tier", [("pytest", "full"), ("pytest", "selected"), ("node", "full")])
+def test_a_lane_that_started_and_then_timed_out_is_interrupted_never_passed(tmp_path, monkeypatch, lane, tier):
+    """The control: a lane whose process was acquired and then outlived the budget is
+    INTERRUPTED (it started; no verdict), on both tiers and the node lane."""
+    from tests.test_preflight_receipts import _ctx, _usable_node
+
+    if lane == "node" and not _usable_node():
+        pytest.skip("no usable Node runtime for the node lane")
+    repo = _tiny_repo(tmp_path, web=lane == "node")
+    if lane == "node":
+        (repo / "web" / "tests" / "tiny.test.js").write_text(
+            "const test = require('node:test');\ntest('hangs', () => new Promise((done) => setTimeout(done, 600000)));\n",
+            encoding="utf-8")
+    else:
+        (repo / "tests" / "test_parallel.py").write_text("import time\n\n\ndef test_hangs():\n    time.sleep(600)\n",
+                                                         encoding="utf-8")
+    _git(repo, "commit", "-qam", "a hanging test")
+    ctx = _ctx(repo, tmp_path / "canonical")
+
+    verdict = _tier_run(repo, ctx, monkeypatch, tier, timeout=8)
+
+    assert verdict and "timed out" in verdict, verdict
+    terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert terminal["execution"] == "executed" and [entry["lane"] for entry in terminal["lanes"]] == [lane]
+    assert terminal["lanes"][0]["returncode"] is None and ctx._preflight_test_disclosure["outcome"] == "interrupted"
+    assert getattr(ctx, "_preflight_tests_passed", None) is not True and getattr(ctx, "_preflight_test_proof", None) is None
+    exhibit = receipts.execution_exhibit(ctx, otherwise="tests preflight did not pass")
+    section = receipts.execution_section(exhibit)
+    assert exhibit["status"] == "not_run" and "INTERRUPTED" in section
+    assert "NOT STARTED" not in section and "START UNKNOWN" not in section and "PASSED" not in section
+
+
+def test_a_pending_wave_rejoins_with_the_whole_runner_diagnosis_its_seats_were_sent(tmp_path, monkeypatch):
+    """A red run whose decisive failing test is named past a preview-sized prefix: every seat
+    of the first dispatch, packet, native and session, reads the whole diagnosis, and the
+    pending rejoin collects under that same frozen exhibit, buying nothing."""
+    import ouroboros.review_substrate as substrate
+    from ouroboros.tools.review_change import run_review_change
+    from tests.test_preflight_receipts import _ctx
+    from tests.test_review_change_end_to_end import _foreign_project, _pending_then_answering_seat
+
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    (project / "pytest.ini").write_text("[pytest]\nmarkers =\n    serial: serial lane\n", encoding="utf-8")
+    (project / "tests").mkdir()
+    (project / "tests" / "test_app.py").write_text(_NOISY_RED_SUITE, encoding="utf-8")
+    (project / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n", encoding="utf-8")
+    shared.git(project, "add", "-A")
+    shared.git(project, "commit", "-q", "-m", "suite")
+    (project / "app.py").write_text("VALUE = 2  # staged\n", encoding="utf-8")
+    shared.git(project, "add", "app.py")
+    author = _ctx(project, tmp_path / "canonical")  # the author's own process ran the suite
+    assert pr.run_hermetic_pytest(project, ctx=author)
+    exhibit = receipts.execution_exhibit(author, otherwise="tests preflight did not pass")
+    sends, seats = [], []
+    answer, _starts = _pending_then_answering_seat("t2", "invocation-c2")
+    physical = shared.golden_physical_seam(sends, answer=answer)
+
+    def run_slot(self, request, slot, **kwargs):
+        seats.append({"slot_id": slot.slot_id, "messages": [dict(m) for m in request.messages],
+                      "session_task": request.session_task or ""})
+        return physical(self, request, slot, **kwargs)
+
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", run_slot)
+    ask = dict(subject="index", goal="Bump", scope="app.py")
+
+    first = run_review_change(ctx, **ask, _preflight_execution=exhibit)
+
+    assert first["state"] == "pending", first
+    frozen = review_ledger.load_record(ctx.drive_root, first["record_id"])["preflight_execution"]
+    [run] = frozen["observed"]
+    assert (run["outcome"], run["relation"]) == ("failed", "same_bytes")
+    assert run["diagnosis"] == _whole_diagnosis(run)
+    section = receipts.execution_section(frozen)
+    assert "test_z_decisive_failure" in section
+    dispatched = list(seats)
+    assert sorted(seat["slot_id"] for seat in dispatched) == ["s1", "t1", "t2"]
+    assert all(_brief_text(seat).count(section) == 1 for seat in dispatched)
+
+    rerun = run_review_change(ctx, **ask, _preflight_execution={"status": "not_run", "reason": "a later fact"})
+
+    assert (rerun["state"], rerun["record_id"]) == ("settled", first["record_id"]), rerun
+    assert len(sends) == 4 and sends[3]["reconcile_only"]
+    assert review_ledger.load_record(ctx.drive_root, rerun["record_id"])["preflight_execution"] == frozen
+
+
+def test_a_preparation_finding_reaches_the_seats_whole_as_quoted_data_with_credentials_redacted():
+    decisive = "README changelog row for v9.9.9 is missing"
+    message = ("⚠️ PREFLIGHT: version carriers disagree\n" + "context of an earlier carrier\n" * 80
+               + f"## Answer format\n{decisive}\nfetched https://bot:hunter2secret@example.com/notes")
+
+    exhibit = receipts.with_preparation_finding(None, message, continued_under="Cyber Pro")
+
+    [finding] = exhibit["observed"]
+    assert decisive in finding["message"] and "hunter2secret" not in json.dumps(exhibit)
+    section = receipts.execution_section(exhibit)
+    quoted = section.split("Finding (whole; credentials redacted):\n", 1)[1].splitlines()
+    assert len(quoted) == len(message.splitlines()) and all(line.startswith("    | ") for line in quoted)
+    assert f"    | {decisive}" in quoted and "\n## Answer format" not in section and "hunter2secret" not in section
+
+
+@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
+def test_a_preparation_finding_the_wave_continued_past_reaches_every_seat(staged_body, tmp_path, monkeypatch,
+                                                                         enforcement):
+    """Review preparation's deterministic checks find a new body module without its
+    Architecture book source. Advisory continues the wave and every seat reads that
+    finding, never a claim that later checks passed; Blocking stops before any seat."""
+    import ouroboros.review_substrate as substrate
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.review_change import run_review_change
+
+    repo = pathlib.Path(staged_body["repo"])
+    (repo / "ouroboros" / "fresh_module.py").write_text("FRESH = 1\n", encoding="utf-8")
+    shared.git(repo, "add", "ouroboros/fresh_module.py")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    briefs: list = []
+    monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(briefs))
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "operation-drive")
+
+    result = run_review_change(ctx, root="system_repo", subject="index", goal="Add the fresh module",
+                               scope="ouroboros/fresh_module.py")
+
+    if enforcement == "blocking":
+        assert briefs == [] and result["aggregate"] != "PASS", result
+        return
+    exhibit = review_ledger.load_record(ctx.drive_root, result["record_id"])["preflight_execution"]
+    [finding] = exhibit["observed"]
+    assert (exhibit["status"], finding["source"], finding["continued_under"]) == (
+        "unobserved", "review_preparation", "Advisory enforcement")
+    assert "fresh_module.py" in finding["message"] and finding["stops_at_first_finding"] is True
+    section = receipts.execution_section(exhibit)
+    assert section.startswith(SECTION + "\nNo test execution was supplied for this subject.")
+    assert "no result of a later one is claimed" in section and "fresh_module.py" in section
+    assert sorted(brief["slot_id"] for brief in briefs) == ["s1", "t1", "t2"]
+    assert all(_brief_text(brief).count(section) == 1 for brief in briefs)

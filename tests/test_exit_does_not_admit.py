@@ -165,11 +165,21 @@ def test_a_live_or_reserved_owner_keeps_its_pending_row_even_when_replay_is_admi
     ensured = _Recorder()
 
     outcomes = dc.reconcile_orphaned_runs(tmp_path, {"t-live"}, gateway_factory=lambda: ensured,
-                                          recoverable_task_ids={"t-reserved"}, replay_pending=lambda: True)
+        recoverable_handles={("t-reserved", "", "inv-reserved")}, replay_pending=lambda: True)
 
     assert outcomes == [] and ensured.started == []
     assert _pending_ids(tmp_path, "t-live") == ["inv-live"]
     assert _pending_ids(tmp_path, "t-reserved") == ["inv-reserved"]
+
+
+def test_an_exact_pending_reservation_does_not_protect_another_start_of_its_task(tmp_path):
+    dc = _pending(tmp_path, invocation_id="inv-reserved")
+    _pending(tmp_path, invocation_id="inv-independent")
+    ensured = _Recorder()
+    dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: ensured,
+        recoverable_handles={(TASK, "", "inv-reserved")}, replay_pending=lambda: True)
+    assert [key for _request, key in ensured.started] == ["inv-independent"]
+    assert _pending_ids(tmp_path) == ["inv-reserved"]
 
 
 def test_the_stopping_sweep_attaches_and_replays_nothing_while_the_admitted_one_ensures(tmp_path, monkeypatch):

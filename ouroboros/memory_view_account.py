@@ -4,9 +4,11 @@ An account (``chronicle_store.publish_account``) is my own text over exact sourc
 several rooms. It enters ``## My story`` only through my selection (``select_account``): the
 acting selection says whether it is shown and which named records of the story it tells
 instead (``told_by``). The resident block keeps its period, counts and one exact composition
-reader instead of a row per source or replaced record; the room keeps its detail
-(``memory_view._capture_room``). New corrections and rejections stay whole beside the
-unchanged account until a newly authored account cites their source versions. Mere
+reader instead of a row per source or replaced record; with a story, a replaced record leaves its
+own room's page too (``memory_view._capture_room``; a story-less nanny keeps it) and stays one
+``memory_read`` away. New corrections and rejections stay whole beside the unchanged account until
+a newly authored account cites their source versions. Reporting them does not compare the account
+with its cited versions for omissions; a later correction may still name an old omission. Mere
 correction or re-selection of an old account does not update its frozen edges. The host
 reports these facts, draft decisions, folds and gaps; it never rewrites meaning.
 
@@ -98,7 +100,7 @@ def accounts_line(status: Mapping[str, Any]) -> str:
 def account_entries(store: ChronicleStore, label: Callable[..., str], units: Mapping[str, memory_inventory.LegacyUnit],
                     fixes: Mapping[str, List[Dict[str, Any]]],
                     period_text: Callable[[memory_inventory.Period], str]) -> List[Dict[str, Any]]:
-    """Every account shown by its acting selection, as a story entry placed like a page (``first``, sequence).
+    """Every account shown by its acting selection, as a story entry placed like a part (``first``, sequence).
 
     ``fixes`` is the story's map of corrections and rejections by target (``memory_view._story_pages``);
     a source's later corrections are read from it by id, so the words shown are the correction's.

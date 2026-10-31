@@ -8,7 +8,7 @@ task card (``card_row``, a child's terminal incident included), a child task's
 own message (its delegation lineage, host-enriched at delivery) and every
 progress row — narration, lifecycle, typed incidents — change a card, not the
 conversation, and leave the revision alone. Where a row is shown decides, never
-its kind (DESIGN "Project unread dot").
+its kind (DESIGN "Unread").
 
 Every case runs the real delivery seam (``events_chat_delivery._handle_send_message``
 or the bridge's media sends) against a real registered Project, so the counter
@@ -25,6 +25,8 @@ import pytest
 from ouroboros.owner_quiz import quiz_states, record_asked
 from ouroboros.projects_registry import create_project, get_project
 from ouroboros.utils import append_jsonl
+from ouroboros import dialogue_store as ds
+from tests._dialogue import chat_rows, progress_rows
 from supervisor import events_chat_delivery as delivery
 from supervisor import message_bus
 
@@ -102,8 +104,7 @@ def test_conversation_messages_advance_unread_once(room, task_id, fields):
 ])
 def test_task_card_content_leaves_unread_alone(room, task_id, fields):
     assert room.deliver(task_id, **fields) == 0
-    rows = (room.root / "logs").glob("*.jsonl")
-    assert any("words" in path.read_text(encoding="utf-8") for path in rows), \
+    assert any(row.get("text") == "words" for row in chat_rows(room.root) + progress_rows(room.root)), \
         "the content itself is still delivered and persisted"
 
 
@@ -181,17 +182,18 @@ def test_empty_text_and_other_rooms_never_advance(room, tmp_path):
 def test_every_counted_message_is_stored_before_its_revision_advances(room, monkeypatch):
     """A client that sees the new revision reads history begun after it, so the row the revision
     counts must already be stored: otherwise that read could paint without it and be acknowledged."""
-    from ouroboros import projects_registry
-
-    chat_log = room.root / "logs" / "chat.jsonl"
-    advance = projects_registry.increment_project_visible_revision
+    append = ds.append
     stored = []
+    registry_before = (room.root / "state/projects.json").read_bytes()
 
-    def observed(data_dir, **kwargs):
-        stored.append(len(chat_log.read_text(encoding="utf-8").splitlines()) if chat_log.exists() else 0)
-        return advance(data_dir, **kwargs)
+    def observed(root, stream, row, **kwargs):
+        receipt = append(root, stream, row, **kwargs)
+        if stream == "chat" and kwargs.get("feed"):
+            assert ds.room(root, room.chat_id)["revision"] == len(chat_rows(root))
+            stored.append(len(chat_rows(root)))
+        return receipt
 
-    monkeypatch.setattr(projects_registry, "increment_project_visible_revision", observed)
+    monkeypatch.setattr(ds, "append", observed)
     assert room.deliver("root-1", "the root's own answer") == 1
     assert room.bridge.send_photo(room.chat_id, b"png", caption="shot", task_id="root-1")[0]
     assert room.bridge.send_video(room.chat_id, b"mp4", caption="clip", task_id="root-1")[0]
@@ -203,7 +205,8 @@ def test_every_counted_message_is_stored_before_its_revision_advances(room, monk
     assert room.bridge.send_quiz(room.chat_id, quiz_id="q1", question="Merge now?",
                                  options=[{"label": "Yes"}, {"label": "No"}], stake="release timing",
                                  assumption="continuing with the merge", task_id="root-1") == (True, "ok")
-    assert stored == [1, 2, 3, 4, 5, 6], "each advance finds its own message already stored"
+    assert stored == [1, 2, 3, 4, 5, 6], "row and revision commit together"
+    assert (room.root / "state/projects.json").read_bytes() == registry_before
 
 
 @pytest.mark.parametrize("kind", ["text", "photo", "video", "document", "links", "quiz"])
@@ -214,9 +217,8 @@ def test_failed_canonical_append_never_mints_a_phantom_revision(room, monkeypatc
     owed until its canonical row is durable, before any live exposure.
     """
     assert room.deliver("root-1", "stored answer") == 1
-    chat_log = room.root / "logs" / "chat.jsonl"
-    initial = chat_log.read_bytes()
-    append = message_bus.append_jsonl
+    initial = chat_rows(room.root)
+    append = ds.append
     if kind == "quiz":
         record_asked(room.root, "root-1", quiz_id="write-q", question="Continue?", options=["Yes", "No"],
                      stake="next step", assumption="continue", chat_id=room.chat_id)
@@ -230,8 +232,10 @@ def test_failed_canonical_append_never_mints_a_phantom_revision(room, monkeypatc
                                                options=[{"label": "Yes"}, {"label": "No"}], stake="next step",
                                                assumption="continue", task_id="root-1"),
     }[kind]
-    monkeypatch.setattr(message_bus, "append_jsonl", lambda path, *args, **kwargs:
-                        False if path == chat_log else append(path, *args, **kwargs))
+    def refuse(*args, **kwargs):
+        raise ds.StoreError("dialogue write failed")
+
+    monkeypatch.setattr(ds, "append", refuse)
     before_frames = len(room.frames)
     if kind == "quiz":
         with pytest.raises(RuntimeError, match="canonical message acceptance could not be persisted"):
@@ -242,13 +246,14 @@ def test_failed_canonical_append_never_mints_a_phantom_revision(room, monkeypatc
         assert block["delivery"]["state"] == "owed" and not block.get("published_at")
     else:
         result = send()
-        assert (result is None if kind == "text" else result == (True, "ok")), result
+        # The text sender answers with the room it selected (an additive return, PR #2150); media senders keep (True, "ok").
+        assert (result == {"chat_id": room.chat_id} if kind == "text" else result == (True, "ok")), result
         assert len(room.frames) > before_frames, "existing best-effort live delivery stays available"
-    assert chat_log.read_bytes() == initial
+    assert chat_rows(room.root) == initial
     assert room.revision() == 1, "the missing canonical row cannot be acknowledged as a new revision"
-    monkeypatch.setattr(message_bus, "append_jsonl", append)
+    monkeypatch.setattr(ds, "append", append)
     send()
-    assert len(chat_log.read_text(encoding="utf-8").splitlines()) == 2
+    assert len(chat_rows(room.root)) == 2
     assert room.revision() == 2, "a later successful write still advances exactly once"
     if kind == "quiz":
         assert quiz_states(room.root, "root-1")["write-q"]["delivery"]["state"] == "delivered"

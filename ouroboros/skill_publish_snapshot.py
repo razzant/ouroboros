@@ -16,12 +16,12 @@ from ouroboros.contracts.skill_manifest import (
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_PAYLOAD_CONTROL_FILENAMES,
 )
+from ouroboros.skill_identity import payload_bucket, release_declaration, release_digest_from_file_digests
 from ouroboros.skill_loader import (
     _MANIFEST_NAMES,
     LoadedSkill,
     SkillPayloadUnreadable,
     _iter_payload_files,
-    reduce_skill_content_hash,
 )
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.skill_publish_eligibility import publication_author_acceptance
@@ -237,7 +237,13 @@ def capture_skill_publish_candidate(loaded: LoadedSkill) -> SkillPublishSnapshot
     if not any(item.path == manifest_rel for item in captured):
         raise SkillPublishSnapshotError("snapshot_manifest_unreadable")
 
-    content_hash = reduce_skill_content_hash((item.path, bytes.fromhex(item.sha256)) for item in captured)
+    # The release digest of exactly these bytes (the bucket's per-install notes are skipped), the same
+    # identity the loader's content hash and every review record use.
+    content_hash = release_digest_from_file_digests(
+        ((item.path, bytes.fromhex(item.sha256)) for item in captured),
+        release_declaration(skill_dir, parsed),
+        bucket=payload_bucket(skill_dir),
+    )
     return SkillPublishSnapshot(
         skill=str(loaded.name or skill_dir.name),
         source=str(loaded.source or ""),

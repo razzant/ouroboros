@@ -103,6 +103,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     (repo / "README.md").write_text("repo readme\n", encoding="utf-8")
     (data / "logs").mkdir()

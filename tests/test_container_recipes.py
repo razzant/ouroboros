@@ -12,8 +12,14 @@ point to it instead of repeating it. Real container lifecycle: tests/system_e2e
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
+import socket
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -88,8 +94,95 @@ def test_the_compose_carrier_is_the_one_executable_recipe():
                for volume in service["volumes"])
 
 
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _boot_health(port: str) -> int:
+    env = os.environ.copy()
+    env["OUROBOROS_SERVER_PORT"] = port
+    completed = subprocess.run(
+        [sys.executable, str(REPO / "packaging" / "docker" / "boot_health.py")],
+        env=env,
+        timeout=10,
+        check=False,
+    )
+    return completed.returncode
+
+
+def _serve(body: bytes, status: int = 200) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler name
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_compose_healthcheck_follows_the_boot_phase_without_a_start_deadline():
+    recipe = yaml.safe_load((REPO / "packaging" / "docker" / "compose.yaml").read_text(encoding="utf-8"))
+    expected = [
+        "CMD",
+        "/opt/python-standalone/bin/python3",
+        "/app/packaging/docker/boot_health.py",
+    ]
+    for service in recipe["services"].values():
+        health = service["healthcheck"]
+        assert health["test"] == expected
+        assert health["start_period"] == "0s"
+        assert health["timeout"] == "5s"
+
+
+def test_boot_health_fails_only_when_the_phase_is_failed():
+    """A progressing or unreachable boot stays healthy; an explicit failed phase does not."""
+    quiet = {
+        b'{"status":"ok","boot":{"phase":"starting"}}',
+        b'{"status":"ok","boot":{"phase":"serving"}}',
+        b'{"status":"ok","boot":{"phase":"ready"}}',
+        b'{"status":"ok"}',
+        b"not-json",
+    }
+    servers = []
+    try:
+        for body in quiet:
+            server = _serve(body)
+            servers.append(server)
+            assert _boot_health(str(server.server_address[1])) == 0
+        failed = _serve(b'{"status":"ok","boot":{"phase":"failed","error":"store"}}')
+        servers.append(failed)
+        assert _boot_health(str(failed.server_address[1])) == 1
+        refused = _serve(b"nope", status=500)
+        servers.append(refused)
+        assert _boot_health(str(refused.server_address[1])) == 0
+        assert _boot_health(str(_free_port())) == 0
+    finally:
+        for server in servers:
+            server.shutdown()
+
+
 def test_the_guides_point_to_the_carrier_instead_of_repeating_it():
     deployment = (REPO / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert "packaging/docker/compose.yaml" in deployment and "```yaml" not in deployment
-    assert "packaging/docker/compose.yaml" in (REPO / "README.md").read_text(encoding="utf-8")
+    assert "python-build-standalone release 20261009" in deployment
+    assert "CPython 3.10.22 and SQLite 3.53.1" in deployment
+    assert "does not replace" in deployment
+    assert "installing the app again" in deployment
+    assert "boot.phase" in deployment and "no start deadline" in deployment
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert "CPython 3.10.22 and SQLite 3.53.1" in readme
+    assert "install the app again" in readme
+    for page in (REPO / "site" / "install" / "index.html", REPO / "docs" / "install" / "index.html"):
+        html = page.read_text(encoding="utf-8")
+        assert "CPython 3.10.22 and SQLite 3.53.1" in html
+        assert "install the app again" in html
+    assert "packaging/docker/compose.yaml" in readme
     assert "docker/compose.yaml" in (REPO / "packaging" / "systemd" / "README.md").read_text(encoding="utf-8")

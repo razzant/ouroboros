@@ -120,6 +120,20 @@ def _settled_rows(root):
     return [row for row in _rows(root) if row.get("credential_harness")]
 
 
+def _collect(run, f):
+    """Collect the run's one recorded seat through the per-seat collector every surface shares,
+    from its recorded request, roster row and frozen actor row (no new send)."""
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.triad_review import parse_review_findings
+
+    payload = json.loads(json.dumps(dataclasses.asdict(run)))
+    roster = payload["slot_roster"][0]
+    slot = ReviewSlot(**{**roster, "route": ReviewRouteKind(roster["route"])})
+    actor, fact = review_operation._collect_pending_row(
+        f.root, ReviewRequest(**payload["request"]), slot, payload["actors"][0], f.ctx, None)
+    return parse_review_findings(actor.raw_text)[2], fact
+
+
 def _parent(f, **task):
     return model_wait.task_model_wait_scope(task={"id": TASK, "chat_id": 7, "_attempt": 1, **task},
                                             drive_root=f.root, event_queue=f.events, worker_slot_held=False)
@@ -137,28 +151,19 @@ def test_reviewer_wait_outlives_the_author_scope_and_closes_only_after_settlemen
     operation = review_operation._LIVE[block["owner_id"]]
     time.sleep(0.15)
     assert _rows(f.root) and not operation.closed, "the author's close is not the panel's"
-    # The checkpoint retained the exact operation BEFORE the first send.
+    # The pointer named the operation BEFORE the first send. (Task acceptance also retained a checkpoint
+    # source with operation ids minted ahead of dispatch; that checkpoint left with the acceptance machine.)
     entry = load_task_result(f.root, TASK)["review_operations"][block["owner_id"]]
     assert entry["state"] == "dispatched" and entry["retained_at" if "retained_at" in entry else "recorded_at"]
     assert entry["controller"] == block["controller"] and block["controller"]["birth"]
-    from ouroboros.artifacts import read_actor_source_bytes
-
-    source = json.loads(read_actor_source_bytes(f.root, TASK, entry["source_ref"]))
-    assert source["request"]["subject"] == "complete answer" and source["slot_roster"][0]["model"] == MODEL
-    assert source["operations"]["one"] == first.actors[0]["operation_id"], "reserved id is the dispatched id"
     f.model.ready.set()
     until(lambda: operation.closed)
     resolved = [r for r in (load_task_result(f.root, TASK)["model_waits"] or {}).values()
                 if r["wait_id"] == row["wait_id"]][0]
     assert resolved["state"] == "resolved" and resolved["resolution"] == "resource_available"
-    # Physical close leaves canonical publication duty outstanding; the mailbox is not consumption.
-    until(lambda: load_task_result(f.root, TASK)["review_operations"][block["owner_id"]]["state"] == "unpublished")
-    from ouroboros.review_dispatch import collect_task_acceptance_run
-
-    collected = collect_task_acceptance_run(json.loads(json.dumps(dataclasses.asdict(first))),
-                                            drive_root=f.root, usage_ctx=f.ctx)
-    assert collected.actors[0]["parsed"]["verdict"] == "PASS"
-    assert collected.collection["facts"] == {"one": "collected"}
+    # Every surface's pointer goes when its operation closes; the answer is then collected free.
+    until(lambda: block["owner_id"] not in (load_task_result(f.root, TASK).get("review_operations") or {}))
+    assert _collect(first, f) == ("PASS", review_operation.COLLECTED)
     assert len(f.model.calls) == 2, "one refused attempt and one answer; collection bought nothing"
 
 
@@ -226,8 +231,8 @@ def test_explicit_calendar_deadline_still_bounds_the_reviewer_wait(env, monkeypa
     assert len(f.model.calls) == 1, "an interrupted wait never re-sends"
 
 
-@pytest.mark.parametrize("stop", ["cancel", "settled_cancel", "panic"])
-def test_stop_panic_and_settled_cancellation_bind_the_operation(env, stop):
+@pytest.mark.parametrize("stop", ["cancel", "settled_cancel", "owner_restart"])
+def test_stop_restart_and_settled_cancellation_bind_the_operation(env, stop, monkeypatch):
     f = env
     with _parent(f) as parent:
         run_review_request(_request(), slots=[_slot()], drive_root=f.root, usage_ctx=f.ctx, llm=f.model)
@@ -241,10 +246,13 @@ def test_stop_panic_and_settled_cancellation_bind_the_operation(env, stop):
     elif stop == "settled_cancel":
         write_task_result(f.root, TASK, "cancelled")
     else:
-        (f.root / "state").mkdir(exist_ok=True)
-        (f.root / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
+        from ouroboros import server_restart
+        import threading
+        monkeypatch.setattr(server_restart, "DATA_DIR", f.root)
+        monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+        server_restart._OWNER_STOP_BEGAN.set()
     until(lambda: operation.closed)
-    expected = "panic" if stop == "panic" else "cancelled"
+    expected = "owner_restart" if stop == "owner_restart" else "cancelled"
     assert operation.control() == expected
     resolved = [r for r in load_task_result(f.root, TASK)["model_waits"].values() if r["wait_id"] == row["wait_id"]]
     assert resolved[0]["resolution"] == expected and len(f.model.calls) == 1
@@ -353,6 +361,10 @@ def test_a_waiting_row_superseded_by_its_live_operation_is_not_forwarded(env):
 _REMOTE_OPERATION = r"""
 import json, os, sys, threading, time
 from types import SimpleNamespace
+# A real worker's multiprocessing parent is its supervisor, even when the
+# Windows venv launcher adds an intermediate OS parent.
+import multiprocessing
+multiprocessing.parent_process = lambda: SimpleNamespace(pid=int(sys.argv[5]))
 root, session, task, surface = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 from ouroboros import config, model_wait, process_custody, review_operation
 from ouroboros.llm_claudexor import ClaudexorModelError
@@ -503,20 +515,21 @@ def _forge(root, wait_id, row, pointer=None, *, remove=False):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("surface", ["task_acceptance", "plan_review"])
+@pytest.mark.parametrize("surface", ["result", "plan_review"])
 def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is_never_told_202(
         env, monkeypatch, record_property, capsys, surface):
     from ouroboros.gateway import task_model_wait as gateway
     from ouroboros.owner_mailbox import KIND_MODEL_WAIT, drain_owner_entries
     from ouroboros.platform_layer import collect_descendant_pids, process_start_time
     from ouroboros.process_custody import current_custody_session_id
+    from ouroboros.process_identity import birth_identity, process_kernel_birth
     from supervisor import queue as task_queue
     from supervisor.task_model_wait import handle_task_model_wait
 
     f = env
     monkeypatch.setattr(task_queue, "RUNNING", {})
     child = subprocess.Popen([sys.executable, "-c", _REMOTE_OPERATION, str(f.root), current_custody_session_id(), TASK,
-                              surface],
+                              surface, str(os.getpid())],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, cwd=os.getcwd())
     out, reader = _lines(child.stdout)
     executing = {}
@@ -536,24 +549,29 @@ def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is
         write_task_result(f.root, TASK, "completed", result="answer")  # the author ended
         block = row["review_operation"]
         assert block["controller"] == {"pid": executing["pid"], "birth": executing["birth"],
+                                       "kernel_birth": process_kernel_birth(executing["pid"]) or "",
                                        "session": current_custody_session_id()}, topology
-        # Its open pointer is part of the proof; only task acceptance also retains a checkpoint source.
+        # Its open pointer is part of the proof; no surface retains a checkpoint source beside it now.
         pointer = load_task_result(f.root, TASK)["review_operations"][block["owner_id"]]
         assert pointer["state"] == "dispatched" and pointer["controller"] == block["controller"]
-        assert ("source_ref" in pointer) is (surface == "task_acceptance")
+        assert "source_ref" not in pointer
         # The supervisor publishes the live operation's waiting row although the author ended.
         forwarded = []
         handle_task_model_wait({"type": "task_model_wait", "task_id": TASK, **row}, _supervisor_ctx(f.root, forwarded))
         assert len(forwarded) == 1 and forwarded[0]["chat_id"] == 7
         stale = gateway._decide(f.root, {**_decision(row, "stale"), "revision": row["revision"] + 5})
         assert stale.status_code == 409 and json.loads(stale.body)["reason_code"] == "stale_model_wait"
-        # Rows naming the same process but another birth (a reused pid) or another server
-        # generation are refused, and a refused claim leaves no pending action behind. A
-        # row alone disagrees with its operation's pointer; a forged row with its own
-        # matching pointer passes that check and meets the birth and session checks.
+        # Rows naming the same process but another birth (a reused pid: another spelling and
+        # kernel birth of the same kind) or another server generation are refused, and a
+        # refused claim leaves no pending action behind. A row alone disagrees with its
+        # operation's pointer; a forged row with its own matching pointer passes that check
+        # and meets the birth and session checks.
+        kind = (birth_identity(block["controller"]["kernel_birth"]) or ("",))[0]
+        reused = {"darwin": "darwin-start:1.000001", "windows": "win-filetime:1",
+                  "linux_boot": "1." + "0" * 32, "ticks": "1."}.get(kind, "")
         before = load_task_result(f.root, TASK)
         for wait_id, controller, state in (
-                ("reused-pid", {**block["controller"], "birth": "another process"}, "dead"),
+                ("reused-pid", {**block["controller"], "birth": "another process", "kernel_birth": reused}, "dead"),
                 ("other-generation", {**block["controller"], "session": "previous-server"}, "alive")):
             assert review_operation.controller_state(controller) == state
             for owner_id in (block["owner_id"], f"forged-{wait_id}"):
@@ -583,9 +601,9 @@ def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is
             "the decision reached the operation through its canonical row, not the author's mailbox"
         resolved = load_task_result(f.root, TASK)["model_waits"][row["wait_id"]]
         assert resolved["state"] == "resolved" and resolved["applied_request_id"] == "switch-remote"
-        # Physical close retains unpaid canonical-publication duty; a liveness-only pointer is removed.
+        # Physical close removes the liveness-only pointer (every surface's pointer now).
         until(lambda: (load_task_result(f.root, TASK)["review_operations"].get(block["owner_id"]) or {}).get(
-            "state", "removed") == ("unpublished" if surface == "task_acceptance" else "removed"))
+            "state", "removed") == "removed")
         # The worker process is still alive; its operation is gone. A waiting row naming
         # that exact live controller is never answered 202, nor published as live.
         assert child.poll() is None
@@ -644,7 +662,7 @@ def test_a_decision_the_remote_operation_applies_between_the_gateway_reads_is_it
 
     monkeypatch.setattr(review_operation._RemoteOperationController, "closed", property(racing))
     child = subprocess.Popen([sys.executable, "-c", _REMOTE_OPERATION, str(f.root), current_custody_session_id(), TASK,
-                              surface],
+                              surface, str(os.getpid())],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, cwd=os.getcwd())
     out, reader = _lines(child.stdout)
     executing = {}
@@ -735,7 +753,8 @@ def test_rejoining_a_live_panel_binds_its_operation_and_retains_no_phantom_check
     assert seen == [operation], "the rejoining caller binds the live operation, not a new one"
     assert again.actors[0]["parsed"]["verdict"] == "PASS" and len(f.model.calls) == 2
     until(lambda: operation.closed)
-    assert list(load_task_result(f.root, TASK)["review_operations"]) == [operation.owner_id]
+    # The rejoin wrote no pointer of its own, and the operation's own pointer went when it closed.
+    until(lambda: not (load_task_result(f.root, TASK).get("review_operations") or {}))
 
 
 class _Entered:
@@ -747,42 +766,3 @@ class _Entered:
 
     def __exit__(self, *exc):
         return self.scope.__exit__(*exc)
-
-
-def test_a_checkpoint_pointer_that_did_not_land_refuses_the_send(env, monkeypatch):
-    f = env
-    # The write "succeeds" but the stored row does not hold this operation's pointer.
-    monkeypatch.setattr(review_operation, "_update_operations", lambda *_a, **_k: {"review_operations": {}})
-    with _parent(f):
-        result = run_review_request(_request(), slots=[_slot()], drive_root=f.root, usage_ctx=f.ctx, llm=f.model)
-    assert f.model.calls == [] and result.actors[0]["operation_state"] == "not_dispatched"
-    assert "pointer did not land" in result.actors[0]["error"]
-
-
-def test_missing_checkpoint_refuses_the_panel_before_any_send(env, monkeypatch):
-    f = env
-
-    def unavailable(*_args, **_kwargs):
-        raise OSError("artifact store unavailable")
-
-    monkeypatch.setattr("ouroboros.artifacts.store_actor_source_bytes", unavailable)
-    with _parent(f):
-        result = run_review_request(_request(), slots=[_slot(), _slot("two")], drive_root=f.root,
-                                    usage_ctx=f.ctx, llm=f.model)
-    assert f.model.calls == []
-    assert {actor["operation_state"] for actor in result.actors} == {"not_dispatched"}
-    assert all(review_operation.CHECKPOINT_REFUSAL in actor["error"] for actor in result.actors)
-    assert not [op for op in review_operation._LIVE.values() if op.task_id == TASK]
-
-
-def test_a_panel_refused_at_zero_cost_keeps_its_own_refusal_and_owes_no_checkpoint(env, monkeypatch):
-    f = env
-    monkeypatch.setattr("ouroboros.artifacts.store_actor_source_bytes",
-                        lambda *_a, **_k: pytest.fail("a panel that can send nothing needs no checkpoint"))
-    request = _request(drain=False)
-    request.evidence = {"requirement": "exact", "__immutable_core_overflow__": {"reason": "owner text too large"}}
-    with _parent(f):
-        result = run_review_request(request, slots=[_slot()], drive_root=f.root, usage_ctx=f.ctx, llm=f.model)
-    assert f.model.calls == [] and "review_operations" not in load_task_result(f.root, TASK)
-    assert result.actors[0]["operation_state"] == "not_dispatched"
-    assert "degraded_core_overflow" in result.actors[0]["error"]

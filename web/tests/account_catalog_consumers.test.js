@@ -110,9 +110,12 @@ test('native pins select exact catalog and a missing account read does not prove
 test('session availability does not borrow a sibling model or treat a failed pin catalog as ready', () => {
     const snapshot = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url))).status;
     snapshot.harnesses = [structuredClone(harness)];
-    snapshot.quota = [{ subject: { harness: 'codex', subject_id: 'personal' }, freshness: 'fresh', constraints: [] }];
+    snapshot.quota = [{ subject: { harness: 'codex', subject_id: 'personal' }, freshness: 'fresh',
+        availability: { state: 'available' }, constraints: [{ id: 'primary', used_ratio: 0.2 }] }];
     const state = { snapshot, catalogKnown: true, accountsKnown: true, quotaKnown: true };
     const row = { route: { kind: 'agent_session', target_id: 'codex=only-a', credential_profile_id: 'personal' } };
+    assert.equal(sessionRouteVerdict(row, state).label, 'Not checked', 'catalog membership alone is not quota proof');
+    snapshot.availability_scope = { model: 'only-a', requestKind: 'text', basis: 'quota_block' };
     assert.equal(sessionRouteVerdict(row, state).label, 'Available');
     row.route.target_id = 'codex=only-b';
     assert.equal(sessionRouteVerdict(row, state).label, 'Unavailable');
@@ -148,7 +151,7 @@ test('older catalogs preserve their usable suggestions without inventing per-acc
         [{ value: 'claudexor::codex=legacy' }]), ['legacy']);
 });
 
-test('Claude [1m] availability keeps account evidence and selected bytes across consumers', () => {
+test('Claude [1m] catalog qualifier survives unknown quota without borrowing sibling proof or changing bytes', () => {
     const snapshot = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url))).status;
     snapshot.harnesses = [{ id: 'claude', enabled: true, status: 'ok', models: [
         { id: 'claude-future[1m]', credential_profile_id: 'failed' },
@@ -156,17 +159,24 @@ test('Claude [1m] availability keeps account evidence and selected bytes across 
         { id: 'alias', resolved_model: 'claude-resolved[1m]', credential_profile_id: 'personal' },
     ] }];
     snapshot.profiles.profiles.forEach((row) => { row.profile.harness_id = 'claude'; });
-    snapshot.quota = [{ subject: { harness: 'claude', subject_id: 'personal' }, freshness: 'fresh', constraints: [] }];
+    snapshot.quota = [{ subject: { harness: 'claude', subject_id: 'personal' }, freshness: 'fresh',
+        availability: { state: 'available' }, constraints: [{ id: 'primary', used_ratio: 0.2 }] }];
     const state = { snapshot, catalogKnown: true, accountsKnown: true, quotaKnown: true };
     const row = { route: { kind: 'agent_session', target_id: 'claude=claude-future[1M]', credential_profile_id: '' } };
     const verdict = sessionRouteVerdict(row, state);
-    assert.equal(verdict.label, 'Available');
+    assert.equal(verdict.label, 'Not checked');
     assert.match(verdict.text, /Base model listed/);
     assert.equal(row.route.target_id, 'claude=claude-future[1M]');
     // The qualifier's meta line is flagged to wrap (readable without hover); other lines are not.
     const metaState = { ...state, setting: { items: [row] } };
     assert.equal(rowMeta(row, metaState, []).qualifier, true);
     assert.match(rowMeta(row, metaState, []).text, /checked by the engine at session start/);
+    assert.equal(rowMeta(row, { ...metaState, quotaKnown: false }, []).qualifier, true);
+    snapshot.availability_scope = { model: null, requestKind: 'text', basis: 'quota_block' };
+    assert.equal(sessionRouteVerdict(row, state).label, 'Not checked', 'generic Accounts echo cannot certify this model');
+    assert.equal(rowMeta(row, metaState, []).qualifier, true);
+    snapshot.availability_scope.model = 'claude-future[1M]';
+    assert.equal(sessionRouteVerdict(row, state).label, 'Available', 'an exact echo plus engine verdict can certify quota');
     const exact = { route: { ...row.route, target_id: 'claude=claude-future' } };  // listed exactly: no qualifier
     assert.equal(rowMeta(exact, { ...state, setting: { items: [exact] } }, []).qualifier, undefined);
     const options = sessionModelOptions(snapshot.harnesses[0], 'claude-future[1m]', { snapshot });
@@ -175,6 +185,7 @@ test('Claude [1m] availability keeps account evidence and selected bytes across 
     assert.equal(sessionRouteVerdict({ route: { ...row.route, credential_profile_id: 'work' } }, state).label, 'Unavailable');
     const onlyFailed = { ...state, snapshot: { ...snapshot, harnesses: [{ ...snapshot.harnesses[0], models: [snapshot.harnesses[0].models[0]] }] } };
     assert.equal(sessionRouteVerdict(row, onlyFailed).label, 'No account');
+    assert.equal(rowMeta(row, { ...onlyFailed, setting: { items: [row] } }, []).qualifier, undefined);
     const baseOnly = { ...snapshot.harnesses[0], models: snapshot.harnesses[0].models.slice(1) };
     assert.match(sessionModelOptions(baseOnly, 'claude-future[1M]').at(-1).label, /base model listed/);
     assert.doesNotMatch(sessionModelOptions(baseOnly, 'claude-resolved[1m]').at(-1).label, /not in discovery/);
@@ -183,5 +194,6 @@ test('Claude [1m] availability keeps account evidence and selected bytes across 
     }
     const unread = { ...state, snapshot: { ...snapshot, harnesses: [{ ...baseOnly, models_error: 'unread' }] } };
     assert.equal(sessionRouteVerdict(row, unread).label, 'Not checked');
+    assert.equal(rowMeta(row, { ...unread, setting: { items: [row] } }, []).qualifier, undefined);
     assert.match(sessionModelOptions({ id: 'codex', models: [{ id: 'future' }] }, 'future[1m]').at(-1).label, /not in discovery/);
 });

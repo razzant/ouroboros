@@ -1,7 +1,7 @@
 """The health invariants ouroboros.context builds, and where they must appear.
 
-This module owns the cache hit-rate invariant, the remote context overflow it reports,
-the hot-store growth it watches, the rest of the invariant coverage, and the rule that
+This module owns the sent-history changes fact (no provider cache verdict), the remote context overflow,
+the rest of the invariant coverage, and the rule that
 the invariants come first in both the dynamic and the background-consciousness context.
 
 The runtime section, the advisory review status, the memory/consolidation sections and
@@ -17,13 +17,15 @@ import json
 
 import pytest
 
+from ouroboros import dialogue_store
 from ouroboros.context import build_health_invariants, build_runtime_section
 
+from tests import _dialogue as dialogue_test
 from tests._context_shared import _make_health_env
 
 
 
-class TestCacheHitRateInvariant:
+class TestSentHistoryHealth:
     def _make_env(self, tmp_path, events_lines):
         class FakeEnv:
             def drive_path(self, p):
@@ -54,131 +56,70 @@ class TestCacheHitRateInvariant:
         (tmp_path / "logs" / "events.jsonl").write_text("\n".join(events_lines) + "\n", encoding="utf-8")
         return FakeEnv()
 
-    def test_cache_hit_rate_good(self, tmp_path):
-        lines = [json.dumps({"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 600}) for _ in range(15)]
-        env = self._make_env(tmp_path, lines)
+    def test_health_names_who_changed_sent_history_under_the_running_code(self, tmp_path):
+        from ouroboros import transcript_prefix
+
+        env = self._make_env(tmp_path, [])
+        assert "SENT HISTORY CHANGES" not in build_health_invariants(env)
+        for task_id, origin in (("t1", "superseded_skill_snapshot"), ("t2", "superseded_skill_snapshot"),
+                                ("t2", "compaction")):
+            transcript_prefix.count_history_change(
+                {}, {"round": 3, "kind": "rewritten", "sanctioned_by": origin}, drive_root=tmp_path, task_id=task_id)
+        line = next(row for row in build_health_invariants(env).splitlines() if "SENT HISTORY CHANGES" in row)
+        assert line.startswith("- INFO: SENT HISTORY CHANGES under the running code ("), line
+        assert ", first at " in line and "the round facts name each change" in line
+        first = line.split(", first at ", 1)[1].split(")", 1)[0]
+        assert len(first) == 17 and first.endswith("Z"), first  # minutes, labelled UTC
+        assert "superseded_skill_snapshot 2 in 2 tasks; compaction 1 in 1 task" in line
+
+    def test_another_codes_record_is_not_this_codes_history(self, tmp_path):
+        from ouroboros import transcript_prefix
+        from ouroboros.utils import atomic_write_json
+
+        env = self._make_env(tmp_path, [])
+        path = transcript_prefix.history_changes_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, {"code": "an-older-commit", "first": "2026-10-20T17:00:00Z", "origins": {
+            "superseded_skill_snapshot": {"count": 193, "tasks": ["t1"]}}})
+        assert "SENT HISTORY CHANGES" not in build_health_invariants(env)
+        transcript_prefix.count_history_change(
+            {}, {"round": 2, "kind": "shrunk", "sanctioned_by": "compaction"}, drive_root=tmp_path, task_id="t9")
         result = build_health_invariants(env)
-        assert "cache hit rate" in result.lower()
-        assert "60%" in result or "60.0%" in result
+        assert "compaction 1 in 1 task" in result and "superseded_skill_snapshot" not in result
 
-    def test_cache_hit_rate_warning_below_30(self, tmp_path):
-        lines = [json.dumps({"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 200}) for _ in range(15)]
-        env = self._make_env(tmp_path, lines)
-        result = build_health_invariants(env)
-        assert "LOW CACHE HIT RATE" in result
+    def test_a_tree_without_git_names_its_version(self, tmp_path, monkeypatch):
+        from ouroboros import transcript_prefix, utils
 
-    def _emit_producer_rounds(self, tmp_path, reported, count=6):
-        """Rounds in the PRODUCER's exact shape.
+        monkeypatch.setattr(utils, "get_git_info", lambda _root: ("", ""))
+        transcript_prefix._running_code.cache_clear()
+        try:
+            env = self._make_env(tmp_path, [])
+            transcript_prefix.count_history_change(
+                {}, {"round": 1, "kind": "rewritten", "sanctioned_by": "compaction"}, drive_root=tmp_path, task_id="t1")
+            assert "under the running code (version " in build_health_invariants(env)
+        finally:
+            transcript_prefix._running_code.cache_clear()
 
-        `loop_llm_call.call_llm_with_retry` is the only emitter of `llm_round`,
-        so a synthesized row proves nothing about what the health line reads:
-        the first version of this rule was inert because the producer stamped
-        `cached_tokens` on every event, including rounds where the provider had
-        reported no cache at all. `reported=None` is a provider that says
-        nothing about caching.
-        """
-        from ouroboros.loop_llm_call import call_llm_with_retry
-
-        class _LLM:
-            def chat(self, **_kwargs):
-                usage = {"provider": "openrouter", "resolved_model": "m",
-                         "prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.0}
-                if reported is not None:
-                    usage["cached_tokens"] = reported
-                return {"content": "ok"}, usage
-
-        for index in range(count):
-            call_llm_with_retry(
-                _LLM(), [{"role": "user", "content": "hi"}], "m", None, "medium", 1,
-                tmp_path / "logs", "cache-probe", index, None, {}, "task", False,
-            )
-
-    def test_no_provider_reported_a_cache_leaves_the_share_unknown(self, tmp_path):
-        """Absence is not a measured zero: a run whose provider never reported a
-        cache rendered as an honest 0% and read as a caching regression nobody
-        had measured."""
-        from ouroboros.context_health import _compute_cache_hit_rate
+    def test_the_task_list_is_capped_and_says_so(self, tmp_path):
+        from ouroboros import transcript_prefix
 
         env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, None)
-        assert _compute_cache_hit_rate(env) is None
-        assert "cache hit rate" not in build_health_invariants(env).lower()
+        for index in range(40):
+            transcript_prefix.count_history_change(
+                {}, {"round": 1, "kind": "rewritten", "sanctioned_by": None}, drive_root=tmp_path, task_id=f"t{index}")
+        assert "origin not recorded 40 in 32+ tasks" in build_health_invariants(env)
 
-    def test_an_explicitly_reported_zero_is_still_a_real_zero(self, tmp_path):
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, 0)
-        assert _compute_cache_hit_rate(env) == 0.0
-        assert "LOW CACHE HIT RATE" in build_health_invariants(env)
-
-    def test_historical_cache_zeros_are_not_measured_misses(self, tmp_path):
-        """Record contract LEGACY_RULE (#1578): an unstamped or v1 zero may be an older
-        writer's unknown-to-zero projection, so after an upgrade those rounds must not
-        read as measured misses and fire LOW CACHE HIT RATE. Their positive counts and
-        every v2 count, a v2 zero included, stay measurements; null and malformed
-        counters measure nothing and void no neighbour."""
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        legacy_zero = [{"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 0, **stamp}
-                       for stamp in ({}, {"record_contract_version": 1}) * 3]
-        legacy_hit = [{"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 600}] * 5
-        unknown = [{"type": "llm_round", "record_contract_version": 2, "prompt_tokens": 1000, "cached_tokens": bad}
-                   for bad in (None, -1, True)]
-        env = self._make_env(tmp_path, [json.dumps(row) for row in legacy_zero])
-        assert _compute_cache_hit_rate(env) is None
-        assert "cache hit rate" not in build_health_invariants(env).lower()
-        env = self._make_env(tmp_path, [json.dumps(row) for row in legacy_zero + legacy_hit + unknown])
-        assert _compute_cache_hit_rate(env) == 0.6
-        assert "OK: cache hit rate (60%)" in build_health_invariants(env)
-        self._emit_producer_rounds(tmp_path, 0, count=7)  # the real producer's v2 zeros ARE misses
-        assert _compute_cache_hit_rate(env) == pytest.approx(3000 / 12000)
-        assert "LOW CACHE HIT RATE" in build_health_invariants(env)
-
-    def test_a_window_with_fewer_than_five_reporting_rounds_stays_unknown(self, tmp_path):
-        """The five-round threshold counts MEASUREMENTS, not rounds. Three
-        reporters beside three silent rounds are still too thin a sample to
-        publish a share, so the invariant says nothing rather than a number the
-        window cannot support."""
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, None, count=3)
-        self._emit_producer_rounds(tmp_path, 600, count=3)
-        assert _compute_cache_hit_rate(env) is None
-
-    def test_silent_rounds_stay_out_of_the_reporters_denominator(self, tmp_path):
-        """A mixed install reads the reporters' own ratio.
-
-        Charging a silent round's prompt tokens to the denominator turned a
-        provider that never measured a cache into measured misses: the share
-        collapsed and "LOW CACHE HIT RATE" fired for a regression no round had
-        measured. Five reporters at 600 cached of 1000 prompt are 60%, whatever
-        the silent rounds beside them spent."""
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, None, count=3)
-        self._emit_producer_rounds(tmp_path, 600, count=5)
-        assert _compute_cache_hit_rate(env) == 0.6
-
-    @pytest.mark.parametrize("reports, expected_rate", [
-        ([None] * 6, None),
-        ([0] * 6, 0.0),
-        ([600] * 6, 0.6),
-        ([None] * 10 + [600] * 5, 0.6),
+    @pytest.mark.parametrize("reports", [
+        [None] * 6, [0] * 6, [600] * 6, [None] * 10 + [600] * 5,
     ], ids=["unknown", "measured_zero", "measured_hit", "mixed"])
-    def test_nullable_adapter_cache_reaches_durable_and_live_rounds(
-        self, tmp_path, reports, expected_rate,
-    ):
+    def test_nullable_adapter_cache_reaches_durable_and_live_rounds(self, tmp_path, reports):
         """The real adapter uses a present null key for an unreported cache.
 
         Omitted-key fixtures alone missed the producer turning that null into
-        zero. Both round events must preserve the measurement before health
-        computes its share over the reporting rounds.
+        zero. Both round events preserve the measurement; health draws no share
+        or verdict from them.
         """
         from queue import Queue
-        from ouroboros.context_health import _compute_cache_hit_rate
         from ouroboros.llm_claudexor import _usage
         from ouroboros.loop_llm_call import call_llm_with_retry
 
@@ -213,7 +154,7 @@ class TestCacheHitRateInvariant:
                 live.append(event["data"]["cached_tokens"])
         assert durable == reports
         assert live == reports
-        assert _compute_cache_hit_rate(env) == expected_rate
+        assert "cache hit rate" not in build_health_invariants(env).lower()
 
 
 def test_health_invariants_reports_remote_context_overflow(tmp_path):
@@ -329,130 +270,6 @@ class TestAdditionalHealthInvariantCoverage:
         result = build_health_invariants(env)
         assert "RESCUE SNAPSHOT AVAILABLE" in result
         assert "2026-04-14-test" in result
-
-
-def _grow_file(path, size: int) -> None:
-    """Create a file whose st_size is exactly `size` without writing `size` bytes."""
-    import os
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.touch()
-    os.truncate(path, size)
-
-
-def _grow_ledger(path, size: int) -> None:
-    """Grow a synthetic usage ledger WITHOUT triggering tail quarantine.
-
-    build_health_invariants reads the ledger (budget-drift check) BEFORE the
-    hot-store stat. A single torn tail row would be QUARANTINED there — the
-    substrate ftruncates the file — shrinking st_size before the check under
-    test runs. Corruption BEFORE the tail instead raises UsageLedgerCorrupt
-    without mutating the file, degrading the budget check to its established
-    "COST ACCOUNTING UNAVAILABLE" path while st_size stays exactly `size`.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row = b"not json\n"
-    path.write_bytes(row * (size // len(row)) + b"x" * (size % len(row)))
-
-
-class TestHotStoreGrowthInvariant:
-    def test_progress_growth_warns_above_threshold(self, tmp_path):
-        from ouroboros.context_budget import PROGRESS_LOG_WARN_BYTES
-
-        env = _make_health_env(tmp_path)
-        _grow_file(tmp_path / "logs" / "progress.jsonl", PROGRESS_LOG_WARN_BYTES + 1)
-
-        result = build_health_invariants(env)
-        assert "HOT STORE GROWTH" in result
-        assert "logs/progress.jsonl" in result
-        assert "rotation" in result  # remediation pointer
-
-    def test_exactly_at_threshold_stays_silent(self, tmp_path):
-        from ouroboros.context_budget import PROGRESS_LOG_WARN_BYTES
-
-        env = _make_health_env(tmp_path)
-        _grow_file(tmp_path / "logs" / "progress.jsonl", PROGRESS_LOG_WARN_BYTES)
-
-        result = build_health_invariants(env)
-        assert "HOT STORE GROWTH" not in result
-
-    def test_rotated_log_thresholds_are_regression_tripwires(self, tmp_path):
-        """events/tools/supervisor/task_reflections rotate on the supervisor
-        tick (CPL4-C1..C4); their thresholds fire only when rotation is broken."""
-        from ouroboros.context_budget import (
-            EVENTS_LOG_WARN_BYTES,
-            SUPERVISOR_LOG_WARN_BYTES,
-            TASK_REFLECTIONS_LOG_WARN_BYTES,
-            TOOLS_LOG_WARN_BYTES,
-        )
-
-        env = _make_health_env(tmp_path)
-        _grow_file(tmp_path / "logs" / "events.jsonl", EVENTS_LOG_WARN_BYTES + 1)
-        _grow_file(tmp_path / "logs" / "tools.jsonl", TOOLS_LOG_WARN_BYTES + 1)
-        _grow_file(tmp_path / "logs" / "supervisor.jsonl", SUPERVISOR_LOG_WARN_BYTES + 1)
-        _grow_file(
-            tmp_path / "logs" / "task_reflections.jsonl",
-            TASK_REFLECTIONS_LOG_WARN_BYTES + 1,
-        )
-
-        result = build_health_invariants(env)
-        assert result.count("HOT STORE GROWTH") == 4
-        assert "logs/events.jsonl" in result
-        assert "logs/tools.jsonl" in result
-        assert "logs/supervisor.jsonl" in result
-        assert "logs/task_reflections.jsonl" in result
-        assert "rotation is broken or missing" in result
-
-    def test_events_archive_chain_growth_warns(self, tmp_path):
-        """Custody replay walks the whole events chain; the pre-rotation 100MB
-        replay-degradation signal now watches live + archive segments."""
-        from ouroboros.context_budget import EVENTS_ARCHIVE_SCAN_WARN_BYTES
-
-        env = _make_health_env(tmp_path)
-        segment = tmp_path / "archive" / "events_20260101T000000.jsonl"
-        segment.parent.mkdir(parents=True, exist_ok=True)
-        with segment.open("wb") as fh:  # sparse: size matters, bytes do not
-            fh.seek(EVENTS_ARCHIVE_SCAN_WARN_BYTES)
-            fh.write(b"x")
-
-        result = build_health_invariants(env)
-        assert "HOT STORE GROWTH" in result
-        assert "events chain" in result
-        assert "never deleted" in result
-        assert "Legacy segments retain inline delegated request bodies" in result
-        assert "without shrinking existing history" in result
-        assert segment.stat().st_size == EVENTS_ARCHIVE_SCAN_WARN_BYTES + 1
-
-    def test_isolated_benchmark_sentinel_suppresses_warnings(self, tmp_path):
-        from supervisor.state import ISOLATED_BENCHMARK_SENTINEL
-        from ouroboros.context_budget import PROGRESS_LOG_WARN_BYTES
-
-        env = _make_health_env(tmp_path)
-        _grow_file(tmp_path / "logs" / "progress.jsonl", PROGRESS_LOG_WARN_BYTES + 1)
-        (tmp_path / ISOLATED_BENCHMARK_SENTINEL).write_text("isolated\n", encoding="utf-8")
-
-        result = build_health_invariants(env)
-        assert "HOT STORE GROWTH" not in result
-
-    def test_scheduled_tasks_store_growth_warns_with_receipt_remediation(self, tmp_path):
-        """The one-shot follow-up receipts (B2b W=A) made this whole-document
-        store grow with every fired follow-up; the scheduler re-parses and
-        rewrites it on every tick under the queue lock."""
-        from ouroboros.context_budget import SCHEDULED_TASKS_WARN_BYTES
-
-        env = _make_health_env(tmp_path)
-        _grow_file(tmp_path / "state" / "scheduled_tasks.json", SCHEDULED_TASKS_WARN_BYTES + 1)
-
-        result = build_health_invariants(env)
-        assert "HOT STORE GROWTH" in result
-        assert "state/scheduled_tasks.json" in result
-        assert "receipts" in result  # remediation pointer
-
-    def test_absent_stores_stay_silent(self, tmp_path):
-        env = _make_health_env(tmp_path)
-
-        result = build_health_invariants(env)
-        assert "HOT STORE GROWTH" not in result
 
 
 def test_health_invariants_come_first_in_dynamic_context(tmp_path):
@@ -588,14 +405,12 @@ def test_project_room_keeps_an_older_own_directive_beside_sibling_traffic(tmp_pa
     sibling = create_project(root, "sibling", name="Sibling")
     own_chat, sibling_chat = int(own["chat_id"]), int(sibling["chat_id"])
     decisive = "CLAUDEXOR_ONLY_AND_THREE_LEVEL_NESTING"
-    (root / "archive").mkdir(parents=True, exist_ok=True)
-    (root / "archive" / "chat_20260820T010000.jsonl").write_text(
-        json.dumps({"chat_id": own_chat, "direction": "in", "ts": "2026-08-20T01:00:00+00:00", "text": decisive}) + "\n",
-        encoding="utf-8",
-    )
-    (root / "logs" / "chat.jsonl").write_text("".join(
-        json.dumps({"chat_id": sibling_chat, "direction": "in", "ts": "2026-08-21T00:00:00+00:00",
-                    "text": f"noise-{i}"}) + "\n" for i in range(4500)), encoding="utf-8")
+    # The directive is old history (an archived chain segment); the sibling noise is the newer live chain.
+    dialogue_test.seed(root, archives={"chat_20260820T010000.jsonl": [
+        {"chat_id": own_chat, "direction": "in", "ts": "2026-08-20T01:00:00+00:00", "text": decisive}]},
+        live={"chat": [{"chat_id": sibling_chat, "direction": "in", "ts": "2026-08-21T00:00:00+00:00",
+                        "text": f"noise-{i}"} for i in range(4500)]})
+    dialogue_test.import_all(root)
 
     _a, _b, changing, _cap = blocks(env, memory, {"id": "own-task", "chat_id": own_chat})
     room = section(changing, f"## This room (Project Own [chat_id={own_chat}])")
@@ -622,21 +437,22 @@ def test_project_room_keeps_the_retention_proof_cross_room_directive_once(tmp_pa
     bind_task_to_project(root, "cat-root", "cat-tower", project_chat, origin={"ref": ref, "text": directive})
     source_row = {**ref, "direction": "in", "text": directive}
     follow = {"chat_id": project_chat, "direction": "in", "ts": "2026-08-21T00:01:00Z", "text": "continue"}
-    (root / "logs" / "chat.jsonl").write_text(json.dumps(source_row) + "\n" + json.dumps(follow) + "\n",
-                                              encoding="utf-8")
+    # The chain does not hold the owner's row (an older install never stored it): the binding kept the words.
+    dialogue_store.append(root, "chat", follow)
     label = f"## This room (Project Cat tower [chat_id={project_chat}])"
+    _a, _b, absent, _cap = blocks(env, memory, {"id": "cat-root", "chat_id": project_chat})
+    room = section(absent, label)
+    assert room.count("CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3") == 1  # retention-proof: the binding kept it
+    assert "### Words that started this work (retention-proof)" in room
+
+    origin = root / "memory" / "chronicle"
+    assert origin.is_dir()  # the first capture activated the chronicle
+    # Once the owner's row itself is an open row of this room, it is read there, once, and not under the heading.
+    dialogue_store.append(root, "chat", source_row)
     _a, _b, present, _cap = blocks(env, memory, {"id": "cat-root", "chat_id": project_chat})
     room = section(present, label)
     assert room.count("CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3") == 1  # an open row of this room
     assert "### Words that started this work" not in room
-
-    origin = root / "memory" / "chronicle"
-    assert origin.is_dir()  # the first capture activated the chronicle
-    (root / "logs" / "chat.jsonl").write_text(json.dumps(follow) + "\n", encoding="utf-8")
-    _a, _b, later, _cap = blocks(env, memory, {"id": "cat-root", "chat_id": project_chat})
-    room = section(later, label)
-    assert room.count("CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3") == 1  # retention-proof: the binding kept it
-    assert "### Words that started this work (retention-proof)" in room
 
 
 def test_chat_history_surfaces_malformed_gap_even_when_search_matches_nothing(tmp_path):
@@ -658,12 +474,8 @@ def test_chat_history_surfaces_malformed_gap_even_when_search_matches_nothing(tm
 def test_archive_only_chat_chain_is_complete_while_live_file_is_absent(tmp_path):
     from ouroboros.memory import Memory
 
-    archive = tmp_path / "archive"
-    archive.mkdir(parents=True)
-    (archive / "chat_20260820T010000.jsonl").write_text(
-        json.dumps({"direction": "in", "text": "archive-only"}) + "\n",
-        encoding="utf-8",
-    )
+    dialogue_test.seed(tmp_path, archives={"chat_20260820T010000.jsonl": [{"direction": "in", "text": "archive-only"}]})
+    dialogue_test.import_all(tmp_path)
 
     entries, coverage = Memory(drive_root=tmp_path).read_chat_generations()
 

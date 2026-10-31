@@ -1,0 +1,12 @@
+{
+  "description": "One rule for a Project that was never named, read by the host (project_facts.project_display_name) and the browser reference (project_reference.js MINTED_ID). Expected \"\" means never named: the reference reads Project.",
+  "cases": [
+    {"id": "proj_5e8bbf266c89", "name": "proj_5e8bbf266c89", "expected": ""},
+    {"id": "proj_5e8bbf266c89", "name": "", "expected": ""},
+    {"id": "community-watch", "name": "community-watch", "expected": "community-watch"},
+    {"id": "blog", "name": "blog", "expected": "blog"},
+    {"id": "proj_notes", "name": "proj_notes", "expected": "proj_notes"},
+    {"id": "launch", "name": "Launch", "expected": "Launch"},
+    {"id": "community-watch-github-ab8245fb", "name": "Community watch — обращения GitHub", "expected": "Community watch — обращения GitHub"}
+  ]
+}

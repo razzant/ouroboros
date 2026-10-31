@@ -17,7 +17,7 @@ import pathlib
 from typing import Any, Dict, Optional, Tuple
 from ouroboros.agent_startup_checks import persist_early_origin_stub as _persist_early_origin_stub_impl
 from ouroboros.config import EFFORT_SCALE, resolve_effort, runtime_setting
-from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+from ouroboros.route_choice import model_role_slot_override  # the role slot a wake follows; resolved per call there
 from ouroboros.subagents import CapabilityDelta, SUBAGENT_RESOLUTION_FIELDS, SubagentDispatch, SubagentExecutorResolution, SubagentLaneResolution, capability_delta_disclosures, resolve_subagent_dispatch
 from ouroboros.task_results import STATUS_RUNNING
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -40,7 +40,8 @@ def _agent():
 
 
 def dispatch_executor_note(decision: Optional[SubagentExecutorResolution],
-                           lane: Optional["SubagentLaneResolution"] = None) -> str:
+                           lane: Optional["SubagentLaneResolution"] = None,
+                           *, cognitive_route: Optional[Dict[str, Any]] = None) -> str:
     """The child's VISIBLE marker for a substrate decision it did not make ('' = silent).
 
     The rule table's `auto` rows are only honest if the child can see which way they
@@ -65,18 +66,25 @@ def dispatch_executor_note(decision: Optional[SubagentExecutorResolution],
         route = decision.route.route_id if decision.route else ""
         configured_atomic = lane is not None and lane.provenance == "configured_subagent"
         if configured_atomic:
+            from ouroboros.supervisor_route import cognitive_route_provenance
+
+            provenance = cognitive_route_provenance(cognitive_route)
+            cognition = (f" Your cognitive route is {lane.model} ({provenance}); "
+                         "its calls bill as that route bills. You may change it with switch_model. "
+                         if provenance else " ")
             return (
                 f"EXECUTOR: your parent selected the configured agent-session route ({route}). "
-                "You are its Ouroboros NANNY. The host starts the exact configured leaf run "
-                "BEFORE your first metered round; the startup/wake receipt in this context "
-                "is the truth about that run, and waiting on it is your own call "
+                "You are its Ouroboros NANNY." + cognition + "For fresh work the host starts the exact leaf "
+                "before your first round. Restored supervision follows its continuation receipt; "
+                "the receipt states custody, and waiting is your own call "
                 "(delegate_wait when you want its facts). Your "
-                "metered rounds are for judgment — verify and integrate what the run "
+                "supervisory rounds are for judgment — verify and integrate what the run "
                 "produces, answer its authorized questions, decide recovery — never for "
-                "rebuilding its work: co-building beside a delegated run is a metered "
-                "duplicate of already-paid work. After a terminal failure, retry or replace "
-                "through delegate_start(retry_of=..., prompt=...) only once cancellation and "
-                "terminal settlement are verified. Auxiliary or API-backed work must be an "
+                "rebuilding its work: co-building beside a delegated run is a "
+                "duplicate of already-paid work. After a terminal failure, replace through "
+                "delegate_start(prompt='') only once cancellation and terminal settlement are "
+                "verified; an unknown start outcome is retried with "
+                "delegate_start(retry_of=..., prompt=''). Auxiliary or API-backed work must be an "
                 "explicit separate child, so its authorship and spend remain visible. When "
                 "no physical run exists and none can be started, record the typed zero-run "
                 "terminal through verify_and_record(contract_kind=delegation_zero_run, "
@@ -92,23 +100,23 @@ def dispatch_executor_note(decision: Optional[SubagentExecutorResolution],
             + "Cost classes: "
             "a subscription-lane run has known-zero marginal cost when the route reports "
             "its settled spend as $0 (an estimated or undisclosed spend is estimated/unknown, "
-            "not zero); every token YOU think on is metered API money. "
-            "While the lane is healthy, delegate everything you can — even small tasks — "
-            "with delegate_start / delegate_wait, and verify what comes back rather than "
-            "believing it. After a delegated run SUCCEEDS, your job is to VERIFY and "
-            "INTEGRATE its output — never to rebuild the same work yourself on metered "
-            "tokens. Follow-up work (fixes, the next increment, a retry with a corrected "
+            "not zero); your own rounds bill as your route bills. Your role, not a billing "
+            "type, decides who does the work: while the lane is healthy the delegated run "
+            "does it (you start and await it with delegate_start / delegate_wait), and you "
+            "verify what comes back rather than believing it. After a delegated run SUCCEEDS, "
+            "your job is to VERIFY and INTEGRATE its output — never to rebuild the same work "
+            "yourself. Follow-up work (fixes, the next increment, a retry with a corrected "
             "prompt) is delegated too, with a new "
-            "delegate_start(subagent_id=..., prompt=...); your own metered rounds "
+            "delegate_start(subagent_id=..., prompt=...); your own rounds "
             "are for judgment — acceptance, integration, honest settlement — not for "
-            "co-building around a $0 run. If your run asks a question (delegate_wait "
+            "co-building around the delegated run. If your run asks a question (delegate_wait "
             "returns waiting_on_user), answer it from the task context with "
             "delegate_answer; a question above your authority — money, scope, external "
             "actions — is escalated with the escalate verb (parent-first; the reply "
             "reaches your mailbox on a later round) while you keep waiting (a timeout_at "
             "question benign-declines at the engine timeout; timeout_at=null waits until answered). "
             "If your task text instructs you to execute the work natively yourself, that "
-            "instruction described the metered fallback and is superseded by this dispatch. "
+            "instruction described the native fallback and is superseded by this dispatch. "
             "Route thinking-work (code, research, generation) through "
             "delegate_start/delegate_wait; your own run_command/read_file rounds are for "
             "verification, integration, and acceptance. The parent's step-by-step context "
@@ -352,8 +360,8 @@ def _initial_effort_for(task: Dict[str, Any], task_type: str) -> str:
     """The effort a task starts on.
 
     For a delegated child this is what ``resolve_subagent_dispatch`` derived and
-    wrote onto the record moments ago, which is ``resolve_effort(task_type)`` — read
-    back rather than recomputed so the loop runs the effort the record states. For
+    wrote onto the record moments ago — read back rather than recomputed so the
+    loop runs the effort the record states. For
     everything else, and for an unrecognized STORED value (durable data outlives the
     schema that wrote it), it is the task-type default directly — or, when the task
     names a model ROLE in its metadata (a consciousness wake-up), that role's effort
@@ -380,37 +388,6 @@ def main_model_named_effort(task_metadata: Dict[str, Any]) -> str:
     override = model_role_slot_override(task_metadata if isinstance(task_metadata, dict) else {})
     model = override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or "")
     return api_model_named_effort(model)
-
-
-def model_role_slot_override(task_metadata: Dict[str, Any]) -> Optional[Tuple[str, bool]]:
-    """The ``(model, use_local)`` pinned by a task's ``metadata.model_role``; ``None`` = Main.
-
-    A consciousness wake-up carries ``model_role="consciousness"`` (owner decision
-    В25=B): when the consciousness model slot is set, the turn runs on that model
-    with that slot's local flag; an empty slot means Main — the same model, the
-    same prefix, the same prompt cache. Roles without a single-model slot (Main
-    itself, the fallback chain) and unknown roles resolve to Main here; their
-    effort and account binding still follow the role (``_initial_effort_for``,
-    ``task_model_binding``).
-    """
-    metadata = task_metadata if isinstance(task_metadata, dict) else {}
-    role = str(metadata.get("model_role") or "").strip().lower()
-    key = MODEL_ROLE_SETTINGS.get(role)
-    if not key or role in ("main", "fallback"):
-        return None
-    model = str(runtime_setting(key, "") or "").strip()
-    raw_local = str(runtime_setting(f"USE_LOCAL_{role.upper()}", "") or "").strip().lower()
-    use_local = raw_local in ("true", "1")
-    if not model:
-        # An empty model slot means Main's model — but the role's own local flag, when the
-        # owner set it and it differs from Main's, still decides the route (В25=B honors
-        # every slot; with equal flags nothing changes and the prefix stays Main's).
-        main_local = str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
-        main_model = str(runtime_setting("OUROBOROS_MODEL", "") or "").strip()
-        if not raw_local or use_local == main_local or not main_model:
-            return None
-        return main_model, use_local
-    return model, use_local
 
 
 def resolve_dispatch_axes(task: Dict[str, Any]) -> Optional[SubagentDispatch]:
@@ -606,7 +583,7 @@ def capability_delta_prompt_block(dispatch: Optional[SubagentDispatch]) -> str:
         )
         action = (
             "Do the work anyway — routed through your delegated run "
-            "(delegate_start / delegate_wait), not your own metered rounds — but say "
+            "(delegate_start / delegate_wait), not your own rounds — but say "
             if delta.get("effective_executor") == "harness"
             else "Do the work anyway, but say "
         )

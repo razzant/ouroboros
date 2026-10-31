@@ -14,6 +14,7 @@ import queue
 from types import SimpleNamespace
 
 import pytest
+from tests._dialogue import progress_rows
 
 from ouroboros.loop_messages import _emit_checkpoint_event
 from supervisor.log_addressing import task_event_queue
@@ -40,7 +41,7 @@ def test_a_system_checkpoint_is_one_events_row_one_progress_row_and_one_frame(lo
     bus: "queue.Queue" = queue.Queue()
     _emit_checkpoint_event(task_event_queue(bus, TASK), "t1", logs, dict(SYSTEM_ROW))
     [event_row] = _rows(logs / "events.jsonl")
-    [progress_row] = _rows(logs / "progress.jsonl")
+    [progress_row] = progress_rows(logs.parent)
     frame = bus.get_nowait()
     assert bus.empty() and frame["type"] == "log_event"
     assert event_row == progress_row
@@ -54,11 +55,11 @@ def test_a_system_checkpoint_is_one_events_row_one_progress_row_and_one_frame(lo
 def test_a_plain_checkpoint_writes_events_only_and_a_detached_queue_still_writes(logs):
     bus: "queue.Queue" = queue.Queue()
     _emit_checkpoint_event(bus, "t1", logs, {"checkpoint_kind": "context_reclaim", "round": 3})
-    assert len(_rows(logs / "events.jsonl")) == 1 and not (logs / "progress.jsonl").exists()
+    assert len(_rows(logs / "events.jsonl")) == 1 and not progress_rows(logs.parent)
     assert bus.get_nowait()["data"]["checkpoint_kind"] == "context_reclaim" and bus.empty()
 
     _emit_checkpoint_event(None, "t1", logs, dict(SYSTEM_ROW))
-    assert len(_rows(logs / "events.jsonl")) == 2 and len(_rows(logs / "progress.jsonl")) == 1
+    assert len(_rows(logs / "events.jsonl")) == 2 and len(progress_rows(logs.parent)) == 1
 
     _emit_checkpoint_event(bus, "t1", None, dict(SYSTEM_ROW))  # no log dir: the frame alone
     assert len(_rows(logs / "events.jsonl")) == 2 and bus.get_nowait()["data"]["phase"] == "entered"
@@ -115,7 +116,7 @@ def test_a_direct_turn_producer_in_the_server_process_writes_once_and_shows_once
                               append_jsonl=lambda path, obj: pytest.fail("the handler persists no checkpoint"))
         _handle_log_event(bus.get_nowait(), ctx)
         assert len(frames) == 1 and frames[0]["chat_id"] == 42 and frames[0]["ts"] == row["ts"]
-        assert len(_rows(tmp_path / "logs" / "events.jsonl")) == 1 and len(_rows(tmp_path / "logs" / "progress.jsonl")) == 1
+        assert len(_rows(tmp_path / "logs" / "events.jsonl")) == 1 and len(progress_rows(tmp_path)) == 1
     finally:
         set_log_sink(None)
 
@@ -128,7 +129,7 @@ def test_the_budget_pause_checkpoint_rides_the_same_producer_path(logs):
     _emit_budget_pause_checkpoint(task_event_queue(bus, TASK), logs, "t1", dict(limit))
     [row] = _rows(logs / "events.jsonl")
     frame = bus.get_nowait()["data"]
-    assert bus.empty() and not (logs / "progress.jsonl").exists()
+    assert bus.empty() and not progress_rows(logs.parent)
     assert row["checkpoint_kind"] == frame["checkpoint_kind"] == "budget_scope_paused"
     assert row["toast_once"] == "t1:budget-paused:root" and row["scope"] == "root" and row["chat_id"] == 7
     assert row["ts"] == frame["ts"]

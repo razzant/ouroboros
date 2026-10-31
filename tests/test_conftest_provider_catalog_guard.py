@@ -1,5 +1,5 @@
 """Self-pin of the root conftest's provider-catalog guard: `LLMClient`'s class caches
-(`_SUPPORTED_PARAMS_CACHE`, `_CONTEXT_LENGTH_CACHE` and the two fetch flags) are process
+(`_SUPPORTED_PARAMS_CACHE`, `_CONTEXT_LENGTH_CACHE`, its date and the two fetch flags) are process
 state. A test whose window measurement fetched OpenRouter's live `/models` catalog must not
 decide what the next test's send strips (`test_llm_no_proxy`'s parameter-rejection retry
 had nothing left to drop). The guard lives in tests/conftest.py; this file exercises its
@@ -20,6 +20,7 @@ conftest = next(
 def _fetched_like_the_live_catalog(cls):
     cls._SUPPORTED_PARAMS_CACHE["probe/model"] = {"max_tokens"}
     cls._CONTEXT_LENGTH_CACHE["probe/model"] = 128_000
+    cls._CONTEXT_LENGTH_OBSERVED_AT = "2026-10-23T00:00:00+00:00"
     cls._SUPPORTED_PARAMS_FETCHED = True
     cls._CAPABILITIES_FETCH_OK = True
 
@@ -52,7 +53,8 @@ def test_a_class_imported_during_the_test_is_found_pristine():
     conftest._restore_provider_catalog(LLMClient, conftest._PROVIDER_CATALOG_PRISTINE)
     assert conftest._provider_catalog_snapshot(LLMClient) == {
         "_SUPPORTED_PARAMS_CACHE": {}, "_SUPPORTED_PARAMS_FETCHED": False,
-        "_CONTEXT_LENGTH_CACHE": {}, "_CAPABILITIES_FETCH_OK": False,
+        "_CONTEXT_LENGTH_CACHE": {}, "_CONTEXT_LENGTH_OBSERVED_AT": "", "_CAPABILITIES_FETCH_OK": False,
+        "_CAPABILITIES_FAILED_AT": "",
     }
     assert conftest._PROVIDER_CATALOG_PRISTINE["_SUPPORTED_PARAMS_CACHE"] == {}  # the template stayed empty
     conftest._restore_provider_catalog(LLMClient, saved)

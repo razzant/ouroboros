@@ -17,6 +17,7 @@ import pytest
 import ouroboros.config as config
 from ouroboros import fallback_cooldown as fcd
 from ouroboros import subagents
+from tests._shared import saved_settings
 from tests._store_shared import read_result
 
 
@@ -37,10 +38,10 @@ def _owned_gateway_uses_each_test_transport(monkeypatch):
 
 # ---------------------------------------------------------------- accessors
 
-def test_heavy_and_light_empty_fall_back_to_main(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_MODEL", "provider::main-x")
+def test_heavy_and_light_empty_fall_back_to_main(monkeypatch, tmp_path):
+    # A saved blank Light is "follow Main" (route keys read the document, route_choice); Heavy is env-read.
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL="provider::main-x", OUROBOROS_MODEL_LIGHT="")
     monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "")
     assert config.get_heavy_model() == "provider::main-x"
     assert config.get_light_model() == "provider::main-x"
 
@@ -71,18 +72,11 @@ def test_fallback_chain_benchmark_dedupes_to_no_op(monkeypatch):
     assert config.get_fallback_models("same::model") == []
 
 
-def test_fallback_chain_reads_legacy_singular_env(monkeypatch):
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "legacy::single")
-    assert config.get_fallback_models("primary") == ["legacy::single"]
-
-
-def test_fallback_chain_empty_means_no_fallback(monkeypatch):
-    # An explicitly empty/unset Fallbacks slot must NOT silently fall back to the shipped
-    # Anthropic default (which would cross an OpenAI-compatible/local owner into an
-    # unconfigured provider). The default reaches a default install via the env instead.
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACK", raising=False)
+def test_fallback_chain_empty_means_no_fallback(monkeypatch, tmp_path):
+    # An explicitly empty Fallbacks slot (a SAVED blank: route keys read the document, route_choice) means
+    # no cross-model fallback; only an unauthored slot takes the install's proposal.
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "env/copy")  # a saved blank beats the environment's copy
     assert config.get_fallback_models("primary") == []
 
 
@@ -92,9 +86,8 @@ def test_parse_fallback_chain_ssot(monkeypatch):
     # Raw chain: parsed, whitespace-trimmed, NO dedup, NO active-drop (those belong to
     # get_fallback_models on top).
     assert config.parse_fallback_chain() == ["a", "b", "a"]
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "legacy")
-    assert config.parse_fallback_chain() == ["legacy"]
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "legacy")  # the retired singular is no environment alias
+    assert config.parse_fallback_chain() == ["a", "b", "a"]
 
 
 def test_infer_model_category_recognizes_chain_link(monkeypatch):
@@ -325,39 +318,35 @@ def test_cooldown_error_kinds_include_rate_limit_but_not_in_retry_kinds():
 
 # ------------------------------------ credentialed-model resolver parses chain (C2)
 
-def test_resolve_credentialed_model_parses_fallbacks_chain(monkeypatch):
+def test_resolve_credentialed_model_parses_fallbacks_chain(monkeypatch, tmp_path):
     from ouroboros.provider_models import resolve_credentialed_model
-    # Only OpenRouter is credentialed in this environment.
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    # Only OpenRouter is credentialed in this install; Light saved blank follows Main (route_choice).
     for k in ("GIGACHAT_CREDENTIALS", "GIGACHAT_USER", "GIGACHAT_PASSWORD",
               "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY"):
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL", "gigachat::GigaChat")  # uncredentialed
     monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "")
     # First chain entry uncredentialed (gigachat), second routes via OpenRouter.
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "gigachat::nocreds, anthropic/claude-sonnet-4.6")
+    saved_settings(monkeypatch, tmp_path, OPENROUTER_API_KEY="or-key", OUROBOROS_MODEL="gigachat::GigaChat",
+                   OUROBOROS_MODEL_LIGHT="", OUROBOROS_MODEL_FALLBACKS="gigachat::nocreds, anthropic/claude-sonnet-4.6")
     # The resolver must parse the chain and return the credentialed SECOND entry — not
     # test the raw comma-string as one (broken) model id, nor skip past it.
     assert resolve_credentialed_model("gigachat::GigaChat") == "anthropic/claude-sonnet-4.6"
 
 
-def test_empty_light_slot_inherits_main_routing_even_when_models_match(monkeypatch):
-    """ENV PRESENCE decides the inherit-from-Main case, not string equality. A
+def test_empty_light_slot_inherits_main_routing_even_when_models_match(monkeypatch, tmp_path):
+    """SLOT PRESENCE decides the inherit-from-Main case, not string equality. A
     local-only install whose Main happens to equal the shipped Light default must
     still route the Light lane locally — it is running Main, not the Light slot."""
     from ouroboros.config import SETTINGS_DEFAULTS
     from ouroboros.subagents import _use_local_for_lane
 
     shared = SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]
-    monkeypatch.setenv("OUROBOROS_MODEL", shared)
-    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
-    monkeypatch.setenv("USE_LOCAL_MAIN", "true")
-    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=shared, OUROBOROS_MODEL_LIGHT="",  # a saved blank Light
+                   USE_LOCAL_MAIN=True, USE_LOCAL_LIGHT=False)
 
     assert _use_local_for_lane("light", shared) is True
     # A slot the owner really configured still governs itself.
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", shared)
+    saved_settings(monkeypatch, None, OUROBOROS_MODEL_LIGHT=shared)
     assert _use_local_for_lane("light", shared) is False
 
 
@@ -1134,12 +1123,13 @@ def test_legacy_heavy_migration_selects_an_exact_api_model(tmp_path, monkeypatch
 def test_legacy_model_global_ceiling_is_not_dispatch_authority(tmp_path, monkeypatch):
     """Scheduling reports requested effort; exact wire disclosure owns adaptation."""
     from ouroboros.agent import capability_delta_prompt_block
-    from ouroboros.llm import LLMClient
+    from tests._shared import write_legacy_capability_rows
 
     monkeypatch.setenv("OUROBOROS_MODEL", "provider::main")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "provider::cheap")
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "max")
-    monkeypatch.setitem(LLMClient._EFFORT_CEILING_CACHE, "provider::cheap", "low")
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    write_legacy_capability_rows(tmp_path, effort_ceilings={"provider::cheap": "low"})
 
     task, dispatch = _dispatched(
         tmp_path / "ceiling", monkeypatch, model_lane="light", _actor_effort="max",
@@ -1267,21 +1257,20 @@ def test_configured_actor_does_not_inherit_a_stale_heavy_parent(tmp_path, monkey
 
 
 def test_scheduler_effort_stays_pre_wire_until_exact_route_disclosure(tmp_path, monkeypatch):
-    """Legacy floors stay diagnostic; physical request usage reports any adjustment."""
+    """A stored legacy floor never moves scheduled effort; physical request usage reports any adjustment."""
     from ouroboros.agent import capability_delta_prompt_block
-    from ouroboros.llm import LLMClient
+    from tests._shared import write_legacy_capability_rows
 
     monkeypatch.setenv("OUROBOROS_MODEL", "provider::main")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "provider::cheap")
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "none")
-    monkeypatch.setitem(LLMClient._EFFORT_FLOOR_CACHE, "provider::cheap", "low")
-    monkeypatch.setitem(LLMClient._EFFORT_FLOOR_LOADED, "provider::cheap", float("inf"))
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    write_legacy_capability_rows(tmp_path, effort_floors={"provider::cheap": "low"})
 
     task, dispatch = _dispatched(
         tmp_path / "floor", monkeypatch, model_lane="light", _actor_effort="none",
     )
     delta = task["capability_delta"]
-    assert LLMClient.clamp_effort_for_route("provider::cheap", "none") == "low"
     assert delta["effective_effort"] == "none"
     assert delta["reduced"] is False
     assert capability_delta_prompt_block(dispatch) == ""
@@ -1662,12 +1651,11 @@ def test_native_child_keeps_plain_inheritance(monkeypatch):
     assert dispatch.lane.provenance == "inherited"
 
 
-def test_policy_light_with_an_empty_light_slot_lands_main_and_says_so(monkeypatch):
+def test_policy_light_with_an_empty_light_slot_lands_main_and_says_so(monkeypatch, tmp_path):
     """The provenance names the DECISION source even when the slot outcome moves
     the effective lane: policy said light, no light slot exists, the model is
     Main — and the record must carry both facts, not blend them."""
-    monkeypatch.setenv("OUROBOROS_MODEL", "provider::main")
-    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL="provider::main", OUROBOROS_MODEL_LIGHT="")
     _harness_ready_dispatch(monkeypatch)
 
     dispatch = subagents.resolve_subagent_dispatch(

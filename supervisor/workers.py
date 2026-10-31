@@ -335,11 +335,9 @@ def _get_chat_agent():
         sys.path.insert(0, str(REPO_DIR))
     from ouroboros.agent import make_agent
     from ouroboros.owner_wait import direct_owner_wait
-    from supervisor.queue import transition_acceptance_fence
 
     agent = make_agent(repo_dir=str(REPO_DIR), drive_root=str(DRIVE_ROOT), event_queue=get_event_q())
-    agent.owner_wait_callback = direct_owner_wait
-    agent.fence_transition = transition_acceptance_fence  # in-process fence: no event, no ack file, no wait
+    agent.owner_wait_callback = direct_owner_wait  # the fence is in-process by the process fact, not a flag
     return agent
 
 
@@ -1286,12 +1284,9 @@ def kill_workers(
                 unconfirmed_pids.append(int(getattr(w.proc, "pid", 0) or 0))
                 log.debug("Cannot confirm worker %s dead", w.wid, exc_info=True)
         WORKERS.clear()
-        orphaned_ids, drained_ids, terminalization_retry_ids = [], [], []
-        # #1196: an exact mid-run budget pause survives the physical epoch. Its
-        # PENDING carrier and its durable ``paused`` row are left exactly as they
-        # are — never cancelled here, never ``pending_parent_interrupted`` — so the
-        # next boot's ``restore_pending_from_snapshot`` re-validates the durable
-        # authority and parks the same task id again (or holds it, typed).
+        orphaned_ids, drained_ids, terminalization_retry_ids, preserved_successors = [], [], [], []
+        # Exact pauses retain their queued marker and durable row across stops;
+        # restore revalidates the same task instead of cancelling it as interrupted.
         retained_paused_ids: list = []
         cleanup_ok = True
         try:
@@ -1335,10 +1330,7 @@ def kill_workers(
                     return None
                 task_id = str(task.get("id") or "").strip()
                 retry_claim = _prepare_retry_claim(task, task_id)
-                if retry_claim is None:
-                    terminalization_retry_ids.append(task_id or "<missing-task-id>")
-                    return False
-                if _settle_terminalization_retry_task(task, retry_claim):
+                if retry_claim is not None and _settle_terminalization_retry_task(task, retry_claim):
                     return True
                 terminalization_retry_ids.append(task_id or "<missing-task-id>")
                 return False
@@ -1368,6 +1360,8 @@ def kill_workers(
                     successor = dict(task)
                     continuing_wait = isinstance(successor.get("_owner_wait_resume"), dict)
                     successor["_attempt"] = int(meta.get("attempt") or task.get("_attempt") or 1) + (0 if continuing_wait else 1)
+                    retention.attach_preserved_successor_source(
+                        DRIVE_ROOT, str(task_id), successor, task, successor["_attempt"] - 1)
                     stamp_execution_handoff(successor, meta)  # #939: no fresh explicit time
                     try:
                         from ouroboros.owner_hurry import retry_reset
@@ -1380,6 +1374,7 @@ def kill_workers(
                     except Exception:
                         log.debug("Planned-restart retry reset failed for %s", task_id, exc_info=True)
                     PENDING.insert(0, successor)
+                    preserved_successors.append(str(task_id))
                     RUNNING.pop(str(task_id), None)
                     continue
                 if _settle_terminalization_task(
@@ -1470,7 +1465,7 @@ def kill_workers(
                     # custody, never a lost row or permission to run it again.
                     PENDING.append(_retain_killed_pending(task, reason=reason, status=status, trigger=trigger))
             if (orphaned_ids or drained_ids or terminalization_retry_ids or retained_paused_ids
-                    or retained_running_ids or retention.held_ids(PENDING)):
+                    or retained_running_ids or preserved_successors or retention.held_ids(PENDING)):
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
@@ -1479,6 +1474,7 @@ def kill_workers(
                         "orphaned_running": orphaned_ids,
                         "drained_pending": drained_ids,
                         "terminalization_retry": terminalization_retry_ids,
+                        **({"preserved_successors": preserved_successors} if preserved_successors else {}),
                         **({"retained_budget_paused": retained_paused_ids} if retained_paused_ids else {}),
                         **({"retained_saved_work": retained_running_ids} if retained_running_ids else {}),
                         **({"held_for_owner_restart": held} if (held := retention.held_ids(PENDING)) else {}),
@@ -1730,11 +1726,14 @@ def _settle_cancelled_pending_row(
             "accounted_upper_bound_usd": None,
         }
     try:
+        from supervisor.cancel_publication import queued_address
         stored = write_task_result(
             DRIVE_ROOT, task_id, status_cancelled,
             strict_existing_dict=True,
-            result="Cancelled before start.", **cost_fields,
+            result=("Cancelled before this continuation started." if int(task.get("_attempt") or 1) > 1
+                    else "Cancelled before start."), **cost_fields,
             **intent_outcome_fields(intent),
+            _field_projector=lambda existing, patch: {**queued_address(task, existing), **patch},
         ) or {}
         stored_status = str(stored.get("status") or "").strip()
         if not stored_status:
@@ -1844,7 +1843,7 @@ def _drop_cancelled_pending() -> bool:
     if not PENDING:
         return True
     try:
-        from ouroboros.project_admission import hold_unreadable_result
+        from supervisor.restart_retention import conserve_unreadable_pending
         from ouroboros.task_results import (
             STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES,
             load_task_result, write_task_result,
@@ -1919,9 +1918,9 @@ def _drop_cancelled_pending() -> bool:
                 )
                 survivors.extend(pending_rows[index:])
                 break
-            if marker is not None or not tid or hold_unreadable_result(t):
-                # Accepted Project work first losing its result keeps the same row;
-                # this pass's hold revalidation persists it (restore's rule).
+            if marker is not None or not tid or conserve_unreadable_pending(t):
+                # Saved pauses and accepted Project work keep their same row;
+                # each continuation's existing hold remains its authority.
                 survivors.append(t)
             else:
                 survivors.append(_make_terminalization_retry_task(
@@ -2280,7 +2279,6 @@ from supervisor.worker_promotion import (  # noqa: E402, F401 -- intentional pub
     _origin_from_mapping,
     _origin_from_task_record,
     _promote_duplicate_reason,
-    _promoted_force_plan_metadata,
     _report_binding_failure,
     ensure_project_scope,
     promote_chat_to_task,

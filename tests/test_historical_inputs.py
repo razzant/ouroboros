@@ -66,7 +66,6 @@ def test_new_direct_correction_keeps_audience_without_predecessor(main_loop):
 
 def test_unrelated_same_room_history_never_becomes_current_criteria(main_loop):
     from ouroboros.loop_delivery import _effective_delivery_criteria
-    from ouroboros.review_evidence_refs import DECLARED_INTENT_SECTIONS
 
     f = main_loop
     f.ctx.current_chat_id = 12
@@ -79,7 +78,6 @@ def test_unrelated_same_room_history_never_becomes_current_criteria(main_loop):
 
     assert old in json.dumps(_sources(f.ctx))
     assert old not in json.dumps(_effective_delivery_criteria(f.ctx))
-    assert "historical_author_inputs" not in DECLARED_INTENT_SECTIONS
 
 
 def test_declared_selection_never_captures_excluded_shared_input(main_loop, tmp_path, monkeypatch):

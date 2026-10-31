@@ -110,7 +110,7 @@ def test_only_the_tasks_own_delegation_is_its_delegation(
         (tmp_path / "repo").mkdir(parents=True, exist_ok=True)
         ctx = ToolContext(repo_dir=str(tmp_path / "repo"), drive_root=str(tmp_path))
         ctx.task_id = TASK
-        assert delegate_hold._single_live_run(ctx) == "run-leaf"
+        assert delegate_hold._eligible_live_runs(ctx) == ["run-leaf"]
         return
 
     if consumer == "continue_writer_check":

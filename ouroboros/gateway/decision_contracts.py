@@ -14,7 +14,8 @@ class DecisionRequest(TypedDict):
     """POST /api/decisions body — the ONE answer ingress for owner decision
     cards (owner decision 1=A). ``decision_id`` is a composed family id:
     ``quiz:{task_id}:{quiz_id}``, ``routing:{client_message_id}:{routing_token}``,
-    ``model_wait:{task_id}:{wait_id}``, or the reserved
+    ``model_wait:{task_id}:{wait_id}``, ``card:{card_id}:{action_id}`` (a press on a
+    living card; ``gateway/card_decision.py``), or the reserved
     ``interaction:{task_id}:{run_id}:{interaction_id}`` family.
     ``request_id`` is the idempotency key; a replayed request returns the
     recorded confirmation instead of acting twice. ``comment`` is the owner's
@@ -28,6 +29,10 @@ class DecisionRequest(TypedDict):
     Routing requires the integer — its choice IS the option. Model waits
     instead require revision and action, with the matching action fields;
     persist_role defaults false, and an empty credential profile means Auto.
+    A card press carries ``revision`` (the card revision it was drawn from; a newer card
+    answers 409 ``card_stale`` with the current ``revision``) and ``values`` only for a
+    form action (keys are the form's field names; JSON scalars, text at most 4000
+    characters, at most 50).
     Each ingress validates its own closed field set before effects.
     """
 
@@ -43,6 +48,7 @@ class DecisionRequest(TypedDict):
     credential_profile_id: NotRequired[str]
     use_local: NotRequired[bool]
     persist_role: NotRequired[bool]
+    values: NotRequired[Dict[str, Any]]  # card: form field values
 
 
 class DecisionResponse(TypedDict, total=False):
@@ -72,6 +78,15 @@ class DecisionResponse(TypedDict, total=False):
     is no observed application yet, not proof that a pending action cannot apply. The role saves
     only while the task's stop state reads clear — a recorded Stop intent (Wrap
     up included) or Panic saves nothing, nor does an unreadable (unknown) state.
+
+    A card press is recorded per ``request_id`` (each press its own; ``once``
+    actions keep the first and answer 409 ``card_action_once`` with ``winner`` (its request_id,
+    time and delivery: a winner still owed is retried under its request_id); a card
+    that changed since it was drawn answers 409 ``card_stale`` with its ``revision``).
+    ``delivery`` says where it went: ``delivered`` into the authoring task's
+    mailbox (``reason_code`` ``awaiting_recipient_read`` while a paused, held or
+    queued author has not read it), ``forwarded`` as the owner's message after
+    that task ended, or ``owed`` (202 with ``reason_code``; resend the same ``request_id``).
     """
 
     ok: bool
@@ -100,3 +115,7 @@ class DecisionResponse(TypedDict, total=False):
     saved: Optional[bool]
     wait: Dict[str, Any]
     reason_code: str
+    delivery: Literal["delivered", "forwarded", "owed"]
+    card_id: str
+    revision: int
+    winner: Dict[str, Any]

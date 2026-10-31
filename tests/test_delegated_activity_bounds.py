@@ -1,6 +1,7 @@
 """Journal reads share the wait's remaining allowance and existing owner controls."""
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 import errno
 import json
 import os
@@ -77,10 +78,14 @@ def test_durable_stop_precedes_the_first_catalog_read(tmp_path, monkeypatch, con
         cancel_intents.request_cancel(tmp_path, "child", source="owner")
     else:
         (tmp_path / "state").mkdir(exist_ok=True)
-        name = "panic_stop.flag" if control == "panic" else "owner_restart_no_resume.flag"
-        (tmp_path / "state" / name).write_text("stop")
+        if control == "panic":
+            from ouroboros import model_wait
+            monkeypatch.setattr(model_wait, "current_model_wait", lambda: SimpleNamespace(control_reason=lambda: "panic"))
+        else:
+            from tests._work_stop_helpers import live_restart
+            live_restart(tmp_path, monkeypatch)
     record, = _records(ctx, gateway, 1, drain=30)
-    _no_read(record, requests, "owner_cancelled" if control == "cancelled" else "owner_panic")
+    _no_read(record, requests, "owner_cancelled" if control == "cancelled" else "owner_panic" if control == "panic" else "owner_owner_restart")
 
 
 @pytest.mark.parametrize("control", ["cancelled", "absolute_ceiling", "finalize_requested"])
@@ -206,7 +211,7 @@ def test_spent_wait_admits_no_new_activity_read(tmp_path, monkeypatch, terminal,
 @pytest.mark.parametrize("errors", ["native", "windows"])
 @pytest.mark.parametrize("flag_name", ["panic_stop.flag", "owner_restart_no_resume.flag"])
 @pytest.mark.parametrize("entry", ["dangling", "unreadable", "obstructed_parent"])
-def test_only_proven_absent_stop_flags_permit_activity_reads(tmp_path, monkeypatch, errors, flag_name, entry):
+def test_installation_input_uncertainty_is_not_a_delegated_task_stop(tmp_path, monkeypatch, errors, flag_name, entry):
     from tests.test_state_authority import _windows_shaped_not_found
 
     ctx, gateway, _clock, requests = _transport(tmp_path, monkeypatch)
@@ -226,5 +231,6 @@ def test_only_proven_absent_stop_flags_permit_activity_reads(tmp_path, monkeypat
             return real(path, *args, **kwargs)
 
         monkeypatch.setattr(os, "lstat", lstat)
-    record, = _records(ctx, gateway, 1, drain=30)
-    _no_read(record, requests, "owner_panic")
+    from ouroboros import cancel_intents
+    monkeypatch.setattr(cancel_intents, "cancel_pending", lambda *a: False)
+    assert delegate_activity._owner_stop(ctx, "child") == ""

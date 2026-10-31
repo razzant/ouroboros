@@ -356,18 +356,21 @@ def test_a_nonfatal_worker_startup_failure_keeps_its_exception(worker, monkeypat
 
 
 @pytest.mark.parametrize("function_name", ["_apply_smart_update_fenced", "_apply_replace_recovery_fenced"])
-def test_a_failed_managed_update_is_recorded_once(monkeypatch, caplog, function_name):
+def test_a_failed_managed_update_is_recorded_once(tmp_path, monkeypatch, caplog, function_name):
     """The update catch records the failure itself; its json_exception call names the
     status, so the same exception is not recorded a second time."""
     from ouroboros.gateway import control
-    from supervisor import update_merge
+    from supervisor import git_ops, update_merge
+    from tests.test_git_lock_owners import _repo
 
+    # The pre-stop lock observation needs a real checkout before the injected failure.
+    monkeypatch.setattr(git_ops, "REPO_DIR", _repo(tmp_path))
     plan = {"available": True, "kind": "clean", "base_sha": "a" * 40, "target_sha": "b" * 40}
     monkeypatch.setattr(update_merge, "plan_managed_update_merge", lambda **_kwargs: plan)
     monkeypatch.setattr(update_merge, "acquire_update_lock", lambda: object())
     monkeypatch.setattr(update_merge, "release_update_lock", lambda _value: None)
     monkeypatch.setattr(update_merge, "active_update_tx", lambda: {})
-    monkeypatch.setattr(control.update_progress, "begin", lambda: None)
+    monkeypatch.setattr(control.update_progress, "begin", lambda **_kwargs: None)  # base/target SHAs since #2159
     monkeypatch.setattr(control.update_progress, "_finish", lambda *_args: None)
     monkeypatch.setattr(control, "_respawn_workers_after_failed_update", lambda: None)
     error = RuntimeError("synthetic update failure")

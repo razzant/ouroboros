@@ -1,4 +1,9 @@
-"""Review/completion handles retain exact bytes through publication and child cleanup."""
+"""Review/completion source handles retain their exact bytes through child copy-back and cleanup.
+
+The review checkpoints here are old task-acceptance records: nothing writes one any more, but a
+stored panel's published source still copies back, promotes its nested sources and downloads,
+so each is built literally in the shape the retired machine stored it.
+"""
 from ouroboros.headless import retry_child_task_refs
 import hashlib
 import json
@@ -14,7 +19,33 @@ from ouroboros.gateway import task_archive
 from ouroboros.gateway.tasks import api_task_artifact
 from ouroboros.headless import copy_child_task_result, prepare_task_drive, remove_subagent_task_drive
 from ouroboros.task_results import write_task_result
-from tests.test_acceptance_publication import _context, _run
+from tests.test_acceptance_publication import _run
+
+
+def _old_tool_trajectory_source(root, task_id, tool_calls):
+    """The complete tool-call corpus the retired task acceptance stored behind its packet views
+    (``acceptance_tool_trajectory``), with the handle an old checkpoint still names."""
+    from ouroboros.observability import redact_projection
+
+    data = json.dumps(redact_projection([dict(call) for call in tool_calls]).value, ensure_ascii=False,
+                      separators=(",", ":"), default=str).encode("utf-8")
+    ref = artifacts.store_actor_source_bytes(root, task_id, category="tool_results",
+                                             source_id="acceptance_tool_trajectory", data=data, extension="json")
+    return {**ref, "reader": "read_file", "artifact_ref": f"artifact_store:{ref['path']}#chars=0-{len(data.decode('utf-8'))}"}
+
+
+def _old_published_panel(root, task_id, run):
+    """An old applied acceptance panel: its exact source in the artifact store and the task result's
+    review projection naming it, as the retired publisher stored both."""
+    raw = json.dumps(run, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ref = artifacts.store_actor_source_bytes(root, task_id, category="context_checkpoints",
+                                             source_id="acceptance", data=raw, extension="json")
+    published = {**run, "panel_index": 0, "applied_source_ref": ref, "applied_source_status": "available",
+                 "publication_revision": 1}
+    projection = {**review_projection.compact_review_projection([published]), "publication_revision": 1,
+                  "task_attempt": int(run.get("task_attempt") or 1)}
+    write_task_result(root, task_id, "running", review_projection=projection)
+    return ref
 
 
 def _field(ref, source):
@@ -63,26 +94,9 @@ def test_failed_completion_promotion_retains_child_until_retry(tmp_path, monkeyp
     assert artifacts.read_actor_source_bytes(parent, "source", ref) == raw
 
 
-def test_unchanged_review_source_is_write_once(tmp_path, monkeypatch):
-    ctx = _context(tmp_path)
-    trace = {"review_runs": [_run()]}
-    review_projection.publish_acceptance_checkpoint(ctx, trace)
-    ref = trace["review_runs"][0]["applied_source_ref"]
-    path = artifacts.task_artifact_dir_path(tmp_path, "applied") / ref["path"]
-    stamp = path.stat().st_mtime_ns
-    monkeypatch.setattr(artifacts, "write_bytes_atomic", lambda *_a, **_k: pytest.fail("same source rewritten"))
-    review_projection.publish_acceptance_checkpoint(ctx, trace)
-    assert trace["review_runs"][0]["applied_source_ref"] == ref
-    assert path.stat().st_mtime_ns == stamp
-    assert not (path.parents[2] / artifacts._ARTIFACT_MANIFEST).exists()
-
-
 @pytest.mark.serial
 def test_source_download_is_bound_and_distinct_from_same_named_user_file(tmp_path):
-    ctx = _context(tmp_path)
-    trace = {"review_runs": [_run()]}
-    review_projection.publish_acceptance_checkpoint(ctx, trace)
-    ref = trace["review_runs"][0]["applied_source_ref"]
+    ref = _old_published_panel(tmp_path, "applied", _run())
     name = Path(ref["path"]).name
     artifacts.store_task_artifact_bytes(tmp_path, "applied", name, b"user result", kind="user_file")
     app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
@@ -119,7 +133,7 @@ def _nested_acceptance_sources(child):
         child, "source", category="tool_results", source_id="command-output",
         data=b"complete output beyond the preview", extension="txt",
     )
-    trajectory = artifacts.persist_tool_trajectory_source(child, "source", [{
+    trajectory = _old_tool_trajectory_source(child, "source", [{
         "tool": "run_command", "result": "preview", "result_partial": True,
         "result_source_ref": result,
     }])
@@ -195,8 +209,6 @@ def test_nested_copy_failure_holds_child_and_rechecks_existing_checkpoint(tmp_pa
 @pytest.mark.parametrize("canonical_checkpoint", [False, True], ids=["child_checkpoint", "canonical_checkpoint"])
 def test_nested_trajectory_promotes_existing_call_blobs_without_crawling_prose(tmp_path, monkeypatch, selected, copy_failure, canonical_checkpoint):
     from ouroboros.observability import persist_call, promote_child_task_refs, retry_pending_child_ref_promotions
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-    from ouroboros.review_evidence_refs import acceptance_evidence_ref_vocabulary, resolve_criteria_evidence_refs
     from ouroboros.task_results import load_task_result
     from ouroboros.utils import sanitize_tool_args_for_log
 
@@ -205,27 +217,20 @@ def test_nested_trajectory_promotes_existing_call_blobs_without_crawling_prose(t
     args = {"cmd": "x" * (4000 if selected else 100), "literal": str(child / "not-a-dependency.json")}
     call = {"tool": "run_command", "tool_call_id": "call", "args": args, "result": "ok"}
     trace = persist_call(child, task_id="source", call_id="call", call_type="tool", payload=call)
-    ctx = _context(child)
-    ctx.task_id = "source"
     checkpoint_root = parent if canonical_checkpoint else child
-    ctx.task_metadata = {"budget_drive_root": str(checkpoint_root)}
-    evidence = build_task_acceptance_evidence(
-        ctx, drive_root=child, task_id="source",
-        llm_trace={"tool_calls": [{**call, "args": sanitize_tool_args_for_log("run_command", args), "trace_ref": trace}]},
-        agent_evidence={"tool_trajectory_indices": [0], "corpus_sha256": "f" * 64} if selected else None,
-    )
-    trajectory = evidence["tool_trajectory_source_ref"]
-    assert "corpus_sha256" not in trajectory  # The model cannot author the host handle.
+    # The old checkpoint's request evidence: the corpus of the task's calls (each with its own
+    # call blob) and a view row citing record 0, the selected view when the author chose one.
+    trajectory = _old_tool_trajectory_source(child, "source", [
+        {**call, "args": sanitize_tool_args_for_log("run_command", args), "trace_ref": trace}])
     section = "tool_trajectory_selected" if selected else "tool_trajectory"
-    citation = evidence[section][0]["ref"]
-    assert acceptance_evidence_ref_vocabulary(evidence)[citation] == "tool_record"
+    citation = f"tool_trajectory:{trajectory['sha256']}[0]"
+    evidence = {"tool_trajectory_source_ref": trajectory,
+                section: [{"tool": "run_command", "ref": citation, "source_index": 0}]}
     criteria = [{"criterion": "command", "status": "supported", "evidence_refs": [citation]}]
     run = _run()
     run["request"].update(task_id="source", evidence=evidence)
     run["actors"][0]["parsed"]["criteria_used"] = criteria
-    review_trace = {"review_runs": [run]}
-    review_projection.publish_acceptance_checkpoint(ctx, review_trace)
-    checkpoint = review_trace["review_runs"][0]["applied_source_ref"]
+    checkpoint = _old_published_panel(checkpoint_root, "source", run)
     original_checkpoint = artifacts.read_actor_source_bytes(checkpoint_root, "source", checkpoint)
     write_task_result(child, "source", "completed",
                       review_projection=load_task_result(checkpoint_root, "source")["review_projection"])
@@ -278,9 +283,6 @@ def test_nested_trajectory_promotes_existing_call_blobs_without_crawling_prose(t
             artifacts.read_actor_source_bytes(destination, "source", {**promoted, "sha256": "0" * 64})
         assert saved["actors"][0]["parsed"]["criteria_used"] == criteria
         assert evidence[section][0]["ref"] == citation
-        vocabulary = acceptance_evidence_ref_vocabulary(evidence)
-        assert vocabulary[citation] == "tool_record"
-        assert resolve_criteria_evidence_refs(criteria, vocabulary) == []
         recovered, complete, issue = artifacts.materialize_tool_args_source(destination, json.loads(raw)[0])
         assert complete and not issue and recovered == args
         assert artifacts.collect_task_artifact_records(destination, "source") == []

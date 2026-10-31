@@ -10,6 +10,8 @@ tests live in ``tests/test_review_pool.py``.
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -86,7 +88,7 @@ def test_a_pool_rows_delivery_is_native_unless_the_row_says_packet(monkeypatch, 
     monkeypatch.setenv("OUROBOROS_SUBAGENTS", stored)  # the applied settings plane the pool reads
     monkeypatch.setattr(rsc, "reviewer_slot_last_executions", lambda: {})
     monkeypatch.setattr(server_maintenance, "review_pool_migration_records", lambda: {})
-    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items, env: {})
+    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items: {})
     body = json.loads(asyncio.run(settings_mod.api_review_pool(None)).body)
     assert [(row["subagent_id"], row["delivery"]) for row in body["pool"]] == [
         ("bare", "native"), ("packed", "packet"), ("session", "session")]
@@ -188,7 +190,6 @@ def test_startup_notice_matches_loaded_runtime_bounds_and_raw_presence(
         monkeypatch, tmp_path, document, launch_env, expected, origin, raw):
     from ouroboros import config as cfg, upgrade_notices as notices
     from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
-    from ouroboros.utils import iter_jsonl_chain_objects
     from supervisor import message_bus as bus, state as ss
 
     lifetime = "OUROBOROS_TASK_ABS_CEILING_SEC"
@@ -203,8 +204,9 @@ def test_startup_notice_matches_loaded_runtime_bounds_and_raw_presence(
     if launch_env is not None:
         monkeypatch.setenv(key, launch_env)
     monkeypatch.setenv(other, "unlimited")
-    if document is not None:
-        path.write_text(json.dumps({other: "unlimited", **document}), encoding="utf-8")
+    if document is not None:  # an install that already carries the consciousness level (no one-time copy)
+        path.write_text(json.dumps({other: "unlimited", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full", **document}),
+                        encoding="utf-8")
     before = path.read_bytes() if path.exists() else None
     for name, value in {"DRIVE_ROOT": tmp_path, "STATE_PATH": tmp_path / "state/state.json",
                         "STATE_LAST_GOOD_PATH": tmp_path / "state/state.last_good.json",
@@ -226,7 +228,7 @@ def test_startup_notice_matches_loaded_runtime_bounds_and_raw_presence(
         notices.startup_upgrade_notices(settings)
     assert (path.read_bytes() if path.exists() else None) == before
     facts = notices.optional_bound_facts(notices._raw_settings_document(), settings)
-    rows = [r for r in iter_jsonl_chain_objects(tmp_path / "logs/chat.jsonl")
+    rows = [r for r in dialogue_test.log_rows(tmp_path / "logs/chat.jsonl")
             if r.get("type") == "optional_bounds_notice"]
     if expected is None:
         assert facts == [] and rows == []
@@ -328,7 +330,7 @@ def test_notice_bookkeeping_preserves_recovered_control_uncertainty(monkeypatch,
 @pytest.mark.parametrize("failure", ["chat_append", "state_marker", "bridge"])
 def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_path, failure):
     from ouroboros import upgrade_notices as notices
-    from ouroboros.utils import iter_jsonl_chain_objects
+    from ouroboros import dialogue_store as ds
     from supervisor import message_bus as bus, state as ss
 
     for name, path in {"DRIVE_ROOT": tmp_path, "STATE_PATH": tmp_path / "state/state.json",
@@ -341,15 +343,15 @@ def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_pa
     monkeypatch.setattr(notices, "_raw_settings_document", lambda: {"OUROBOROS_MAX_ROUNDS": 150,
                         "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"})
     ss.save_state({"owner_chat_id": 7, "owner_id": 1})
-    real_update, real_append = ss.update_state, bus.append_jsonl
+    real_update, real_append = ss.update_state, ds.append
     delivered = []
     failed = False
 
-    def fail_once():
+    def fail_once(error=OSError):
         nonlocal failed
         if not failed:
             failed = True
-            raise OSError("injected persistence/delivery failure")
+            raise error("injected persistence/delivery failure")
 
     def update(fn):
         if failure == "state_marker":
@@ -358,7 +360,7 @@ def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_pa
 
     def append(*a, **kw):
         if failure == "chat_append":
-            fail_once()
+            fail_once(ds.StoreError)
         return real_append(*a, **kw)
 
     def send(*a, **kw):
@@ -367,7 +369,7 @@ def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_pa
         delivered.append(a)
 
     monkeypatch.setattr(ss, "update_state", update)
-    monkeypatch.setattr(bus, "append_jsonl", append)
+    monkeypatch.setattr(ds, "append", append)
     monkeypatch.setattr(bus, "get_bridge", lambda: SimpleNamespace(send_message=send))
     settings = {}
     notices.startup_upgrade_notices(settings)
@@ -375,7 +377,7 @@ def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_pa
     notices.startup_upgrade_notices(settings)
     notices.startup_upgrade_notices(settings)
     assert ss.load_state()[notices.OPTIONAL_BOUNDS_NOTICE_KEY]
-    rows = [r for r in iter_jsonl_chain_objects(tmp_path / "logs/chat.jsonl") if r.get("type") == "optional_bounds_notice"]
+    rows = [r for r in dialogue_test.log_rows(tmp_path / "logs/chat.jsonl") if r.get("type") == "optional_bounds_notice"]
     assert len(rows) == 1 and "150 rounds" in rows[0]["text"]
     # Durable web history is the owner delivery witness. External bridge loss
     # does not erase that row or require another visible notice on restart.

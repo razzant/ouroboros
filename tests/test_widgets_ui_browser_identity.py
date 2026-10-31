@@ -77,7 +77,7 @@ def _declaration():
 
 
 @contextlib.contextmanager
-def _page(browser_name, tabs):
+def _page(browser_name, tabs, ledger=None):
     pytest.importorskip("playwright.sync_api")
     from playwright.sync_api import sync_playwright
 
@@ -112,7 +112,12 @@ def _page(browser_name, tabs):
                 if route.request.method == "POST":
                     state["preferences"].update(route.request.post_data_json)
                 reply(state["preferences"])
-            elif url.path.startswith("/api/extensions/"):
+            elif url.path.startswith("/api/widgets/asset-leases"):
+                # A framed mount's route lease (mint, renew, revoke): the frame then loads under its URL.
+                lease = "L" * 43
+                reply({"ok": True} if url.path.endswith("/revoke") else
+                      {"token": lease, "base_url": f"/api/widget-resources/{lease}/", "expires_in": 120, "renew_after": 40})
+            elif url.path.startswith(("/api/extensions/", "/api/widget-resources/")):
                 state["requests"].append(url.path + (f"?{url.query}" if url.query else ""))
                 if state["hold"] and url.path.endswith(state["hold"]):
                     state["pending"].append(route)
@@ -146,6 +151,9 @@ def _page(browser_name, tabs):
                 route.fulfill(content_type=mime, body=file.read_bytes())
 
         page.route("**/*", route_request)
+        if ledger:  # what an earlier page left in this browser's start ledger (web/modules/holds.js)
+            stored = json.dumps(json.dumps({"v": 1, "entries": ledger}))
+            page.add_init_script(f"if (window === window.top) localStorage.setItem('ouroboros.holds', {stored});")
         try:
             page.goto(ORIGIN, wait_until="domcontentloaded")
             yield page, state
@@ -372,6 +380,32 @@ def test_widget_failed_list_retry_preserves_frames_stop_and_initial_recovery(bro
 
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("browser_name", ("chromium", "webkit"))
+def test_a_widget_start_the_page_did_not_outlive_rests_until_start(browser_name):
+    """An earlier page froze while this revision of the frame was starting: the card rests on its facade with the
+    held line until Start, whose own start leaves the ledger once the frame loaded and a second passed. An entry
+    for an older revision holds nothing: the new code starts as usual."""
+    tabs = [{"skill": "hold_probe", "tab_id": tab_id, "title": tab_id, "revision": "r7", "render": {
+        "kind": "iframe", "route": "frame", "start": "auto",
+    }} for tab_id in ("frozen", "fixed")]
+    ledger = {"widget:hold_probe:frozen": {"reason": "start", "rev": "r7", "at": 1},
+              "widget:hold_probe:fixed": {"reason": "start", "rev": "r6", "at": 1}}
+    with _page(browser_name, tabs, ledger) as (page, _state):
+        frozen = page.locator('[data-widget-key="hold_probe:frozen"]')
+        page.locator('[data-widget-key="hold_probe:fixed"]').frame_locator("iframe").locator("#increment").wait_for()
+        frozen.locator("[data-widget-facade]").wait_for()
+        assert frozen.locator("iframe").count() == 0
+        assert "Held back: the page stopped while this was starting last time." in frozen.inner_text()
+        assert frozen.locator("[data-widget-power]").inner_text() == "Start"
+        frozen.locator("[data-widget-power]").click()
+        frozen.frame_locator("iframe").locator("#increment").wait_for()
+        page.wait_for_function("""() => {
+            const entries = JSON.parse(localStorage.getItem('ouroboros.holds') || '{}').entries || {};
+            return !entries['widget:hold_probe:frozen'] && !entries['widget:hold_probe:fixed'];
+        }""", timeout=5_000)
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("browser_name", ("chromium", "webkit"))
 def test_widget_policy_menu_uses_shared_keyboard_position_and_page_lifetime(browser_name):
     tab = {"skill": "menu_probe", "tab_id": "main", "title": "Kept widget", "render": {
         "kind": "iframe", "route": "frame", "start": "retain",
@@ -382,9 +416,9 @@ def test_widget_policy_menu_uses_shared_keyboard_position_and_page_lifetime(brow
         trigger = card.locator('[data-widget-menu-trigger]')
         card.frame_locator('iframe').locator('#increment').click()
         page.evaluate("window.keptFrame = document.querySelector('iframe')")
-        assert card.locator('.skills-card-menu-dialog').is_hidden()
+        assert card.locator('.skills-card-menu-dialog:not([data-leaving])').is_hidden()
         trigger.click()
-        menu = page.locator('body > .skills-card-menu-dialog[open]')
+        menu = page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open]')
         menu.wait_for()
         geometry = menu.evaluate("""menu => {
             const r = menu.getBoundingClientRect();
@@ -399,10 +433,10 @@ def test_widget_policy_menu_uses_shared_keyboard_position_and_page_lifetime(brow
         assert page.evaluate("document.activeElement.dataset.widgetStartMode") == "manual"
         page.keyboard.press('Escape')
         assert trigger.evaluate("trigger => trigger === document.activeElement")
-        assert page.locator('body > .skills-card-menu-dialog').count() == 0
-        assert card.locator('.skills-card-menu-dialog').is_hidden()
+        assert page.locator('body > .skills-card-menu-dialog:not([data-leaving])').count() == 0
+        assert card.locator('.skills-card-menu-dialog:not([data-leaving])').is_hidden()
         page.keyboard.press('Enter')
-        page.locator('body > .skills-card-menu-dialog[open]').wait_for()
+        page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open]').wait_for()
         page.keyboard.press('Escape')
         assert trigger.evaluate("trigger => trigger === document.activeElement")
         trigger.click()
@@ -415,7 +449,7 @@ def test_widget_policy_menu_uses_shared_keyboard_position_and_page_lifetime(brow
         page.wait_for_function("document.querySelector('[data-widget-start-mode=retain]').getAttribute('aria-checked') === 'true'")
         trigger.click()
         page.evaluate("showWidgets('chat')")
-        assert page.locator('body > .skills-card-menu-dialog').count() == 0
+        assert page.locator('body > .skills-card-menu-dialog:not([data-leaving])').count() == 0
         assert page.evaluate("document.querySelector('iframe') === keptFrame")
         assert card.frame_locator('iframe').locator('#count').inner_text() == '1'
 
@@ -497,8 +531,8 @@ def test_widget_policy_binding_survives_persisted_pagehide_but_disposes_on_exit(
             dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
         }""")
         trigger.click()
-        page.locator('body > .skills-card-menu-dialog[open]').wait_for()
+        page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open]').wait_for()
         page.keyboard.press("Escape")
         page.evaluate("dispatchEvent(new PageTransitionEvent('pagehide', {persisted: false}))")
         trigger.click()
-        assert page.locator('body > .skills-card-menu-dialog[open]').count() == 0
+        assert page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open]').count() == 0

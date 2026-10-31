@@ -39,17 +39,14 @@ def test_transport_timeout_is_narrowed_by_numeric_owner_deadline(monkeypatch):
     assert deadlines.transport_timeout_with_deadline(90, deadline_ts=999.0) == 0.001
 
 
-def test_update_letter_timeout_is_a_clamped_config_getter(monkeypatch):
-    from ouroboros.config import SETTINGS_DEFAULTS, get_update_letter_timeout_sec
+def test_the_retired_update_letter_ceiling_has_no_getter_and_is_purged(monkeypatch):
+    """The description is ordinary work (Ouroboros#2389): its old one-shot ceiling bounds nothing."""
+    import ouroboros.config as config
+    from ouroboros.settings_defaults import RETIRED_SETTING_KEYS
 
-    monkeypatch.delenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", raising=False)
-    assert get_update_letter_timeout_sec() == float(SETTINGS_DEFAULTS["OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC"])
-    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "not-a-number")
-    assert get_update_letter_timeout_sec() == 120.0
-    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "0")
-    assert get_update_letter_timeout_sec() == 10.0
-    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "99999")
-    assert get_update_letter_timeout_sec() == 600.0
+    assert "OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC" in RETIRED_SETTING_KEYS
+    assert "OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC" not in config.SETTINGS_DEFAULTS
+    assert not hasattr(config, "get_update_letter_timeout_sec")
 
 
 def test_dispatch_window_distinguishes_no_deadline_from_spent_deadline(monkeypatch):

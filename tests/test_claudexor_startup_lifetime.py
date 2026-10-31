@@ -117,6 +117,7 @@ def _gone(pid):
 @pytest.fixture
 def startup(tmp_path, monkeypatch):
     root = tmp_path / "data"
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))  # parent and consumers share one install
     home = root / "claudexor"
     home.mkdir(parents=True)
     engine = tmp_path / "fixture_engine.py"

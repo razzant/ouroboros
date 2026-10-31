@@ -31,6 +31,7 @@ from tests.test_transport_death_retry import (
     _released_connect,
     _status_failure,
 )
+from tests._shared import saved_settings
 
 
 def _held_repeat(kwargs):
@@ -73,7 +74,7 @@ def test_presence_unknown_uses_paced_recovery_without_paid_repeat_counter(
 ):
     """Raw HTTP losses use the same paced continuation as ordinary turns."""
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable",
                         lambda *_a, **_kw: {"kind": "upstream_http", "status_code": 200})
@@ -216,6 +217,7 @@ def test_generic_terminal_names_the_class_the_repeat_was_released_with(tmp_path,
     record. The generic no-call terminal names the class the repeat itself
     failed with, exactly as the wait terminal does: the sticky `bad_request`
     belongs to the free redial, not to the paid attempt the owner is told about."""
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", _no_chain)
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda _sec, _wake: False)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
@@ -370,9 +372,11 @@ def test_context_overflow_with_no_episode_keeps_the_overflow_salvage(tmp_path, m
     assert usage["reason_code"] == "llm_api_error"
     assert trace["forced_finalization"]["source"] == "context_overflow_local_salvage"
     assert result == loop_transport.provider_terminal_fallback_text(
-        {}, is_context_overflow=True, is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False,
+        usage, is_context_overflow=True, is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False,
     )
-    assert "context exceeded the selected model window" in result
+    assert "Context-size recovery" in result and "exact transcript" in result
+    # Nothing substantive could leave the view, so no renewal was sent and the refusal names the frame.
+    assert "a renewed view could not make it fit (largest parts: " in result
 
 
 def test_round_record_outranks_a_wait_cause_that_holds_an_overflow_kind(tmp_path):

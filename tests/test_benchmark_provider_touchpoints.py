@@ -119,3 +119,12 @@ def test_terminal_bench_container_env_forwards_minimax_region(tmp_path, monkeypa
     monkeypatch.setenv("MINIMAX_REGION", "cn_zh")
     env = agent._container_env()
     assert env.get("MINIMAX_REGION") == "cn_zh"
+
+
+def test_inherited_added_key_rows_never_reach_a_benchmark_task():
+    """``OUROBOROS_CONNECTIONS`` carries the added keys' secrets in its rows: a benchmark task's shell
+    must not inherit it, while the built-in provider keys the server authenticates from stay."""
+    from devtools.benchmarks.common.server_runner import _is_secret_env_key
+
+    assert _is_secret_env_key("OUROBOROS_CONNECTIONS") is True
+    assert _is_secret_env_key("OPENROUTER_API_KEY") is False and _is_secret_env_key("OUROBOROS_MODEL") is False

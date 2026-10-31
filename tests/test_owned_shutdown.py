@@ -323,7 +323,8 @@ def test_a_target_recorded_after_the_stop_began_is_finished_by_the_next_start(tm
     finally:
         _reap(late, machinery)
 
-def test_a_live_process_under_an_unproven_identity_is_never_signalled(tmp_path, monkeypatch):
+@pytest.mark.parametrize("measurable", [True, False])
+def test_a_live_process_under_an_unproven_identity_is_never_signalled(tmp_path, monkeypatch, measurable):
     from ouroboros import owned_shutdown
     from ouroboros import workspace_executor as executor
 
@@ -336,9 +337,17 @@ def test_a_live_process_under_an_unproven_identity_is_never_signalled(tmp_path, 
         record = json.loads(path.read_text(encoding="utf-8"))
         record["host_command_sha256"] = "0" * 64  # the pid now names some other command
         path.write_text(json.dumps(record), encoding="utf-8")
+        if not measurable:
+            monkeypatch.setattr(executor, "_process_command_sha256", lambda _: "")
         monkeypatch.setattr(executor, "_kill_host_pid", lambda _pid: pytest.fail("unproven identity signalled"))
         outcome = owned_shutdown.stop_owned_work(data)
-        assert outcome["unconfirmed"] == [path.stem] and proc.poll() is None
+        assert proc.poll() is None
+        if measurable:
+            assert outcome["state"] == "completed" and not path.exists()
+            event = json.loads((data / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            assert event["outcome"] == "not_ours" and event["record_id"] == path.stem
+        else:
+            assert outcome["unconfirmed"] == [path.stem] and path.exists()
     finally:
         _reap(proc)
 
@@ -671,19 +680,21 @@ def test_a_reader_racing_a_fold_still_names_the_pending_registration(tmp_path, m
 
 def test_every_shutdown_door_records_its_stop_requests_before_any_wait():
     """Wiring: owner Restart, the lifespan teardown and the emergency exit each call begin_owned_stop
-    before their first wait (deleting any one call fails here)."""
+    with their cause before their first wait (deleting any one call or cause fails here)."""
     import inspect
 
     import server
     from ouroboros import server_restart
 
     restart = inspect.getsource(server_restart._stop_owned_work)
-    assert restart.index("begin_owned_stop(") < restart.index("_owned_live_task_ids(") < restart.index("kill_workers(")
+    assert restart.index('begin_owned_stop(DATA_DIR, cause="owner_restart")') < restart.index("_owned_live_task_ids(") \
+        < restart.index("kill_workers(")
     teardown = inspect.getsource(server.lifespan)
     stop_flag = teardown.index("_supervisor_stop.set()  # first")
-    assert stop_flag < teardown.index("begin_owned_stop(", stop_flag) < teardown.index("supervisor_thread.join(", stop_flag)
+    door = teardown.index("begin_owned_stop(lifespan_drive_root, cause=server_stop_cause())", stop_flag)
+    assert stop_flag < door < teardown.index("supervisor_thread.join(", stop_flag)
     emergency = inspect.getsource(server._emergency_process_cleanup)
-    assert emergency.index("begin_owned_stop(") < emergency.index("kill_workers(")
+    assert emergency.index("begin_owned_stop(DATA_DIR, cause=server_stop_cause())") < emergency.index("kill_workers(")
 
 
 def test_the_ledger_compaction_forgets_dropped_rows(tmp_path):
@@ -765,11 +776,23 @@ def test_every_door_joins_the_one_stop_and_the_boot_retry_precedes_launches():
     from ouroboros import server_restart
 
     lifespan = inspect.getsource(server.lifespan)
-    boot = lifespan.index("finish_unconfirmed_stops(lifespan_drive_root)")
-    assert boot < lifespan.index("start_inherited_import(lifespan_drive_root)")
-    for later in ("auto_start_local_model", "warm_owned_daemon()", "create_host_service_app(",
-                  "_reload_extensions(lifespan_drive_root", "_start_supervisor_if_needed(settings)"):
-        assert boot < lifespan.index(later), later
+    # The boot coordinator's step list is the order: the owned-stop retry is its first step, every
+    # launch (background services, the Host Service, the extension reload) a later one, and the
+    # supervisor start waits for the extensions' event behind them.
+    steps = lifespan[lifespan.index("    steps = ["):lifespan.index("    start_boot_coordinator(steps")]
+    order = [name for name in ("owned_stops", "inherited_records", "services", "host_service", "extensions")
+             if f'("{name}", ' in steps]
+    assert order == ["owned_stops", "inherited_records", "services", "host_service", "extensions"]
+    assert steps.index('("owned_stops", ') < steps.index('("inherited_records", ') < steps.index('("services", ') \
+        < steps.index('("host_service", ') < steps.index('("extensions", ')
+    from ouroboros import server_boot
+    boot_steps = inspect.getsource(server_boot)
+    for launch, step in (("auto_start_local_model", "start_background_services"), ("warm_owned_daemon()", "start_background_services"),
+                         ("create_host_service_app(", "serve_host_service")):
+        assert launch in boot_steps[boot_steps.index(f"def {step}("):], launch
+    assert "_reload_extensions(lifespan_drive_root" in lifespan[lifespan.index("def _extensions("):]
+    gate = lifespan[lifespan.index("def _after_extensions("):lifespan.index("store_switch.when_ready(")]
+    assert gate.index("_await_extensions_ready(body_stop)") < gate.index("start_body()") < gate.index("_start_supervisor_if_needed(settings)")
     teardown = lifespan.split("\n    finally:\n", 1)[1]
     assert teardown.index("kill_workers(") < teardown.index("stop_owned_work(lifespan_drive_root)")
     emergency = inspect.getsource(server._emergency_process_cleanup)

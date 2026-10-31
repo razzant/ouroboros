@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import agent_task_pipeline as pipeline, cancel_intents, loop, loop_llm_call, loop_transport
-from ouroboros.gateway import host_service
+from ouroboros.gateway.host_service_places import _presence_exception
 from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
 from ouroboros.presence_runner import PresenceTurnError, PresenceTurnGate, presence_result_from_stored, run_presence_turn
@@ -130,7 +130,7 @@ def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_s
     for err in (first.value, replay.value):
         assert err.code == "presence_attempt_outcome_unknown"
         assert (err.turn_ref, err.work_ref) == (task_id, "next-task")  # admitted child custody preserved
-        response = host_service._presence_exception(err, 409)
+        response = _presence_exception(err, 409)
         body = json.loads(response.body)
         assert response.status_code == 409 and body["code"] == "presence_attempt_outcome_unknown"
         assert body["disposition"] == "retained" and not body.get("text") and "outcome" not in body

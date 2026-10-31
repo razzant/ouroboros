@@ -2,10 +2,10 @@
 // the routing authority; account and context choices belong to the exact role.
 // Catalog arrival only enriches choices. It never authors an assignment.
 import { apiClient, fetchJson } from './api_client.js';
-import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog } from './settings_catalog.js';
+import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
 import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_status_store.js';
-import { parseModelSource, composeModelSource, configuredApiProviders, indexProfilesByHarness,
-    profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, API_CHOICE_PREFIX,
+import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
+    profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER } from './route_editor_primitives.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions } from './route_editor_primitives.js';
@@ -46,26 +46,29 @@ export function sourceFromChoice(choice) {
  * The Models source select. One vocabulary with Agents: the same groups, the
  * same order, the same configured-only API list; only the "Uses Main" entry and
  * the absent agent-session group are specific to a model role.
- * @param {{sources?: Array, providers?: Array<{id:string,label?:string}>, current?: string,
- *   catalogKnown?: boolean, accountsKnown?: boolean, providerProfiles?: object}} args
- *   `providers` is `configuredApiProviders()` output, `current` a stored row source.
+ * @param {{sources?: Array, providers?: Array<{id:string,label?:string}>, connections?: Array,
+ *   current?: string, catalogKnown?: boolean, accountsKnown?: boolean, providerProfiles?: object}} args
+ *   `providers` is `configuredApiProviders()` output, `connections` `apiConnections()` output,
+ *   `current` a stored row source.
  */
-export function modelSourceGroups({ sources = [], providers = [], current = '',
+export function modelSourceGroups({ sources = [], providers = [], connections = [], current = '', inheritLabel = 'Uses Main',
     catalogKnown = false, accountsKnown = false, providerProfiles = {}, hasConfiguredAccounts = false } = {}) {
     return [
-        ...(current === 'inherit' ? [{ options: [{ value: 'inherit', label: 'Uses Main' }] }] : []),
-        ...routeChoiceGroups({ modelSources: sources, providers, providerProfiles,
+        ...(current === 'inherit' ? [{ options: [{ value: 'inherit', label: inheritLabel }] }] : []),
+        ...routeChoiceGroups({ modelSources: sources, providers, connections, providerProfiles,
             currentChoice: current === 'inherit' ? '' : sourceChoice(current),
             catalogKnown, accountsKnown, hasConfiguredAccounts, includeSessions: false }),
     ];
 }
 
-export function modelContextNote(item, override = 0) {
-    if (Number(override) > 0) return `${Number(override).toLocaleString('en-US')} tokens · set by you; the provider may accept less.`;
-    const window = Number(item?.max_context_window || item?.context_window || 0);
-    return window > 0 ? `Auto: ${window.toLocaleString('en-US')} tokens · advertised for this route.`
-        : 'Auto: context limit not known for this route.';
+export function modelContextNote(preview) {
+    return preview?.window?.text || 'Context limit not known for this route.';
 }
+
+// The slot an empty role uses: Main, except the Safety Supervisor, which checks with the Light model (and so
+// with Main when Light is empty too). A contract row may name its own (`inherits`).
+const INHERITS = Object.freeze({ safety: 'light' });
+export const inheritTargetOf = (slot) => String(slot?.inherits || INHERITS[slot?.slot] || 'main');
 
 export function modelRolesHost(id) {
     return `<div id="${escapeHtml(id)}" class="model-role-editor"></div>`;
@@ -80,6 +83,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     let settings = {};
     let providerProfiles = {};
     let apiProviders = [];
+    let connections = [];
     let catalog = { items: [], model_sources: [], read_state: 'not_read' };
     let loaded = false;
     let destroyed = false;
@@ -150,9 +154,24 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Economy or route defaults for Processing.'] : []),
         ...rows.flatMap((row) => rowErrors(row).map(({ message }) => message)),
     ]; }
-    function effectiveSource(row) { return row.source === 'inherit' ? rows.find((entry) => entry.slot.slot === 'main')?.source || 'openrouter' : row.source; }
+    // The row an empty role resolves to, along its inherit chain (safety → light → main).
+    function inheritedRow(row) {
+        let current = row;
+        for (let step = 0; step < 4 && current?.source === 'inherit'; step += 1) {
+            const target = inheritTargetOf(current.slot);
+            current = rows.find((entry) => entry.slot.slot === target && entry !== current)
+                || rows.find((entry) => entry.slot.slot === 'main');
+        }
+        return current;
+    }
+    const inheritName = (row) => {
+        const target = slots.find((slot) => slot.slot === inheritTargetOf(row.slot));
+        return String(target?.label || 'Main').replace(/ Model$/, '');
+    };
+    const emptyUsesText = (row) => (inheritTargetOf(row.slot) === 'main' ? 'Empty uses Main' : `Empty uses the ${inheritName(row)} model`);
+    function effectiveSource(row) { return row.source === 'inherit' ? inheritedRow(row)?.source || 'openrouter' : row.source; }
     function responseModel(row) {
-        const selected = row.source === 'inherit' ? rows.find((entry) => entry.slot.slot === 'main') : row;
+        const selected = row.source === 'inherit' ? inheritedRow(row) : row;
         return selected ? composeModelSource(selected.source, selected.model) : '';
     }
     function sourceId(row) { const source = effectiveSource(row); return source.startsWith('subscription:') ? source.slice(13) : ''; }
@@ -160,15 +179,23 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     // A saved source whose key is gone stays selectable and labelled; discovery
     // only widens the list, it never rewrites the owner's assignment.
     function sourceGroupsFor(row, facts = {}) {
-        return modelSourceGroups({ sources: catalog.model_sources, providers: apiProviders,
-            providerProfiles, current: row.source, ...facts });
+        return modelSourceGroups({ sources: catalog.model_sources, providers: apiProviders, connections,
+            providerProfiles, current: row.source, inheritLabel: `Uses ${inheritName(row)}`, ...facts });
+    }
+    // A saved API source that cannot send says why under its row; the select keeps it chosen.
+    function keyNote(row) {
+        if (row.local || !row.model || row.source === 'inherit' || sourceId(row)
+            || apiProviders.some((provider) => provider.id === row.source)) return '';
+        return { off: 'This key is turned off in Accounts; nothing is sent through it.',
+            removed: 'This key was removed in Accounts; nothing is sent through it.',
+            'no key': 'This source has no key in Accounts.' }[unavailableConnectionState(row.source, connections)];
     }
     function itemsFor(row) {
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
     }
     function currentItem(row) {
-        const model = row.source === 'inherit' ? rows.find((entry) => entry.slot.slot === 'main')?.model : row.model;
+        const model = row.source === 'inherit' ? inheritedRow(row)?.model : row.model;
         const matches = itemsFor(row).filter((item) => (parseModelSource(item.value || item.id).model === model
             || item.id === model) && (!row.account || item.credential_profile_id === row.account));
         return matches.length === 1 ? matches[0] : undefined;
@@ -188,7 +215,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             <div class="model-role-context">
                 <label class="ui-field">Window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
                     placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window"></label>
-                <span data-model-context-note>${escapeHtml(modelContextNote(currentItem(row), row.context))}</span>
+                <span data-model-context-note>${escapeHtml(modelContextNote(row.windowPreview))}</span>
+                <button type="button" class="btn btn-default" data-window-clear hidden>Clear confirmation</button>
             </div>
             <div class="model-role-context">
                 <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response"></label>
@@ -203,7 +231,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return `<div class="model-role-row" data-model-role="${escapeHtml(row.id)}">
             <div class="model-role-controls">
                 ${selectHtml(`data-model-role-source aria-label="${escapeHtml(row.slot.label)} source"`, sourceGroupsFor(row), sourceChoice(row.source))}
-                ${modelChooserHtml(`id="${escapeHtml(inputId)}" data-model-role-model aria-label="${escapeHtml(row.slot.label)}${isFallback ? ` ${index + 1}` : ''}"`, row.model, `${hostId}-${row.id}-models`, [], { placeholder: row.slot.slot === 'main' ? 'Choose a model' : 'Empty uses Main' })}
+                ${modelChooserHtml(`id="${escapeHtml(inputId)}" data-model-role-model aria-label="${escapeHtml(row.slot.label)}${isFallback ? ` ${index + 1}` : ''}"`, row.model, `${hostId}-${row.id}-models`, [], { placeholder: row.slot.slot === 'main' ? 'Choose a model' : emptyUsesText(row) })}
                 <select class="ui-control" data-model-role-account aria-label="${escapeHtml(row.slot.label)} account" ${sourceId(row) ? '' : 'hidden'}></select>
                 ${isFallback ? `<span class="model-role-order"><button type="button" class="btn btn-default" data-model-up aria-label="Move fallback up" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" class="btn btn-default" data-model-down aria-label="Move fallback down" ${index === total - 1 ? 'disabled' : ''}>↓</button><button type="button" class="btn btn-default" data-model-remove aria-label="Remove fallback">Remove</button></span>` : ''}
             </div>
@@ -248,6 +276,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const node = element.querySelector(`[data-model-role="${row.id}"]`);
             if (!node) continue;
             const responseIdentity = JSON.stringify([responseModel(row), row.local, row.account]);
+            const windowIdentity = JSON.stringify([responseIdentity, row.context]);
+            if (row.windowIdentity !== windowIdentity) {
+                row.windowPreview = null;
+                if (showContext) void responseLimit(row, node);
+                row.windowIdentity = windowIdentity;
+            }
             if (row.responseIdentity && row.responseIdentity !== responseIdentity) {
                 const field = node.querySelector('[data-response-limit]');
                 if (field) { field.value = ''; responseEdits.delete(field); }
@@ -271,7 +305,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
                 ...item, value: parseModelSource(item.value || item.id).model,
             }))));
-            if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(currentItem(row), row.context);
+            if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
             if (showContext) node.querySelector('[data-processing-capability]').textContent = processingCapabilityNote(row.processing_preference || processingPreference, currentItem(row)?.processing,
                 catalog.model_sources.find((source) => source.id === sourceId(row))?.processingPreferences);
@@ -282,7 +316,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const own = Boolean(sourceId(row) && rowCatalog);
             const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !own });
             status.textContent = row.local ? 'Uses the local runtime.'
-                : note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : 'Uses Main.')
+                : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
                         ? 'No models were listed for this source. Your selection is kept.'
                         : 'Uses your subscription. No API key required.') : '');
@@ -331,22 +365,28 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         }
         const model = responseModel(row);
         if (!model || model.endsWith('::')) { note.textContent = 'Choose a model to check its maximum response.'; return; }
-        const identity = JSON.stringify([model, row.local, row.account]);
+        const identity = JSON.stringify([model, row.local, row.account, row.context]);
         const draft = field.value;
         const sequence = row.responseSequence = (row.responseSequence || 0) + 1;
         if (apply) row.responseApplying = sequence;
         const current = () => !destroyed && sequence === row.responseSequence && node.isConnected
-            && identity === JSON.stringify([responseModel(row), row.local, row.account]);
+            && identity === JSON.stringify([responseModel(row), row.local, row.account, row.context]);
+        let saved = false;
         try {
-            const data = await apiClient.responseLimitPreview({ model, local: row.local, account: row.account });
+            const data = await apiClient.responseLimitPreview({ model, local: row.local, account: row.account,
+                role: row.slot.slot, window: Number(row.context || 0) });
             if (!current()) return;
             if (!data.response_limit || !data.route) throw new Error('Maximum response is not checked');
+            row.windowPreview = data;
+            node.querySelector('[data-model-context-note]').textContent = modelContextNote(data);
+            node.querySelector('[data-window-clear]').hidden = !data.window_ack;
             let evidence = data.response_limit;
             if (apply) {
                 const result = await apiClient.ownerCapabilityAck({ ...data.route, route_fp: evidence.route_fp, max_output_tokens: value });
                 if (!current()) return;
                 if (!result.ok) throw new Error(result.error || 'Maximum response could not be saved');
                 evidence = result.ack;
+                saved = true;
             }
             // Edits can precede the deferred toggle which starts this read.
             if (!apply && !responseEdits.has(field) && field.value === draft) field.value = evidence.source === 'owner_ack' ? String(evidence.max_output_tokens || '') : '';
@@ -356,7 +396,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const server = endpoint ? ` Server: ${endpoint.host}${endpoint.pathname.replace(/\/$/, '')}.` : '';
             note.textContent = `${evidence.max_output_tokens && !evidence.stale ? `${evidence.max_output_tokens.toLocaleString('en-US')} tokens · ${source}` : 'Auto: maximum response unknown'}.${server} Context window is separate.${data.route.provider === 'claudexor' ? ' Planning allowance only; the native engine controls its response.' : ''}`;
         } catch (error) { if (current()) note.textContent = error.message; }
-        finally { if (row.responseApplying === sequence) row.responseApplying = 0; }
+        finally {
+            if (row.responseApplying === sequence) row.responseApplying = 0;
+            if (saved && current()) void responseLimit(row, node);
+        }
     }
 
     function bindRows(element) {
@@ -369,6 +412,17 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             });
             node.querySelector('.model-role-details')?.addEventListener('toggle', (event) => {
                 if (event.target.open) void responseLimit(row, node);
+            });
+            node.querySelector('[data-window-clear]')?.addEventListener('click', async () => {
+                const preview = row.windowPreview;
+                if (!preview?.window_route) return;
+                try {
+                    const result = await apiClient.ownerCapabilityAck({ ...preview.window_route, window_tokens: 0 });
+                    if (!result.ok) throw new Error(result.error || 'Confirmation could not be cleared');
+                    if (!destroyed && node.isConnected) await responseLimit(row, node);
+                } catch (error) {
+                    if (!destroyed && node.isConnected) node.querySelector('[data-model-context-note]').textContent = error.message;
+                }
             });
             node.querySelector('[data-response-apply]')?.addEventListener('click', () => { void responseLimit(row, node, true); });
             node.querySelector('[data-response-limit]')?.addEventListener('input', (event) => { responseEdits.add(event.target); });
@@ -403,8 +457,13 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 });
             }
             node.querySelector('[data-model-remove]')?.addEventListener('click', () => {
+                const siblings = rows.filter((entry) => entry.slot === row.slot);
+                const next = siblings[siblings.indexOf(row) + 1] || siblings[siblings.indexOf(row) - 1];
                 rows = rows.filter((entry) => entry !== row); changed(); render();
-                host()?.querySelector('[data-model-add]')?.focus();
+                // The caret moves to the fallback now in this place, else to Add (DESIGN "List editors").
+                const shown = next && host()?.querySelector(`[data-model-role="${next.id}"]`);
+                if (shown) revealNewRow(shown, shown.querySelector('[data-model-role-model]'));
+                else host()?.querySelector('[data-model-add]')?.focus();
             });
         }
         element.querySelectorAll('[data-model-role-group]').forEach((group) => {
@@ -429,6 +488,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             settings = { ...value }; slots = contract.modelSlots || slots;
             processingPreference = String(settings[PROCESSING_PREFERENCE_KEY] || ''); processingTouched = false;
             providerProfiles = contract.providerProfiles || providerProfiles;
+            connections = apiConnections(settings, providerProfiles);
             apiProviders = configuredApiProviders(settings, providerProfiles);
             rows = [];
             for (const slot of slots) {
@@ -444,8 +504,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 listener: updateCatalogViews });
             render();
         },
-        adoptCatalog(data = {}) {
-            catalog = mergeModelCatalog(catalog, data);
+        adoptCatalog(data = {}, { connectionCatalogs } = {}) {
+            // The wizard supplies its already-merged general snapshot plus unsaved server reads.
+            catalog = connectionCatalogs ? withConnectionCatalogs(data, connectionCatalogs) : mergeModelCatalog(catalog, data);
             if (Array.isArray(data.items)) {
                 for (const row of rows) void refreshRow(row, { force: true });
             }

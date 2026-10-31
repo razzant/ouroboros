@@ -1,4 +1,6 @@
 """Publication and closure use canonical receipts before exposing delivery success."""
+
+from tests import _dialogue as dialogue_test
 import json
 from types import SimpleNamespace
 
@@ -21,7 +23,6 @@ def publication(tmp_path, monkeypatch):
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
     monkeypatch.setattr(message_bus, "publish_event", lambda *args: events.append(args))
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda *_: None)
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=bridge, append_jsonl=append_jsonl)
     event = {"type": "send_quiz", "task_id": "t", "quiz_id": "q", "chat_id": 1,
              "question": "Which approach?", "options": [{"label": "First"}, {"label": "Second"}],
@@ -39,8 +40,73 @@ def _due(publication):
     write_task_result(publication.root, "t", row["status"], owner_quiz=row["owner_quiz"])
 
 
+@pytest.mark.parametrize("end", ["terminal", "timeout"])
+@pytest.mark.parametrize("assumption", ["", "Continue reading only"])
+def test_required_publication_recovers_after_wait_end(tmp_path, monkeypatch, end, assumption):
+    import asyncio
+    from ouroboros import dialogue_store
+    from ouroboros.gateway.task_decision import recover_question_deliveries
+    from ouroboros.owner_wait import wait_after_tools
+    from tests.test_native_owner_wait import native_context
+
+    ctx = native_context(tmp_path)
+    ctx.current_chat_id = 1
+    origin = {"task_id": ctx.task_id, "binding_id": "source-place", "source_event_id": "external-event"}
+    owner_quiz.record_asked(tmp_path, ctx.task_id, quiz_id="q1", question="May I proceed?",
+        options=[], assumption=assumption, wait_for_answer=True, chat_id=1, presence_contact=origin)
+    bridge, frames = message_bus.LocalChatBridge({}), []
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_: None)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    host = SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=bridge, append_jsonl=append_jsonl)
+    event = {"type": "send_quiz", "task_id": ctx.task_id, "quiz_id": "q1", "chat_id": 1,
+             "question": "May I proceed?", "options": [], "assumption": assumption, "wait_for_answer": True}
+
+    def unavailable(*_a, **_kw):
+        raise dialogue_store.StoreError("fixture publication unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(dialogue_store, "append", unavailable)
+        handlers._handle_send_quiz(event, host)
+    before = owner_quiz.quiz_states(tmp_path, ctx.task_id)["q1"]
+    assert before["delivery"]["state"] == "owed" and not before.get("published_at")
+    assert not frames
+    if end == "terminal":
+        write_task_result(tmp_path, ctx.task_id, "completed")
+        assert owner_quiz.reconcile_terminal(tmp_path, ctx.task_id) == ["q1"]
+    else:
+        ctx._owner_wait_deadline_at, ctx._owner_wait_max_minutes = "2000-01-01T00:00:00+00:00", 1
+        messages = []
+        wait_after_tools(ctx, messages, {}, {}, 1, [], set())
+        wait = load_task_result(tmp_path, ctx.task_id)["owner_wait"]
+        assert wait["state"] == "resumed" and wait["resume_reason"] == "timeout"
+        if not assumption:
+            assert "No assumption was recorded; no answer is not consent" in str(messages)
+    ended = owner_quiz.quiz_states(tmp_path, ctx.task_id)["q1"]
+    assert ended["wait_ended_at"] and not ended.get("wait_for_answer")
+    assert not ended.get("published_at") and ended["assumption"] == assumption
+    def due(quizzes):
+        quizzes["q1"]["delivery"]["next_retry_at"] = ""
+        return True
+    owner_quiz._mutate_projection(tmp_path, ctx.task_id, due)
+    assert asyncio.run(recover_question_deliveries(tmp_path)) == {"attempted": 1, "delivered": 1, "pending": 0}
+    after = owner_quiz.quiz_states(tmp_path, ctx.task_id)["q1"]
+    assert after["published_at"] and after["delivery"]["state"] == "delivered"
+    assert after["assumption"] == assumption and owner_quiz.current_question(after)
+    assert after["state"] == ("expired_terminal" if end == "terminal" else "open")
+    [frame] = [row for row in frames if row["type"] == "quiz"]
+    assert frame["wait_for_answer"] is False and frame["assumption"] == assumption
+    assert frame["wait_ended_at"] == ended["wait_ended_at"]
+    assert frame["presence_contact"] == origin and frame["chat_id"] == 1
+    assert asyncio.run(recover_question_deliveries(tmp_path))["attempted"] == 0
+
+
 def test_strict_publication_failure_keeps_timed_debt_then_exposes_delivered_fact(publication, monkeypatch):
-    real_append = message_bus.append_jsonl
+    from ouroboros import dialogue_store as ds
+
+    real_append = ds.append
     observed = []
 
     def refuse(*_args, **_kwargs):
@@ -48,9 +114,9 @@ def test_strict_publication_failure_keeps_timed_debt_then_exposes_delivered_fact
         observed.append(block["delivery"]["attempts"])
         assert block["publication_chat_id"] == 1
         assert block["publication_evidence"] == "pre_exposure"
-        return False
+        raise ds.StoreError("injected publication write failure")
 
-    monkeypatch.setattr(message_bus, "append_jsonl", refuse)
+    monkeypatch.setattr(ds, "append", refuse)
     handlers._handle_send_quiz(publication.event, publication.ctx)
     block = _block(publication)
     assert observed == [1] and not publication.frames and not publication.events
@@ -60,7 +126,7 @@ def test_strict_publication_failure_keeps_timed_debt_then_exposes_delivered_fact
     # A duplicate event must not bypass the persisted retry delay.
     handlers._handle_send_quiz(publication.event, publication.ctx)
     assert observed == [1] and _block(publication)["delivery"] == block["delivery"]
-    monkeypatch.setattr(message_bus, "append_jsonl", real_append)
+    monkeypatch.setattr(ds, "append", real_append)
     _due(publication)
     handlers._handle_send_quiz({**publication.event, "chat_id": 73}, publication.ctx)
     assert _block(publication)["delivery"]["attempts"] == 2
@@ -69,7 +135,7 @@ def test_strict_publication_failure_keeps_timed_debt_then_exposes_delivered_fact
     assert frame["chat_id"] == 1  # The failed write already bound the address.
     assert frame["question_delivery"] == {"kind": "publication", "state": "delivered"}
     assert publication.events[0][1]["question_delivery"] == frame["question_delivery"]
-    [row] = [json.loads(line) for line in (publication.root / "logs/chat.jsonl").read_text().splitlines()]
+    [row] = dialogue_test.log_rows(publication.root / "logs/chat.jsonl")
     assert row["client_message_id"] == "quiz_publication:t:q"
     assert row["quiz"]["question_delivery"]["state"] == "owed"  # Snapshot before durable append.
     from ouroboros.gateway.history import _assemble_history_response
@@ -127,7 +193,7 @@ def test_closure_without_publication_witness_never_guesses_from_ask_chat(publica
     block = _block(publication)
     assert block["delivery"]["reason_code"] == "publication_address_unknown"
     assert block["delivery"]["attempts"] == 1 and not block.get("discharged_at")
-    assert not publication.frames and not (publication.root / "logs/chat.jsonl").exists()
+    assert not publication.frames and not dialogue_test.log_rows(publication.root / "logs/chat.jsonl")
 
 
 def test_closure_ack_failure_reuses_durable_history_receipt(publication, monkeypatch):
@@ -140,13 +206,13 @@ def test_closure_ack_failure_reuses_durable_history_receipt(publication, monkeyp
     block = _block(publication)
     assert block["delivery"]["history_at"] and not block.get("discharged_at")
     assert not publication.frames
-    first_history = (publication.root / "logs/chat.jsonl").read_text()
+    first_history = dialogue_test.log_text(publication.root / "logs/chat.jsonl")
     handlers._handle_send_quiz_state(publication.event, publication.ctx)  # timer gates repeat effects
     assert _block(publication)["delivery"]["attempts"] == 1
     _due(publication)
     monkeypatch.setattr(owner_quiz, "mark_discharged", real_discharge)
     handlers._handle_send_quiz_state(publication.event, publication.ctx)
-    assert (publication.root / "logs/chat.jsonl").read_text() == first_history
+    assert dialogue_test.log_text(publication.root / "logs/chat.jsonl") == first_history
     assert _block(publication)["discharged_at"]
     [frame] = publication.frames
     assert frame["state"] == "closed" and frame["closed_reason"] == "Superseded"

@@ -615,7 +615,6 @@ def _verify_and_record(
 ) -> str:
     expected_match = kwargs.get("expected_match", "substring")
     artifact_paths = kwargs.get("artifact_paths")
-    timeout_sec = kwargs.get("timeout_sec")
     criterion_source = kwargs.get("criterion_source", "")
     criterion_basis = kwargs.get("criterion_basis", "")
     bucket = str(kwargs.get("bucket") or "")
@@ -713,12 +712,11 @@ def _verify_and_record(
             publish_process_facts as _publish_process_facts,
         )
         from ouroboros.tools.shell import (
-            _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
             _executor_can_run_cwd,
-            _resolve_effective_timeout,
             _shell_env_for_cwd,
             _tracked_subprocess_run,
         )
+        from ouroboros.tools.shell_process import command_timeout_for_call
         from ouroboros.workspace_executor import execute as executor_execute
 
         try:
@@ -739,7 +737,8 @@ def _verify_and_record(
             "source": binding.source,
             "skill_name": binding.skill_name,
         }
-        timeout = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=timeout_sec)
+        # The one resolution the loop's outer wait also reads, so this check's own timeout fires first.
+        timeout = command_timeout_for_call("verify_and_record", kwargs, ctx)
         bootstrap_process_path()  # mirror run_command: ensure the check sees the full PATH
         use_executor = _executor_can_run_cwd(ctx, pathlib.Path(work_dir))
         # R4: the node resolver never rewrites args["check"] — the ORIGINAL argv

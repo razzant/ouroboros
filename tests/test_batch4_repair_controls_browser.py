@@ -12,8 +12,10 @@ from threading import Thread
 
 import pytest
 
+from tests._shared import producer_evidence_dir
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_owner_continue import _interrupted
+from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 WEB = Path(__file__).resolve().parents[1] / 'web'
@@ -43,24 +45,24 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
     from starlette.routing import Route
     from starlette.testclient import TestClient
     from ouroboros.gateway.task_continue import api_task_continue
-    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from tests._work_projection_shared import state_fields
     from ouroboros.owner_continue import continuation_offer
     from ouroboros.owner_pause import install_fence, set_fence_state
     from ouroboros.task_results import load_task_result, write_task_result
 
     q, _, workers = _install_queue(tmp_path, monkeypatch)
     _interrupted(tmp_path)
-    write_task_result(tmp_path, 'pausing-root', 'running', root_task_id='pausing-root')
+    write_task_result(tmp_path, 'pausing-root', 'running', root_task_id='pausing-root', chat_id=1)
     fence, _ = install_fence(tmp_path, 'pausing-root', request_id='tree-pause')
-    workers.PENDING.append({'id': 'pausing-root', 'root_task_id': 'pausing-root', 'type': 'task',
+    workers.PENDING.append({'id': 'pausing-root', 'root_task_id': 'pausing-root', 'type': 'task', 'chat_id': 1,
                             'title': 'Saved root waiting for child', '_budget_pause': {'reason': 'owner'}})
-    workers.RUNNING['child'] = {'task': {'id': 'child', 'root_task_id': 'pausing-root', 'parent_task_id': 'pausing-root'}}
-    write_task_result(tmp_path, 'child', 'running', root_task_id='pausing-root', parent_task_id='pausing-root')
+    workers.RUNNING['child'] = {'task': {'id': 'child', 'root_task_id': 'pausing-root', 'parent_task_id': 'pausing-root', 'chat_id': 1}}
+    write_task_result(tmp_path, 'child', 'running', root_task_id='pausing-root', parent_task_id='pausing-root', chat_id=1)
     async def detail(_request):
         row = load_task_result(tmp_path, 'pred-1')
         return JSONResponse({**row, 'continuation_offer': continuation_offer(row, 'pred-1')})
     async def state(_request):
-        return JSONResponse({'active_chat_activities': _chat_activities_snapshot_safe(tmp_path),
+        return JSONResponse({**state_fields(tmp_path),
                              'active_chat_activities_complete': True, 'bg_consciousness_enabled': False})
     async def tasks(_request):
         return JSONResponse({'queue': {'pending': [{'id': t['id'], 'task': t} for t in workers.PENDING],
@@ -95,8 +97,7 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
     server = ThreadingHTTPServer(('127.0.0.1', 0), partial(Handler, directory=str(WEB)))
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    evidence = tmp_path / 'screenshots'
-    evidence.mkdir()
+    evidence = producer_evidence_dir(tmp_path / 'screenshots', "batch4-repair-controls")
     persist = q.persist_queue_snapshot
     try:
         with sync_playwright() as pw:
@@ -108,7 +109,10 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
                 page.route('**/api/**', respond)
                 page.goto(f'http://127.0.0.1:{server.server_port}/fixture')
                 page.wait_for_function('window.ready')
-                expect(page.locator('[data-activity-section="queue"]')).to_contain_text('pausing')
+                child = page.locator('.activity-row').filter(has=page.locator('[data-id="child"]'))
+                root = page.locator('.activity-row').filter(has=page.locator('[data-id="pausing-root"]'))
+                expect(child.locator('.activity-sub')).to_have_text('Pausing…')
+                expect(root.locator('.activity-sub')).to_have_text('Paused · 1 helper still working')
                 for door in ('header-restart', 'settings-restart'):
                     page.locator('#' + door).click()
                     expect(page.get_by_text('1 task is still pausing', exact=False)).to_be_visible()
@@ -136,7 +140,8 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
                 set_fence_state(tmp_path, 'pausing-root', fence_id=fence['fence_id'], state='paused')
                 page.reload()
                 page.wait_for_function('window.ready')
-                expect(page.locator('[data-activity-section="queue"]')).to_contain_text('paused')
+                expect(root.locator('.activity-sub')).to_have_text('Paused')
+                expect(child).to_have_count(0)
                 page.locator('#header-restart').click()
                 expect(page.get_by_text('1 task is still pausing', exact=False)).to_have_count(0)
                 page.get_by_role('button', name='Cancel', exact=True).click()
@@ -192,8 +197,8 @@ def test_hard_bound_continue_reason_on_real_collapsed_chat_cards(tmp_path, monke
     from ouroboros.gateway.tasks import api_task_get
     from ouroboros.gateway.task_continue import api_task_continue
     from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros import dialogue_store
     from ouroboros.task_results import load_task_result, write_task_result
-    from ouroboros.utils import append_jsonl
 
     q, _, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr('ouroboros.llm.LLMClient.chat', lambda *_a, **_k: pytest.fail('paid explanation'))
@@ -204,7 +209,7 @@ def test_hard_bound_continue_reason_on_real_collapsed_chat_cards(tmp_path, monke
             _interrupted(tmp_path, tid, reason_code=reason)
             write_task_result(tmp_path, tid, 'failed', chat_id=room,
                               deadline_at='2000-01-01T00:00:00Z' if kind == 'expired' else '2099-01-01T00:00:00Z')
-            append_jsonl(tmp_path / 'logs' / 'chat.jsonl', {
+            dialogue_store.append(tmp_path, 'chat', {
                 'task_id': tid, 'chat_id': room, 'direction': 'out', 'role': 'system',
                 'system_type': 'task_summary', 'task_terminal_status': 'failed', 'is_progress': True,
                 'text': 'Report preparation ended.', 'ts': '2026-09-26T12:00:00Z'})
@@ -253,8 +258,7 @@ def test_hard_bound_continue_reason_on_real_collapsed_chat_cards(tmp_path, monke
             browser = getattr(pw, engine).launch(headless=True)
             try:
                 page = browser.new_page(viewport={'width': width, 'height': 900}, has_touch=width < 980)
-                errors = []
-                page.on('pageerror', lambda error: errors.append(str(error)))
+                errors = PageErrors(page, engine)
                 page.route('**/api/**', respond)
                 for room in (1, 7):
                     page.goto(f'http://127.0.0.1:{server.server_port}/fixture?room={room}')
@@ -264,14 +268,14 @@ def test_hard_bound_continue_reason_on_real_collapsed_chat_cards(tmp_path, monke
                     for card in cards.values():
                         expect(card).to_have_count(1)
                         if card.get_attribute('data-expanded') == '1':
-                            card.locator('[data-live-summary-button]').click()
+                            card.locator('[data-live-disclosure]').click()
                     page.screenshot(path=str(evidence / f'continue-{engine}-{width}-room{room}.png'))
                     for kind in ('budget', 'expired'):
                         cards[kind].screenshot(path=str(evidence / f'continue-{engine}-{width}-room{room}-{kind}.png'))
                     before_posts = len(requests)
                     for kind, phrase in [('budget', 'budget'), ('expired', 'deadline')]:
                         card = cards[kind]
-                        reason = card.locator(':scope > .chat-live-actions > [data-continue-refusal]')
+                        reason = card.locator(':scope > .chat-live-foot > .chat-live-foot-end > .chat-live-actions > [data-continue-refusal]')
                         expect(reason).to_be_visible()
                         expect(reason).to_contain_text('Continue unavailable.')
                         expect(reason).to_contain_text(phrase)
@@ -281,7 +285,7 @@ def test_hard_bound_continue_reason_on_real_collapsed_chat_cards(tmp_path, monke
                         expect(card.locator('[data-continue-task]')).to_have_count(0)
                         expect(card.locator('[data-live-phase]')).to_have_text('Failed')
                         assert card.evaluate('el => el.scrollWidth <= el.clientWidth + 1')
-                    expect(cards['expired'].locator('[data-live-activity]')).to_contain_text('provider')
+                    expect(cards['expired'].locator('[data-live-activity]')).to_contain_text('could not get a usable model answer')
                     page.evaluate('window.savedRefusal=document.querySelector("[data-continue-refusal]")')
                     page.evaluate('window.replay()')
                     assert page.evaluate('window.savedRefusal===document.querySelector("[data-continue-refusal]")')
@@ -302,7 +306,7 @@ def test_hard_bound_continue_reason_on_real_collapsed_chat_cards(tmp_path, monke
                     successor = load_task_result(tmp_path, f'ready-{room}')['continued_by']['successor_task_id']
                     assert sum(task['id'] == successor for task in workers.PENDING) == 1
                     page.screenshot(path=str(evidence / f'continue-{engine}-{width}-room{room}-continued.png'))
-                assert not errors
+                assert not errors.unexpected(), errors
             finally:
                 browser.close()
     finally:

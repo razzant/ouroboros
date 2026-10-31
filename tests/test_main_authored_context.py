@@ -3,12 +3,14 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
+from pathlib import Path
 import queue
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import context_compaction, loop, usage_accounting as ua
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.tools.registry import ToolRegistry
 from tests.test_context_fit_integration import _plan
@@ -24,11 +26,10 @@ def main_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "12")
     monkeypatch.setenv("MCP_ENABLED", "false")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
-    monkeypatch.setattr(context_compaction, "_call_summarizer",
-                        lambda *a, **kw: pytest.fail("Authored views must not call a helper model"))
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
     registry._ctx.repo_dir.mkdir()
     registry._ctx.context_fit_plan = _plan(preferred="max", window=900_000)
@@ -93,11 +94,77 @@ def test_main_records_and_applies_authored_view_without_manual_observation(main_
     before, after = f.inputs[1]["messages"], f.inputs[2]["messages"]
     assert checkpoint["messages"] == before
     assert f.source.splitlines()[-1] in str(checkpoint["messages"])
-    assert before[:2] == after[:2]
+    unmarked = lambda rows: [{k: v for k, v in m.items() if k != "cache_control"} for m in rows]  # noqa: E731
+    assert unmarked(after[:2]) == unmarked(before[:2])  # only the seal's host-only mark moved on
     assert not any(m.get("tool_call_id") == "read" for m in after)
     assert any(m.get("tool_call_id") == "compact" for m in after)
     assert "I retained the trailing conclusion." in str(after)
     assert "[Context view receipt]" in str(after)
+
+
+@pytest.mark.parametrize("role", ["root", "subagent"])
+@pytest.mark.parametrize("mode", ["nano", "low", "max"])
+def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, tmp_path, monkeypatch, role, mode):
+    """Mode-specific context assembly, then shared-loop delivery; not model adherence."""
+    from ouroboros import context
+    from ouroboros.tools.compact_context import get_tools
+    from tests.test_doc_context import _make_env_and_memory
+
+    f = main_loop
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
+    env, memory = _make_env_and_memory(tmp_path / "context")
+    system = (Path(__file__).resolve().parents[1] / "prompts/SYSTEM.md").read_text(encoding="utf-8")
+    env.repo_path("prompts/SYSTEM.md").write_text(system, encoding="utf-8")
+    task = {"id": "authored-main", "type": "task", "text": "Investigate the proposed label change.",
+            "delegation_role": role}
+    if role == "subagent":
+        task["configured_subagent"] = {"route": {"kind": "api_model"}}
+    f.messages, _ = context.build_llm_messages(env, memory, task, ctx=f.ctx)
+    schema = get_tools()[0].schema
+    note = ("The reader loses the work's name among repeated labels; the proposal helps identify it. "
+            "The owner approved label research, then cancelled only that branch; storage research remains approved. "
+            "Implementation is still a proposal, not permission. The layout consequence is inferred; native behavior is unknown.")
+    f.source = note + "\n" + f.source
+    (f.ctx.repo_dir / "evidence.txt").write_text(f.source, encoding="utf-8")
+    restored = {}
+
+    def compact(kwargs):
+        inspected = json.loads(next(m["content"] for m in kwargs["messages"] if m.get("tool_call_id") == "inspect"))
+        unit = next(unit for unit in inspected["units"] if unit["kind"] == "tool")
+        restored.update({"checkpoint_ref": inspected["restore_checkpoint"], "unit_id": unit["unit_id"],
+                         "raw_sha256": unit["raw_sha256"]})
+        return call("compact_context", {"working_note": note, "keep_unit_ids": []}, "compact")
+
+    def restore(kwargs):
+        accounts = [block["text"] for message in kwargs["messages"]
+                    if message.get("role") == "assistant" and not message.get("tool_calls")
+                    and isinstance(message.get("content"), list)
+                    for block in message["content"]
+                    if block.get("type") == "text" and block.get("_context_capsule")]
+        assert any(text == "[Actor-authored working view; exact source retained by checkpoint]\n" + note
+                   for text in accounts)
+        assert not any(m.get("tool_call_id") == "read" for m in kwargs["messages"])
+        return call("compact_context", {"restore_unit_refs": [restored]}, "restore")
+
+    f.run([call("read_file", {"path": "evidence.txt"}, "read"),
+           call("compact_context", {"inspect": True}, "inspect"), compact, restore, {"content": "done"}])
+    first, after = f.inputs[0], f.inputs[-1]
+    assert system in "\n".join(block["text"] for block in first["messages"][0]["content"])
+    assert "later reader, not only my present understanding" in system
+    assert "who decided what within which scope" in system
+    assert "supersede only what they actually change" in system
+    delivered = next(tool["function"] for tool in first["tools"] if tool["function"]["name"] == "compact_context")
+    assert delivered == schema
+    guidance = delivered["parameters"]["properties"]["working_note"]["description"]
+    assert "future reader" in guidance and "within those sources" in guidance
+    assert "unaffected branches" in guidance and "invent no detail" in guidance
+    assert "raw evidence remains retrievable" in delivered["description"].lower()
+    assert f.ctx._context_view_receipt["status"] == "applied"
+    visible = "\n".join(m["content"] if isinstance(m.get("content"), str) else
+                        "\n".join(b.get("text", "") for b in (m.get("content") or []) if isinstance(b, dict))
+                        for m in after["messages"])
+    assert note in visible and f.source.splitlines()[-1] in visible
+    assert first["messages"][:2] == after["messages"][:2]
 
 
 def test_explicit_recent_count_compacts_older_units_with_authored_note(main_loop):
@@ -234,25 +301,28 @@ def test_main_fit_reports_known_pressure_without_rejecting_useful_shrink(tmp_pat
 
     monkeypatch.setattr(capability_evidence, "resolve_main_token_density", lambda *a, **kw: (1.0, "cold_estimate"))
     plan = _plan(preferred="max", window=100)
-    observed = [*plan.messages_for("max"), {"role": "user", "content": "Full owner requirement. " * 200},
+    observed = [*plan.messages_for("max"), {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND,
+                                            "content": "Full owner requirement. " * 200},
                 call("read_file", {}, "read"), {"role": "tool", "tool_call_id": "read", "content": "raw " * 2000}]
     request = ContextReclaimRequest("route", "round", context_compaction.context_reclaim_transcript_sha256(observed),
         "cold_estimate", 1.0, 0, working_note="I understood the source.",
         expected_view_revision=context_compaction.context_reclaim_transcript_sha256(observed), keep_unit_ids=())
     fit = lambda messages, tools: _measure_main_context_view(plan, messages, tools, "max", "high", "1")
-    owner_words = ("Full owner requirement. " * 200,)  # what the loop passes from the typed owner corpus
-    candidate, receipt, usage = context_compaction.compact_tool_history_llm(
+    candidate, receipt = context_compaction.compact_tool_history_llm(  # the owner's row is typed at delivery
         observed, request=request, observed_messages=observed, tool_schemas=[], fit_candidate=fit,
-        drive_root=tmp_path, task_id="large-main", protected_texts=owner_words)
-    assert receipt.status == "applied" and receipt.reclaimed_tokens > 0 and usage is None
+        drive_root=tmp_path, task_id="large-main")
+    assert receipt.status == "applied" and receipt.reclaimed_tokens > 0
     assert receipt.fit["accepted"] and receipt.fit["predicted_capacity_miss"]
     assert receipt.fit["strict_bound_proven"] is False
     assert candidate[:3] == observed[:3]  # the owner's words stay whole under keep_unit_ids=()
-    untyped, untyped_receipt, _ = context_compaction.compact_tool_history_llm(
-        observed, request=request, observed_messages=observed, tool_schemas=[], fit_candidate=fit,
+    legacy = [*observed[:2], {"role": "user", "content": observed[2]["content"]}, *observed[3:]]  # delivered untyped
+    legacy_request = replace(request, transcript_sha256=context_compaction.context_reclaim_transcript_sha256(legacy),
+                             expected_view_revision=context_compaction.context_reclaim_transcript_sha256(legacy))
+    untyped, untyped_receipt = context_compaction.compact_tool_history_llm(
+        legacy, request=legacy_request, observed_messages=legacy, tool_schemas=[], fit_candidate=fit,
         drive_root=tmp_path, task_id="large-main")
-    assert untyped_receipt.status == "applied" and untyped[:2] == observed[:2]
-    assert untyped[2] != observed[2]  # an untyped host prose row is an addressable dialogue unit (3A)
+    assert untyped_receipt.status == "applied" and untyped[:2] == legacy[:2]
+    assert untyped[2] != legacy[2]  # an untyped row is an addressable dialogue unit the mind may fold (3A)
     unknown = _measure_main_context_view(replace(plan, status="unknown"), candidate, [], "max", "high", "1")
     assert unknown["accepted"] and unknown["capacity_total_tokens"] is None
     unbound = _measure_main_context_view(None, candidate, [], "max", "high", "1")

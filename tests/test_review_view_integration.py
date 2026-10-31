@@ -21,6 +21,7 @@ from tests import _legacy_plan_shared as legacy
 from tests.test_plan_dispute_history import (
     _first_two_rounds, _state, harness as _plan_harness, LATE_FEEDBACK, RATIONALE, OWNER_CHOICES, RAW_REASON,
 )
+from tests.test_review_history_view import same_decisions
 
 harness = _plan_harness
 from tests.test_main_authored_context import call
@@ -91,7 +92,7 @@ def test_three_waves_actor_note_cold_author_and_later_round_keep_current_index(h
         drive_root=ctx.drive_root, task_id=ctx.task_id, operative_subject=operative)["bodies"]]
     assert RAW_REASON not in str(after), [(i, row.get("role"), list(row), str(row.get("content"))[:120]) for i, row in enumerate(after) if RAW_REASON in str(row)]
     assert OWNER_CHOICES in str(after), "attachment absent after ordinary note"
-    assert _index(after)[-1]["decision_rows"] == history["decision_rows"]
+    assert same_decisions(_index(after)[-1], history)
     assert _index(after)[-1]["operative_subject"]["spec"] == operative["spec"]
     checkpoint = json.loads(read_actor_source_bytes(ctx.drive_root, ctx.task_id, receipt["checkpoint_ref"]))
     assert RAW_REASON in str(checkpoint["messages"])
@@ -106,7 +107,7 @@ def test_three_waves_actor_note_cold_author_and_later_round_keep_current_index(h
         assert RAW_REASON not in str(rebound.messages_for(mode))
     cold = _capture(harness.make_ctx())
     assert capsule in cold and RAW_REASON not in str(cold) and OWNER_CHOICES in str(cold)
-    assert _index(cold)[-1]["decision_rows"] == history["decision_rows"]
+    assert same_decisions(_index(cold)[-1], history)
     # A later recorded round lands after the selection (a cold author's closed round 4,
     # s1 note 'late'): its body is not covered by the selection and stays in the view.
     legacy.advance_recorded(ctx.drive_root, "three_rounds_then_late_note", workspace=harness.workspace)
@@ -228,7 +229,7 @@ def test_commit_and_change_use_same_authored_selection_and_cold_packet(staged_bo
     after, receipt, _ = _apply(ctx, _capture(ctx))
     assert receipt["status"] == "applied", receipt
     assert view.SELECTED_VIEW_FIELD in load_task_result(drive, ctx.task_id, strict=True)
-    assert _index(after)[-1]["decision_rows"] == history["decision_rows"]
+    assert same_decisions(_index(after)[-1], history)
     cold = _capture(ToolContext(repo_dir=root, drive_root=drive, task_id=ctx.task_id))
     assert NOTE in str(cold) and RATIONALE in str(cold)
     assert not [row for row in cold if view.REVIEW_HISTORY_MESSAGE_KEY in row]
@@ -312,9 +313,10 @@ def test_first_commit_gate_wave_reaches_the_next_request_after_the_authors_fold(
     # The producer's typed notification was consumed once at the tool boundary.
     assert getattr(ctx, "_pending_review_context", None) == {}
     for index in (_index(messages)[-1], _index(after)[-1]):
-        (round_,) = index["rounds"]
-        assert round_["review_record_id"] == record["record_id"]
-        assert round_["verdict"]["aggregate"] == record["verdict"]["aggregate"]  # no invented verdict
+        # The record itself is behind its one address; the entry names the recorded verdict, never an invented one.
+        (entry,) = [e for e in index["addresses"].values() if e["read"].get("tool") == "query_data"]
+        assert entry["read"]["arguments"] == {"op": "json", "kind": "review_ledger", "ids": [record["record_id"]]}
+        assert f"aggregate verdict {record['verdict']['aggregate']}" in entry["what"] and "rounds" not in index
 
 
 def test_late_supplement_after_selection_keeps_new_text_and_old_verdict(tmp_path):

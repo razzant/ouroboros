@@ -66,12 +66,13 @@
 #
 # A WINDOWS-ONLY JOB: consumer. The same witness, same isolation, then
 # `--harness-install codex`: the production `install_missing_harness_cli` performs a
-# REAL local install of the engine-pinned Codex from the npm registry into the
-# disposable home, and the receipt must name the release-verified package-native
-# `codex.exe`, which must answer `--version` with the pin directly and by bare name
-# through a shell-less Node spawn, and to which both the harness rows of the daemon
-# Ouroboros starts itself and `claudexor doctor` must resolve; that daemon is always
-# stopped. No login, OAuth, account or model task is attempted. An engine without
+# REAL local install of the exact Codex release the engine selects from the npm
+# registry into the disposable home (release-verified or, newer, deterministic-only),
+# and the receipt must name that version and the package-native `codex.exe` or the
+# package-declared Node entry, which must answer `--version` with it directly and by
+# bare name through a shell-less Node spawn, and to which both the harness rows of the
+# daemon Ouroboros starts itself and `claudexor doctor` must resolve; that daemon is
+# always stopped. No login, OAuth, account or model task is attempted. An engine without
 # Windows native Codex install (3.14.0 and older) refuses the dry-run disclosure with
 # its own typed code, so this job stays red until the runtime pin carries that
 # release — there is no skip.

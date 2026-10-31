@@ -80,7 +80,9 @@ def handle_task_model_wait(event: dict, ctx: Any) -> None:
             return
         payload["chat_id"] = payload["review_operation"].get("chat_id")
     address_ctx_event(ctx, payload)
-    ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "progress.jsonl", payload)
+    from ouroboros import dialogue_store
+
+    dialogue_store.append_quietly(ctx.DRIVE_ROOT, "progress", payload)
     ctx.bridge.push_log(payload)
 
 

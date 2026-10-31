@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Independent client example</title>
+  <link rel="stylesheet" href="/auth/style.css">
+  <script type="module" src="/static/client.js"></script>
+</head>
+<body data-client-view="main">
+  <main>
+    <p class="eyebrow">Independent client example</p>
+    <h1>Your own interface</h1>
+    <p>This small client uses Ouroboros's public HTTP and WebSocket operations.</p>
+    <p id="connection" role="status">Connecting…</p>
+    <button id="reconnect" type="button" hidden>Reconnect</button>
+    <ol id="messages" aria-label="Live messages" aria-live="polite"></ol>
+    <form id="chat">
+      <label for="message">Message</label>
+      <input id="message" required autocomplete="off">
+      <button id="send" disabled>Send</button>
+    </form>
+    <p><a href="/onboarding">Setup</a> · <a href="/onboarding?builtin=1">Open built-in setup</a></p>
+  </main>
+</body>
+</html>

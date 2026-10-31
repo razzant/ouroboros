@@ -12,7 +12,7 @@ import hashlib
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from ouroboros._usage_response import provider_cost_value
+from ouroboros._usage_response import consumed_cost_value, provider_cost_value
 from ouroboros.observability import call_manifest_path, persist_call, read_blob_ref, read_call_payload, write_blob
 from ouroboros.utils import utc_now_iso
 
@@ -87,14 +87,17 @@ def parse_generation_receipt(payload, generation_id: str, *, status_code: int = 
         return {"status": "invalid_response", "status_code": status_code}
     if not generation_id or data.get("id") != generation_id:
         return {"status": "id_mismatch", "status_code": status_code}
-    # total_cost is the account charge. Scalar usage is a documented shape;
-    # upstream_inference_cost is deliberately not a substitute for this price.
+    # total_cost is the account charge (scalar usage is a documented shape);
+    # upstream_inference_cost never substitutes for it, and only a BYOK generation adds
+    # it: the reply's own rule (consumed_cost_value), so a receipt cannot zero BYOK spend.
     raw = data.get("total_cost")
     if raw is None and isinstance(data.get("usage"), dict):
         raw = data["usage"].get("cost")
-    cost = provider_cost_value(raw)
+    consumed = consumed_cost_value({"cost": raw, "is_byok": data.get("is_byok"),
+                                    "cost_details": {"upstream_inference_cost": data.get("upstream_inference_cost")}})
+    cost = provider_cost_value(consumed)
     if cost is None:
-        return {"status": "missing_price" if raw is None else "invalid_price", "status_code": status_code}
+        return {"status": "missing_price" if consumed is None else "invalid_price", "status_code": status_code}
     return {"status": "price", "status_code": status_code, "cost_usd": cost}
 
 

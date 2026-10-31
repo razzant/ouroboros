@@ -355,6 +355,26 @@ def _record_evolution_commit_receipt(
     return message
 
 
+def _evolution_test_publication_stop(ctx: ToolContext, commit_sha: str, test_warning: str) -> str:
+    """Withhold an evolution push that lacks full green proof of this exact commit.
+
+    Unlike lost authority this keeps the reviewed commit's provenance and settles the
+    attempt; only publication waits. A bound candidate's commit is never pushed here,
+    so nothing waits: its local adoption checks its own (possibly selected) evidence.
+    """
+    from ouroboros import body_candidate
+
+    if str(ctx.current_task_type or "") != "evolution" or body_candidate.is_bound(ctx):
+        return ""
+    from ouroboros.preflight_qualification import full_proof_error
+
+    error = test_warning or full_proof_error(ctx, ctx.repo_dir, commit_sha)
+    if not error:
+        return ""
+    ctx.last_push_succeeded = False
+    return f" [EVOLUTION_PUBLICATION_STOPPED: {error.strip()}; the reviewed commit stays local, nothing was pushed]"
+
+
 def _evolution_publication_stopped_result(
     ctx: ToolContext, commit_message: str, commit_sha: str, test_warning: str,
     created_tag: str = "", started_at: float = 0.0,

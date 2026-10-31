@@ -247,6 +247,8 @@ def test_a_pending_invocation_keeps_the_owner_resume_refused_until_it_binds_or_f
     assert refused["error"] == "external_runs_unsettled"
     assert refused["runs"] == [{"run_id": "", "state": budget_pause.EXTERNAL_STOP_UNKNOWN,
                                 "stop_outcome": "pending_invocation_unbound"}]
+    assert refused["blockers"] == [{"kind": "delegated_run", **refused["runs"][0]}]
+    assert "a delegated start has an unknown outcome (no run was recorded)" in refused["message"]
     assert refused["action"] == "wait_for_delegated_runs_to_settle_or_cancel_them"
     assert "_budget_pause" in task and "_budget_pause_resume" not in task
     row = budget_pause.budget_pause_row(tmp_path, "a882-pending-grant")

@@ -29,8 +29,8 @@ Contract (count-anchored both ways):
   shorter than the row does not certify it, because the population also holds
   bare top-level tokens (``state``, ``logs``, ``archive`` …) that would keep
   any invented exact row alive — that is what made the check vacuous. The
-  complete set of rows admitted with no in-tree writer is
-  ``STALE_ROW_EXEMPTIONS``, asserted by equality;
+  complete set of rows admitted without a scanned writer is
+  ``STALE_ROW_EXEMPTIONS``, each with its audited reason, asserted by equality;
 - the total number of distinct scanned paths is pinned — adding a NEW
   data-relative path fails here until PERSISTENCE.md gets its row and the pin
   moves.
@@ -56,6 +56,8 @@ DATA_ROOT_MARKERS = (
 DATA_REL_CALL_NAMES = frozenset({"drive_path"})
 PATH_CTORS = frozenset({"Path", "PurePath", "PurePosixPath", "PureWindowsPath"})
 DIR_LISTING_CALLS = frozenset({"iterdir", "glob", "rglob"})
+# ``unindexed(parent, "leaf"[, recorded])`` (ouroboros/unindexed.py) names a NEW generated copy ``parent/leaf.noindex``.
+UNINDEXED_CALL, UNINDEXED_SUFFIX = "unindexed", ".noindex"
 TOP_LEVEL = frozenset({
     "state", "logs", "memory", "skills", "task_results", "observability",
     "locks", "archive", "settings.json", "uploads", "services", "artifacts",
@@ -91,14 +93,21 @@ SUBROOT_ALIASES = {
     # UNINSTALL_TOMBSTONE_FILENAME` — which the scan already resolves to the
     # aliased path, so the two spellings collapse onto one entity.
     "uninstalled.json": "state/skills/*/uninstalled.json",
-    # _stage_extension_import_tree (extension_import_staging.py:84-88) builds
-    # `state_dir / "__extension_imports" / f"{pid}-{uuid}"` plus its `skill`
-    # subtree; its ONE caller (extension_loader.py:649) passes the
-    # `state_dir = skill_state_dir(drive_root, skill.name)` bound at :581, and
-    # the sweep (:120) spells the same directory through skill_state_dir.
-    "__extension_imports/*-*": "state/skills/*/__extension_imports/*-*",
-    "__extension_imports/*-*/skill": "state/skills/*/__extension_imports/*-*/skill",
-    "__extension_imports/*-*/skill/*": "state/skills/*/__extension_imports/*-*/skill/*",
+    # _stage_extension_import_tree (extension_import_staging.py) builds the content-addressed
+    # `state_dir / "__extension_imports" / identity` tree (`skill/`, `complete.json`, `owners/<pid>`)
+    # and extension_cache_lock spells `state_dir / f".extension-{purpose}.lock"`; every caller
+    # passes `state_dir = skill_state_dir(drive_root, skill.name)` (extension_loader.py, the
+    # catalog cache in extension_process_runner.py, the sweep's own skill_state_dir binding).
+    "__extension_imports/*": "state/skills/*/__extension_imports/*",
+    "__extension_imports/*/complete.json": "state/skills/*/__extension_imports/*/complete.json",
+    "__extension_imports/*/owners": "state/skills/*/__extension_imports/*/owners",
+    "__extension_imports/*/owners/*": "state/skills/*/__extension_imports/*/owners/*",
+    "__extension_imports/*/skill": "state/skills/*/__extension_imports/*/skill",
+    "__extension_imports/*/skill/*": "state/skills/*/__extension_imports/*/skill/*",
+    ".extension-*.lock": "state/skills/*/.extension-*.lock",
+    # The import lock is beside skill_state_dir, so deleting that skill's state
+    # cannot make a concurrent acquirer lock another inode.
+    ".*-extension-imports.lock": "state/skills/.*-extension-imports.lock",
 }
 
 # The same human promise for a parameter whose NAME is the audited root, read
@@ -389,6 +398,10 @@ class _PathResolver:
     def resolve(self, node: ast.expr, consts: dict[str, str],
                 local: dict[str, str]) -> tuple[str, bool]:
         """``(data-relative path, is-data-relative)`` for a path expression."""
+        if isinstance(node, ast.Call) and _call_name(node) == UNINDEXED_CALL and len(node.args) >= 2:
+            inner, ok = self.resolve(node.args[0], consts, local)
+            leaf = _literal_segment(node.args[1])
+            return (f"{inner}/{leaf}{UNINDEXED_SUFFIX}", True) if ok and leaf and _is_named(inner) else ("", False)
         if isinstance(node, ast.Name):
             known = local.get(node.id)
             return (known, True) if known else ("", False)
@@ -476,7 +489,16 @@ class _PathResolver:
                     for node in nodes:
                         if not isinstance(node, ast.Return) or node.value is None:
                             continue
-                        rel, ok = self.resolve(node.value, consts, local)
+                        value = node.value
+                        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                                and value.func.attr == "resolve" and isinstance(value.func.value, ast.BinOp)
+                                and isinstance(value.func.value.op, ast.Div)
+                                and self._segment(value.func.value.right, consts) in TOP_LEVEL):
+                            # A pure helper may RETURN the canonical store root;
+                            # its callers own mkdir. This does not promote local
+                            # locator readers' resolve() calls to store declarations.
+                            value = value.func.value
+                        rel, ok = self.resolve(value, consts, local)
                         if ok and _is_named(rel):
                             found.setdefault(fn.name, set()).add(rel)
                 per_file[path] = found
@@ -573,6 +595,10 @@ class _PathResolver:
                             rel = _normalize([literal])
                             if rel:
                                 found.add(SUBROOT_ALIASES.get(rel, rel))
+                    elif isinstance(node, ast.Call) and _call_name(node) == UNINDEXED_CALL:
+                        rel, ok = self.resolve(node, consts, local)
+                        if ok and _is_named(rel):
+                            found.add(SUBROOT_ALIASES.get(rel, rel))
                     elif isinstance(node, ast.Call) and _call_name(node) == "store_actor_source_bytes":
                         rel = self._source_handle_path(node, scope)
                         if rel:
@@ -768,7 +794,106 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # read at Panic and covered by the existing ``claudexor/**`` row.
 # 378 -> 377: the retired plan engine's operative-spec source (context_checkpoints/plan-spec-*.json);
 # earlier records keep theirs, nothing writes one any more.
-EXPECTED_SCAN_PATHS = 377
+# 377 -> 378 (test health): adoption reads the receipt directory ``state/preflight_receipts``
+# (``ouroboros/preflight_qualification.py``; the existing receipts row).
+# 378 -> 379 (review copies' lifetime): the prune walks ``state/review_checkouts`` itself
+# (``ouroboros/review_checking_prune.py``; the existing seats and views rows).
+# 379 -> 380: test_evidence stores full gate sources/results below source_handles/test-evidence.
+# 380 -> 387 (the startup-architecture change): the boot receipts ``state/git_bootstrap.json`` and
+# ``state/native_seed.json``, the content-addressed extension import trees and their locks
+# (``__extension_imports/*``, ``.extension-*.lock``), ``state/dialog.sqlite`` and its name-tier lock
+# ``state/dialog.lock`` (``ouroboros/dialogue_store.py``; one section-3 row that also names the cutover
+# and import-job locks).
+# 386 -> 401 (skill sources): the git transport's caches under ``state/skill_sources`` (repository
+# and pointer clones, their locks, meta and snapshots, probe/merge scratch), the starter marker
+# ``state/skill_starter.json`` and the per-bucket install staging ``skills/*/.staging/*-*``.
+# 401 -> 402 (source views): ``state/skill_sources/repos/*/views/*`` holds per-path
+# snapshots; ``catalog.json`` now has either the repository root or a view as its parent.
+# 402 -> 404 (update retention): ``state/skills/*/update_backup.json`` and the
+# now-derived existing rollback location ``skills/*/.rollback/*.*``.
+# 387 -> 412: both changes together (the skill-source paths above on the startup-architecture
+# count; ``state/native_seed.json`` is now written by ``ouroboros/skill_builtin.py``).
+# 412 -> 413 (computer use on by default): the one-time offer reads the earlier launcher's
+# ``skills/native/.post-bootstrap-seed-*`` markers so a default the owner removed stays removed.
+# 413 -> 414: the saved storage count ``state/storage_measurement.json`` (``ouroboros/storage.py``;
+# the last two finished counts the Dashboard gauge and the mind's storage fact read) has its own row
+# in section 2.
+# 414 -> 402 (the review fold): the task-acceptance machine left, and with it twelve spellings only
+# its writers named — the source ids ``acceptance``, ``acceptance-artifact-inventory``,
+# ``acceptance-operation``, ``acceptance-packet``, ``acceptance_historical``,
+# ``historical-acceptance-intent``, ``historical_owner_request`` and ``review-artifact`` under
+# ``context_checkpoints`` and ``acceptance_tool_trajectory`` under ``tool_results``
+# (``acceptance_history.py``, ``acceptance_retrieving.py``, and the acceptance-only writers of
+# ``review_projection.py``, ``review_operation.py``, ``review_evidence_sections.py``,
+# ``review_source_closure.py`` and ``artifacts.py``), the request-source snapshot root
+# ``source_handles/review_inputs`` (``review_source_closure.retain_review_request_sources``), and
+# ``observability/blobs`` with its ``.stream.*`` temp name (``write_blob_stream``, the acceptance diff's
+# private retention, deleted with its module ``repo_diff_capture``).
+# Every row stays: stored acceptance sources are still served (section 7), old review-input snapshots
+# are still read, and the tool-results plane keeps live writers; the last two rows are exempted from
+# the no-stale-rows direction below, each with its reason.
+# 402 -> 406 (plugin-first, living cards): the card store ``state/cards``, its per-card
+# ``state/cards/<card_id>.json`` records and content-addressed ``state/cards/apps/<sha256>.html``
+# app bytes (one section-4 row), and the Keep-on-Widgets pins ``state/pinned_cards.json`` (its
+# own section-2 row; ``ouroboros/card_store.py`` writes all four).
+# 407 -> 408: ``state/panic_source.json`` is diagnostic latest-source evidence
+# (section 2); causal observations also use the existing ``logs/events.jsonl``.
+# 408 -> 407 (managed Node/npm): promotion adds immutable .g-* siblings rather than
+# displacing into node/.old-*; metadata reads use _node_roots instead of spelling
+# node/*-*/managed-node.json. Retained generations and legacy roots share section 4's cx row.
+# 407 -> 408: the upstream local evolution export adds task_results/artifacts/*/evolution-*.json.
+# 408 -> 409: ``state/body_adoption/installation_stop.py``, the stdlib Panic reader captured beside
+# the switch helper (body adoption row).
+# 409 -> 414: the place seam (one path the inherited pin missed) plus focus, the gate directory and its
+# author-census member family, documented in section 2.
+# 414 -> 417 (live calls):
+# Live calls retain conversation-wire.jsonl and the sibling extension-imports lock.
+# The unused realtime-wire and realtime-prepared probe writers are retired by the host lane.
+# The host's exact-route tariff cache adds state/pricing/litellm.json.
+# PERSISTENCE names its overwrite lifetime; reconcile markers already exist on base.
+
+
+# 414 -> 415: ``state/sent_history_changes.json``, the running code's record of sent-history changes
+# (``ouroboros/transcript_prefix.py``, its own section-2 row).
+# The skill-review fold (tool-reuse-20261020) removed the root-task projection (+ its gaps file), the
+# accepted-rebuttals file and the dispatch markers, and added the frozen payload view under
+# ``state/review_checkouts/views/`` (one section-2 row each in PERSISTENCE.md): 415 -> 410.
+# #2151's pure observability helper hid two named paths and introduced three false
+# data-root spellings. Resolving its return restores the audited 410-path population;
+# the local evolution export introduced by #2137 is also a sentinel below.
+# 410 -> 411: #2177 retains a parked pre-start task's inline image as
+# ``source_handles/context_checkpoints/inline-image-*.image`` (``budget_pause``; its section-7 row).
+# 411 -> 413: the published MCP catalogs (``state/mcp/catalogs`` and its ``server-*.json`` envelopes,
+# ``ouroboros/mcp_catalog.py``, their section-4 row).
+# 413 -> 416: the shared download cache ``package-downloads`` and its per-manager
+# ``package-downloads/*`` (named by ``workspace_preflight``, written by package managers),
+# and a candidate run's named-evidence ``.../delegated_runs/*/evidence/summary.json`` reread.
+# 416 -> 417 (this branch): retained bootstrap identity ``state/delegate_bootstrap/*.json`` and per-target
+# payload mutation locks ``state/delegate_payload_mutations/*.lock``; the retired global claim spelling is gone.
+# 417 -> 418: the desktop window's Interface size ``state/desktop_page_zoom.json`` (``launcher_page_zoom.py``,
+# its section-2 row).
+# 418 -> 421: immutable delegated evidence generations and their unpublished staging.
+# 421 -> 420: ``logs/task_reflections.jsonl`` lost its last named writer with ``ouroboros/reflection.py``
+# (the retired automatic reflection's routed store); its row stays, exempted below with its reason.
+# 420 -> 419: ``memory/knowledge/patterns.md`` lost its fixed-path readers (the resident context section,
+# the deep-review whitelist and the project-fork seed): it is an ordinary note read through knowledge tools.
+# 419 -> 425: ``state/shutdown_entry.json``, a generation's boot claim and first shutdown door cause; one
+# record file per private copy ``state/private_copies/*.json`` with its legacy-import receipt and lock
+# (the records row), and the seat homes the owner's Storage -> Free lists
+# (``review_checking_prune.finished_seat_homes``, the seats row).
+# 425 -> 426: ``state/openrouter_models.json``, the OpenRouter catalogue every process adopts.
+# 426 -> 429 (live calls): live wire evidence, the extension import lock and the live tariff cache.
+# 429 -> 430: ``state/delegate_document_imports/*.lock``, one selected document's import decision.
+# 430 -> 431: ``observability/calls/*/*``, the target's per-call evidence (408d9a84d), counted on merge.
+# 427 -> 429: ``observability/calls/*/*``, scanned on the target before this pin moved, and
+# ``state/claudexor_route_health.json``, the engine's newest per-route failure shares (its section-2 row).
+# 429 -> 430: adds ``state/update_material.json`` and ``state/update_letter.lock``;
+# the scan no longer yields the legacy ``state/usage_attempts.lock`` spelling.
+# 430 -> 431: checkout-specific preflight heads, registered in the review-ledger row.
+# 433 target paths plus the three call wire/import-lock/tariff paths.
+# Two existing disposable families are now named by their owner-keep readers:
+# task_drives/*/session_scratch_owners and task_trees/*.
+EXPECTED_SCAN_PATHS = 438
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -785,6 +910,7 @@ SENTINELS = frozenset({
     "logs/chat.jsonl",
     "memory/identity.md",
     "task_results/artifacts/*",
+    "task_results/artifacts/*/evolution-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-reentry-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-transport-queue-*.json",
     "task_trees/*/blackboard.jsonl",
@@ -814,13 +940,14 @@ UNRESOLVED_SPELLINGS = frozenset({
     # `state`/`logs` reached with the file name as a parameter or loop value:
     # delegate_recovery.py (the two stop flags), usage_ledger.py (ledger /
     # quarantine / lock names), gateway/logs.py + memory.py + supervisor/
-    # state.py (bounded log tail, rotation helper).
-    "state/*",
+    # state.py (bounded log tail, rotation helper). ``state/*`` left this set
+    # when the per-target payload mutation lock gave the bare ``state`` token
+    # a documented resolvable writer.
     "logs/*",
     # skill payload roots resolved from a validated relpath (bucket + name):
     # config.py, contracts/skill_payload_policy.py, skill_payload_binding.py,
-    # tools/core.py — the `skills/<source>/<name>/**` row owns them.
-    "skills/*",
+    # tools/core.py — the `skills/<source>/<name>/**` row owns them. (`skills/*`
+    # itself is named by that row's per-bucket install staging spelling.)
     "skills/*/*",
 })
 
@@ -927,6 +1054,23 @@ def _covers(scan_path: str, pattern: str, scan_prefix_ok: bool = True) -> bool:
 # --- tests -----------------------------------------------------------------
 
 
+def test_update_backup_inventory_names_its_pending_and_partial_restore_lifetime():
+    row = next(line for line in DOC.read_text(encoding="utf-8").splitlines()
+               if line.startswith("| `state/skills/<name>/` owner state"))
+    assert "`update_backup.json`" in row
+    assert "only while a review-basis update is pending" in row
+    assert "removed when it settles or the skill is uninstalled" in row
+    assert "kept as evidence after a partial restore" in row
+    assert "state/skills/*/update_backup.json" in scan_data_paths()
+
+
+def test_skill_update_docs_name_all_rejection_reasons():
+    for filename in ("CREATING_SKILLS.md", "CLIENT_CONTRACT.md"):
+        text = (REPO / "docs" / filename).read_text(encoding="utf-8")
+        for reason in ("review_blockers", "review_unfinished", "preflight_failed", "landing_failed"):
+            assert f"`{reason}`" in text, (filename, reason)
+
+
 def test_scan_is_populated_and_pinned():
     paths = scan_data_paths()
     assert "uploads/views/*_*" in paths, "the shared original-retention writer must remain scanned"
@@ -968,9 +1112,11 @@ def test_every_scanned_path_has_an_inventory_row():
     )
 
 
-# Rows the backward check must NOT demand a writer for, each because the row
-# itself states there is none in this tree. Asserted by equality below, so an
-# entry that acquires a writer (or a row that quietly loses one) surfaces.
+# Rows the backward check must NOT demand a scanned writer for, each with its
+# audited reason: the row itself states there is no writer in this tree, or (one
+# entry) its live writers name every file through a dynamic source id, which the
+# scan refuses to name. Asserted by equality below, so an entry that acquires a
+# scanned writer (or a row that quietly loses one) surfaces.
 STALE_ROW_EXEMPTIONS = frozenset({
     # PERSISTENCE.md documents this plane as an orphan of a removed feature:
     # "none in this tree ... nothing reads or recreates it". Confirmed by grep —
@@ -979,6 +1125,27 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # The retired compactor's archive: "none since the usage store" — kept as
     # evidence, read only by the explicit history audit (model_send_seal).
     "archive/usage_ledger/segment_*.jsonl",
+    # The retired task acceptance's request-source snapshots: the row states no
+    # live writer (``review_source_closure.retain_review_request_sources`` left
+    # with the acceptance machine); old snapshots are still read
+    # (``review_source_closure._owned_attachment_path`` during child-ref promotion,
+    # ``delegate_registration_policy.minted_review_root``).
+    "task_results/artifacts/*/source_handles/review_inputs",
+    # A LIVE plane the scan cannot see: ``delegate_output.retain_terminal_bytes``
+    # and ``delegate_collection._retain`` spell each source id as an f-string over a
+    # run id, and ``artifacts.persist_exact_text_source`` (the result review's
+    # ``review_result.subject_source`` and every other exact-text writer) takes it as
+    # a parameter — never an exact string, and a dynamic id names no file here
+    # (``test_dynamic_source_handle_arguments_do_not_certify_named_rows``). The
+    # population saw this plane only through the retired acceptance tool-trajectory
+    # literal.
+    "task_results/artifacts/*/source_handles/tool_results",
+    # The row states no writer in this tree: the automatic post-task reflection and
+    # its routed store (``ouroboros/reflection.py``) are gone. The history is still
+    # read (``journal_read(source='reflections')``, ``read_file``), and server.py
+    # rotates it through ``rotate_jsonl_log_if_needed``, which takes the name as a
+    # parameter the scan does not resolve.
+    "logs/task_reflections.jsonl",
 })
 
 
@@ -1005,9 +1172,11 @@ def test_every_inventory_row_is_still_real():
     Making it bite cost two resolution facts and one exemption. The stdlib
     rotating handlers (`logs/server.log`, `logs/launcher.log`) and the
     oversized-task-text sink (`logs/tasks/*`) were resolved instead of
-    exempted — a real writer must be SEEN, not excused. The remaining row is
-    an orphan plane the document itself says nothing in this tree writes, and
-    it is exempted by name in ``STALE_ROW_EXEMPTIONS``.
+    exempted — a real writer must be SEEN, not excused. The exempted rows are
+    named in ``STALE_ROW_EXEMPTIONS`` with their reasons: planes the document
+    itself says nothing in this tree writes, and the one live plane whose
+    writers name every file through a dynamic source id the scan refuses to
+    name.
     """
     text = DOC.read_text(encoding="utf-8")
     stale = stale_rows(text)
@@ -1139,8 +1308,32 @@ def test_resolved_observability_root_matches_real_writer_outputs(tmp_path):
         relative = pathlib.Path(ref["path"]).relative_to(root.resolve()).as_posix()
         assert relative.startswith("observability/")
         assert any(fnmatch.fnmatchcase(relative, path) for path in paths)
-    assert {"observability/blobs/*.*.gz", "observability/calls/*/*.json"} <= paths
+    assert {"observability/blobs/*.*.gz", "observability/calls/*/*.json",
+            "observability/calls/*/*.model_send_violation.json", "observability/salvaged/*.txt"} <= paths
     assert not any(path.startswith(("blobs/", "calls/")) for path in paths)
+
+
+def test_pure_resolved_store_helper_keeps_its_prefix(tmp_path):
+    """Read-only root helpers need no mkdir; opaque locators declare no store."""
+    module = tmp_path / "ouroboros" / "synthetic_writer.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from pathlib import Path\n"
+        "def store_root(data_dir):\n"
+        "    return (Path(data_dir) / 'observability').resolve(strict=False)\n"
+        "def writer(data_dir):\n"
+        "    return store_root(data_dir) / 'blobs' / 'known.gz'\n"
+        "def reader(locator):\n"
+        "    return Path(locator).resolve() / 'unknown.json'\n"
+        "def relative_reader(locator, relative):\n"
+        "    root = (Path(locator) / 'observability').resolve()\n"
+        "    return root / relative\n",
+        encoding="utf-8",
+    )
+    paths = scan_data_paths(tmp_path)
+    assert "observability/blobs/known.gz" in paths
+    assert "observability/*" not in paths
+    assert not any(path.startswith("blobs/") or path.endswith("unknown.json") for path in paths)
 
 
 def test_literal_source_handle_calls_match_real_writer_outputs(tmp_path):
@@ -1216,3 +1409,11 @@ def test_dynamic_source_handle_arguments_do_not_certify_named_rows(tmp_path):
         encoding="utf-8",
     )
     assert scan_data_paths(tmp_path) == frozenset()
+
+
+def test_live_call_evidence_replaces_unused_probe_artifacts():
+    paths = scan_data_paths()
+    assert "state/skills/.*-extension-imports.lock" in paths
+    assert ".*-extension-imports.lock" not in paths
+    assert "task_results/artifacts/*/conversation-wire.jsonl" in paths
+    assert not any("/realtime-wire.jsonl" in path or "/realtime-prepared-" in path for path in paths)

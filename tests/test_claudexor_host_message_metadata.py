@@ -1,4 +1,5 @@
-"""Host acceptance metadata never enters the strict model-message envelope."""
+"""Host-only message markers (the owner-source observation, review feedback) never enter the strict
+model-message envelope."""
 import asyncio
 from copy import deepcopy
 import json
@@ -73,25 +74,17 @@ def test_host_feedback_preserves_exact_provider_wire_and_accounting(case):
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_actual_claudexor_send_copy_preserves_canonical_feedback(claudexor_setup, asynchronous):  # noqa: F811
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
     from ouroboros.loop_llm_call import _send_main_candidate
 
     root, gateway, client = claudexor_setup
-    trace = {"review_runs": [{"authority": "host_root", "binding_hash": "critic"}]}
     messages = [{"role": "user", "content": "Exact reviewer result\r\nПривет", "review_feedback": [
         {"task_id": "host-task", "run_index": 0, "binding_hash": "critic"}]}]
     before = deepcopy(messages)
-    observed = []
-    def observer(canonical):
-        observed.extend(deepcopy(canonical))
-        expose_acceptance_feedback(trace, canonical, "host-task")
     if asynchronous:
         asyncio.run(client.chat_async(messages, MODEL))
     else:
         _send_main_candidate(client, {"messages": messages, "model": MODEL}, model=MODEL,
-            use_local=False, deadline_ts=None, physical_context=None, candidate_predicate=None,
-            model_context_observer=observer)
-        assert observed == before and trace["review_runs"][0]["feedback_delivered"]
+            use_local=False, deadline_ts=None, physical_context=None, candidate_predicate=None)
     payload = gateway.uploads[0][0]
     assert payload["messages"] == [{"role": "user", "content": before[0]["content"]}]
     assert retained(root, "request") == payload

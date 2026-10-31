@@ -2,11 +2,10 @@
 
 A model name is not evidence. Whether a route accepts image input is a fact about
 the exact resolved route (provider, endpoint, API surface, routing options and the
-available account identity), recorded only from a catalog Ouroboros already reads
-(OpenRouter ``/models``; an OpenAI-compatible gateway's ``/models`` read by the
-task-start window probe) and valid for 24 hours from that catalog's response. No
-record means unknown, and unknown never withholds the owner's image: the route
-receives the pixels and answers for itself. A Claudexor route answers from its
+key or account that read it; OpenRouter's catalog is public), recorded only from a
+catalog Ouroboros already reads (OpenRouter and compatible task-start ``/models``;
+saved picker discovery for compatible, Anthropic and DeepSeek) and valid for 24
+hours from that response. No record means unknown: send pixels. Claudexor reads its
 account's catalog (``provider_models.supports_vision``).
 
 ``prepare_messages_for_send`` decides what each send carries; transport builders
@@ -45,11 +44,12 @@ import logging
 import pathlib
 import threading
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 from ouroboros.config import get_image_input_mode, get_vision_caption_timeout_sec, get_vision_model, resolve_effort
 from ouroboros.deadline_utils import owner_deadline_exhausted, transport_timeout_with_deadline
 from ouroboros.observability import new_call_id, persist_call
-from ouroboros.provider_models import provider_for_model, supports_vision
+from ouroboros.provider_models import image_input_from_modalities, provider_for_model, supports_vision
 from ouroboros.utils import emit_cognitive_operation_event, utc_now_iso
 from ouroboros.vision_image_limits import prepare_caption_image, prepare_route_images, refusal_identity, sent_caption_identity
 from ouroboros.config import runtime_setting
@@ -102,11 +102,8 @@ class VisionRoutingContext:
 # --- Evidence: one parser, one route scope, one store ---------------------------
 
 def _modalities(value: Any) -> Any:
-    if value is None or value == []:
-        return None
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return "image" in {item.strip().lower() for item in value}
-    return _MALFORMED
+    verdict = image_input_from_modalities(value)
+    return _MALFORMED if verdict is None and value not in (None, []) else verdict
 
 
 def _strict_flag(value: Any) -> Any:
@@ -126,8 +123,8 @@ def _supported_object(value: Any) -> Any:
 def image_input_from_row(row: Any) -> Optional[bool]:
     """Image input stated by one catalog row: True/False, or None when the row is unclear.
 
-    Only a documented, unambiguous field counts: a non-empty input-modality list
-    (``architecture.input_modalities``), a strict JSON bool in ``supports_vision``
+    Only a documented, unambiguous field counts: a complete input-modality list
+    (``input_modalities`` or ``architecture.input_modalities``), a strict JSON bool in ``supports_vision``
     or ``capabilities.supports_vision``, or Anthropic's
     ``capabilities.image_input.supported``. A missing, null or empty field says
     nothing; any other shape, or fields that disagree, make the whole row unknown,
@@ -140,6 +137,7 @@ def image_input_from_row(row: Any) -> Optional[bool]:
         return None
     architecture, capabilities = architecture or {}, capabilities or {}
     found = [
+        _modalities(row.get("input_modalities")),
         _modalities(architecture.get("input_modalities")),
         _strict_flag(row.get("supports_vision")),
         _strict_flag(capabilities.get("supports_vision")),
@@ -151,40 +149,42 @@ def image_input_from_row(row: Any) -> Optional[bool]:
     return verdicts.pop() if len(verdicts) == 1 else None
 
 
-def image_route_scope(target: Mapping[str, Any]) -> str:
-    """Key of the image-input namespace for one resolved route, or "" when its scope is unknown.
+def image_route_scope(target: Mapping[str, Any], *, catalog: bool = True) -> str:
+    """Key of the image facts of one resolved route, or "" when its scope is unknown.
 
-    Provider, endpoint, API surface, routing options and the available account
-    identity: what one catalog response describes. The model is a member of the
-    record, because one response observes every model of its endpoint at once.
+    Provider, endpoint (its path's case kept), API surface, routing options and identity: a carried
+    subscription account, else a digest of the route's API key, never the key. OpenRouter's catalog
+    is public, so its ``catalog`` facts serve every key and connection; a refusal (``catalog=False``)
+    keeps both. The model is a record member: one response observes every model of its endpoint.
     """
     provider = str(target.get("provider") or "").strip().lower()
-    endpoint = str(target.get("base_url") or "").strip().rstrip("/").lower()
-    if not provider or not endpoint:
+    endpoint = urlsplit(str(target.get("base_url") or "").strip().rstrip("/"))
+    if not provider or not endpoint.geturl():
         return ""
+    key = "" if catalog and provider == "openrouter" else str(target.get("api_key") or "")
     routing: Dict[str, Any] = {}
     if provider == "openrouter":
         from ouroboros.llm_routing import _resolve_or_provider
 
-        routing = _resolve_or_provider()
-    scope = {
-        "provider": provider, "endpoint": endpoint,
-        "surface": "messages" if provider == "anthropic" else "chat.completions",
-        "routing": routing, "account": str(target.get("account_fingerprint") or ""),
+        routing = _resolve_or_provider(None if catalog else target.get("provider_routing"))
+    scope = {  # urlsplit already folds the scheme's case; the host's is folded here
+        "provider": provider, "surface": "messages" if provider == "anthropic" else "chat.completions",
+        "endpoint": endpoint._replace(netloc=endpoint.netloc.lower()).geturl(), "routing": routing,
+        "account": target.get("account_fingerprint") or (key and sha256(key.encode()).hexdigest()) or "",
     }
     return sha256(json.dumps(scope, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
 
 
-def record_catalog_image_input(provider: str, base_url: str, rows: Any, *, source: str) -> None:
+def record_catalog_image_input(provider: str, base_url: str, rows: Any, *, source: str, api_key: str = "") -> None:
     """Persist one catalog response's image-input statements for its route scope.
 
-    Called by the readers Ouroboros already runs, right after the response
-    arrives, so the record's time is the catalog's observation time. The newest
-    response replaces the scope's record whole: a model it no longer describes
-    becomes unknown. Never raises; a lost write leaves the route unknown.
+    Called by the readers Ouroboros already runs, right after the response arrives, with the key
+    it sent: the record's time and scope are the catalog's observation. The newest response
+    replaces the scope's record whole, so a model it no longer describes becomes unknown. Never
+    raises; a failed or busy write keeps the previous record, in force until it expires.
     """
     try:
-        key = image_route_scope({"provider": provider, "base_url": base_url})
+        key = image_route_scope({"provider": provider, "base_url": base_url, "api_key": api_key})
         if not key:
             return
         statements: Dict[str, bool] = {}
@@ -214,10 +214,10 @@ class ImageInputEvidence:
 def route_image_input(model: str) -> ImageInputEvidence:
     """The fresh catalog statement for the exact API route ``model`` resolves to, else unknown.
 
-    Reads the shared store on every call and never fetches, so a worker or a
-    cold VLM child sees what any process recorded under the canonical root.
-    Claudexor routes answer from their account catalog instead; a local lane has
-    no catalog.
+    The route resolves from current settings, as every send's ``LLMClient()`` does. Reads the
+    shared store on every call and never fetches, so a worker or a cold VLM child sees what any
+    process recorded under the canonical root. Claudexor routes answer from their account
+    catalog instead; a local lane has no catalog.
     """
     name = str(model or "").strip()
     if not name or provider_for_model(name) in {"local", "claudexor"}:
@@ -228,7 +228,7 @@ def route_image_input(model: str) -> ImageInputEvidence:
 
         target = LLMClient()._resolve_remote_target(name)
         key = image_route_scope(target)
-        records = evidence._load(evidence.canonical_evidence_root()).get(EVIDENCE_NAMESPACE) or {}
+        records = evidence._read(evidence.canonical_evidence_root()).get(EVIDENCE_NAMESPACE) or {}
         record = records.get(key) if key else None
         if not isinstance(record, dict):
             return ImageInputEvidence()
@@ -489,12 +489,12 @@ def candidate_images(raw_sha256: Optional[str]) -> Optional[frozenset]:
 
 
 def image_route_key(model: str, role: str = "vision", pin: Optional[str] = None) -> str:
-    """The vision route a refusal belongs to: the resolved route's image scope, model and account.
+    """The vision route a refusal belongs to: the resolved route's own scope, model and account.
 
-    Another model, provider, endpoint, routing option or account is another route: a fallback
-    never inherits a refusal, and equal model strings with different accounts are different
-    routes (``model_slots.route_binding``: ``role``'s account unless ``pin`` names one; Auto
-    and API routes have none). "" for our local lane.
+    Another model, provider, endpoint, routing option, API key or account is another route: a
+    fallback never inherits a refusal (OpenRouter's public catalog scope included), and equal model
+    strings with different accounts are different routes (``model_slots.route_binding``: ``role``'s
+    account unless ``pin`` names one; Auto and API routes have none). "" for our local lane.
     """
     name = str(model or "").strip()
     if not name or provider_for_model(name) == "local":
@@ -510,10 +510,10 @@ def image_route_key(model: str, role: str = "vision", pin: Optional[str] = None)
             pin = chosen["model_account_override"]  # the owner's live choice binds the role, as the send does
         account = route_binding(name, False, role, overrides=None if pin is None else {
             role: {"model_account_override": pin}})[2]
-    except Exception:
+        scope = image_route_scope(target, catalog=False) or str(target.get("provider") or "")
+    except Exception:  # an unreadable route (e.g. an unparseable endpoint) is keyed by its model alone
         return name
-    return "|".join((image_route_scope(target) or str(target.get("provider") or ""), str(target.get("source") or ""),
-                     str(target.get("resolved_model") or name), account))
+    return "|".join((scope, str(target.get("source") or ""), str(target.get("resolved_model") or name), account))
 
 
 def _route_refusals(accumulated_usage: Any, model: str, role: str = "vision",
@@ -646,18 +646,19 @@ def _caption_for_block(
     task_id: str = "",
     event_queue: Any = None,
 ) -> Tuple[str, str]:
-    """Return (caption, failure), both empty if no route can accept these pixels.
-
-    Each candidate's prepared-byte identity governs its refusal and memo lookup.
-    """
+    """Return (caption, failure), both empty without a route. Each candidate's
+    prepared-byte identity governs its refusal and memo lookup."""
     memo = accumulated_usage.setdefault("_vision_caption_memo", {})
     model, url, url_digest, preparation_note, failure = prepare_caption_image(block, ctx, llm, accumulated_usage)
     # Completed captions remain reusable after their generating account is unavailable.
     key = f"{url_digest}|{model}|v1"
     if memo.get(key):
         return str(memo[key]), ""
+    from ouroboros.loop_llm_call import TIMEOUT_REPEAT_KEY  # an owed timeout repeat (#1886) buys no caption
     if not model or not url:
         return "", failure
+    if TIMEOUT_REPEAT_KEY in accumulated_usage:
+        return "", failure or "no new caption is generated for a timeout repeat"
     call_id = new_call_id("vision_caption")
     prompt_ref = {}
 
@@ -881,7 +882,7 @@ def prepare_messages_for_send(
 _ROUND_ERROR_KEYS = ("_last_llm_error", "_last_llm_error_kind", "_last_llm_retry_same_request", "_last_llm_status_code",
                      "_last_llm_provider_code", "_last_llm_provider_message", "_last_llm_provider_fields",
                      "_last_llm_provider_message_cut", "_last_llm_resource_refusal", "_last_llm_reset_at",
-                     "_last_llm_attempt_custody", "execution_status", "reason_code")
+                     "_last_llm_attempt_custody", "_last_llm_failure", "execution_status", "reason_code")
 
 
 def _round_capture(ctx: Any, failed: Any) -> bool:
@@ -955,7 +956,7 @@ def retry_refused_image_round(ctx: Any, failed: Any) -> Optional[Tuple[Any, Any]
     if refusal is None or not _round_capture(ctx, failed):
         return None
     from ouroboros import loop
-    from ouroboros.loop_llm_call import RETRY_ATTEMPTS_SPENT_KEY, RETRY_WALL_EXHAUSTED_KEY
+    from ouroboros.loop_llm_call import REFUSED_CANDIDATE_KEY, RETRY_ATTEMPTS_SPENT_KEY, RETRY_WALL_EXHAUSTED_KEY
     from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
 
     from ouroboros.model_slots import task_model_binding
@@ -972,9 +973,6 @@ def retry_refused_image_round(ctx: Any, failed: Any) -> Optional[Tuple[Any, Any]
     sent, retry = True, None
     try:
         fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
-        if fit is not None and (fit.measurement.route_fp, fit.measurement.round_id) in loop._context_reclaim_passes(
-                ctx.tools._ctx):  # this round already reclaimed: measure its result, never reclaim again
-            fit = loop._measure_after_reclaim(ctx)
         msg, cost = loop._dispatch_round_model(
             ctx, fit, attempt_cap=1, candidate_predicate=_without_refused_images(failed, digests),
             max_tokens=int(getattr(failed, "max_completion_tokens", 0) or 0) or None)
@@ -989,6 +987,11 @@ def retry_refused_image_round(ctx: Any, failed: Any) -> Optional[Tuple[Any, Any]
         pending = (usage.pop(_PENDING_REFUSALS_KEY, None) or {}).get(route) or {}
     if msg is not None:
         usage.setdefault(REFUSED_IMAGES_KEY, {}).setdefault(route, {}).update(pending)
+    elif usage.get(REFUSED_CANDIDATE_KEY):
+        # Main admission refused this candidate before sending. Keep its size
+        # facts for the common recovery path, without claiming an executed retry.
+        sent = False
+        retry = {"error_kind": "context_overflow", "cause": "pre_send_admission"}
     elif sent:
         capture = loop.last_physical_attempt_capture()
         own = capture is not None and getattr(capture, "attempt_id", None) != getattr(failed, "attempt_id", None)

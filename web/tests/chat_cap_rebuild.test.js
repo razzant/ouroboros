@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
+import { TextStub } from './chat_dom_fixture.js';
 
 // DOM stub: the in-file harness of chat_instance_dom.test.js (house pattern:
 // each instance-driving suite carries its own copy), plus a WebSocket constant
@@ -55,7 +56,7 @@ class ElementStub {
         this._innerHTML = this._textContent
             .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     }
-    get textContent() { return this._textContent; }
+    get textContent() { return this._textContent + this.children.filter((child) => child.nodeType === 3).map((child) => child.data).join(''); }
     set innerHTML(value) {
         this._innerHTML = String(value || '');
         if (!this.ownerDocument) return;
@@ -86,6 +87,7 @@ class ElementStub {
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) || ''; }
     removeAttribute(name) { this.attributes.delete(name); }
+    hasAttribute(name) { return this.attributes.has(name); }
     appendChild(node) { return this.insertBefore(node, null); }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
     prepend(...nodes) { const before = this.children[0] || null; nodes.forEach((node) => this.insertBefore(node, before)); }
@@ -111,6 +113,9 @@ class ElementStub {
         node.parentElement = null;
     }
     remove() { this.parentNode?.removeChild?.(this); this.isConnected = false; }
+    get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
+    get firstChild() { return this.children[0] || null; }
+    get lastChild() { return this.children.at(-1) || null; }
     replaceChildren(...nodes) { this.children = []; nodes.forEach((node) => this.appendChild(node)); }
     contains(node) {
         if (node === this) return true;
@@ -171,6 +176,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
     const document = {
         byId: new Map(), hidden: false, activeElement: null,
         createElement(tag) { return new ElementStub(tag, document); },
+        createTextNode(data) { return new TextStub(data); },
         createDocumentFragment() {
             const fragment = new ElementStub('#document-fragment', document);
             fragment.isDocumentFragment = true;
@@ -180,6 +186,8 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
         addEventListener() {}, removeEventListener() {},
     };
     const mount = new ElementStub('div', document);
+    document.body = new ElementStub('body', document);
+    document.body.appendChild(mount);
     document.byId.set('content', mount);
     const storage = new Map();
     globalThis.document = document;
@@ -359,7 +367,7 @@ test('live overflow cleanup preserves every retained archive card and its DOM no
     const { instance, handlers, messages } = makeInstance(mount);
     try {
         await sync(instance, 1);
-        const button = created.find(node => node.className === 'chat-load-older-btn');
+        const button = created.find(node => node.classList?.contains?.('chat-load-older-btn'));
         assert.ok(button && !button.hidden);
         await button.listeners.get('click')[0]();
         assert.equal(new URL(calls.at(-1), 'http://local').searchParams.get('cursor'), 'opaque-older');

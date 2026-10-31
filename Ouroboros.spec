@@ -12,6 +12,11 @@ python-standalone interpreter then runs the agent as a subprocess.
 import os
 import sys
 
+# PyInstaller imports modules recursively, and the default limit (1000) holds about 115 nested imports.
+# The Windows build of 7.9.0 passed that depth (RecursionError during analysis, tag run 40778443901);
+# PyInstaller's documented remedy is a higher limit for the spec's own process.
+sys.setrecursionlimit(sys.getrecursionlimit() * 5)
+
 block_cipher = None
 
 # ---------------------------------------------------------------------------
@@ -19,6 +24,8 @@ block_cipher = None
 # ---------------------------------------------------------------------------
 _is_macos = sys.platform == "darwin"
 _is_windows = sys.platform == "win32"
+_is_linux = sys.platform == "linux"
+_bundle_linux_gtk = _is_linux and os.environ.get('OUROBOROS_BUNDLE_LINUX_GTK', '1') == '1'
 
 if _is_windows:
     _icon = 'assets/icon.ico' if os.path.exists('assets/icon.ico') else None
@@ -52,6 +59,9 @@ from PyInstaller.utils.hooks import collect_all as _collect_all
 _extra_datas = []
 _extra_binaries = []
 _extra_hiddenimports = []
+
+if _bundle_linux_gtk:
+    _extra_hiddenimports += ['gi', 'gi.repository.Gtk', 'gi.repository.WebKit2', 'cairo']
 
 # Bundle the official, notarized Node.js runtime (pruned to bin/node[.exe]) so
 # skill payloads with runtime=node and the `node --check` preflight work out of
@@ -155,8 +165,9 @@ a = Analysis(
         'webview',
         'ouroboros.config',
     ] + _extra_hiddenimports,
-    hookspath=[],
-    hooksconfig={},
+    hookspath=['packaging/appimage/hooks'] if _bundle_linux_gtk else [],
+    hooksconfig={'gi': {'module-versions': {'Gtk': '3.0', 'WebKit2': '4.1', 'Soup': '3.0'}}}
+        if _bundle_linux_gtk else {},
     runtime_hooks=['scripts/pyi_rth_pythonnet.py'] if _is_windows else [],
     excludes=[],
     win_no_prefer_redirects=False,
@@ -204,6 +215,10 @@ if _is_macos:
             'CFBundleShortVersionString': open('VERSION').read().strip(),
             'CFBundleVersion': open('VERSION').read().strip(),
             'NSHighResolutionCapable': True,
+            'NSMicrophoneUsageDescription': 'Ouroboros uses your microphone for dictation and voice when you start them.',
+            'NSCameraUsageDescription': 'Ouroboros uses your camera when you turn it on during a live call.',
+            # WebKit refuses webkitSpeechRecognition (Browser speech) in an app without this string.
+            'NSSpeechRecognitionUsageDescription': 'Ouroboros uses speech recognition when you dictate with Browser speech.',
             'LSMinimumSystemVersion': '12.0',
         },
     )

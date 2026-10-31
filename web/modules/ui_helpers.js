@@ -1,5 +1,4 @@
 import { apiFetch } from './api_client.js';
-import { escapeHtmlAttr as escapeHtml, normalizeTone } from './ui_primitives.js';
 import { safeExternalUrl } from './utils.js';
 export { renderSafeField, collectSafeFieldValues, normalizeTone, setInlineStatus } from './ui_primitives.js';
 // Cycle note: toast.js imports normalizeTone from this module. Both edges only
@@ -7,11 +6,6 @@ export { renderSafeField, collectSafeFieldValues, normalizeTone, setInlineStatus
 // the ES-module cycle is benign.
 import { showToast } from './toast.js';
 
-
-export function renderToneBadge(label, tone = 'muted', className = 'skills-badge') {
-    const cleanTone = normalizeTone(tone);
-    return `<span class="${className} ${className}-${cleanTone}">${escapeHtml(label || '')}</span>`;
-}
 
 export function installedTime(item) {
     const time = Date.parse(item?.installed_at || item?.provenance?.installed_at || item?.provenance?.updated_at || '');

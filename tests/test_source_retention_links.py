@@ -6,9 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros import artifacts, headless, observability, source_retention
-from ouroboros.review_source_closure import retain_review_request_sources
-from ouroboros.review_substrate import ReviewRequest
+from ouroboros import headless, observability, source_retention
 
 
 @pytest.fixture(params=[None, errno.EXDEV, errno.EPERM, errno.EACCES, errno.EOPNOTSUPP])
@@ -41,28 +39,6 @@ def test_promoted_blob_shares_inode_or_copies_and_survives_child_removal(tmp_pat
     shutil.rmtree(child)
     _, restored, _ = observability.read_call_payload(parent, task_id=task, call_id="request")
     assert restored == {**payload, "send_messages": payload["messages"]}
-
-
-def test_nested_review_inputs_share_checkpoint_or_copy_on_link_failure(tmp_path, link_error):
-    task, raw = "review-task", b'{"messages": [{"content": "exact checkpoint"}]}'
-    ref = artifacts.store_actor_source_bytes(tmp_path, task, category="context_checkpoints",
-                                            source_id="checkpoint", data=raw, extension="json")
-    original = artifacts.task_artifact_dir_path(tmp_path, task) / ref["path"]
-    request = ReviewRequest(surface="plan_review", task_id=task, goal="review", subject="plan",
-                            evidence={"source_refs": [ref]})
-    retain_review_request_sources(request, source_root=tmp_path, custody_root=tmp_path)
-    read_root = Path(request.policy["review_source_closure"]["read_root"])
-    retained = artifacts.task_artifact_dir_path(read_root, task) / ref["path"]
-    assert retained.read_bytes() == raw
-    assert (retained.stat().st_ino == original.stat().st_ino) is (link_error is None)
-    # The normal writer reuses the published inode; removing one placement
-    # leaves the other independently owned by the review's retained root.
-    inode = original.stat().st_ino
-    assert artifacts.store_actor_source_bytes(tmp_path, task, category="context_checkpoints",
-        source_id="checkpoint", data=raw, extension="json") == ref
-    assert original.stat().st_ino == inode and retained.read_bytes() == raw
-    original.unlink()
-    assert artifacts.read_actor_source_bytes(read_root, task, ref) == raw
 
 
 def test_failed_blob_publication_retains_child_until_retry(tmp_path, monkeypatch, link_error):

@@ -236,19 +236,3 @@ def test_data_read_missing_non_memory_path_uses_narrower_sentinel(tmp_path):
     assert "DATA_NOT_YET_CREATED" in result
     assert "lazily on first write" not in result
     assert "not guaranteed" in result
-
-
-# ---------------------------------------------------------------------------
-# Section header annotation
-# ---------------------------------------------------------------------------
-
-def test_memory_section_headers_indicate_already_loaded():
-    """Inspect the source: build_memory_sections must annotate identity
-    and scratchpad so the agent doesn't re-read them."""
-    import inspect
-    import ouroboros.context as ctx_mod
-    src = inspect.getsource(ctx_mod.build_memory_sections)
-    assert "memory/scratchpad.md" in src
-    assert "memory/identity.md" in src
-    assert "already loaded" in src
-    assert "do not re-read" in src

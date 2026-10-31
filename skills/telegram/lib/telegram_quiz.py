@@ -5,14 +5,20 @@ The host's ``chat.quiz`` event carries the card identity (``task_id``,
 ingress the web card uses — Host Service ``POST /chat/decision`` →
 ``task_decision.answer_decision`` — so the answer is idempotent per
 ``request_id`` (``tg:<update_id>``), first answer wins, and a late answer is
-accepted exactly as it is for the browser card: the host records it and delivers
-it into the card's chat as an ordinary owner message, and the toast says which
-of those happened. The only state kept here maps a
+accepted exactly as it is for the browser card. The only state kept here maps a
 short callback token and the sent message to that identity: Telegram caps
 ``callback_data`` at 64 bytes, too short for the ids themselves. A card also
-remembers its settled lifecycle state, so the host's ``chat.quiz_state`` facts
-edit it forward only. Nothing here parses the owner's words; a reply is
-delivered verbatim as their own answer.
+remembers its settled lifecycle state and the host's recorded answer, so the
+host's ``chat.quiz_state`` facts edit it forward only. Nothing here parses the
+owner's words; a reply is delivered verbatim as their own answer.
+
+The card is the answer's receipt. It shows what the host recorded, never what this
+bridge sent: the winning option and/or the owner's words, and under them how the
+host's delivery stands, in the web card's words (``question_presentation.js``). A
+saved, pending or unknown delivery is one status line, a confirmed one none; no line
+claims the task read the answer. A tap is also told by a toast. A tap or a text answer gets
+a separate message only for a problem: a conflict, a closed question, an error, an
+unconfirmed answer or a card that could not be updated (owner's choice, 27 Oct: A).
 
 The card carries the whole authored text: the project it belongs to, the host's
 facts about the asking task, the question, the stake, and every option with its
@@ -21,8 +27,8 @@ goes out first as ordered plain messages through the client's existing chunker,
 and a compact message with the project line, the numbered option labels, the
 hint and the keyboard follows last. Only that last message is remembered, so a
 tap, a reply to it and the answered-edit keep working exactly as for a short
-card; a reply to one of the earlier explanation parts is an ordinary owner
-message, deliberately without per-part bookkeeping. An open question (no
+card; a reply to an earlier explanation part is an ordinary owner message
+carrying the bridge's host-row reference. An open question (no
 options) is the same card without a keyboard; its hint asks for a reply.
 """
 
@@ -52,9 +58,17 @@ HostPost = Callable[[Any, str, Dict[str, Any]], Awaitable[Tuple[int, Dict[str, A
 _TEXTS_EN = {
     "hint": "Tap an option, or reply to this message with your own answer.",
     "hint_open": "Reply to this message with your answer.",
-    "recorded": "✅ Answer delivered to the task.",
-    "late_delivered": "✅ The task had already finished — your answer was delivered to the chat.",
-    "late_recorded": "✅ Answer recorded. The task had already finished and this card has no chat to deliver it to.",
+    # The host's delivery of an accepted answer, as the web card says it; never a read receipt.
+    "status_saved": "Answer saved · the task reads it when it continues",
+    "status_pending": "Answer recorded · delivery pending",
+    "status_unknown": "Answer recorded · delivery unknown",
+    "receipt_delivered": "Answer delivered",
+    "receipt_recorded": "Answer recorded",
+    "late": "The task had already finished.",
+    "lost": "Not accepted: this question was already answered. Recorded answer: {answer}",
+    "not_updated": "The question card above could not be updated.",
+    "unconfirmed": "The answer was not confirmed (HTTP {status}), so it may not be recorded. "
+                   "Send the same answer again later.",
     "already": "This question was already answered.",
     "expired": "This question has expired — the task moved on.",
     "gone": "This question is no longer known to Ouroboros.",
@@ -78,6 +92,9 @@ _TEXTS = Index("quiz", _TEXTS_EN, "the question cards sent to the owner's phone:
 # An answer and a closure are both final, and neither replaces the other: closure is never an answer.
 _LIFECYCLE_RANK = {"open": 0, "expired_terminal": 1, "superseded": 2, "answered": 3, "closed": 3}
 _FINAL_STATES = ("answered", "closed")
+# The host's facts about an answer that a card remembers beside its state.
+_ANSWER_FACTS = ("answered_index", "comment", "question_delivery")
+_TOAST_MAX = 200  # Telegram's callback answer limit
 
 # The host publishes ``chat.quiz`` and ``chat.quiz_state`` as independent
 # coroutines on the extension loop, so a fact could outrun the card's own send
@@ -185,14 +202,24 @@ def render_compact_text(labels: List[str], *, project_name: str = "",
     return "\n".join(lines)
 
 
+def answered_edit_reserve(lang: str) -> int:
+    """The room a one-message card keeps for its answered edit, in UTF-16 units: the English
+    reserve plus however much longer this language makes the edit's own lines (the answered
+    label and the longest delivery line), so a translation never pushes the edit past the limit."""
+    def chrome(texts: Mapping[str, str]) -> int:
+        statuses = (texts[key] for key in ("status_saved", "status_pending", "status_unknown"))
+        return _u16len("\n" + texts.format("answered_line", answer="")) + 1 + max(map(_u16len, statuses))
+    return _ANSWERED_EDIT_RESERVE + max(0, chrome(_texts(lang)) - chrome(_texts("")))
+
+
 async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_text: str,
-                         keyboard: List[List[dict]]) -> Tuple[int, bool]:
+                         keyboard: List[List[dict]], reserve: int = _ANSWERED_EDIT_RESERVE) -> Tuple[int, bool]:
     """Send the card; return the keyboard message id and whether it overflowed.
 
     A card that fits Telegram's per-message limit (UTF-16 units) WITH room for
-    its later answered edit is one message with the keyboard. A longer one is
-    sent as ordered plain parts through the client's chunker, then the compact
-    keyboard message; nothing authored is truncated.
+    its later answered edit (``answered_edit_reserve``) is one message with the
+    keyboard. A longer one is sent as ordered plain parts through the client's
+    chunker, then the compact keyboard message; nothing authored is truncated.
     """
     async def send(text: str) -> int:
         # An open question (no options) carries no keyboard: a plain message
@@ -203,7 +230,7 @@ async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_
         return int(await client.send_message(chat_id, text, parse_mode="") or 0)
 
     full = f"{body}\n{hint_text}"
-    if _u16len(full) + _ANSWERED_EDIT_RESERVE <= _TELEGRAM_TEXT_LIMIT:
+    if _u16len(full) + reserve <= _TELEGRAM_TEXT_LIMIT:
         return await send(full), False
     await client.send_message(chat_id, body, parse_mode="")
     return await send(f"{compact}\n{hint_text}"), True
@@ -235,10 +262,16 @@ def quiz_for_token(api, token: str) -> Optional[Dict[str, Any]]:
     return dict(record) if isinstance(record, dict) else None
 
 
-def remember_state(api, token: str, record: Dict[str, Any], state: str) -> None:
-    """Persist a settled lifecycle state on the card: the no-rollback evidence."""
-    if _LIFECYCLE_RANK.get(state, 0) and str(record.get("state") or "") != state:
-        remember_quiz(api, token, {**record, "state": state})
+def remember_state(api, token: str, record: Dict[str, Any], state: str,
+                   facts: Optional[Dict[str, Any]] = None) -> None:
+    """Persist a settled lifecycle state on the card: the no-rollback evidence. An answer
+    also keeps the host's recorded facts (``merge_answer_facts``) for later partial facts."""
+    if not _LIFECYCLE_RANK.get(state, 0):
+        return
+    updated = {key: value for key, value in record.items() if facts is None or key not in _ANSWER_FACTS}
+    updated.update(state=state, **(facts or {}))
+    if updated != record:
+        remember_quiz(api, token, updated)
 
 
 def quiz_for_message(api, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
@@ -268,32 +301,96 @@ async def _deliver(
     return await post(api, "/chat/decision", body)
 
 
-def _outcome_text(status: int, payload: Dict[str, Any], lang: str) -> str:
+def _winner(fact: Mapping[str, Any]) -> Dict[str, Any]:
+    """The recorded answer a host fact names: its option index and/or the owner's own words."""
+    index, comment = fact.get("answered_index"), fact.get("comment")
+    return {**({"answered_index": index} if isinstance(index, int) and not isinstance(index, bool) else {}),
+            **({"comment": comment} if isinstance(comment, str) and comment else {})}
+
+
+def _delivery(fact: Mapping[str, Any]) -> Dict[str, Any]:
+    """The host's projected answer delivery (``owner_quiz.question_delivery_projection``)."""
+    view = fact.get("question_delivery")
+    if not isinstance(view, dict) or view.get("kind") != "answer" or view.get("state") not in ("owed", "delivered"):
+        return {}
+    return {key: view[key] for key in ("kind", "state", "reason_code", "dismissed") if key in view}
+
+
+def merge_answer_facts(held: Mapping[str, Any], fact: Mapping[str, Any]) -> Dict[str, Any]:
+    """One answered fact over what is already known of the card: its winner and delivery.
+
+    Host facts arrive in any order and some name only a part: a read acknowledgement carries
+    the delivery alone, and absence never clears a winner. A fact naming any winner field
+    names the whole winner (first answer wins, so it never changes) and is never mixed with
+    another fact's fields or with this bridge's own attempt. Delivery moves forward only: an
+    older ``owed`` snapshot never takes back a ``delivered`` one.
+    """
+    facts = _winner(fact) or _winner(held)
+    old, new = _delivery(held), _delivery(fact)
+    delivery = old if not new or (old.get("state") == "delivered" and new.get("state") != "delivered") else new
+    return {**facts, **({"question_delivery": delivery} if delivery else {})}
+
+
+def _status_line(facts: Mapping[str, Any], lang: str) -> str:
+    """The card's delivery line: saved, pending or unknown while owed (dismissed included:
+    removal from current questions delivers nothing), none once delivered or unknown to the host."""
+    delivery = _delivery(facts)
+    if delivery.get("state") != "owed":
+        return ""
+    reason = delivery.get("reason_code")
+    key = ("status_saved" if reason == "awaiting_recipient_read"
+           else "status_unknown" if reason == "late_answer_delivery_unknown" else "status_pending")
+    return _texts(lang)[key]
+
+
+def _receipt(facts: Mapping[str, Any], late: bool, lang: str) -> str:
+    """One sentence on an accepted answer from the host's facts alone: the owed status, a
+    confirmed delivery, or only the record. ``forwarded`` proves neither a reader nor a place."""
     texts = _texts(lang)
-    if status < 400:
-        if payload.get("answered_after_terminal") is True:
-            # The card outlived its task: the answer became an owner message in
-            # the card's chat, unless that chat has no owner turn to start.
-            return texts["late_delivered" if payload.get("forwarded") else "late_recorded"]
-        return texts["recorded"]
-    if status == 404:
-        return texts["gone"]
-    if status == 409:
-        if str(payload.get("state") or "") == "closed":
-            return texts["closed"]
-        answered = payload.get("answered_index") is not None or str(payload.get("state") or "") == "answered"
-        return texts["already"] if answered else texts["expired"]
-    return texts.format("failed", status=status)
+    state = _delivery(facts).get("state")
+    line = _status_line(facts, lang) or texts["receipt_delivered" if state == "delivered" else "receipt_recorded"]
+    return f"{line}." + (f" {texts['late']}" if late else "")
 
 
 def _echo(answer: str) -> str:
     return answer if len(answer) <= _ANSWER_ECHO_MAX else answer[:_ANSWER_ECHO_MAX] + "…"
 
 
-def _answered_text(record: Dict[str, Any], answer: str, lang: str) -> str:
+def _clip_u16(text: str, units: int) -> str:
+    """``text`` within ``units`` UTF-16 units, an ellipsis marking a cut."""
+    if _u16len(text) <= units:
+        return text
+    budget, kept = units - 1, []
+    for char in text:
+        budget -= _u16len(char)
+        if budget < 0:
+            break
+        kept.append(char)
+    return "".join(kept) + "…"
+
+
+def _answer_echo(record: Mapping[str, Any], facts: Mapping[str, Any]) -> str:
+    options = list(record.get("options") or [])
+    index, parts = facts.get("answered_index"), []
+    if index is not None:
+        parts.append(f"{index + 1}. {options[index]}" if 0 <= index < len(options) else f"{index + 1}.")
+    if facts.get("comment"):
+        parts.append(_echo(str(facts["comment"])))
+    return " — ".join(parts)
+
+
+def _answered_text(record: Mapping[str, Any], facts: Mapping[str, Any], lang: str) -> str:
+    """The settled card: its text, the recorded answer and the delivery line. The answer's
+    echo gives way first, so the edit always fits one Telegram message."""
     texts = _texts(lang)
-    line = texts.format("answered_line", answer=answer) if answer else texts["answered_plain"]
-    return f"{record.get('text') or ''}\n{line}"
+    base = str(record.get("text") or "")
+    status = _status_line(facts, lang)
+    tail = f"\n{status}" if status else ""
+    answer = _answer_echo(record, facts)
+    if not answer:
+        return f"{base}\n{texts['answered_plain']}{tail}"
+    room = _TELEGRAM_TEXT_LIMIT - _u16len(f"{base}\n{texts.format('answered_line', answer='')}{tail}")
+    return f"{base}\n{texts.format('answered_line', answer=_clip_u16(answer, max(1, room)))}{tail}"
 
 
 def lifecycle_edit(
@@ -305,8 +402,9 @@ def lifecycle_edit(
     ``open`` that does not close a wait, a fact older than the card's own state, or
     the other final state.
     The card mirrors the web one (``web/modules/question_presentation.js``): an
-    answer settles it on the recorded option and/or the owner's own words; a closed
-    wait drops the waiting line; an expired card stays answerable, because a late
+    answer settles it on the recorded option and/or the owner's own words and the
+    host's delivery line, keeping what an earlier fact recorded (``merge_answer_facts``);
+    a closed wait drops the waiting line; an expired card stays answerable, because a late
     answer is still accepted as the owner's message (В17a=A); a superseded card is
     a read-only record, and so is a closed question, which states its closure and the
     stated reason, never an answer. A final state is always re-applied — the edit is idempotent.
@@ -323,14 +421,7 @@ def lifecycle_edit(
         reason = str(event.get("closed_reason") or "").strip()
         return f"{base}\n{texts['closed']}" + (f"\n{_echo(reason)}" if reason else ""), []
     if state == "answered":
-        options = list(record.get("options") or [])
-        index = event.get("answered_index")
-        parts = []
-        if isinstance(index, int) and not isinstance(index, bool):
-            parts.append(f"{index + 1}. {options[index]}" if 0 <= index < len(options) else f"{index + 1}.")
-        if str(event.get("comment") or ""):
-            parts.append(_echo(str(event["comment"])))
-        return _answered_text(record, " — ".join(parts), lang), []
+        return _answered_text(record, merge_answer_facts(record, event), lang), []
     if state == "superseded":
         return f"{base}\n{texts['superseded']}", []
     status = texts["resumed" if state == "open" else "expired_terminal"]
@@ -357,7 +448,8 @@ def lifecycle_target(
     edit = lifecycle_edit(record, event, lang) if record and message_id else None
     if record is None or edit is None:
         return None
-    remember_state(api, token, record, str(event.get("state") or ""))
+    state = str(event.get("state") or "")
+    remember_state(api, token, record, state, merge_answer_facts(record, event) if state == "answered" else None)
     return int(record.get("chat_id") or 0), message_id, edit[0], edit[1]
 
 
@@ -374,11 +466,16 @@ def card_lock(token: str) -> asyncio.Lock:
 
 
 def _retain_fact(token: str, event: Dict[str, Any]) -> None:
-    """Keep the highest-ranked fact that arrived before its card was remembered."""
+    """Keep the highest-ranked fact that arrived before its card was remembered; two answered
+    facts merge, so a later delivery-only fact never drops the winner the first one named."""
     held = _RETAINED_FACTS.get(token) or {}
     if _LIFECYCLE_RANK.get(str(event.get("state") or ""), 0) >= _LIFECYCLE_RANK.get(str(held.get("state") or ""), 0):
+        fact = dict(event)
+        if fact.get("state") == "answered" and held.get("state") == "answered":
+            fact = {key: value for key, value in fact.items() if key not in _ANSWER_FACTS}
+            fact.update(merge_answer_facts(held, event))
         _RETAINED_FACTS.pop(token, None)
-        _RETAINED_FACTS[token] = dict(event)
+        _RETAINED_FACTS[token] = fact
     for stale in list(_RETAINED_FACTS)[:-_MAX_REMEMBERED]:
         _RETAINED_FACTS.pop(stale, None)
 
@@ -408,27 +505,71 @@ async def follow_lifecycle(api, event: Dict[str, Any], lang: str, *, client_fact
 async def apply_retained_fact(api, token: str, lang: str, *, client_factory, published=None) -> None:
     """Right after ``remember_quiz``, under the same lock: the fact that outran creation,
     or the settled state the ``chat.quiz`` event itself carries (a queued ask can land
-    after its question was answered or closed); the higher-ranked of the two applies."""
+    after its question was answered or closed); the higher-ranked of the two applies,
+    and the facts that outran creation count as the newer ones."""
+    outran = _RETAINED_FACTS.pop(token, None)
     if published and str(published.get("state") or "open") != "open":
         _retain_fact(token, published)
+    if outran is not None:
+        _retain_fact(token, outran)
     event = _RETAINED_FACTS.pop(token, None)
     if event is not None:
         await _apply_fact(api, token, event, lang, client_factory)
 
 
-async def _mark_answered(api, client, record: Dict[str, Any], answer: str, lang: str) -> None:
+def _outcome(status: int, payload: Mapping[str, Any], attempted: Mapping[str, Any]) -> str:
+    """``accepted``, ``conflict``, ``closed``, ``unconfirmed`` or ``refused``: the host's state and
+    recorded winner outrank the HTTP code. A 409 or a 5xx naming the recorded winner is accepted
+    when that winner is this very answer (sent again after an unconfirmed one, or recorded with its
+    delivery still owed) and a conflict otherwise: before refusing a later answer the host retries
+    the owed delivery of the earlier winner, and that retry can fail with a 503 carrying the earlier
+    winner. A 5xx naming no winner leaves the outcome unknown."""
+    state, winner = str(payload.get("state") or ""), _winner(payload)
+    if status < 400:
+        return "accepted"
+    if status == 409 and state == "closed":
+        return "closed"
+    if (status == 409 and (state == "answered" or winner)) or (status >= 500 and state == "answered" and winner):
+        return "accepted" if winner == dict(attempted) else "conflict"
+    return "unconfirmed" if status >= 500 else "refused"
+
+
+def _refusal_text(status: int, lang: str) -> str:
+    """No answer recorded, or (any 5xx) none confirmed: its outcome stays unknown."""
+    texts = _texts(lang)
+    if status >= 500:
+        return texts.format("unconfirmed", status=status)
+    return texts["gone"] if status == 404 else texts["expired"] if status == 409 else texts.format("failed", status=status)
+
+
+def _lost(record: Mapping[str, Any], facts: Mapping[str, Any], lang: str) -> str:
+    answer = _answer_echo(record, facts)
+    return _texts(lang).format("lost", answer=answer) if answer else _texts(lang)["already"]
+
+
+async def _settle_answer(api, client, record: Dict[str, Any], payload: Dict[str, Any],
+                         lang: str) -> Tuple[bool, Dict[str, Any]]:
+    """Settle the card on the host's record; ``(edit landed, merged facts)``. A failed edit
+    is returned to the caller to say once, never retried."""
     token = mint_token(str(record.get("task_id") or ""), str(record.get("quiz_id") or ""))
+    fact = {**payload, "state": "answered"}
     # The card's lifecycle lock (``_CARD_LOCKS``): an expiry edit already on the wire
     # lands first, then this answer re-reads the stored card and settles it last.
     async with card_lock(token):
         record = quiz_for_token(api, token) or record
-        remember_state(api, token, record, "answered")
+        facts = merge_answer_facts(record, fact)
+        edit = lifecycle_edit(record, fact, lang)
         message_id = int(record.get("message_id") or 0)
+        if edit is None:
+            return True, facts
+        remember_state(api, token, record, "answered", facts)
         if not message_id:
-            return
-        await client.edit_message_text_with_inline_keyboard(
-            int(record.get("chat_id") or 0), message_id, _answered_text(record, answer, lang), [], parse_mode="",
-        )
+            return True, facts
+        settled = await client.edit_message_text_with_inline_keyboard(
+            int(record.get("chat_id") or 0), message_id, edit[0], edit[1], parse_mode="")
+    if not settled:
+        api.log("warning", "Telegram quiz card edit failed (answered).")
+    return bool(settled), facts
 
 
 async def _settle_closed(api, client, record: Dict[str, Any], payload: Dict[str, Any], lang: str) -> None:
@@ -438,10 +579,30 @@ async def _settle_closed(api, client, record: Dict[str, Any], payload: Dict[str,
         await follow_lifecycle(api, fact, lang, client_factory=lambda: client)
 
 
+async def _tell_outcome(api, client, record: Dict[str, Any], status: int, payload: Dict[str, Any],
+                        outcome: str, chat_id: int, lang: str) -> None:
+    """Settle the card on the host's record and say a problem once, as one message: a conflict naming
+    the recorded answer, a closed question, a refusal, an unconfirmed answer, or a card that could not
+    be updated (that line joins a conflict's own rather than adding a second message)."""
+    texts = _texts(lang)
+    if outcome in ("accepted", "conflict"):
+        settled, facts = await _settle_answer(api, client, record, payload, lang)
+        lines = [_lost(record, facts, lang)] if outcome == "conflict" else []
+        if not settled:
+            lines = (lines or [_receipt(facts, payload.get("answered_after_terminal") is True, lang)]) + [texts["not_updated"]]
+    else:
+        lines = [texts["closed"] if outcome == "closed" else _refusal_text(status, lang)]
+    if lines:
+        await client.send_message(chat_id, "\n".join(lines), parse_mode="")
+    if outcome == "closed":
+        await _settle_closed(api, client, record, payload, lang)
+
+
 async def answer_from_callback(
     api, client, cb_data: str, *, cb_id: str, update_id: int, lang: str, post: HostPost,
 ) -> None:
-    """A tapped option → the decision ingress; toast the honest outcome."""
+    """A tapped option → the decision ingress; the toast and the card tell the host's record, and a
+    problem also gets its one message, as a text answer does (``_tell_outcome``)."""
     parts = str(cb_data or "").split(":")
     record = quiz_for_token(api, parts[1]) if len(parts) == 3 else None
     try:
@@ -453,24 +614,26 @@ async def answer_from_callback(
         await client.answer_callback_query(cb_id, text=_texts(lang)["gone"])
         return
     status, payload = await _deliver(api, post, record, option_index=index, comment="", update_id=update_id)
-    await client.answer_callback_query(cb_id, text=_outcome_text(status, payload, lang))
-    recorded = payload.get("answered_index")
-    if status < 400 or (status == 409 and isinstance(recorded, int)):
-        # Settle the card on the RECORDED option (a first-wins loser learns the winner).
-        chosen = recorded if isinstance(recorded, int) and 0 <= recorded < len(options) else index
-        await _mark_answered(api, client, record, f"{chosen + 1}. {options[chosen]}", lang)
-    elif status == 409:
-        await _settle_closed(api, client, record, payload, lang)
+    outcome = _outcome(status, payload, {"answered_index": index})
+    late = payload.get("answered_after_terminal") is True
+    if outcome == "accepted":
+        token = mint_token(str(record.get("task_id") or ""), str(record.get("quiz_id") or ""))
+        toast = "✅ " + _receipt(merge_answer_facts(quiz_for_token(api, token) or record, payload), late, lang)
+    else:
+        texts = _texts(lang)
+        toast = (texts["already"] if outcome == "conflict" else texts["closed"] if outcome == "closed"
+                 else _refusal_text(status, lang))
+    await client.answer_callback_query(cb_id, text=_clip_u16(toast, _TOAST_MAX))
+    # The card settles on the RECORDED answer: a first-wins loser learns the whole winner.
+    await _tell_outcome(api, client, record, status, payload, outcome, int(record.get("chat_id") or 0), lang)
 
 
 async def answer_from_reply(
     api, client, record: Dict[str, Any], answer_text: str, *,
     chat_id: int, update_id: int, lang: str, post: HostPost,
 ) -> None:
-    """A reply to the card → the owner's own verbatim answer (comment-only)."""
+    """A reply to the card → the owner's own verbatim answer (comment-only). The settled card is
+    its receipt; one message comes only for a problem (``_tell_outcome``)."""
     status, payload = await _deliver(api, post, record, option_index=None, comment=answer_text, update_id=update_id)
-    await client.send_message(chat_id, _outcome_text(status, payload, lang))
-    if status < 400:
-        await _mark_answered(api, client, record, _echo(answer_text), lang)
-    elif status == 409:
-        await _settle_closed(api, client, record, payload, lang)
+    outcome = _outcome(status, payload, {"comment": answer_text} if answer_text else {})
+    await _tell_outcome(api, client, record, status, payload, outcome, chat_id, lang)

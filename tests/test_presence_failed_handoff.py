@@ -10,7 +10,7 @@ from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
 from ouroboros.presence_runner import PresenceTurnError, PresenceTurnGate, presence_result_from_stored, run_presence_turn
 from ouroboros.task_results import load_task_result
 from ouroboros.tools.control_routing import _finish_swarm_handoff
-from ouroboros.tools.presence import _finish_presence
+from tests.presence_legacy_helpers import _finish_presence
 from tests.test_presence_runner import _admission, _event
 
 

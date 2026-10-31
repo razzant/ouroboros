@@ -696,9 +696,9 @@ def test_child_finalization_publishes_receipts_to_canonical_root(tmp_path):
 
     # Durability: the receipts survive child-drive pruning (retention GC / the
     # cancel path delete the drive; the canonical copy is the durable record).
-    import shutil as _shutil
+    from tests._store_shared import remove_store_tree
 
-    _shutil.rmtree(child_drive)
+    remove_store_tree(child_drive)
     rows = _receipt_rows_of(_get_task_result(SimpleNamespace(drive_root=tmp_path), tid))
     assert rows is not None and len(rows) == 3
     assert rows[0]["criterion_id"] == "claim_red"
@@ -2797,7 +2797,9 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
         SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path), restored,
     ) == {}
     assert restored["predecessor_authority"]["source"] == restored["predecessor_authority_source"]
-    assert restored["predecessor_authority"]["result"] == "Previous exact result"
+    assert "result" not in restored["predecessor_authority"]
+    assert restored["predecessor_authority"]["omitted_fields"]["result"] == len("Previous exact result")
+    assert read_result(tmp_path, "previous")["result"] == "Previous exact result"
 
 
 def test_assign_tasks_mirrors_running_subagent_status_to_parent_drive(tmp_path, monkeypatch):
@@ -3048,19 +3050,18 @@ def test_override_delegation_constraint_requires_parent_lineage(tmp_path, monkey
     assert ledger.open_delegation_constraints("root1") == []
 
 
-def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
+def test_subagent_silence_preserves_live_custody_and_service_logs(tmp_path, monkeypatch):
     from supervisor import queue as queue_module
     from supervisor import workers as workers_module
-    from ouroboros.task_results import STATUS_INTERRUPTED, load_task_result
 
     class FakeProc:
         pid = 12345
 
         def is_alive(self):
-            return False
+            return True
 
         def terminate(self):
-            raise AssertionError("already dead")
+            raise AssertionError("Silence cannot authorize process termination")
 
         def join(self, timeout=None):
             return None
@@ -3074,9 +3075,7 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "load_state", lambda: {})
     monkeypatch.setattr(queue_module, "append_jsonl", lambda *args, **kwargs: None)
     monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
-    # Activity model: a "timed out" task is one with no real progress for the idle
-    # window AND no progressing subtree (heartbeat alone is not progress). Variant A:
-    # run the heavy teardown reaper synchronously (no daemon) for a deterministic test.
+    # Heartbeats alone request attention; the live process and service logs stay owned.
     monkeypatch.setattr(queue_module, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue_module, "_reap_queue", queue_module._stdqueue.Queue())
     monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
@@ -3100,7 +3099,7 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
             "_attempt": 1,
         },
         # idle for ~1000s, far beyond the monkeypatched idle window max(1, 1+120)=121s,
-        # with no progressing subtree -> activity-based stop.
+        # with no progressing subtree -> factual attention only.
         "started_at": time.time() - 1000,
         "last_heartbeat_at": time.time() - 1000,
         "worker_id": 9,
@@ -3108,18 +3107,10 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     }
 
     queue_module.enforce_task_timeouts()
-    # Drain the off-loop reaper synchronously (kill/archive/respawn).
-    while not queue_module._reap_queue.empty():
-        queue_module._reap_timed_out_task(queue_module._reap_queue.get_nowait())
-
-    assert queue_module.PENDING
-    retried = queue_module.PENDING[0]
-    assert retried["id"] == "childtimeout"
-    assert retried["_attempt"] == 2
-    assert retried["timeout_retry_from"] == "childtimeout"
-    assert load_task_result(tmp_path, "childtimeout")["status"] == STATUS_INTERRUPTED
-    assert "childtimeout" not in queue_module.RUNNING
-    assert not service_dir.exists()
+    assert queue_module._reap_queue.empty() and queue_module.PENDING == []
+    assert queue_module.RUNNING["childtimeout"]["silence_attention"]["state"] == "pending_attention"
+    assert worker.busy_task_id == "childtimeout" and not worker.reaping
+    assert service_dir.exists()
 
 
 def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
@@ -3267,6 +3258,7 @@ def test_orphan_reconcile_does_not_use_a_stale_snapshot_as_death_proof(tmp_path,
 def test_request_restart_latches_reason_until_task_end(tmp_path, monkeypatch):
     from ouroboros.tools import control as control_module
     from ouroboros.tools import control_runtime
+    from tests.body_candidate_support import host_restart_ack
 
     from supervisor import evolution_lifecycle
 
@@ -3287,14 +3279,21 @@ def test_request_restart_latches_reason_until_task_end(tmp_path, monkeypatch):
         pending_restart_reason = None
         repo_dir = tmp_path
         drive_root = tmp_path
+        task_id = "restart-requester"  # one request per requester attempt
+        task_attempt = 1
 
         def drive_path(self, rel):
             return tmp_path / rel
 
     ctx = _Ctx()
+    sent = host_restart_ack(ctx, tmp_path)
     result = control_module._request_restart(ctx, "reload runtime")
 
     assert "Restart requested" in result
+    # Only the intent goes out now; the restart itself waits for this task's end.
+    [intent] = sent
+    assert (intent["type"], intent["phase"], intent["task_id"], intent["task_attempt"], intent["reason"]) == (
+        "restart_request", "intent", "restart-requester", 1, "reload runtime")
     assert ctx.pending_events == []
     assert ctx.pending_restart_reason == "reload runtime"
     assert written

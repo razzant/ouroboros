@@ -138,6 +138,8 @@ def _migrated_sources() -> dict[str, str]:
         "web/model_roles.css": _decommented(_read("web/model_roles.css")),
         "web/model_wait.css": _decommented(_read("web/model_wait.css")),
         "web/room_work.css": _decommented(_read("web/room_work.css")),
+        "web/cards.css": _decommented(_read("web/cards.css")),
+        "web/consciousness.css": _decommented(_read("web/consciousness.css")),
         "web/style.css (migrated regions)": _migrated_style_region(),
     }
 
@@ -329,7 +331,7 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     directions. The regions have to actually contain the migrated rules —
     including the chat surface and its `.chat-live-executor-chip`, which
     migrated with the chat typography pass — and they must not creep over
-    neighbours (skills, marketplace, logs, evolution) that still carry their
+    neighbours (marketplace, logs, widgets) that still carry their
     historical literals. Marker-pair structure itself (as many ends as begins,
     strictly alternating) is asserted by ``_style_marker_spans`` on every call
     that reads a region."""
@@ -340,7 +342,10 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     assert ".updates-status" in region
     assert ".updates-restore-row" in region
     # Dashboard -> Storage (#1418) was written on the scale; its slice stays guarded.
-    assert ".storage-row-label" in region
+    assert ".storage-place-label" in region
+    # Dashboard -> Evolution was rewritten on the scale (the time line of versions); its slice stays guarded.
+    assert ".evo-campaign" in region
+    assert ".evo-detail-title" in region
     # Chat migrated on 2026-09-01 (frontend sprint, Q1=B): page chrome,
     # transcript/bubbles/live cards/composer, and the structured-delivery +
     # quiz-card slice, executor chip now included.
@@ -349,10 +354,15 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     assert ".chat-live-title" in region
     assert ".chat-live-executor-chip" in region
     assert ".chat-quiz-card" in region
-    # Unmigrated neighbours stay out until their own pass. (`.log-entry` and
-    # `.evo-runtime-pill` are NOT in this list: the shared status-tone rules
-    # inside the chat region legitimately name them as co-selectors.)
-    for selector in (".skills-card", ".marketplace-card", ".widgets-card", ".evo-runtime-card"):
+    # The Skills page (Installed, Browse, Sources, the detail sheet and its
+    # dialogs) migrated with the skill-sources redesign; its region stays guarded.
+    assert ".skills-installed-card" in region
+    assert ".skills-head-card" in region
+    assert ".skills-source-row" in region
+    # Unmigrated neighbours stay out until their own pass. (`.log-entry` is NOT
+    # in this list: the shared status-tone rules inside the chat region
+    # legitimately name it as a co-selector.)
+    for selector in (".widgets-card",):
         assert selector not in region, (
             f"{selector} is an unmigrated surface; a marker crept over it"
         )
@@ -377,15 +387,16 @@ DECLARATION = re.compile(r"^\s*(--[a-z0-9-]+)\s*:", re.MULTILINE)
 
 
 def _js_sources() -> str:
-    """Every web module, concatenated.
+    """Every first-party web script, concatenated: the two page scripts (app.js
+    and theme.js, beside the vendored *.min.js bundles) and the modules.
 
     JS participates in the variable contract from both ends: it writes measured
     values with ``setProperty('--chat-input-reserve', …)`` and it reads themed
     ones with ``getComputedStyle(...).getPropertyValue('--diagram-bg')``. A
-    token at either end is live even though no CSS rule mentions it."""
-    return "".join(
-        path.read_text(encoding="utf-8") for path in sorted((WEB / "modules").rglob("*.js"))
-    )
+    token at either end is live even though no CSS rule mentions it: app.js's
+    handles write the dragged box's ``--drag-width``."""
+    scripts = [WEB / "app.js", WEB / "theme.js", *sorted((WEB / "modules").rglob("*.js"))]
+    return "".join(path.read_text(encoding="utf-8") for path in scripts)
 
 
 def test_every_css_variable_is_declared_somewhere() -> None:
@@ -581,7 +592,9 @@ def test_chat_transcript_reserves_composer_space_as_one_flex_spacer():
     assert len(bases) == 1
     assert "content: '';" in bases[0]
     assert "flex: 0 0 calc(var(--chat-input-reserve, 108px) - 8px);" in bases[0]
-    mobile = [body for _, body in spacers if "env(safe-area-inset-bottom" in body]
+    # The stack layout's spacer adds the shell's bottom inset (ui.css --inset-bottom: the system safe area and,
+    # inside Telegram, the host's), never a raw env() of its own.
+    mobile = [body for _, body in spacers if "var(--inset-bottom)" in body]
     assert len(mobile) == 1
     assert "- 8px" in mobile[0]
     panel = [body for selector, body in spacers if selector == ".chat-instance-panel .chat-messages::after"]

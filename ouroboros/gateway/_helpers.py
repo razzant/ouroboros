@@ -21,10 +21,7 @@ _TRUE_LITERALS = frozenset({"1", "true", "yes", "on"})
 _FALSE_LITERALS = frozenset({"0", "false", "no", "off"})
 
 
-from ouroboros.jsonl_tail import (  # noqa: E402
-    ARCHIVE_BACKFILL_MAX,
-    TAIL_WINDOW_START_BYTES as _TAIL_WINDOW_START_BYTES,  # noqa: F401  (re-exported for gateway/history_paging.py)
-)
+from ouroboros.jsonl_tail import ARCHIVE_BACKFILL_MAX  # noqa: E402
 
 
 async def run_sync_to_completion(function, /, *args, **kwargs):

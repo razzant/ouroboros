@@ -102,7 +102,7 @@ def test_actual_provider_builders_remove_only_host_row_metadata(monkeypatch, pro
         sent = payload["messages"]
     elif provider == "local":
         monkeypatch.setattr("ouroboros.local_model.get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
-        _, payload = client._build_local_candidate(messages, None, 64, "auto", compact=False)
+        _, payload = client._build_local_candidate(messages, None, 64, "auto")  # never cut (#1018)
         sent = payload["messages"]
     elif provider == "anthropic":
         _, sent = client._build_anthropic_messages(messages)

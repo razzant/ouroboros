@@ -34,6 +34,60 @@ def _assert_balanced(value: str) -> None:
     ET.fromstring(f"<root>{value}</root>")
 
 
+def _old_u16len(value: str) -> int:
+    return sum(2 if ord(char) > 0xFFFF else 1 for char in value)
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", 0), ("ASCII", 5), ("Привет", 6), ("e\u0301", 2),
+    ("\x00\uffff", 2), ("\U00010000\U0010ffff", 4), ("😀", 2),
+    ("\ud800", 1), ("\udfff", 1), ("\ud83d\ude00", 2),
+    ("a\ud800😀\udfff", 5),
+])
+def test_u16len_preserves_code_units_including_surrogates(value, expected):
+    _plugin, api = _load_skill()
+    assert api._u16len(value) == _old_u16len(value) == expected
+
+
+@pytest.mark.parametrize("source", [
+    "", " \n\n", "Привет, мир! e\u0301 👩\u200d💻\nNext line",
+    *["a" * size + "😀z" for size in (4093, 4094, 4095, 4096)],
+    "😀" * 2049, ("слово 😀 " * 600),
+    "\ud800middle\udfff\ud83d\ude00" * 420,
+    "a" * 4095 + "\ud83d\ude00\ud800",
+    "**" + "Привет 😀 & <tag> " * 320 + "**",
+    "```python\n" + "x = '<&😀>'\n" * 400 + "```",
+    "<b>raw HTML &amp; &#128512;</b>\n" * 180,
+    "[link](https://example.com/?a=1&b=2) and `a < b`\n" * 140,
+    "> quote 😀\n> second\n\n| A | B |\n| --- | --- |\n| & | Ж |\n" * 80,
+], ids=lambda source: f"chars-{len(source)}")
+def test_formatter_and_raw_chunker_match_old_u16len(source, monkeypatch):
+    _plugin, api = _load_skill()
+    new_u16len = api._u16len
+    monkeypatch.setattr(api, "_u16len", _old_u16len)
+    expected = (api.markdown_to_telegram_chunks(source), api._chunk_raw_text(source))
+    monkeypatch.setattr(api, "_u16len", new_u16len)
+    assert (api.markdown_to_telegram_chunks(source), api._chunk_raw_text(source)) == expected
+
+
+@pytest.mark.parametrize("wrong_length,source", [
+    (len, "😀" * 2049),
+    (lambda value: len(value.encode("utf-16", "surrogatepass")) // 2, "a" * 4094 + "\nb"),
+    (lambda value: len(value.encode("utf-16-le")) // 2, "a\ud800\ud83d\ude00"),
+], ids=["codepoints", "bom", "strict-surrogates"])
+def test_u16len_differential_detects_incorrect_replacements(wrong_length, source, monkeypatch):
+    _plugin, api = _load_skill()
+    for chunker in (api.markdown_to_telegram_chunks, api._chunk_raw_text):
+        monkeypatch.setattr(api, "_u16len", _old_u16len)
+        expected = chunker(source)
+        monkeypatch.setattr(api, "_u16len", wrong_length)
+        if "\ud800" in source:
+            with pytest.raises(UnicodeEncodeError):
+                chunker(source)
+        else:
+            assert chunker(source) != expected
+
+
 def test_gfm_table_becomes_aligned_pre_grid():
     _plugin, telegram_api = _load_skill()
     rendered = telegram_api.markdown_to_telegram_html(
@@ -218,9 +272,9 @@ def test_block_aware_chunking_keeps_quote_and_table_blocks_whole():
 
 # Termination guards: pytest-timeout, not ``signal.alarm`` — Windows has no
 # SIGALRM, and an unhandled alarm would kill the whole pytest worker. The
-# bound is a HANG guard, not a perf budget: the 100 KB single-block case takes
-# ~4 s on a fast Linux host and exceeded 10 s on windows-latest under xdist
-# (a thread-method timeout kills the worker), while the CI ceiling is 300 s.
+# bound is a HANG guard, not a perf budget. Before the UTF-16 length optimization,
+# the 100 KB case took ~4 s on a Linux host and exceeded 10 s on Windows under
+# xdist (a thread-method timeout kills the worker). These are historical timings.
 @pytest.mark.timeout(120)
 def test_chunker_terminates_for_oversized_link_tag_and_pre_block():
     _plugin, telegram_api = _load_skill()

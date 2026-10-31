@@ -1,0 +1,546 @@
+{
+  "engine_tree": "94eaa9ef8cb232b3d3a4b31628c9e1a9c1b5c666",
+  "scenario": "continuation",
+  "provider": "offline Codex HTTP fixture",
+  "uploads": [
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto",
+        "preferredProfileId": "a"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        },
+        {
+          "role": "assistant",
+          "content": "served by a",
+          "nativeContinuation": {
+            "route": {
+              "source": "codex",
+              "credentialProfileId": "a",
+              "accountFingerprint": "e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77",
+              "model": "gpt-6.1-sol"
+            },
+            "format": "codex.responses.v1",
+            "payload": [
+              {
+                "type": "reasoning",
+                "id": "rs_fixture",
+                "encrypted_content": "fixture-sealed"
+              },
+              {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "served by a"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "role": "user",
+          "content": "continue"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto",
+        "preferredProfileId": "a"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        },
+        {
+          "role": "assistant",
+          "content": "served by a",
+          "nativeContinuation": {
+            "route": {
+              "source": "codex",
+              "credentialProfileId": "a",
+              "accountFingerprint": "e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77",
+              "model": "gpt-6.1-sol"
+            },
+            "format": "codex.responses.v1",
+            "payload": [
+              {
+                "type": "reasoning",
+                "id": "rs_fixture",
+                "encrypted_content": "fixture-sealed"
+              },
+              {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "served by a"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "role": "user",
+          "content": "continue"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        },
+        {
+          "role": "assistant",
+          "content": "served by a"
+        },
+        {
+          "role": "user",
+          "content": "continue"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    }
+  ],
+  "idempotency_keys": [
+    "a013435277c7423d8656316e3e9109a2",
+    "247c1e55e3454f2280350e715d1699f7",
+    "16095b55fb90448185628b4277eadd22",
+    "afdbff3d210e482480d8afb3f7c96f0d"
+  ],
+  "wire": [
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-5e8476b11367\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-5e8476b11367",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-5e8476b11367\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-5e8476b11367/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-5e8476b11367\",\"state\":\"uploaded\",\"receivedBytes\":183,\"expectedBytes\":183}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-5e8476b11367/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-6dd1767b257f\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6.json\",\"sha256\":\"sha256:37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6\",\"sizeBytes\":183,\"createdAt\":\"2026-10-21T06:10:58.019Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_utf8": "{\"id\":\"job-69c6171c6c9c\",\"state\":\"running\",\"createdAt\":\"2026-10-21T06:10:58.531Z\",\"startedAt\":\"2026-10-21T06:10:58.621Z\",\"finishedAt\":null,\"dispatch\":{\"state\":\"started\",\"startedAt\":\"2026-10-21T06:10:58.643Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"absent\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":null,\"problem\":null}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-69c6171c6c9c",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-69c6171c6c9c\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:10:58.531Z\",\"startedAt\":\"2026-10-21T06:10:58.621Z\",\"finishedAt\":\"2026-10-21T06:10:59.006Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:58.643Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-77f71392ac89\",\"sha256\":\"sha256:0a521a1ee495974b9b8abc5d2e863d20dfee01109ab716947d3a4f94d73d0783\",\"sizeBytes\":1229},\"readyAt\":\"2026-10-21T06:10:59.006Z\",\"expiresAt\":\"2026-11-20T06:10:59.006Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-69c6171c6c9c/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"completed\",\"message\":{\"role\":\"assistant\",\"content\":\"served by a\",\"nativeContinuation\":{\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":\"gpt-6.1-sol\"},\"format\":\"codex.responses.v1\",\"payload\":[{\"type\":\"reasoning\",\"id\":\"rs_fixture\",\"encrypted_content\":\"fixture-sealed\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"served by a\"}]}]}},\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":\"gpt-6.1-sol\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":null}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-69c6171c6c9c/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-69c6171c6c9c\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:10:58.531Z\",\"startedAt\":\"2026-10-21T06:10:58.621Z\",\"finishedAt\":\"2026-10-21T06:10:59.006Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:58.643Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-77f71392ac89\",\"sha256\":\"sha256:0a521a1ee495974b9b8abc5d2e863d20dfee01109ab716947d3a4f94d73d0783\",\"sizeBytes\":1229},\"releasedAt\":\"2026-10-21T06:10:59.337Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-93a3c9a818a4\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":688}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-93a3c9a818a4",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-93a3c9a818a4\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":688}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-93a3c9a818a4/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-93a3c9a818a4\",\"state\":\"uploaded\",\"receivedBytes\":688,\"expectedBytes\":688}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-93a3c9a818a4/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-a993422ca271\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-11018ff1e5fc313a6dd98d8e6ebbf91738cf2b5e4598d2077e143a41f1802811.json\",\"sha256\":\"sha256:11018ff1e5fc313a6dd98d8e6ebbf91738cf2b5e4598d2077e143a41f1802811\",\"sizeBytes\":688,\"createdAt\":\"2026-10-21T06:10:59.758Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_ref": "body-94eaa9ef-f5295e440a435064.json",
+      "body_sha256": "f5295e440a435064c82c4c723d0e171f7724faa8e6ef74b948155973cad628dd"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-efd1b6a024ce",
+      "status": 200,
+      "body_ref": "body-94eaa9ef-f5295e440a435064.json",
+      "body_sha256": "f5295e440a435064c82c4c723d0e171f7724faa8e6ef74b948155973cad628dd",
+      "repeat": 22
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-efd1b6a024ce",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-efd1b6a024ce\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:11:00.015Z\",\"startedAt\":\"2026-10-21T06:11:00.150Z\",\"finishedAt\":\"2026-10-21T06:11:00.734Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:11:00.158Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-64997368ed66\",\"sha256\":\"sha256:da22755b1ceed9e5cf7619958b7003be4e55e3c71d5e08cb863091d9e96b892f\",\"sizeBytes\":2754},\"readyAt\":\"2026-10-21T06:11:00.733Z\",\"expiresAt\":\"2026-11-20T06:11:00.733Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":false,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.07220799999959127,\"silenceMs\":0.5662919999995211,\"lastChunkAfterResponseMs\":0.07220799999959127,\"largestSilenceMs\":0.5662919999995211,\"source\":\"codex\",\"operationId\":\"job-efd1b6a024ce\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"retryBlockedBy\":\"native_continuation\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"The history carries native continuation bound to this account, so it cannot move to another account; resend without that continuation or start a new conversation.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:11:00.552Z\",\"state\":\"provisional\"}]}}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-efd1b6a024ce/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"failed\",\"message\":null,\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":false,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.07220799999959127,\"silenceMs\":0.5662919999995211,\"lastChunkAfterResponseMs\":0.07220799999959127,\"largestSilenceMs\":0.5662919999995211,\"source\":\"codex\",\"operationId\":\"job-efd1b6a024ce\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"retryBlockedBy\":\"native_continuation\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"The history carries native continuation bound to this account, so it cannot move to another account; resend without that continuation or start a new conversation.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:11:00.552Z\",\"state\":\"provisional\"}]}},\"failureEvidence\":{\"bodyBase64\":\"eyJkZXRhaWwiOiJUaGUgJ2dwdC02LjEtc29sJyBtb2RlbCBpcyBub3Qgc3VwcG9ydGVkIHdoZW4gdXNpbmcgQ29kZXggd2l0aCBhIENoYXRHUFQgYWNjb3VudC4ifQ==\",\"receivedBytes\":94,\"bodyComplete\":true,\"stage\":\"json\",\"errors\":[],\"causeCycle\":false}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-efd1b6a024ce/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-efd1b6a024ce\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:11:00.015Z\",\"startedAt\":\"2026-10-21T06:11:00.150Z\",\"finishedAt\":\"2026-10-21T06:11:00.734Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:11:00.158Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-64997368ed66\",\"sha256\":\"sha256:da22755b1ceed9e5cf7619958b7003be4e55e3c71d5e08cb863091d9e96b892f\",\"sizeBytes\":2754},\"releasedAt\":\"2026-10-21T06:11:01.169Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":false,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.07220799999959127,\"silenceMs\":0.5662919999995211,\"lastChunkAfterResponseMs\":0.07220799999959127,\"largestSilenceMs\":0.5662919999995211,\"source\":\"codex\",\"operationId\":\"job-efd1b6a024ce\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"retryBlockedBy\":\"native_continuation\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"The history carries native continuation bound to this account, so it cannot move to another account; resend without that continuation or start a new conversation.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:11:00.552Z\",\"state\":\"provisional\"}]}}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-ef9b37dea860\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":688}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-ef9b37dea860",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-ef9b37dea860\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":688}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-ef9b37dea860/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-ef9b37dea860\",\"state\":\"uploaded\",\"receivedBytes\":688,\"expectedBytes\":688}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-ef9b37dea860/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-9391fc2d8d5d\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-11018ff1e5fc313a6dd98d8e6ebbf91738cf2b5e4598d2077e143a41f1802811.json\",\"sha256\":\"sha256:11018ff1e5fc313a6dd98d8e6ebbf91738cf2b5e4598d2077e143a41f1802811\",\"sizeBytes\":688,\"createdAt\":\"2026-10-21T06:11:01.393Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_utf8": "{\"id\":\"job-da4184345b9e\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:11:01.795Z\",\"startedAt\":\"2026-10-21T06:11:01.796Z\",\"finishedAt\":\"2026-10-21T06:11:02.130Z\",\"dispatch\":{\"state\":\"not_started\",\"startedAt\":null,\"route\":null},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-eb27e119166a\",\"sha256\":\"sha256:c5ddecc7549ed2f793e63d28c0bbe59819cb708bd4952b8cc1304b73ceac02c4\",\"sizeBytes\":1057},\"readyAt\":\"2026-10-21T06:11:02.127Z\",\"expiresAt\":\"2026-11-20T06:11:02.127Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"invalid_continuation\",\"message\":\"Native continuation must match the exact account, profile and format, and a turn another model answered must carry its own content or tool calls.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{}}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-da4184345b9e/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"failed\",\"message\":null,\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":null},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":{\"code\":\"invalid_continuation\",\"message\":\"Native continuation must match the exact account, profile and format, and a turn another model answered must carry its own content or tool calls.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{}}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-da4184345b9e/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-da4184345b9e\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:11:01.795Z\",\"startedAt\":\"2026-10-21T06:11:01.796Z\",\"finishedAt\":\"2026-10-21T06:11:02.130Z\",\"dispatch\":{\"state\":\"not_started\",\"startedAt\":null,\"route\":null},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-eb27e119166a\",\"sha256\":\"sha256:c5ddecc7549ed2f793e63d28c0bbe59819cb708bd4952b8cc1304b73ceac02c4\",\"sizeBytes\":1057},\"releasedAt\":\"2026-10-21T06:11:02.843Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"invalid_continuation\",\"message\":\"Native continuation must match the exact account, profile and format, and a turn another model answered must carry its own content or tool calls.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{}}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-8adc10743f50\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":265}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-8adc10743f50",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-8adc10743f50\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":265}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-8adc10743f50/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-8adc10743f50\",\"state\":\"uploaded\",\"receivedBytes\":265,\"expectedBytes\":265}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-8adc10743f50/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-6ac0813c86d8\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-ecf0437acdb06f0583a4f64b6e5d78fb94dac2dc441dbc0f53f9212e3752ace0.json\",\"sha256\":\"sha256:ecf0437acdb06f0583a4f64b6e5d78fb94dac2dc441dbc0f53f9212e3752ace0\",\"sizeBytes\":265,\"createdAt\":\"2026-10-21T06:11:03.217Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_ref": "body-94eaa9ef-34448a47f73eed6c.json",
+      "body_sha256": "34448a47f73eed6c99221840ac2a14dfa2ccf48321ac7c28af350e7246a28988"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-b33a9d965acd",
+      "status": 200,
+      "body_ref": "body-94eaa9ef-34448a47f73eed6c.json",
+      "body_sha256": "34448a47f73eed6c99221840ac2a14dfa2ccf48321ac7c28af350e7246a28988",
+      "repeat": 16
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-b33a9d965acd",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-b33a9d965acd\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:11:03.505Z\",\"startedAt\":\"2026-10-21T06:11:03.534Z\",\"finishedAt\":\"2026-10-21T06:11:04.018Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:11:03.576Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-b47ea893d517\",\"sha256\":\"sha256:789dacd81f61b8345cc562ec1a792ff7410e508c3c061f4f70e9afd021bb1ea2\",\"sizeBytes\":1153},\"readyAt\":\"2026-10-21T06:11:04.018Z\",\"expiresAt\":\"2026-11-20T06:11:04.018Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-b33a9d965acd/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"completed\",\"message\":{\"role\":\"assistant\",\"content\":\"served by b\",\"nativeContinuation\":{\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"},\"format\":\"codex.responses.v1\",\"payload\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"served by b\"}]}]}},\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":null}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-b33a9d965acd/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-b33a9d965acd\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:11:03.505Z\",\"startedAt\":\"2026-10-21T06:11:03.534Z\",\"finishedAt\":\"2026-10-21T06:11:04.018Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:11:03.576Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-b47ea893d517\",\"sha256\":\"sha256:789dacd81f61b8345cc562ec1a792ff7410e508c3c061f4f70e9afd021bb1ea2\",\"sizeBytes\":1153},\"releasedAt\":\"2026-10-21T06:11:04.238Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    }
+  ],
+  "provider_posts": [
+    {
+      "account": "a",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    },
+    {
+      "account": "a",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          },
+          {
+            "encrypted_content": "fixture-sealed",
+            "id": "rs_fixture",
+            "type": "reasoning"
+          },
+          {
+            "content": [
+              {
+                "text": "served by a",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "type": "message"
+          },
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "continue"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    },
+    {
+      "account": "b",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "served by a"
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "continue"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    }
+  ]
+}

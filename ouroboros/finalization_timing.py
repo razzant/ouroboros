@@ -8,8 +8,9 @@ Latency stamps are telemetry, never gates. Upstream of this module:
 ``chat.jsonl`` inbound rows carry ``message_accepted_at``, ``task_received``
 carries ``activity_emitted_at``, and request/response manifests and ``llm_round``
 carry ``first_request_at``/``first_answer_at``. This module adds the finalization
-phases, which ride the live final event, and one ``task_finalization_timing`` row
-in ``events.jsonl`` written after the sender returns.
+phases, which ride the live final event, the supervisor consumer's dequeue stamp,
+and one ``task_finalization_timing`` row in ``events.jsonl`` written after the
+sender returns.
 """
 
 from __future__ import annotations
@@ -122,11 +123,32 @@ def stamp_finalization_enqueue(event):
     return {**event, "_finalization_timing": timing}
 
 
+def stamp_finalization_dequeue(event):
+    """Stamp the moment the supervisor consumer took a live final off the bus.
+
+    It splits the queue wait (enqueue -> dequeue) from the handler's work before the
+    send (dequeue -> sender) on the row. The origin is the worker's monotonic stamp, the
+    same basis as ``sender.started_sec`` (the monotonic clock is system-wide on the
+    supported hosts); the event's own sidecar is replaced, never mutated in place. A
+    malformed sidecar is left as it came: telemetry never costs the delivery.
+    """
+    timing = event.get("_finalization_timing") if isinstance(event, dict) else None
+    if not isinstance(timing, dict) or "_origin" not in timing:
+        return
+    try:
+        dequeued_sec = max(0.0, time.monotonic() - float(timing["_origin"]))
+    except (TypeError, ValueError):
+        return
+    event["_finalization_timing"] = {**timing, "dequeued_at": utc_now_iso(), "dequeued_sec": dequeued_sec}
+
+
 def emit_finalization_timing(event, drive_root):
     """One best-effort journal row after the deduplicated sender has returned.
 
     This is a host send-handler receipt, not proof of client display. A missing
     phase was not observed; failed sends/crashes and durable replay add no row.
+    ``enqueue_to_sender_sec`` splits into ``enqueue_to_dequeue_sec`` (bus wait) and
+    ``dequeue_to_sender_sec`` (the handler before the send); None when unstamped.
     The sender's existing delivery identity, not a new registry, deduplicates it.
     """
     timing = event.get("_finalization_timing")
@@ -135,7 +157,7 @@ def emit_finalization_timing(event, drive_root):
     try:
         from ouroboros.utils import append_jsonl
 
-        sender = timing["phases"]["sender"]
+        sender, dequeued = timing["phases"]["sender"], timing.get("dequeued_sec")
         append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
             **{key: value for key, value in timing.items() if not key.startswith("_")},
             "type": "task_finalization_timing", "ts": sender["finished_at"],
@@ -143,6 +165,9 @@ def emit_finalization_timing(event, drive_root):
             "basis": "send_handler_returned", "total_sec": sender["finished_sec"],
             "enqueue_to_sender_sec": (max(0.0, sender["started_sec"] - timing["enqueued_sec"])
                                       if "enqueued_sec" in timing else None),
+            "enqueue_to_dequeue_sec": (max(0.0, dequeued - timing["enqueued_sec"])
+                                       if dequeued is not None and "enqueued_sec" in timing else None),
+            "dequeue_to_sender_sec": max(0.0, sender["started_sec"] - dequeued) if dequeued is not None else None,
         })
     except Exception:
         logging.getLogger(__name__).debug("Finalization timing could not be recorded", exc_info=True)

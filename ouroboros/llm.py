@@ -60,7 +60,6 @@ from ouroboros.llm_attempt import (
 )
 from ouroboros.llm_capability_policy import (
     _CapabilityPolicyMixin,  # noqa: F401
-    _MANDATORY_VALUE_MARKERS,  # noqa: F401
     _OPTIONAL_DROPPABLE_PARAMS,  # noqa: F401
     _OPTIONAL_SAMPLING_PARAMS,  # noqa: F401
     normalize_reasoning_effort,  # noqa: F401
@@ -71,13 +70,9 @@ from ouroboros.llm_fallback import (
 from ouroboros.llm_gigachat import (
     _GigaChatLaneMixin,  # noqa: F401
 )
+from ouroboros.context_budget import estimate_message_chars as _estimate_message_chars  # noqa: F401 -- the historical private name
 from ouroboros.llm_local import (
-    _compact_local_text,  # noqa: F401
-    _compact_markdown_sections,  # noqa: F401
-    _estimate_message_chars,  # noqa: F401
-    _LOCAL_COMPACTION_MODES,  # noqa: F401
     _LocalLaneMixin,  # noqa: F401
-    _split_markdown_sections,  # noqa: F401
     LocalContextTooLargeError,  # noqa: F401
 )
 from ouroboros.llm_messages import (
@@ -164,7 +159,8 @@ class LLMClient(
         base_url: str = "https://openrouter.ai/api/v1",
     ):
         self._api_key_override = api_key
-        self._api_key = api_key or runtime_setting("OPENROUTER_API_KEY", "")
+        # Route resolution owns credentials at dispatch. Constructing an ordinary
+        # actor for preparation must not fetch an unused provider key.
         self._base_url = base_url
         self._client = None
         self._client_api_key: Optional[str] = None
@@ -231,7 +227,7 @@ class LLMClient(
                 local_kwargs = {"timeout": timeout}
                 if reasoning_effort is not None:
                     local_kwargs["reasoning_effort"] = reasoning_effort
-                if processing_preference:
+                if processing_preference is not None:
                     local_kwargs["processing_preference"] = processing_preference
                 message, usage = self._chat_local(
                     messages, tools, max_tokens, tool_choice, **local_kwargs,
@@ -307,7 +303,7 @@ class LLMClient(
                 local_kwargs = {"timeout": timeout}
                 if reasoning_effort is not None:
                     local_kwargs["reasoning_effort"] = reasoning_effort
-                if processing_preference:
+                if processing_preference is not None:
                     local_kwargs["processing_preference"] = processing_preference
                 result = self._chat_local(messages, tools, max_tokens, tool_choice, **local_kwargs)
                 return result, last_physical_attempt_capture()

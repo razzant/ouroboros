@@ -90,7 +90,7 @@ def test_native_risk_extension_registers_and_dispatches_out_of_process(tmp_path)
         repo_dir=pathlib.Path(__file__).resolve().parents[1],
         drive_root=child_drive,
         budget_drive_root=str(drive_root),
-        task_metadata={"budget_drive_root": str(drive_root)},
+        task_metadata={"budget_drive_root": str(drive_root), "work_kind": "owner"},  # an owner task's minted kind
         task_contract={"objective": "native-objective"},
     ))
     assert _payload(registry.execute(tool_name, {"message": "ok"})).endswith(f":ok:{child_drive}:{drive_root}:native-objective")
@@ -211,6 +211,7 @@ def test_out_of_process_extension_tool_failure_uses_tool_error_prefix(tmp_path):
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("native_tool_fail", "boom")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
 
     result = registry.execute(tool_name, {})
 
@@ -254,6 +255,7 @@ def test_out_of_process_extension_child_does_not_receive_settings_as_env(tmp_pat
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("native_env_contract", "check")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
 
     assert _payload(registry.execute(tool_name, {})).endswith("no-env-leak")
 
@@ -276,7 +278,9 @@ def test_native_risk_extension_abort_during_import_does_not_abort_host(tmp_path)
     assert "out-of-process catalog failure" in err
     assert "native_abort" not in extension_loader.snapshot()["extensions"]
     shared_imports = drive_root / "state" / "skills" / "native_abort" / "__extension_imports"
-    assert not shared_imports.exists() or not any(shared_imports.iterdir())
+    # Complete source bytes survive a failed import; the failed catalog is never cached.
+    assert len(list(shared_imports.glob("sha256-*/complete.json"))) == 1
+    assert not (shared_imports.parent / "extension_catalog.json").exists()
 
 
 def test_native_risk_extension_route_dispatches_out_of_process(tmp_path):
@@ -511,6 +515,7 @@ def test_isolated_dependency_extension_dispatches_out_of_process_without_native_
     assert tool is not None
     assert tool["out_of_process"] is True
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
     assert _payload(registry.execute(tool_name, {})).endswith("pure-isolated")
 
 
@@ -550,6 +555,7 @@ def test_isolated_dependency_extension_stdout_does_not_break_child_protocol(tmp_
         assert stat.S_IMODE(calls_dir.stat().st_mode) == 0o700
     tool_name = extension_loader.extension_surface_name("isolated_noisy_stdout", "value")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
     assert _payload(registry.execute(tool_name, {})).endswith("pure-isolated-noisy")
 
 
@@ -608,6 +614,7 @@ def test_parallel_isolated_extension_children_do_not_sweep_each_other_import_tre
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("isolated_parallel_imports", "alive")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(registry.execute, tool_name, {"delay": 0.4})
@@ -616,6 +623,8 @@ def test_parallel_isolated_extension_children_do_not_sweep_each_other_import_tre
 
     assert _payload(first.result()).endswith("True")
     assert _payload(second.result()).endswith("True")
+    imports = drive_root / "state" / "skills" / loaded.name / "__extension_imports"
+    assert len(list(imports.glob("sha256-*/complete.json"))) == 1
 
 
 def test_isolated_dependency_extension_child_inherits_runtime_mode(tmp_path, monkeypatch):

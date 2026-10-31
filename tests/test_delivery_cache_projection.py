@@ -2,6 +2,8 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
+import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -52,8 +54,9 @@ def _wires(messages, monkeypatch):
     return out
 
 
-@pytest.mark.parametrize("batch_size", [1, 3, 7])
-def test_real_png_auto_batches_share_eviction_projection_with_fit_and_all_wire_builders(tmp_path, monkeypatch, batch_size):
+@pytest.mark.parametrize(("batch_size", "live_count"), [(1, 6), (3, 8), (5, 10), (6, 5), (7, 6)])
+def test_real_png_auto_batches_share_eviction_projection_with_fit_and_all_wire_builders(tmp_path, monkeypatch,
+                                                                                     batch_size, live_count):
     repo = tmp_path / "repo"
     repo.mkdir()
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data", task_id="image-projection")
@@ -84,15 +87,20 @@ def test_real_png_auto_batches_share_eviction_projection_with_fit_and_all_wire_b
     trace = {"tool_calls": []}
     process_tool_results(rows, messages, trace, lambda *_a, **_kw: None,
                          SimpleNamespace(_ctx=ctx), fit_candidate=fit, tool_schemas=[])
-    assert measured and all(len(_images(m)) == MAX_LIVE_IMAGE_BLOCKS for m in measured)
+    assert measured and all(len(_images(m)) == live_count for m in measured)
     assert _images(messages) == _images(measured[-1])
     for wire in _wires(messages, monkeypatch).values():
         assert _images(wire["messages"]) == _images(messages)
         assert "_host_context_kind" not in json.dumps(wire)
+        assert "_source_sha256" not in json.dumps(wire)
     assert [m["role"] for m in messages[len(before):len(before) + len(rows)]] == ["tool"] * len(rows)
-    assert all(row["image_attachment"] == {"status": "attached"} for row in trace["tool_calls"])
+    for row, original in zip(trace["tool_calls"], originals[MAX_LIVE_IMAGE_BLOCKS:]):
+        fact = row["image_attachment"]
+        assert fact["status"] == "attached"
+        assert Path(fact["source_path"]).read_bytes() == original
+        assert fact["source_sha256"] == hashlib.sha256(original).hexdigest()
     assert [path.read_bytes() for path in paths] == originals
-    # Positive direct path uses the same existing cap and image implementation.
+    # Direct attachments share the same sequence of high-water batch evictions.
     ctx.messages = deepcopy(initial)
     for path in paths[MAX_LIVE_IMAGE_BLOCKS:]:
         assert attach_local_image_to_context(ctx, str(path))[0]
@@ -124,8 +132,8 @@ def test_typed_error_and_empty_result_remain_known_through_real_main_seals_and_a
             assert fact["facts"] == {"status": "error", "code": "SHELL_EXIT_ERROR", "is_error": True, "exit_code": 17}
             if row["tool_call_id"] == "process-2":
                 assert row["content"] == ""
-            else:
-                sealed_seen |= isinstance(row["content"], list)
+            else:  # the seal's host-only mark: the typed row keeps its exact text
+                sealed_seen |= "cache_control" in row and isinstance(row["content"], str)
     assert sealed_seen
     messages = f.inputs[7]["messages"]
     # Reclaim through the failed command, rather than stopping after the first
@@ -145,7 +153,7 @@ def test_typed_error_and_empty_result_remain_known_through_real_main_seals_and_a
     request = _request(messages, 1)
     request = replace(request, working_note="The failed commands returned exit 17.", keep_unit_ids=(),
                       expected_view_revision=request.transcript_sha256)
-    authored, author_receipt, _ = cc.compact_tool_history_llm(messages, request=request,
+    authored, author_receipt = cc.compact_tool_history_llm(messages, request=request,
         observed_messages=messages, fit_candidate=lambda *_: {"accepted": True},
         drive_root=f.ctx.drive_root, task_id=f.ctx.task_id)
     assert author_receipt.status == "applied"
@@ -165,7 +173,7 @@ def test_cache_sealing_never_makes_a_changed_or_opaque_result_known(body):
                "exact", facts={"status": "ok", "is_error": False, "exit_code": 0})}
     messages = [{"role": "user", "content": "task"}, row]
     before = deepcopy(body)
-    seal_task_transcript(messages, keep_active=0, min_prefix_tokens=0)
+    seal_task_transcript(messages, min_prefix_tokens=0)
     assert read_tool_result_record(row)["state"] == "unknown"
     if isinstance(body, list):
         assert row["content"] == before
@@ -179,7 +187,7 @@ def test_cache_text_wrapper_preserves_text_boundaries_and_exact_empty_output():
             TOOL_RESULT_RECORD_KEY: make_tool_result_record({"tool_call_id": "same", "invocation_id": "host"}, value,
                                                            facts={"status": "error", "is_error": True, "exit_code": 17})}
         assert read_tool_result_record(row)["state"] == "recorded"
-        seal_task_transcript([{"role": "user", "content": "task"}, row], keep_active=0, min_prefix_tokens=0)
+        seal_task_transcript([{"role": "user", "content": "task"}, row], min_prefix_tokens=0)
         assert read_tool_result_record(row)["state"] == "recorded"
         if not value:
             assert row["content"] == ""

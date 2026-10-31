@@ -105,11 +105,11 @@ def test_authored_stop_money_check_uses_real_cap_not_planning_margin(monkeypatch
 
 
 def test_resealing_author_stop_retains_queue_generation_comparison():
-    from ouroboros.loop_acceptance import _end_task_acceptance_fence
+    from ouroboros.delivery_seal import _end_task_acceptance_fence
     calls = []
     ctx = SimpleNamespace(_task_acceptance_fence_token='owned', _task_acceptance_fence_generation=7,
         end_acceptance_fence=lambda **kw: calls.append(kw) or {'ok': True, 'status': 'sealed'})
-    assert _end_task_acceptance_fence(ctx, outcome='terminal')
+    assert _end_task_acceptance_fence(ctx, outcome='author_stop')
     assert ctx._task_acceptance_fence_token is None
     assert _end_task_acceptance_fence(ctx, outcome='author_stop')
     assert calls[-1] == {'token': 'owned', 'outcome': 'author_stop', 'expected_generation': 7}

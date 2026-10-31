@@ -57,7 +57,7 @@ public final class MainActivity extends Activity {
         if (saved != null) pendingDownload = saved.getString("pending_download");
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(android.graphics.Color.rgb(13, 11, 15));
+        root.setBackgroundColor(android.graphics.Color.rgb(15, 15, 17));
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.ime());

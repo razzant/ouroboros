@@ -1,6 +1,40 @@
 /** Dependency-free JSDoc mirror of `ouroboros.gateway.client_contracts` — the replaceable-client envelopes
  *  `api_types.js` indexes: the served main interface, the setup bootstrap, the settings writers' refusal,
- *  the auth gate's JSON login and the `GET /api/contract` document. */
+ *  completion readback, the auth gate's JSON login and the `GET /api/contract` document. */
+/**
+ * One completion attempt read back: saved is true while the settings document holds its write, false when
+ * refused before writing, null when unconfirmed. Only `receipt` (its own success envelope) completes.
+ * @typedef {Object} OnboardingAttemptResponse
+ * @property {?boolean} saved
+ * @property {import('./api_types.js').OnboardingCompleteResponse=} receipt
+ * @property {string=} error
+ * @property {string=} code
+ * @property {string=} post_commit_failed
+ */
+/**
+ * @typedef {Object} ChatInbound
+ * @property {string=} reply_to
+ * @property {"chat"} type
+ * @property {string} content
+ * @property {string=} sender_session_id
+ * @property {string=} client_message_id
+ * @property {boolean=} force_plan
+ * @property {Array<Object>=} attachments  // [{filename, display_name, mime}] — image uploads become native blocks (v6.26.0)
+ * @property {number=} chat_id     // multi-project thread routing (v6.32.0); main chat = 1
+ * @property {string=} project_id  // per-project memory scope (v6.32.0)
+ * @property {Object=} client_surface  // raw sending-surface observables measured at send time (pywebview/ua/viewport/matchMedia/captured_at; optional IANA timezone)
+ */
+/**
+ * @typedef {Object} CommandInbound
+ * @property {Object=} client_surface
+ * @property {"command"} type
+ * @property {string} cmd
+ */
+/**
+ * Emergency request accepted on this connection; does not prove process exit.
+ * @typedef {Object} PanicAcceptedOutbound
+ * @property {"panic_accepted"} type
+ */
 /**
  * The main interface THIS server generation serves at `/` and `/static`: the applied selection (fixed until
  * the core restarts), not the requested value and not an asset digest.
@@ -120,6 +154,8 @@
  * The wizard's starting values; besides these keys it carries one key per `contract.providerFields[].stateKey`
  * (a configured secret reads as `secretPlaceholder`), `contract.budgetFields[].stateKey` and `contract.modelSlots[].stateKey`.
  * @typedef {Object} SetupInitialState
+ * @property {Object[]} connections Masked OUROBOROS_CONNECTIONS rows, keyed by kind/name.
+ * @property {string} safetyModel
  * @property {string} providerProfile
  * @property {string} reviewEnforcement
  * @property {string} runtimeMode
@@ -199,7 +235,7 @@
  * @property {string} method
  * @property {string} path
  * @property {string[]} path_params
- * @property {'gate'|'public'} auth
+ * @property {'gate'|'public'|'asset_lease'} auth
  * @property {boolean} typed  // false: published without shapes (an explicit gap)
  * @property {string[]=} query
  * @property {string[]=} headers  // request headers the handler reads; a trailing "!" marks a required one
@@ -231,6 +267,7 @@
  * @property {string[]} interface_paths
  * @property {ContractHttpEntry[]} http
  * @property {ContractWs} ws
+ * @property {CallSocketContract=} call_socket
  * @property {Object.<string,Object>} schemas
  */
 
@@ -243,9 +280,32 @@
  */
 
 /**
+ * Host-retained source of a private Main contact; external context, never owner authority.
+ * @typedef {Object} PresenceContact
+ * @property {string} task_id
+ * @property {string} binding_id
+ * @property {string} source_event_id
+ * @property {string} label
+ * @property {string} conversation_key
+ * @property {string=} transport_skill
+ * @property {string=} behavior_skill
+ * @property {string=} profile_fingerprint
+ * @property {string=} state_fingerprint
+ * @property {string=} selection_fingerprint
+ * @property {string=} provider
+ * @property {string=} account_id
+ * @property {string=} conversation_id
+ * @property {string=} thread_id
+ * @property {string=} actor_id
+ * @property {string=} place_id
+ * @property {string=} url
+ */
+
+/**
  * The question card of a `msg_type: "quiz"` history row (the question itself is the row's `text`).
  * `state`: open | answered | closed | expired_terminal | superseded, merged at read time.
  * @typedef {Object} ChatHistoryQuiz
+ * @property {PresenceContact=} presence_contact
  * @property {string} quiz_id
  * @property {Object[]=} options  // QuizOption rows {label, detail?, recommended?}
  * @property {string=} stake
@@ -261,10 +321,44 @@
  */
 
 /**
+ * The living card of a `msg_type: "card"` history row (its plain `fallback_text` is the row's `text`): its
+ * identity as first published. Read the current body, revision and presses from `GET /api/cards/{card_id}`.
+ * @typedef {Object} ChatHistoryCard
+ * @property {string} card_id
+ * @property {'components'|'widget'|'app'} kind
+ * @property {string} title
+ * @property {number} revision
+ */
+
+/**
+ * A `reply_to` reference as the host resolved it; an unresolved one is `{address, unresolved: true}`.
+ * @typedef {Object} ChatReplyReference
+ * @property {string=} address
+ * @property {number=} chat_id
+ * @property {'user'|'assistant'|'system'=} role
+ * @property {string=} author_label
+ * @property {string=} kind
+ * @property {string=} snippet
+ * @property {string=} ts
+ * @property {string=} task_id
+ * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
+ * @property {boolean=} unresolved
+ */
+
+/**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
  * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
  * (`quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` + `historical_terminal`) are never shown.
  * @typedef {Object} ChatHistoryMessage
+ * @property {PlaceHistoryFacts=} place_history
+ * @property {PresenceContact=} presence_contact
+ * @property {string=} wait_ended_at
+ * @property {string=} row_address
+ * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
+ * @property {ChatReplyReference=} reply_to
+ * @property {Object=} relay
+ * @property {string=} reply_to_relay
+ * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
  * @property {string} text
  * @property {'user'|'assistant'|'system'} role
  * @property {string} ts  // the stored row's time: the same string its live frame carried
@@ -278,16 +372,16 @@
  * @property {string=} sender_label
  * @property {string=} sender_session_id
  * @property {string=} client_message_id  // correlation id, not proof of owner authorship; use role
+ * @property {"swarm"=} subagents_mode  // effective mode at acceptance; preserved on replay
  * @property {boolean=} ingress_accepted
  * @property {boolean=} ingress_dispatched
  * @property {boolean=} ingress_pending
- * @property {boolean=} ingress_undispatched
  * @property {Object[]=} attachments  // ChatAttachmentView
  * @property {boolean=} text_placeholder
  * @property {Object=} chat_annotation
  * @property {string=} origin_id
  * @property {boolean=} origin_projected
- * @property {('document'|'photo'|'video'|'links'|'quiz')=} msg_type
+ * @property {('document'|'photo'|'video'|'links'|'quiz'|'card')=} msg_type
  * @property {string=} filename
  * @property {string=} mime
  * @property {string=} download_url
@@ -297,6 +391,7 @@
  * @property {Object[]=} actions  // LinkAction rows {label, url}
  * @property {string=} title
  * @property {ChatHistoryQuiz=} quiz
+ * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
  * @property {Object=} historical_terminal
  * @property {Object=} model_waits
@@ -358,7 +453,8 @@
  * Additive /api/chat/history row fields on `system_type: "skill_review"` rows:
  * the exact-job reference the producer already writes into chat.jsonl. A row
  * carrying a non-empty `job_id` lets the Chat card lazily fetch the rendered
- * review via GET /api/skills/{skill}/review-history/{job_id}; rows without it
+ * review via GET /api/skills/{skill}/review-history/{record_id or job_id} (the
+ * review record when the row names one, else the job); rows without either
  * (legacy full-text rows) keep local expansion. All fields are additive and
  * safely ignorable by renderers.
  * @typedef {Object} SkillReviewHistoryRowFields
@@ -366,18 +462,21 @@
  * @property {string=} status
  * @property {string=} content_hash
  * @property {string=} job_id
+ * @property {string=} record_id
  * @property {number=} review_round
  * @property {number=} snapshot_attempt
  */
 
 /**
- * `coverage` v1: delivered stored bytes per stream; a span is `{from, to, chain, gaps}` or null.
- * Byte delivery, never chronology or proof of the conversation's start.
+ * `coverage` v1: delivered coordinates per stream; a span is `{from, to, chain, gaps}` or null. Stored
+ * order counts bytes under chain `dialog`; a room with imported history counts chat rows in time order under
+ * `dialog-chrono-<end>` (`-at-<position>` around a row) and adds `keys` (CLIENT_CONTRACT §5). Never proof of
+ * the conversation's start.
  * @typedef {Object} ChatHistoryCoverage
  * @property {number} v
  * @property {string} view
  * @property {Object.<string,number>} upper
- * @property {Object.<string,?{from: number, to: number, chain: string, gaps: string[]}>} spans
+ * @property {Object.<string,?{from: number, to: number, chain: string, gaps: string[], keys: ({from: ?Array, to: ?Array, frozen: number}|undefined)}>} spans
  */
 
 /**
@@ -396,6 +495,17 @@
  */
 
 /**
+ * `around`: a task card or an exact stored row. `found` binds `history_id`; a moved row names its
+ * current `chat_id`. Only complete source misses prove absent; failures/imports answer 503.
+ * @typedef {Object} ChatHistoryAnchor
+ * @property {'found'|'absent'|'moved'|'ambiguous'|'unavailable'} state
+ * @property {string=} task_id
+ * @property {string=} row_address
+ * @property {number=} chat_id
+ * @property {string=} history_id
+ */
+
+/**
  * `GET /api/chat/history`: conversation rows oldest first; replay evidence may follow them
  * regardless of timestamp and recur across pages. An error answer keeps this shape: no rows,
  * `has_more` true and the cursor that was sent as `next_cursor`.
@@ -405,8 +515,10 @@
  * @property {string=} next_before_ts  // legacy, no longer sent
  * @property {?string} next_cursor
  * @property {?string=} page_cursor
+ * @property {string=} after_cursor  // the newest page and every `after` read: the rows stored since
  * @property {ChatHistoryWindow} window
  * @property {ChatHistoryCoverage=} coverage
+ * @property {ChatHistoryAnchor=} anchor  // an `around` read only
  * @property {string=} error
  * @property {string=} reason_code
  */
@@ -423,10 +535,26 @@
  * `POST /api/owner/context-mode`.
  * @typedef {Object} OwnerContextModeRequest
  * @property {'nano'|'low'|'max'} mode
+ * @property {string=} project_id
+ */
+
+/**
+ * @typedef {Object} OwnerEffortRangeRequest
+ * @property {string} min
+ * @property {string} recommended
+ * @property {string} max
+ * @property {string=} project_id
+ */
+
+/**
+ * @typedef {Object} OwnerSubagentsModeRequest
+ * @property {"off"|"auto"|"swarm"} mode
+ * @property {string=} project_id
  */
 
 /**
  * @typedef {Object} OwnerSafetyModeRequest
+ * @property {'your_work'|'consciousness'=} kind
  * @property {'full'|'light'|'off'} mode
  */
 
@@ -438,12 +566,82 @@
  */
 
 /**
- * `POST /api/settings/secret`: exactly one selector, `{key}`, `{mcp_server_id}` or `{mcp_server_id,
- * header_name}`.
+ * One stored safety check, retaining both its chip and the tool it checked.
+ * @typedef {Object} RecentWakeCheck
+ * @property {string} chip
+ * @property {string} tool
+ */
+
+/**
+ * `GET /api/consciousness` recent_wakes: ledger-selected facts, never authored by the view.
+ * CostPresentation is the task card's existing carrier (api_types.js).
+ * @typedef {Object} RecentWake
+ * @property {{label: string, owner: boolean}=} as
+ * @property {string} task_id
+ * @property {?number} chat_id
+ * @property {'own'|'focus'} cause
+ * @property {string} place_label
+ * @property {string} conversation
+ * @property {?string} started_at
+ * @property {?string=} first_reply_at
+ * @property {?string} ended_at
+ * @property {boolean} live
+ * @property {'running'|'waiting'|'queued'|'paused'|'unknown'|'working'|'done'|'warn'|'error'|'cancelled'} phase
+ * @property {boolean} quiet
+ * @property {string=} summary
+ * @property {?string} note
+ * @property {?number=} tool_calls
+ * @property {?number=} rounds
+ * @property {Array<RecentWakeCheck>} checks
+ * @property {boolean=} said_owner
+ * @property {?number=} accounted_upper_bound_usd
+ * @property {?number=} accounted_upper_bound_usd_with_children
+ * @property {?CostPresentation=} cost_presentation
+ * @property {'available'|'unavailable'=} cost_accounting_status
+ * @property {string=} cost_accounting_error
+ * @property {boolean=} cost_final
+ * @property {boolean=} cost_with_children_partial
+ * @property {?CostCustody=} cost_custody
+ * @property {?number=} unknown_unmetered
+ * @property {?number=} non_final_rows
+ * @property {?number=} reserved_usd
+ * @property {?number=} unresolved_upper_bound_usd
+ * @property {?boolean=} ledger_integrity_degraded
+ */
+
+/** Recent-wakes fields of the open consciousness panel.
+ * @typedef {Object} RecentWakesView
+ * @property {Array<RecentWake>|null} recent_wakes
+ * @property {string=} recent_wakes_coverage
+ */
+
+/** Places declarations live in a sibling to keep the client envelope module within its size band. */
+/** @typedef {import('./place_contract_types.js').PlaceConnectRequest} PlaceConnectRequest */
+/** @typedef {import('./place_contract_types.js').PlaceIcon} PlaceIcon */
+/** @typedef {import('./place_contract_types.js').PlaceReadiness} PlaceReadiness */
+/** @typedef {import('./place_contract_types.js').PlaceSummary} PlaceSummary */
+/** @typedef {import('./place_contract_types.js').PlaceIdentityAccount} PlaceIdentityAccount */
+/** @typedef {import('./place_contract_types.js').PlaceIdentity} PlaceIdentity */
+/** @typedef {import('./place_contract_types.js').PlaceStatusPayload} PlaceStatusPayload */
+/** @typedef {import('./place_contract_types.js').PlaceHistoryAttention} PlaceHistoryAttention */
+/** @typedef {import('./place_contract_types.js').PlaceHistoryImport} PlaceHistoryImport */
+/** @typedef {import('./place_contract_types.js').PlaceHistoryFacts} PlaceHistoryFacts */
+/** @typedef {import('./place_contract_types.js').PlaceDisconnectRequest} PlaceDisconnectRequest */
+/** @typedef {import('./place_contract_types.js').PlaceOwnerAccountRequest} PlaceOwnerAccountRequest */
+/** @typedef {import('./place_contract_types.js').PlaceRoomSummary} PlaceRoomSummary */
+/** @typedef {import('./place_contract_types.js').PlaceRoomsCoverage} PlaceRoomsCoverage */
+/** @typedef {import('./place_contract_types.js').PlaceRoomsResponse} PlaceRoomsResponse */
+/** @typedef {import('./place_contract_types.js').PlaceUpdateRequest} PlaceUpdateRequest */
+
+/**
+ * `POST /api/settings/secret`: exactly one selector, `{key}`, `{mcp_server_id}`, `{mcp_server_id,
+ * header_name}` or `{connection, field}` (an added API key `kind@name` and one of its secret fields).
  * @typedef {Object} SettingsSecretRequest
  * @property {string=} key
  * @property {string=} mcp_server_id
  * @property {string=} header_name
+ * @property {string=} connection
+ * @property {string=} field
  */
 
 /**
@@ -478,9 +676,12 @@
  */
 
 /**
- * `POST /api/projects/{project_id}/update`: rename, the one mutable field.
+ * `POST /api/projects/{project_id}/update`: name, pin or closure; at least one.
+ * `closed`: true closes as owner; false reopens.
  * @typedef {Object} ProjectUpdateRequest
- * @property {string} name
+ * @property {string=} name
+ * @property {boolean=} pinned
+ * @property {boolean=} closed
  */
 
 /**
@@ -650,12 +851,23 @@
  */
 
 /**
+ * The optional body of `POST /api/tasks/{task_id}/resume`: held calls whose outcome is unknown
+ * (a refusal's `acceptable_unknown`) the owner goes on past, and why. Recorded, never re-run.
+ * @typedef {Object} TaskResumeRequest
+ * @property {string[]=} accept_unknown
+ * @property {string=} reason
+ */
+
+/**
  * `POST /api/tasks/{task_id}/resume` after budget, owner, sleep or technical authority pause.
  * @typedef {Object} TaskResumeResponse
  * @property {boolean} ok
  * @property {string} task_id
  * @property {string=} root_task_id
  * @property {('resumed'|'settled')=} late_phase
+ * @property {boolean=} tree_only
+ * @property {boolean=} owner_pause_released
+ * @property {boolean=} snapshot_persisted
  * @property {boolean=} exact_continuation
  * @property {string=} grant_id
  * @property {number=} grant_generation
@@ -664,4 +876,304 @@
  * @property {string[]=} held_siblings
  * @property {string[]=} rebound_held_siblings
  * @property {string=} released_hold
+ * @property {{rows: Array<{task_id: string, reason: string}>, count: number}=} membership_gaps
+ * @property {string=} message
+ */
+
+/* Living-message cards (`ouroboros.gateway.card_contracts`): the `card` / `card_state` frames, the read API
+ * and the pin receipt. Presses go to `POST /api/decisions` with `card:{card_id}:{action_id}`. */
+
+/**
+ * One recorded owner press: `delivery` is `delivered` (the authoring task's mailbox), `forwarded` (the owner's
+ * message after that task ended) or `owed`; `request_id` retries an owed press, after a reload too.
+ * @typedef {Object} CardSubmissionSummary
+ * @property {string} action_id
+ * @property {string} label
+ * @property {string} at
+ * @property {'owed'|'delivered'|'forwarded'} delivery
+ * @property {string} request_id
+ * @property {string=} reason_code  // 'awaiting_recipient_read' until a paused, held or queued author reads it
+ */
+
+/**
+ * A living card in Ouroboros's message; its history row is `msg_type: "card"` with the same `card`.
+ * @typedef {Object} CardOutbound
+ * @property {string=} row_address
+ * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {ChatReplyReference=} reply_to
+ * @property {Object=} relay
+ * @property {string=} reply_to_relay
+ * @property {string=} kind  // ChatReferenceFields' row kind; the card's own kind is card.kind
+ * @property {Object.<string,number>=} room_revisions
+ * @property {'card'} type
+ * @property {'assistant'} role
+ * @property {ChatHistoryCard} card
+ * @property {string} fallback_text
+ * @property {string} ts
+ * @property {number=} chat_id
+ * @property {string=} task_id
+ * @property {boolean=} project_thread
+ */
+
+/**
+ * A shown card changed (a new body: `card.revision` grew; or a recorded press): read `GET /api/cards/{card_id}`.
+ * @typedef {Object} CardStateOutbound
+ * @property {'card_state'} type
+ * @property {ChatHistoryCard} card
+ * @property {CardSubmissionSummary[]} submissions_summary
+ * @property {number} submissions_dropped
+ * @property {string} ts
+ * @property {number=} chat_id
+ */
+
+/**
+ * @typedef {Object} CardWidgetRef
+ * @property {string} skill
+ * @property {string} tab_id
+ * @property {Object=} input
+ */
+
+/**
+ * `url` serves the app's HTML as `text/plain` (nosniff, no-store): build a sandboxed `srcdoc`, never navigate to it.
+ * @typedef {Object} CardAppRef
+ * @property {string} sha256
+ * @property {number} size
+ * @property {string} url
+ */
+
+/**
+ * `GET /api/cards/{card_id}`: exactly one of `components` (with optional `data`), `widget` or `app`.
+ * @typedef {Object} CardResponse
+ * @property {string} card_id
+ * @property {'components'|'widget'|'app'} kind
+ * @property {string} title
+ * @property {string} fallback_text
+ * @property {number} chat_id
+ * @property {string} task_id
+ * @property {number} revision
+ * @property {string} created_at
+ * @property {string} updated_at
+ * @property {boolean} pinned
+ * @property {Object[]=} components
+ * @property {Object=} data
+ * @property {CardWidgetRef=} widget
+ * @property {CardAppRef=} app
+ * @property {CardSubmissionSummary[]} submissions_summary
+ * @property {number} submissions_dropped
+ */
+
+/**
+ * One start the page did not outlive (web/modules/holds.js).
+ * @typedef {Object} UiHold
+ * @property {string} key
+ * @property {string} rev
+ */
+
+/**
+ * @typedef {Object} UiHoldsSurface
+ * @property {boolean=} pywebview
+ * @property {boolean=} telegram
+ */
+
+/**
+ * `POST /api/ui/holds`.
+ * @typedef {Object} UiHoldsRequest
+ * @property {Array<UiHold>} holds
+ * @property {UiHoldsSurface=} surface
+ */
+
+/**
+ * @typedef {Object} UiHoldsResponse
+ * @property {boolean} ok
+ * @property {number} named
+ */
+
+/**
+ * `POST /api/widgets/fault` (`gateway/widgets.py`): one fault a mounted module widget's card shows; identity is
+ * the page's mount, the rest the frame's clipped report.
+ * @typedef {Object} WidgetFaultRequest
+ * @property {string} skill
+ * @property {string} tab_id
+ * @property {string} revision
+ * @property {'board'|'message'} where
+ * @property {'error'|'rejection'|'csp'} kind
+ * @property {string} message
+ * @property {string} source
+ * @property {number} line
+ */
+
+/**
+ * @typedef {Object} WidgetFaultResponse
+ * @property {boolean} ok
+ * @property {boolean} logged
+ */
+
+/**
+ * `POST`/`DELETE /api/cards/{card_id}/pin`.
+ * @typedef {Object} CardPinResponse
+ * @property {boolean} ok
+ * @property {string} card_id
+ * @property {boolean} pinned
+ * @property {string=} pinned_at
+ */
+
+/**
+ * @typedef {Object} CallOpenRequest
+ * @property {number} chat_id
+ * @property {string} client_message_id
+ * @property {string=} feature
+ */
+/**
+ * @typedef {Object} CallOpenResponse
+ * @property {string} call_id
+ * @property {string} ws_path
+ * @property {boolean} vision
+ * @property {boolean=} joined
+ */
+/**
+ * @typedef {Object} CallRefusal
+ * @property {false} ok
+ * @property {string} code
+ * @property {string} error
+ */
+/**
+ * @typedef {Object} ConversationFinishedOutbound
+ * @property {"conversation_finished"} type
+ * @property {number} chat_id
+ * @property {string} call_id
+ * @property {string} task_id
+ * @property {string} reason
+ */
+/**
+ * Separate media socket; control schemas are in GET /api/contract.schemas.
+ * @typedef {Object} CallSocketContract
+ * @property {string} path
+ * @property {string} host_open_path
+ * @property {string} host_peer_path
+ * @property {string} host_auth
+ * @property {number} protocol
+ * @property {string} audio_header
+ * @property {number} audio_header_bytes
+ * @property {number} max_audio_payload_bytes
+ * @property {number} max_video_payload_bytes
+ * @property {number} max_control_bytes
+ * @property {Object.<string,string>} peer_messages
+ * @property {Object.<string,string>} server_messages
+ */
+/**
+ * @typedef {Object} HostCallOpenRequest
+ * @property {'meeting'} role
+ * @property {string=} call_id
+ * @property {string=} binding_id
+ * @property {Object=} event
+ * @property {string=} label
+ * @property {boolean=} mic
+ * @property {boolean=} speaker
+ * @property {boolean=} video
+ */
+/**
+ * @typedef {Object} HostCallOpenResponse
+ * @property {string} call_id
+ * @property {string} peer_path
+ */
+/**
+ * @typedef {Object} CallHello
+ * @property {'hello'} type
+ * @property {1} protocol
+ * @property {'owner'|'meeting'} role
+ * @property {boolean} mic
+ * @property {boolean} speaker
+ * @property {boolean=} video
+ * @property {number} rate
+ * @property {string=} label
+ */
+/**
+ * @typedef {Object} CallMute
+ * @property {'mute'} type
+ * @property {boolean} muted
+ */
+/**
+ * @typedef {Object} CallPlayed
+ * @property {'played'} type
+ * @property {string} item_id
+ * @property {number} played_ms
+ */
+/**
+ * @typedef {Object} CallContext
+ * @property {'context'} type
+ * @property {string} text
+ * @property {string} source
+ */
+/**
+ * @typedef {Object} CallParticipant
+ * @property {'participant'} type
+ * @property {string} label
+ * @property {boolean} speaking
+ */
+/**
+ * @typedef {Object} CallShare
+ * @property {'share'} type
+ * @property {boolean} sharing
+ * @property {'screen'|'camera'} kind
+ */
+/**
+ * @typedef {Object} CallBye
+ * @property {'bye'} type
+ * @property {string=} reason
+ */
+/**
+ * @typedef {Object} CallState
+ * @property {'state'} type
+ * @property {'preparing'|'connecting'|'live'|'reconnecting'|'closing'|'closed'} state
+ * @property {string} reason
+ * @property {string=} engine
+ * @property {string=} phase
+ * @property {string=} detail
+ * @property {'settings'|'retry'=} action
+ */
+/**
+ * @typedef {Object} CallActivity
+ * @property {'activity'} type
+ * @property {'working'|'idle'} activity
+ * @property {string} label
+ */
+/**
+ * @typedef {Object} CallTurn
+ * @property {'turn'} type
+ * @property {'awaiting'|'answering'|'idle'} turn
+ */
+/**
+ * @typedef {Object} CallCaption
+ * @property {'caption'} type
+ * @property {'owner'|'ouroboros'} speaker
+ * @property {string} text
+ * @property {boolean} final
+ * @property {string} item_id
+ * @property {boolean=} replace
+ */
+/**
+ * @typedef {Object} CallFlush
+ * @property {'flush'} type
+ * @property {number} epoch
+ */
+
+/**
+ * @typedef {Object} OwnerSafetyRulesRequest
+ * @property {string} rules
+ */
+
+/**
+ * @typedef {Object} OwnerSafetyRulesResponse
+ * @property {boolean} ok
+ * @property {string} rules
+ */
+
+/**
+ * @typedef {Object} OwnerSafetyModelRequest
+ * @property {Object} settings
+ */
+
+/**
+ * @typedef {Object} OwnerSafetyModelResponse
+ * @property {boolean} ok
  */

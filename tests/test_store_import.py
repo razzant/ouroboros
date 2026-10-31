@@ -79,6 +79,13 @@ def snapshot(root: pathlib.Path) -> dict:
     return files
 
 
+def reconcile_legacy(root):
+    """An owner-requested fresh pass, using the same resumable job as maintenance."""
+    from ouroboros import maintenance_jobs
+    maintenance_jobs.record(root, "legacy_reconcile", state="pending", cursor=None, done=0, total=None)
+    return store_import.run_legacy_reconcile(root, progress=None, should_stop=lambda: False)["root_report"]
+
+
 def meta(root: pathlib.Path, key: str):
     with store.open_store(root, write=False) as txn:
         return txn.meta(key)
@@ -206,7 +213,7 @@ def test_the_cancel_latch_migration_runs_first_so_a_latched_row_is_imported_not_
 def test_the_name_tier_is_recorded_from_the_boot_probe(tmp_path, monkeypatch):
     from ouroboros import platform_layer
 
-    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path: False)
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path, **kw: False)
     root = fixture_root(tmp_path)  # built under the same tier the probe reports (one tier per directory)
     assert ensure_current_store(root, with_children=False)["lock_tier"] == store.TIER_NAME
     assert store.probe(root) == ("present", store.TIER_NAME)
@@ -219,29 +226,135 @@ def test_the_boot_probe_retiers_an_existing_store_both_ways(tmp_path, monkeypatc
     from ouroboros import platform_layer
 
     root = fixture_root(tmp_path)
-    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path: True)
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path, **kw: True)
     assert ensure_current_store(root, with_children=False)["lock_tier"] == store.TIER_ENFORCED
     store.update_task(root, "done1", lambda current: {**current, "db_era": True})
-    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path: False)  # the directory moved to NFS
+    identity = store_import._mount_identity(root / "state")
+    monkeypatch.setattr(store_import, "_mount_identity", lambda path: {**identity, "st_dev": identity["st_dev"] + 1})
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path, **kw: False)  # the directory moved to NFS
     report = ensure_current_store(root, with_children=False)
     assert (report["status"], report["lock_tier"], report["retiered_from"]) == ("unchanged", store.TIER_NAME, store.TIER_ENFORCED)
-    assert store.probe(root) == ("present", store.TIER_NAME) and meta(root, "lock_tier") == store.TIER_NAME
+    assert store.probe(root) == ("present", store.TIER_NAME) and meta(root, "lock_tier")["tier"] == store.TIER_NAME
     assert load(root, "done1")["db_era"] is True and meta(root, "phase") == store.PUBLISHED
     locks: list = []
     real_name_lock = store.name_lock
     monkeypatch.setattr(store, "name_lock", lambda root_, name, **kw: locks.append(name) or real_name_lock(root_, name, **kw))
     store.update_task(root, "done1", lambda current: {**current, "name_era": True})
     assert locks == [store.LOCK_NAME]  # the write went through the name lock: the open mode followed the tier
-    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path: True)  # and back
+    monkeypatch.setattr(store_import, "_mount_identity", lambda path: identity)
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path, **kw: True)  # and back
     report = ensure_current_store(root, with_children=False)
     assert (report["lock_tier"], report["retiered_from"]) == (store.TIER_ENFORCED, store.TIER_NAME)
-    assert store.probe(root) == ("present", store.TIER_ENFORCED) and meta(root, "lock_tier") == store.TIER_ENFORCED
+    assert store.probe(root) == ("present", store.TIER_ENFORCED) and meta(root, "lock_tier")["tier"] == store.TIER_ENFORCED
     locks.clear()
     assert load(root, "done1")["name_era"] is True and locks == []  # kernel locks again: no name lock taken
     assert "retiered_from" not in ensure_current_store(root, with_children=False)
 
 
+_SIBLING_WRITE = """
+import sys
+from ouroboros import store
+with store.open_store(sys.argv[1], write=True) as txn:
+    txn.set_meta("sibling_wrote", True)
+    print(txn.conn.execute("PRAGMA journal_mode").fetchone()[0])
+"""
+
+
+@pytest.mark.parametrize("boot", [False, True], ids=["first_touch", "boot"])
+@pytest.mark.parametrize("body_sha", [None, "b" * 40], ids=["no_body_sha", "body_sha"])
+@pytest.mark.parametrize("before, after", [(store.TIER_ENFORCED, store.TIER_NAME), (store.TIER_NAME, store.TIER_ENFORCED)],
+                         ids=["enforced_to_name", "name_to_enforced"])
+def test_a_boot_retier_leaves_this_process_choosing_the_journal_its_siblings_choose(tmp_path, monkeypatch, before, after,
+                                                                                     boot, body_sha):
+    """A lock-tier re-record converts the file the way an export hands it off, but this process keeps
+    running: its next write keeps the journal a sibling process (a worker) keeps, while this process's
+    cached connection stays open across the sibling's write. Without a boot that is the rollback
+    journal both open with connection-local PERSIST; a boot then chooses this runtime's journal for the
+    new tier (``store_journal``), and both use that. Left in the handed-off set it wrote in DELETE mode
+    for its whole life while the workers chose PERSIST, and on Windows a worker's open PERSIST journal
+    then fails every DELETE commit of the server."""
+    import sys
+
+    from ouroboros import platform_layer
+    from tests.group_run import run_in_group
+
+    root = fixture_root(tmp_path)
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path, **kw: before == store.TIER_ENFORCED)
+    ensure_current_store(root, with_children=False)
+    identity = store_import._mount_identity(root / "state")
+    monkeypatch.setattr(store_import, "_mount_identity", lambda path: {**identity, "st_dev": identity["st_dev"] + 1})
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path, **kw: after == store.TIER_ENFORCED)
+    report = ensure_current_store(root, with_children=False, body_sha=body_sha, initialize_journal=boot)
+    assert report["retiered_from"] == before  # the volume changed
+    expected = store._journal_mode(store.store_path(root), after).lower() if boot else "persist"
+    with store.open_store(root, write=True) as txn:
+        txn.set_meta("server_wrote", True)
+        mine = txn.conn.execute("PRAGMA journal_mode").fetchone()[0]
+    try:
+        sibling = run_in_group([sys.executable, "-c", _SIBLING_WRITE, str(root)], timeout=120,
+                               cwd=str(pathlib.Path(__file__).resolve().parents[1]), env=dict(os.environ))
+    finally:
+        store.close_connections()
+    assert sibling.returncode == 0, sibling.stdout + sibling.stderr
+    assert mine == sibling.stdout.strip().splitlines()[-1] == expected
+
+
 # ---- export -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("initialize_journal", [False, True], ids=["helper", "boot"])
+def test_raced_newer_publication_keeps_older_boot_journal_authority(tmp_path, monkeypatch, initialize_journal):
+    """A newer helper publishes after the old boot's absent probe, before its import lock.
+    Only the explicit boot may demote that WAL file before opening it.
+    """
+    import contextlib
+    import sqlite3
+    import sys
+
+    from tests.group_run import run_in_group
+
+    root = tmp_path / "raced"
+    path = store.store_path(root)
+    path.parent.mkdir(parents=True)
+    if store._journal_mode(path.parent, store.TIER_ENFORCED) != "WAL":
+        pytest.skip("requires a native WAL-eligible SQLite runtime and local filesystem")
+    real_lock = store.name_lock
+    publications = []
+    script = (
+        "import sys; from ouroboros import store, store_import; "
+        "store_import.ensure_current_store(sys.argv[1], with_children=False); "
+        "print(store.wal_file(store.store_path(sys.argv[1]))); store.close_connections()"
+    )
+
+    @contextlib.contextmanager
+    def lock(root_, name, **kwargs):
+        if name == store_import.IMPORT_LOCK_NAME and not publications:
+            result = run_in_group([sys.executable, "-c", script, str(root)], timeout=30,
+                                  cwd=str(pathlib.Path(__file__).resolve().parents[1]), env=dict(os.environ))
+            publications.append(result)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert result.stdout.strip().splitlines()[-1] == "True"
+            assert store.wal_file(path)
+        with real_lock(root_, name, **kwargs):
+            yield
+
+    monkeypatch.setattr(store, "name_lock", lock)
+    # The parent models the older opening runtime; its helper above keeps the
+    # actual eligible SQLite facts in an independent process.
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 50, 4))
+    if initialize_journal:
+        report = ensure_current_store(root, with_children=False, body_sha="raced-body",
+                                      initialize_journal=True)
+        assert report["journal_selected"] and not store.wal_file(path)
+        with store.open_store(root, write=True) as txn:
+            txn.set_meta("after_raced_boot", True)
+            assert txn.meta("last_store_body")["sha"] == "raced-body"
+            assert txn.conn.execute("PRAGMA journal_mode").fetchone()[0] == "persist"
+    else:
+        with pytest.raises(store.StoreError, match="journal is WAL"):
+            ensure_current_store(root, with_children=False, body_sha="raced-body", initialize_journal=False)
+        assert store.wal_file(path)
+    assert len(publications) == 1
 
 def test_the_export_reproduces_every_file_byte_for_byte(tmp_path):
     root = fixture_root(tmp_path)
@@ -287,7 +400,7 @@ def test_derived_set_file_rows_are_never_imported_as_owner_held(tmp_path):
     assert held("delegated_runs") == {"child1": {"task_id": "child1", "closed_runs": {"r9": {"settled": True}}}}
     assert "root1" in held("pending_drives") and held("unknowns") == {"task:x": {"reason": "cancel_latch_migration_failed"}}
     write_result(root, result("fresh2"))  # P6': the old body ran, the set files are re-read
-    assert ensure_current_store(root, with_children=False)["status"] == "reconciled"
+    assert reconcile_legacy(root)["status"] == "reconciled"
     assert held("nonterminal") == held("synthesis") == {} and set(o.members(root, "nonterminal")) == {"root1"}
 
 
@@ -303,13 +416,13 @@ def test_p6_keeps_the_store_only_set_rows_and_moves_only_what_the_old_body_chang
     add_set_member(root, "custody_open", "invocation:old", {"task_id": "root1", "request": {"o": 1}})  # the old body's
     atomic_write_json(set_file_path(root, "unknowns"), {})  # the old body retired task:x
     write_result(root, result("fresh2"))
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert report["status"] == "reconciled" and report["set_rows"] == 2, report
     with store.open_store(root, write=False) as txn:
         assert set(txn.set_rows("custody_open")) == {"run:r1", "invocation:new", "invocation:old"}
         assert txn.set_rows("unknowns") == {}
     write_result(root, result("fresh3"))  # the files unchanged since: nothing moves, the store's rows stand
-    assert ensure_current_store(root, with_children=False)["set_rows"] == 0
+    assert reconcile_legacy(root)["set_rows"] == 0
     with store.open_store(root, write=False) as txn:
         assert set(txn.set_rows("custody_open")) == {"run:r1", "invocation:new", "invocation:old"}
 
@@ -361,14 +474,14 @@ def test_p6_applies_the_custody_events_an_old_body_appended_after_the_boundary_o
     append_jsonl(path, {"ts": "2026-01-02T00:00:01+00:00", "type": c.START_REQUESTED, "invocation_id": "inv-z",
                         "task_id": "root1", "request": {"p": 1}})
     write_result(root, result("fresh2"))
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert report["status"] == "reconciled" and report["legacy_custody"] == 2, report
     runs = c.replay(root)
     assert runs["run-a"].settled and runs["run-a"].cost_usd == 0.25 and not runs["run-b"].settled
     assert [row["invocation_id"] for row in c.pending_invocations(root)] == ["inv-z"]
     assert sorted(run.run_id for run in c.open_runs(root)) == ["run-b"]
     write_result(root, result("fresh3"))
-    assert ensure_current_store(root, with_children=False)["legacy_custody"] == 0  # the boundary moved past them
+    assert reconcile_legacy(root)["legacy_custody"] == 0  # the boundary moved past them
     with store.open_store(root, write=False) as txn:
         assert txn.meta(CHAIN_BOUNDARY) == path.stat().st_size
 
@@ -395,9 +508,10 @@ def test_the_export_writes_the_whole_document_once_fields_live_in_rows(tmp_path)
         body = json.loads(txn.body_text("done1"))
         assert body["launch_handoffs"] == {} and body["model_waits"] == {}  # the keys keep their place, emptied
         assert txn.handoffs("done1") == {"launch_handoffs": {"op1": claim}, "model_waits": {},
-                                         "retired_model_consumers": {}}
+                                         "retired_model_consumers": {}, "swarm_fanouts": {}}
         assert txn.load("done1")["launch_handoffs"] == {"op1": claim}
         assert "retired_model_consumers" not in txn.load("done1")  # a key the file lacked stays absent
+        assert "swarm_fanouts" not in txn.load("done1")
     for task_id in ("root1", "child1", "done1"):
         task_result_path(root, task_id).unlink()
     export_facts(root)
@@ -450,34 +564,34 @@ def test_a_changed_file_replaces_its_row_and_a_touched_file_does_not(tmp_path):
     ensure_current_store(root, with_children=False)
     path = task_result_path(root, "done1")
     os.utime(path, ns=(1, 1))  # timestamps alone prove nothing
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert reconcile_legacy(root)["status"] == "unchanged"
     atomic_write_json(path, result("done1", "completed", note="an old body wrote this"))
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert report["status"] == "reconciled" and report["changed"] == 1 and report["conflicts"] == 0
     assert load(root, "done1")["note"] == "an old body wrote this"
     assert meta(root, "baseline")["done1"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert reconcile_legacy(root)["status"] == "unchanged"
 
 
 def test_the_reconciliation_reads_only_stat_changed_files_and_compares_them_by_content(tmp_path, monkeypatch):
     root = fixture_root(tmp_path)
-    ensure_current_store(root, with_children=False)
+    ensure_current_store(root)  # publish children before measuring the whole-tree maintenance pass
     read: list = []
     real_read = store_import._read_result
     monkeypatch.setattr(store_import, "_read_result", lambda path: read.append(path.stem) or real_read(path))
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert reconcile_legacy(root)["status"] == "unchanged"
     assert read == []  # the budget: one listing plus one stat per file, no reads while nothing moved
     path = task_result_path(root, "done1")
     os.utime(path, ns=(5, 5))  # touched, same bytes: read once, compared by digest, the stored stat refreshed
     touched_mtime = path.stat().st_mtime_ns  # the filesystem may round to its own resolution
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert reconcile_legacy(root)["status"] == "unchanged"
     assert read == ["done1"] and meta(root, "baseline")["done1"]["mtime_ns"] == touched_mtime
     read.clear()
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged" and read == []
+    assert reconcile_legacy(root)["status"] == "unchanged" and read == []
     text = path.read_text(encoding="utf-8")
     assert json.loads(text)["status"] == "failed" and text.count('"failed"') == 1
     path.write_text(text.replace('"failed"', '"passed"'), encoding="utf-8")  # same length, new mtime, any JSON layout
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert report["status"] == "reconciled" and report["changed"] == 1 and read == ["done1"]
     assert load(root, "done1")["status"] == "passed"
 
@@ -503,7 +617,7 @@ def test_a_read_error_aborts_the_import_typed_and_stamps_nothing(tmp_path, monke
     os.utime(task_result_path(root, "done1"), ns=(7, 7))
     monkeypatch.setattr(pathlib.Path, "read_bytes", exhausted)
     with pytest.raises(store.StoreBusy):
-        ensure_current_store(root, with_children=False)
+        reconcile_legacy(root)
     monkeypatch.setattr(pathlib.Path, "read_bytes", real_read_bytes)
     assert load(root, "done1")["status"] == "failed"
 
@@ -513,7 +627,7 @@ def test_a_new_file_is_imported_and_a_deleted_file_moves_its_row_to_quarantine(t
     ensure_current_store(root, with_children=False)
     write_result(root, result("fresh1"))
     task_result_path(root, "child1").unlink()
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert (report["new"], report["deleted"]) == (1, 1)
     assert load(root, "fresh1")["status"] == "completed" and load(root, "child1") is None
     copies = list((root / "task_results" / "quarantine").glob("child1.deleted-*.json"))
@@ -528,14 +642,14 @@ def test_a_row_changed_on_both_sides_lets_the_file_win_and_keeps_the_db_version(
     ensure_current_store(root, with_children=False)
     store.update_task(root, "done1", lambda current: {**current, "db_side": True})
     atomic_write_json(task_result_path(root, "done1"), result("done1", "completed", file_side=True))
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert report["conflicts"] == 1
     assert load(root, "done1") == result("done1", "completed", file_side=True)
     conflict = meta(root, "conflicts")["done1"]
     assert json.loads(conflict["db_body"])["db_side"] is True
     # a db-only change with an untouched file is kept (no conflict, no replacement)
     store.update_task(root, "child1", lambda current: {**current, "db_only": True})
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert reconcile_legacy(root)["status"] == "unchanged"
     assert load(root, "child1")["db_only"] is True
 
 
@@ -555,7 +669,7 @@ def test_p6_compares_and_preserves_the_whole_projected_document(tmp_path):
     atomic_write_json(task_result_path(root, "done1"), result("done1", "failed", launch_handoffs={"op1": claim}, file_side=True))
     atomic_write_json(task_result_path(root, "child1"), result("child1", "completed", launch_handoffs={"op1": claim}, file_side=True))
     task_result_path(root, "root1").unlink()
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert (report["changed"], report["deleted"], report["conflicts"]) == (2, 1, 1), report
     conflict = meta(root, "conflicts")["done1"]
     assert set(json.loads(conflict["db_body"])["launch_handoffs"]) == {"op1", "op2"}
@@ -564,12 +678,12 @@ def test_p6_compares_and_preserves_the_whole_projected_document(tmp_path):
     copies = list((root / "task_results" / "quarantine").glob("root1.deleted-*.json"))
     assert len(copies) == 1 and json.loads(copies[0].read_text(encoding="utf-8"))["task_id"] == "root1"
     write_result(root, result("fresh2", launch_handoffs={"op1": claim}))
-    ensure_current_store(root, with_children=False)
+    reconcile_legacy(root)
     with store.open_store(root, write=True) as txn:
         txn.put_handoff("fresh2", "launch_handoffs", "op2", claim)
         txn.touch("fresh2")
     task_result_path(root, "fresh2").unlink()
-    ensure_current_store(root, with_children=False)
+    reconcile_legacy(root)
     copies = list((root / "task_results" / "quarantine").glob("fresh2.deleted-*.json"))
     assert len(copies) == 1 and set(json.loads(copies[0].read_text(encoding="utf-8"))["launch_handoffs"]) == {"op1", "op2"}
 
@@ -594,10 +708,10 @@ def test_a_refused_or_quarantined_identity_stays_occupied_for_strict_reads_and_c
         assert load(root, task_id) is None
     assert write_task_result(root, "fresh9", "scheduled", create_only=True, strict_existing_dict=True)["status"] == "scheduled"
     write_result(root, result("legacy", "completed"))  # the old body wrote an admissible file under the identity
-    assert ensure_current_store(root, with_children=False)["new"] == 1
+    assert reconcile_legacy(root)["new"] == 1
     assert load_task_result(root, "legacy", strict=True)["status"] == "completed"
     atomic_write_json(task_result_path(root, "done1"), {"task_id": "done1", "status": "completed"})  # unstamped: quarantined at P6'
-    assert ensure_current_store(root, with_children=False)["quarantined"] == 1
+    assert reconcile_legacy(root)["quarantined"] == 1
     with pytest.raises(ValueError, match="unreadable or invalid"):
         write_task_result(root, "done1", "scheduled", create_only=True, strict_existing_dict=True)
 
@@ -606,11 +720,11 @@ def test_set_file_edits_alone_are_not_detected_but_follow_a_result_change(tmp_pa
     root = fixture_root(tmp_path)
     ensure_current_store(root, with_children=False)
     add_set_member(root, "custody_open", "run:r2", {"task_id": "done1"})
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"  # the named limit
+    assert reconcile_legacy(root)["status"] == "unchanged"  # the named limit
     with store.open_store(root, write=False) as txn:
         assert "run:r2" not in txn.set_rows("custody_open")
     write_result(root, result("fresh2"))
-    ensure_current_store(root, with_children=False)
+    reconcile_legacy(root)
     with store.open_store(root, write=False) as txn:
         assert "run:r2" in txn.set_rows("custody_open")
 
@@ -620,7 +734,7 @@ def test_an_inadmissible_changed_file_is_quarantined_with_its_row(tmp_path):
     ensure_current_store(root, with_children=False)
     path = task_result_path(root, "done1")
     path.write_text("{not json", encoding="utf-8")
-    report = ensure_current_store(root, with_children=False)
+    report = reconcile_legacy(root)
     assert report["quarantined"] == 1 and load(root, "done1") is None
     assert not path.exists() and (root / "task_results" / "quarantine" / "done1.json").exists()
 

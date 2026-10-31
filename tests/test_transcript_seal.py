@@ -1,4 +1,6 @@
-"""Tests for seal_task_transcript — transcript cache-boundary sealing."""
+"""Tests for seal_task_transcript — the one message-side cache boundary."""
+
+import copy
 
 from ouroboros.loop import seal_task_transcript
 from ouroboros.loop_messages import _extract_plain_text_from_content
@@ -8,11 +10,11 @@ from ouroboros.loop_messages import _extract_plain_text_from_content
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _tool_msg(text: str, call_id: str = "tc1") -> dict:
+def _tool_msg(text, call_id: str = "tc1") -> dict:
     return {"role": "tool", "tool_call_id": call_id, "content": text}
 
 
-def _user_msg(text: str = "hi") -> dict:
+def _user_msg(text="hi") -> dict:
     return {"role": "user", "content": text}
 
 
@@ -29,11 +31,16 @@ def _make_messages(n_tool_rounds: int, prefix_per_tool: int = 3000) -> list:
     return msgs
 
 
-def _sealed_indices(messages: list) -> list:
-    return [
-        i for i, m in enumerate(messages)
-        if m.get("role") == "tool" and isinstance(m.get("content"), list)
-    ]
+def _marked(messages: list) -> list:
+    """Rows carrying the seal's host-only mark, a message-level ``cache_control``."""
+    return [i for i, m in enumerate(messages) if "cache_control" in m]
+
+
+def _unmarked(messages: list) -> list:
+    return [{key: value for key, value in m.items() if key != "cache_control"} for m in messages]
+
+
+_IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -54,73 +61,53 @@ def test_extract_plain_text_none():
 
 
 # ─────────────────────────────────────────────────────────────
-# seal_task_transcript — basic cases
+# seal_task_transcript — the newest row with text (#596, #1186)
 # ─────────────────────────────────────────────────────────────
 
-def test_no_seal_when_not_enough_tool_rounds():
-    """With <= keep_active tool rounds, nothing is sealed on a tool message."""
-    msgs = _make_messages(n_tool_rounds=5, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    assert _sealed_indices(msgs) == []
+def test_the_newest_tool_result_is_the_boundary_without_a_lag():
+    """No tool result waits outside the cached prefix, whatever the round count."""
+    for rounds in (1, 3, 5, 6, 7):
+        msgs = _make_messages(n_tool_rounds=rounds)
+        seal_task_transcript(msgs, min_prefix_tokens=100)
+        assert _marked(msgs) == [len(msgs) - 1]
 
 
-def test_seal_appears_with_sufficient_rounds_and_prefix():
-    """Seal appears when there are more than keep_active tool rounds and prefix is large."""
-    msgs = _make_messages(n_tool_rounds=7, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    sealed = _sealed_indices(msgs)
-    assert len(sealed) == 1
+def test_the_mark_is_host_only_and_every_row_keeps_its_exact_content():
+    msgs = _make_messages(n_tool_rounds=7)
+    before = copy.deepcopy(msgs)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert msgs[-1]["cache_control"] == {"type": "ephemeral"}
+    assert _unmarked(msgs) == before
 
 
-def test_no_seal_when_prefix_too_short():
-    """No seal when prefix tokens are below min_prefix_tokens."""
-    msgs = _make_messages(n_tool_rounds=7, prefix_per_tool=1)
-    # Each tool result is 1 char → prefix will be tiny
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=2048)
-    assert _sealed_indices(msgs) == []
+def test_tool_free_rows_advance_the_boundary():
+    """A clock line and owner words are the newest rows with text; an answer never is."""
+    msgs = _make_messages(n_tool_rounds=2)
+    msgs += [_user_msg("[Host clock at this request: 2026-10-21T00:00:00Z UTC]"), _assistant_msg("done")]
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert _marked(msgs) == [len(msgs) - 2]
+    msgs.append(_user_msg("owner: one more thing"))
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert _marked(msgs) == [len(msgs) - 1]
 
 
-def test_sealed_message_has_cache_control():
-    """Sealed message has cache_control in its content block."""
-    msgs = _make_messages(n_tool_rounds=7, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    idx = _sealed_indices(msgs)[0]
-    content = msgs[idx]["content"]
-    assert isinstance(content, list)
-    assert len(content) == 1
-    assert content[0]["type"] == "text"
-    assert "cache_control" in content[0]
-    assert content[0]["cache_control"]["type"] == "ephemeral"
+def test_empty_opaque_and_textless_rows_fall_back_to_an_earlier_text_row():
+    msgs = _make_messages(n_tool_rounds=2)
+    anchor = len(msgs) - 1
+    msgs += [_assistant_msg(), _tool_msg("", "empty"), _tool_msg("   ", "blank"),
+             _tool_msg([{"type": "text", "text": "shot"}, _IMAGE], "opaque"),
+             _user_msg([_IMAGE]), _user_msg("   "), _assistant_msg("answer")]
+    before = copy.deepcopy(msgs)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert _marked(msgs) == [anchor]
+    assert _unmarked(msgs) == before  # an empty output stays exact: padding belongs to the send copy
 
 
-def test_sealed_text_matches_original():
-    """Sealed message text is identical to the original tool result.
-
-    With keep_active=5 and 7 total tool rounds, the seal boundary is
-    tool_indices[-(5+1)] = tool_indices[-6] = the 2nd tool result (tc1).
-    """
-    boundary_text = "BOUNDARY_RESULT_" * 200  # the message that will be sealed
-    msgs = [
-        _user_msg("start" * 200),
-        _assistant_msg(),
-        _tool_msg("x" * 3000, "tc0"),   # index -7, older than boundary
-        _assistant_msg(),
-        _tool_msg(boundary_text, "tc1"), # index -6, this is the seal boundary
-        _assistant_msg(),
-        _tool_msg("x" * 3000, "tc2"),
-        _assistant_msg(),
-        _tool_msg("x" * 3000, "tc3"),
-        _assistant_msg(),
-        _tool_msg("x" * 3000, "tc4"),
-        _assistant_msg(),
-        _tool_msg("x" * 3000, "tc5"),
-        _assistant_msg(),
-        _tool_msg("x" * 3000, "tc6"),
-    ]
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    sealed = _sealed_indices(msgs)
-    assert len(sealed) == 1
-    assert msgs[sealed[0]]["content"][0]["text"] == boundary_text
+def test_a_multipart_user_row_with_text_is_the_boundary_and_keeps_its_blocks():
+    msgs = _make_messages(n_tool_rounds=2) + [_user_msg([{"type": "text", "text": "look"}, _IMAGE])]
+    before = copy.deepcopy(msgs)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert _marked(msgs) == [len(msgs) - 1] and _unmarked(msgs) == before
 
 
 # ─────────────────────────────────────────────────────────────
@@ -129,46 +116,41 @@ def test_sealed_text_matches_original():
 
 def test_seal_rotates_forward_on_second_call():
     """When new tool rounds are added, the seal boundary advances."""
-    msgs = _make_messages(n_tool_rounds=7, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    first_sealed_idx = _sealed_indices(msgs)[0]
+    msgs = _make_messages(n_tool_rounds=7)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    first_sealed_idx = _marked(msgs)[0]
 
-    # Add one more tool round
     msgs.append(_assistant_msg("new round"))
     msgs.append(_tool_msg("new_result" * 500, call_id="tc_new"))
 
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    second_sealed_idx = _sealed_indices(msgs)[0]
-    assert second_sealed_idx > first_sealed_idx
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert _marked(msgs) == [len(msgs) - 1] and len(msgs) - 1 > first_sealed_idx
 
 
 def test_previous_seal_reverted_on_recompute():
-    """After a second call, the previously sealed message is plain string again."""
-    msgs = _make_messages(n_tool_rounds=7, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    first_sealed_idx = _sealed_indices(msgs)[0]
+    """After a second call, the previous boundary row is exactly as it was produced."""
+    msgs = _make_messages(n_tool_rounds=7)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    first_sealed_idx = _marked(msgs)[0]
+    produced = _unmarked([msgs[first_sealed_idx]])[0]
 
-    # Add a new round so the seal boundary should move
     msgs.append(_assistant_msg("new"))
     msgs.append(_tool_msg("new_data" * 500, call_id="tc_new"))
+    seal_task_transcript(msgs, min_prefix_tokens=100)
 
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-
-    # The previously sealed message must now be a plain string
-    assert isinstance(msgs[first_sealed_idx]["content"], str)
+    assert msgs[first_sealed_idx] == produced
 
 
 def test_only_one_sealed_boundary_at_a_time():
-    """There is at most one sealed tool message at any point."""
-    msgs = _make_messages(n_tool_rounds=10, prefix_per_tool=3000)
-    # Call twice to simulate two consecutive LLM rounds
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    assert len(_sealed_indices(msgs)) <= 1
+    """There is exactly one marked row at any point."""
+    msgs = _make_messages(n_tool_rounds=10)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert len(_marked(msgs)) == 1
 
 
 # ─────────────────────────────────────────────────────────────
-# seal_task_transcript — compaction safety
+# seal_task_transcript — send copies and compaction safety
 # ─────────────────────────────────────────────────────────────
 
 def test_strip_cache_control_flattens_tool_role_list_to_string():
@@ -218,22 +200,47 @@ def test_anthropic_messages_pass_through_list_content_for_tool_result():
     assert tool_result_block["content"] == sealed_content
 
 
+def test_marker_routes_render_the_mark_only_in_their_send_copy():
+    """A marker route's copy draws the block marker where the old in-place seal put it
+    (a tool result's one text block, nested in ``tool_result.content`` on the direct
+    lane); a marker-free copy drops the mark; the transcript itself never changes."""
+    from ouroboros.llm import LLMClient
+    msgs = [_user_msg("start"), {"role": "assistant", "content": None, "tool_calls": [{
+        "id": "tc1", "type": "function", "function": {"name": "my_tool", "arguments": "{}"}}]},
+        _tool_msg("sealed data")]
+    seal_task_transcript(msgs, min_prefix_tokens=0)
+    before = copy.deepcopy(msgs)
+    marked = [{"type": "text", "text": "sealed data", "cache_control": {"type": "ephemeral"}}]
+    copied = LLMClient._copy_messages_with_cache_policy(
+        msgs, allow_message_cache_control=True, flatten_tool_content_blocks=False)
+    plain = LLMClient._copy_messages_with_cache_policy(
+        msgs, allow_message_cache_control=False, flatten_tool_content_blocks=True)
+    _, direct = LLMClient()._build_anthropic_messages(msgs)
+    assert copied[2] == {"role": "tool", "tool_call_id": "tc1", "content": marked}
+    assert plain[2] == {"role": "tool", "tool_call_id": "tc1", "content": "sealed data"}
+    assert direct[-1]["content"] == [{"type": "tool_result", "tool_use_id": "tc1", "content": marked}]
+    assert msgs == before
+
+
 def test_claudexor_send_copy_is_stable_when_rolling_seal_moves():
-    """The subscription projection normalizes both sides of a seal move."""
+    """The subscription projection drops the mark: each request extends the last one."""
+    import json
+
     from ouroboros.llm_claudexor import _request
 
     target = {"source": "codex", "resolved_model": "model"}
     parameters = {"model_account_override": ""}
     messages = _make_messages(n_tool_rounds=7, prefix_per_tool=3000)
-    seal_task_transcript(messages, keep_active=5, min_prefix_tokens=100)
+    seal_task_transcript(messages, min_prefix_tokens=100)
     first = _request(target, messages, None, parameters)["messages"]
 
     messages.append(_assistant_msg("new round"))
     messages.append(_tool_msg("new_result" * 500, call_id="tc_new"))
-    seal_task_transcript(messages, keep_active=5, min_prefix_tokens=100)
+    seal_task_transcript(messages, min_prefix_tokens=100)
     second = _request(target, messages, None, parameters)["messages"]
 
     assert second[:len(first)] == first
+    assert "cache_control" not in json.dumps(second)
 
 
 def test_claudexor_send_copy_preserves_nontext_tool_blocks():
@@ -253,93 +260,98 @@ def test_claudexor_send_copy_preserves_nontext_tool_blocks():
 
 
 def test_compaction_receives_plain_strings():
-    """After seal + revert cycle, all tool messages are plain strings (safe for compaction)."""
+    """Across seals every tool message stays a plain string, the boundary row included."""
     msgs = _make_messages(n_tool_rounds=8, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
 
-    # Simulate a new round and re-seal (which reverts previous seal)
     msgs.append(_assistant_msg("another"))
     msgs.append(_tool_msg("more_data" * 300, call_id="tc_extra"))
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
 
-    # All tool messages except the current seal boundary should be plain strings
-    sealed = set(_sealed_indices(msgs))
-    for i, m in enumerate(msgs):
-        if m.get("role") == "tool" and i not in sealed:
-            assert isinstance(m["content"], str), f"Tool msg at {i} is not a plain string"
+    assert all(isinstance(m["content"], str) for m in msgs if m.get("role") == "tool")
 
 
 # ─────────────────────────────────────────────────────────────
-# seal_task_transcript — the task-message anchor (short transcripts)
+# seal_task_transcript — the task-message anchor and older transcripts
 # ─────────────────────────────────────────────────────────────
 
-def _task_message_markers(messages: list) -> list:
-    first_user = next((m for m in messages if m.get("role") == "user"), None)
-    content = (first_user or {}).get("content")
-    if not isinstance(content, list):
-        return []
-    return [b for b in content if isinstance(b, dict) and b.get("cache_control")]
-
-
-def test_short_transcript_anchors_the_prefix_on_the_task_message():
-    """Below the rolling-seal threshold the task message carries the one marker."""
-    msgs = _make_messages(n_tool_rounds=3, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-
-    assert _sealed_indices(msgs) == []
-    assert len(_task_message_markers(msgs)) == 1
-    assert _task_message_markers(msgs)[0]["text"].startswith("start")
+def test_a_lone_task_message_is_the_anchor_and_keeps_its_shape():
+    msgs = _make_messages(n_tool_rounds=0)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
+    assert _marked(msgs) == [0] and msgs[0]["content"] == "start" * 100
 
 
 def test_qualifying_rolling_seal_migrates_the_marker_in_the_same_call():
     """Exactly one message-side marker exists across the migration."""
-    msgs = _make_messages(n_tool_rounds=3, prefix_per_tool=3000)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
-    assert len(_task_message_markers(msgs)) == 1
+    msgs = _make_messages(n_tool_rounds=3, prefix_per_tool=4)
+    seal_task_transcript(msgs, min_prefix_tokens=1000)
+    assert _marked(msgs) == [0]
 
     msgs.append(_assistant_msg("round 3"))
-    msgs.append(_tool_msg("x" * 3000, call_id="tc3"))
-    msgs.append(_assistant_msg("round 4"))
-    msgs.append(_tool_msg("x" * 3000, call_id="tc4"))
-    msgs.append(_assistant_msg("round 5"))
-    msgs.append(_tool_msg("x" * 3000, call_id="tc5"))
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+    msgs.append(_tool_msg("x" * 4000, call_id="tc3"))
+    seal_task_transcript(msgs, min_prefix_tokens=1000)
 
-    assert len(_sealed_indices(msgs)) == 1
-    assert _task_message_markers(msgs) == []
+    assert _marked(msgs) == [len(msgs) - 1]
 
 
 def test_an_unqualified_prefix_keeps_the_task_message_anchor():
-    """A tool count that qualifies but a prefix too small keeps one marker."""
+    """A newer row with text but a prefix too small keeps one marker on the task."""
     msgs = _make_messages(n_tool_rounds=7, prefix_per_tool=4)
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100_000)
+    seal_task_transcript(msgs, min_prefix_tokens=100_000)
 
-    assert _sealed_indices(msgs) == []
-    assert len(_task_message_markers(msgs)) == 1
+    assert _marked(msgs) == [0]
 
 
 def test_blank_task_message_is_never_the_cache_anchor():
     """Anthropic rejects a marker on empty text; leave it unmarked instead."""
     msgs = [_user_msg("   "), _assistant_msg("a"), _tool_msg("out", call_id="tc0")]
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+    seal_task_transcript(msgs, min_prefix_tokens=100)
 
-    assert _task_message_markers(msgs) == []
+    assert _marked(msgs) == []
     assert msgs[0]["content"] == "   "
 
 
 def test_the_anchor_lands_on_the_last_non_empty_text_block():
-    """A multipart task message keeps its later blocks cacheable too."""
-    msgs = [
-        {"role": "user", "content": [
-            {"type": "text", "text": "task"},
-            {"type": "text", "text": "contract"},
-            {"type": "text", "text": "   "},
-        ]},
-        _assistant_msg("a"),
-        _tool_msg("out", call_id="tc0"),
-    ]
-    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+    """A multipart task message keeps its later blocks cacheable too, on every marker route."""
+    from ouroboros.llm import LLMClient
+    blocks = [{"type": "text", "text": "task"}, {"type": "text", "text": "contract"}, {"type": "text", "text": "   "}]
+    msgs = [_user_msg(copy.deepcopy(blocks)), _assistant_msg("a"), _tool_msg("out", call_id="tc0")]
+    seal_task_transcript(msgs, min_prefix_tokens=100)
 
-    markers = _task_message_markers(msgs)
-    assert len(markers) == 1
-    assert markers[0]["text"] == "contract"
+    assert _marked(msgs) == [0] and msgs[0]["content"] == blocks
+    copied = LLMClient._copy_messages_with_cache_policy(
+        msgs, allow_message_cache_control=True, flatten_tool_content_blocks=False)
+    _, direct = LLMClient()._build_anthropic_messages(msgs)
+    for content in (copied[0]["content"], direct[0]["content"]):
+        assert [block["text"] for block in content if "cache_control" in block] == ["contract"]
+
+
+def test_an_old_in_place_seal_is_undone_without_another_shape_change():
+    """A transcript the old seal wrapped (restored from a checkpoint): the tool row flattens
+    to its exact text, the block-list task message keeps its list and its affinity, an opaque
+    row stays exact, and the one mark moves to the newest text row."""
+    from ouroboros.llm import LLMClient
+    marker = {"type": "ephemeral"}
+    cited = [{"type": "text", "text": "cited", "citations": [{"url": "https://example.invalid"}]}]
+    msgs = [{"role": "system", "content": [{"type": "text", "text": "stable policy", "cache_control": marker}]},
+            {"role": "user", "content": [{"type": "text", "text": "task", "cache_control": marker}]},
+            _assistant_msg(), _tool_msg([{"type": "text", "text": "old seal", "cache_control": marker}], "t0"),
+            _assistant_msg(), _tool_msg(copy.deepcopy(cited), "t1")]
+    session = LLMClient._openrouter_session_identity("anthropic/claude-fable-5", msgs)
+    seal_task_transcript(msgs, min_prefix_tokens=0)
+
+    assert msgs[1]["content"] == [{"type": "text", "text": "task"}]
+    assert msgs[3]["content"] == "old seal" and msgs[5]["content"] == cited
+    assert _marked(msgs) == [3]
+    assert session and LLMClient._openrouter_session_identity("anthropic/claude-fable-5", msgs) == session
+
+
+def test_a_caller_declared_marker_on_a_later_row_is_left_in_place():
+    from ouroboros.tools.review_helpers import cached_prompt_blocks
+    declared = cached_prompt_blocks("stable review contract", "this round's evidence", ttl="1h")
+    msgs = [_user_msg("task"), _assistant_msg(), _user_msg(copy.deepcopy(declared)),
+            _assistant_msg(), _tool_msg("result")]
+    seal_task_transcript(msgs, min_prefix_tokens=0)
+
+    assert msgs[2]["content"] == declared
+    assert _marked(msgs) == [4]

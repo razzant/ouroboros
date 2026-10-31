@@ -5,6 +5,19 @@ from __future__ import annotations
 import json
 import pathlib
 
+from tests import _dialogue as dialogue_test
+
+_RECENT = json.dumps({"chat_id": 1, "direction": "in", "text": "complete recent chat"})
+
+
+def _chain(tmp_path, rows):
+    """The older install's live chat chain, written once (a legacy cursor signs these exact bytes);
+    the dialogue import reads it before any context is built."""
+    chat = tmp_path / "logs" / "chat.jsonl"
+    if not chat.exists():
+        dialogue_test.seed(tmp_path, live={"chat": [row + "\n" for row in rows]})
+    return chat
+
 
 def test_closed_objective_before_old_horizon_reaches_chooser(tmp_path, monkeypatch):
     from ouroboros import post_task_evolution as pte
@@ -28,7 +41,7 @@ def test_closed_objective_before_old_horizon_reaches_chooser(tmp_path, monkeypat
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed", fake_chat)
     monkeypatch.setattr(pte, "_active_campaign_objective", lambda: "")
     env = type("Env", (), {"drive_root": tmp_path})()
-    decision = pte._decide_promotion(env, {"id": "root"}, None, object(), force=False)
+    decision = pte._decide_promotion(env, {"id": "root"}, None, object())
     assert decision and decision["promote"] is False
     assert old_objective in captured["prompt"]
 
@@ -56,7 +69,7 @@ def test_closed_objective_unavailable_abstains_before_chooser(tmp_path, monkeypa
 
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed", chooser)
     env = type("Env", (), {"drive_root": tmp_path})()
-    assert pte._decide_promotion(env, {"id": "root"}, None, object(), force=False) is None
+    assert pte._decide_promotion(env, {"id": "root"}, None, object()) is None
     assert called == []
 
 
@@ -90,8 +103,8 @@ def _wake_context(tmp_path, *, chat_rows=None):
     (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
     if not (tmp_path / "state" / "state.json").exists():
         (tmp_path / "state" / "state.json").write_text("{}", encoding="utf-8")
-    rows = chat_rows if chat_rows is not None else [json.dumps({"chat_id": 1, "direction": "in", "text": "complete recent chat"})]
-    (tmp_path / "logs" / "chat.jsonl").write_text("".join(row + "\n" for row in rows), encoding="utf-8")
+    _chain(tmp_path, chat_rows if chat_rows is not None else [_RECENT])
+    dialogue_test.import_all(tmp_path)
     task = {"id": "wake1", "type": "task", "text": "[Wake-up · heartbeat]", "_is_direct_chat": True,
             "metadata": {"initiator": "consciousness", "usage_category": "consciousness",
                          "consciousness_autonomy": "act"}}
@@ -129,11 +142,8 @@ def _legacy_memory(tmp_path, block):
     """One legacy block covering the one chat row, with the old cursor after it: no cursor gap."""
     from ouroboros.utils import jsonl_generation_signature
 
-    for name in ("memory", "logs"):
-        (tmp_path / name).mkdir(parents=True, exist_ok=True)
-    chat = tmp_path / "logs" / "chat.jsonl"
-    chat.write_text(json.dumps({"chat_id": 1, "direction": "in", "text": "complete recent chat"}) + "\n",
-                    encoding="utf-8")  # the same bytes _wake_context writes
+    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+    chat = _chain(tmp_path, [_RECENT])  # the same bytes _wake_context reads
     (tmp_path / "memory" / "dialogue_blocks.json").write_text(json.dumps([{
         "ts": "2026-08-21T00:00:00Z", "source": "consolidator", "message_count": 1, **block,
     }]), encoding="utf-8")
@@ -169,4 +179,5 @@ def test_wake_context_discloses_a_durable_dialogue_gap(tmp_path):
 def test_wake_context_discloses_an_omitted_schedule_count(tmp_path):
     _write_schedules(tmp_path, 9)
     context = _wake_context(tmp_path)
-    assert '"omitted_count": 1' in context
+    runtime = json.loads(context.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
+    assert runtime["scheduled_tasks"]["omitted_count"] == 1

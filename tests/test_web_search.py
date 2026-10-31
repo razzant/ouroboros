@@ -19,6 +19,13 @@ from ouroboros.tools.search import _web_search
 from tests._usage_store_testing import ledger_rows
 
 
+@pytest.fixture(autouse=True)
+def _anthropic_sdk_present(monkeypatch):
+    """These tests fake the Anthropic search call; the helper still imports the optional
+    SDK first, so its presence is chosen here, not inherited from the interpreter."""
+    monkeypatch.setitem(sys.modules, "anthropic", sys.modules.get("anthropic") or types.ModuleType("anthropic"))
+
+
 # ---------------------------------------------------------------------------
 # Shared streaming fixtures
 # ---------------------------------------------------------------------------
@@ -411,13 +418,19 @@ def test_streaming_emits_progress_on_search(ctx, patch_env, mock_openai):
                     item_id="m1", output_index=1, sequence_number=4, logprobs=[]),
         _make_completed_event(200, 80),
     ]
-    mock_openai.responses.create.return_value = _FakeStream(events)
+    order = []
+    ctx.emit_progress_fn.side_effect = lambda text: order.append(text)
+
+    def create(**kwargs):
+        order.append("<dispatch>")
+        return _FakeStream(events)
+
+    mock_openai.responses.create.side_effect = create
 
     result = _web_search(ctx, "test query")
 
-    ctx.emit_progress_fn.assert_called_once()
-    call_text = ctx.emit_progress_fn.call_args[0][0]
-    assert "test query" in call_text
+    # The attempt is said before dispatch; only the stream's own web_search_call is search evidence.
+    assert order == ["🔍 Trying OpenAI web search: test query", "<dispatch>", "🔍 Searching: test query"]
 
     data = json.loads(result)
     assert data["answer"] == "Hello world"
@@ -526,11 +539,11 @@ def test_streaming_sanitizes_progress_and_cited_sources(ctx, patch_env, mock_ope
 
     result = json.loads(_web_search(ctx, f"query {leaked_secret}"))
 
-    progress_text = ctx.emit_progress_fn.call_args[0][0]
+    rows = [call.args[0] for call in ctx.emit_progress_fn.call_args_list]
     serialized = json.dumps(result)
-    assert leaked_secret not in progress_text
+    assert [row.split(":")[0] for row in rows] == ["🔍 Trying OpenAI web search", "🔍 Searching"]
+    assert all(leaked_secret not in row and "***REDACTED***" in row for row in rows)
     assert leaked_secret not in serialized
-    assert "***REDACTED***" in progress_text
     assert "***REDACTED***" in serialized
 
 
@@ -878,7 +891,8 @@ def test_streaming_no_progress_without_search_events(ctx, patch_env, mock_openai
 
     result = _web_search(ctx, "simple query")
 
-    ctx.emit_progress_fn.assert_not_called()
+    # An attempt without a web_search_call event never claims that a search ran.
+    assert [call.args[0] for call in ctx.emit_progress_fn.call_args_list] == ["🔍 Trying OpenAI web search: simple query"]
     data = json.loads(result)
     assert data["answer"] == "Direct answer"
 
@@ -913,7 +927,8 @@ def test_streaming_progress_fires_only_once(ctx, patch_env, mock_openai):
 
     _web_search(ctx, "multi-search query")
 
-    assert ctx.emit_progress_fn.call_count == 1
+    assert [call.args[0] for call in ctx.emit_progress_fn.call_args_list] == [
+        "🔍 Trying OpenAI web search: multi-search query", "🔍 Searching: multi-search query"]
 
 
 def test_direct_search_dispatch_failure_releases_same_unsent_reservation(ctx, patch_env, mock_openai, monkeypatch):

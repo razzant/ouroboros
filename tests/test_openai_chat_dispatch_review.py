@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import pathlib
 
-import ouroboros.context_compaction as context_compaction
-import ouroboros.llm as llm_module
-import ouroboros.llm_observability as llm_observability
 import ouroboros.openai_chat_dispatch as dispatch
 from ouroboros.context_fit import estimate_context_prompt_tokens
-from ouroboros.openai_chat_custom import normalize_openai_custom_tool_calls
 from ouroboros.request_wire_receipts import (
     WireCandidateSpec,
     bind_wire_candidate,
@@ -51,128 +46,6 @@ def _custom_call(call_id, name, raw_input):
         "custom": {"name": name, "input": raw_input},
         "function": None,
     }
-
-
-def _custom_exchange(tool, raw_input, *, effort="medium"):
-    name = tool["function"]["name"]
-    source = {
-        "model": "future-model-without-prefix",
-        "messages": [{"role": "user", "content": f"Use {name}."}],
-        "reasoning_effort": effort,
-        "tool_choice": "required",
-        "tools": [copy.deepcopy(tool)],
-    }
-    candidate = bind_wire_candidate(
-        target=_target(),
-        api_surface="chat.completions",
-        source_payload=source,
-        candidate_spec=WireCandidateSpec(
-            "openai_chat_custom", effort, "requested_wire_form"
-        ),
-        requested_effort=effort,
-        ladder_ordinal=1,
-    )
-    calls, receipts = normalize_openai_custom_tool_calls(
-        [_custom_call("call-custom", name, raw_input)],
-        candidate,
-    )
-    message = {"role": "assistant", "content": "", "tool_calls": calls}
-    usage = {
-        "cost": 0.0,
-        dispatch.REQUEST_WIRE_USAGE_KEY: {
-            "candidate_sha256": receipts[0].candidate_sha256,
-        },
-        dispatch.CUSTOM_RECEIPTS_USAGE_KEY: receipts,
-    }
-    return message, usage
-
-
-class _QueuedLLM:
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.requests = []
-
-    def _resolve_remote_target(self, _model):
-        return _target()
-
-    def chat(self, **kwargs):
-        self.requests.append(copy.deepcopy(kwargs))
-        message, usage = self.responses.pop(0)
-        return copy.deepcopy(message), usage
-
-
-def _capture_persistence(monkeypatch):
-    persisted = []
-    monkeypatch.setattr(
-        llm_observability,
-        "persist_call",
-        lambda *_a, **kwargs: persisted.append(copy.deepcopy(kwargs)),
-    )
-    return persisted
-
-
-def _response_payloads(persisted):
-    return [
-        item["payload"]
-        for item in persisted
-        if str(item.get("call_type") or "").endswith("_response")
-    ]
-
-
-def test_compaction_chat_observed_persists_public_usage_and_returns_receipt(
-    monkeypatch,
-    tmp_path,
-):
-    part = context_compaction._part("source", "text")
-    invalid, first_usage = _custom_exchange(
-        context_compaction._CONTEXT_SUMMARIES_TOOL,
-        '{"summaries":"wrong"}',
-        effort="low",
-    )
-    arguments = json.dumps({
-        "summaries": [{"source_id": part.source_id, "summary": "ok"}],
-    }, separators=(",", ":"))
-    valid = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{
-            "id": "call-valid",
-            "type": "function",
-            "function": {
-                "name": "emit_context_summaries",
-                "arguments": arguments,
-            },
-        }],
-    }
-    llm = _QueuedLLM([(invalid, first_usage), (valid, {"cost": 0.0})])
-    persisted = _capture_persistence(monkeypatch)
-    monkeypatch.setattr(llm_module, "LLMClient", lambda: llm)
-
-    result = context_compaction._call_summarizer(
-        [part],
-        drive_root=tmp_path,
-        task_id="compaction",
-        phase="map",
-        spec={
-            "model": "openai::future-model-without-prefix",
-            "effort": "low",
-            "output_budget": 100,
-            "use_local": False,
-        },
-        summary_budgets={"source": 100},
-        usage_total={},
-    )
-
-    assert result == {part.source_id: "ok"}
-    assert len(llm.requests) == 2
-    assert llm.requests[1]["messages"][-1]["role"] == "tool"
-    assert dispatch.CUSTOM_RECEIPTS_USAGE_KEY not in first_usage
-    response_payloads = _response_payloads(persisted)
-    assert response_payloads[0]["usage"]["request_wire"]
-    assert all(
-        dispatch.CUSTOM_RECEIPTS_USAGE_KEY not in item["usage"]
-        for item in response_payloads
-    )
 
 
 class _HistoryError(Exception):

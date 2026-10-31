@@ -8,6 +8,75 @@ export async function apiFetch(url, init = {}) {
     return fetch(url, init);
 }
 
+/** Owner admission uses the ordinary authenticated gateway and canonical ingress. */
+export function openLiveConversation(payload) {
+    return fetchJson('/api/call/open', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+        { rejectOkFalse: true });
+}
+
+export function liveConversationSocket(path) {
+    if (!/^\/ws\/call\/[a-f0-9]+$/.test(path)) throw new Error('Invalid call address');
+    const url = new URL(path, window.location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new WebSocket(url.href);
+}
+
+/** How long one `/api/state` read may take, request and body together: an engineering tolerance, not a target. */
+export const STATE_READ_LIFETIME_MS = 60_000;
+
+const stateReadEnded = (reason) => Object.assign(new Error(`state read ${reason}`), { name: 'StateReadEnded', reason });
+
+/** Run `read(transportSignal)`, request and body, within one lifetime: the caller's `signal` ends it with
+ * `aborted()` (an already aborted one sends nothing), the lifetime with a `StateReadEnded` `expired`. Either end
+ * cancels the transport, and the read settles then even when the transport ignores the cancellation. */
+function withinStateLifetime(read, { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS,
+    aborted = () => stateReadEnded('aborted') } = {}) {
+    if (signal?.aborted) return Promise.reject(aborted());
+    const transport = new AbortController();
+    let end;
+    const ended = new Promise((_, reject) => {
+        end = (error) => { transport.abort(); reject(error); };
+    });
+    const onAbort = () => end(aborted());
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => end(stateReadEnded('expired')), lifetimeMs);
+    return Promise.race([read(transport.signal), ended]).finally(() => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+    });
+}
+
+/**
+ * One `/api/state` read that settles within its lifetime: `{response, state}`, where `state` is the parsed body
+ * of an OK answer and `undefined` for a non-OK answer or a body that does not parse. It rejects with the
+ * transport's own error, or with a `StateReadEnded` whose `reason` is `expired` (the lifetime ran out, request or
+ * body) or `aborted` (the caller's `signal`; an already aborted one sends nothing).
+ */
+export function readState(path = '/api/state', { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS } = {}) {
+    return withinStateLifetime(async (transport) => {
+        const response = await apiFetch(path, { cache: 'no-store', signal: transport });
+        if (!response.ok) return { response, state: undefined };
+        try {
+            return { response, state: await response.json() };
+        } catch (error) {
+            if (transport.aborted) throw error;
+            return { response, state: undefined };
+        }
+    }, { signal, lifetimeMs });
+}
+
+/**
+ * `fetchJson('/api/state')` within the same lifetime, for readers that keep its contract: the body, or its typed
+ * error (`status`, `body`, `payload`; `isStoreMigrating`) for a non-OK answer. The caller's `init.signal` ends it
+ * as fetch would (its abort reason, an `AbortError`); a read that outlives the lifetime is a `StateReadEnded`.
+ */
+export function readStateJson(init = {}) {
+    const { signal = null, ...rest } = init;
+    return withinStateLifetime((transport) => fetchJson('/api/state', { cache: 'no-store', ...rest, signal: transport }),
+        { signal, aborted: () => signal.reason ?? new DOMException('This operation was aborted', 'AbortError') });
+}
+
 /**
  * The core's own same-origin sign-in, returning to this page. Only its network
  * gate answers 401 on the readiness and state reads that send a page here: a
@@ -60,6 +129,12 @@ export async function fetchJson(url, init = {}, options = {}) {
         // Widgets list into a resolved "error object" that a consumer read as
         // an EMPTY authoritative list and stopped kept-running frames on.
         if (error?.name === 'AbortError' || init?.signal?.aborted) throw error;
+        // A caller whose action may already have started on the server (Storage) asks for the truth: an OK
+        // answer it cannot read is an unknown outcome with no HTTP status, never a reply carrying a placeholder.
+        if (options.requireBody && response.ok) {
+            // Its sentence stays empty: the consumer says it in its own words (and language).
+            throw Object.assign(new Error(''), { unreadable: true, responseStatus: response.status });
+        }
         data = { error: `non-json response (HTTP ${response.status})` };
     }
     if (!response.ok || (options.rejectOkFalse && data && data.ok === false)) {
@@ -76,7 +151,7 @@ export async function fetchJson(url, init = {}, options = {}) {
 export function jsonPost(url, payload = {}, options = {}) {
     return fetchJson(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...options.headers },
         body: JSON.stringify(payload),
     }, options);
 }
@@ -127,14 +202,17 @@ export function cancelHarnessMaintenance(operationId) {
 }
 
 /**
- * Run the read-only publication preflight for one selected skill. Domain
- * states, including repairable findings, remain successful JSON responses;
- * only transport/admission refusals reject through fetchJson.
+ * Run the read-only publication preflight for one selected skill and the
+ * destination the owner chose (omitted = the skill's origin, else the hub); the
+ * answer's `repository` is the one the publish task binds.
+ * Domain states, including repairable findings, remain successful JSON
+ * responses; only transport/admission refusals reject through fetchJson.
  * @param {string} skill
+ * @param {import('./skill_source_contract_types.js').SkillPublishDestinationChoice|null} [destination]
  * @returns {Promise<import('./api_types.js').SkillPublishPreflightResponse>}
  */
-export function skillPublishPreflight(skill) {
-    return jsonPost(`/api/skills/${encodeURIComponent(skill)}/publish-preflight`, {});
+export function skillPublishPreflight(skill, destination = null) {
+    return jsonPost(`/api/skills/${encodeURIComponent(skill)}/publish-preflight`, destination ? { destination } : {});
 }
 
 /**
@@ -204,6 +282,15 @@ export function taskArtifactArchiveUrl(taskId, directory) {
     return `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeSegment(name)}?archive=${encodeURIComponent(directory)}`;
 }
 
+/**
+ * Address of Wrap up's saved-work document, which the task-file route writes on read: the
+ * detail's `wrap_up_document` name with `?wrap_up={request_id}`; '' when the host named none.
+ */
+export function taskWrapUpDocumentUrl(taskId, wrapUp) {
+    const url = typeof wrapUp?.request_id === 'string' ? taskArtifactDownloadUrl(taskId, wrapUp.name) : '';
+    return url && `${url}?wrap_up=${encodeURIComponent(wrapUp.request_id)}`;
+}
+
 /** URL for one published immutable source handle (a delegated run's journal range included). */
 export function taskSourceDownloadUrl(taskId, ref) {
     const path = typeof ref?.path === 'string' ? ref.path : '';
@@ -217,8 +304,15 @@ export function taskSourceDownloadUrl(taskId, ref) {
     return `${url}?source=${encodeURIComponent(path)}`;
 }
 
-export async function resumeTask(taskId) {
-    return fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/resume`, { method: 'POST' });
+/**
+ * Owner Resume. A refusal may list `acceptable_unknown`: held calls whose outcome is unknown; naming
+ * them in `body` goes on without their results (recorded on the task, never run again).
+ * @param {string} taskId
+ * @param {import('./client_contract_types.js').TaskResumeRequest|null} [body]
+ */
+export async function resumeTask(taskId, body = null) {
+    const url = `/api/tasks/${encodeURIComponent(taskId)}/resume`;
+    return body ? jsonPost(url, body) : fetchJson(url, { method: 'POST' });
 }
 
 /**
@@ -240,8 +334,11 @@ export function hurryTask(taskId, requestId) {
 }
 
 /**
- * Owner Pause of a whole task tree (Batch4): text-free like hurry — the body is
- * ONLY the stable request_id (the same id on retry is idempotent). The answer
+ * Owner Pause of a whole task tree (Batch4): the body is the stable request_id
+ * (the same id on retry is idempotent) and this client's declaration that the
+ * owner pressed it (`actor: "owner"`, no text), which the card words as "You
+ * paused it" and which grants no power. Every shell that opens the core's own
+ * page (a browser, the desktop window, the Telegram Mini App) sends it here. The answer
  * arrives after the root's durable fence landed; its `state` is `requested`
  * while members still settle, `paused` once saved, or `released` on replay
  * after that action was resumed. A 202 `latch_pending` answer is accepted
@@ -253,7 +350,7 @@ export function hurryTask(taskId, requestId) {
 export function pauseTask(taskId, requestId) {
     return jsonPost(
         `/api/tasks/${encodeURIComponent(taskId)}/pause`,
-        { request_id: String(requestId || '') },
+        { request_id: String(requestId || ''), actor: 'owner' },
         { rejectOkFalse: true },
     );
 }
@@ -292,8 +389,8 @@ export async function fetchTaskDetail(taskId) {
  * @param {string} taskId
  * @returns {Promise<import('./api_types.js').TaskDetailResponse|null>}
  */
-export async function fetchTaskDetailStrict(taskId) {
-    const resp = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+export async function fetchTaskDetailStrict(taskId, { signal } = {}) {
+    const resp = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`, signal ? { signal } : {});
     if (resp && typeof resp.json === 'function') {
         if (resp.ok !== false) return resp.json();
         if (resp.status === 404) return null;
@@ -324,6 +421,68 @@ export function extensionRoutePath(skill, route, params = null) {
     return `${extensionRoutePrefix(skill)}${cleanRoute}${query}`;
 }
 
+/**
+ * Skill sources and their catalogs (one lifecycle for every source kind). The
+ * catalog is served from the host's per-source cache and never waits for the
+ * network; `refresh` asks the host to re-read its sources in the background.
+ * Shapes: skill_source_contract_types.js (fixtures: web/tests/fixtures/skills_v4/).
+ */
+const sourcePath = (id) => `/api/skill-sources/${encodeURIComponent(id)}`;
+// Writes answer {ok:false, code, error} on refusal; the callers read that as a thrown error
+// whose `body` keeps the typed refusal.
+const STRICT = { rejectOkFalse: true };
+/** @typedef {import('./skill_source_contract_types.js').SkillSourceChangeResponse} SkillSourceChangeResponse */
+export const skillSourcesApi = {
+    /** @returns {Promise<import('./skill_source_contract_types.js').SkillSourcesResponse>} */
+    list: () => fetchJson('/api/skill-sources', { cache: 'no-store' }),
+    /**
+     * @param {import('./skill_source_contract_types.js').SkillSourceProbeRequest} target
+     * @returns {Promise<import('./skill_source_contract_types.js').SkillSourceProbeResponse>}
+     */
+    probe: (target) => jsonPost('/api/skill-sources/probe', target),
+    /**
+     * @param {import('./skill_source_contract_types.js').SkillSourceAddRequest} source
+     * @returns {Promise<SkillSourceChangeResponse>}
+     */
+    add: (source) => jsonPost('/api/skill-sources', source, STRICT),
+    /** Create or connect the owner's private GitHub repository (only on an explicit click). */
+    mySkills: () => jsonPost('/api/skill-sources/my-skills', {}, STRICT),
+    /**
+     * @param {string} id
+     * @param {import('./skill_source_contract_types.js').SkillSourceChangeRequest} changes
+     * @returns {Promise<SkillSourceChangeResponse>}
+     */
+    update: (id, changes) => jsonPost(sourcePath(id), changes, STRICT),
+    /** @returns {Promise<SkillSourceChangeResponse>} */
+    remove: (id) => jsonPost(`${sourcePath(id)}/remove`, {}, STRICT),
+    /** @returns {Promise<SkillSourceChangeResponse>} */
+    refresh: (id) => jsonPost(`${sourcePath(id)}/refresh`, {}, STRICT),
+    /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogResponse>} */
+    catalog: ({ refresh = false } = {}) => fetchJson(`/api/skill-catalog${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' }),
+    /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogSearchResponse>} */
+    search: ({ q = '', source = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}) })}`, { cache: 'no-store', ...init }),
+    /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogItemDetailResponse>} */
+    item: (sourceId, name, init = {}) => fetchJson(`/api/skill-catalog/item/${encodeURIComponent(sourceId)}/${encodeURIComponent(name)}`, { cache: 'no-store', ...init }),
+    /**
+     * `replace` confirms replacing the other skill of the same name.
+     * @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogInstallResponse>}
+     */
+    install: (id, { turnOnWhenReady = true, replace = false } = {}) => jsonPost('/api/skill-catalog/install',
+        { id, turn_on_when_ready: turnOnWhenReady, ...(replace ? { replace: true } : {}) }, STRICT),
+    /**
+     * The exact candidate the owner saw (`digest`) against the local revision it was shown with
+     * (`localDigest`): either one changing makes the host refuse instead of acting on a stale dialog.
+     * @param {'replace'|'keep'|'merge'} mode
+     * @returns {Promise<import('./skill_source_contract_types.js').SkillUpdateResponse>}
+     */
+    updateSkill: (name, mode, digest, localDigest = '', { skipReview = false } = {}) => jsonPost(`/api/skills/${encodeURIComponent(name)}/update`,
+        { mode, digest, ...(localDigest ? { local_digest: localDigest } : {}), ...(skipReview ? { skip_review: true } : {}) }, STRICT),
+    /** @returns {Promise<import('./skill_source_contract_types.js').SkillUninstallResponse>} */
+    uninstallSkill: (name) => jsonPost(`/api/skills/${encodeURIComponent(name)}/uninstall`, {}, STRICT),
+    /** @returns {Promise<import('./skill_source_contract_types.js').StarterSkillsResponse>} */
+    starterSkills: () => fetchJson('/api/onboarding/starter-skills', { cache: 'no-store' }),
+};
+
 export function updateStrategyForPlan(plan = {}) {
     if (!plan.available) return '';
     const kind = String(plan.kind || '');
@@ -331,23 +490,27 @@ export function updateStrategyForPlan(plan = {}) {
     return kind === 'clean' ? 'auto_merge' : 'assisted';
 }
 
+/** Storage actions may have started when the answer is cut: an unreadable OK body is an error, not a reply. */
+const STORAGE_READ = { requireBody: true };
+
 export const apiClient = {
     harnessMaintenanceInventory,
     startHarnessMaintenance,
     harnessMaintenanceOperation,
     cancelHarnessMaintenance,
-    /** Read a recent window or replay one opaque, room-bound history page. */
-    chatHistory: ({ chatId = 1, cursor = null, signal } = {}) => {
+    /** Read a recent window, replay a room-bound page, or read around a task or exact row address. */
+    chatHistory: ({ chatId = 1, cursor = null, around = null, signal } = {}) => {
         const params = new URLSearchParams();
         if (chatId !== 1) params.set('chat_id', String(chatId));
         if (cursor) params.set('cursor', cursor);
+        if (around) params.set('around', around);  // `task:<id>` or canonical `row:…`
         const query = params.toString();
         return fetchJson(`/api/chat/history${query ? `?${query}` : ''}`, { cache: 'no-store', signal });
     },
     /** @returns {Promise<import('./api_types.js').HealthResponse>} */
     health: () => fetchJson('/api/health', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').StateResponse>} */
-    state: () => fetchJson('/api/state', { cache: 'no-store' }),
+    state: () => readStateJson(),
     /** One composer file into the upload store. @returns {Promise<import('./api_types.js').UploadResponse>} */
     uploadChatAttachment: (file) => {
         const body = new FormData();
@@ -359,20 +522,26 @@ export const apiClient = {
     webSearchPreview: (selection = {}) => fetchJson(
         `/api/settings?${new URLSearchParams({ websearch_preview: '1', ...selection })}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./model_route_types.js').ResponseLimitPreview>} */
-    responseLimitPreview: ({ model, local = false, account = '' }) => fetchJson(
-        `/api/settings?${new URLSearchParams({ response_limit_preview: '1', model, local: String(Boolean(local)), account })}`,
+    responseLimitPreview: ({ model, local = false, account = '', role = 'main', window }) => fetchJson(
+        `/api/settings?${new URLSearchParams({ response_limit_preview: '1', model, local: String(Boolean(local)), account, role, ...(window === undefined ? {} : { window: String(window) }) })}`,
         { cache: 'no-store' }),
     /** @param {{key: string}|{mcp_server_id: string, header_name?: string}} selector @returns {Promise<{value: string}>} */
     revealSettingsSecret: (selector) => jsonPost('/api/settings/secret', selector),
     /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
     uiPreferences: (init = {}) => fetchJson('/api/ui/preferences', { cache: 'no-store', ...init }),
     saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload),
+    /** Live skill contributions (CLIENT_CONTRACT §11). @returns {Promise<import('./api_types.js').UiContributionsResponse>} */
+    uiContributions: (init = {}) => fetchJson('/api/ui/contributions', { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./ui_i18n_types.js').UiI18nResponse>} */
     uiI18n: () => fetchJson('/api/ui/i18n', { cache: 'no-store' }),
     /** @param {string|import('./ui_i18n_types.js').UiI18nLanguageRequest} payload */
     saveUiLanguage: (payload) => jsonPost('/api/ui/i18n/language', typeof payload === 'string' ? { language: payload } : payload),
     /** @param {import('./ui_i18n_types.js').UiI18nMissingRequest} payload */
     reportI18nMissing: (payload) => jsonPost('/api/ui/i18n/missing', payload),
+    /** The holds this page found (holds.js). @param {import('./client_contract_types.js').UiHoldsRequest} payload */
+    reportUiHolds: (payload) => jsonPost('/api/ui/holds', payload),
+    /** A running module widget's fault (widget_module.js). @param {import('./client_contract_types.js').WidgetFaultRequest} payload */
+    reportWidgetFault: (payload) => jsonPost('/api/widgets/fault', payload),
     importI18n: (memoryDocument) => jsonPost('/api/ui/i18n/import', memoryDocument),
     exportI18nUrl: (language = '') => `/api/ui/i18n/export${language ? `?language=${encodeURIComponent(language)}` : ''}`,
     regenerateI18n: (payload = {}) => jsonPost('/api/ui/i18n/regenerate', payload),
@@ -408,8 +577,11 @@ export const apiClient = {
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
     ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
-    /** The owner's effort range, saved as one ordered triple. @param {{min: string, recommended: string, max: string}} range */
+    /** Save room primary effort and ordered helper bounds. @param {import('./client_contract_types.js').OwnerEffortRangeRequest} range */
     ownerEffortRange: (range) => jsonPost('/api/owner/effort-range', range),
+    /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
+     * @returns {Promise<import('./api_types.js').OwnerSubagentsModeResponse>} */
+    ownerSubagentsMode: (choice) => jsonPost('/api/owner/subagents-mode', choice),
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
     logsTail: (name, limit = 2000) => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
@@ -437,43 +609,93 @@ export const apiClient = {
     deleteSkill: (skill, payloadRoot, expectedContentHash = '') => jsonPost(`/api/skills/${encodeURIComponent(skill)}/delete`, {
         payload_root: payloadRoot,
         ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
-    }),
-    skillGrants: (skill, items, expectedContentHash = '') => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, {
+    }, { headers: { Prefer: 'respond-async' } }),
+    skillGrants: (skill, items, expectedContentHash = '', enableAfterGrant = false) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, {
         items, ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
-    }),
-    /**
-     * @param {string} skill
-     * @param {import('./api_types.js').OwnerSkillPresenceRuntimeRequest} payload
-     * @returns {Promise<import('./api_types.js').OwnerSkillPresenceRuntimeResponse>}
-     */
-    savePresenceRuntime: (skill, payload) => jsonPost(
-        `/api/owner/skills/${encodeURIComponent(skill)}/presence-runtime`,
-        payload,
-    ),
+        ...(enableAfterGrant ? { enable_after_grant: true } : {}),
+    }, { headers: { Prefer: 'respond-async' } }),
     projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task', { task_id: taskId, id, name }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
-    projectUpdate: (projectId, name) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`, { name }),
+    projectUpdate: (projectId, update) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`,
+        typeof update === 'string' ? { name: update } : update),
     /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
     /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     /**
-     * Dashboard storage: the server's last measurement, read passively (no walk, no write).
+     * Dashboard storage: the saved count, the running count's progress and fresh free space, read
+     * passively (no walk, no write); `count` names the finished count this client already holds.
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
-    storage: (init = {}) => fetchJson('/api/storage', { cache: 'no-store', ...init }),
+    storage: ({ count = '', ...init } = {}) => fetchJson(
+        `/api/storage${count ? `?count=${encodeURIComponent(count)}` : ''}`, { cache: 'no-store', ...init }, STORAGE_READ,
+    ),
     /**
-     * Start one bounded measurement, or join the running one (202 either way).
+     * Start one complete count in the server's child, or join the running one (202 either way).
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
-    measureStorage: () => jsonPost('/api/storage/measure', {}),
+    measureStorage: () => jsonPost('/api/storage/measure', {}, STORAGE_READ),
+    /**
+     * Stop the running count; the saved count stays.
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    cancelStorageMeasure: () => jsonPost('/api/storage/measure/cancel', {}, STORAGE_READ),
+    /**
+     * List, without side effects, the finished work the app's own retirers would remove now (202; a second
+     * preview joins the running one).
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    previewStorageFree: () => jsonPost('/api/storage/free/preview', {}, STORAGE_READ),
+    /**
+     * Free exactly the previewed items of the chosen whole groups under the named plan (202; `started` and
+     * `reason` say whether it ran).
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    freeStorage: (plan, groups) => jsonPost('/api/storage/free', { plan, groups }, STORAGE_READ),
+    /**
+     * Free exactly these items of the plan's ordinary pool, by their ids (202; `started` and `reason` say whether
+     * it ran; one bad id refuses the whole request). Never resent after a dropped connection.
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    freeStorageItems: (plan, items) => jsonPost('/api/storage/free', { plan, items }, STORAGE_READ),
+    /**
+     * Discard, whole, exactly these finished copies of the plan's `view=manual` list, each chosen by the owner (202;
+     * `started` and `reason` say whether it ran). The form is its own: it carries no `items` or `groups`. `acceptLoss`
+     * is `true` only after the owner was told the whole copy goes with whatever is not proven saved in it; the server
+     * refuses anything else as `loss_not_accepted`. Never resent after a dropped connection.
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    freeStorageManual: (plan, manual, acceptLoss) => jsonPost('/api/storage/free', { plan, manual, accept_loss: acceptLoss === true }, STORAGE_READ),
+    /**
+     * One page of a plan's list: the pool, what it leaves out, the finished copies discarded by hand, or the outcomes of its run. `version` comes from
+     * the first page and goes on every next one; a 409 `view_changed` means start again from `cursor=0`.
+     * @returns {Promise<import('./storage_types.js').StorageFreeItemsResponse>}
+     */
+    storageFreeItems: ({ plan, view, cursor = 0, limit = 100, version = '', ...init }) => {
+        const query = new URLSearchParams({ plan, view, cursor: String(cursor), limit: String(limit) });
+        if (version) query.set('version', version);
+        return fetchJson(`/api/storage/free/items?${query}`, { cache: 'no-store', ...init }, STORAGE_READ);
+    },
+    /**
+     * Stop the listing or the run; what was freed stays freed.
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
     updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
     updateCheck: () => jsonPost('/api/update/check', {}),
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
+    /**
+     * The owner's Write/Rewrite: one ordinary Main task describes this exact range.
+     * @param {'write'|'rewrite'} mode
+     * @returns {Promise<import('./api_types.js').UpdateDescriptionResponse>}
+     */
+    updateDescription: (mode, key = {}) => jsonPost('/api/update/description', {
+        mode, base_sha: String(key.base_sha || ''), target_sha: String(key.target_sha || ''),
+    }),
     /** @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
     updateApply: (strategy, plan = {}, { confirmRecovery = false } = {}) => jsonPost('/api/update/apply', {
         strategy,
@@ -493,4 +715,21 @@ export function previewMcpImport(payload, signal) {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload), signal,
     });
+}
+
+/** Passive saved review history; no review or regeneration is dispatched. */
+export function getTaskReviewHistory(taskId, offset = 0) {
+    return fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/reviews?offset=${Number(offset) || 0}`);
+}
+
+/** Exact saved source selected by the owning task/record/seat, never a file path. */
+export function taskReviewSourceUrl(taskId, recordId, seatId, source = {}) {
+    const query = new URLSearchParams({ role: source.role || 'response', part: source.part || '', sha256: source.sha256 || '', domain: source.domain || 'ledger' });
+    return `/api/tasks/${encodeURIComponent(taskId)}/reviews/${encodeURIComponent(recordId)}/${encodeURIComponent(seatId)}?${query}`;
+}
+
+/** A task's saved Skill review as normalized text: Read and Download share it; the server checks the task owns it. */
+export function taskSkillReviewSourceUrl(taskId, jobOrRecordId, skill) {
+    const query = new URLSearchParams({ skill: String(skill || ''), format: 'text' });
+    return `/api/tasks/${encodeURIComponent(taskId)}/reviews/skill/${encodeURIComponent(jobOrRecordId)}?${query}`;
 }

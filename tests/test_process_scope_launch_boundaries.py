@@ -87,6 +87,11 @@ def test_the_foreground_receipt_follows_the_invocation_not_the_task_scope(tmp_pa
     """``run_command`` under b814's real invocation: the foreground receipt (binding drive root AND task
     id) discharges the command's own external duty while it still runs. ``manual`` is a valid task id,
     not a lifetime label. Unbound keeps no duty, receipt or marker."""
+    # The test owns only the launch it creates. An outer task runner may put
+    # its own marker in this pytest process's environment.
+    for marker in tuple(os.environ):
+        if marker.startswith(ps.TASK_SCOPE_PREFIX):
+            monkeypatch.delenv(marker)
     import threading
     import time
 

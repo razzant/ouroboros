@@ -47,7 +47,7 @@ test('compact drops Advanced, paste-code and Close but keeps a completing comman
 
     const verified = loginCardHtml({ ...active, verdict: { kind: 'success', reason: '' } },
         999999, { mode: LOGIN_CARD_COMPACT });
-    assert.ok(verified.includes('Connected.'));
+    assert.ok(verified.includes('Signed in.'));
     assert.ok(!verified.includes('data-login-retry'), 'nothing to retry once verified');
 
     const explicitExternal = { ...active, transport: 'client_pty',

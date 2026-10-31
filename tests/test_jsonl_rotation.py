@@ -3,7 +3,9 @@
 `supervisor/state.rotate_jsonl_log_if_needed` rotates logs/<name> into
 archive/<prefix>_<ts>.jsonl under the append sidecar lock, suppresses itself in
 sentinel-marked isolated benchmark roots, and never collides archive names.
-`rotate_chat_log_if_needed` stays as a thin compatibility wrapper.
+The dialogue chains (``chat.jsonl``, ``progress.jsonl``) no longer rotate on the
+tick: the dialogue store's cutover rotates them one last time
+(``dialogue_import.rotate_final``), under the same lock and naming.
 """
 
 from __future__ import annotations
@@ -14,18 +16,17 @@ import pytest
 
 from supervisor.state import (
     ISOLATED_BENCHMARK_SENTINEL,
-    rotate_chat_log_if_needed,
     rotate_jsonl_log_if_needed,
 )
 
 
-# (live filename, archive prefix) — v6.109.29 added events + tools to the
-# supervisor-tick rotation alongside chat/progress. Each pair must produce
-# the same byte-preserving rename + empty-live side effect.
+# (live filename, archive prefix) — the logs the supervisor tick still rotates.
+# Each pair must produce the same byte-preserving rename + empty-live side effect.
 ROTATED_LOG_NAMES = [
-    ("progress.jsonl", "progress"),
+    ("supervisor.jsonl", "supervisor"),
     ("events.jsonl", "events"),
     ("tools.jsonl", "tools"),
+    ("task_reflections.jsonl", "task_reflections"),
 ]
 
 
@@ -42,7 +43,7 @@ def _seed_log(root, name, rows=50):
 
 @pytest.mark.parametrize(("name", "prefix"), ROTATED_LOG_NAMES)
 def test_rotation_moves_live_to_archive(tmp_path, name, prefix):
-    """A >max_bytes file for chat/progress/events/tools rotates to
+    """A threshold-sized runtime log rotates to
     archive/<prefix>_<ts>.jsonl, the live file is recreated empty, and no
     line is lost (v6.109.29)."""
     live = _seed_log(tmp_path, name)
@@ -58,28 +59,39 @@ def test_rotation_moves_live_to_archive(tmp_path, name, prefix):
 
 
 def test_rotation_noop_below_threshold(tmp_path):
-    live = _seed_log(tmp_path, "progress.jsonl", rows=2)
-    rotate_jsonl_log_if_needed(tmp_path, "progress.jsonl", "progress", max_bytes=10**9)
+    live = _seed_log(tmp_path, "events.jsonl", rows=2)
+    rotate_jsonl_log_if_needed(tmp_path, "events.jsonl", "events", max_bytes=10**9)
     assert not (tmp_path / "archive").exists()
     assert live.stat().st_size > 0
 
 
 def test_rotation_suppressed_by_isolated_benchmark_sentinel(tmp_path):
-    live = _seed_log(tmp_path, "progress.jsonl")
+    live = _seed_log(tmp_path, "events.jsonl")
     (tmp_path / ISOLATED_BENCHMARK_SENTINEL).write_text("", encoding="utf-8")
 
-    rotate_jsonl_log_if_needed(tmp_path, "progress.jsonl", "progress", max_bytes=100)
+    rotate_jsonl_log_if_needed(tmp_path, "events.jsonl", "events", max_bytes=100)
 
     assert not (tmp_path / "archive").exists()
     assert live.stat().st_size > 0  # untouched: bench harness readers see one file
 
 
-def test_chat_wrapper_still_rotates_chat(tmp_path):
+def test_the_dialogue_chains_rotate_only_at_the_cutover(tmp_path):
+    """The supervisor tick has no chat/progress rotator any more; the cutover's final rotation
+    uses today's naming and leaves the live file empty, and the rows land in the store."""
+    from ouroboros import dialogue_import, dialogue_store
+    from supervisor import state
+
+    assert not hasattr(state, "rotate_chat_log_if_needed")
     live = _seed_log(tmp_path, "chat.jsonl")
-    rotate_chat_log_if_needed(tmp_path, max_bytes=100)
+    original = live.read_text(encoding="utf-8")
+    report = dialogue_import.cutover(tmp_path)
     archives = sorted((tmp_path / "archive").glob("chat_*.jsonl"))
-    assert len(archives) == 1
-    assert live.stat().st_size == 0
+    assert [path.name for path in archives] == [report["chat"]["rotated"]]
+    assert archives[0].read_text(encoding="utf-8") == original and live.stat().st_size == 0
+    assert dialogue_store.counts(tmp_path)["chat"] == 50
+    assert dialogue_import.cutover(tmp_path)["replanned"] is False
+    assert sorted((tmp_path / "archive").glob("chat_*.jsonl")) == archives
+    assert dialogue_store.counts(tmp_path)["chat"] == 50 and live.stat().st_size == 0
 
 
 def test_same_second_rotations_do_not_clobber_archives(tmp_path, monkeypatch):
@@ -89,13 +101,13 @@ def test_same_second_rotations_do_not_clobber_archives(tmp_path, monkeypatch):
 
     monkeypatch.setattr(state_mod, "utc_now_iso", lambda: "2026-08-08T06:00:00.000000Z")
 
-    _seed_log(tmp_path, "progress.jsonl")
-    rotate_jsonl_log_if_needed(tmp_path, "progress.jsonl", "progress", max_bytes=100)
-    _seed_log(tmp_path, "progress.jsonl")  # refill within the "same second"
-    rotate_jsonl_log_if_needed(tmp_path, "progress.jsonl", "progress", max_bytes=100)
+    _seed_log(tmp_path, "events.jsonl")
+    rotate_jsonl_log_if_needed(tmp_path, "events.jsonl", "events", max_bytes=100)
+    _seed_log(tmp_path, "events.jsonl")  # refill within the "same second"
+    rotate_jsonl_log_if_needed(tmp_path, "events.jsonl", "events", max_bytes=100)
 
-    archives = sorted(p.name for p in (tmp_path / "archive").glob("progress_*.jsonl"))
+    archives = sorted(p.name for p in (tmp_path / "archive").glob("events_*.jsonl"))
     assert len(archives) == 2
     # Name-ordered readers must keep chronological order: base name first.
-    assert archives[0] == "progress_20260808T060000.jsonl"
-    assert archives[1] == "progress_20260808T060000_1.jsonl"
+    assert archives[0] == "events_20260808T060000.jsonl"
+    assert archives[1] == "events_20260808T060000_1.jsonl"

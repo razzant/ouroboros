@@ -247,13 +247,38 @@ def test_launcher_relaunches_only_when_a_loaded_module_changed_in_the_checkout(t
     assert launcher.checkout_sha(tmp_path / "not-a-repo") == ""
 
 
-def test_packaged_launcher_counts_helpers_it_loaded_from_its_bundle(tmp_path, monkeypatch):
-    """A frozen launcher imported its helpers from the bundle, not the checkout:
-    PyInstaller presents them as ``<bundle>/<pkg>/<module>.pyc`` (not a native app run)."""
+@pytest.mark.parametrize("layout", ["flat", "macos_app", "aliased"])
+def test_packaged_launcher_counts_helpers_it_loaded_from_its_bundle(tmp_path, monkeypatch, layout):
+    """A frozen launcher imported its helpers from the bundle, not the checkout: PyInstaller
+    names them ``<bundle>/<pkg>/<module>.pyc`` or ``.py``. In a macOS app the bundle is
+    ``Contents/Frameworks`` and its ``<pkg>`` a real link into ``Contents/Resources``, so only
+    the path as named lies inside the bundle; a module named through an alias of the bundle
+    lies inside it only resolved. Real links, not a native app run."""
     from ouroboros import launcher_bootstrap as launcher
     from ouroboros import launcher_server_reaper as helper
 
-    repo, bundle = tmp_path / "repo", tmp_path / "bundle"
+    if layout != "flat":
+        try:
+            (tmp_path / "link-probe").symlink_to(tmp_path, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("This Windows account cannot create directory symlinks")
+            raise
+    repo, bundle, source = tmp_path / "repo", tmp_path / "bundle", "launcher_server_reaper.pyc"
+    named = bundle / "ouroboros" / source
+    if layout == "macos_app":
+        bundle, source = tmp_path / "Ouroboros.app" / "Contents" / "Frameworks", "launcher_server_reaper.py"
+        (bundle.parent / "Resources" / "ouroboros").mkdir(parents=True)
+        (bundle.parent / "Resources" / "ouroboros" / source).write_text("GEN = 1\n")
+        bundle.mkdir()
+        (bundle / "ouroboros").symlink_to(pathlib.Path("..", "Resources", "ouroboros"), target_is_directory=True)
+        named = bundle / "ouroboros" / source
+        assert not named.resolve().is_relative_to(bundle.resolve())
+    elif layout == "aliased":
+        bundle.mkdir()
+        (tmp_path / "alias").symlink_to(bundle, target_is_directory=True)
+        named = tmp_path / "alias" / "ouroboros" / source
+        assert not named.is_relative_to(bundle) and named.resolve().is_relative_to(bundle.resolve())
     repo.mkdir()
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "t@example.invalid")
@@ -264,7 +289,7 @@ def test_packaged_launcher_counts_helpers_it_loaded_from_its_bundle(tmp_path, mo
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "one")
     loaded = git(repo, "rev-parse", "HEAD")
-    monkeypatch.setattr(helper, "__file__", str(bundle / "ouroboros" / "launcher_server_reaper.pyc"))
+    monkeypatch.setattr(helper, "__file__", str(named))
     (repo / "ouroboros/other.py").write_text("GEN = 2\n")
     git(repo, "commit", "-qam", "unrelated")
     assert launcher.launcher_sources_changed(repo, loaded, bundle_dir=bundle) is False

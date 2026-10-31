@@ -17,6 +17,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -47,6 +48,18 @@ def _find_pyinstaller_cmd_pos(src: str) -> int:
     return -1
 
 
+def _python_standalone_extras(src: str, interpreter: str) -> tuple[set, list]:
+    """Extras of the locked exports a build script installs into ``interpreter``."""
+    exported = {
+        match.group(2): set(re.findall(r"--extra (\w+)", match.group(1)))
+        for match in re.finditer(r'^ *uv export (.*)--output-file "?(\$\w+)"?$', src, re.M)
+    }
+    lock_header = _read("requirements-runtime.lock").splitlines()[1]
+    exported["requirements-runtime.lock"] = set(re.findall(r"--extra (\w+)", lock_header))
+    installs = list(re.finditer(rf"^ *uv pip install --python {re.escape(interpreter)} .*-r (\S+)", src, re.M))
+    return set().union(*(exported[match.group(1).strip('"')] for match in installs)), installs
+
+
 # ---------------------------------------------------------------------------
 # build.sh  (macOS)
 # ---------------------------------------------------------------------------
@@ -54,21 +67,61 @@ def _find_pyinstaller_cmd_pos(src: str) -> int:
 class TestBuildSh:
     """build.sh must bundle Chromium headless shell without bundled macOS WebKit."""
 
+    def test_macos_source_entry_is_built_before_headers_are_pruned(self):
+        src = _read("build.sh")
+        compile_pos = src.index("xcrun clang")
+        install_pos = src.index('cp build/macos/ouroboros-shell')
+        assert src.index("rm -rf build dist") < compile_pos < _find_pyinstaller_cmd_pos(src) < install_pos
+        assert '-mmacosx-version-min=12.0' in src
+        assert '-Wl,-rpath,@executable_path/../Frameworks/python-standalone/lib' in src
+        assert 'python-standalone/include/python${SHELL_PY_VERSION}' in src
+        assert '"python-standalone/lib/$SHELL_PY_LIB"' in src
+        stub = _read("packaging/macos/ouroboros_shell.c")
+        assert "Py_InitializeFromConfig" in stub and "Py_RunMain" in stub
+        assert "Py_SetPythonHome" not in stub and "execv" not in stub
+
+    @pytest.mark.parametrize("matching", [True, False])
+    def test_entry_install_requires_its_own_runtime_library_not_build_pythons(self, tmp_path, matching):
+        """Run the real install block against the static-python layout (no artifact is executed)."""
+        # The PATH's bash, as the notarization tests below: a bare "bash" on Windows starts System32's WSL launcher.
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("build.sh's install block needs bash")
+        src = _read("build.sh")
+        start = src.index('cp build/macos/ouroboros-shell')
+        end = src.index('echo "--- Installing packaged CLI wrappers', start)
+        app = tmp_path / "New app.app"
+        frameworks = app / "Contents/Frameworks"
+        (app / "Contents/MacOS").mkdir(parents=True)
+        (frameworks / "python-standalone/lib").mkdir(parents=True)
+        library = frameworks / ("python-standalone/lib/libpython3.10.dylib" if matching else "libpython3.10.dylib")
+        library.write_bytes(b"library fixture, never executed")
+        compiled = tmp_path / "build/macos/ouroboros-shell"
+        compiled.parent.mkdir(parents=True)
+        compiled.write_bytes(b"entry fixture, never executed")
+        result = subprocess.run([bash, "-ec", src[start:end]], cwd=tmp_path, capture_output=True, text=True,
+                                env={**os.environ, "APP_PATH": str(app), "SHELL_PY_LIB": "libpython3.10.dylib"})
+        assert (result.returncode == 0) is matching, result.stderr
+        assert (app / "Contents/MacOS/ouroboros-shell").read_bytes() == compiled.read_bytes()
+
+    def test_source_entry_identity_is_restored_after_deep_sign_then_outer_seal_verified(self):
+        src = _read("build.sh").replace("\\\n", " ")
+        commands = [line.strip() for line in src.splitlines() if line.strip().startswith("codesign -s")]
+        deep = next(i for i, line in enumerate(commands) if "--deep" in line)
+        assert '--identifier com.ouroboros.agent' in commands[deep + 1]
+        assert 'Contents/MacOS/ouroboros-shell' in commands[deep + 1]
+        assert '--deep' not in commands[deep + 2] and '"$APP_PATH"' in commands[deep + 2]
+        assert '"$SHELL_SIGN_ID" != "com.ouroboros.agent"' in src
+        assert src.index('"$SHELL_SIGN_ID" !=') < src.index('codesign --verify --strict --deep')
+
     def test_playwright_install_chromium_present(self):
         src = _read("build.sh")
         assert "playwright install --only-shell chromium" in src, (
             "build.sh must call 'playwright install --only-shell chromium' on macOS"
         )
-        assert "Skipping bundled WebKit on macOS" in src, (
-            "build.sh must document the macOS WebKit packaging policy"
-        )
-        assert "Removing stale bundled WebKit payloads from macOS package tree" in src
         assert 'rglob(".local-browsers")' in src
         assert 'glob("webkit-*")' in src
         assert "shutil.rmtree" in src
-        assert "managed" in src and "Playwright cache" in src, (
-            "build.sh must leave WebKit available through the managed runtime cache"
-        )
         assert "playwright install webkit" not in src
         assert "pw.webkit.launch" not in src
 
@@ -210,6 +263,16 @@ class TestBuildSh:
             "build.sh must preserve nested macOS app/framework bundles during "
             "symlink normalization"
         )
+
+
+    def test_source_handoff_interpreter_receives_the_desktop_extra(self):
+        """The source launcher needs desktop modules outside PyInstaller's archive."""
+        src = _read("build.sh").replace("\\\n", " ")
+        extras, installs = _python_standalone_extras(src, "python-standalone/bin/python3")
+        assert "desktop" in extras, f"python-standalone receives only extras {sorted(extras)}"
+        assert "build" not in extras, "build tooling must stay out of the packaged interpreter"
+        symlink_pos = src.find("Normalizing python-standalone symlinks")
+        assert all(match.start() < symlink_pos < _find_pyinstaller_cmd_pos(src) for match in installs)
 
 
 def test_compileall_env_neutralization_actually_seals_bytecode(tmp_path):
@@ -364,6 +427,15 @@ class TestBuildLinuxSh:
             assert 'OUROBOROS_PACKAGED_BUNDLE_ROOT:-' not in src
             assert '$SCRIPT_DIR/../_internal' in src
 
+    def test_source_handoff_interpreter_receives_the_desktop_extra(self):
+        """Headless detection after the source handoff imports webview from python-standalone."""
+        assert "from webview.guilib import initialize" in _read("launcher.py")
+        src = _read("build_linux.sh").replace("\\\n", " ")
+        extras, installs = _python_standalone_extras(src, '"$PORTABLE_PYTHON"')
+        assert "desktop" in extras, f"python-standalone receives only extras {sorted(extras)}"
+        assert "build" not in extras, "build tooling must stay out of the packaged interpreter"
+        assert all(match.start() < _find_pyinstaller_cmd_pos(src) for match in installs)
+
 
 # ---------------------------------------------------------------------------
 # build_windows.ps1  (Windows / PowerShell)
@@ -383,6 +455,8 @@ class TestBuildWindowsPs1:
             "ripgrep runtime download",
             "Betterleaks runtime installation",
             "Agent dependency installation",
+            "Desktop dependency export",
+            "Desktop dependency installation",
             "Claudexor runtime seed fetch",
             "Chromium installation",
             "WebKit installation",
@@ -506,6 +580,56 @@ class TestBuildWindowsPs1:
             assert r"%ROOT%\_internal\repo.bundle" in src
             assert 'set "ROOT=%ROOT%\\_internal"' in src
 
+    def test_source_handoff_interpreter_receives_the_desktop_extra(self):
+        """The source launcher prepares pythonnet from python-standalone before importing webview."""
+        runtime = _read("ouroboros/launcher_windows_runtime.py")
+        assert "from clr_loader import get_netfx" in runtime and "from pythonnet import set_runtime" in runtime
+        src = _read("build_windows.ps1").replace("`\n", " ")
+        extras, installs = _python_standalone_extras(src, '"python-standalone\\python.exe"')
+        assert "desktop" in extras, f"python-standalone receives only extras {sorted(extras)}"
+        assert "build" not in extras, "build tooling must stay out of the packaged interpreter"
+        assert all(match.start() < _find_pyinstaller_cmd_pos(src) for match in installs)
+
+
+def test_python_standalone_pin_is_the_fixed_sqlite_release():
+    """Desktop packages take CPython 3.10.22 from python-build-standalone 20261009.
+
+    That release is the last one that still ships Python 3.10, and its SQLite
+    is 3.53.1 (the WAL-reset fix). The two download scripts are the pin.
+    """
+    shell = _read("scripts/download_python_standalone.sh")
+    windows = _read("scripts/download_python_standalone.ps1")
+    assert 'RELEASE="20261009"' in shell
+    assert 'PY_VERSION="3.10.22"' in shell
+    assert '$Release = "20261009"' in windows
+    assert '$PyVersion = "3.10.22"' in windows
+    assert "20260211" not in shell and "20260211" not in windows
+    assert "3.10.19" not in shell and "3.10.19" not in windows
+    for platform in (
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+    ):
+        assert platform in shell
+    assert "x86_64-pc-windows-msvc" in windows
+    pinned = dict(re.findall(r'PLATFORM="([^"]+)"\n\s+SHA256="([0-9a-f]{64})"', shell))
+    assert set(pinned) == {
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+    }
+    windows_sha = re.search(r'\$Sha256 = "([0-9a-f]{64})"', windows)
+    assert windows_sha is not None
+    docker = _read("Dockerfile")
+    docker_sha = dict(re.findall(r'PLATFORM="([^"]+)"; SHA256="([0-9a-f]{64})"', docker))
+    assert docker_sha == {
+        "x86_64-unknown-linux-gnu": pinned["x86_64-unknown-linux-gnu"],
+        "aarch64-unknown-linux-gnu": pinned["aarch64-unknown-linux-gnu"],
+    }
+    assert windows_sha.group(1) not in docker_sha.values()
+
 
 # ---------------------------------------------------------------------------
 # Dockerfile  (Docker / web runtime)
@@ -554,10 +678,30 @@ class TestDockerfile:
     """
 
     def test_build_is_self_contained(self):
-        """``docker build -t ouroboros-web .`` must not depend on a locally built base tag."""
+        """``docker build -t ouroboros-web .`` must not depend on a locally built base tag.
+
+        The interpreter is the pinned python-build-standalone build, checked in
+        the image build for Python 3.10.22 and SQLite >= 3.51.3.
+        """
         src = _read("Dockerfile")
-        assert "FROM python:3.10-slim" in src
+        assert "FROM python:3.10-slim" not in src
+        assert "FROM debian:trixie-slim" in src
+        assert "ghcr.io/astral-sh/uv:" in src
         assert "FROM ${" not in src, "the image must not start from an unpublished local tag"
+        assert "sha256sum -c -" in src
+        assert "assert sqlite>=(3, 51, 3)" in src
+        assert "--python /opt/python-standalone/bin/python3" in src
+
+    def test_runtime_stage_keeps_the_python_base_packages(self):
+        """debian:trixie-slim lacks what python:3.10-slim installed: without CA
+        certificates git and OpenSSL cannot verify HTTPS (Update fetches), and
+        tzdata/netbase back zoneinfo and service lookups."""
+        src = _read("Dockerfile")
+        runtime = src[src.index("FROM debian:trixie-slim AS runtime"):]
+        install = re.search(r"apt-get install -y --no-install-recommends ([^\\\n]+)", runtime)
+        assert install is not None
+        assert {"ca-certificates", "git", "netbase", "tzdata"} <= set(install.group(1).split())
+        assert "LANG=C.UTF-8" in runtime
 
     def test_playwright_pin_matches_lock(self):
         src = _read("Dockerfile")
@@ -599,6 +743,21 @@ class TestDockerfile:
         )
         assert "playwright install --only-shell" not in ci, "the portable lane measures the shipped image"
 
+    def test_ci_docker_builds_never_bake_the_checkout_token(self):
+        """`COPY . .` keeps `.git`, so a job building the image from its checkout must not
+        persist GITHUB_TOKEN as `.git/config`'s extraheader into a layer (#1263)."""
+        import yaml
+
+        jobs = yaml.safe_load(_read(".github/workflows/ci.yml"))["jobs"]
+        building = sorted(name for name, job in jobs.items()
+                          if any("docker build" in str(step.get("run", "")) for step in job.get("steps", [])))
+        assert {"docker-portable-test", "docker-ui-smoke"} <= set(building), building
+        for name in building:
+            checkouts = [step for step in jobs[name]["steps"]
+                         if str(step.get("uses", "")).startswith("actions/checkout@")]
+            assert checkouts, name
+            assert all((step.get("with") or {}).get("persist-credentials") is False for step in checkouts), name
+
 
 @pytest.mark.parametrize(
     "path",
@@ -620,8 +779,10 @@ def test_uv_project_commands_validate_lock_freshness(path):
 
 
 def test_generated_runtime_lock_keeps_lf_on_windows():
-    attributes = _read(".gitattributes").splitlines()
-    assert "requirements-runtime.lock text eol=lf" in attributes
+    """The regenerated lock keeps LF in a Windows checkout, so the clean-tree bundle gate sees no false edit."""
+    attributes = subprocess.run(["git", "check-attr", "eol", "--", "requirements-runtime.lock"], cwd=REPO_ROOT,
+                                capture_output=True, text=True, check=True).stdout
+    assert attributes.strip() == "requirements-runtime.lock: eol: lf", attributes
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +814,6 @@ class TestRepoBundleReleaseTagGuard:
     def test_dirty_tree_refusal_reports_the_offending_paths(self):
         src = _read("scripts/build_repo_bundle.py")
         assert '"status", "--porcelain"' in src
-        assert '"Commit or stash changes first so the embedded managed repo matches the packaged code.\\n"' in src
         assert "+ status" in src
 
 
@@ -665,8 +825,9 @@ class TestMacOSSigning:
     """The CI build job and build.sh together implement optional macOS code
     signing and notarization. The contracts here prevent
     regression of the GitHub Actions `secrets.*`-in-step-`if:` pitfall, the
-    build-script env override / optional-notarytool gate, the keychain
-    cleanup guard, and the stapler-failure-as-soft-warning behaviour.
+    build-script env override, the keychain cleanup guard, and the
+    notarization contract: off without Apple credentials, otherwise the app
+    and the DMG each get a validated stapled ticket or the build stops.
 
     See docs/DEVELOPMENT.md::"GitHub Actions: secrets in step-level if
     conditions" for the rationale.
@@ -886,66 +1047,125 @@ class TestMacOSSigning:
             "`security find-identity` instead."
         )
 
-    def test_build_sh_notarization_optional(self):
-        """build.sh must include an optional notarization block guarded on
-        APPLE_ID + APPLE_TEAM_ID + APPLE_APP_SPECIFIC_PASSWORD, calling
-        `xcrun notarytool submit` followed by `xcrun stapler staple`."""
-        src = _read("build.sh")
-        assert "xcrun notarytool submit" in src, (
-            "build.sh must call `xcrun notarytool submit` to upload the "
-            "DMG for Apple notarization when credentials are configured"
-        )
-        assert "xcrun stapler staple" in src, (
-            "build.sh must call `xcrun stapler staple` after a successful "
-            "notarytool submission so the ticket is attached to the DMG"
-        )
-        # The notarization block must be guarded on the three notarytool
-        # credential env vars, otherwise builds without an Apple ID hard-fail.
-        for var in ("APPLE_ID", "APPLE_TEAM_ID", "APPLE_APP_SPECIFIC_PASSWORD"):
-            assert var in src, (
-                f"build.sh notarization block must reference {var} so it "
-                f"is gated on the full credential set"
-            )
+    @staticmethod
+    def _shell_function(src: str, name: str) -> str:
+        """Return one top-level shell function of build.sh, verbatim."""
+        start = src.index(f"\n{name}() {{\n") + 1
+        return src[start:src.index("\n}\n", start) + 3]
 
-    def test_build_sh_stapler_failure_is_soft(self):
-        """`xcrun stapler staple` must be wrapped in an `if/then/else`
-        (or paired with `||`) so a transient stapler failure becomes a
-        warning instead of aborting the build under `set -e`.
-
-        Apple's stapler service can fail intermittently after a successful
-        `notarytool submit` (CDN propagation lag, transient 5xx). A
-        signed-and-notarized-but-unstapled DMG is still functional —
-        Gatekeeper fetches the ticket online on first launch — so a
-        stapler hiccup must not delete the macOS artifact from the
-        release.
-        """
+    def _run_notarization(self, tmp_path, *, status: str, staple_rc: int = 0):
+        """Execute build.sh's own notarize/staple functions against a fake xcrun."""
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("build.sh functions need bash")
         src = _read("build.sh")
-        # Find the stapler invocation and check it is inside an `if` head
-        # (i.e. `if xcrun stapler staple ...; then`) OR followed by `||`.
-        # The simplest robust check: locate the line, then verify either
-        # (a) it begins with `if ` after stripping leading whitespace, or
-        # (b) it ends with ` || ...` style continuation.
-        # Only inspect actual code lines — strip both whole-line bash comments
-        # (`# …`) and inline trailing comments (`code # …`) before testing.
-        stapler_lines = []
-        for raw in src.splitlines():
-            code = raw.split("#", 1)[0]
-            if "xcrun stapler staple" in code:
-                stapler_lines.append(code)
-        assert stapler_lines, (
-            "build.sh must call `xcrun stapler staple` (notarization step)"
+        fake = tmp_path / "bin"
+        fake.mkdir()
+        (fake / "xcrun").write_text(
+            "#!/bin/sh\n"
+            'echo "$*" >> "$XCRUN_LOG"\n'
+            'case "$1 $2" in\n'
+            '  "notarytool submit") printf \'{"id": "sub-1", "status": "%s"}\' "$FAKE_STATUS" ;;\n'
+            '  "stapler staple"|"stapler validate") exit "$FAKE_STAPLE_RC" ;;\n'
+            "esac\n",
+            encoding="utf-8", newline="\n",  # bash rejects CRLF on the Windows shards
         )
-        for line in stapler_lines:
-            stripped = line.strip()
-            wrapped_in_if = stripped.startswith("if ") and stripped.endswith("; then")
-            soft_or = "||" in stripped
-            assert wrapped_in_if or soft_or, (
-                "build.sh `xcrun stapler staple` invocation must be guarded "
-                "(`if xcrun stapler staple ...; then ... else WARN ... fi` "
-                "or `xcrun stapler staple ... || echo WARN`) so a transient "
-                "stapler failure does not abort the build under `set -e` and "
-                f"silently drop the macOS DMG. Offending line: {stripped!r}"
-            )
+        (fake / "xcrun").chmod(0o755)
+        script = (
+            "set -e\nsleep() { :; }\n"
+            + self._shell_function(src, "notarize")
+            + self._shell_function(src, "staple")
+            + 'notarize dist/app.zip\nstaple dist/Ouroboros.app\necho DONE\n'
+        )
+        log = tmp_path / "xcrun.log"
+        env = dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ['PATH']}", XCRUN_LOG=str(log),
+                   FAKE_STATUS=status, FAKE_STAPLE_RC=str(staple_rc), APPLE_ID="dev@example.test",
+                   APPLE_TEAM_ID="TEAM", APPLE_APP_SPECIFIC_PASSWORD="secret")
+        result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=env,
+                                capture_output=True, text=True, check=False)
+        return result, log.read_text(encoding="utf-8") if log.exists() else ""
+
+    def test_build_sh_notarization_accepts_only_apples_accepted_status(self, tmp_path):
+        """notarytool can exit 0 on "Invalid": build.sh reads the JSON status,
+        prints the developer log, staples and validates, and stops otherwise."""
+        accepted, calls = self._run_notarization(tmp_path, status="Accepted")
+        assert accepted.returncode == 0 and "DONE" in accepted.stdout, accepted.stderr
+        assert "notarytool log sub-1" in calls
+        assert "stapler staple dist/Ouroboros.app" in calls
+        assert "stapler validate dist/Ouroboros.app" in calls
+
+        (tmp_path / "invalid").mkdir()
+        invalid, calls = self._run_notarization(tmp_path / "invalid", status="Invalid")
+        assert invalid.returncode != 0 and "DONE" not in invalid.stdout
+        assert "status 'Invalid'" in invalid.stderr
+        assert "notarytool log sub-1" in calls and "stapler" not in calls
+
+    def test_build_sh_staple_failure_stops_the_build(self, tmp_path):
+        """A notarized build that cannot staple a validated ticket is not shipped:
+        v7.7.0 published a DMG whose app Gatekeeper rejected."""
+        failed, calls = self._run_notarization(tmp_path, status="Accepted", staple_rc=1)
+        assert failed.returncode != 0 and "DONE" not in failed.stdout
+        assert "no validated notarization ticket" in failed.stderr
+        assert calls.count("stapler staple dist/Ouroboros.app") == 3
+
+    def test_build_sh_notarizes_the_app_before_the_dmg_and_only_with_credentials(self):
+        src = _read("build.sh")
+        gate = src[src.index("NOTARIZE=0"):src.index("notarize() {")]
+        for var in ("SIGN_MODE", "APPLE_ID", "APPLE_TEAM_ID", "APPLE_APP_SPECIFIC_PASSWORD"):
+            assert var in gate, f"notarization must stay off without {var}"
+        order = [
+            src.index("=== Signing Ouroboros.app ==="),
+            src.index('ditto -c -k --keepParent "$APP_PATH" "$APP_ZIP"'),
+            src.index('notarize "$APP_ZIP"'),
+            src.index('staple "$APP_PATH"'),
+            src.index('ditto "$APP_PATH" "$DMG_STAGE_DIR/Ouroboros.app"'),
+            src.index("hdiutil create"),
+            src.index('codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"'),
+            src.index('notarize "$DMG_PATH"'),
+            src.index('staple "$DMG_PATH"'),
+        ]
+        assert order == sorted(order), "the stapled app must be what the DMG contains"
+
+    def test_build_sh_drops_debug_symbols_and_pyobjc_tests_before_pyinstaller(self, tmp_path):
+        """Executes build.sh's own payload prune: debug-symbol bundles and pyobjc's
+        test suite go, runtime extensions stay, and it happens before PyInstaller."""
+        src = _read("build.sh")
+        marker = "--- Removing stale WebKit, debug-symbol and test payloads"
+        assert src.index(marker) < src.index("python3 -m PyInstaller")
+        body = src[src.index("python3 - <<'PY'\n", src.index(marker)) + len("python3 - <<'PY'\n"):]
+        body = body[:body.index("\nPY\n")]
+        site = tmp_path / "python-standalone" / "lib" / "python3.10" / "site-packages"
+        dsym = site / "objc" / "_objc.cpython-310-darwin.so.dSYM" / "Contents" / "Resources" / "DWARF"
+        dsym.mkdir(parents=True)
+        (dsym / "_objc.cpython-310-darwin.so").write_bytes(b"dwarf")
+        (site / "objc" / "_objc.cpython-310-darwin.so").write_bytes(b"runtime")
+        (site / "PyObjCTest" / "NULL.cpython-310-darwin.so.dSYM").mkdir(parents=True)
+        (site / "PyObjCTest" / "test_null.py").write_text("", encoding="utf-8")
+        (site / "AppKit").mkdir()
+        (site / "AppKit" / "__init__.py").write_text("", encoding="utf-8")
+
+        result = subprocess.run([sys.executable, "-c", body], cwd=tmp_path,
+                                capture_output=True, text=True, check=False)
+
+        assert result.returncode == 0, result.stderr
+        assert not (site / "PyObjCTest").exists()
+        assert not (site / "objc" / "_objc.cpython-310-darwin.so.dSYM").exists()
+        assert (site / "objc" / "_objc.cpython-310-darwin.so").read_bytes() == b"runtime"
+        assert (site / "AppKit" / "__init__.py").exists()
+        assert "Removed 1 test package(s) and 2 debug-symbol bundle(s)" in result.stdout
+
+    def test_macos_smoke_proves_gatekeeper_on_the_copied_out_app(self):
+        """codesign passed v7.7.0; the release proof must ask Gatekeeper about the
+        app a user drags out (the decision itself is executed in
+        tests/test_release_proof_macos.py)."""
+        src = _read(self._CI_PATH)
+        smoke = src[src.index("- name: Smoke final macOS DMG"):src.index("- name: Smoke final Linux archive")]
+        assert 'xcrun stapler validate "$DMG"' in smoke
+        assert 'xcrun stapler validate "$SBOM_ROOT/Ouroboros.app"' in smoke
+        assert 'spctl --assess --type exec -vv "$SBOM_ROOT/Ouroboros.app"' in smoke
+        assert "--context context:primary-signature" in smoke
+        assert smoke.count("grep -q 'source=Notarized Developer ID'") == 2
+        assert smoke.index('ditto "$MOUNT" "$SBOM_ROOT"') < smoke.index("spctl --assess")
 
 
 # ===========================================================================
@@ -1032,18 +1252,21 @@ def test_spec_retains_cross_platform_packaging_hooks():
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
 def test_launcher_retains_cross_platform_runtime_hooks():
     launcher_source = _pkg_read("launcher.py")
-    assert "embedded_python_candidates" in launcher_source
+    assert "find_embedded_python" in launcher_source
+    assert "embedded_python_candidates" in _pkg_read("ouroboros/launcher_bootstrap.py")
     assert "_prepare_windows_webview_runtime" in launcher_source
     assert "git_install_hint()" in launcher_source
     assert "create_kill_on_close_job" in launcher_source
-    assert "kill_process_on_port(int(companion_port))" in launcher_source
-    assert "force_kill_pid(child.pid)" in launcher_source
+    assert "kill_runtime_orphans(DATA_DIR" in launcher_source
+    reaper = _pkg_read("ouroboros/launcher_server_reaper.py")
+    assert "kill_process_on_port(int(companion_port))" in reaper
+    assert "force_kill_pid(child.pid)" in reaper
 
 
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
 def test_launcher_preserves_macos_git_setup_path():
     launcher_source = _pkg_read("launcher.py")
-    assert 'subprocess.Popen(["xcode-select", "--install"])' in launcher_source
+    assert '_hidden_popen(["xcode-select", "--install"], bootstrap=True)' in launcher_source  # owned, no window flag off Windows
     assert "Install Git (Xcode CLI Tools)" in launcher_source
     assert "Installing... A system dialog may appear." in launcher_source
 
@@ -1125,21 +1348,27 @@ def test_ci_release_preflight_validates_tag_matches_version():
     assert 'tag != expected_tag' in workflow
 
 
+_RELEASE_REQUIRED = ("build", "windows-proof", "release-preflight", "lint", "full-test", "system-e2e-mock",
+                     "ui-smoke", "integration-test", "marker-guards", "docker-ui-smoke", "docker-portable-test",
+                     "skill-smoke", "test-verdict")
+
+
 def test_ci_collects_independent_failures_without_relaxing_release_gates():
+    import yaml
+
     workflow = _ci_workflow()
-    assert "${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') }}" in workflow
+    jobs = yaml.safe_load(workflow)["jobs"]
     assert "tag_valid: ${{ steps.release_meta.outputs.tag_valid }}" in workflow
-    assert "needs.release-preflight.outputs.tag_valid == 'true'" in workflow
-    assert "needs.release-preflight.result == 'success'" in workflow.split("\n  release:\n", 1)[1]
-    for expression in (
-        "FULL_TEST_RESULT: ${{ needs.full-test.result }}",
-        "INTEGRATION_RESULT: ${{ needs.integration-test.result }}",
-        "SYSTEM_E2E_RESULT: ${{ needs.system-e2e-mock.result }}",
-    ):
-        assert expression in workflow
-    assert '"$FULL_TEST_RESULT" != success' in workflow
-    assert '"$INTEGRATION_RESULT" != success' in workflow
-    assert '"$SYSTEM_E2E_RESULT" != success' in workflow
+    # Builds start once the tag is valid, beside the tests, instead of waiting for them.
+    assert "needs" not in jobs["release-preflight"]
+    assert jobs["build"]["needs"] == ["release-preflight"]
+    assert "needs.release-preflight.outputs.tag_valid == 'true'" in jobs["build"]["if"]
+    # ...and the release job, not the preflight, requires every lane: nothing is waived by tag.
+    release = jobs["release"]["if"]
+    for name in _RELEASE_REQUIRED:
+        assert f"needs.{name}.result == 'success'" in release, name
+        assert name in jobs["release"]["needs"], name
+    assert "refs/tags/v7" not in workflow
     assert "if: startsWith(github.ref, 'refs/tags/v')" in workflow.split("  android-build:", 1)[1].split("  release-preflight:", 1)[0]
     assert "continue-on-error: true" in workflow.split("  vendor-package-smoke:", 1)[1].split("  release:", 1)[0]
 
@@ -1158,27 +1387,15 @@ def test_ci_setup_aware_failure_collection_guards_each_independent_lane():
     assert "refs/tags/v" in ui["Run browser tools Chromium/WebKit smoke"]["if"]
 
 
-def test_ci_release_prerequisite_shell_gate_truth_table():
+def test_ci_release_requires_success_and_never_a_skipped_or_red_lane():
+    """The release `if` asks every required job for success, so a skipped lane (no result at all)
+    or a red one stops publication on every tag alike; FLAKY and ACCEPTED tests are green lanes."""
     import yaml
 
-    jobs = yaml.safe_load(_ci_workflow())["jobs"]
-    step = next(step for step in jobs["release-preflight"]["steps"]
-                if step.get("name") == "Require test prerequisites for publication")
-    cases = [
-        (("success", "success", "success"), True),
-        (("failure", "success", "success"), False),
-        (("success", "skipped", "success"), False),
-        (("success", "success", "cancelled"), False),
-        (("", "success", "success"), False),
-    ]
-    for (full, integration, system), expected in cases:
-        env = os.environ.copy()
-        env.update(FULL_TEST_RESULT=full, INTEGRATION_RESULT=integration, SYSTEM_E2E_RESULT=system)
-        bash = shutil.which("bash")
-        if bash is None:
-            pytest.skip("workflow shell is unavailable on this host")
-        result = subprocess.run([bash, "-c", step["run"]], env=env, capture_output=True, text=True)
-        assert (result.returncode == 0) is expected, (full, integration, system, result.stderr)
+    release = yaml.safe_load(_ci_workflow())["jobs"]["release"]["if"]
+    assert "github.ref == 'refs/tags/" not in release and "github.repository ==" not in release
+    assert "!= 'skipped'" not in release
+    assert release.count("== 'success'") == len(_RELEASE_REQUIRED)
 
 
 def test_ci_failure_collection_guards_every_independent_step_and_rerun_uploads():
@@ -1186,8 +1403,9 @@ def test_ci_failure_collection_guards_every_independent_step_and_rerun_uploads()
 
     jobs = yaml.safe_load(_ci_workflow())["jobs"]
     expected = {
-        "quick-test": ["Verify generated Pages output", "Lint (deterministic F-rule gate — catches the NameError-under-except class)", "Run browser-module tests (node --test — mirrored by the hermetic commit gate)", "Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)", "Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
-        "full-test-runs": ["Run browser-module tests (node --test — mirrored by the hermetic commit gate)", "Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)", "Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
+        "lint": ["Verify generated Pages output", "Lint (deterministic F-rule gate — catches the NameError-under-except class)", "Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)"],
+        "quick-test": ["Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
+        "full-test-runs": ["Run browser-module tests (node --test — mirrored by the hermetic commit gate)", "Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
         "marker-guards": ["Guard non-empty browser marker lanes", "Guard non-empty serial marker lane", "Guard non-empty skill_smoke marker lane", "Guard non-empty size_ratchet marker lane"],
         "docker-ui-smoke": ["Install UI smoke browser binaries", "Run Docker UI smoke", "Run Docker browser tools Chromium/WebKit smoke"],
         "system-e2e-mock": ["Run the keyless system E2E scenario lane (real isolated servers)", "Run the cancellation E-suite mock lane"],
@@ -1220,23 +1438,14 @@ def test_ci_step_outcome_references_resolve_to_prior_step_ids():
 
 
 
-def test_neither_the_code_workflow_nor_the_browser_push_workflow_filters_pushes_by_path():
+def test_release_tags_and_manual_browser_runs_keep_unfiltered_entrypoints():
     import yaml
 
-    # A path list decides whether a LANDED commit is tested at all: packaging/, devtools/,
-    # prompts/, skills/, the Makefile, the spec and the requirements are read by tests and
-    # builds, so both push entries must see a push that touches only those.
-    ci = yaml.safe_load(_ci_workflow())
-    ci_push = ci.get("on", ci.get(True))["push"]
-    assert ci_push == {"branches": ["main", "ouroboros", "ouroboros-stable"], "tags": ["v*"]}
-
+    # Event matrix: test_platform_ci_events; exact triggers: test_ci_diagnostic_workflows.
     push = yaml.safe_load((_REPO_PATH / ".github/workflows/ui-browser-push.yml").read_text(encoding="utf-8"))
     trigger = push.get("on", push.get(True))
-    assert list(trigger) == ["push", "workflow_dispatch"], "the UI-only entry adds no schedule or paid lane"
+    assert list(trigger) == ["workflow_dispatch"], "the UI-only entry is manual and adds no paid lane"
     assert trigger["workflow_dispatch"]["inputs"]["diagnostic"]["options"] == ["full", "viewport", "inflight"]
-    assert trigger["push"]["branches"] == ["ouroboros"]
-    for label, entry in (("ci.yml", ci_push), ("ui-browser-push.yml", trigger["push"])):
-        assert "paths" not in entry and "paths-ignore" not in entry, label
     assert push["jobs"]["ui-smoke"]["uses"] == "./.github/workflows/ui-browser.yml"
 
     shared = yaml.safe_load((_REPO_PATH / ".github/workflows/ui-browser.yml").read_text(encoding="utf-8"))
@@ -1294,10 +1503,9 @@ def test_ci_has_fork_safe_three_os_betterleaks_candidate_matrix():
     start = workflow.index("  betterleaks-platform-smoke:")
     job = workflow[start : workflow.index("\n  # ─", start)]
     assert "github.event_name == 'workflow_dispatch'" in quick_job
-    assert "github.event_name == 'pull_request'" in job
-    assert "github.base_ref == 'ouroboros'" in job
-    assert "github.event_name == 'workflow_dispatch'" in job
-    assert "pull_request_target" not in job
+    # Manual runs only: ci.yml has no pull_request trigger, so no dormant PR branch is kept.
+    assert "if: github.event_name == 'workflow_dispatch'" in job
+    assert "pull_request" not in job
     assert "os: [ubuntu-latest, windows-latest, macos-latest]" in job
     assert "uses: ./.github/actions/setup-python-env" in job
     assert "python -m ouroboros.betterleaks_runtime install" in job

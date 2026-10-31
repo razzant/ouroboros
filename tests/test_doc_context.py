@@ -5,15 +5,15 @@ Doc matrix (D-ARCH unification, owner 2026-08-08):
        (self-body, project tasks with or without a folder, evolution, external
        surfaces); navigation map in low. It is Ouroboros's capability/tools/
        access map — never dropped per-task in max.
-  DEVELOPMENT is MODE-INDEPENDENT per task class, keyed by D-DEV (owner
-       2026-08-08) on the ACTIVE REPO BINDING — the handbook loads exactly when
-       the work targets Ouroboros's own body, a path fact and never a guess from
-       message text (P5). On-demand pointer for the EXTERNAL-SURFACE class (a
-       bound workspace incl. an auto-provisioned genesis tree, a subagent, an
-       api/cli/scheduled surface); full for everything still bound to the system
-       repo — including a direct-chat turn in a PROJECT ROOM, which binds no
-       workspace. Project MEMBERSHIP is deliberately NOT the signal. Explicit
-       context_requires_development / context_requires_self_body_docs win.
+  DEVELOPMENT follows the SUBJECT OF THE WORK (D-DEV 2026-08-08, 6A 2026-10-27,
+       BIBLE P1; `context_input_selection.development_resident`): an explicit
+       context_requires_development wins either way (absent is not false); a
+       subagent or an api/cli/scheduled surface gets its chapter map unless the
+       task asks for the handbook; self-body work keeps it; a bound tree that
+       body_fact proves foreign gets the map; an unbound task (a direct-chat
+       turn in a PROJECT ROOM included) or a tree whose body fact is unknown
+       keeps it — a path fact, never a guess from message text (P5). Project
+       MEMBERSHIP is deliberately NOT the signal.
   README/CHECKLISTS: on-demand pointer in all modes.
 SYSTEM + BIBLE are tier-0 and always full.
 """
@@ -22,7 +22,6 @@ import os
 import pathlib
 import tempfile
 import pytest
-from tests._governance_docs_shared import governance_doc_text
 from tests.test_swarm_host_admission import host as _promotion_host
 from tests._store_shared import seed_result, unreadable_result
 
@@ -65,6 +64,17 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
     return env, memory
 
 
+def foreign_tree(path: pathlib.Path) -> pathlib.Path:
+    """A git tree whose only remote is someone else's repository: body_fact proves it foreign."""
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    if not (path / ".git").exists():
+        for args in (("init", "-q"), ("remote", "add", "origin", "https://github.com/someone/elsewhere.git")):
+            subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    return path
+
+
 def _build_system_text(task_overrides=None, *, context_mode="max"):
     from ouroboros.context import build_llm_messages
     tmpdir = pathlib.Path(tempfile.mkdtemp())
@@ -91,18 +101,6 @@ def test_max_mode_inlines_architecture_and_development_in_full():
     assert _ARCH_BODY_SENTINEL in text  # full body inlined
     assert "navigation map" not in text
     assert "## DEVELOPMENT.md" in text
-
-
-def test_plan_review_docs_pin_honest_continuation_from_retained_sources():
-    """A plan participant continues only from its own retained delivery and reply; an
-    unreadable source is a fresh send the ask row discloses (`continued`), never a borrowed
-    transcript. Both books state it; the retired engine's refusal code is not live text."""
-    repo = pathlib.Path(__file__).resolve().parents[1]
-
-    for relative in ("docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"):
-        text = governance_doc_text(relative, repo)
-        assert "an unreadable source means a fresh send" in text and "`continued`" in text, relative
-        assert "plan_review_exact_artifact_unavailable" not in text, relative
 
 
 def test_forked_task_captures_canonical_memory_and_exact_api_context():
@@ -161,11 +159,11 @@ def test_forked_context_uses_canonical_global_cognition_not_child_noise(monkeypa
         (root / "memory" / "knowledge").mkdir(parents=True, exist_ok=True)
         (root / "logs").mkdir(parents=True, exist_ok=True)
         (root / "state").mkdir(parents=True, exist_ok=True)
-    (canonical / "memory" / "knowledge" / "patterns.md").write_text(
-        "CANONICAL_PATTERN_REGISTER", encoding="utf-8",
+    (canonical / "memory" / "knowledge" / "overview.md").write_text(
+        "CANONICAL_OVERVIEW", encoding="utf-8",
     )
-    (child / "memory" / "knowledge" / "patterns.md").write_text(
-        "CHILD_PATTERN_NOISE", encoding="utf-8",
+    (child / "memory" / "knowledge" / "overview.md").write_text(
+        "CHILD_OVERVIEW_NOISE", encoding="utf-8",
     )
     (canonical / "memory" / "deep_review.md").write_text(
         "CANONICAL_DEEP_REVIEW", encoding="utf-8",
@@ -186,14 +184,15 @@ def test_forked_context_uses_canonical_global_cognition_not_child_noise(monkeypa
     )
     rendered = json.dumps(messages, ensure_ascii=False)
 
-    assert "CANONICAL_PATTERN_REGISTER" in rendered
-    assert "CHILD_PATTERN_NOISE" not in rendered
+    assert "CANONICAL_OVERVIEW" in rendered
+    assert "CHILD_OVERVIEW_NOISE" not in rendered
     # The report rides as a pointer to the CANONICAL source (its size, its address), never a
     # body, with an absolute canonical read address; actual dispatch of that call opens it.
     assert f"{len('CANONICAL_DEEP_REVIEW')} chars" in rendered
     assert "CANONICAL_DEEP_REVIEW" not in rendered and "CHILD_DEEP_NOISE" not in rendered
     call = {"root": "runtime_data", "path": str((canonical / "memory" / "deep_review.md").resolve())}
-    assert f"Read: read_file(root='runtime_data', path='{call['path']}')" in rendered
+    pointer = f"Read: read_file(root='runtime_data', path={call['path']!r})"  # as the product spells it (repr)
+    assert json.dumps(pointer, ensure_ascii=False)[1:-1] in rendered
     registry = ToolRegistry(repo_dir=env.repo_dir, drive_root=child)
     registry.set_context(ctx)
     read = registry.execute("read_file", call)
@@ -216,7 +215,7 @@ def test_deep_review_is_a_historical_pointer_dated_only_by_its_header(tmp_path):
             ("<!-- deep-review provenance: generated_at=2026-01-01T00:00:00Z, source_revision=unknown -->\n",
              "generated_at=2026-01-01T00:00:00Z, source_revision=unknown (its provenance header)")):
         original = prefix + "retained historical reasoning " * 400
-        path.write_text(original, encoding="utf-8")
+        path.write_bytes(original.encode("utf-8"))  # pin the source bytes, not the host's text-mode EOL
         # A recent file mtime is not a review date, even on a copied old report.
         os.utime(path, (1900000000, 1900000000))
         messages, _ = build_llm_messages(
@@ -328,10 +327,12 @@ def test_valid_named_predecessor_materializes_into_first_model_request_and_actor
         predecessor_id, include_authority=True,
     ))
 
-    assert tail in rendered
-    assert "L1 asks L2 to spawn L3" in rendered
+    # The first request carries the brief and its reader; the contract stays at its source (THESIS I-7, C5).
+    assert "predecessor_authority" in rendered and predecessor_id in rendered and "include_authority" in rendered
+    assert tail not in rendered and "L1 asks L2 to spawn L3" not in rendered
     assert actor_read["status"] == "available"
     assert actor_read["authority"]["task_contract"]["objective"].endswith(tail)
+    assert actor_read["authority"]["task_contract"]["delegation_budget"]["intent_note"] == "L1 asks L2 to spawn L3"
 
 
 def test_unreadable_current_plan_review_source_returns_typed_startup_refusal(monkeypatch):
@@ -352,32 +353,23 @@ def test_unreadable_current_plan_review_source_returns_typed_startup_refusal(mon
 
 
 def test_named_owner_source_resolves_beyond_automatic_recent_generations():
-    import json
-
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.project_dialogue import build_owner_message_ref
 
+    from tests import _dialogue as dialogue_test
+
     tmpdir = pathlib.Path(tempfile.mkdtemp())
     env, _memory = _make_env_and_memory(tmpdir)
-    archive = env.drive_root / "archive"
-    logs = env.drive_root / "logs"
-    archive.mkdir(parents=True)
-    logs.mkdir(parents=True, exist_ok=True)
     text = "old but exact owner authority"
     ref = build_owner_message_ref(
         chat_id=1, client_message_id="old-owner", ts="2026-08-01T00:00:00Z", text=text,
     )
-    (archive / "chat_0001.jsonl").write_text(
-        json.dumps({**ref, "direction": "in", "text": text}) + "\n", encoding="utf-8",
-    )
-    for index in range(2, 6):
-        (archive / f"chat_000{index}.jsonl").write_text(
-            json.dumps({"direction": "in", "text": f"newer-{index}"}) + "\n",
-            encoding="utf-8",
-        )
-    (logs / "chat.jsonl").write_text(
-        json.dumps({"direction": "in", "text": "live"}) + "\n", encoding="utf-8",
-    )
+    # The owner's row is in the oldest of five archived generations of the legacy chain, imported as the upgrade does.
+    dialogue_test.seed(env.drive_root, archives={
+        "chat_0001.jsonl": [{**ref, "direction": "in", "text": text}],
+        **{f"chat_000{index}.jsonl": [{"direction": "in", "text": f"newer-{index}"}] for index in range(2, 6)}},
+        live={"chat": [{"direction": "in", "text": "live"}]})
+    dialogue_test.import_all(env.drive_root)
     task = {"id": "legacy-source", "origin_message_ref": ref}
 
     assert validate_task_authority_sources(env, task) == {}
@@ -401,9 +393,9 @@ def test_max_mode_external_workspace_keeps_arch_full_but_drops_development():
     )
     assert "## ARCHITECTURE.md" in external
     assert _ARCH_BODY_SENTINEL in external  # capability map stays resident
-    assert "navigation map" not in external
-    assert "## DEVELOPMENT.md" not in external  # handbook is the pointer
-    assert "DEVELOPMENT.md" in external  # ...but visibly named (P1)
+    assert "## ARCHITECTURE.md (navigation map)" not in external
+    assert "## DEVELOPMENT.md\n\n" not in external  # the handbook is not inlined...
+    assert "## DEVELOPMENT.md (navigation map)" in external  # ...its chapter map is (6A, P1's visible pointer)
 
     self_body = _build_system_text(
         {
@@ -476,17 +468,17 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
     development_body = "# DEVELOPMENT.md — Dev Guide\n\n## Review\n\nRead every source before committing.\n"
     (env.repo_dir / "docs" / "DEVELOPMENT.md").write_text(development_body, encoding="utf-8", newline="\n")
     memory = Memory(host.root, repo_dir=env.repo_dir)
-    workspace = tmp_path / "working-copy"
-    workspace.mkdir()
+    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: the flag alone decides the handbook
     project = create_project(host.root, "code-copy", name="Code Copy")
-    entry = next(tool for tool in get_tools() if tool.name == "promote_chat_to_task")
+    entry = next(tool for tool in get_tools() if tool.name == "start_task")
     field = "context_requires_self_body_docs"
     parameters = entry.schema["parameters"]
     assert parameters["properties"][field]["type"] == "boolean"
     assert field not in parameters["required"]
     description = parameters["properties"][field]["description"]
     assert "Ouroboros code" in description and "copies elsewhere" in description
-    assert "context_requires_development" not in parameters["properties"]
+    explicit = parameters["properties"]["context_requires_development"]  # absent is not false (6A)
+    assert explicit["type"] == "boolean" and "default" not in explicit and "context_requires_development" not in parameters["required"]
     events = []
 
     def emit(event):
@@ -502,7 +494,7 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
     for flag in (True, None, False):
         kwargs = {} if flag is None else {field: flag}
         result = entry.handler(tool_ctx, "Inspect this working copy", title="Working copy inspection",
-                               predecessor_task_id="", project_id=project["id"],
+                               project_id=project["id"],
                                workspace_root=str(workspace), **kwargs)
         assert result.startswith("OK: task"), result
         task = copy.deepcopy(host.pending[-1])
@@ -569,13 +561,20 @@ def test_development_keys_on_the_repo_binding_not_project_membership():
     (D-ARCH): full in max for every class, navigation map in low."""
     # A project task with a BOUND workspace (this is what a promoted project task
     # is since Q10=A auto-provisions a genesis tree) works on ANOTHER codebase.
+    foreign = str(foreign_tree(pathlib.Path(tempfile.mkdtemp()) / "proj-tree"))
     folder_max = _build_system_text(
-        {"project_id": "proj_sub", "workspace_root": "/tmp/proj-tree", "workspace_mode": "external"},
+        {"project_id": "proj_sub", "workspace_root": foreign, "workspace_mode": "external"},
         context_mode="max",
     )
     assert _ARCH_BODY_SENTINEL in folder_max  # ARCH full in max, always
-    assert "## DEVELOPMENT.md" not in folder_max
-    assert "DEVELOPMENT.md" in folder_max  # named in the on-demand pointer
+    assert "## DEVELOPMENT.md\n\n" not in folder_max
+    assert "## DEVELOPMENT.md (navigation map)" in folder_max  # its chapter map stands in (6A)
+    # A bound tree whose body fact is unknown (no git here) keeps the book: missing facts never narrow it (6A).
+    unknown_max = _build_system_text(
+        {"project_id": "proj_sub", "workspace_root": "/tmp/proj-tree-unknown", "workspace_mode": "external"},
+        context_mode="max",
+    )
+    assert "## DEVELOPMENT.md\n\n" in unknown_max
 
     # A direct-chat turn in a PROJECT ROOM binds no workspace: still Ouroboros's
     # own body, so it KEEPS the handbook. This is the case the project_id-keyed
@@ -624,7 +623,7 @@ def test_development_keys_on_the_repo_binding_not_project_membership():
     explicit_off = _build_system_text(
         {"project_id": "proj_sub", "context_requires_development": False}, context_mode="max"
     )
-    assert "## DEVELOPMENT.md" not in explicit_off
+    assert "## DEVELOPMENT.md\n\n" not in explicit_off and "## DEVELOPMENT.md (navigation map)" in explicit_off
 
 
 def test_readme_and_checklists_are_on_demand_pointer_in_both_modes():

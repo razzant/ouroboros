@@ -86,7 +86,7 @@ def test_invalid_saved_authority_masks_secrets_and_can_still_roundtrip_or_be_rep
 
 def test_real_settings_get_post_uses_url_roundtrip(settings_client, monkeypatch):  # noqa: F811
     from ouroboros import mcp_client
-    monkeypatch.setattr(mcp_client, "refresh_all_background", lambda **kwargs: None)
+    monkeypatch.setattr(mcp_client.MCPManager, "refresh_all_background", lambda *args, **kwargs: None)
     client, on_disk, saved = settings_client
     on_disk.update(MCP_ENABLED=False, MCP_SERVERS=[server()])
     received = client.get("/api/settings")

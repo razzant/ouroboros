@@ -61,7 +61,7 @@ def test_mixed_history_keeps_unique_publications_and_specific_unknowns(tmp_path,
 
 
 @pytest.mark.parametrize("failure", ["unstable", "unreadable", "exception"])
-def test_transient_history_repairs_on_next_boot_and_clears_only_its_unknown(tmp_path, monkeypatch, failure):
+def test_transient_history_repairs_in_maintenance_and_clears_only_its_unknown(tmp_path, monkeypatch, failure):
     project = _legacy(tmp_path, "older")
     _published(tmp_path, "older", project["chat_id"])
     original = Memory.read_chat_generations
@@ -85,7 +85,9 @@ def test_transient_history_repairs_on_next_boot_and_clears_only_its_unknown(tmp_
     assert reads == [1], "GET never repairs or scans history"
     obligations.add(tmp_path, "unknowns", "unrelated", {"reason": "retained uncertainty"})
     monkeypatch.setattr(Memory, "read_chat_generations", original)
-    assert migrations.prepare_startup_state(tmp_path)["question_publications"] == {"bound": 1, "unknown": 0}
+    assert migrations.prepare_startup_state(tmp_path)["question_publications"] == {}
+    from ouroboros.store_import import run_legacy_reconcile
+    assert run_legacy_reconcile(tmp_path)["question_publications"] == {"bound": 1, "unknown": 0}
     assert quiz_states(tmp_path, "task")["older"]["publication_chat_id"] == project["chat_id"]
     unknowns = obligations.members(tmp_path, "unknowns")
     assert "question:task:older" not in unknowns and "unrelated" in unknowns
@@ -100,8 +102,10 @@ def test_persistent_unreadable_history_stops_boot_replay_until_explicit_rebuild(
     original = Memory.read_chat_generations
     monkeypatch.setattr(Memory, "read_chat_generations", lambda *_a, **_kw: (
         [], {"snapshot_stable": True, "gaps": [{"kind": "generation_unreadable"}]}))
-    for _attempt in range(2):
-        assert migrations.prepare_startup_state(tmp_path)["question_publications"] == {"bound": 0, "unknown": 1}
+    assert migrations.prepare_startup_state(tmp_path)["question_publications"] == {"bound": 0, "unknown": 1}
+    assert migrations.prepare_startup_state(tmp_path)["question_publications"] == {}
+    from ouroboros.store_import import run_legacy_reconcile
+    assert run_legacy_reconcile(tmp_path)["question_publications"] == {"bound": 0, "unknown": 1}
     assert migrations.watermarks(tmp_path)["question_publication_retry"] == {"attempts": 2, "state": "rebuild_required"}
     monkeypatch.setattr(Memory, "read_chat_generations", lambda *_a, **_kw: pytest.fail("unbounded boot replay"))
     assert migrations.prepare_startup_state(tmp_path)["question_publications"] == {}

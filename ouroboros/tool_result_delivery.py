@@ -19,23 +19,12 @@ Two policies share the machinery:
     drives a prefix search and the view is ``[Tool result source view]``.
 
 ``measured_frame``
-    Main's first show. With B the smaller known positive of the owner target
-    and the route capacity, W the capacity alone, R the reply reserve and Pmin
-    the measured minimum request (every envelope with status and address, no
-    body), unsolicited bodies share ``max(0, min(B - R - Pmin, ceil(B /
-    RECLAIM_LOW_WATER_DIVISOR)))`` less what requested forms already took of
-    ``B - R - Pmin`` -- one allowance per batch, the reserve subtracted once --
-    while a form the call asked for (a head/tail view, a page, a window) may use
-    the physical room ``W - R - Pmin``: an owner target is economy for what the
-    host adds unasked, never a cut of a chosen read. The chosen forms are
-    measured whole beside the minimum unasked envelopes, so each side is priced
-    at its own measured density -- a plain page fitting W stays whole beside a
-    heavily escaped log, never cut by a batch average. The complete candidate is
-    re-measured before it is handed back; only requested forms with minimum
-    unasked envelopes exceeding W may shrink a requested form. An unknown W is disclosed (``capacity_unknown``) and a
-    requested form is delivered as chosen: no capacity is invented, and a known
-    target still bounds the unsolicited bodies. With B unknown too the batch is
-    delivered whole. The callback's ``accepted`` flag is never read as fit here.
+    Unasked bodies share the measured eighth. Chosen bodies arrive as asked,
+    even beside a crowded transcript: Main's pre-send recovery narrows memory
+    and host material first. Only a chosen body exceeding usable input by itself
+    may be cut here. A resulting non-fitting candidate is named for recovery,
+    never mistaken for an accepted provider request.
+
 """
 
 from __future__ import annotations
@@ -58,7 +47,7 @@ RESULT_VIEW_MARKER = "RESULT_VIEW_JSON="
 FULL_SOURCE_MARKER = "FULL_RESULT_SOURCE_JSON="
 FULL_SOURCE_UNAVAILABLE = "FULL_RESULT_SOURCE_UNAVAILABLE=true"
 SOURCE_UNAVAILABLE_NOTE = "Do not treat this partial result as complete; exact source persistence failed."
-RECOVER_PAGEABLE = "Read the exact source above, or page this tool (offset/limit) for the omitted range."
+RECOVER_PAGEABLE = "Read the exact source above, or request another range using this tool's declared parameters."
 RECOVER_OTHER = "Do not rerun this tool to recover omitted output. Read the exact source above."
 
 # Re-measurements of the complete candidate after the first allocation. Each one
@@ -119,15 +108,31 @@ def typed_result_facts(row: Mapping[str, Any]) -> Dict[str, Any]:
     return facts
 
 
-def prepare_producer_sources(results: Sequence[Mapping[str, Any]], drive_root: Any, task_id: str) -> list:
-    """Retain clean producer text before measuring its model-visible locator."""
+def prepare_producer_sources(results: Sequence[Mapping[str, Any]], drive_root: Any, task_id: str,
+                             notes: Sequence[str] = ()) -> list:
+    """Retain clean producer text before measuring its model-visible locator.
+
+    A row the host notes only at delivery (``notes``, aligned with ``results``) keeps the
+    note as ``delivery_note`` and its own result as that clean text.
+    """
     rows = [dict(row) for row in results]
-    for row in rows:
+    for index, row in enumerate(rows):
         producer_text = getattr(row.get("tool_result"), "producer_text", None)
-        if producer_text is not None:
+        note = notes[index] if index < len(notes) else ""
+        if note:
+            row["delivery_note"] = note
+        if producer_text is not None or note:
+            clean = row["result"] if producer_text is None else producer_text
             row["producer_source_ref"] = (persist_result_source(drive_root, task_id,
-                str(row["tool_call_id"]) + ".producer", producer_text) if drive_root is not None else {})
+                str(row["tool_call_id"]) + ".producer", clean) if drive_root is not None else {})
     return rows
+
+
+def with_delivery_note(row: Mapping[str, Any], text: str) -> str:
+    """What the mind is shown: ``text`` with the row's delivery note trailing it. Measurement
+    and the transcript use this; the host readers of a result keep ``text``."""
+    note = row.get("delivery_note")
+    return f"{text}\n\n{note}" if note else text
 
 
 def with_producer_source(row: Mapping[str, Any], text: str) -> str:
@@ -153,6 +158,8 @@ def _span_text(ranges: Sequence[Sequence[int]]) -> str:
 def render_result_view(
     text: str, *, head_chars: int, tail_chars: int, tool_name: str = "",
     source_ref: Optional[Mapping[str, Any]] = None, facts: Optional[Mapping[str, Any]] = None,
+    delivery: Optional[Mapping[str, Any]] = None,
+    reader_available: bool = True,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Head+tail view of ``text`` with exact ranges, or ``text`` itself.
 
@@ -172,6 +179,8 @@ def render_result_view(
     omitted = [head, total - tail]
     shown = [[lo, hi] for lo, hi in ([0, head], [total - tail, total]) if lo < hi]
     ref = dict(source_ref) if isinstance(source_ref, Mapping) and source_ref else {}
+    if not reader_available:
+        ref.pop("read", None)
     view: Dict[str, Any] = {
         "complete_chars": total,
         "complete_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -180,7 +189,10 @@ def render_result_view(
         "range_basis": RESULT_VIEW_BASIS,
         "facts": dict(facts or {}),
     }
-    if ref:
+    if delivery is not None:
+        # Host allocation facts never become producer stdout or producer status.
+        view["delivery"] = {**delivery, "source_status": "ready" if ref else "source_unavailable"}
+    if ref and reader_available:
         view["read_omitted"] = {
             "tool": "read_file", "root": str(ref.get("root") or "artifact_store"), "path": ref.get("path"),
             "start_line": 1, "max_lines": max(1, len(text.splitlines())),
@@ -193,7 +205,10 @@ def render_result_view(
     lines = [RESULT_VIEW_MARKER + json.dumps(view, ensure_ascii=False, sort_keys=True, separators=(",", ":"))]
     if ref:
         lines.append(FULL_SOURCE_MARKER + json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        lines.append(RECOVER_PAGEABLE if tool_name in PAGEABLE_TOOL_RESULTS else RECOVER_OTHER)
+        lines.append((RECOVER_PAGEABLE if tool_name in PAGEABLE_TOOL_RESULTS else RECOVER_OTHER)
+                     if reader_available else "The exact source is retained, but no reader is loaded in this connection. "
+                     + ("Another range is available using this tool's declared parameters."
+                        if tool_name in PAGEABLE_TOOL_RESULTS else "Do not rerun this tool to recover omitted output."))
     else:
         lines.extend([FULL_SOURCE_UNAVAILABLE, SOURCE_UNAVAILABLE_NOTE])
     delivered = text[:head] + marker + text[total - tail:] + "\n" + "\n".join(lines)
@@ -360,6 +375,7 @@ def _measured_frame(
     *, drive_root: pathlib.Path, task_id: str,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Main's first show: one measured batch allowance, requested forms first."""
+
     count = len(rows)
     texts = [reader_text(text) for text in full]
     digests = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts]
@@ -369,7 +385,21 @@ def _measured_frame(
 
     whole = measure(full)
     boundary, reserve, eighth = frame_bounds(whole)
+    target = _positive(whole.get("target_total_tokens"))
     capacity = _positive(whole.get("capacity_total_tokens"))
+    limiters = [set() for _ in rows]
+
+    def diagnostic(index: int) -> Dict[str, Any]:
+        return {"selection": "automatic" if requests[index] is None else "explicit",
+                "limiters": sorted(limiters[index]), "target_tokens": target, "capacity_tokens": capacity,
+                "reserve_tokens": reserve, "batch_share_tokens": eighth,
+                "unasked_results": sum(request is None for request in requests)}
+
+    for i, request in enumerate(requests):
+        if capacity is None:
+            limiters[i].add("capacity_unknown")
+        if request is not None and request != (None, None) and sum(request) < len(texts[i]):
+            limiters[i].add("explicit_view")
     receipt: Dict[str, Any] = {"fit": whole, "measurements": 1, "boundary_tokens": boundary, "capacity_tokens": capacity,
                                "reserve_tokens": reserve, "results": count, "partial": []}
     if boundary is None:
@@ -383,29 +413,33 @@ def _measured_frame(
                 continue
             source = persist_result_source(drive_root, task_id, rows[index]["tool_call_id"], full[index])
             delivered, view = render_result_view(texts[index], head_chars=head, tail_chars=tail,
-                tool_name=names[index], source_ref=source, facts=facts[index])
+                tool_name=names[index], source_ref=source, facts=facts[index], delivery=diagnostic(index))
             if view is not None:
                 rows[index]["result"] = delivered
                 _mark_partial(rows[index], source, {**view, "requested": True})
                 receipt["partial"].append({"tool_call_id": rows[index]["tool_call_id"],
                     "shown_ranges": view["shown_ranges"], "source_status": rows[index]["result_source_status"]})
-        return rows, {**receipt, "status": "capacity_unknown"}
+        final = measure([row["result"] for row in rows]) if receipt["partial"] else whole
+        return rows, {**receipt, "status": "capacity_unknown", "fit": final,
+                      "measurements": 2 if receipt["partial"] else 1}
 
     def envelope(index: int, source: Mapping[str, Any]) -> str:
         return render_result_view(texts[index], head_chars=0, tail_chars=0, tool_name=names[index],
-                                  source_ref=source, facts=facts[index])[0]
+                                  source_ref=source, facts=facts[index], delivery=diagnostic(index))[0]
 
     def form(index: int, chars: int) -> str:  # a body at ``chars``, on its stand-in address
         head, tail = split_allowance(chars, requests[index], len(texts[index]))
         if head + tail >= len(texts[index]):
             return full[index]
         return render_result_view(texts[index], head_chars=head, tail_chars=tail, tool_name=names[index],
-                                  source_ref=standins[index], facts=facts[index])[0]
+                                  source_ref=standins[index], facts=facts[index], delivery=diagnostic(index))[0]
 
     standins = [_standin_source_ref(row["tool_call_id"], text, digest) for row, text, digest in zip(rows, texts, digests)]
     envelopes = [envelope(index, standins[index]) for index in range(count)]
     minimum = measure(envelopes)
     p_min, p_whole = _tokens(minimum), _tokens(whole)
+    # Stand-ins size allocation only; minimum_view_unfit is measured below
+    # with actual source outcomes (a failed persistence has a shorter envelope).
     free = boundary - reserve - p_min
     room = None if capacity is None else capacity - reserve - p_min  # what requested forms may use
     unsolicited_allowance = max(0, min(free, eighth))
@@ -416,7 +450,7 @@ def _measured_frame(
              for i in range(count) if requests[i] is not None}
     receipt.update(measurements=2, minimum_tokens=p_min, whole_tokens=p_whole, free_tokens=free,
                    requested_room_tokens=room, unsolicited_allowance_tokens=unsolicited_allowance)
-    whole_fits = (room is None or p_whole + reserve <= capacity) and all(wants[i] >= len(texts[i]) for i in wants)
+    whole_fits = (room is None or p_whole + reserve < capacity) and all(wants[i] >= len(texts[i]) for i in wants)
     complete = "complete" if room is not None else "capacity_unknown"
     if whole_fits and p_whole + reserve <= boundary and p_whole - p_min <= unsolicited_allowance:
         return rows, {**receipt, "status": complete}  # every body together inside the unasked share
@@ -425,7 +459,20 @@ def _measured_frame(
     chosen_contents = [form(i, wants[i]) if i in wants else envelopes[i] for i in range(count)]
     chosen = minimum if not wants else whole if chosen_contents == full else measure(chosen_contents)
     p_chosen = _tokens(chosen)
-    receipt.update(measurements=2 + (chosen is not minimum and chosen is not whole), chosen_tokens=p_chosen)
+    requested_capacity = capacity
+    body_costs = {}
+    for i in wants:
+        empty = list(envelopes)
+        empty[i] = ""
+        baseline = measure(empty)
+        one = list(empty)
+        one[i] = chosen_contents[i]
+        body_costs[i] = max(0, _tokens(measure(one)) - _tokens(baseline))
+    protected = {i for i in wants if capacity is None or body_costs[i] <= capacity - reserve}
+    for i in wants.keys() - protected:
+        facts[i] = {**facts[i], "cut_reason": "chosen_body_exceeds_usable_input"}
+    receipt.update(measurements=2 + (chosen is not minimum and chosen is not whole) + 2 * len(wants),
+                   chosen_tokens=p_chosen, chosen_body_tokens={rows[i]["tool_call_id"]: cost for i, cost in body_costs.items()})
     chosen_chars = sum(max(0, len(chosen_contents[i]) - len(envelopes[i])) for i in wants)
     requested_rate = max(p_chosen - p_min, 1) / max(chosen_chars, 1)
     # Initial estimate of unasked cost: price omitted requested text at its shown
@@ -439,18 +486,33 @@ def _measured_frame(
             and (not unsolicited_tokens or p_whole + reserve <= boundary)):
         return rows, {**receipt, "status": complete}
 
-    allocation = [0] * count
+    allocation = [wants.get(i, 0) if i in protected else 0 for i in range(count)]
     if room is None or p_chosen - p_min <= room:  # unknown window, or every chosen form fits it whole
         allocation = [wants.get(index, 0) for index in range(count)]
         requested_tokens = float(p_chosen - p_min)
     else:  # the window shares out among the chosen forms at their own measured rate
-        for index, chars in _water_fill(wants, int(max(0, room) / requested_rate)).items():
+        for index, chars in _water_fill({i: want for i, want in wants.items() if i not in protected},
+                int(max(0, room - sum(body_costs[i] for i in protected)) / requested_rate)).items():
             allocation[index] = chars
         requested_tokens = sum(allocation[i] for i in wants) * requested_rate
     left = min(free, float("inf") if room is None else room) - requested_tokens
     pool = int(max(0.0, min(left, float(unsolicited_allowance))) / unsolicited_rate)
     for index, chars in _water_fill({i: body_chars[i] for i in range(count) if requests[i] is None}, pool).items():
         allocation[index] = chars
+    # Explain the bound that actually allocated this batch, not merely which
+    # window was selected. A known window can leave ample room while the target
+    # or the unsolicited eighth limits a view to nothing.
+    unasked_bounds = {"unsolicited_share": float(eighth)}
+    if target is not None:
+        unasked_bounds["target_pressure"] = target - reserve - p_min - requested_tokens
+    if capacity is not None:
+        unasked_bounds["physical_pressure"] = capacity - reserve - p_min - requested_tokens
+    binding = min(unasked_bounds.values())
+    for i, request in enumerate(requests):
+        if request is None:
+            limiters[i].update(name for name, value in unasked_bounds.items() if value == binding)
+        elif allocation[i] < wants[i]:
+            limiters[i].add("physical_pressure")
 
     sources: Dict[int, Dict[str, Any]] = {}
 
@@ -466,7 +528,7 @@ def _measured_frame(
         if index not in sources:  # persisted once, before any partial view of it is handed out
             sources[index] = persist_result_source(drive_root, task_id, rows[index]["tool_call_id"], full[index])
         delivered, view = render_result_view(texts[index], head_chars=head, tail_chars=tail, tool_name=names[index],
-                                             source_ref=sources[index], facts=facts[index])
+                                             source_ref=sources[index], facts=facts[index], delivery=diagnostic(index))
         if view is None:  # the anti-growth floor made it whole after all
             if publish:
                 rows[index]["result"] = full[index]
@@ -487,18 +549,33 @@ def _measured_frame(
         body_tokens = max(0, _tokens(final) - _tokens(without_unsolicited))
         receipt["unsolicited_body_tokens"] = body_tokens
         # Only the window shrinks a requested form; the target binds unsolicited bodies alone.
-        capacity_over = _tokens(final) + reserve - capacity if capacity is not None else 0
+        capacity_over = _tokens(final) + reserve - requested_capacity if capacity is not None else 0
         economy_over = max(body_tokens - unsolicited_allowance,
                            _tokens(final) + reserve - boundary if body_tokens else 0)
         over = max(capacity_over, economy_over)
         # An unasked overshoot cannot take space from chosen forms that fit
         # beside the minimum unasked envelopes. Both eligibility and cost use
         # that already measured baseline, including real source locators.
-        shrink_chosen = capacity is not None and _tokens(without_unsolicited) + reserve > capacity
-        shrinking = [i for i in range(count) if shrink_chosen or requests[i] is None]
+        shrink_chosen = capacity is not None and _tokens(without_unsolicited) + reserve > requested_capacity
+        shrinking = [i for i in range(count) if (shrink_chosen and i not in protected) or requests[i] is None]
         shown_total = sum(min(allocation[i], len(texts[i])) for i in shrinking)
+        if capacity_over > 0 and shown_total <= 0 and not any("minimum_view_unfit" in causes for causes in limiters):
+            actual_minimum = measure([render(i, 0, publish=False) for i in range(count)])
+            receipt["measurements"] += 1
+            if _tokens(actual_minimum) + reserve > capacity:
+                for causes in limiters:
+                    causes.add("minimum_view_unfit")
+                continue  # include the new diagnostic bytes in the delivered measurement
         if over <= 0 or shown_total <= 0 or attempt > _MAX_REMEASURES:
             break
+        for i in shrinking:
+            if capacity_over > 0:
+                limiters[i].add("physical_pressure")
+            if requests[i] is None and economy_over > 0:
+                if body_tokens > unsolicited_allowance:
+                    limiters[i].update(name for name, value in unasked_bounds.items() if value == binding)
+                if _tokens(final) + reserve > boundary:
+                    limiters[i].add("target_pressure" if target == boundary else "physical_pressure")
         attempt += 1
         if attempt > _MAX_REMEASURES:
             for i in shrinking:  # last resort: the minimum view of every body still over
@@ -510,7 +587,10 @@ def _measured_frame(
                 allocation[i] = int(allocation[i] * max(0.0, 1.0 - (cut * 1.1) / shown_total))
     status = ("capacity_unknown" if capacity is None
               else "projected" if _tokens(final) + reserve <= capacity else "minimum_view_unfit")
-    target = _positive(whole.get("target_total_tokens"))
+    receipt["recovery_required"] = capacity is not None and _tokens(final) + reserve > capacity
+    for i in wants:
+        if allocation[i] < wants[i] and rows[i].get("result_partial"):
+            rows[i]["result_source_view"]["cut_reason"] = "chosen_body_exceeds_usable_input"
     receipt["target_excess_tokens"] = max(0, _tokens(final) + reserve - target) if target else None
     receipt["partial"] = [{"tool_call_id": rows[i]["tool_call_id"], "tool": names[i],
                            "shown_ranges": rows[i]["result_source_view"]["shown_ranges"],

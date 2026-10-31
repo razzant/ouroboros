@@ -215,8 +215,8 @@ def test_gr5_2_reap_reconciles_delegated_runs_and_discloses(qenv, monkeypatch):
     task_reaper.reap_timed_out_task({
         "worker_id": 1, "proc": None, "task_id": "rp5",
         "task": {"id": "rp5", "chat_id": 3}, "task_type": "chat",
-        "terminal_reason": "idle_timeout", "attempt": 3, "owner_chat_id": 3,
-        "runtime_sec": 100.0, "will_retry": False, "retry_task_id": "",
+        "terminal_reason": "deadline", "attempt": 3, "owner_chat_id": 3,
+        "runtime_sec": 100.0, "deadline_reached": True, "ceiling_reached": False,
     })
 
     assert calls == ["rp5"], (
@@ -230,11 +230,11 @@ def test_gr5_2_reap_reconciles_delegated_runs_and_discloses(qenv, monkeypatch):
     # R2: the audit envelope rides the SAME single terminal write as the flat
     # list, stamped with the reaper's own trigger.
     envelope = row["delegate_terminal_reconciliation"]
-    assert envelope["trigger"] == "reaper_idle_timeout"
+    assert envelope["trigger"] == "reaper_deadline"
     assert envelope["open_run_ids"] == ["run-open"]
     (only_write,) = disclosure_writes
     assert only_write["delegated_runs_unreconciled"] == ["run-open"]
-    assert only_write["delegate_terminal_reconciliation"]["trigger"] == "reaper_idle_timeout"
+    assert only_write["delegate_terminal_reconciliation"]["trigger"] == "reaper_deadline"
     assert any(
         r.get("type") == "delegated_runs_unreconciled" and r.get("task_id") == "rp5"
         for r in _event_rows(qenv.drive)

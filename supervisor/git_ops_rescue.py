@@ -188,7 +188,7 @@ def _create_rescue_snapshot(branch: str, reason: str,
         from ouroboros.update_channels import get_rescue_git_timeout_sec
 
         capture_env = {k: v for k, v in os.environ.items() if k != "GIT_DIFF_OPTS"}
-        capture_env.update({"LC_ALL": "C", "LANG": "C"})
+        capture_env = _go().host_git_env(capture_env)
         diff_rc, diff_stdout, diff_stderr = _go()._run_git_process_bounded(
             ["git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color",
              "--src-prefix=a/", "--dst-prefix=b/", "HEAD"],

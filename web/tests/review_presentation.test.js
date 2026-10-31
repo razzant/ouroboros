@@ -20,7 +20,16 @@ import {
 } from '../modules/review_presentation.js';
 import { reconcileReviewElementTree } from '../modules/review_dom_patch.js';
 import { getLogTaskGroupId, isGroupedTaskEvent } from '../modules/log_events.js';
-import { loadSkillReviewDetail } from '../modules/skill_review_card.js';
+import { formatMsgTime } from '../modules/utils.js';
+
+// The Reviews door is an element: its words are its one text node, before the chevron its card draws.
+function doorStub() {
+    const door = { hidden: true, dataset: {}, firstChild: null,
+        ownerDocument: { createTextNode: (data) => ({ nodeType: 3, data }) },
+        insertBefore(node) { door.firstChild = node; return node; },
+        get textContent() { return door.firstChild?.data || ''; } };
+    return door;
+}
 
 const groupedSkillRow = (overrides = {}) => ({
     system_type: 'skill_review',
@@ -284,10 +293,11 @@ test('Plan waves retain the canonical reviewed timestamp through full and compac
 
     assert.equal(project(false).attempts[0].timestamp, reviewedAt);
     assert.equal(project(true).attempts[0].timestamp, reviewedAt);
+    // The row says the reviewed moment in the chat's own clock (the same formatter as every message).
     assert.match(renderReviewsSection([project(false)], {
         sectionExpanded: true,
         expandedGroups: new Set(['plan:root']),
-    }), new RegExp(reviewedAt.replaceAll('+', '\\+')));
+    }), new RegExp(`<span class="review-seat-note">${formatMsgTime(reviewedAt).short}</span>`));
 });
 
 test('a fresh Plan attempt replaces matching compact history until its full wave lands', () => {
@@ -1014,8 +1024,7 @@ test('author finish is shown beside raw reviewer signal without becoming PASS', 
         expandedGroups: new Set([plan.id]),
         expandedAttempts: new Set([attemptKey]),
     });
-    assert.match(html, /Author finish: partial/);
-    assert.match(html, /reviewer signal=REVIEW_REQUIRED/);
+    assert.match(html, /<dt>Author finish<\/dt><dd>partial · reviewer signal=REVIEW_REQUIRED/);
     assert.match(html, /Fixed the defect and deferred cosmetic notes/);
     assert.match(html, /REVIEW_REQUIRED/);
 });
@@ -1079,11 +1088,11 @@ test('renderer is quiet, accessible and never invents review dollars', () => {
         expandedAttempts: new Set([`${group.id}:job-1`]),
     });
     assert.match(html, /<section class="chat-live-reviews"/);
-    assert.match(html, /data-review-section-toggle aria-expanded="true"/);
+    assert.match(html, /data-review-section data-expanded="1"/);
     assert.match(html, /data-review-group-toggle="task:root:alpha" aria-expanded="true"/);
-    assert.match(html, /data-skill-review-job="job-1"/);
+    assert.match(html, /\/api\/tasks\/initiator-child\/reviews\/skill\/job-1\?skill=alpha&amp;format=text/);
     assert.match(html, /Initiated by task initiator-child/);
-    assert.match(html, /data-review-attempt-detail="task:root:alpha:job-1"[^>]*aria-busy="false"/);
+    assert.match(html, /data-review-read-name="alpha · saved skill review"/);
     assert.match(html, /2 shown/);
     assert.doesNotMatch(html, /\$\d|cost=/i);
 });
@@ -1182,12 +1191,12 @@ test('expanded non-Skill attempts disclose unavailable cost while compact rows s
         expandedGroups: new Set([plan.id]),
         expandedAttempts: new Set([attemptKey]),
     });
-    assert.match(html, /chat-review-group-cost">Cost unavailable/);
-    assert.match(html, /Cost unavailable/);
+    // Exact accounting is not proved for a Plan wave: Record facts say so, never a number.
+    assert.match(html, /<dt>Cost<\/dt><dd>unavailable<\/dd>/);
     const compact = renderReviewsSection([plan], {});
     const compactRow = compact.slice(
         compact.indexOf('data-review-group-toggle'),
-        compact.indexOf('<div class="chat-review-attempts"'),
+        compact.indexOf('<div class="chat-review-attempts '),
     );
     assert.doesNotMatch(compactRow, /Cost unavailable|\$\d/);
 });
@@ -1200,9 +1209,33 @@ test('initiator detail is omitted when it is the owner', () => {
     }), /Initiated by task/);
 });
 
+test('the Reviews door keeps its chevron: its words are its one text node, rewritten in place', () => {
+    // The card draws the door's chevron as an element after its words (chat.js), so the door's ::after stays the
+    // touch hit area of ui.css; a render must never wipe that element.
+    const chevron = { nodeType: 1, tagName: 'svg' };
+    const nodes = [chevron];
+    const door = { hidden: true, dataset: {}, ownerDocument: { createTextNode: (data) => ({ nodeType: 3, data }) },
+        get firstChild() { return nodes[0] || null; },
+        insertBefore(node, before) { nodes.splice(before ? nodes.indexOf(before) : nodes.length, 0, node); return node; },
+        setAttribute() {} };
+    const controller = createReviewPresentationController({ host: { innerHTML: '', addEventListener() {} }, summary: door,
+        disclosure: { sectionExpanded: false, expandedGroups: new Set(), expandedAttempts: new Set() } });
+    controller.update(reviewGroupFromHistoryRow(groupedSkillRow()));
+    const [words] = nodes;
+    assert.deepEqual([words.nodeType, words.data, nodes[1]], [3, 'Reviews 1', chevron]);
+    controller.update(reviewGroupFromLifecycle({ lifecycle: {
+        kind: 'review', status: 'running', target: 'beta', job_id: 'job-9',
+        group_id: 'task:root:beta', presentation_owner_task_id: 'root',
+    } }));
+    assert.deepEqual(nodes.map((node) => node.nodeType), [3, 1], 'one text node, then the chevron');
+    assert.equal(nodes[0], words, 'the same text node, rewritten in place');
+    assert.match(words.data, /^Reviews 2/);
+    assert.equal(door.hidden, false);
+});
+
 test('review updates never change owner disclosure state', () => {
     const host = { innerHTML: '', addEventListener() {} };
-    const summary = { hidden: true, textContent: '', dataset: {} };
+    const summary = doorStub();
     const disclosure = { sectionExpanded: false, expandedGroups: new Set(), expandedAttempts: new Set() };
     let domWrites = 0;
     const controller = createReviewPresentationController({
@@ -1220,75 +1253,25 @@ test('review updates never change owner disclosure state', () => {
     assert.equal(domWrites, 2, 'each actual review reconcile enters the pre-write boundary');
 });
 
-test('an open exact Skill detail survives a review re-render while its read is in flight', async () => {
-    const detailStore = new Map();
-    const details = [];
-    const loads = [];
-    let resolveFetch;
-    let fetches = 0;
-    const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
-    const host = {
-        ownerDocument: { activeElement: null },
-        addEventListener() {},
-        contains: () => false,
-        querySelector: () => null,
-        querySelectorAll(selector) {
-            return selector === '[data-review-attempt-detail]' && details.length
-                ? [details.at(-1)] : [];
-        },
-        set innerHTML(value) {
-            this._html = value;
-            if (!value.includes('data-skill-review-job="job-1"')) return;
-            details.push({
-                dataset: {
-                    reviewAttemptDetail: 'task:root:alpha:job-1',
-                    skillReviewSkill: 'alpha',
-                    skillReviewJob: 'job-1',
-                },
-                hidden: false,
-                innerHTML: '',
-                attrs: {},
-                setAttribute(key, next) { this.attrs[key] = next; },
-            });
-        },
-        get innerHTML() { return this._html || ''; },
-    };
-    const disclosure = {
-        sectionExpanded: true,
-        expandedGroups: new Set(['task:root:alpha']),
-        expandedAttempts: new Set(['task:root:alpha:job-1']),
-    };
-    const controller = createReviewPresentationController({
-        host,
-        summary: { hidden: true, textContent: '', dataset: {} },
-        disclosure,
-        onLoadSkillDetail(detail) {
-            loads.push(loadSkillReviewDetail(detail, {
-                skill: detail.dataset.skillReviewSkill,
-                jobId: detail.dataset.skillReviewJob,
-            }, {
-                store: detailStore,
-                fetchImpl: async () => {
-                    fetches += 1;
-                    await fetchGate;
-                    return { ok: true, json: async () => ({ markdown: 'exact detail' }) };
-                },
-                render: (markdown) => markdown,
-            }));
-        },
+test('an opened saved Skill reader keeps its exact job when review content updates', async () => {
+    let click;
+    const host = { innerHTML: '', addEventListener(_type, callback) { click = callback; } };
+    const summary = doorStub();
+    const reads = [];
+    const controller = createReviewPresentationController({ host, summary,
+        disclosure: { sectionExpanded: true, expandedGroups: new Set(['task:root:alpha']), expandedAttempts: new Set() },
+        onRead(file) { reads.push(file); },
     });
     controller.update(reviewGroupFromHistoryRow(groupedSkillRow()));
-    await Promise.resolve();
-    const firstDetail = details.at(-1);
-    controller.update(reviewGroupFromHistoryRow(groupedSkillRow({ status: 'warnings' })));
-    const rebuiltDetail = details.at(-1);
-    assert.notEqual(rebuiltDetail, firstDetail);
-    assert.equal(fetches, 1);
-    assert.equal(rebuiltDetail.dataset.state, 'loading');
-    resolveFetch();
-    await Promise.all(loads);
-    assert.equal(rebuiltDetail.dataset.state, 'loaded');
-    assert.match(rebuiltDetail.innerHTML, /exact detail/);
+    const urls = [...host.innerHTML.matchAll(/data-review-read-url="([^"]+)"/g)].map(match => match[1].replaceAll('&amp;', '&'));
+    assert.ok(urls[0].includes('/reviews/skill/job-1?skill=alpha&format=text'));
+    const button = { dataset: { reviewReadUrl: urls[0], reviewReadName: 'alpha · saved skill review' } };
+    await click({ target: { closest: selector => selector === '[data-review-read-url]' ? button : null }, detail: 0 });
+    assert.equal(reads.length, 1);
+    controller.update(reviewGroupFromHistoryRow(groupedSkillRow({ status: 'warnings', attempts: [{ job_id: 'job-new', skill: 'alpha', status: 'warnings' }] })));
+    assert.equal(reads.length, 1, 'a routine update does not open or regenerate a read');
+    assert.equal(reads[0].reader.url, urls[0], 'the selected source remains the exact old job');
+    assert.ok(host.innerHTML.includes('/reviews/skill/job-new?skill=alpha&amp;format=text'));
 });
 
 test('typed invalidations dedupe revisions and guarantee one trailing refresh', async () => {
@@ -1412,15 +1395,15 @@ test('invalid review revisions stay opaque and do not become ordered counters', 
     assert.equal(reads, 2);
 });
 
-test('review re-render restores keyboard focus to the equivalent disclosure control', () => {
+test('a re-render that replaces a focused control hands focus to the same group toggle', () => {
     const doc = { activeElement: null };
     const buttons = new Map();
     let clickHandler = null;
-    const makeButton = (kind, key = '') => ({
-        dataset: kind === 'group' ? { reviewGroupToggle: key } : {},
-        matches: (selector) => kind === 'section' && selector === '[data-review-section-toggle]',
+    const makeButton = (key) => ({
+        dataset: { reviewGroupToggle: key },
+        isConnected: true,
         closest(selector) {
-            return kind === 'group' && selector === '[data-review-group-toggle]' ? this : null;
+            return selector.includes('[data-review-group-toggle]') ? this : null;
         },
         focus() { doc.activeElement = this; },
     });
@@ -1428,17 +1411,17 @@ test('review re-render restores keyboard focus to the equivalent disclosure cont
         ownerDocument: doc,
         addEventListener(type, handler) { if (type === 'click') clickHandler = handler; },
         contains: (candidate) => [...buttons.values()].includes(candidate),
-        querySelector: (selector) => selector === '[data-review-section-toggle]' ? buttons.get('section') : null,
-        querySelectorAll: (selector) => selector === '[data-review-group-toggle]' ? [buttons.get('group')] : [],
+        querySelector: (selector) => [...buttons.values()].find((button) => selector === `[data-review-group-toggle="${button.dataset.reviewGroupToggle}"]`) || null,
+        // A stub without a template: every render replaces the subtree, as a full rebuild would.
         set innerHTML(value) {
             this._html = value;
-            buttons.set('section', makeButton('section'));
-            buttons.set('group', makeButton('group', 'task:root:alpha'));
+            for (const button of buttons.values()) button.isConnected = false;
+            buttons.set('group', makeButton('task:root:alpha'));
         },
         get innerHTML() { return this._html || ''; },
     };
-    const summary = { hidden: true, textContent: '', dataset: {} };
-    const disclosure = { sectionExpanded: false, expandedGroups: new Set(), expandedAttempts: new Set() };
+    const summary = doorStub();
+    const disclosure = { sectionExpanded: true, expandedGroups: new Set() };
     const controller = createReviewPresentationController({ host, summary, disclosure });
     controller.update(reviewGroupFromHistoryRow(groupedSkillRow()));
     const oldGroupButton = buttons.get('group');
@@ -1540,34 +1523,6 @@ test('keyed reconciliation preserves exact detail node, focused descendant and s
     assert.equal(detail.scrollTop, 37);
     assert.equal(detail.dataset.state, 'loaded');
     assert.equal(attempts.children.length, 2);
-});
-
-test('Retry keeps keyboard focus on the live detail status while refetching', () => {
-    const doc = { activeElement: null };
-    let clickHandler = null;
-    let retryOptions = null;
-    const detail = {
-        dataset: { skillReviewSkill: 'alpha', skillReviewJob: 'job-1' },
-        setAttribute(key, value) { this[key] = value; },
-        focus() { doc.activeElement = this; },
-    };
-    const retry = { closest: (selector) => selector === '[data-review-attempt-detail]' ? detail : null };
-    const host = {
-        ownerDocument: doc,
-        addEventListener(type, handler) { if (type === 'click') clickHandler = handler; },
-        contains: () => true,
-        querySelectorAll: () => [],
-    };
-    createReviewPresentationController({
-        host,
-        summary: { hidden: true, textContent: '', dataset: {} },
-        disclosure: {},
-        onLoadSkillDetail(_detail, options) { retryOptions = options; },
-    });
-    clickHandler({ target: { closest: (selector) => selector === '[data-skill-review-retry]' ? retry : null } });
-    assert.deepEqual(retryOptions, { retry: true });
-    assert.equal(doc.activeElement, detail);
-    assert.equal(detail.tabindex, '-1');
 });
 
 test('generic expandByDefault plumbing is gone from Chat and log projection', () => {

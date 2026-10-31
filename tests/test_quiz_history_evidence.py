@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 import threading
@@ -39,7 +41,19 @@ def runtime(tmp_path, monkeypatch):
     task = {"id": "task-quiz", "chat_id": 1, "drive_root": str(tmp_path)}
     monkeypatch.setattr(queue, "RUNNING", {task["id"]: {"task": task}})
     monkeypatch.setattr(queue, "PENDING", [])
+    from ouroboros.task_results import write_task_result
+    # A live asker has its running result (its owner-Pause authority) before it asks.
+    write_task_result(tmp_path, task["id"], "running", chat_id=1)
     return SimpleNamespace(root=tmp_path, bridge=bridge, frames=frames, task=task)
+
+
+def _readable_by_the_chain_reader(root):
+    """Transition (unit Q1b migrates the chat readers onto the dialogue store): the readers still
+    read the chain files, so the rows the store holds are exported to them first -- the exact
+    bytes an older body reads. Drop this call when the readers read the store."""
+    from ouroboros.dialogue_import import export_for_older_body
+
+    export_for_older_body(root)
 
 
 def _ask(runtime, quiz_id, *, chat_id=1):
@@ -67,9 +81,21 @@ def _answer(runtime, quiz_id, *, request_id, index=0, comment=""):
 
 
 def _facts(runtime):
-    rows, coverage = Memory(runtime.root).read_chat_generations()
-    assert coverage["snapshot_stable"] and not coverage["gaps"]
-    return [row for row in rows if row.get("type") == "quiz_answer"]
+    from tests._dialogue import chat_rows
+
+    return [row for row in chat_rows(runtime.root) if row.get("type") == "quiz_answer"]
+
+
+def _read(runtime, quiz_id):
+    """The live asker reads its answer: only this saved read settles the owed delivery."""
+    from ouroboros.owner_mailbox import acknowledge_transcript_entry
+
+    [entry] = [row for row in drain_owner_entries(runtime.root, runtime.task["id"])
+               if row["msg_id"] == f"quiz_answer:{runtime.task['id']}:{quiz_id}"]
+    assert not quiz_states(runtime.root, runtime.task["id"])[quiz_id].get("discharged_at")
+    assert acknowledge_transcript_entry(runtime.root, runtime.task["id"], entry)
+    assert quiz_states(runtime.root, runtime.task["id"])[quiz_id].get("discharged_at")
+    return entry
 
 
 def test_answers_survive_eighteen_quizzes_mailbox_gc_and_rotation(runtime):
@@ -79,16 +105,19 @@ def test_answers_survive_eighteen_quizzes_mailbox_gc_and_rotation(runtime):
         selected = 0 if index % 2 == 0 else None
         assert _answer(runtime, quiz_id, request_id=f"answer-{index}", index=selected,
                        comment=f"  Verbatim choice {index}\nsecond line  ")[0] == 200
+        if index < 2:  # the asker reads these two; the other sixteen stay unread in its mailbox
+            _read(runtime, quiz_id)
         if index == 8:
             state.rotate_jsonl_log_if_needed(runtime.root, "chat.jsonl", "chat", max_bytes=1)
+    # Only read (settled) answers leave the projection; an owed one is never evicted.
     assert len(quiz_states(runtime.root, runtime.task["id"])) == 16
-    assert "q00" not in quiz_states(runtime.root, runtime.task["id"])
+    assert {"q00", "q01"}.isdisjoint(quiz_states(runtime.root, runtime.task["id"]))
     # TZ-1 V10: an unread answer leaves the mailbox only into the settled row that holds it.
     assert not cleanup_task_mailbox(runtime.root, runtime.task["id"])
     from ouroboros.task_results import write_task_result
 
     held = write_task_result(runtime.root, runtime.task["id"], "completed", result="done")["unread_mailbox"]
-    assert held["total"] == 18 and held["read_complete"] is True
+    assert held["total"] == 16 and held["read_complete"] is True
     assert cleanup_task_mailbox(runtime.root, runtime.task["id"])
     state.rotate_jsonl_log_if_needed(runtime.root, "chat.jsonl", "chat", max_bytes=1)
     assert not drain_owner_entries(runtime.root, runtime.task["id"], include_acknowledged=True)
@@ -154,6 +183,7 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
     # the owner's words; no path re-injects the frame into the bubble.
     from ouroboros.gateway.history import make_chat_history_endpoint
 
+    _readable_by_the_chain_reader(runtime.root)
     response = asyncio.run(make_chat_history_endpoint(runtime.root)(
         SimpleNamespace(query_params={"n_human": "100", "thread": "1"})))
     messages = json.loads(response.body)["messages"]
@@ -201,13 +231,14 @@ def test_competing_answers_preserve_only_the_recorded_winner(runtime, monkeypatc
             comment=f"Owner choice {index}",
         ), [0, 1]))
     assert sorted(status for status, _ in outcomes) == [200, 409]
-    winner = quiz_states(runtime.root, runtime.task["id"])["race"]
     # Concurrent healing may append the same source twice; the dialogue reader
     # owns identity deduplication, while every physical row must keep the winner.
     facts = _facts(runtime)
-    # The decision bytes are exact; discharge is later delivery bookkeeping,
-    # recorded only after this immutable evidence row and the mailbox succeed.
+    # The decision bytes are exact; discharge is later delivery bookkeeping, recorded only
+    # after this immutable evidence row, the mailbox write and the asker's saved read.
     decision = lambda block: {key: value for key, value in block.items() if key not in {"discharged_at", "delivery"}}
+    _read(runtime, "race")
+    winner = quiz_states(runtime.root, runtime.task["id"])["race"]
     assert winner.get("discharged_at")
     assert facts and all(decision(fact["quiz"]) == decision(winner) for fact in facts)
     assert {fact["client_message_id"] for fact in facts} == {"quiz_answer:task-quiz:race"}
@@ -217,6 +248,7 @@ def test_competing_answers_preserve_only_the_recorded_winner(runtime, monkeypatc
     [fact] = [row for row in source["rows"] if row.get("type") == "quiz_answer"]
     assert decision(fact["quiz"]) == decision(winner)
     assert fact["quiz"]["comment"] == f"Owner choice {winner['answered_index']}"
+    _readable_by_the_chain_reader(runtime.root)
     response = asyncio.run(make_chat_history_endpoint(runtime.root)(
         SimpleNamespace(query_params={"n_human": "100", "thread": "1"})))
     messages = json.loads(response.body)["messages"]
@@ -263,7 +295,7 @@ def test_answer_history_uses_canonical_root_and_project_binding(runtime):
     assert _answer(runtime, "project", request_id="project-answer", comment="Keep the room")[0] == 200
     [fact] = _facts(runtime)
     assert fact["chat_id"] == project["chat_id"]
-    assert not (child / "logs" / "chat.jsonl").exists()
+    assert not dialogue_test.log_rows(child / "logs" / "chat.jsonl")
     [mailbox] = drain_owner_entries(child, runtime.task["id"], include_acknowledged=True)
     assert mailbox["text"] == fact["text"]
 
@@ -276,7 +308,10 @@ def test_history_recovers_evicted_answer_without_an_extra_bubble(runtime):
         qid = f"history-{index}"
         _ask(runtime, qid)
         assert _answer(runtime, qid, request_id=qid, index=1, comment=f"choice-{index}")[0] == 200
+        _read(runtime, qid)  # only settled answers can leave the projection
+    assert "history-0" not in quiz_states(runtime.root, runtime.task["id"])  # history must recover it
     cleanup_task_mailbox(runtime.root, runtime.task["id"])
+    _readable_by_the_chain_reader(runtime.root)
     response = asyncio.run(make_chat_history_endpoint(runtime.root)(
         SimpleNamespace(query_params={"n_human": "100", "thread": "1"})))
     messages = json.loads(response.body)["messages"]
@@ -318,6 +353,8 @@ def test_new_request_heals_committed_answer_before_projection_eviction(runtime):
                            request_id='winner', comment='Original owner answer')['ok']
     status, reply = _answer(runtime, 'crash', request_id='new-browser-request', index=1, comment='Losing payload')
     assert status == 409 and reply['answered_index'] == 0
+    healed = _read(runtime, 'crash')  # the asker reads the healed winner, which settles it
+    assert 'Original owner answer' in healed['text'] and 'Losing payload' not in healed['text']
     for i in range(16):
         _ask(runtime, f'following-{i}')
         assert _answer(runtime, f'following-{i}', request_id=f'following-{i}')[0] == 200

@@ -198,7 +198,7 @@ def test_a_saved_server_without_an_explicit_id_keeps_its_masked_token():
 
 
 def test_real_settings_save_refuses_the_ambiguous_mask_and_writes_nothing(settings_client, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(mcp_client, "refresh_all_background", lambda **kwargs: None)
+    monkeypatch.setattr(mcp_client.MCPManager, "refresh_all_background", lambda *args, **kwargs: None)
     client, on_disk, saved = settings_client
     stored = [
         _server(name="My Company Internal Tools", url="https://a.example/mcp", auth_token="Bearer a-secret"),
@@ -240,3 +240,14 @@ def test_saved_server_test_refuses_an_ambiguous_identity(test_endpoint):
     response = client.post("/test", json={"server_id": "my_company_b762e68c1ef1"})
     assert response.status_code == 409 and response.json()["code"] == "MCP_ID_AMBIGUOUS"
     assert seen == []
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    configure = mcp_client.reconfigure_from_settings
+    def configured(settings):
+        monkeypatch.setattr(config, "load_settings", lambda: settings)
+        configure(settings)
+    monkeypatch.setattr(mcp_client, "reconfigure_from_settings", configured)

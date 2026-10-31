@@ -418,6 +418,8 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
 
     class _AbsentRunGateway:
         """get_run 404s (run gone); remove_project is temporarily unreachable."""
+        store_identity = "store-a"
+
         def __init__(self): self.removals, self.remove_fails = [], True
         def handshake(self, **_kw): return {}
         def get_run(self, rid, **_kw):
@@ -434,7 +436,7 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
     gateway = _AbsentRunGateway()
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-gone", task_id="t-a", route_id="r", model="m",
-        project_id="prj-owned", project_owned=True, ledger_root=str(tmp_path)))
+        project_id="prj-owned", project_owned=True, ledger_root=str(tmp_path), daemon_store_id="store-a"))
     dc._CUSTODY.clear()
 
     # 1. Retire unreachable: the run FACT lands now; the debt survives.
@@ -463,7 +465,7 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
 
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-gone-2", task_id="t-b", route_id="r", model="m",
-        project_id="prj-2", project_owned=True, ledger_root=str(tmp_path)))
+        project_id="prj-2", project_owned=True, ledger_root=str(tmp_path), daemon_store_id="store-a"))
     dc._CUSTODY.clear()
     out = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: _AllGone())
     assert [o["action"] for o in out] == ["absent"]

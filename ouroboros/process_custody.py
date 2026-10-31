@@ -143,6 +143,9 @@ def record_process(
     """Append a custody record for an already-spawned process."""
     if scope not in _VALID_SCOPES:
         raise ValueError(f"process custody scope must be one of {_VALID_SCOPES}, got {scope!r}")
+    from ouroboros.install_identity import require_owned_root
+
+    drive_root = require_owned_root(drive_root)
     try:
         pgid = process_group_id(pid)
     except Exception:
@@ -188,6 +191,9 @@ def spawn_supervised(
     it must not wait or persist. Callback failure follows normal spawn cleanup.
     The returned Popen retains its exact durable row as ``_ouroboros_custody``.
     """
+    from ouroboros.install_identity import require_owned_root
+
+    drive_root = require_owned_root(drive_root)  # refuse before handoff or spawn
     if new_process_group:
         merged = dict(subprocess_new_group_kwargs())
         merged.update(popen_kwargs)
@@ -328,15 +334,66 @@ def _fingerprint_matches(entry: Dict[str, Any], *, require_measured: bool = Fals
     return True
 
 
+def measured_identity_mismatch(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Positive evidence of a recycled identity, never an unavailable observation.
+
+    Compare the same birth spellings as the matcher. A failed legacy measurement
+    cannot refute an older row; pre-native Windows command hashes were submitted
+    argv and cannot refute anything without a recorded birth either.
+    """
+    pid = int(entry.get("pid") or 0)
+    if pid <= 0 or not pid_is_alive(pid) or pid_is_zombie(pid):
+        return {}
+    fp = entry.get("fingerprint") if isinstance(entry.get("fingerprint"), dict) else {}
+    boot, start, command = (str(fp.get(key) or "") for key in
+                            ("start_time_boot", "start_time", "cmd_sha256"))
+    if IS_WINDOWS and not (boot or start):
+        return {}
+    measured, mismatches = {}, []
+    if boot or start:
+        live = process_start_time(pid)
+        measured["start_time"] = live
+        if live and live not in {boot, start}:
+            ticks, sep, _ = live.partition(".")
+            if not boot and sep and ticks.isdigit():
+                # Match the old ps spelling only when it can actually be read.
+                legacy = process_start_time_legacy(pid)
+                measured["start_time_legacy"] = legacy
+                if legacy and legacy != start:
+                    mismatches.append("start_time")
+            else:
+                mismatches.append("start_time")
+    if command:
+        measured["cmd_sha256"] = _live_cmd_sha256(pid)
+        if measured["cmd_sha256"] and measured["cmd_sha256"] != command:
+            mismatches.append("cmd_sha256")
+    return {"recorded": fp, "measured": measured, "mismatches": mismatches} if mismatches else {}
+
+
+def record_not_ours(drive_root: Any, entry: Dict[str, Any], evidence: Dict[str, Any], *,
+                    lock_timeout_sec: float = 2.0) -> bool:
+    """Persist the measured refutation before retiring its ownership record.
+
+    A failed write keeps the record (``False``); the caller's removal is conditional
+    and spares a newer registration of the same PID.
+    """
+    return append_jsonl(pathlib.Path(drive_root) / "logs" / "supervisor.jsonl", {
+        "ts": utc_now_iso(), "type": "process_not_ours", "outcome": "not_ours",
+        "pid": entry.get("pid"), "pgid": entry.get("pgid"), "purpose": entry.get("purpose"),
+        "record_id": entry.get("record_id") or f"pid-{entry.get('pid')}", **evidence,
+    }, lock_timeout_sec=lock_timeout_sec)
+
+
 def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
-    """Keep dead-leader evidence while a group member can still execute."""
+    """Keep dead/unknown-leader evidence; a measured foreign leader refutes the group."""
     purpose = str(entry.get("purpose") or "")
     scope = str(entry.get("scope") or "")
     pgid = int(entry.get("pgid") or 0)
     return bool(
-        (purpose.startswith(("service:", "workspace_service:")) or purpose == "evidence_packer")
+        (purpose.startswith(("service:", "workspace_service:")) or purpose == "maintenance")
         and scope in {"task", "session"}
         and pgid > 0
+        and not (pgid == int(entry.get("pid") or 0) and measured_identity_mismatch(entry))
         and process_group_has_live_members(pgid)
     )
 
@@ -788,7 +845,7 @@ def quiesce_custodied_services(
     blockers: List[str] = []
     for entry in entries:
         purpose = str(entry.get("purpose") or "")
-        is_service = purpose.startswith(("service:", "workspace_service:")) or purpose == "evidence_packer"
+        is_service = purpose.startswith(("service:", "workspace_service:")) or purpose == "maintenance"
         leader_matches = _fingerprint_matches(entry)
         if (
             is_service
@@ -798,6 +855,11 @@ def quiesce_custodied_services(
             targets.append(entry)
         elif leader_matches:
             survivors.append(entry)
+        else:
+            mismatch = measured_identity_mismatch(entry)
+            if mismatch and not record_not_ours(drive_root, entry, mismatch):
+                survivors.append(entry)
+                blockers.append(f"custody_identity_unrecorded:{int(entry.get('pid') or 0)}")
 
     from ouroboros.platform_layer import kill_pid_tree
 
@@ -930,9 +992,12 @@ def reap_orphaned_processes(
             survivors.append(entry)
             continue
         leader_matches = _fingerprint_matches(entry)
-        group_survives = _service_group_survives_leader(entry)
+        group_survives = not leader_matches and _service_group_survives_leader(entry)
         if not leader_matches and not group_survives:
-            continue  # dead/recycled pid with no surviving service group: prune silently
+            mismatch = measured_identity_mismatch(entry)
+            if mismatch and not record_not_ours(drive_root, entry, mismatch):
+                survivors.append(entry)
+            continue  # dead, or a recorded refutation with no surviving service group
         if leader_matches and entry.get("purpose") in (retained_purposes or set()):
             survivors.append(entry)
             continue

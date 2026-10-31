@@ -1,23 +1,8 @@
 """Steering delivery into a running task's mailbox.
 
-Extracted VERBATIM from ``supervisor/events.py`` (byte-neutral module-size
-boundary for the pinned events surface): the cancel-pending steering refusal
-and the ``steer_task`` event handler. ``supervisor.events`` imports the handler
-back and keeps the dispatch table; the routing-receipt emitter stays in
-``events.py`` (many other handlers use it) and is imported lazily here so the
-dependency stays one-way at import time.
-
-Who speaks decides how the message travels (the event's ``issuer`` fact, minted
-by the tool host-side, never by the model). An OWNER TURN steers with owner
-text: ``KIND_OWNER_TEXT``, the owner-message generation bump, the room veto and
-the owner acknowledgement/notice. A TASK speaking for itself never travels as
-owner text: its words are written as a ``KIND_TASK_MESSAGE`` row with
-``independent_task`` provenance through the same writer ``forward_to_worker``
-uses, any host-listed active independent root is addressable (owner 6C, the
-hidden partition included), no standalone chat message is sent, and the receipt plus one typed
-Logs row carry the true author and target (owner 5=A/7A). A relay retains the
-drained owner message's acknowledgement without acquiring owner authority.
-An unlabelled owner refusal is a typed System row, never Ouroboros speech.
+The public tell_task tool uses the retained steer_task event and receipt rail.
+The issuer remains capability provenance. The atomic relay entry carries exact
+owner quotes and the teller's own contextual note, independently of its lane.
 """
 
 from __future__ import annotations
@@ -25,7 +10,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ouroboros.utils import utc_now_iso
 
@@ -51,6 +36,21 @@ def _issuer(evt: Dict[str, Any]) -> Dict[str, Any]:
 
 def _task_issued(evt: Dict[str, Any]) -> bool:
     return str(_issuer(evt).get("kind") or "") == "task"
+
+
+def _notice_row_owed(evt: Dict[str, Any], carrier: str, *, paired: bool) -> bool:
+    """Whether an owner act's refusal publishes its System row (``_refusal_row``).
+
+    Always when its receipt selected that row as the carrier: no ACK carrying the cause
+    was handed over (its durable row was refused, or no live ACK went out), so nothing else
+    tells it, whatever message the act wears. Otherwise only for an unlabelled act (a
+    synthetic receipt id) on a path that keeps the row the web shows, paired with the ACK.
+    A task that spoke for itself reads its typed refusal in its tool result and Logs row.
+    """
+    if _task_issued(evt):
+        return False
+    return carrier == "system" or (
+        paired and not _relayed_owner_message(str(evt.get("client_message_id") or "").strip()))
 
 
 def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]) -> bool:
@@ -90,7 +90,7 @@ def _refuse_steering_while_cancelling(
     *,
     target_label: str = "",
     notify: bool = True,
-) -> bool:
+) -> Optional[str]:
     """Whether a cancellation owns this task — refuse the steering write if so.
 
     Checked TWICE on purpose: once up front (cheap, off the lock) and once inside
@@ -98,34 +98,43 @@ def _refuse_steering_while_cancelling(
     points the queue lock is taken and the durable liveness re-checked, which is
     exactly the window a cancel ingress lands in; a single up-front check would
     let a message reach a task the supervisor is already tearing down.
+    ``None`` when no cancellation owns it; otherwise the carrier the refusal's
+    receipt selected for its owner notice.
     """
     try:
         from ouroboros.cancel_intents import cancel_pending
 
         if not cancel_pending(ctx.DRIVE_ROOT, target):
-            return False
+            return None
     except Exception:
         log.debug("steer_task cancel-pending check failed", exc_info=True)
-        return False
-    _steer_receipt(
+        return None
+    carrier = str(_steer_receipt(
         ctx, evt, target, target_label=target_label, status="rejected", reason="cancel_pending",
-    )
+    ).get("routing_notice_carrier") or "")
     # A cancel-pending refusal is a live notice to the OWNER who asked; a task
     # that spoke for itself reads its typed refusal in the tool result instead.
-    # An act that wears an owner message already shows its cause on that
-    # message's receipt line; only an UNLABELLED owner act (a synthetic receipt
-    # id) needs the standalone sentence — the same rule as the other refusals.
-    notify = notify and not _relayed_owner_message(str(evt.get("client_message_id") or "").strip())
-    if notify and not _task_issued(evt):
-        _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending")
-    return True
+    # An act that wears an owner message shows its cause on that message's
+    # receipt line once its ACK is handed over; an UNLABELLED owner act (a
+    # synthetic receipt id), or one whose ACK was not, needs the standalone
+    # sentence — the same rule as the other refusals (``_notice_row_owed``).
+    if notify and _notice_row_owed(evt, carrier, paired=True):
+        _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending", carrier)
+    return carrier
 
 
 def _refusal_row(
-    ctx: Any, evt: Dict[str, Any], target: str, target_label: str, status: str, reason: str,
+    ctx: Any, evt: Dict[str, Any], target: str, target_label: str, status: str, reason: str, carrier: str = "",
 ) -> None:
-    """An unlabelled owner act has no chat receipt row, so publish its host cause as System."""
+    """Publish an owner act's host cause as System: an unlabelled act has no chat receipt row,
+    and any act whose ACK was not handed over has no other notice (``_notice_row_owed``).
+
+    The row names the carrier its receipt selected: ``routing_ack`` when the ACK already
+    carried the cause (a transport showing ACKs skips this copy), otherwise ``system``.
+    It replies to the act's own owner message, never to the target task's origin.
+    """
     from ouroboros.project_dialogue import routing_refusal_cause
+    from supervisor.events_project_routing import _routing_notice_reply
     from supervisor.message_bus import notification_chat_route
 
     chat = notification_chat_route(evt.get("chat_id"))
@@ -135,6 +144,8 @@ def _refusal_row(
         ctx.send_with_budget(
             chat, f"{target_label or 'Task'} · {routing_refusal_cause('steer_task', status, reason, None)}",
             role="system", system_type="steer_not_delivered", task_id=target,
+            progress_meta={"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
+                           "reply_to": _routing_notice_reply(ctx, evt)},
         )
     except Exception:
         log.debug("steer refusal row failed for %s", target, exc_info=True)
@@ -156,6 +167,13 @@ def _steer_receipt(
         status=status, reason=reason, detail=detail,
         attachment_manifest=attachment_manifest, publish=not task_issued or bool(owner_message_id),
     )
+    for quote in evt.get("quotes") or []:
+        source = quote.get("source") or {}
+        if source.get("client_message_id") and source["client_message_id"] != evt.get("client_message_id"):
+            _emit_routing_receipt(ctx, {**evt, "client_message_id": source["client_message_id"],
+                                       "chat_id": source["chat_id"]},
+                                  action="steer_task", target=target, target_label=target_label,
+                                  status=status, reason=reason, detail=detail)
     if task_issued:
         # One typed Logs row per task-authored act: true author, target, outcome
         # (7A). The receiving task's own timeline gets ``task_message_injected``
@@ -176,40 +194,11 @@ def _steer_receipt(
     return receipt
 
 
-def _owner_lane_allows(ctx: Any, task: Dict[str, Any], target: str, chat_id: int) -> bool:
-    """The room veto for an OWNER turn: its own chat's roots, a root bound to its
-    Project room, and -- from the Main lane, which sees the global manifest --
-    every root. The lane is the host registry's answer for the issuing chat, so
-    a Swarm root (no routing contract) and a picker click read the same rule."""
-    from ouroboros.server_routing_context import _main_lane_chat
-
-    if _main_lane_chat(chat_id):
-        return True  # Main, including the bound external owner, needs no registry read.
-    try:
-        if int(task.get("chat_id") or 0) == chat_id:
-            return True
-    except (TypeError, ValueError):
-        pass
-    # A converted/bound task may keep its original chat_id on the live object
-    # but belong to a project thread — match via the durable binding.
-    try:
-        from ouroboros.projects_registry import project_chat_for_task
-        from ouroboros.server_routing_context import _reserved_project_for_chat
-
-        if int(project_chat_for_task(ctx.DRIVE_ROOT, target) or 0) == chat_id:
-            return True
-        return not _reserved_project_for_chat(ctx, chat_id)
-    except Exception:
-        return False
-
-
 def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     """Deliver a steering message to an addressable independent root.
 
-    An owner turn in a Project room is restricted to that room; one in Main may
-    address any root in the host-provided global manifest, including a
-    Project-bound root. A task speaking for itself may address any host-listed
-    active independent root (owner 6C). In every case this only enforces
+    Any turn may address an independent root. Quotes keep owner authority and
+    the note is always contextual, independently of the issuer lane. In every case this only enforces
     transport invariants and writes the active task drive; stale targets are
     reported, never silently respawned.
     """
@@ -219,9 +208,8 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         chat_id = int(evt.get("chat_id") or 0)
     except (TypeError, ValueError):
         chat_id = 0
-    if not target or not message.strip():
+    if not target or (not message.strip() and not evt.get("quotes")):
         return
-    task_issued = _task_issued(evt)
     issuer_task_id = str(_issuer(evt).get("task_id") or "")
     direct_agent = None
     direct_lock = None
@@ -251,6 +239,7 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
     target_label = ""
+    evt = {**evt, "relay_target": task}
     if isinstance(task, dict):
         from ouroboros.project_dialogue import routing_target_label
 
@@ -267,7 +256,7 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     # human label as a successful delivery.
     if _refuse_steering_while_cancelling(
         ctx, evt, target, target_label=target_label,
-    ):
+    ) is not None:
         return
 
     # Three different refusals in the same order the boolean used to fold them
@@ -283,25 +272,22 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         refusal = "target_unknown"
     elif str(task.get("delegation_role") or "") == "subagent":
         refusal = "subagent_target"
-    elif task_issued and _presence_target_refused(ctx, evt, task):
+    elif _presence_target_refused(ctx, evt, task):
         refusal = "presence_work_not_related"
-    elif not task_issued and not _owner_lane_allows(ctx, task, target, chat_id):
-        refusal = "chat_mismatch"
     else:
         refusal = ""
     if refusal:
         # Fail visibly: the chosen task is not a steerable running task here.
         # The receipt carries the cause; an OWNER turn whose act wears no owner
-        # message (a synthetic receipt id) also gets the chat sentence, because
-        # nothing else in its chat can show the refusal. A task that spoke for
-        # itself reads the typed refusal in its tool result and its Logs row.
-        client_message_id = str(evt.get("client_message_id") or "").strip()
-        _steer_receipt(
+        # message (a synthetic receipt id), or whose ACK was not handed over,
+        # also gets the chat sentence, because nothing else in its chat can show
+        # the refusal. A task that spoke for itself reads the typed refusal in
+        # its tool result and its Logs row.
+        carrier = str(_steer_receipt(
             ctx, evt, target, target_label=target_label, status="needs_manual_target", reason=refusal,
-        )
-        owner_unlabelled = not task_issued and not _relayed_owner_message(client_message_id)
-        if owner_unlabelled:
-            _refusal_row(ctx, evt, target, target_label, "needs_manual_target", refusal)
+        ).get("routing_notice_carrier") or "")
+        if _notice_row_owed(evt, carrier, paired=True):
+            _refusal_row(ctx, evt, target, target_label, "needs_manual_target", refusal, carrier)
         log.info("steer_task: %s target %s for chat %s", refusal, target, chat_id)
         return
     # Idempotent delivery: a stable msg_id from client_message_id+target dedups
@@ -319,20 +305,26 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     routing_token = str(evt.get("routing_token") or "").strip()
     base_id = client_message_id or uuid.uuid4().hex
     msg_id = f"{base_id}:{target}:{routing_token}" if routing_token else f"{base_id}:{target}"
-    relayed_owner_message_id = _relayed_owner_message(client_message_id)
     direct_lock_held = False
     queue_lock_held = False
     fence_generation_changed = False
     delivered = False
-    cancel_pending_refused = False
+    # A refusal found inside the admission transaction: (status, reason, the carrier its
+    # receipt selected). Nothing was written or staged. No refusal returns early (GR2-9):
+    # each falls through so its owner notice runs AFTER the locks are released (a chat
+    # send is not something to hold the global queue lock for — and an early `return`
+    # skipped the notice entirely).
+    refused = None
     active_fence = None
-    staged_manifest: list = []
-    attachment_report = ""
+    relay_entry = {}
+
+    def refuse(reason: str):
+        carrier = _steer_receipt(ctx, evt, target, target_label=target_label,
+                                 status="needs_manual_target", reason=reason).get("routing_notice_carrier")
+        return "needs_manual_target", reason, str(carrier or "")
+
     try:
         from supervisor.queue import ACCEPTANCE_FENCES, _queue_lock, _task_drive_for_task
-        from ouroboros.owner_mailbox import (
-            KIND_OWNER_TEXT, PROVENANCE_INDEPENDENT_TASK, write_owner_message, write_task_message,
-        )
         if direct_active and direct_lock is not None:
             direct_lock.acquire()
             direct_lock_held = True
@@ -341,32 +333,8 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 and getattr(direct_agent, "_accepting_owner_messages", False)
                 and str(getattr(direct_agent, "_current_task_id", "") or "") == target
             ):
-                _steer_receipt(
-                    ctx, evt, target, target_label=target_label,
-                    status="needs_manual_target", reason="target_closed",
-                )
-                return
+                refused = refuse("target_closed")
         drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_active else _task_drive_for_task(task, target)
-        attachment_note = ""
-        # Tasks cannot attach files to peer messages: only an owner turn stages.
-        uploads = (
-            evt.get("attachment_uploads")
-            if not task_issued and isinstance(evt.get("attachment_uploads"), list) else []
-        )
-        if uploads:
-            from ouroboros.artifacts import attachment_manifest_projection, stage_task_attachments
-            from ouroboros.gateway.tasks import _render_attachment_lines
-
-            # Staging runs after the up-front cancel check (top of this handler)
-            # but BEFORE the transactional re-check below — so the manifest is
-            # kept and the re-check refusal removes the just-staged inputs
-            # (GR2-9) instead of leaving orphaned files in the artifact store
-            # of a task the supervisor is tearing down.
-            staged_manifest = stage_task_attachments(drive, target, uploads)
-            rendered = _render_attachment_lines(attachment_manifest_projection(drive, target, staged_manifest))
-            if rendered:
-                attachment_report = rendered
-                attachment_note = f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]"
         if not direct_active:
             _queue_lock.acquire()
             queue_lock_held = True
@@ -375,70 +343,40 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 isinstance(row, dict) and str(row.get("id") or "") == target
                 for row in list(getattr(ctx, "PENDING", []) or [])
             )
-            if live_meta is None and not still_pending:
-                _steer_receipt(
-                    ctx, evt, target, target_label=target_label,
-                    status="needs_manual_target", reason="target_finished",
-                )
-                return
             # The worker can remain RUNNING solely for post-task work after
             # its solve loop and last mailbox drain. Never promise a delivery
             # to an actor whose own result is already terminal.
             from ouroboros.task_results import load_task_result
             from ouroboros.task_status import SETTLED_STATUSES
 
-            if (load_task_result(drive, target) or {}).get("status") in SETTLED_STATUSES:
-                _steer_receipt(ctx, evt, target, target_label=target_label,
-                               status="needs_manual_target", reason="target_finished")
-                return
-            fence_root = str(task.get("root_task_id") or target)
-            active_fence = ACCEPTANCE_FENCES.get(fence_root)
-            if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
-                _steer_receipt(
-                    ctx, evt, target, target_label=target_label,
-                    status="needs_manual_target", reason="acceptance_fence_sealed",
-                )
-                return
+            if live_meta is None and not still_pending:
+                refused = refuse("target_finished")
+            elif (load_task_result(drive, target) or {}).get("status") in SETTLED_STATUSES:
+                refused = refuse("target_finished")
+            else:
+                active_fence = ACCEPTANCE_FENCES.get(str(task.get("root_task_id") or target))
+                if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
+                    refused = refuse("acceptance_fence_sealed")
         # Re-check INSIDE the admission transaction: the up-front check runs
         # before the queue lock is taken, and a cancel ingress lands in exactly
         # that window. Held under the same lock as the write, so the refusal and
-        # the admission cannot both win. No early return here (GR2-9): the
-        # refusal falls through so the staged-input removal and the owner
-        # notice run AFTER the lock is released (a chat send is not something
-        # to hold the global queue lock for — and the old `return` skipped the
-        # notice entirely).
-        if _refuse_steering_while_cancelling(
+        # the admission cannot both win.
+        cancelling = None if refused else _refuse_steering_while_cancelling(
             ctx, evt, target, target_label=target_label, notify=False,
-        ):
-            cancel_pending_refused = True
-        elif task_issued:
-            # A task's own words: a task-message row under the sender's id and
-            # the independent provenance. No owner generation moves -- a peer
-            # message supersedes no reviewed answer (owner 4=A).
-            if not write_task_message(
-                drive, message, target, source_task_id=issuer_task_id,
-                provenance=PROVENANCE_INDEPENDENT_TASK, msg_id=msg_id,
-                sender_origin=evt.get("sender_origin") if isinstance(evt.get("sender_origin"), dict) else None,
-            ):
-                raise OSError("task mailbox append was not durable")
+        )
+        if cancelling is not None:
+            refused = ("rejected", "cancel_pending", cancelling)
+        elif refused is None:
+            from ouroboros.owner_relay import write_relay
+            relay_entry, newly_written = write_relay(
+                drive, target, relay_id=str(evt.get("relay_id") or routing_token or msg_id),
+                note=message, quotes=list(evt.get("quotes") or []), chat_id=chat_id, summary=str(evt.get("summary") or ""),
+                teller_task_id=issuer_task_id, canonical_root=ctx.DRIVE_ROOT, sender_origin=evt.get("sender_origin"),
+                client_surface=evt.get("client_surface"))
             delivered = True
-        else:
-            if not write_owner_message(
-                drive,
-                f"{message}{attachment_note}",
-                target,
-                msg_id=msg_id,
-                kind=KIND_OWNER_TEXT,
-                client_message_id=relayed_owner_message_id,
-                client_surface=(
-                    dict(evt["client_surface"])
-                    if isinstance(evt.get("client_surface"), dict) and evt.get("client_surface")
-                    else None
-                ),
-                attachment_manifest=staged_manifest if uploads else None,
-            ):
-                raise OSError("owner mailbox append was not durable")
-            if direct_active:
+            if not newly_written or not evt.get("quotes"):
+                active_fence = None  # context alone supersedes no reviewed owner answer
+            if direct_active and newly_written and evt.get("quotes"):
                 direct_agent._owner_message_generation = int(
                     getattr(direct_agent, "_owner_message_generation", 0) or 0
                 ) + 1
@@ -451,36 +389,25 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
             delivered = True
     except Exception:
         log.warning("steer_task delivery failed for task %s", target, exc_info=True)
-        _steer_receipt(
-            ctx, evt, target, target_label=target_label,
-            status="needs_manual_target", reason="mailbox_write_failed",
-        )
+        refused = refuse("mailbox_write_failed")
     finally:
         if queue_lock_held:
             _queue_lock.release()
         if direct_lock_held:
             direct_lock.release()
-        if staged_manifest and not delivered:
-            try:
-                from ouroboros.artifacts import remove_staged_attachments
-
-                remove_staged_attachments(staged_manifest)
-            except Exception:
-                log.debug("staged-attachment cleanup failed for %s", target, exc_info=True)
-    if cancel_pending_refused:
-        # GR2-9: the message was refused, so the inputs staged for it must not
-        # linger in the dying task's artifact store. The notice is the owner's:
-        # a task that spoke for itself has its typed refusal and Logs row.
-        if not task_issued and not relayed_owner_message_id:
-            _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending")
+    if refused is not None:
+        # Only the cancel refusal keeps an unlabelled act's paired web row here; any
+        # refusal whose ACK was not handed over tells its cause in this row.
+        status, reason, carrier = refused
+        if _notice_row_owed(evt, carrier, paired=reason == "cancel_pending"):
+            _refusal_row(ctx, evt, target, target_label, status, reason, carrier)
     if delivered:
         if fence_generation_changed:
             ctx.persist_queue_snapshot(reason="acceptance_fence_owner_message")
         log.info("steer_task: delivered to task %s (chat %s) on drive %s", target, chat_id, drive)
-        # A landed act publishes no row: the receipt on the owner's message keeps
-        # the staging manifest, the target's mailbox and the caller's tool result
-        # keep the model's [ATTACHMENTS] block (DESIGN "Chat authorship and System rows").
+        # The one visible forward is separate from the silent source receipt.
+        from ouroboros.owner_relay import publish_relay
+        publish_relay(ctx.DRIVE_ROOT, target, relay_entry, getattr(ctx, "bridge", None), task)
         _steer_receipt(
             ctx, evt, target, target_label=target_label, status="delivered",
-            detail=attachment_report, attachment_manifest=staged_manifest if uploads else None,
         )

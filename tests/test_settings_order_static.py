@@ -24,7 +24,7 @@ def _titles(name: str) -> list[str]:
 def test_behavior_runs_from_review_and_power_to_the_host_tail() -> None:
     assert _titles("behavior") == [
         "Review Enforcement", "Task Result Review", "Max Review Cycles",
-        "Access", "Safety Supervisor", "Post-Task Self-Evolution", "Background Cognition",
+        "Access", "Safety Supervisor", "Post-Task Self-Evolution", "Consciousness",
         "Context Mode", "Image Input", "Skills",
         "Prompt Cache TTL", "External Skills Repo", "ClawHub Marketplace",
         "Update Channel", "Startup &amp; background",
@@ -44,8 +44,10 @@ def test_runtime_limits_put_the_budget_pair_first() -> None:
     fields = re.findall(r'<label for="(s-[a-z0-9-]+)">', limits)
     assert fields == [
         "s-total-budget", "s-settings-per-task-cost",
-        "s-workers", "s-max-rounds", "s-task-lifetime", "s-presence-max-active", "s-tool-timeout",
+        "s-workers", "s-max-rounds", "s-task-lifetime", "s-tool-timeout",
     ]
+    # Concurrent conversations is a bound of consciousness in places: it lives in Behavior › Consciousness › More.
+    assert "s-presence-max-active" not in panel
 
 
 def test_accounts_end_with_the_network_gate_then_the_legacy_escape_hatch() -> None:
@@ -55,6 +57,7 @@ def test_accounts_end_with_the_network_gate_then_the_legacy_escape_hatch() -> No
 def test_dashboard_tabs_follow_expected_use_and_logs_stays_the_default() -> None:
     tabs = DASHBOARD[DASHBOARD.index("const DASHBOARD_TABS = ["):]
     tabs = tabs[:tabs.index("];")]
-    assert re.findall(r"value: '([a-z]+)'", tabs) == ["logs", "activity", "costs", "updates", "storage", "evolution"]
+    assert re.findall(r"value: '([a-z]+)'", tabs) == [
+        "logs", "activity", "consciousness", "costs", "updates", "storage", "evolution"]
     app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
     assert "dashboardActiveSubtab: 'logs'" in app

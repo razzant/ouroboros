@@ -16,11 +16,12 @@ from ouroboros import loop, loop_transport, owner_mailbox, usage_accounting as u
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
 from ouroboros.presence_authority import presence_ceiling_payload
-from ouroboros.tools.registry import ToolRegistry
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_presence_completion import _call as finish
 from tests.test_presence_runner import _admission
 from tests.test_transport_death_retry import _events, _ledger
 from tests.test_context_fit_integration import _plan
+from tests._shared import saved_settings
 
 PRIMARY = "claudexor::codex=primary-model"
 FALLBACK = "claudexor::codex=fallback-model"
@@ -154,7 +155,7 @@ def test_same_operation_recoverable_never_dials_a_fallback(data_root, monkeypatc
 
 def test_stop_during_unknown_wait_preserves_one_attempt(data_root, monkeypatch):
     from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
+    saved_settings(monkeypatch, data_root, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: {})
 
     def stop(_seconds, _wake):

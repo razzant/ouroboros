@@ -4,7 +4,7 @@
 // seconds and removes only the Main copy; an answered question never enters Main again.
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
-import { NodeStub, fixture, turn } from './chat_decision_fixture.js';
+import { NodeStub, fixture, frameBubble, turn } from './chat_decision_fixture.js';
 
 // The rows the producer emits (ouroboros/project_dialogue.py::project_question_pointer): complete
 // for display, `ts` from the question's own asked_at. One batch is asked in sequence.
@@ -18,18 +18,19 @@ const SETTLE_MS = 5000;
 const text = (node, name) => node.querySelector(`.${name}`)?.textContent ?? null;
 const options = (node) => node.querySelectorAll('.chat-quiz-option');
 const labels = (node) => options(node).map((button) => text(button, 'chat-quiz-option-label'));
+// A Main copy names its Project in its bubble's voice line, beside `Ouroboros` (owner 19.10, A).
+const chipOf = (card) => card.parentNode.querySelector('.chat-quiz-project');
 
 // A Main column: bubbles are framed and mounted like chat.js does, and retirement goes through
 // the one removal seam the chat instance hands over.
 function mainFixture(extra = {}) {
     const column = new NodeStub();
     const removed = [];
-    const fx = fixture({ isMain: true,
-        frameNode: (_msg, card) => { const bubble = new NodeStub(); bubble.append(card); return bubble; },
+    const fx = fixture({ isMain: true, frameNode: frameBubble,
         insertMessageNode: (node) => { column.append(node); return true; },
         removeMessageNode: (node) => { removed.push(node); node.remove(); },
         ...extra });
-    const cards = () => column.children.map((bubble) => bubble.children[0]);
+    const cards = () => column.children.map((bubble) => bubble.querySelector('.chat-quiz-card'));
     return { ...fx, column, removed, cards, add: (row) => fx.decision.appendQuestionPointer(row) };
 }
 
@@ -50,16 +51,17 @@ test('a realistic burst: every unanswered question is the full Project form, an 
         const cards = fx.cards();
         assert.deepEqual(cards.map((card) => card.dataset.quizId), ['q-resumed', 'q-optional', 'q-finished', 'q-replaced', 'q-waiting']);
         assert.deepEqual(cards.map((card) => text(card, 'chat-quiz-status-text')), [
-            'Unanswered · the task continued; an answer is still accepted',
-            'Unanswered · an answer is still accepted',
-            'Unanswered · the task finished; a late answer is accepted as your message',
+            'Unanswered · task continued',
+            'Unanswered',
+            'Unanswered · task finished',
             'Replaced by a newer question',
             'Waiting for your answer',
         ]);
         for (const card of cards) {
             assert.ok(card.classList.contains('chat-quiz-card') && card.classList.contains('project-question-card'));
             assert.equal(text(card, 'chat-quiz-chip'), 'Question');
-            assert.equal(text(card, 'chat-live-project-name'), 'Storage');
+            assert.equal(text(card.parentNode, 'chat-live-project-name'), 'Storage');
+            assert.equal(card.querySelector('.chat-quiz-project'), null, 'the reference is the bubble\'s, not the card\'s');
             assert.equal(text(card, 'chat-quiz-question'), 'Merge **now**?');
             assert.equal(text(card, 'chat-quiz-stake'), 'At stake: Release timing');
             assert.deepEqual(labels(card), ['Yes', 'No']);
@@ -76,9 +78,9 @@ test('a realistic burst: every unanswered question is the full Project form, an 
     } finally { fx.restore(); }
 });
 
-test('the mirror is the Project form node for node; its one addition is the Project chip', () => {
+test('the mirror is the Project form node for node; its one addition is the Project reference in its voice line', () => {
     const shape = (node) => [node.className, node.textContent, node.disabled, node.children.map(shape)];
-    const room = fixture();
+    const room = fixture({ frameNode: frameBubble });
     const main = mainFixture();
     try {
         main.add({ ...WAITING, assumption: 'Yes meanwhile' });
@@ -87,16 +89,23 @@ test('the mirror is the Project form node for node; its one addition is the Proj
         const own = room.decision.buildQuizCard({ role: 'assistant', task_id: 't-1', ts: ASKED[0], text: 'Merge **now**?',
             msg_type: 'quiz', quiz: { quiz_id: 'qz-1', state: 'open', wait_for_answer: true, owner_wait_state: 'waiting',
                 stake: 'Release timing', assumption: 'Yes meanwhile', options: [
-                    { label: 'Yes', detail: 'Ship today', recommended: true }, { label: 'No', detail: 'Wait for CI' }] } });
+                    { label: 'Yes', detail: 'Ship today', recommended: true }, { label: 'No', detail: 'Wait for CI' }] } })
+            .querySelector('.chat-quiz-card');
         const [head, ...body] = mirror.children;
         const [ownHead, ...ownBody] = own.children;
         assert.deepEqual(body.map(shape), ownBody.map(shape));
-        assert.deepEqual(head.children.map((node) => node.className),
-            ['chat-quiz-chip', 'chat-live-project-card-btn chat-quiz-project', 'chat-quiz-status']);
-        assert.deepEqual(ownHead.children.map((node) => node.className), ['chat-quiz-chip', 'chat-quiz-status']);
-        assert.deepEqual(shape(head.children[2]), shape(ownHead.children[1]));
+        // One head in every room: the chip, the status beside it (it describes the question), the quiet Close alone
+        // at the row's end (owner 19.10, A).
+        assert.deepEqual(shape(head), shape(ownHead));
+        assert.deepEqual(head.children.map((node) => node.className), ['chat-quiz-chip', 'chat-quiz-status', 'chat-quiz-head-end']);
+        assert.deepEqual(head.children[2].children.map((node) => node.className), ['chat-quiz-close ui-hit-area']);
         assert.equal(own.classList.contains('project-question-card'), false);
-        const chip = head.children[1];
+        // The mirror's one addition: the Project reference beside `Ouroboros` in its bubble's voice line; the room's
+        // own card names no Project and keeps the plain sender line.
+        const [voice] = mirror.parentNode.children;
+        assert.deepEqual(voice.children.map((node) => node.className), ['sender', 'chat-live-project-card-btn chat-quiz-project ui-hit-area']);
+        assert.equal(own.parentNode.children[0].className, 'sender');
+        const chip = voice.children[1];
         assert.equal(chip.querySelector('.chat-live-project-status').getAttribute('aria-hidden'), 'true');
         chip.click();
         assert.deepEqual(main.opened.map((detail) => [detail.project.id, detail.project.chat_id, detail.task_id, detail.quiz_id]),
@@ -165,7 +174,8 @@ test('own words answer from Main; a failed attempt stays answerable and a lost r
         { ok: false, status: 500, json: async () => ({}) },
         { ok: false, status: 409, json: async () => ({ state: 'answered', answered_index: 1, comment: 'Winner.' }) },
     ];
-    const fx = mainFixture({ fetchImpl: async (_url, init) => replies.shift()
+    const fx = mainFixture({ fetchDetail: async () => ({ task_id: 't-1', project_id: 'p1', owner_quiz: { 'qz-1': { ...ROW, state: 'open' } } }),
+        fetchImpl: async (_url, init) => replies.shift()
         || { ok: true, status: 200, json: async () => ({ ok: true, state: 'answered', comment: JSON.parse(init.body).comment }) } });
     try {
         fx.add(WAITING);
@@ -173,10 +183,10 @@ test('own words answer from Main; a failed attempt stays answerable and a lost r
         const [raced, own] = fx.cards();
         options(raced)[0].click();
         await turn();
-        assert.deepEqual([raced.dataset.state, fx.toasts[0].text], ['open', 'Could not record the answer (500).']);
+        assert.deepEqual([raced.dataset.state, fx.toasts[0].text], ['open', 'Answer not confirmed. Your original answer is kept.']);
         mock.timers.tick(SETTLE_MS);
         assert.equal(fx.column.children.length, 2, 'a refused attempt starts no countdown');
-        options(raced)[0].click();
+        raced.querySelector('.chat-quiz-retry').click();
         await turn();
         assert.deepEqual([raced.dataset.state, text(raced, 'chat-quiz-answer'), fx.toasts[1].text],
             ['answered', "Owner's answer: Winner.", 'Already answered.']);
@@ -224,10 +234,12 @@ test('an unknown source keeps what is known; otherwise the copy is a safe record
         fx.add({ ...ROW, quiz_state: 'unknown', source_status: 'unavailable', question: '', options: [] });
         const [known] = fx.cards();
         assert.deepEqual([known.dataset.state, text(known, 'chat-quiz-status-text')], ['open', 'Waiting for your answer']);
+        assert.equal(known.querySelector('.chat-quiz-mark').dataset.hue, 'owner', 'the copy carries the owner\'s dot too');
         assert.equal(options(known)[0].disabled, false, 'an unavailable read never disables a known question');
         fx.add({ ...ROW, quiz_id: 'cold', quiz_state: 'unknown', source_status: 'unavailable' });
         const cold = fx.cards()[1];
         assert.deepEqual([cold.dataset.state, text(cold, 'chat-quiz-status-text')], ['unknown', 'Status unavailable']);
+        assert.equal(cold.querySelector('.chat-quiz-mark').dataset.hue, 'neutral', 'an unreadable source claims no move');
         assert.ok(options(cold).every((button) => button.disabled) && !cold.querySelector('.chat-quiz-comment'),
             'no invented invitation to answer');
         // The source becomes readable: the whole answerable form mounts where the record was.
@@ -241,11 +253,11 @@ test('an unknown source keeps what is known; otherwise the copy is a safe record
         const partial = fx.cards()[2];
         assert.deepEqual([text(partial, 'chat-quiz-question'), options(partial).length, Boolean(partial.querySelector('.chat-quiz-comment'))],
             ['Open the original question for its text.', 0, false]);
-        partial.querySelector('.chat-quiz-project').click();
+        chipOf(partial).click();
         assert.equal(fx.opened.at(-1).quiz_id, 'narrow');
         fx.add({ ...WAITING, task_id: 't-9', quiz_id: 'narrow', ts: ASKED[1], project_name: 'Storage v2' });
         const full = fx.cards()[2];
-        assert.deepEqual([labels(full), text(full, 'chat-live-project-name'), fx.column.children.length], [['Yes', 'No'], 'Storage v2', 3]);
+        assert.deepEqual([labels(full), text(full.parentNode, 'chat-live-project-name'), fx.column.children.length], [['Yes', 'No'], 'Storage v2', 3]);
     } finally { fx.restore(); }
 });
 
@@ -341,7 +353,7 @@ test('a removed copy stays removed after the bounded memory forgets it: the cano
         const unknown = fx.cards()[2];
         assert.equal(unknown.dataset.state, 'unknown');
         assert.ok(options(unknown).every(button => button.disabled));
-        unknown.querySelector('.chat-quiz-project').click();
+        chipOf(unknown).click();
         assert.equal(fx.opened.at(-1).quiz_id, 'unreadable');
         unavailable = false;
         canonical['t-1'].unreadable = 'open';
@@ -400,7 +412,7 @@ test('failed, missing and foreign canonical reads keep a safe Project recovery p
             await turn();
             fx.decision.applyQuizStateFrame({}, { task_id: 't-1', quiz_id: 'stale', state: 'open' });
             assert.equal(card.dataset.state, 'unknown', 'snapshots and non-answer live facts cannot unlock an unverified copy');
-            card.querySelector('.chat-quiz-project').click();
+            chipOf(card).click();
             assert.equal(fx.opened.at(-1).quiz_id, 'stale');
             // An explicit retry of the owned pointer can recover the canonical Project form.
             recovered = true;
@@ -411,6 +423,85 @@ test('failed, missing and foreign canonical reads keep a safe Project recovery p
         } finally { fx.decision.destroy(); fx.restore(); }
     }
 }));
+
+test('a Main card that settles asks the waiting pill to recount, and its lifecycle stays readable', () => withTimers(async () => {
+    let recounts = 0;
+    const fx = mainFixture({ onQuestionsChanged: () => { recounts += 1; } });
+    try {
+        fx.add({ ...WAITING });
+        assert.deepEqual(fx.decision.observedQuestion('t-1', 'qz-1'), { state: 'open', question_delivery: undefined });
+        const before = recounts;
+        fx.decision.applyQuizStateFrame({}, { task_id: 't-1', quiz_id: 'qz-1', state: 'open', owner_wait_state: 'resumed' });
+        assert.equal(recounts, before, 'a change that keeps it answerable is no recount');
+        fx.decision.applyQuizStateFrame({}, { task_id: 't-1', quiz_id: 'qz-1', state: 'answered', answered_index: 1 });
+        assert.ok(recounts > before, 'settling is');
+        assert.equal(fx.decision.observedQuestion('t-1', 'qz-1').state, 'answered');
+        assert.equal(fx.decision.observedQuestion('t-1', 'other'), null);
+    } finally { fx.decision.destroy(); fx.restore(); }
+}));
+
+test('only a receipt for the same delivery keeps a pending answer\'s copy out of Main', () => {
+    const fx = mainFixture();
+    const unknown = { ...ROW, quiz_state: 'answered', answered_index: 1,
+        question_delivery: { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' } };
+    try {
+        // A long-lived tab remembers the question's publication receipt from before the answer.
+        fx.decision.applyQuizStateFrame({}, { task_id: 't-1', quiz_id: 'qz-1', state: 'open',
+            question_delivery: { kind: 'publication', state: 'delivered' } });
+        fx.add(unknown);
+        const [card] = fx.cards();
+        assert.ok(card, 'the pending answer mounts at the first try');
+        assert.equal(card.querySelector('.chat-quiz-dismiss')?.textContent, 'Remove from pending');
+        fx.decision.destroy(); fx.restore();
+        const other = mainFixture();
+        try {
+            other.decision.applyQuizStateFrame({}, { task_id: 't-1', quiz_id: 'qz-1', state: 'answered', answered_index: 1,
+                question_delivery: { kind: 'answer', state: 'delivered' } });
+            other.add(unknown);
+            assert.equal(other.cards().length, 0, 'its own delivered receipt does keep it out');
+        } finally { other.decision.destroy(); other.restore(); }
+    } finally { fx.decision.destroy(); fx.restore(); }
+});
+
+// Main's waiting pill mounts a question beyond the loaded history from its own census rows: one the
+// current census named is live at once; one kept from an older read (a gap, a failed read, a
+// reconnect) is withheld until its own canonical read, so a stale "unanswered" never takes input.
+test('a pointer from an older read mounts withheld until its canonical read; a current census row is live at once', async () => {
+    const reads = [];
+    const fx = mainFixture({ fetchDetail: (...args) => new Promise(resolve => reads.push([args, resolve])) });
+    try {
+        fx.decision.appendQuestionPointer({ ...WAITING, quiz_id: 'kept' }, { stale: true });
+        const kept = fx.cards()[0];
+        assert.equal(kept.dataset.state, 'unknown');
+        assert.equal(text(kept, 'chat-quiz-status-text'), 'Status unavailable');
+        assert.ok(options(kept).every(button => button.disabled));
+        assert.equal(kept.querySelector('.chat-quiz-close')?.disabled ?? true, true, 'nor can it be closed');
+        await turn();
+        assert.equal(reads.length, 1, 'it reads its canonical question at once');
+        reads[0][1]({ task_id: 't-1', project_id: 'p1', owner_quiz: {
+            kept: { quiz_id: 'kept', state: 'open', question: 'Canonical source', options: ['A', 'B'] } } });
+        await turn();
+        const confirmed = fx.cards()[0];
+        assert.equal(confirmed.dataset.state, 'open');
+        assert.ok(options(confirmed).every(button => !button.disabled), 'the confirmed form takes answers');
+        assert.equal(text(confirmed, 'chat-quiz-question'), 'Canonical source');
+        // Memory that evicted something would make an unconfirmed pointer read too; a row of the
+        // current census needs no read.
+        for (let i = 0; i < 2001; i += 1)
+            fx.decision.applyQuizStateFrame({}, { task_id: 'noise', quiz_id: `n-${i}`, state: 'open' });
+        fx.decision.appendQuestionPointer({ ...WAITING, quiz_id: 'current', ts: ASKED[1] }, { canonical: true });
+        const current = fx.cards().find(card => card.dataset.quizId === 'current');
+        assert.equal(current.dataset.state, 'open');
+        assert.ok(options(current).every(button => !button.disabled));
+        await turn();
+        assert.equal(reads.length, 1, 'no read for the current census row');
+        fx.decision.appendQuestionPointer({ ...WAITING, quiz_id: 'plain', ts: ASKED[1] });
+        assert.equal(fx.cards().find(card => card.dataset.quizId === 'plain').dataset.state, 'unknown',
+            'without either word, eviction alone still withholds');
+        await turn();
+        assert.equal(reads.length, 2);
+    } finally { fx.decision.destroy(); fx.restore(); }
+});
 
 test('an answered pointer settles a pending safe copy for five seconds', () => withTimers(async () => {
     const pending = [];
@@ -574,10 +665,10 @@ test('an unchanged row writes nothing and a narrower re-delivery never blanks th
             assumption: '', recommended_index: null, project_name: '' });
         assert.equal(writes, painted + 1, 'only the append attempt itself; the card is untouched');
         const [card] = fx.cards();
-        assert.deepEqual([labels(card), text(card, 'chat-quiz-stake'), text(card, 'chat-live-project-name')],
+        assert.deepEqual([labels(card), text(card, 'chat-quiz-stake'), text(card.parentNode, 'chat-live-project-name')],
             [['Yes', 'No'], 'At stake: Release timing', 'Storage']);
         fx.decision.buildQuestionPointer({ ...WAITING, project_name: 'Storage v2' });
-        assert.equal(text(card, 'chat-live-project-name'), 'Storage v2', 'a renamed Project renames the chip in place');
+        assert.equal(text(card.parentNode, 'chat-live-project-name'), 'Storage v2', 'a renamed Project renames the chip in place');
     } finally { fx.restore(); }
 });
 
@@ -592,7 +683,7 @@ test('a fresh single-wait census ends older waits in place without settling or r
         assert.equal(text(older, 'chat-quiz-status-text'), 'Waiting for your answer', 'a pre-arrival read cannot end a newer wait');
         fx.decision.appendActivityQuestion({ ...WAITING, quiz_id: 'q2', ts: ASKED[1] });
         assert.deepEqual([older, newer, foreign].map((card) => text(card, 'chat-quiz-status-text')), [
-            'Unanswered · the task continued; an answer is still accepted', 'Waiting for your answer', 'Waiting for your answer']);
+            'Unanswered · task continued', 'Waiting for your answer', 'Waiting for your answer']);
         assert.match(text(older, 'chat-quiz-assumption'), /^The wait ended without an answer/);
         assert.deepEqual([older.dataset.state, Boolean(older.querySelector('.chat-quiz-comment'))], ['open', true]);
         // Neither a missing stamp nor a sub-millisecond tie is an order.
@@ -602,7 +693,7 @@ test('a fresh single-wait census ends older waits in place without settling or r
         assert.deepEqual(fx.cards().slice(3, 5).map((card) => text(card, 'chat-quiz-status-text')),
             ['Waiting for your answer', 'Waiting for your answer']);
         fx.add(WAITING);
-        assert.equal(text(older, 'chat-quiz-status-text'), 'Unanswered · the task continued; an answer is still accepted',
+        assert.equal(text(older, 'chat-quiz-status-text'), 'Unanswered · task continued',
             'stale history cannot restore the closed wait');
         mock.timers.tick(SETTLE_MS * 2);
         assert.equal(fx.removed.length, 0, 'an unanswered question is never removed');
@@ -657,8 +748,8 @@ test('a replaced question stays as a read-only record; a native Main quiz is nev
         const native = fx.decision.buildQuizCard({ type: 'quiz', role: 'assistant', quiz_id: 'native', task_id: 't-main',
             question: 'Main question?', options: [{ label: 'A' }, { label: 'B' }], assumption: 'A', state: 'open', ts: ASKED[0] });
         fx.column.append(native);
-        const nativeCard = native.children[0];
-        assert.equal(nativeCard.querySelector('.chat-quiz-project'), null);
+        const nativeCard = native.querySelector('.chat-quiz-card');
+        assert.equal(native.querySelector('.chat-quiz-project'), null, 'a native Main question names no Project');
         options(nativeCard)[0].click();
         await turn();
         mock.timers.tick(SETTLE_MS * 2);
@@ -730,7 +821,7 @@ test('an optional canonical ask inherits no resumed fact from another quiz wait'
         const detail = await fx.decision.readQuestion('t-1', 'opt', 'p1');
         assert.equal(detail.owner_wait_state, undefined);
         const card = fx.decision.buildQuizCard(detail);
-        assert.equal(text(card, 'chat-quiz-status-text'), 'Unanswered · an answer is still accepted');
+        assert.equal(text(card, 'chat-quiz-status-text'), 'Unanswered');
         assert.ok(options(card).every(button => !button.disabled));
     } finally { fx.decision.destroy(); fx.restore(); }
 });

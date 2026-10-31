@@ -1,0 +1,16 @@
+{
+  "about": "Host wait folding (ouroboros/checkpoint_waits.py fold_line, web/modules/task_checkpoints.js waitFoldLine): each case's rows, in arrival order, give one line.",
+  "cases": [
+    {"kind": "usage_lock_wait", "rows": [["a", "entered", 0.0]], "line": "Waiting for accounting access"},
+    {"kind": "usage_lock_wait", "rows": [["a", "entered", 0.0], ["a", "ended", 0.56]], "line": "Accounting wait ended · 0.6 s"},
+    {"kind": "usage_lock_wait", "rows": [["a", "entered", 0.0], ["a", "ended", 0.3], ["b", "entered", 0.0], ["b", "ended", 12.5]], "line": "Accounting waits ×2 · longest 13 s"},
+    {"kind": "usage_lock_wait", "rows": [["a", "ended", 0.5], ["b", "entered", 0.0]], "line": "Waiting for accounting access · Accounting wait ended · 0.5 s"},
+    {"kind": "usage_lock_wait", "rows": [["a", "ended", 0.25], ["a", "entered", 0.0], ["a", "ended", 0.25]], "line": "Accounting wait ended · 0.3 s"},
+    {"kind": "usage_lock_wait", "rows": [["a", "ended", 900]], "line": "Accounting wait ended · 15 min"},
+    {"kind": "control_store_wait", "rows": [["a", "ended", 119.6]], "line": "Control storage wait ended · 2 min"},
+    {"kind": "control_store_wait", "rows": [["a", "ended", 75.2], ["b", "ended", 9.96]], "line": "Control storage waits ×2 · longest 1 min 15 s"},
+    {"kind": "control_store_wait", "rows": [["a", "ended", 9.96]], "line": "Control storage wait ended · 10.0 s"},
+    {"kind": "usage_lock_wait", "rows": [["a", "ended", null], ["b", "ended", null]], "line": "Accounting waits ×2"},
+    {"kind": "usage_lock_wait", "rows": [["a", "ended", null]], "line": "Accounting wait ended"}
+  ]
+}

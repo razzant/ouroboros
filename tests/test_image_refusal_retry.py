@@ -426,6 +426,56 @@ def test_a_retry_whose_candidate_still_carries_the_image_never_leaves_the_host(r
     assert _events(root, "image_refusal_retry")[0]["outcome"] == "not_sent"
 
 
+@pytest.mark.parametrize("retry_kind", ["fit", "presend_size", "provider_size", "unknown"])
+def test_image_retry_size_failure_reaches_recovery_but_unknown_never_repeats(root, monkeypatch, retry_kind):
+    from ouroboros import loop_model_call
+
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", CAPTIONER)
+
+    def answer(_n, images):
+        if images:
+            return _ProviderError(400)
+        if retry_kind == "provider_size":
+            return _ProviderError(400, "maximum context length exceeded", "context_length_exceeded")
+        return _died() if retry_kind == "unknown" else "ok"
+
+    provider = _Provider(root, answer)
+    caption = "caption " * (60_000 if retry_kind == "presend_size" else 2)
+    monkeypatch.setattr(provider, "vision_query", lambda *a, **kw: (caption, {"cost": 0.0}))
+    ctx = _round(root, provider, plan=replace(_main_plan(), window_tokens=100_000))
+    passes = []
+    # Hold the view fixed: the real recovery still consumes each pass once,
+    # but an unchanged candidate must earn no physical retry.
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_pass",
+                        lambda ctx, steps, *args: passes.append(steps) or False)
+    msg, _cost, _mode = loop._call_round_model(ctx)
+    [event] = _events(root, "image_refusal_retry")
+    if retry_kind in {"presend_size", "provider_size"}:
+        assert msg is None
+        assert ctx.accumulated_usage[loop_model_call.CONTEXT_REFUSAL_ROUND_KEY] == ctx.round_idx
+        assert passes == list(loop_model_call.REFUSAL_PASSES)
+        assert len(loop._context_overflow_retries(ctx.tools._ctx)) == 2
+        assert loop_model_call.REFUSED_CANDIDATE_KEY not in ctx.accumulated_usage
+        assert vr.REFUSED_IMAGES_KEY not in ctx.accumulated_usage
+    else:
+        assert not passes and loop_model_call.CONTEXT_REFUSAL_ROUND_KEY not in ctx.accumulated_usage
+    if retry_kind == "presend_size":
+        assert provider.sent == [{DIGEST_A}] and event["outcome"] == "not_sent"
+        assert event["retry_error"]["error_kind"] == "context_overflow"
+        [prediction] = _events(root, "context_fit_refused")
+        assert prediction["cause"] == "known_window_prediction" and prediction["predicted_free_tokens"] < 0
+        assert len(_events(root, "llm_api_error")) == 1  # only the original image refusal
+    else:
+        assert provider.sent == [{DIGEST_A}, frozenset()]
+        assert event["outcome"] == ("answered" if retry_kind == "fit" else "failed")
+        if retry_kind == "unknown":
+            capture = loop.last_physical_attempt_capture()
+            assert capture.state == "unresolved" and capture.provider_status_code is None
+            assert vr.REFUSED_IMAGES_KEY not in ctx.accumulated_usage
+        elif retry_kind == "fit":
+            assert msg is not None and vr.REFUSED_IMAGES_KEY in ctx.accumulated_usage
+
+
 def test_a_new_task_sends_the_same_image_as_pixels_again(root):
     provider = _Provider(root, _refuse_images())
     assert loop._call_round_model(_round(root, provider))[0] is not None

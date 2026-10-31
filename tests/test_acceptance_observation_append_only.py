@@ -16,28 +16,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import loop
-from ouroboros.loop_acceptance_review import prepare_acceptance_observation
-from ouroboros.loop_messages import _append_or_merge_user_content, _record_owner_directive
+from ouroboros.loop_messages import (
+    _append_or_merge_user_content,
+    _record_owner_directive,
+    prepare_acceptance_observation,
+)
 
 
 @pytest.fixture
-def eligible(monkeypatch, tmp_path):
-    """Smallest non-direct root-task context that receives the selector: Required
-    reviews the write the host observed (#1731), not the queued task itself."""
-    monkeypatch.setattr(loop, "get_task_review_mode", lambda: "required")
+def eligible(tmp_path):
+    """Smallest root-task context that receives the selector: delivery control asks
+    Main to select a completion, so the observation row is rendered."""
     ctx = SimpleNamespace(
         task_id="root", task_attempt=1, drive_root=tmp_path,
         task_metadata={"root_task_id": "root"}, task_contract={}, is_direct_chat=False,
-        _loop_mailbox_seen_ids=set(), _owner_directives=[],
+        _loop_mailbox_seen_ids=set(), _owner_directives=[], _delivery_control_required=True,
     )
     _record_owner_directive(ctx, source="initial_user", content="Prepare the full report.", msg_id="first")
     messages = [{"role": "user", "content": "Prepare the full report."}]
     trace = {"tool_calls": [{"tool": "write_file", "is_error": False, "status": "ok", "args": {"path": "report.md"}},
                             {"tool": "read_file", "is_error": False, "status": "ok", "args": {}}],
              "reasoning_notes": []}
-    schemas = [{"function": {"name": "task_acceptance_review"}}]
-    return ctx, messages, trace, schemas
+    return ctx, messages, trace
 
 
 def _advance_round(messages: list, trace: dict, idx: int) -> None:
@@ -54,9 +54,9 @@ def _observation_rows(messages: list) -> list:
 
 
 def test_unchanged_owner_facts_keep_exactly_one_frozen_row(eligible):
-    ctx, messages, trace, schemas = eligible
+    ctx, messages, trace = eligible
 
-    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
     rows = _observation_rows(messages)
     assert len(rows) == 1
     first_index = messages.index(rows[0])
@@ -64,7 +64,7 @@ def test_unchanged_owner_facts_keep_exactly_one_frozen_row(eligible):
 
     for idx in (1, 2):
         _advance_round(messages, trace, idx)
-        prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+        prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
 
     rows = _observation_rows(messages)
     assert len(rows) == 1, "an unchanged selector must not append a second row"
@@ -73,9 +73,9 @@ def test_unchanged_owner_facts_keep_exactly_one_frozen_row(eligible):
 
 
 def test_rendered_facts_omit_the_per_round_tool_count(eligible):
-    ctx, messages, trace, schemas = eligible
+    ctx, messages, trace = eligible
 
-    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
 
     note = _observation_rows(messages)[0]["content"]
     assert "tool_count" not in note
@@ -88,14 +88,14 @@ def test_rendered_facts_omit_the_per_round_tool_count(eligible):
 
 
 def test_changed_owner_facts_append_a_second_row_and_keep_the_first(eligible):
-    ctx, messages, trace, schemas = eligible
+    ctx, messages, trace = eligible
 
-    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
     first = copy.deepcopy(_observation_rows(messages)[0])
 
     _advance_round(messages, trace, 1)
     _record_owner_directive(ctx, source="direct_incoming", content="Also cover Q3.", msg_id="followup")
-    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
 
     rows = _observation_rows(messages)
     assert len(rows) == 2
@@ -105,14 +105,14 @@ def test_changed_owner_facts_append_a_second_row_and_keep_the_first(eligible):
 
 
 def test_fence_token_change_appends_a_second_row(eligible):
-    ctx, messages, trace, schemas = eligible
+    ctx, messages, trace = eligible
 
-    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
     first = copy.deepcopy(_observation_rows(messages)[0])
 
     _advance_round(messages, trace, 1)
     ctx._task_acceptance_fence_token = "fence-1"
-    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
 
     rows = _observation_rows(messages)
     assert len(rows) == 2
@@ -121,8 +121,8 @@ def test_fence_token_change_appends_a_second_row(eligible):
 
 
 def test_merge_never_rewrites_a_sent_observation_row(eligible):
-    ctx, messages, trace, schemas = eligible
-    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+    ctx, messages, trace = eligible
+    prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
     frozen = copy.deepcopy(messages[-1])
 
     _append_or_merge_user_content(messages, "note")
@@ -146,13 +146,13 @@ def test_merge_still_merges_into_an_ordinary_user_row():
 
 
 def test_every_round_extends_the_previous_request_as_a_prefix(eligible):
-    ctx, messages, trace, schemas = eligible
+    ctx, messages, trace = eligible
     snapshots = []
 
     for idx in range(3):
         if idx:
             _advance_round(messages, trace, idx)
-        prepare_acceptance_observation(ctx, trace, queue.Queue(), messages, schemas)
+        prepare_acceptance_observation(ctx, trace, queue.Queue(), messages)
         snapshots.append(copy.deepcopy(messages))
 
     for previous, following in zip(snapshots, snapshots[1:]):

@@ -29,7 +29,6 @@ import {
     harnessFamilyMarkup,
     humanizeResetAt,
     nextUpBadge,
-    quotaSubjectAliases,
     quotaSummary,
     removeAccount,
     removeAccountConfirmBody,
@@ -41,9 +40,21 @@ import {
     vendorCredentialRetainedNotice,
 } from '../modules/harness_accounts.js';
 import { profileOptionsFor } from '../modules/route_editor_primitives.js';
+import { loginCardHtml } from '../modules/harness_login_cards.js';
+import { agentsOutcomeText, familyStatusText } from '../modules/onboarding_agents_step.js';
 
 const MULTI = JSON.parse(readFileSync(
     fileURLToPath(new URL('./fixtures/credential_profiles_multi.json', import.meta.url)), 'utf-8'));
+// The same accounts after the engine's unified migration (#244): the detected
+// codex default login is its named `codex-default` row; claude's native default
+// was never signed in, so nothing was migrated for it.
+const MIGRATED_MULTI = {
+    profiles: [{ profile: { harness_id: 'codex', profile_id: 'codex-default', enabled: true },
+        status: { verification: 'passed', verification_source: 'local_store' },
+        identity: { email: 'n@x.io', plan: 'plus' } }, ...MULTI.profiles],
+    harnessAccounts: [],
+    accountPools: MULTI.harnessAccounts.map(({ harness_id, next_up }) => ({ harness_id, next_up })),
+};
 
 const RUNNING = { state: 'running', engine_version: '3.3.13', runtime: { state: 'ready' } };
 
@@ -76,6 +87,33 @@ function fakeStore(reads, { error = '', snapshot = null } = {}) {
 }
 
 const ALL = (value) => ({ catalog: value, accounts: value, quota: value });
+
+test('Cursor auth and agent catalog access do not certify either execution surface', () => {
+    const snapshot = payload({
+        harnesses: [{ id: 'cursor', enabled: true, status: 'ok', models: [{ id: 'cursor-test' }] }],
+        profiles: { profiles: [{ profile: {
+            harness_id: 'cursor', profile_id: 'cursor-default', enabled: true,
+        }, status: { verification: 'passed', verification_source: 'vendor', availability: 'available' } }] },
+    });
+    const group = accountGroups(snapshot, { accountsRead: 'ok', catalogKnown: true })[0];
+    assert.equal(group.harness, 'cursor');
+    assert.deepEqual(group.status, { tone: 'ok', label: 'Signed in' });
+    const html = harnessFamilyMarkup(group, snapshot, { accountsRead: 'ok', quotaRead: 'ok' });
+    assert.match(html, /Login verified/);
+    assert.doesNotMatch(html, />Connected<|Verified live|rotating/);
+    assert.equal(familyStatusText(snapshot, 'cursor').text, 'Signed in');
+    for (const skipPresets of [false, true]) {
+        assert.match(agentsOutcomeText(['cursor'], { snapshot, skipPresets }),
+            /Sign-in does not verify main-chat support or agent execution/);
+    }
+    for (const mode of ['full', 'compact']) {
+        const login = loginCardHtml({ harness: 'cursor', profile: 'cursor-default',
+            envelope: { job: { state: 'succeeded' } }, verdict: { kind: 'success' } }, 0, { mode });
+        assert.match(login, /Signed in\./);
+        assert.match(login, /Sign-in does not verify main-chat support or agent execution/);
+        assert.doesNotMatch(login, /Connected\./);
+    }
+});
 
 // ---------------------------------------------------------------------------
 // Grouping: zero accounts, one account, several accounts in one family.
@@ -113,31 +151,30 @@ test('an empty family that WAS read says so, and its button still connects', () 
 
 test('several accounts of one family are grouped, counted, and called equivalent', () => {
     // The owner's ask, verbatim: «все акки клод кода должны быть эквивалентны».
-    // Three codex accounts (one native + two named) become ONE card whose
-    // header says they rotate — no row is the "real" one.
-    const groups = accountGroups(payload({ profiles: MULTI }), { accountsRead: 'ok' });
+    // Three codex accounts (the migrated default + two named) become ONE card
+    // whose header counts them alike — no row is the "real" one.
+    const groups = accountGroups(payload({ profiles: MIGRATED_MULTI }), { accountsRead: 'ok' });
     const codex = groups.find((g) => g.harness === 'codex');
     assert.equal(codex.rows.length, 3);
     assert.equal(codex.status.tone, 'ok');
-    assert.match(codex.status.label, /3 accounts · rotating/);
+    assert.match(codex.status.label, /3 accounts signed in/);
     // Once a family HAS accounts its header button ADDS one, which is what
-    // makes them equivalent instead of one-default-plus-extras. The affordance
-    // used to hang off the native row only.
+    // makes them equivalent instead of one-default-plus-extras.
     assert.equal(familyActionLabel(codex, payload()), 'Add account');
 
-    // Both claude rows are DISABLED in the fixture. That owner-authored state
-    // outranks their failed/empty verification: the header does not shout
-    // "need attention" and does not pretend the remedy is another sign-in.
+    // The claude row is DISABLED in the fixture. That owner-authored state
+    // outranks its failed verification: the header does not shout "need
+    // attention" and does not pretend the remedy is another sign-in.
     // (An ENABLED failure keeps the family-level alarm; pinned below.)
     const claude = groups.find((g) => g.harness === 'claude');
     assert.equal(claude.status.tone, 'muted');
-    assert.match(claude.status.label, /2 accounts · all disabled/);
+    assert.match(claude.status.label, /1 account · all disabled/);
 });
 
-test('one connected account reads as connected, not as a count', () => {
+test('one authenticated account reports sign-in, not operational readiness', () => {
     const rows = [{ harness: 'codex', profile_id: 'work', kind: 'profile',
         status: { verification: 'passed', verification_source: 'vendor' } }];
-    assert.deepEqual(familyStatus(rows, { accountsRead: 'ok' }), { tone: 'ok', label: 'Connected' });
+    assert.deepEqual(familyStatus(rows, { accountsRead: 'ok' }), { tone: 'ok', label: 'Signed in' });
     // Present but never signed in: not an alarm, and not a lie either.
     const cold = [{ harness: 'codex', profile_id: 'work', kind: 'profile', status: {} }];
     assert.deepEqual(familyStatus(cold, { accountsRead: 'ok' }),
@@ -148,24 +185,20 @@ test('one connected account reads as connected, not as a count', () => {
         { tone: 'muted', label: '1 account · not verified' });
 });
 
-test('"N accounts · rotating" counts only the accounts rotation can actually use', () => {
+test('a family counts observed logins without claiming rotation capacity', () => {
     // Caught by LOOKING at the rendered tab: a Cursor family holding one signed-in
     // account and one cold native row announced "2 accounts · rotating", promising
-    // a rotation width that did not exist.
+    // a rotation width that did not exist (a cold row is any row not signed in).
     const mixed = [
-        { harness: 'cursor', profile_id: '', kind: 'native', status: {} },
+        { harness: 'cursor', profile_id: 'cursor-default', kind: 'profile', status: {} },
         { harness: 'cursor', profile_id: 'ultra', kind: 'profile',
           status: { verification: 'passed', verification_source: 'local_store' } },
     ];
     assert.deepEqual(familyStatus(mixed, { accountsRead: 'ok' }),
-        { tone: 'ok', label: '1 of 2 connected' });
+        { tone: 'ok', label: '1 of 2 signed in' });
 });
 
-test('a disabled account is out of the rotation claim, and all-disabled is its own state', () => {
-    // Unified-accounts sprint: the header's "rotating" promise may only count
-    // accounts that are BOTH signed in and enabled. A disabled row is the
-    // owner's own exclusion — counting it over-promises the pool exactly the
-    // way counting a cold row used to.
+test('disabling excludes rotation without erasing a passed login', () => {
     const mixed = [
         { harness: 'codex', profile_id: 'codex-default', kind: 'profile', enabled: true,
           status: { verification: 'passed', verification_source: 'local_store' } },
@@ -173,12 +206,26 @@ test('a disabled account is out of the rotation claim, and all-disabled is its o
           status: { verification: 'passed', verification_source: 'vendor' } },
     ];
     assert.deepEqual(familyStatus(mixed, { accountsRead: 'ok' }),
-        { tone: 'ok', label: '1 of 2 connected' });
+        { tone: 'ok', label: '2 accounts signed in' });
+    const unknown = { harness: 'codex', profile_id: 'unknown', enabled: true,
+        status: { verification: 'not_run', availability: 'unknown' } };
+    assert.deepEqual(familyStatus([...mixed, unknown]),
+        { tone: 'ok', label: '2 of 3 signed in' });
     // Every login healthy, every account disabled: saying "not signed in"
     // would send the owner to a login that fixes nothing.
     const allOff = mixed.map((row) => ({ ...row, enabled: false }));
     assert.deepEqual(familyStatus(allOff, { accountsRead: 'ok' }),
-        { tone: 'muted', label: '2 accounts · all disabled' });
+        { tone: 'muted', label: '2 accounts signed in · all disabled' });
+    assert.deepEqual(familyStatus([allOff[0]]),
+        { tone: 'muted', label: 'Signed in · all disabled' });
+    assert.deepEqual(familyStatus([allOff[0], { ...allOff[1], status: { verification: 'not_run' } }]),
+        { tone: 'muted', label: '1 of 2 signed in · all disabled' });
+    for (const accountsRead of ['not_read', 'failed', 'transport', 'indeterminate']) {
+        assert.deepEqual(familyStatus(mixed, { accountsRead }),
+            { tone: 'muted', label: '2 accounts signed in — last known' });
+        assert.deepEqual(familyStatus(allOff, { accountsRead }),
+            { tone: 'muted', label: '2 accounts signed in · all disabled — last known' });
+    }
     // Disabled rows are intentionally not probed by the engine. Their
     // verification=not_run remains neutral but must not overwrite the owner's
     // stronger structural state.
@@ -194,6 +241,8 @@ test('a disabled account is out of the rotation claim, and all-disabled is its o
     }));
     assert.deepEqual(familyStatus(ambiguous, { accountsRead: 'ok' }),
         { tone: 'muted', label: '2 accounts · not verified' });
+    assert.deepEqual(familyStatus(allOffNotRun, { accountsRead: 'failed' }),
+        { tone: 'muted', label: '2 accounts · all disabled — last known' });
     // …and the metadata line states the exclusion in words on the row itself.
     assert.match(accountMetaLine(allOff[0], payload()), /^disabled — excluded from rotation/);
 });
@@ -210,12 +259,16 @@ test('a disabled account with a failed verification does not redden the family h
           status: { verification: 'failed' } },
     ];
     assert.deepEqual(familyStatus(rows, { accountsRead: 'ok' }),
-        { tone: 'ok', label: '1 of 2 connected' });
+        { tone: 'ok', label: '1 of 2 signed in' });
     // The SAME failure on an ENABLED account is rotation's problem and keeps
     // the alarm.
     const enabledFailure = rows.map((row) => ({ ...row, enabled: true }));
     assert.deepEqual(familyStatus(enabledFailure, { accountsRead: 'ok' }),
         { tone: 'error', label: '1 of 2 need attention' });
+    assert.deepEqual(familyStatus(enabledFailure, { accountsRead: 'failed' }),
+        { tone: 'error', label: '1 of 2 need attention — last known' });
+    assert.deepEqual(familyStatus(rows.map((row) => ({ ...row, enabled: false }))),
+        { tone: 'muted', label: '1 of 2 signed in · all disabled' });
 });
 
 test('the Next up badge renders every wire kind fail-safe, unknown included', () => {
@@ -227,11 +280,13 @@ test('the Next up badge renders every wire kind fail-safe, unknown included', ()
     assert.equal(nextUpBadge(withPool({ kind: 'api_key_route' }), 'codex'),
         'Next up: API key (no subscription capacity)');
     assert.equal(nextUpBadge(withPool({ kind: 'none', reason: 'nothing routable' }), 'codex'), '');
-    // The legacy union, through the same dual-wire reader.
+    // An old client's carrier speaks for nothing, and a retired `native` kind
+    // reaching the pool union is just an unknown kind.
     const legacy = { ...base, profiles: { harnessAccounts: [
         { harness_id: 'codex', next_up: { kind: 'native', route: 'local_session' } },
     ], profiles: [] } };
-    assert.equal(nextUpBadge(legacy, 'codex'), 'Next up: default account');
+    assert.equal(nextUpBadge(legacy, 'codex'), '');
+    assert.equal(nextUpBadge(withPool({ kind: 'native', route: 'local_session' }), 'codex'), 'Next up: unknown');
     // FAIL-SAFE: an unknown future kind is a generic unknown, never a crash
     // and never a guessed account (plan §E: old clients must degrade honestly).
     assert.equal(nextUpBadge(withPool({ kind: 'quantum_pool' }), 'codex'), 'Next up: unknown');
@@ -243,33 +298,18 @@ test('the Next up badge renders every wire kind fail-safe, unknown included', ()
         { accountsRead: 'failed' }), '');
 });
 
-test('the migrated default row may inherit the LEGACY quota subject, exactly once', () => {
-    // Unified migration window (plan §K.3): the quota journal is not
-    // rewritten, so right after migration the row's fresh window can still be
-    // keyed by the legacy ''/null subject. The alias applies ONLY to the
-    // reserved `<harness>-default` row on a unified payload, and an
-    // exact-keyed reading always wins.
-    const unified = { unified_accounts: true };
-    const row = { harness: 'claude', profile_id: 'claude-default', kind: 'profile' };
-    assert.deepEqual(quotaSubjectAliases(row, unified), ['']);
-    assert.deepEqual(quotaSubjectAliases({ ...row, profile_id: 'work' }, unified), []);
-    assert.deepEqual(quotaSubjectAliases(row, {}), [], 'legacy engines get no alias');
-
-    const legacyKeyed = [{ subject: { harness: 'claude', subject_id: '' }, freshness: 'fresh',
+test('a row reads only its exact quota subject; an unprofiled window is nobody\'s', () => {
+    // #244: a null/empty subject is an unprofiled route's own window (an
+    // explicit API key), never `<harness>-default`'s, and no row borrows it.
+    const unprofiled = [{ subject: { harness: 'claude', subject_id: null }, freshness: 'fresh',
         constraints: [{ used_ratio: 0.5, resets_at: '2026-08-09T14:00:00Z' }] }];
     const now = Date.parse('2026-08-09T12:00:00Z');
-    const inherited = quotaSummary(legacyKeyed, 'claude', 'claude-default',
-        { nowMs: now, fallbackSubjectIds: [''] });
-    assert.match(inherited.label, /^50% used/);
-    // The exact subject wins the moment a re-keyed reading exists.
-    const reKeyed = [...legacyKeyed,
+    assert.equal(quotaSummary(unprofiled, 'claude', 'claude-default', { nowMs: now }).label, 'Usage unavailable');
+    assert.equal(quotaSummary(unprofiled, 'claude', 'work', { nowMs: now }).label, 'Usage unavailable');
+    const exact = [...unprofiled,
         { subject: { harness: 'claude', subject_id: 'claude-default' }, freshness: 'fresh',
           constraints: [{ used_ratio: 0.2, resets_at: '2026-08-09T14:00:00Z' }] }];
-    assert.match(quotaSummary(reKeyed, 'claude', 'claude-default',
-        { nowMs: now, fallbackSubjectIds: [''] }).label, /^20% used/);
-    // No alias, no inheritance: another named row never borrows the window.
-    assert.equal(quotaSummary(legacyKeyed, 'claude', 'work', { nowMs: now }).label,
-        'Usage unavailable');
+    assert.match(quotaSummary(exact, 'claude', 'claude-default', { nowMs: now }).label, /^20% used/);
 });
 
 test('the family button keeps its ADD intent even when the runtime needs repair', () => {
@@ -281,7 +321,7 @@ test('the family button keeps its ADD intent even when the runtime needs repair'
     // step would remove the add intent the card exists for. The repair is a
     // prerequisite the login card performs and reports in the foreground, and
     // the service banner above already names the fault.
-    const populated = accountGroups(payload({ profiles: MULTI }), { accountsRead: 'ok' })
+    const populated = accountGroups(payload({ profiles: MIGRATED_MULTI }), { accountsRead: 'ok' })
         .find((g) => g.harness === 'codex');
     const broken = { daemon: { state: 'stale', runtime: { state: 'error' } } };
     assert.equal(familyActionLabel(populated, broken), 'Add account');
@@ -344,23 +384,21 @@ test('the unknown-status refresh action preserves recovery for every profile har
 // Row anatomy.
 // ---------------------------------------------------------------------------
 
-test('the legacy default row is named by who it is, never by a retired account TYPE', () => {
-    // Unified-accounts sprint: "Default CLI login" and "Managed by the X CLI"
-    // described a separate account type the unified model retired. A legacy
-    // pseudo-row is named by the identity the daemon observed — its email —
-    // and only an identity-less one falls back to the neutral "Default
-    // account". The caption is gone from the metadata line entirely.
-    const native = { harness: 'codex', profile_id: '', kind: 'native', identity: {},
+test('a migrated default row is named by who it is, never by a retired account TYPE', () => {
+    // "Default CLI login" and "Managed by the X CLI" described a separate
+    // account type the unified model retired. A row is named by its display
+    // name, then the identity the daemon observed — its email — then its id;
+    // the caption is gone from the metadata line, and every row keeps the
+    // engine's own Enabled/Remove routes beside Sign in again.
+    const migrated = { harness: 'codex', profile_id: 'codex-default', kind: 'profile', identity: {},
         status: { verification: 'passed', verification_source: 'local_store' } };
-    assert.equal(accountName(native), 'Default account');
-    assert.equal(accountName({ ...native, identity: { email: 'owner@example.com' } }),
+    assert.equal(accountName(migrated), 'codex-default');
+    assert.equal(accountName({ ...migrated, identity: { email: 'owner@example.com' } }),
         'owner@example.com');
-    const meta = accountMetaLine(native, payload({ harnesses: [{ id: 'codex' }] }));
+    const meta = accountMetaLine(migrated, payload({ harnesses: [{ id: 'codex' }] }));
     assert.doesNotMatch(meta, /Managed by/);
     assert.doesNotMatch(meta, /CLI/);
-    // Removal is a NAMED-profile affordance: this app cannot honestly sign a
-    // vendor CLI out, so it does not offer to.
-    assert.equal(rowActionLabel(native, payload()), 'Sign in again');
+    assert.equal(rowActionLabel(migrated, payload()), 'Sign in again');
 });
 
 test('the metadata line leads with humanized usage, never a raw ISO instant', () => {
@@ -521,9 +559,9 @@ test('the REAL store, fed a corrupted runtime, reaches the repair sentence', asy
 });
 
 test('a card does not contradict itself: the header is dated by the same read as its rows', () => {
-    // The row badge stops claiming "Verified live" when the ACCOUNTS read never
+    // The row badge stops claiming "Login verified" when the ACCOUNTS read never
     // landed. The header lozenge counts the very same rows, so it obeys the very
-    // same provenance — otherwise one card says "Connected" in green over rows
+    // same provenance — otherwise one card says "Signed in" in green over rows
     // that each say "last known", and the owner has to decide which half to
     // believe. An account that needs ATTENTION keeps its tone: a dated warning
     // is still a warning, and muting it would hide the one row worth acting on.
@@ -532,17 +570,17 @@ test('a card does not contradict itself: the header is dated by the same read as
     const broken = [{ harness: 'codex', profile_id: 'work', kind: 'profile',
         status: { verification: 'failed' } }];
 
-    assert.deepEqual(familyStatus(live, { accountsRead: 'ok' }), { tone: 'ok', label: 'Connected' });
+    assert.deepEqual(familyStatus(live, { accountsRead: 'ok' }), { tone: 'ok', label: 'Signed in' });
     for (const gap of ['not_read', 'failed', 'transport']) {
         const dated = familyStatus(live, { accountsRead: gap });
         assert.equal(dated.tone, 'muted', `${gap} must not paint a green aggregate`);
-        assert.match(dated.label, /Connected — last known/);
+        assert.match(dated.label, /Signed in — last known/);
         assert.equal(familyStatus(broken, { accountsRead: gap }).tone, 'error',
             `${gap} must not mute an account that needs attention`);
     }
     // Two rows, one signed in: the count is still honest, just dated.
     assert.match(familyStatus([...live, { harness: 'codex', profile_id: 'cold', kind: 'profile', status: {} }],
-        { accountsRead: 'failed' }).label, /1 of 2 connected — last known/);
+        { accountsRead: 'failed' }).label, /1 of 2 signed in — last known/);
 });
 
 test('an UNREACHABLE daemon reaches the banner as ONE coarse verdict, carrying its own reason', async () => {

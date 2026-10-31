@@ -43,6 +43,8 @@ def test_kill_saved_warm_sleep_keeps_cause_before_and_after_restore(tmp_path, mo
         return read_checkpoint(*args, **kwargs)
     monkeypatch.setattr(owner_wait, "saved_sleep_checkpoint", after_signal)
     if door == "panic":
+        from tests._work_stop_helpers import live_panic
+        live_panic(tmp_path, monkeypatch)
         (tmp_path / "state" / "panic_stop.flag").write_text("panic")
     # Restart's explicit door must work even when its flag was not written.
     with monkeypatch.context() as failing:
@@ -88,6 +90,9 @@ def test_markerless_saved_sleep_recovery_is_upgraded_by_actual_stop(tmp_path, mo
     flag = tmp_path / "state" / ("owner_restart_no_resume.flag" if door == "restart" else "panic_stop.flag")
     flag.write_text("owner_restart_no_resume" if door == "restart" else "panic")
     if consumer == "kill":
+        if door == "panic":
+            from tests._work_stop_helpers import live_panic
+            live_panic(tmp_path, monkeypatch)
         assert workers.kill_workers(archive_service_logs=False, reconcile_delegate_custody=False,
                                     reconcile_review_custody=False, hold_never_started=door == "restart")
     else:
@@ -100,7 +105,6 @@ def test_markerless_saved_sleep_recovery_is_upgraded_by_actual_stop(tmp_path, mo
 
 
 def test_sent_review_settles_after_pause_and_author_close_with_original_group(env, monkeypatch):  # noqa: F811
-    import dataclasses
     import json
     import threading
 
@@ -108,12 +112,11 @@ def test_sent_review_settles_after_pause_and_author_close_with_original_group(en
     from ouroboros import usage_accounting as ua
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted, require_physical_dispatch_window
     from ouroboros.model_wait import model_waitable
-    from ouroboros.review_dispatch import collect_task_acceptance_run
     from ouroboros.review_substrate import run_review_request
     from ouroboros.task_results import write_task_result
     from supervisor.owner_pause_control import request_owner_pause
     from tests.test_billing_group import _scope, _spend
-    from tests.test_review_operation_lifetime import TASK, _parent, _request, _slot, until
+    from tests.test_review_operation_lifetime import TASK, _collect, _parent, _request, _slot, until
 
     f = env
     _, _, workers = _install_queue(f.root, monkeypatch)
@@ -158,10 +161,10 @@ def test_sent_review_settles_after_pause_and_author_close_with_original_group(en
     until(lambda: operation.closed)
     from ouroboros.task_results import load_task_result
 
-    until(lambda: load_task_result(f.root, TASK)["review_operations"][operation.owner_id]["state"] == "unpublished")
-    collected = collect_task_acceptance_run(json.loads(json.dumps(dataclasses.asdict(result))),
-                                            drive_root=f.root, usage_ctx=f.ctx)
-    assert collected.actors[0]["parsed"]["verdict"] == "PASS"
+    # A closed operation removes its pointer from the task row.
+    until(lambda: operation.owner_id not in (load_task_result(f.root, TASK).get("review_operations") or {}))
+    # The recorded seat is collected through the per-seat collector every surface shares (no new send).
+    assert _collect(result, f) == ("PASS", review_operation.COLLECTED)
     assert observations == [None]
     assert ua.usage_projection(f.root, billing_group_id="original")["accounted_usd"] == pytest.approx(2.0)
     rows = ledger_rows(f.root)

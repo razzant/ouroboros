@@ -61,13 +61,13 @@ def test_query_model_timeout_becomes_error_actor(monkeypatch, request):
     assert prompt["slot"]["route"] == "api_chat"
 
     from ouroboros.tools.review import _parse_model_response
-    from ouroboros.triad_review import parse_model_review_results
+    from ouroboros.triad_review import parse_seat_answers
 
     flattened = _parse_model_response(model, result, headers)
     assert flattened["operation_id"] == result["operation_id"]
     assert flattened["operation_state"] == "in_flight"
     assert flattened["late_result_pending"] is True
-    [record] = parse_model_review_results({"results": [flattened]}).actor_records
+    [record] = parse_seat_answers({"results": [flattened]}, {}).actor_records
     assert record.to_dict()["operation_id"] == result["operation_id"]
     assert record.to_dict()["operation_state"] == "in_flight"
     assert record.to_dict()["late_result_pending"] is True

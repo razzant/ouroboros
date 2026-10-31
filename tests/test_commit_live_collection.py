@@ -1,4 +1,4 @@
-"""Recorded commit collection joins a live worker; acceptance stays a pure read."""
+"""Recorded commit collection joins a live worker."""
 from __future__ import annotations
 
 import copy
@@ -271,27 +271,7 @@ def test_live_rejoin_uses_remaining_original_window_and_does_not_refresh_it(live
     assert len(f.calls) == 1
 
 
-def test_pure_acceptance_collection_does_not_wait_for_live_worker(live, monkeypatch):
-    f = live
-    request = replace(f.request, surface="task_acceptance")
-    key = custody._attempt_key(request, f.slot)
-    monkeypatch.setitem(custody._ACTIVE, key, f.entry)
-    run = dict(request=asdict(request), slot_roster=[asdict(f.slot)], actors=[copy.deepcopy(f.row)])
-
-    def no_runner(*_a, **_kw):
-        pytest.fail("pure acceptance collection entered the waiting runner")
-
-    monkeypatch.setattr("ouroboros.review_substrate.run_review_request", no_runner)
-    try:
-        result = operation.collect_recorded_acceptance_run(run, drive_root=f.ctx.drive_root, usage_ctx=f.ctx)
-        assert result.collection["facts"] == {f.slot.slot_id: "deferred"}
-        assert result.actors[0]["operation_id"] == f.entry.operation_id
-        assert not f.entry.event.is_set()
-    finally:
-        custody._ACTIVE.pop(key)
-
-
-@pytest.mark.parametrize("stop", ["cancel", "panic"])
+@pytest.mark.parametrize("stop", ["cancel", "owner_restart"])
 def test_stop_during_recorded_live_join_reaches_original_wait(tmp_path, monkeypatch, stop):
     from ouroboros import config
     from tests.test_review_operation_lifetime import QuotaModel
@@ -333,12 +313,13 @@ def test_stop_during_recorded_live_join_reaches_original_wait(tmp_path, monkeypa
 
             request_cancel(tmp_path, task, reason="owner stop", source="test")
         else:
-            (tmp_path / "state/panic_stop.flag").write_text("panic")
+            from tests._work_stop_helpers import live_restart
+            live_restart(tmp_path, monkeypatch)
         second.join(5)
         assert not second.is_alive() and "error" not in result, result
         assert result["actor"]["operation_id"] == entry.operation_id
         assert result["actor"]["status"] == "error"
-        assert entry.operation.control() == ("cancelled" if stop == "cancel" else "panic")
+        assert entry.operation.control() == ("cancelled" if stop == "cancel" else "owner_restart")
         assert len(model.calls) == 1
     finally:
         model.ready.set()

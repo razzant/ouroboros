@@ -5,6 +5,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import httpx
 import pytest
@@ -26,7 +27,7 @@ def engine(monkeypatch, tmp_path):
     from ouroboros.gateways import claudexor as wire
 
     calls, clients = [], []
-    state = {"operations": deepcopy(WIRE["operations"]), "error": None}
+    state = {"operations": deepcopy(WIRE["operations"]), "error": None, "quota_mode": "ignored"}
     monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "owned")
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
 
@@ -65,8 +66,22 @@ def engine(monkeypatch, tmp_path):
                 headers={"Retry-After": "3"})
         if request.url.path == "/v2/quota":
             result = deepcopy(WIRE["quota"])
-            if request.url.params.get("view") != "resources":
+            view = request.url.params.get("view")
+            if view == "resources_freshness" and state["quota_mode"] == "refused":
+                return httpx.Response(400, json={"code": "invalid_query", "message": "view must be resources"})
+            if view == "resources_freshness" and state["quota_mode"] == "current":
+                for snapshot in result["snapshots"]:
+                    for constraint in snapshot["constraints"]:
+                        constraint["freshness"] = "fresh"
+                result["availability_scope"] = {
+                    "model": request.url.params.get("model"),
+                    "requestKind": request.url.params.get("requestKind"), "basis": "quota_block"}
+            elif view != "resources":
                 result.pop("resources")
+                # An ignored selector's first epoch must not be merged into the
+                # negotiated resources fallback, even though both GETs succeed.
+                if state.get("distinct_epochs"):
+                    result["snapshots"][0]["source"] = "ignored-first-epoch"
             if state.get("malformed_resources"):
                 result.pop("resources", None)
             return httpx.Response(200, json=result)
@@ -74,7 +89,8 @@ def engine(monkeypatch, tmp_path):
             return httpx.Response(200, json=WIRE["receipt"])
         if request.url.path == "/v2/credential-profiles":
             return httpx.Response(200, json={"profiles": [{"profile": {
-                "harness_id": "claude", "profile_id": "claude-default", "enabled": False}}], "harnessAccounts": []})
+                "harness_id": "claude", "profile_id": "claude-default", "enabled": False}}],
+                "harnessAccounts": [], "accountPools": []})
         if request.url.path in {"/v2/harnesses", "/v2/agent-capabilities"}:
             return httpx.Response(200, json={"harnesses": []})
         raise AssertionError(f"Unexpected engine call: {request.method} {request.url.path}")
@@ -116,7 +132,10 @@ def test_status_negotiates_rich_quota_once_and_preserves_legacy_accounts(engine,
         state["operations"] = []
     payload = client.get("/api/claudexor/status").json()
     quota_calls = [call for call in calls if call[1] == "/v2/quota"]
-    assert quota_calls == [("GET", "/v2/quota", {} if legacy else {"view": "resources"}, None, None)]
+    selectors = [{"view": "resources_freshness", "requestKind": "text"}]
+    if not legacy:
+        selectors.append({"view": "resources"})
+    assert quota_calls == [("GET", "/v2/quota", query, None, None) for query in selectors]
     assert payload["quota"] == WIRE["quota"]["snapshots"]
     assert payload["profiles"]["profiles"][0]["profile"]["enabled"] is False
     assert payload["reads"] == {"catalog": "ok", "accounts": "ok", "quota": "ok"}
@@ -128,14 +147,15 @@ def test_status_negotiates_rich_quota_once_and_preserves_legacy_accounts(engine,
     assert "private-fixture-token" not in json.dumps(payload)
 
 
-def test_status_and_passive_quota_each_send_only_their_own_selector(engine):
-    """One resource-capable engine: full status negotiates resources, the passive view freshness."""
+def test_status_and_passive_quota_preserve_their_legacy_resource_contracts(engine):
+    """Full Accounts keeps advertised resources; passive reads add no catalog barrier."""
     client, _, calls = engine
     status = client.get("/api/claudexor/status").json()
     passive_start = len(calls)
     passive = client.get("/api/claudexor/status?view=quota").json()
     assert [params for _, path, params, *_ in calls if path == "/v2/quota"] == [
-        {"view": "resources"}, {"view": "constraint_freshness"}]
+        {"view": "resources_freshness", "requestKind": "text"}, {"view": "resources"},
+        {"view": "resources_freshness", "requestKind": "text"}]
     assert status["resources"] == WIRE["quota"]["resources"]
     assert passive["reads"] == {"catalog": "not_read", "accounts": "ok", "quota": "ok"}
     assert passive["quota"] == WIRE["quota"]["snapshots"]
@@ -143,11 +163,57 @@ def test_status_and_passive_quota_each_send_only_their_own_selector(engine):
     assert sorted(path for _, path, *_ in calls[passive_start:]) == ["/v2/credential-profiles", "/v2/quota"]
 
 
-def test_missing_rich_facet_is_failed_quota_not_fresh_empty(engine):
-    client, state, _ = engine
+@pytest.mark.parametrize("mode", ["ignored", "refused", "current"])
+def test_missing_advertised_resources_is_failed_quota_not_fresh_empty(engine, mode):
+    client, state, calls = engine
+    state["quota_mode"] = mode
     state["malformed_resources"] = True
     payload = client.get("/api/claudexor/status").json()
     assert payload["reads"] == {"catalog": "ok", "accounts": "ok", "quota": "failed"}
+    assert payload["facets"]["quota"]["error"] == "malformed_response"
+    assert "resources" not in payload and "availability_scope" not in payload
+    # A current scoped envelope missing its advertised facet is malformed, not
+    # permission to read a second epoch and hide the producer's broken answer.
+    assert len([call for call in calls if call[1] == "/v2/quota"]) == (1 if mode == "current" else 2)
+
+
+@pytest.mark.parametrize("mode", ["ignored", "refused"])
+def test_older_resource_engine_preserves_complete_account_facets(engine, mode):
+    from ouroboros.claudexor_observations import quota_availability
+
+    client, state, calls = engine
+    state.update(quota_mode=mode, distinct_epochs=True)
+    payload = client.get("/api/claudexor/status").json()
+    assert payload["reads"]["quota"] == "ok"
+    assert payload["resource_capabilities"]["read"] is True
+    assert payload["resources"] == WIRE["quota"]["resources"]
+    for facet in ("balances", "spending", "resets"):
+        assert payload["resources"][0][facet] == WIRE["quota"]["resources"][0][facet]
+    assert payload["quota"] == WIRE["quota"]["snapshots"]
+    assert "availability_scope" not in payload
+    assert quota_availability({"snapshots": payload["quota"]}, "claude")["state"] == "unknown"
+    assert [params for _, path, params, *_ in calls if path == "/v2/quota"] == [
+        {"view": "resources_freshness", "requestKind": "text"}, {"view": "resources"}]
+    assert len([call for call in calls if call[1] == "/v2/operations"]) == 1
+
+
+def test_current_combined_envelope_reaches_full_and_passive_contracts_unchanged(engine):
+    from ouroboros.gateway.contracts import ClaudexorQuotaResponse, ClaudexorStatusResponse
+
+    client, state, calls = engine
+    state["quota_mode"] = "current"
+    full = client.get("/api/claudexor/status").json()
+    passive_start = len(calls)
+    passive = client.get("/api/claudexor/status?view=quota").json()
+    scope = {"model": None, "requestKind": "text", "basis": "quota_block"}
+    for payload, contract in ((full, ClaudexorStatusResponse), (passive, ClaudexorQuotaResponse)):
+        assert set(payload) <= set(get_type_hints(contract))
+        assert payload["resources"] == WIRE["quota"]["resources"]
+        assert payload["availability_scope"] == scope
+        assert all(c["freshness"] == "fresh" for c in payload["quota"][0]["constraints"])
+    assert [params for _, path, params, *_ in calls if path == "/v2/quota"] == [
+        {"view": "resources_freshness", "requestKind": "text"}] * 2
+    assert sorted(path for _, path, *_ in calls[passive_start:]) == ["/v2/credential-profiles", "/v2/quota"]
 
 
 def test_disabled_named_default_refresh_forwards_exact_target_without_wake(engine):
@@ -185,7 +251,8 @@ def test_unread_operations_catalog_does_not_erase_successful_siblings(engine, fa
     assert payload["reads"] == {"catalog": "ok", "accounts": "ok", "quota": "ok"}
     assert payload["quota"] == WIRE["quota"]["snapshots"]
     assert payload["profiles"]["profiles"][0]["profile"]["profile_id"] == "claude-default"
-    assert [call for call in calls if call[1] == "/v2/quota"] == [("GET", "/v2/quota", {}, None, None)]
+    assert [call for call in calls if call[1] == "/v2/quota"] == [
+        ("GET", "/v2/quota", {"view": "resources_freshness", "requestKind": "text"}, None, None)]
     state["catalog_error"] = None
     payload = client.get("/api/claudexor/status").json()
     assert payload["resource_capabilities_read"] == "ok"

@@ -5,12 +5,12 @@ import json
 import logging
 import os
 import pathlib
-from collections import Counter, deque
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-from ouroboros.utils import append_jsonl, iter_jsonl_objects, read_json_dict, read_text, short, utc_now_iso, write_text
+from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, read_text, short, utc_now_iso, write_text
 from ouroboros.platform_layer import (
     file_lock_exclusive as _lock_ex,
     file_lock_shared as _lock_sh,
@@ -19,48 +19,89 @@ from ouroboros.platform_layer import (
 
 log = logging.getLogger(__name__)
 
-_SCRATCHPAD_MAX_BLOCKS = 10
+_DIALOGUE_LOGS = frozenset({"chat.jsonl", "progress.jsonl"})  # their rows live in state/dialog.sqlite
+# The rows one recent window reads at most, host waits included: a read bound, not a quota.
+_RECENT_ROWS_CEILING = 2000
+
+
+def scratchpad_block_sha256(block: Mapping[str, Any]) -> str:
+    """The sha256 of one block's exact stored JSON (sorted keys, no spaces): content addressing.
+
+    It names the bytes a reader saw, never a host-minted identity, so a fold that names it
+    replaces exactly those bytes or nothing; byte-identical blocks share it."""
+    encoded = json.dumps(block, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class ScratchpadFoldFailed(RuntimeError):
+    """A fold that changed no active block: ``not_active`` or ``ambiguous`` (no exact selection of the
+    blocks read under the lock, ``active``), ``journal_unavailable`` or ``write_failed`` (``kind``)."""
+
+    def __init__(self, kind: str, detail: str, *, digests: Any = (), active: Any = ()):
+        super().__init__(detail)
+        self.kind, self.digests, self.active = kind, list(digests), list(active)
+
+
+class ScratchpadProjectionStale(RuntimeError):
+    """The canonical blocks changed and stay changed; regenerating ``memory/scratchpad.md`` failed. Raised
+    after the write's journal row: the caller reports the applied change (``result``) beside the stale file."""
+
+    def __init__(self, blocks: List[Dict[str, Any]], error: BaseException):
+        super().__init__(f"{type(error).__name__}: {error}")
+        self.blocks, self.result = blocks, None
+
+
+def _fold_span(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The period a fold's sources cover; an earlier fold contributes its own span."""
+    stamps: List[str] = []
+    for block in blocks:
+        fold = block["metadata"].get("fold") if isinstance(block.get("metadata"), dict) else None
+        covers = fold["covers"] if isinstance(fold, dict) and isinstance(fold.get("covers"), dict) else {}
+        stamps += [str(covers.get(end) or block.get("ts") or "") for end in ("from", "to")]
+    return {"from": min(stamps), "to": max(stamps), "blocks": len(blocks)}  # ISO-8601 UTC sorts as text
 
 
 def render_scratchpad_markdown(
-    blocks: List[Dict[str, Any]], *, journal_pointer: bool = False,
+    blocks: List[Dict[str, Any]], *, journal_reader: str, journal_pointer: bool = False,
 ) -> str:
     """Render scratchpad blocks the one way the runtime renders them.
 
-    SINGLE SOURCE OF TRUTH for the block markdown. Both the writer
-    (Memory._write_scratchpad_markdown, which persists memory/scratchpad.md)
-    and the consumer-side degradation path
-    (ouroboros/context.py::_render_scratchpad_for_context, which re-renders a
-    kept slice when the section exceeds its context budget) call this, so a
-    degraded context build reads in the SAME order as the file it stands in
-    for. Blocks arrive oldest-first (storage order) and are rendered
-    newest-first, which is the order the model has always read.
+    SINGLE SOURCE OF TRUTH for the block markdown: the writer
+    (Memory._write_scratchpad_markdown, which persists memory/scratchpad.md) and
+    context (ouroboros/context.py::_scratchpad_for_context, which renders the
+    canonical blocks whole) call this. Blocks arrive oldest-first (storage order)
+    and are rendered newest-first, which is the order the model has always read;
+    each heading names the block's sha256, the address a fold uses.
 
     ``journal_pointer`` adds the retired/replaced-blocks pointer line; the
-    writer passes ``Memory.journal_path().exists()`` for it.
+    writer passes ``Memory.journal_path().exists()`` for it. ``journal_reader``
+    (``Memory.scratchpad_journal_reader``) is how the reader of this text opens
+    that journal; every fold's line, an older one's included, shows it, not the stored recipe.
     """
-    n = len(blocks)
-    parts = [f"## Scratchpad (working memory — {n}/{_SCRATCHPAD_MAX_BLOCKS} blocks)\n"]
+    chars = sum(len(str(block.get("content", ""))) for block in blocks)
+    parts = [f"## Scratchpad (working memory — {len(blocks)} blocks, {chars:,} characters)\n",
+             "Nothing leaves by age or size: a block leaves only through a fold I accept "
+             "(`update_scratchpad` with `replaces` = the sha256 after its heading).\n"]
     if journal_pointer:
-        parts.append(
-            "Exact retired/replaced source blocks remain readable with "
-            "`read_file(root='runtime_data', "
-            "path='memory/scratchpad_journal.jsonl', start_line=1)`.\n\n"
-        )
+        parts.append(f"Exact retired/replaced source blocks remain readable with {journal_reader}.\n\n")
     for block in reversed(blocks):
         ts = str(block.get("ts", ""))[:16]
         source = block.get("source", "?")
         content = block.get("content", "")
-        parts.append(f"### [{ts} — {source}]\n{content}\n\n---\n")
+        parts.append(f"### [{ts} — {source}] sha256 {scratchpad_block_sha256(block)}\n{content}\n\n---\n")
         metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+        fold = metadata.get("fold") if isinstance(metadata.get("fold"), dict) else {}
+        if fold:
+            covers, focus = (value if isinstance(value, dict) else {}
+                             for value in (fold.get("covers"), metadata.get("focus")))
+            draft = f"; helper draft: {fold['draft_source']}" if fold.get("draft_source") else ""
+            parts.append(f"Fold of {covers.get('blocks', '?')} blocks ({str(covers.get('from', ''))[:16]}.."
+                         f"{str(covers.get('to', ''))[:16]}), accepted by {focus.get('role') or 'unknown'} "
+                         f"{focus.get('task_id') or ''}".rstrip() + f"{draft}.\n")
         source_ref = metadata.get("source_ref") if isinstance(metadata.get("source_ref"), dict) else {}
         entry_id = str(source_ref.get("entry_id") or "")
         if entry_id:
-            parts.append(
-                "Exact replaced blocks: `read_file(root='runtime_data', "
-                "path='memory/scratchpad_journal.jsonl', start_line=1)`; "
-                f"locate `entry_id={entry_id}`.\n\n"
-            )
+            parts.append(f"Exact replaced blocks: {journal_reader}; locate `entry_id={entry_id}`.\n\n")
     return "\n".join(parts)
 
 
@@ -172,10 +213,21 @@ def _chat_history_snapshot_id(
     return hashlib.sha256(encoded).hexdigest()
 
 
+
+def _ok_answer_mark(bucket: Any) -> str:
+    """✓ for an ordinary success. A typed code that answers ok yet names another outcome
+    (an inspection before apply, a review block) shows its bucket: the code table decides."""
+    from ouroboros._outcome_tool_errors import _OK_TOOL_STATUSES
+    from ouroboros.tools.tool_result import TOOL_CODE_SPECS
+
+    named = {spec.outcome_bucket for spec in TOOL_CODE_SPECS.values() if spec.status == "ok"} - _OK_TOOL_STATUSES
+    return str(bucket) if bucket in named else "✓"
+
 class Memory:
     def __init__(self, drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None):
         self.drive_root = drive_root
         self.repo_dir = repo_dir
+        self._logs: Dict[str, pathlib.Path] = {}
 
     def _memory_path(self, rel: str) -> pathlib.Path:
         return (self.drive_root / "memory" / rel).resolve()
@@ -186,23 +238,26 @@ class Memory:
     def world_path(self) -> pathlib.Path: return self._memory_path("WORLD.md")
     def journal_path(self) -> pathlib.Path: return self._memory_path("scratchpad_journal.jsonl")
     def identity_journal_path(self) -> pathlib.Path: return self._memory_path("identity_journal.jsonl")
-    def logs_path(self, name: str) -> pathlib.Path: return (self.drive_root / "logs" / name).resolve()
+    def world_journal_path(self) -> pathlib.Path: return self._memory_path("world_journal.jsonl")
+    def logs_path(self, name: str) -> pathlib.Path:  # once per instance: a resolve lstat's every component
+        return self._logs.get(name) or self._logs.setdefault(name, (self.drive_root / "logs" / name).resolve())
 
-    @staticmethod
-    def scratchpad_journal_source_ref(entry_id: str = "") -> Dict[str, Any]:
-        ref: Dict[str, Any] = {
-            "read": {
-                "tool": "read_file",
-                "arguments": {
-                    "root": "runtime_data",
-                    "path": "memory/scratchpad_journal.jsonl",
-                    "start_line": 1,
-                },
-            },
-        }
+    def scratchpad_journal_source_ref(self, entry_id: str = "") -> Dict[str, Any]:
+        """The stored recipe for this journal, by its absolute path: a relative ``runtime_data`` path
+        names the follower's own execution drive, so a fold followed from a fork would miss it. An
+        address, not a grant: dispatch applies the follower's own restrictions."""
+        read = {"root": "runtime_data", "path": str(self.journal_path()), "start_line": 1}
+        ref: Dict[str, Any] = {"read": {"tool": "read_file", "arguments": read}}
         if str(entry_id or "").strip():
             ref["entry_id"] = str(entry_id).strip()
         return ref
+
+    def scratchpad_journal_reader(self, ctx: Any = None) -> str:
+        """How ``ctx`` opens this journal (``canonical_runtime_reader``: relative on this drive, absolute
+        from a fork); without a focus (the persisted ``scratchpad.md``) the address, access unknown."""
+        from ouroboros.tool_access_reads import canonical_runtime_reader
+
+        return canonical_runtime_reader(ctx, self.drive_root, "memory/scratchpad_journal.jsonl")
 
     def load_scratchpad(self) -> str:
         path = self.scratchpad_path()
@@ -235,77 +290,36 @@ class Memory:
                 except OSError:
                     pass
 
-    def _has_retired_flat_scratchpad_without_blocks(self) -> bool:
-        sp = self.scratchpad_path()
-        bp = self.scratchpad_blocks_path()
-        if bp.exists() or not sp.exists():
-            return False
+    def _refuse_retired_flat_scratchpad(self) -> None:
+        """A flat pre-block ``scratchpad.md`` without ``scratchpad_blocks.json`` is never written over."""
+        sp, bp = self.scratchpad_path(), self.scratchpad_blocks_path()
         try:
-            text = read_text(sp).strip()
+            text = "" if bp.exists() or not sp.exists() else read_text(sp).strip()
         except Exception:
-            return False
-        if not text:
-            return False
-        return not (
-            text.startswith("# Scratchpad\n\nUpdatedAt:")
-            and "(empty" in text
+            text = ""
+        if not text or (text.startswith("# Scratchpad\n\nUpdatedAt:") and "(empty" in text):
+            return
+        append_jsonl(self.journal_path(), {
+            "ts": utc_now_iso(), "type": "legacy_scratchpad_requires_manual_upgrade", "path": str(sp)})
+        raise RuntimeError(
+            "LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE: "
+            "memory/scratchpad.md exists without scratchpad_blocks.json. "
+            "Move preserved notes manually before appending new scratchpad blocks."
         )
 
     def append_scratchpad_block(self, content: str, source: str = "task", metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        bp = self.scratchpad_blocks_path()
-        bp.parent.mkdir(parents=True, exist_ok=True)
-
-        if self._has_retired_flat_scratchpad_without_blocks():
-            msg = (
-                "LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE: "
-                "memory/scratchpad.md exists without scratchpad_blocks.json. "
-                "Move preserved notes manually before appending new scratchpad blocks."
-            )
-            append_jsonl(self.journal_path(), {
-                "ts": utc_now_iso(),
-                "type": "legacy_scratchpad_requires_manual_upgrade",
-                "path": str(self.scratchpad_path()),
-            })
-            raise RuntimeError(msg)
-
+        """Append one block. Nothing leaves the active list here: no count, size or age rotation
+        (#918); a block leaves only through ``fold_scratchpad_blocks``."""
+        self.scratchpad_blocks_path().parent.mkdir(parents=True, exist_ok=True)
+        self._refuse_retired_flat_scratchpad()
         new_block = {"ts": utc_now_iso(), "source": source, "content": content}
         if metadata:
             new_block["metadata"] = dict(metadata)
-
-        # Lazy import keeps ouroboros.context_budget optional at import time,
-        # matching ouroboros/consolidator.py:~674.
-        from ouroboros.context_budget import SCRATCHPAD_MAX_CONTENT_CHARS
-
+        stale: Optional[ScratchpadProjectionStale] = None
         try:
-            def _append(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-                updated = [*blocks, new_block]
-                # Evict oldest-first (FIFO) until BOTH caps are satisfied:
-                #   - _SCRATCHPAD_MAX_BLOCKS (count cap)
-                #   - SCRATCHPAD_MAX_CONTENT_CHARS (content-size cap, ibl-2b09abdadd25:
-                #     a count-only cap still lets N blocks' combined content run
-                #     well past the context section's char budget)
-                # The block we just appended (updated[-1]) is never an
-                # eviction target. Each eviction is journalled with a
-                # source_ref and FAILS HARD if the journal write does not
-                # land (no silent amputation, BIBLE P1).
-                while len(updated) > 1 and (
-                    len(updated) > _SCRATCHPAD_MAX_BLOCKS
-                    or sum(len(b.get("content", "")) for b in updated) > SCRATCHPAD_MAX_CONTENT_CHARS
-                ):
-                    evicted_block = updated.pop(0)
-                    written = append_jsonl(self.journal_path(), {
-                        "ts": utc_now_iso(),
-                        "type": "block_evicted",
-                        "evicted_block_ts": evicted_block.get("ts", ""),
-                        "evicted_block_source": evicted_block.get("source", ""),
-                        "evicted_block_content": evicted_block.get("content", ""),
-                        "source_ref": self.scratchpad_journal_source_ref(),
-                    })
-                    if not written:
-                        raise RuntimeError("scratchpad eviction journal write failed")
-                return updated
-
-            self.mutate_scratchpad_blocks(_append)
+            self.mutate_scratchpad_blocks(lambda blocks: [*blocks, new_block])
+        except ScratchpadProjectionStale as error:
+            stale = error  # the block is in the canonical list; only its projection is behind
         except Exception:
             # An honest journal (P1): a failed write must be journaled as a
             # failure and surfaced to the caller — the old path logged
@@ -313,33 +327,114 @@ class Memory:
             log.error("Failed to append scratchpad block", exc_info=True)
             try:
                 append_jsonl(self.journal_path(), {
-                    "ts": utc_now_iso(),
-                    "type": "block_append_failed",
-                    "source": source,
-                    "block": dict(new_block),
-                })
+                    "ts": utc_now_iso(), "type": "block_append_failed", "source": source, "block": dict(new_block)})
             except Exception:
                 log.debug("Failed to journal block_append_failed", exc_info=True)
             raise
         try:
-            total_chars = sum(len(b.get("content", "")) for b in self.load_scratchpad_blocks())
+            blocks = stale.blocks if stale else self.load_scratchpad_blocks()
+            total_chars = sum(len(b.get("content", "")) for b in blocks)
             append_jsonl(self.journal_path(), {
-                "ts": utc_now_iso(),
-                "type": "block_appended",
-                "content_len": total_chars,
-                "source": source,
-                "metadata": dict(metadata or {}),
-                "block": dict(new_block),
-            })
+                "ts": utc_now_iso(), "type": "block_appended", "content_len": total_chars, "source": source,
+                "metadata": dict(metadata or {}), "block": dict(new_block),
+                **({"projection_error": str(stale)} if stale else {})})
         except Exception:
             log.debug("Failed to write scratchpad size to journal", exc_info=True)
-
+        if stale is not None:
+            stale.result = new_block
+            raise stale
         return new_block
 
-    def mutate_scratchpad_blocks(self, mutator: Any) -> List[Dict[str, Any]]:
-        """Mutate block source and regenerate its markdown under one sidecar lock."""
-        from ouroboros.utils import atomic_write_json
+    def fold_scratchpad_blocks(self, content: str, replaces: List[str], *,
+                               metadata: Optional[Dict[str, Any]] = None, draft_source: str = "") -> Dict[str, Any]:
+        """Put one accepted text in place of exactly the named active blocks (#918).
 
+        ``replaces`` holds each block's ``scratchpad_block_sha256`` as its reader saw it; a
+        byte-identical block is named once per copy. Under the one sidecar lock an inexact
+        selection raises ``ScratchpadFoldFailed`` with nothing changed. The exact originals are
+        journaled first (``fold_sources_preserved``, an ``entry_id`` of this one event); a failed
+        journal or canonical write changes no block (``block_fold_failed``). The fold takes the
+        earliest replaced block's place; every unnamed block, one appended meanwhile included,
+        keeps its bytes and order. ``blocks_folded`` records the completed write."""
+        requested = [str(digest).strip().lower() for digest in replaces]
+        if not requested or not str(content or "").strip():
+            raise ValueError("a fold names at least one block and carries the accepted text")
+        self.scratchpad_blocks_path().parent.mkdir(parents=True, exist_ok=True)
+        self._refuse_retired_flat_scratchpad()
+        fold_meta: Dict[str, Any] = {"replaces": requested, **({"draft_source": draft_source} if draft_source else {})}
+        fold = {"ts": utc_now_iso(), "source": "fold", "content": content,
+                "metadata": {**dict(metadata or {}), "fold": fold_meta}}
+        state: Dict[str, Any] = {}
+
+        def _fold(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            digests = [scratchpad_block_sha256(block) for block in blocks]
+            wanted, active = Counter(requested), Counter(digests)
+            missing = [digest for digest in wanted if not active[digest]]
+            if missing:
+                raise ScratchpadFoldFailed("not_active", f"{len(missing)} named sha256 match no active block",
+                                           digests=missing, active=blocks)
+            uneven = [digest for digest in wanted if active[digest] != wanted[digest]]
+            if uneven:
+                raise ScratchpadFoldFailed("ambiguous", "; ".join(
+                    f"sha256 {digest} is named {wanted[digest]} time(s) but {active[digest]} active blocks share it"
+                    for digest in uneven), digests=uneven, active=blocks)
+            chosen = [index for index, digest in enumerate(digests) if digest in wanted]
+            removed = set(chosen)
+            sources = [blocks[index] for index in chosen]
+            fold_meta["covers"] = _fold_span(sources)
+            event = json.dumps({"source_blocks": sources, "fold_block": fold}, ensure_ascii=False, sort_keys=True)
+            entry_id = "scratchpad-fold:" + hashlib.sha256(event.encode("utf-8")).hexdigest()
+            fold["metadata"]["source_ref"] = self.scratchpad_journal_source_ref(entry_id)
+            kept = [block for index, block in enumerate(blocks) if index not in removed]
+            updated = [*kept[:chosen[0]], fold, *kept[chosen[0]:]]
+            state.update(entry_id=entry_id, sources=sources, sha256=[digests[index] for index in chosen],
+                         blocks_before=len(blocks), blocks_after=len(updated),
+                         content_len=sum(len(str(block.get("content", ""))) for block in updated))
+            if not append_jsonl(self.journal_path(), {
+                    "ts": utc_now_iso(), "type": "fold_sources_preserved", "entry_id": entry_id,
+                    "source_blocks": sources, "source_sha256": state["sha256"], "fold_block": fold,
+                    "source_ref": fold["metadata"]["source_ref"]}, ensure_record_boundary=True):
+                raise ScratchpadFoldFailed("journal_unavailable", "the exact source blocks could not be journaled")
+            state["preserved"] = True
+            return updated
+
+        stale: Optional[ScratchpadProjectionStale] = None
+        try:
+            self.mutate_scratchpad_blocks(_fold)
+        except ScratchpadProjectionStale as error:
+            stale = error  # the canonical fold stands; only its projection is behind
+        except ScratchpadFoldFailed as refused:
+            selection = refused.kind in ("not_active", "ambiguous")
+            append_jsonl(self.journal_path(), {
+                "ts": utc_now_iso(), "type": "block_fold_refused" if selection else "block_fold_failed",
+                "kind": refused.kind, "detail": str(refused), "sha256": refused.digests, "fold_block": fold,
+                **({"entry_id": state["entry_id"]} if state.get("entry_id") else {})})
+            raise
+        except Exception as error:
+            # The atomic canonical write leaves the complete old file when it raises.
+            failure = f"{type(error).__name__}: {error}"
+            if state.get("preserved"):
+                append_jsonl(self.journal_path(), {"ts": utc_now_iso(), "type": "block_fold_failed",
+                                                   "entry_id": state["entry_id"], "error": failure})
+            raise ScratchpadFoldFailed("write_failed", failure) from error
+        result = {"block": fold, **state}
+        try:
+            append_jsonl(self.journal_path(), {
+                "ts": utc_now_iso(), "type": "blocks_folded", "entry_id": state["entry_id"],
+                "replaced_sha256": state["sha256"], "fold_sha256": scratchpad_block_sha256(fold),
+                "blocks_before": state["blocks_before"], "blocks_after": state["blocks_after"],
+                "content_len": state["content_len"], **({"projection_error": str(stale)} if stale else {})})
+        except Exception:
+            log.debug("Failed to journal blocks_folded", exc_info=True)
+        if stale is not None:
+            stale.result = result
+            raise stale
+        return result
+
+    def mutate_scratchpad_blocks(self, mutator: Any) -> List[Dict[str, Any]]:
+        """Mutate block source and regenerate its markdown under one sidecar lock. The canonical
+        ``scratchpad_blocks.json`` is replaced atomically (a raise leaves the old file); a failed
+        ``scratchpad.md`` regeneration after it raises ``ScratchpadProjectionStale``: the change stands."""
         bp = self.scratchpad_blocks_path()
         bp.parent.mkdir(parents=True, exist_ok=True)
         fd = None
@@ -351,7 +446,10 @@ class Memory:
             if not isinstance(updated, list):
                 raise ValueError("scratchpad block mutator must return a list")
             atomic_write_json(bp, updated)
-            self._write_scratchpad_markdown(updated)
+            try:
+                self._write_scratchpad_markdown(updated)
+            except Exception as error:
+                raise ScratchpadProjectionStale(updated, error) from error
             return updated
         finally:
             if fd is not None:
@@ -389,6 +487,7 @@ class Memory:
             self.scratchpad_path(),
             render_scratchpad_markdown(
                 blocks, journal_pointer=self.journal_path().exists(),
+                journal_reader=self.scratchpad_journal_reader(),
             ),
         )
 
@@ -467,9 +566,9 @@ class Memory:
         self, count: int = 100, offset: int = 0, search: str = "",
         snapshot: str = "", **filters: str,
     ) -> str:
-        chat_path = self.logs_path("chat.jsonl")
-        archive_dir = self.drive_root / "archive"
-        if not chat_path.exists() and not any(archive_dir.glob("chat_*.jsonl")):
+        from ouroboros import dialogue_store as ds
+
+        if ds.stream_end(self.drive_root, "chat") == 0 and ds.range_coverage(self.drive_root, "chat")["imported"]:
             meta = self.load_dialogue_meta()
             signature = meta.get("chat_log_signature") if isinstance(meta, dict) else {}
             if not (isinstance(signature, dict) and signature.get("first_line_sha256")):
@@ -487,6 +586,10 @@ class Memory:
                 exclude_a2a=True,
                 predicate=matches,
             )
+            # "From latest" is by time: an imported earlier message, stored after newer rows, pages at its send time,
+            # and its room's live rows read as the room does whichever of them the filters kept.
+            from ouroboros.dialogue_provenance import in_reading_order, rooms_read_by_time
+            entries = in_reading_order(entries, rooms_read_by_time(self.drive_root, entries))
 
             current_snapshot = _chat_history_snapshot_id(coverage, filters, search)
             requested_snapshot = str(snapshot or "").strip().lower()
@@ -554,198 +657,111 @@ class Memory:
         except Exception as e:
             return f"(error reading history: {e})"
 
-    def _ordered_chat_generation_paths(self) -> List[pathlib.Path]:
-        """Existing canonical chat generations, oldest archive through live.
-
-        This is deliberately a chat-specific Memory primitive, not a generic
-        history framework.  Consolidation owns cursor semantics; this reader
-        gives ordinary cognition and ``chat_history`` the same physical
-        generation horizon instead of silently treating the mutable live file
-        as the whole biography.
-        """
-        from ouroboros.chat_chain import _ordered_chat_generation_paths
-
-        live = self.logs_path("chat.jsonl")
-        return _ordered_chat_generation_paths(live)
-
     def read_chat_generations(
-        self,
-        *,
-        exclude_a2a: bool = False,
+        self, *, exclude_a2a: bool = False,
         predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        room_id: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """Read the archive/live chat chain with truthful coverage facts.
+        """A frozen SQL horizon with honest import/invalid-interval coverage.
 
-        Filtering happens while traversing the complete existing chain and
-        therefore before any caller applies a recent-window bound.  A rotation
-        racing the capture is retried; a persistently moving chain is returned
-        as a known-partial snapshot with an explicit gap rather than certified
-        complete.
+        Explicit recall requests the whole biography. Room consumers supply their
+        room address so filtering never reads another room's history first.
         """
-        from ouroboros.utils import jsonl_generation_signature
+        from ouroboros import chat_chain, dialogue_store as ds, dialogue_positions as dp
 
-        last_entries: List[Dict[str, Any]] = []
-        last_coverage: Dict[str, Any] = {}
-        for attempt in range(3):
-            paths = self._ordered_chat_generation_paths()
-            before = [jsonl_generation_signature(path) for path in paths]
-            entries: List[Dict[str, Any]] = []
-            gaps: List[Dict[str, Any]] = []
-            generations: List[Dict[str, Any]] = []
-            for path, signature in zip(paths, before):
-                if not path.exists():
-                    # A live file can be absent before the first append or in the
-                    # short interval after rotation.  A genuinely missing cursor
-                    # generation is detected by the consolidator-owned resolver.
-                    continue
-                generation_rows, parse_gaps = self._read_chat_generation(path)
-                gaps.extend(parse_gaps)
-                generations.append({
-                    "path": str(path),
-                    "first_line_sha256": str(signature.get("first_line_sha256") or ""),
-                    "size": int(signature.get("size") or 0),
-                    "rows": len(generation_rows),
-                })
-                for entry in generation_rows:
-                    if exclude_a2a and is_a2a_chat_id(entry.get("chat_id")):
-                        continue
-                    if predicate is not None and not predicate(entry):
-                        continue
-                    entries.append(entry)
+        upper = ds.stream_end(self.drive_root, "chat")
+        imported = ds.range_coverage(self.drive_root, "chat", upper=upper)
+        shown: set = set()  # what a Project read through the appearance index may lack (``room_appearances.read_gaps``)
+        source = (ds.iter_rows(self.drive_root, "chat", upper=upper) if room_id is None else
+                  chat_chain.room_rows(self.drive_root, room_id, upper=upper, gaps=shown))
+        entries = [entry.row for entry in source
+                   if not (exclude_a2a and is_a2a_chat_id(entry.row.get("chat_id")))
+                   and (predicate is None or predicate(entry.row))]
+        gaps = [{"kind": "jsonl_malformed" if gap.kind == "invalid" else "jsonl_non_object",
+                 "path": str(ds.path(self.drive_root)), "offset": gap.seq, "length": gap.length}
+                for gap in dp.skipped_between(self.drive_root, "chat", upper=upper)]
+        if imported["pending"]:
+            gaps.append({"kind": "history_importing", "detail": "Dialogue history is still importing"})
+        if imported["mismatch"]:
+            gaps.append({"kind": "history_import_failed", "detail": "A segment could not be imported"})
+        if shown:
+            from ouroboros.room_appearances import GAP_DETAILS
 
-            after_paths = self._ordered_chat_generation_paths()
-            after = [jsonl_generation_signature(path) for path in after_paths]
-            stable_paths = [str(path) for path in paths] == [str(path) for path in after_paths]
-            stable_generations = stable_paths and all(
-                str(left.get("first_line_sha256") or "")
-                == str(right.get("first_line_sha256") or "")
-                and int(right.get("size") or 0) == int(left.get("size") or 0)
-                for left, right in zip(before, after)
-            )
-            coverage = {
-                "generations": generations,
-                "matched_rows": len(entries),
-                "gaps": gaps,
-                "capture_attempts": attempt + 1,
-                "snapshot_changed_during_read": bool(
-                    not stable_generations
-                ),
-                "snapshot_stable": stable_generations,
-                "reader": "chat_history(count, offset, search)",
-            }
-            try:
-                from ouroboros.chat_chain import _resolve_generation_segments
-
-                _segments, _offset, cursor_gap = _resolve_generation_segments(
-                    self.load_dialogue_meta(), self.logs_path("chat.jsonl"),
-                )
-                if cursor_gap:
-                    coverage["gaps"].append({
-                        "kind": "consolidation_cursor_generation_missing",
-                        "detail": "The consolidation cursor names a generation that is no longer readable.",
-                    })
-            except Exception as exc:
-                coverage["gaps"].append({
-                    "kind": "consolidation_cursor_state_unreadable",
-                    "error": type(exc).__name__,
-                })
-            durable_gaps, durable_gap_ids = self._durable_dialogue_gaps()
-            coverage["gaps"].extend(durable_gaps)
-            coverage["durable_gap_ids"] = durable_gap_ids
-            last_entries, last_coverage = entries, coverage
-            if stable_generations:
-                return entries, coverage
-        last_coverage = dict(last_coverage)
-        last_coverage["snapshot_stable"] = False
-        last_coverage.setdefault("gaps", []).append({
-            "kind": "generation_chain_changed_during_capture",
-            "detail": "archive/live generation ordering did not stabilize after 3 attempts",
-        })
-        return last_entries, last_coverage
-
-    @staticmethod
-    def _read_chat_generation(
-        path: pathlib.Path, *, tail_bytes: Optional[int] = None, max_rows: Optional[int] = None,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Read one physical generation without hiding malformed durable rows."""
-        rows: List[Dict[str, Any]] = []
-        gaps: List[Dict[str, Any]] = []
-        try:
-            with path.open("rb") as handle:
-                if tail_bytes is not None:
-                    size = path.stat().st_size
-                    if size > tail_bytes:
-                        handle.seek(size - tail_bytes - 1)
-                        if handle.read(1) != b"\n":
-                            handle.readline()
-                        gaps.append({
-                            "kind": "generation_prefix_unscanned", "path": str(path),
-                            "omitted_bytes_at_least": size - tail_bytes,
-                        })
-                if max_rows is not None:
-                    buffered = deque(maxlen=max_rows)
-                    seen = 0
-                    for raw in handle:
-                        seen += 1
-                        buffered.append((seen, raw))
-                    if seen > max_rows:
-                        gaps.append({
-                            "kind": "generation_tail_rows_unscanned", "path": str(path),
-                            "omitted_rows": seen - max_rows,
-                        })
-                    source = buffered
-                else:
-                    source = enumerate(handle, start=1)
-                for line_number, raw in source:
-                    if not raw.strip():
-                        continue
-                    try:
-                        decoded = raw.decode("utf-8")
-                        value = json.loads(decoded)
-                    except UnicodeDecodeError:
-                        gaps.append({"kind": "jsonl_decode_error", "path": str(path), "line": line_number})
-                        continue
-                    except (json.JSONDecodeError, ValueError):
-                        gaps.append({"kind": "jsonl_malformed", "path": str(path), "line": line_number})
-                        continue
-                    if not isinstance(value, dict):
-                        gaps.append({"kind": "jsonl_non_object", "path": str(path), "line": line_number})
-                        continue
-                    rows.append(value)
-        except OSError as exc:
-            gaps.append({"kind": "generation_unreadable", "path": str(path), "error": type(exc).__name__})
-        return rows, gaps
-
-    def _read_jsonl_entries(
-        self,
-        log_name: str,
-        exclude_a2a: bool = False,
-    ) -> List[Dict[str, Any]]:
-        path = self.logs_path(log_name)
-        try:
-            return [e for e in iter_jsonl_objects(path)
-                    if not (exclude_a2a and is_a2a_chat_id(e.get("chat_id")))]
-        except Exception:
-            log.warning("Failed to read JSONL entries from %s", log_name, exc_info=True)
-            return []
+            gaps.extend({"kind": kind, "detail": GAP_DETAILS[kind]} for kind in sorted(shown))
+        coverage = {
+            "generations": ([{"path": str(ds.path(self.drive_root)), "first_line_sha256": "dialogue:chat",
+                              "size": upper, "rows": len(entries)}] if upper else []),
+            "matched_rows": len(entries), "gaps": gaps, "capture_attempts": 1,
+            "snapshot_changed_during_read": False, "snapshot_stable": bool(imported["imported"]),
+            "reader": "chat_history(count, offset, search)",
+        }
+        if imported["imported"]:
+            _position, missing = chat_chain.generation_cursor(self.drive_root, self.load_dialogue_meta())
+            if missing:
+                gaps.append({"kind": "consolidation_cursor_generation_missing",
+                             "detail": "The consolidation cursor names a generation that is no longer readable."})
+        durable_gaps, durable_gap_ids = self._durable_dialogue_gaps()
+        gaps.extend(durable_gaps)
+        coverage["durable_gap_ids"] = durable_gap_ids
+        return entries, coverage
 
     def read_task_recent(
-        self, log_name: str, task_id: str, want: int, *, iter_objects=None, list_archives=None,
+        self, log_name: str, task_id: str, want: int, *, iter_objects=None, list_archives=None, stat=None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """The newest ``want`` rows of ONE task (or of the log when ``task_id`` is
-        empty) through the bounded rotation-aware reader (razzant/ouroboros#131);
+        empty) through an addressed SQL query for chat/progress;
         for ``tools.jsonl`` the rows of the newest ``want`` logical calls (#1316).
 
-        The window is a doubling byte tail of the live file plus at most the
+        SQL coverage records the queried coordinates, older matching rows and
+        incomplete or invalid import ranges. Other logs use a doubling byte tail
+        of the live file plus at most the
         three newest archives, so a busy neighbour cannot push this task's own
         rows out of a shared global suffix, and the whole file is never parsed
         for its tail. ``coverage`` states what the window was and whether the
         quota went unmet while older archives stayed unopened (BIBLE P1: the
         section discloses it; ``read_file`` on the log pages the rest).
-        ``iter_objects`` and ``list_archives`` are the reader's parser and
-        archive-listing seams, passed through unchanged.
+        ``iter_objects``, ``list_archives`` and ``stat`` are the reader's parser,
+        archive-listing and metadata seams, passed through unchanged; without any,
+        the log's ``archive/`` listing is reused until the log rotates and an
+        archive that holds none of this task's rows is not parsed again for it.
         """
-        from ouroboros.jsonl_tail import read_rotated_jsonl_entries
+        if log_name in _DIALOGUE_LOGS:
+            from ouroboros import dialogue_store as ds
+            from ouroboros.checkpoint_waits import wait_episode
+
+            stream, wanted, limit = log_name[:-6], str(task_id or "").strip(), max(1, int(want))
+            upper = ds.stream_end(self.drive_root, stream)
+            # A host wait row rides along without spending the quota (``checkpoint_waits``): a burst
+            # of accounting waits never pushes the task's own rows out of its window.
+            records, own, before, bounded = [], 0, upper, False
+            while not bounded:
+                batch = (ds.probe_rows(self.drive_root, stream, [("task_id", wanted)], before=before, limit=limit + 1)
+                         if wanted else list(reversed(ds.newest(self.drive_root, stream, limit=limit + 1, before=before))))
+                for record in batch:
+                    bounded = own >= limit or len(records) >= _RECENT_ROWS_CEILING
+                    if bounded:
+                        break
+                    records.append(record)
+                    own += wait_episode(record.row) is None
+                if len(batch) <= limit:
+                    break
+                before = batch[-1].seq
+            lower = records[-1].seq if bounded else 0
+            imported = ds.range_coverage(self.drive_root, stream, lower=lower, upper=upper)
+            gaps = (["history is still importing"] if imported["pending"] else [])
+            if imported["mismatch"]:
+                gaps.append("a segment could not be imported")
+            if imported["gaps"]:
+                gaps.append("recorded invalid intervals")
+            coverage = {"task_id": wanted, "source": f"state/dialog.sqlite ({stream})", "dialogue": True,
+                        "lower": lower, "upper": upper, "shown": len(records), "matched": len(records),
+                        "host_waits": len(records) - own,
+                        "quota_met": own >= limit, "older_available": bounded, "gaps": gaps,
+                        "archives_bounded": False, "archives": 0, "archives_available": 0,
+                        "live_size": upper, "live_window": upper - lower}
+            return [entry.row for entry in reversed(records)], coverage
+
+        from ouroboros.jsonl_tail import read_rotated_jsonl_entries, remembered_listing, task_archive_parser
         from ouroboros.tool_call_log import counts_as_call, logical_calls
 
         wanted = str(task_id or "").strip()
@@ -762,11 +778,14 @@ class Memory:
 
         stem = log_name[:-len(".jsonl")] if log_name.endswith(".jsonl") else log_name
         coverage: Dict[str, Any] = {"task_id": wanted, "source": f"logs/{log_name}"}
+        if iter_objects is None and list_archives is None and stat is None:
+            list_archives = remembered_listing(self.logs_path(log_name))
+            iter_objects = task_archive_parser(self.logs_path(log_name), wanted) if wanted else None
         try:
             rows = read_rotated_jsonl_entries(
                 self.logs_path(log_name), self.drive_root / "archive", stem,
                 max(1, int(want)), counts, coverage=coverage,
-                iter_objects=iter_objects, list_archives=list_archives,
+                iter_objects=iter_objects, list_archives=list_archives, stat=stat,
             )
         except Exception:
             log.warning("Failed to read recent %s rows", log_name, exc_info=True)
@@ -787,37 +806,6 @@ class Memory:
                              "archives_bounded": bool(coverage.get("archives_bounded")) and len(calls) < int(want)})
         coverage["quota_met"] = int(coverage.get("matched") or 0) >= int(want)
         return shown, coverage
-
-    def read_jsonl_tail_after_offset(
-        self,
-        log_name: str,
-        offset: int,
-        max_entries: int = 100,
-    ) -> List[Dict[str, Any]]:
-        # Full project awareness (v6.32.0): the one identity's dialogue stream is
-        # its WHOLE conversation — main + project threads alike — because Ouroboros
-        # is one awareness across direct chat, project rooms, and background
-        # consciousness (BIBLE P1). Only A2A virtual-transport ids are excluded
-        # (machine-to-machine traffic, not the human dialogue). A project task's
-        # OWN focused recent-chat view is built separately in build_recent_sections.
-        entries = self._read_jsonl_entries(log_name, exclude_a2a=True)
-        if offset <= 0:
-            return entries[-max_entries:] if max_entries < len(entries) else entries
-        if offset > len(entries):
-            log.warning(
-                "Dialogue consolidation offset %s exceeds %s filtered entry count %s; using plain tail",
-                offset,
-                log_name,
-                len(entries),
-            )
-            return entries[-max_entries:] if max_entries < len(entries) else entries
-        suffix = entries[offset:]
-        return suffix[-max_entries:] if max_entries < len(suffix) else suffix
-
-    def jsonl_generation_signature(self, log_name: str) -> Dict[str, Any]:
-        from ouroboros.utils import jsonl_generation_signature
-
-        return jsonl_generation_signature(self.logs_path(log_name))
 
     @staticmethod
     def _format_chat_line(
@@ -876,24 +864,16 @@ class Memory:
         from ouroboros.jsonl_tail import coverage_line
 
         sections: List[str] = []
-        # (log, header, formatter, quota, note): the note names what the formatter really
-        # does with more rows than it renders (progress renders its newest 50; tools renders
-        # 10 and scans 20 for review markers; events counts every row it is given).
-        for log_name, header, formatter, want, note in (
-            ("progress.jsonl", "## Recent progress", lambda rows: self.summarize_progress(rows, limit=50), 50,
-             lambda n: f"newest 50 rendered of {n} loaded" if n > 50 else ""),
-            ("tools.jsonl", "## Recent tools", self.summarize_tools, 20,
-             lambda n: f"10 rendered, {min(n, 20)} scanned for review markers" if n > 10 else ""),
-            ("events.jsonl", "## Recent events", self.summarize_events, 200, lambda n: ""),
-        ):
+        for log_name, header, formatter, want, note in self._recent_sections():
             source = own_drive if own_drive is not None and log_name != "progress.jsonl" else self
             entries, coverage = source.read_task_recent(log_name, task_id, want if task_id else 200)
             if own_drive is not None:  # a child's header says which drive each window came from
-                coverage["source"] = "canonical logs/progress.jsonl" if source is self else (
+                coverage["source"] = "canonical state/dialog.sqlite (progress)" if source is self else (
                     f"task drive logs/{log_name}" + (
                         " (worker rows; host-side rows such as waits stay in the canonical log)"
                         if log_name == "events.jsonl" else ""))
-            shown = int(coverage.get("shown") or 0)  # tools: logical calls, never rows (#1316)
+            # tools: logical calls, never rows (#1316); progress: the task's own rows, waits ride along
+            shown = int(coverage.get("shown") or 0) - int(coverage.get("host_waits") or 0)
             if note(shown):
                 coverage["rendered"] = note(shown)
             summary = formatter(entries)
@@ -901,13 +881,41 @@ class Memory:
                 sections.append(f"{header} ({coverage_line(coverage)})" + (f"\n\n{summary}" if summary else ""))
         return sections
 
-    def summarize_progress(self, entries: List[Dict[str, Any]], limit: int = 15) -> str:
-        if not entries:
-            return ""
-        return "\n".join(
-            f"⚙️ {str(e.get('ts', ''))[11:16] if len(str(e.get('ts', ''))) >= 16 else ''} {short(str(e.get('text', '')), 800)}"
-            for e in entries[-limit:]
+    def _recent_sections(self) -> tuple:
+        # (log, header, formatter, quota, note): the note names what the formatter really
+        # does with more rows than it renders (progress renders its newest 50; tools renders
+        # 10 and scans 20 for review markers; events counts every row it is given).
+        return (
+            ("progress.jsonl", "## Recent progress", lambda rows: self.summarize_progress(rows, limit=50), 50,
+             lambda n: f"newest 50 rendered of {n} loaded" if n > 50 else ""),
+            ("tools.jsonl", "## Recent tools", self.summarize_tools, 20,
+             lambda n: f"10 rendered, {min(n, 20)} scanned for review markers" if n > 10 else ""),
+            ("events.jsonl", "## Recent events", self.summarize_events, 200, lambda n: ""),
         )
+
+    def remember_log_listings(self) -> None:
+        """Off the turn (the boot): list ``archive/`` once for each rotated log the recent sections
+        read, so a process's first owner turn starts from that remembered listing (``read_task_recent``);
+        a log rotated since, or a listing that could not be remembered, is listed by its turn as before."""
+        from ouroboros.jsonl_tail import remembered_listing
+
+        for log_name, *_section in self._recent_sections():
+            if log_name not in _DIALOGUE_LOGS:
+                remembered_listing(self.logs_path(log_name))(self.drive_root / "archive", log_name[:-len(".jsonl")])
+
+    def summarize_progress(self, entries: List[Dict[str, Any]], limit: int = 15) -> str:
+        """The newest ``limit`` progress rows, oldest first; each run of host waits among them is
+        one line that does not count against ``limit`` (``checkpoint_waits.fold_progress``)."""
+        from ouroboros.checkpoint_waits import fold_progress
+
+        lines, own = [], 0
+        for e in reversed(fold_progress(entries or [])):
+            own += not e.get("host_waits")
+            if own > limit:
+                break
+            ts = str(e.get('ts', ''))
+            lines.append(f"⚙️ {ts[11:16] if len(ts) >= 16 else ''} {short(str(e.get('text', '')), 800)}")
+        return "\n".join(reversed(lines))
 
     def summarize_tools(self, entries: List[Dict[str, Any]]) -> str:
         """One line per LOGICAL call (#1316): a start with no later row is an
@@ -935,7 +943,7 @@ class Memory:
                 note = (" (wait ended; no result recorded)" if "wait_ended" in call else
                         " (started; no outcome recorded)")
             elif isinstance(settled.get("is_error"), bool):
-                status = "·" if settled["is_error"] else "✓"
+                status = "·" if settled["is_error"] else _ok_answer_mark(settled.get("status"))
             elif settled.get("status"):
                 if settled["status"] == "ok":
                     status = "✓"
@@ -968,16 +976,6 @@ class Memory:
             lines.append("\nRecent errors:")
             lines.extend(f"  {e.get('type', '?')}: {short(str(e.get('error', '')), 120)}" for e in errors[-10:])
         return "\n".join(lines)
-
-    def summarize_supervisor(self, entries: List[Dict[str, Any]]) -> str:
-        if not entries:
-            return ""
-        for e in reversed(entries):
-            if e.get("type") in ("launcher_start", "restart", "boot"):
-                branch = e.get("branch") or e.get("git_branch") or "?"
-                sha = short(str(e.get("sha") or e.get("git_sha") or ""), 12)
-                return f"{e['type']}: {e.get('ts', '')} branch={branch} sha={sha}"
-        return ""
 
     def _default_scratchpad(self) -> str:
         return f"# Scratchpad\n\nUpdatedAt: {utc_now_iso()}\n\n(empty — write anything here)\n"

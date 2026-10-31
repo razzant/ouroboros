@@ -73,12 +73,15 @@ def _stable_hash(payload: Any) -> str:
 
 
 def _run_git(root: pathlib.Path, *args: str) -> str:
+    from ouroboros.git_observation import host_git_env
+
     proc = subprocess.run(
         ["git", *args],
         cwd=str(root),
         capture_output=True,
         text=True,
         check=False,
+        env=host_git_env(),
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "git command failed").strip()
@@ -534,6 +537,22 @@ def mutation_evidence_projection(evidence: Mapping[str, Any] | None) -> dict[str
                     blockers.append("terminal_surface_limit_exceeded")
 
     blockers = sorted(dict.fromkeys(item for item in blockers if item))
+    # The union above serves retained patch custody. Only the separately
+    # observed dirty set answers what remains outside HEAD; a retained clean
+    # commit is not an uncommitted file. Old snapshots carry no such claim.
+    remainder_rows = [row for row in (terminal.get("surfaces") or [] if isinstance(terminal, Mapping) else [])
+                      if isinstance(row, Mapping) and "uncommitted_paths" in row]
+    remainder = ({
+        "state": "unknown" if any(row.get("uncommitted_state") != "known" for row in remainder_rows) else "known",
+        "count": sum(len(row["uncommitted_paths"]) for row in remainder_rows),
+        # Exact paths stay in the existing task detail's mutation_evidence.
+        # Result axes, terminal rows and WS carry only this disclosed omission.
+        "paths_omitted": sum(len(row["uncommitted_paths"]) for row in remainder_rows),
+        "snapshot_at": str(terminal.get("captured_at") or ""),
+        "baseline_hash": str(terminal.get("baseline_hash") or ""),
+    } if remainder_rows else {})
+    if remainder.get("state") == "unknown":
+        remainder["count"] = None
     return {
         "version": MUTATION_EVIDENCE_VERSION,
         "present": True,
@@ -547,6 +566,7 @@ def mutation_evidence_projection(evidence: Mapping[str, Any] | None) -> dict[str
         "terminal_snapshot_present": isinstance(terminal, Mapping),
         "terminal_candidate_count": terminal_candidate_count,
         "terminal_excluded_count": terminal_excluded_count,
+        **({"uncommitted_remainder": remainder} if remainder else {}),
         "blockers": blockers,
         "clean_eligible": not blockers,
     }
@@ -556,7 +576,7 @@ def load_mutation_evidence_projection(
     results_drive_root: Any,
     task_id: str,
 ) -> dict[str, Any]:
-    """Load the compact projection without exposing roots, paths, or fingerprints."""
+    """Load compact attribution; the named task's existing Details read retains exact paths."""
     try:
         result = load_task_result(results_drive_root, str(task_id or "")) or {}
     except Exception:
@@ -569,7 +589,10 @@ def load_mutation_evidence_projection(
             "blockers": ["mutation_evidence_unavailable"],
             "clean_eligible": False,
         }
-    return mutation_evidence_projection(result.get("mutation_evidence"))
+    projection = mutation_evidence_projection(result.get("mutation_evidence"))
+    if projection.get("uncommitted_remainder"):
+        projection["uncommitted_remainder"]["task_id"] = str(task_id)
+    return projection
 
 
 def attributed_git_candidates(
@@ -727,14 +750,16 @@ def record_terminal_mutation_candidates(
                     "candidates": [],
                     "excluded_preexisting_dirty": [],
                     "blockers": ["baseline_dirty_overflow"],
+                    "uncommitted_paths": [], "uncommitted_state": "unknown",
                 })
                 rows.append(row)
                 continue
             try:
                 root = _canonical_root(root_text)
                 current_head = _run_git(root, "rev-parse", "HEAD").strip()
+                uncommitted = _git_status_paths(root)
                 changed = sorted(dict.fromkeys(
-                    _git_status_paths(root)
+                    uncommitted
                     + _git_committed_paths(
                         root,
                         str(git.get("base_commit") or ""),
@@ -743,6 +768,7 @@ def record_terminal_mutation_candidates(
                 ))
             except Exception:
                 current_head = ""
+                uncommitted = []
                 changed = []
                 blockers.append("candidate_scan_failed")
             dirty = _foreign_dirty_paths(git)
@@ -774,6 +800,8 @@ def record_terminal_mutation_candidates(
                 "base_commit": current_head,
                 "excluded_preexisting_dirty": excluded,
                 "blockers": sorted(dict.fromkeys(blockers)),
+                "uncommitted_paths": sorted(set(uncommitted) - dirty),
+                "uncommitted_state": "unknown" if blockers else "known",
                 "head_advanced": bool(
                     current_head
                     and current_head != str(git.get("base_commit") or "")

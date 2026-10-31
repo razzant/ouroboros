@@ -2,10 +2,12 @@
 <!-- Reproducible Pages OG-preview layout (1200x630 sibling of social-preview.svg). -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <metadata><![CDATA[
-Render from the repository root with the existing Ouroboros icon:
+Render from the repository root with the Ouroboros icon (rounded like the macOS squircle):
   magick -font /System/Library/Fonts/Supplemental/Arial.ttf \
     assets/og-preview.svg /tmp/ouroboros-og-layout.png
-  magick assets/icon_1024.png -resize 232x232 /tmp/ouroboros-og-icon.png
+  magick assets/icon_1024.png -resize 232x232 \
+    \( -size 232x232 xc:none -fill white -draw "roundrectangle 0,0 231,231 52,52" \) \
+    -compose DstIn -composite /tmp/ouroboros-og-icon.png
   magick /tmp/ouroboros-og-layout.png /tmp/ouroboros-og-icon.png \
     -geometry +84+199 -composite -strip assets/og-preview.png
   pngquant --force --output assets/og-preview.png --quality 80-95 \
@@ -34,13 +36,6 @@ assets/social-preview.svg remains the separate GitHub social-preview source.
 
   <rect width="1200" height="630" fill="url(#background)"/>
   <rect width="1200" height="630" fill="url(#signal)"/>
-
-  <g fill="none" stroke="#f07a86" stroke-width="1" opacity="0.12">
-    <circle cx="200" cy="315" r="138"/>
-    <circle cx="200" cy="315" r="163"/>
-    <path d="M39 315H361"/>
-    <path d="M200 152V478"/>
-  </g>
 
   <rect x="376" y="112" width="744" height="2" fill="url(#rule)"/>
 

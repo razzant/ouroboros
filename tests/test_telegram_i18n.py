@@ -120,8 +120,12 @@ def test_relayed_host_sentences_are_sent_as_the_host_wrote_them_and_are_never_tr
     body = quiz.render_quiz_text("Ship it?", ["Yes", "No"], "", "", host_facts=facts, lang="ru")
     assert facts in body and "ПЕРЕВОД" not in body
     assert memory.pending_count(root, "ru") == 0 or facts not in dict(memory.take_pending(root, "ru", 50))
-    notifier_source = (Path(_ROOT / "lib" / "telegram_notifier.py")).read_text(encoding="utf-8")
-    assert 'msg += "\\n" + reason' in notifier_source, "the reason line is relayed as composed (Stop now / Wrap up stay English)"
+    notifier = sys.modules[plugin.__package__ + ".lib.telegram_notifier"]
+    reason = "Stop now / Wrap up: the author's own reason λ."
+    _seed(root, "ru", {reason: {"text": "ПЕРЕВОД"}})
+    text = notifier._completion_text({"outcome_phase": "warn", "reason_detail": reason}, "root", "ru")
+    assert reason in text and "ПЕРЕВОД" not in text
+    assert reason not in dict(memory.take_pending(root, "ru", 50))
 
 
 def test_language_keyboard_lists_english_the_memories_on_disk_and_marks_the_current_one(plugin, tmp_path, monkeypatch):

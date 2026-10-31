@@ -717,6 +717,36 @@ def shell_command_string(argv: List[str]) -> str:
     return ""
 
 
+# An explicit Windows interpreter takes everything after its inline switch as its own
+# command text (cmd /c|/k, PowerShell -c|-Command). After PowerShell's -File script or
+# -CommandWithArgs command, the remaining argv are passed on as that one's arguments.
+_CMD_INLINE_SWITCHES = frozenset({"/c", "/k"})
+_POWERSHELL_INLINE_SWITCHES = frozenset({"-c", "-command", "/c"})
+_POWERSHELL_ARGUMENT_SWITCHES = frozenset({"-file", "-f", "-commandwithargs", "-cwa"})
+
+
+def inline_operand_start(argv: List[str], shell_name: str, *, strict: bool = False) -> int:
+    """Index where an explicit ``cmd``/``powershell``/``pwsh`` inline command operand begins
+    (``len(argv)`` after a trailing switch), 0 when there is none. ``strict`` stops at a
+    PowerShell switch that passes the remaining argv to a script as arguments."""
+    switches = _CMD_INLINE_SWITCHES if shell_name == "cmd" else _POWERSHELL_INLINE_SWITCHES
+    for idx, arg in enumerate(argv[1:], start=1):
+        word = str(arg or "").strip().lower()
+        if word in switches:
+            return idx + 1
+        if strict and shell_name != "cmd" and word in _POWERSHELL_ARGUMENT_SWITCHES:
+            return 0
+    return 0
+
+
+def inline_shell_command(argv: List[str], shell_name: str) -> str:
+    """The inline command text an explicit shell receives, joined; "" when there is none."""
+    if shell_name in {"bash", "sh", "zsh"}:
+        return shell_command_string(argv)
+    start = inline_operand_start(argv, shell_name)
+    return " ".join(str(part) for part in argv[start:]) if start else ""
+
+
 def shell_argv_with_inline(raw_cmd: Any) -> List[str]:
     argv = shell_argv(raw_cmd)
     if argv and pathlib.PurePath(argv[0]).name.lower() in POSIX_SHELL_HEADS:

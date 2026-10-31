@@ -7,6 +7,36 @@ import inspect
 import pytest
 
 
+@pytest.mark.parametrize("resources,allowed", [
+    ({"web": True, "network": False}, False),
+    ({"allow_web": True, "allow_network": False}, False),
+    ({"web": True, "internet": False}, False),
+    ({"web": True, "network": True}, True),
+])
+def test_web_network_resource_gate_agrees_across_discovery_and_dispatch(tmp_path, monkeypatch, resources, allowed):
+    from ouroboros.tools import registry_guards
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    monkeypatch.setattr("ouroboros.tools.search._available_web_search_backends", lambda: ["fixture"])
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    drive.mkdir()
+    ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="web-gate",
+                      task_metadata={"task_contract": {"allowed_resources": resources}})
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ctx)
+    names = {row["function"]["name"] for row in registry.schemas()}
+    for name in registry_guards._WEB_TOOLS:
+        assert registry_guards._builtin_network_allowed(ctx, name) is allowed
+        assert (name in names) is allowed
+        assert (registry.get_schema_by_name(name) is not None) is allowed
+        guard = registry_guards._capability_resource_guard_result(ctx, name, {})
+        assert (guard is None) is allowed
+        if guard is not None:
+            assert guard.code == "RESOURCE_CONSTRAINT_BLOCKED"
+            assert "allowed_resources.network=false" in guard.text
+
+
 def test_registry_core_extraction_preserves_only_proven_facades():
     """Execution moves once; the compatibility module exports only proven ABI."""
     import ouroboros.tools as tools_package
@@ -508,8 +538,8 @@ def test_stable_host_predispatch_denials_are_native_and_keep_legacy_projection(
         ("query_code", {"op": "digest"}, "binding failed", "error", "TOOL_ARG_ERROR", "⚠️ TOOL_ARG_ERROR (query_code): RuntimeError: binding failed", "argument_error", True, 0),
         ("apply_patch", {"patch": "*** Begin Patch\n*** End Patch"}, "binding failed", "blocked", "EDIT_OPS_BLOCKED", "⚠️ APPLY_PATCH_ERROR: RuntimeError: binding failed", "edit_ops_blocked", True, 1),
         ("edit_batch", {"edits": [{"path": "x", "old_str": "a", "new_str": "b", "count": 1}]}, "binding failed", "blocked", "EDIT_OPS_BLOCKED", "⚠️ EDIT_BATCH_ERROR: RuntimeError: binding failed", "edit_ops_blocked", True, 1),
-        ("vcs_status", {}, "binding failed", "ok", "GIT_ERROR", "⚠️ GIT_ERROR: RuntimeError: binding failed", "git_error", False, 0),
-        ("vcs_diff", {}, "binding failed", "ok", "GIT_ERROR", "⚠️ GIT_ERROR: RuntimeError: binding failed", "git_error", False, 0),
+        ("vcs_read", {"action": "status"}, "binding failed", "ok", "GIT_ERROR", "⚠️ GIT_ERROR: RuntimeError: binding failed", "git_error", False, 0),
+        ("vcs_read", {"action": "diff"}, "binding failed", "ok", "GIT_ERROR", "⚠️ GIT_ERROR: RuntimeError: binding failed", "git_error", False, 0),
         ("read_file", {"path": "x"}, "binding failed", "error", "LEGACY_TOOL_ERROR", "⚠️ READ_FILE_ERROR: RuntimeError: binding failed", "error", True, 1),
     ),
 )
@@ -579,6 +609,8 @@ def test_binding_failures_cut_over_only_the_exact_native_families(
         "task-binding",
     )
 
+    if tool_name == "vcs_read":  # its refusal also names the two roots vcs_read takes
+        text += tool_resolution._VCS_READ_ROOTS
     assert row["tool_result"] == ToolResult(status=status, code=code, text=text)
     assert row["result"] == text
     assert row["is_error"] is is_error
@@ -755,7 +787,8 @@ def test_light_actionable_redirects_keep_legacy_mapping_without_light_remap(
         expected_text = (
             "⚠️ COGNITIVE_TOOL_REQUIRED: cognitive memory is not written via 'write_file'. "
             "Use the dedicated first-class tools (always available in light mode): "
-            "update_identity for memory/identity.md, update_scratchpad for "
+            "update_identity for memory/identity.md, update_world for memory/WORLD.md, "
+            "update_scratchpad for "
             "memory/scratchpad.md, knowledge_write for memory/knowledge/<topic>.md. They "
             "apply the correct structure (journaling, timestamped blocks, index maintenance). "
             "Read the current state before writing (Bible P12)."

@@ -1,143 +1,78 @@
-import { initMarketplace } from './marketplace.js';
-import { confirmHubUpdate, hubVersionText, initOuroborosHub } from './ouroboroshub.js';
-import { bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
+// The Skills page: three views of one page — Installed (what Ouroboros can do
+// now), Browse (what else it could do, from every connected source) and Sources
+// (where skills come from and how much each place is trusted). Installed is the
+// default and never waits for a source or GitHub: it reads the local listing and
+// the serialized lifecycle queue, and every owner action keeps its own words,
+// confirmation and refusal. Browse and Sources live in their own modules.
+import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
 import { bindMenu } from './ui_interactions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
-import { apiClient, apiFetch } from './api_client.js';
-import { patchInstalledSkillEnrichment, renderInstalledSkillCard, renderReviewFindingsList, renderSkillHubBadges } from './skill_card_renderer.js';
-import { hubFactsPending } from './hub_sync.js';
+import { apiClient, apiFetch, skillSourcesApi } from './api_client.js';
+import {
+    fillFindingsOnOpen, installedSkillModel, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
+    renderInstalledSkillCard,
+} from './skill_card_renderer.js';
+import { createSkillBrowse } from './skill_browse.js';
+import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
+import { openSkillDetailSheet } from './skill_detail_sheet.js';
+import {
+    openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
+} from './skill_dialogs.js';
+import { plural, popularityText, repoLabel, routeExternalLink, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
 import {
-    boundedText,
-    emitSkillLifecycle,
-    escapeHtmlAttr as escapeHtml,
-    fetchJson,
-    grantReady,
-    renderSkillRepairPrompt,
-    reviewTone,
-    reviewReady,
+    boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
+    reviewTone, reviewReady,
 } from './utils.js';
 
 const SKILLS_TABS = [
-    { value: 'installed', label: 'My skills', pillId: 'skills-tab-pill-installed', tabId: 'skills-tab-installed', panelId: 'skills-pane-installed' },
-    { value: 'marketplace', label: 'ClawHub', pillId: 'skills-tab-pill-marketplace', tabId: 'skills-tab-marketplace', panelId: 'skills-pane-marketplace' },
-    { value: 'ouroboroshub', label: 'OuroborosHub', pillId: 'skills-tab-pill-ouroboroshub', tabId: 'skills-tab-ouroboroshub', panelId: 'skills-pane-ouroboroshub' },
+    { value: 'installed', label: 'Installed', pillId: 'skills-tab-pill-installed', tabId: 'skills-tab-installed', panelId: 'skills-pane-installed' },
+    { value: 'browse', label: 'Browse', pillId: 'skills-tab-pill-browse', tabId: 'skills-tab-browse', panelId: 'skills-pane-browse' },
+    { value: 'sources', label: 'Sources', tabId: 'skills-tab-sources', panelId: 'skills-pane-sources' },
 ];
 const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
-
-/** Installed skills UI: review, grant, enable, repair, update, uninstall, delete. */
+const INSTALLED_FILTERS = [
+    ['all', 'All'], ['needs', 'Needs you'], ['updates', 'Updates'], ['off', 'Off'], ['made', 'Made here'],
+];
+const WORK_POLL_MS = 3000;
+const REVIEW_POLL_MS = 15000;
 
 function skillsPageTemplate() {
     return `
         <section class="page app-page-glass" id="page-skills">
             ${renderPageHeader({
-                title: 'Skills',
-                icon: PAGE_ICONS.skills,
-                description: 'Skills extend Ouroboros with new tools, routes, and widgets. Each skill is reviewed for safety before you turn it on.',
-                actionsHtml: '<button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
+                page: 'skills',
+                actionsHtml: '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button><button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
                 tabsHtml: renderTabStrip({
-                    items: SKILLS_TABS,
-                    active: 'installed',
-                    dataAttr: 'data-tab',
-                    activeClass: 'is-active',
-                    ariaLabel: 'Skills views',
-                    stripClass: 'skills-tabs',
-                    tabClass: 'skills-tab',
+                    items: SKILLS_TABS, active: 'installed', dataAttr: 'data-tab', activeClass: 'is-active',
+                    ariaLabel: 'Skills views', stripClass: 'skills-tabs', tabClass: 'skills-tab',
                 }),
             })}
-            <div class="skills-search-chrome" id="skills-pane-marketplace-chrome" data-chrome-pane="marketplace" hidden></div>
-            <div class="skills-search-chrome" id="skills-pane-ouroboroshub-chrome" data-chrome-pane="ouroboroshub" hidden></div>
+            <div class="skills-search-chrome" data-chrome-pane="installed">
+                <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
+                <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show"></div>
+            </div>
+            <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
             <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
-                <div id="skills-status" class="muted" role="status" aria-live="polite"></div>
-                <div id="skills-list" class="skills-list"></div>
-                <div id="skills-empty" class="muted" hidden>
-                    No skills yet. Browse <b>ClawHub</b> or
-                    <b>OuroborosHub</b> to add one, or import a custom
-                    package from the Files tab.
+                    <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
+                    <div id="skills-list" class="skills-list"></div>
+                    <p id="skills-filter-empty" class="skills-empty" hidden>No installed skill matches.</p>
+                    <div id="skills-empty" class="skills-empty" hidden>
+                        <p>No skills yet. Pick one in Browse, or ask Ouroboros: “find a skill for …”.</p>
+                        <button type="button" class="btn btn-primary btn-sm" data-skills-goto="browse">Browse skills</button>
+                    </div>
                 </div>
-            </div>
-                <div class="skills-tab-panel" id="skills-pane-marketplace" data-pane="marketplace" role="tabpanel" aria-labelledby="skills-tab-marketplace" hidden></div>
-                <div class="skills-tab-panel" id="skills-pane-ouroboroshub" data-pane="ouroboroshub" role="tabpanel" aria-labelledby="skills-tab-ouroboroshub" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-browse" data-pane="browse" role="tabpanel" aria-labelledby="skills-tab-browse" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-sources" data-pane="sources" role="tabpanel" aria-labelledby="skills-tab-sources" hidden></div>
             </div>
         </section>
     `;
 }
 
-
-function isMissingGrantLoadError(skill) {
-    return !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
-}
-
-function sortSkillsForDisplay(skills) {
-    return [...skills].sort((a, b) => {
-        if (a.lifecycle_virtual && !b.lifecycle_virtual) return -1;
-        if (!a.lifecycle_virtual && b.lifecycle_virtual) return 1;
-        return installedTime(b) - installedTime(a) || String(a.name || '').localeCompare(String(b.name || ''));
-    });
-}
-
-
-// OuroborosHub catalog snapshot for the display-only My-skills sync badges
-// (hub_sync verdict). Fetched once per Skills page open and reused across
-// re-renders; fail-soft — a failed fetch only hides catalog-derived badges.
-const hubCatalog = { promise: null, settled: false, available: false, byName: new Map(), generation: 0 };
-
-function loadHubCatalog(force = false) {
-    if (force) hubCatalog.promise = null;
-    if (!hubCatalog.promise) {
-        // Generation guard: only the NEWEST request may commit its snapshot,
-        // so a slow older response cannot overwrite fresher catalog state.
-        const generation = ++hubCatalog.generation;
-        hubCatalog.settled = false;
-        hubCatalog.promise = fetchJson('/api/marketplace/ouroboroshub/catalog')
-            .then((data) => {
-                if (generation !== hubCatalog.generation) return;
-                const byName = new Map();
-                for (const row of data.results || []) {
-                    const key = String(row.sanitized_name || row.slug || '');
-                    if (key && !byName.has(key)) byName.set(key, row);
-                }
-                hubCatalog.byName = byName;
-                hubCatalog.available = true;
-            })
-            .catch(() => {
-                if (generation !== hubCatalog.generation) return;
-                hubCatalog.byName = new Map();
-                hubCatalog.available = false;
-            })
-            .finally(() => {
-                if (generation === hubCatalog.generation) hubCatalog.settled = true;
-            });
-    }
-    return hubCatalog.promise;
-}
-
-let skillsRenderGeneration = 0;
-let skillsSnapshot = null;
-
-/** Versions for the shared Hub Update confirmation: local manifest and last catalog observation. */
-function hubUpdateFacts(name) {
-    const skill = skillsSnapshot?.rawSkills?.find((row) => row?.name === name);
-    const row = hubCatalog.byName.get(name);
-    let hubVersion = hubCatalog.available ? 'not in the catalog' : 'catalog unavailable';
-    if (row) hubVersion = hubVersionText(row.latest_version);
-    else if (!hubCatalog.available && !hubCatalog.settled) hubVersion = 'not checked yet';
-    return { localVersion: String(skill?.version || ''), hubVersion };
-}
-
-
-async function fetchSkills() {
-    const extResp = await apiClient.extensions();
-    if (!Array.isArray(extResp?.skills)) throw new Error('Installed skills response is unavailable.');
-    return { skills: extResp.skills, live: extResp.live || {} };
-}
-
-
-function lifecycleEventsFromQueue(queueResp) {
+export function lifecycleEventsFromQueue(queueResp) {
     const events = Array.isArray(queueResp?.events) ? queueResp.events : [];
     const active = queueResp?.active;
     if (!active || typeof active !== 'object') return events;
@@ -148,8 +83,7 @@ function lifecycleEventsFromQueue(queueResp) {
     return [...deduped, active];
 }
 
-
-function mergeLifecycleEvents(skills, events) {
+export function mergeLifecycleEvents(skills, events) {
     const out = skills.map((skill) => ({ ...skill }));
     const byName = new Map(out.map((skill) => [skill.name, skill]));
     const names = new Set(byName.keys());
@@ -161,14 +95,14 @@ function mergeLifecycleEvents(skills, events) {
         processedTargets.add(name);
         if (!LIFECYCLE_VISIBLE_STATUSES.has(event.status)) continue;
         if (names.has(name)) {
-            // The skill already has a real card. Annotate it with the in-flight
-            // transition so it can show "Disabling…/Enabling…" instead of a stale
-            // clean toggle while the (serialized) lifecycle lane works through it.
-            // Events are reversed → newest first, so the first wins per skill.
+            // The skill already has a real card: annotate it with the in-flight
+            // transition so it shows "Turning off…" instead of a stale toggle
+            // while the serialized lifecycle lane works through it.
             const existing = byName.get(name);
             if (existing) {
                 existing.lifecycle_status = event.status;
                 existing.lifecycle_kind = event.kind || existing.lifecycle_kind || '';
+                existing.lifecycle_message = event.message || '';
                 existing.lifecycle_pending = event.status !== 'failed';
                 if (event.status === 'failed' && event.error) existing.lifecycle_error = event.error;
             }
@@ -178,7 +112,7 @@ function mergeLifecycleEvents(skills, events) {
         out.unshift({
             name,
             description: event.message || event.error || 'Skill lifecycle operation',
-            version: '—',
+            version: '',
             type: 'skill',
             enabled: false,
             review_status: 'pending',
@@ -197,8 +131,8 @@ function mergeLifecycleEvents(skills, events) {
     return out;
 }
 
-
-function updateQueueBadges(events) {
+/** In-flight lifecycle work, newest event per skill (the Installed tab pill). */
+export function inFlightCount(events) {
     const latestByTarget = new Map();
     const untargeted = [];
     for (const event of [...events].reverse()) {
@@ -209,182 +143,93 @@ function updateQueueBadges(events) {
         }
         if (!latestByTarget.has(target)) latestByTarget.set(target, event);
     }
-    const actionable = [...latestByTarget.values(), ...untargeted]
-        .filter((event) => LIFECYCLE_VISIBLE_STATUSES.has(event.status));
-    const bySource = new Map();
-    for (const event of actionable) {
-        const source = event.source === 'ouroboroshub' ? 'ouroboroshub'
-            : event.source === 'clawhub' ? 'marketplace'
-            : 'installed';
-        bySource.set(source, (bySource.get(source) || 0) + 1);
-    }
-    for (const [id, count] of bySource.entries()) {
-        const el = document.getElementById(`skills-tab-pill-${id}`);
-        if (!el) continue;
-        el.hidden = !count;
-        el.textContent = count ? String(count) : '';
-    }
-    for (const id of ['installed', 'marketplace', 'ouroboroshub']) {
-        if (bySource.has(id)) continue;
-        const el = document.getElementById(`skills-tab-pill-${id}`);
-        if (!el) continue;
-        el.hidden = true;
-        el.textContent = '';
-    }
+    return [...latestByTarget.values(), ...untargeted]
+        .filter((event) => event.status === 'queued' || event.status === 'running').length;
 }
 
-
-async function renderSkillsList(container, emptyEl, reviewingSkills = new Set(), repairingSkills = new Set(), interactions = {}) {
-    if (!container.isConnected) return;
-    const renderGeneration = ++skillsRenderGeneration;
-    const current = () => renderGeneration === skillsRenderGeneration && container.isConnected;
-    // A snapshot already settled when this render began may be older than the
-    // server's 120 s display memo; a read still in flight is fresh by construction.
-    const catalogWasStale = hubCatalog.settled;
-    const catalogSettled = loadHubCatalog();
-    const status = document.getElementById('skills-status');
-    // Keep primary rows pristine: merging a newer terminal queue into already
-    // annotated cards would retain old lifecycle_pending/error fields.
-    const snapshot = { ...skillsSnapshot, rawSkills: null, live: {} };
-    const reads = { state: 'loading', queue: 'loading' };
-    const labels = { state: 'Skill settings', queue: 'Lifecycle progress' };
-    const catalogOptions = () => ({
-        githubTokenConfigured: snapshot.githubTokenConfigured,
-        hubCatalogByName: hubCatalog.byName,
-        hubCatalogAvailable: hubCatalog.available,
+function sortSkillsForDisplay(skills) {
+    return [...skills].sort((a, b) => {
+        if (a.lifecycle_virtual && !b.lifecycle_virtual) return -1;
+        if (!a.lifecycle_virtual && b.lifecycle_virtual) return 1;
+        return installedTime(b) - installedTime(a) || String(a.name || '').localeCompare(String(b.name || ''));
     });
-    const projected = () => sortSkillsForDisplay(mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue)));
-    function showReadState() {
-        if (!status) return;
-        status.className = 'muted';
-        status.textContent = Object.entries(reads).filter(([, state]) => state !== 'ready')
-            .map(([name, state]) => state === 'loading' ? `${labels[name]} loading…`
-                : `${labels[name]} could not be refreshed. Refresh to retry; previous details are retained where available.`).join(' ');
-    }
-    function applyEnrichment() {
-        if (!current() || !snapshot.rawSkills) return;
-        skillsSnapshot = snapshot;
-        const skills = projected();
-        const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map(card => [card.dataset.skill, card]));
-        for (const skill of [...skills].reverse()) {
-            const card = cards.get(skill.name);
-            if (card) {
-                patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live,
-                    catalogOptions(), interactions.menuFor?.(card) || card);
-                cards.delete(skill.name);
-            } else {
-                const template = document.createElement('template');
-                template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, catalogOptions());
-                container.insertBefore(template.content.firstElementChild, container.firstElementChild);
-            }
-        }
-        for (const card of cards.values()) {
-            interactions.beforeReplace?.(card);
-            card.remove();
-        }
-        if (emptyEl) emptyEl.hidden = skills.length > 0;
-        updateQueueBadges(lifecycleEventsFromQueue(snapshot.queue));
-        showReadState();
-    }
-    function settleOptional(name, data) {
-        if (!current()) return;
-        const valid = name === 'state' ? typeof data?.github_token_configured === 'boolean'
-            : Array.isArray(data?.events) || (data?.active && typeof data.active === 'object');
-        reads[name] = valid ? 'ready' : 'failed';
-        if (valid) {
-            if (name === 'state') snapshot.githubTokenConfigured = data.github_token_configured;
-            else snapshot.queue = data;
-        }
-        applyEnrichment();
-    }
-    // Neither optional read participates in the primary list/Refresh promise.
-    apiClient.state().then(data => settleOptional('state', data), () => settleOptional('state', null));
-    apiClient.skillLifecycleQueue().then(data => settleOptional('queue', data), () => settleOptional('queue', null));
-    if (status) {
-        status.className = 'muted';
-        status.textContent = 'Loading installed skills…';
-    }
-    try {
-        const primary = await fetchSkills();
-        if (!current()) return;
-        snapshot.rawSkills = primary.skills;
-        snapshot.live = primary.live;
-    } catch (err) {
-        if (!current()) return;
-        if (emptyEl) emptyEl.hidden = true;
-        if (status) {
-            status.className = 'skills-load-error';
-            status.textContent = `Could not load installed skills: ${err.message || err}.${skillsSnapshot ? ' Showing the previous list; Refresh to retry.' : ' Refresh to retry.'}`;
-        }
-        return;
-    }
-    if (!current()) return;
-    skillsSnapshot = snapshot;
-    const skills = projected();
-    updateQueueBadges(lifecycleEventsFromQueue(snapshot.queue));
-    showReadState();
-    if (emptyEl) emptyEl.hidden = skills.length > 0;
-    // A menu may have opened while the primary read was pending. Close it at
-    // the actual replacement boundary, while its owner is still connected.
-    interactions.beforeReplace?.();
-    container.innerHTML = skills.map((skill) => renderInstalledSkillCard(
-        skill, reviewingSkills, repairingSkills, snapshot.live, catalogOptions(),
-    )).join('');
-    catalogSettled.then(async () => {
-        if (!current()) return;
-        if (hubFactsPending(snapshot.rawSkills)) {
-            // The list never waits for the hub: facts the server could not know
-            // before a catalog read landed arrive with one local re-read. A
-            // snapshot this render merely reused may be older than the server's
-            // 120 s display memo, so it is refreshed first — never a second
-            // re-read on the same unknown answer.
-            if (catalogWasStale) await loadHubCatalog(true);
-            if (!current() || !hubCatalog.available) return;
-            const again = await fetchSkills().catch(() => null);
-            if (!current()) return;
-            if (again) {
-                snapshot.rawSkills = again.skills;
-                snapshot.live = again.live;
-                applyEnrichment();
-            }
-        }
-        // Optional badges never recreate a card, its open menu or edited field.
-        const byName = new Map(projected().map((skill) => [skill.name, skill]));
-        container.querySelectorAll('[data-skill-hub-badges]').forEach((node) => {
-            const skill = byName.get(node.dataset.skillHubBadges);
-            if (skill) node.innerHTML = renderSkillHubBadges(skill, catalogOptions());
-        });
-    }).catch(() => {});
 }
 
-
-/** Repaint the cards from the list already in memory: an action's spinner needs no network read. */
-function repaintSkillsList(container, reviewingSkills, repairingSkills, interactions = {}) {
-    const snapshot = skillsSnapshot;
-    if (!container.isConnected || !snapshot?.rawSkills) return;
-    const options = { githubTokenConfigured: snapshot.githubTokenConfigured, hubCatalogByName: hubCatalog.byName, hubCatalogAvailable: hubCatalog.available };
-    const byName = new Map(mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue)).map((skill) => [skill.name, skill]));
-    for (const card of container.querySelectorAll(':scope > .skills-card')) {
-        const skill = byName.get(card.dataset.skill);
-        if (skill) patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live, options, interactions.menuFor?.(card) || card);
-    }
+/** Does one installed row belong in a filter of the Installed strip? */
+export function matchesInstalledFilter(skill, filter, model = installedSkillModel(skill)) {
+    if (filter === 'needs') return model.needs;
+    if (filter === 'updates') return model.update;
+    if (filter === 'off') return !skill.enabled && !skill.lifecycle_virtual;
+    if (filter === 'made') return isMadeHere(skill);
+    return true;
 }
 
+/** «All 62 · Needs you 10 · Updates 12 · Off 41 · Made here 43», as facts of the loaded list. */
+export function installedFilterCounts(skills) {
+    const counts = Object.fromEntries(INSTALLED_FILTERS.map(([key]) => [key, 0]));
+    for (const skill of skills) {
+        const model = installedSkillModel(skill);
+        for (const [key] of INSTALLED_FILTERS) if (matchesInstalledFilter(skill, key, model)) counts[key] += 1;
+    }
+    return counts;
+}
 
-async function postWithFeedback(url, body) {
-    const resp = await apiFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {}),
+/** «Update all» covers unmodified skills from trusted rows only (SPEC §7). */
+export function updateAllCandidates(skills, sources = null) {
+    const trust = new Map((sources || []).map((source) => [source.id, source.trust]));
+    return skills.filter((skill) => {
+        const install = skill.install;
+        if (!install?.update_available?.digest || install.modified || install.base_known === false || install.withdrawn || skill.lifecycle_pending) return false;
+        if (install.basis !== 'trusted') return false;
+        const rowTrust = trust.get(install.source?.id);
+        return rowTrust === undefined || rowTrust === 'trusted';
     });
-    const payload = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-        throw new Error(payload.error || `HTTP ${resp.status}`);
-    }
-    return payload;
 }
 
-function buildHealPrompt(skill) {
+/**
+ * Where a skill can be published (B10): back to where it came from (a hub entry
+ * that points at its author's repository goes there), a git source the owner
+ * added, or the public hub — its shared catalog, or, for a skill that came from
+ * the hub, a new entry beside the original.
+ */
+export function publishDestinations(skill, sources = []) {
+    const out = [];
+    const origin = skill.install?.source;
+    const originRow = sources.find((source) => source.id === origin?.id);
+    const originKind = originRow?.kind || origin?.kind;
+    const authorRepo = String(skill.install?.release?.repo || '');
+    if (origin?.id && ['hub', 'git'].includes(originKind)) {
+        out.push(authorRepo
+            ? { value: `origin:${origin.id}`, repository: repoLabel(authorRepo), label: `Back to ${repoLabel(authorRepo)} — its author’s repository`,
+                detail: 'Suggest your changes to its author as a new version. The author decides.' }
+            : { value: `origin:${origin.id}`, repository: repoLabel(originRow?.url || origin.url), label: `Back to ${origin.name || originRow?.name} — where it came from`,
+                detail: 'Suggest your changes as a new version. The maintainers decide.' });
+    }
+    for (const source of sources.filter((row) => row.kind === 'git')) {
+        if (source.id === origin?.id) continue;
+        out.push({ value: `source:${source.id}`, repository: repoLabel(source.url), label: `${source.name} — your own source`,
+            detail: origin ? 'Publish your version now, under the same name, for your own installs.' : `Publish now. Every Ouroboros that reads ${source.name} gets it at once.` });
+    }
+    // The hub's two rows are one repository: a skill from it goes back as its origin, or beside it as a new skill.
+    const community = sources.find((row) => row.kind === 'hub' && row.part === 'community');
+    if (community && originKind === 'hub') {
+        out.push({ value: `new:${community.id}`, repository: repoLabel(community.url), label: `${community.name} — as a new skill`,
+            detail: 'Ask to list it next to the original under another name.' });
+    } else if (community) {
+        out.push({ value: `source:${community.id}`, repository: repoLabel(community.url), label: `${community.name} — share with everyone`,
+            detail: 'Ask to list it in the shared catalog. New skills and new authors are read by the maintainer first.' });
+    }
+    return out;
+}
+
+/** A chosen destination as the publish preflight and task carry it: `{source_id, mode}`. */
+export function destinationFromChoice(value) {
+    const [mode, sourceId] = String(value || '').split(':');
+    if (!sourceId) return null;
+    return { source_id: sourceId, mode: mode === 'origin' ? 'origin' : mode === 'new' ? 'new_entry' : 'entry' };
+}
+
+export function buildHealPrompt(skill) {
     const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
     const diagnostics = {
         name: boundedText(skill.name, 200),
@@ -408,18 +253,240 @@ function buildHealPrompt(skill) {
     );
 }
 
+async function postWithFeedback(url, body) {
+    const resp = await apiFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Prefer: 'respond-async' },
+        body: JSON.stringify(body || {}),
+    });
+    const payload = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(payload.error || `HTTP ${resp.status}`);
+    return payload;
+}
 
-function attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx = {}, repaintFn = renderFn) {
+async function fetchSkills() {
+    const extResp = await apiClient.extensions();
+    if (!Array.isArray(extResp?.skills)) throw new Error('Installed skills response is unavailable.');
+    return { skills: extResp.skills, live: extResp.live || {} };
+}
+
+export function initSkills(ctx = {}) {
+    const page = document.createElement('div');
+    page.innerHTML = skillsPageTemplate();
+    document.getElementById('content').appendChild(page.firstElementChild);
+
+    const root = document.getElementById('page-skills');
+    const container = document.getElementById('skills-list');
+    const status = document.getElementById('skills-status');
+    const emptyEl = document.getElementById('skills-empty');
+    const filterEmpty = document.getElementById('skills-filter-empty');
+    const filtersEl = document.getElementById('skills-installed-filters');
+    const searchInput = document.getElementById('skills-installed-search');
+    const refreshBtn = document.getElementById('skills-refresh');
+    const updateAllBtn = document.getElementById('skills-update-all');
+    const reviewingSkills = new Set();
+    const repairingSkills = new Set();
+    let activeTab = 'installed';
+    let visible = false;
+    let destroyed = false;
+    let renderGeneration = 0;
+    let filter = 'all';
+    let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
     let activeMenu = null;
-    function closeSkillMenus(options = {}) {
-        activeMenu?.binding.close(options);
+    let sheet = null;
+    let pollTimer = 0;
+    let lastListingRead = 0;
+    let firstStartAsked = false;
+
+    // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
+    const cache = { sources: null, sourcesValue: null, sourcesProblem: '', catalog: null, catalogValue: null };
+    const store = {
+        sources(force = false) {
+            if (force || !cache.sources) {
+                cache.sources = skillSourcesApi.list().then((data) => {
+                    const list = Array.isArray(data) ? data : (Array.isArray(data?.sources) ? data.sources : []);
+                    cache.sourcesValue = list;
+                    cache.sourcesProblem = String(data?.problem || '');
+                    return list;
+                }).catch((error) => { cache.sources = null; throw error; });
+            }
+            return cache.sources;
+        },
+        catalog({ refresh = false } = {}) {
+            if (refresh || !cache.catalog) {
+                cache.catalog = skillSourcesApi.catalog({ refresh }).then((data) => { cache.catalogValue = data; return data; })
+                    .finally(() => { setTimeout(() => { cache.catalog = null; }, 0); });
+            }
+            return cache.catalog;
+        },
+    };
+    const projected = () => (snapshot?.rawSkills
+        ? sortSkillsForDisplay(mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue))) : []);
+    const installedByName = () => (snapshot?.rawSkills ? new Map(projected().map((skill) => [skill.name, skill])) : null);
+    const officialSource = () => (cache.sourcesValue || []).find((source) => source.kind === 'hub' && source.part === 'official') || null;
+    // The catalog entry an installed skill came from (its author, full text), when the catalog was read.
+    const catalogEntry = (skill) => (cache.catalogValue?.items || [])
+        .find((item) => item.source_id === skill?.install?.source?.id && item.name === skill?.name) || null;
+    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured });
+
+    // ---- Installed view -------------------------------------------------------------------------
+    function paintFilters(skills) {
+        const counts = skills ? installedFilterCounts(skills) : null;
+        filtersEl.innerHTML = INSTALLED_FILTERS.map(([key, label]) => {
+            const count = counts ? counts[key] : null;
+            const hide = key !== 'all' && count === 0 && filter !== key;
+            return hide ? '' : `<button type="button" class="filter-chip skills-category${key === filter ? ' active' : ''}" aria-pressed="${key === filter ? 'true' : 'false'}" data-installed-filter="${key}">${escapeHtml(label)}${count === null ? '' : `<span class="skills-category-count">${count}</span>`}</button>`;
+        }).join('');
     }
-    function openSkillMenu(trigger) {
-        if (activeMenu?.trigger === trigger) {
-            closeSkillMenus({ restoreFocus: true });
+
+    function applyInstalledFilter() {
+        const query = searchInput.value.trim().toLowerCase();
+        const byName = installedByName() || new Map();
+        let shown = 0;
+        for (const card of container.querySelectorAll(':scope > .skills-card')) {
+            const skill = byName.get(card.dataset.skill);
+            const ok = !skill || (matchesInstalledFilter(skill, filter)
+                && (!query || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query))));
+            card.hidden = !ok;
+            if (ok) shown += 1;
+        }
+        const total = container.querySelectorAll(':scope > .skills-card').length;
+        filterEmpty.hidden = !(total && !shown);
+    }
+
+    function paintChrome() {
+        const skills = snapshot?.rawSkills ? projected() : null;
+        paintFilters(skills);
+        const candidates = skills ? updateAllCandidates(skills, cache.sourcesValue) : [];
+        updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
+        updateAllBtn.textContent = `Update all (${candidates.length})`;
+        const pill = document.getElementById('skills-tab-pill-installed');
+        const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
+        if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
+    }
+
+    function paintInstalled({ replace = false } = {}) {
+        if (!snapshot?.rawSkills || destroyed) return;
+        const skills = projected();
+        const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [card.dataset.skill, card]));
+        let replacementFocus = null;
+        if (replace) {
+            closeMenus();
+            container.innerHTML = skills.map((skill) => renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions())).join('');
+        } else {
+            for (const skill of [...skills].reverse()) {
+                const card = cards.get(skill.name);
+                if (card) {
+                    // A queue placeholder has no controls to enrich. Replace only this
+                    // structural transition; real cards retain drafts and disclosures.
+                    if (card.hasAttribute('data-lifecycle-virtual') !== Boolean(skill.lifecycle_virtual)) {
+                        const ownsMenu = activeMenu?.card === card;
+                        const focused = card.contains(document.activeElement)
+                            || (ownsMenu && activeMenu.popover.contains(document.activeElement));
+                        if (ownsMenu) closeMenus();
+                        const template = document.createElement('template');
+                        template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions());
+                        const fresh = template.content.firstElementChild;
+                        card.replaceWith(fresh);
+                        if (focused) replacementFocus = fresh;
+                    } else {
+                        patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions(),
+                            activeMenu?.card === card ? activeMenu.popover : card);
+                    }
+                    cards.delete(skill.name);
+                } else {
+                    const template = document.createElement('template');
+                    template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions());
+                    container.insertBefore(template.content.firstElementChild, container.firstElementChild);
+                }
+            }
+            for (const card of cards.values()) {
+                if (activeMenu?.card === card) closeMenus();
+                card.remove();
+            }
+        }
+        emptyEl.hidden = skills.length > 0;
+        paintChrome();
+        applyInstalledFilter();
+        if (replacementFocus && !replacementFocus.hidden) {
+            replacementFocus.querySelector('.skills-card-name')?.focus({ preventScroll: true });
+        }
+        browse?.repaintStates();
+        schedulePoll();
+    }
+
+    async function readInstalled({ quiet = false } = {}) {
+        if (destroyed) return;
+        const generation = ++renderGeneration;
+        const current = () => generation === renderGeneration && !destroyed;
+        const next = { rawSkills: null, live: {}, queue: snapshot?.queue || null, githubTokenConfigured: snapshot?.githubTokenConfigured };
+        const optional = { state: 'loading', queue: 'loading' };
+        const showReads = () => {
+            if (!current() || !snapshot?.rawSkills) return;
+            const notes = Object.entries(optional).filter(([, value]) => value === 'failed')
+                .map(([name]) => (name === 'state' ? 'Skill settings' : 'Lifecycle progress'));
+            status.dataset.tone = notes.length ? 'warn' : 'muted';
+            status.textContent = notes.length ? `${notes.join(' and ')} could not be refreshed. Refresh to retry; earlier facts are kept.` : '';
+        };
+        apiClient.state().then((data) => {
+            if (!current()) return;
+            const ok = typeof data?.github_token_configured === 'boolean';
+            optional.state = ok ? 'ready' : 'failed';
+            if (ok) next.githubTokenConfigured = data.github_token_configured;
+            if (snapshot === next) paintInstalled();
+            showReads();
+        }, () => { if (current()) { optional.state = 'failed'; showReads(); } });
+        apiClient.skillLifecycleQueue().then((data) => {
+            if (!current()) return;
+            const ok = Array.isArray(data?.events) || (data?.active && typeof data.active === 'object');
+            optional.queue = ok ? 'ready' : 'failed';
+            if (ok) next.queue = data;
+            if (snapshot === next) paintInstalled();
+            showReads();
+        }, () => { if (current()) { optional.queue = 'failed'; showReads(); } });
+        if (!quiet && !snapshot) { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; }
+        try {
+            const primary = await fetchSkills();
+            if (!current()) return;
+            next.rawSkills = primary.skills;
+            next.live = primary.live;
+            lastListingRead = Date.now();
+        } catch (err) {
+            if (!current()) return;
+            emptyEl.hidden = true;
+            status.dataset.tone = 'danger';
+            status.textContent = `Couldn’t refresh installed skills: ${err.message || err}.${snapshot ? ' Showing the previous list. Refresh to try again.' : ' Refresh to try again.'}`;
             return;
         }
-        closeSkillMenus();
+        const firstPaint = !snapshot;
+        snapshot = next;
+        if (!quiet && !firstPaint) status.textContent = '';
+        if (firstPaint) status.textContent = '';
+        paintInstalled({ replace: firstPaint });
+        showReads();
+    }
+
+    // Local lifecycle progress only (never GitHub): the queue while work runs, the
+    // listing now and then while a review runs outside the lane.
+    function schedulePoll() {
+        clearTimeout(pollTimer);
+        if (destroyed || !visible || !snapshot) return;
+        const working = inFlightCount(lifecycleEventsFromQueue(snapshot.queue)) > 0;
+        const reviewing = reviewingSkills.size > 0 || projected().some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
+        if (!working && !reviewing) return;
+        pollTimer = setTimeout(async () => {
+            if (destroyed || !visible) return;
+            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working) await readInstalled({ quiet: true });
+            else schedulePoll();
+        }, WORK_POLL_MS);
+    }
+
+    // ---- menus and the Official mark ------------------------------------------------------------
+    function closeMenus(options = {}) { activeMenu?.binding.close(options); }
+
+    function openSkillMenu(trigger) {
+        if (activeMenu?.trigger === trigger) { closeMenus({ restoreFocus: true }); return; }
+        closeMenus();
         const owner = trigger.closest('.skills-card-menu');
         const popover = owner?.querySelector('.skills-card-menu-dialog');
         if (!popover) return;
@@ -436,660 +503,540 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             trigger.setAttribute('aria-expanded', 'false');
             activeMenu = null;
         } });
-        activeMenu = { trigger, binding, popover };
+        activeMenu = { trigger, binding, popover, card: trigger.closest('.skills-card') };
     }
 
-    async function requestMissingKeyGrants(name, items, expectedContentHash = '') {
+    // ---- owner actions on installed skills ------------------------------------------------------
+    async function currentSkill(name) {
+        const { skills } = await fetchSkills();
+        const skill = skills.find((item) => item.name === name);
+        if (!skill) throw new Error('Skill not found in the current list. Refresh and try again.');
+        return skill;
+    }
+
+    async function requestMissingKeyGrants(name, items, expectedContentHash = '', enableAfterGrant = false) {
         const cleanItems = (items || []).map((k) => String(k || '').trim()).filter(Boolean);
-        if (!cleanItems.length) return;
-        const revision = expectedContentHash || (await fetchSkills()).skills.find((skill) => skill.name === name)?.content_hash;
+        if (!cleanItems.length) return null;
+        const revision = expectedContentHash || (await currentSkill(name)).content_hash;
         if (!revision) throw new Error('Skill revision is unavailable. Refresh and retry.');
         const ok = await openConfirmDialog({
             title: `Grant access to ${name}`,
-            body: `Grant access to these keys and permissions for ${name}?\n\n${cleanItems.join('\n')}\n\nOnly grant access to reviewed skills you trust.`,
+            body: `Let ${name} use these keys and permissions?\n\n${cleanItems.join('\n')}\n\nOnly grant access to skills you trust.`,
             confirmLabel: 'Grant access',
         });
         if (!ok) throw Object.assign(new Error('Skill grant cancelled.'), { cancelled: true });
-        const bridge = window.pywebview?.api?.request_skill_key_grant;
-        const result = bridge
-            ? await bridge(name, cleanItems)
-            : await apiClient.skillGrants(name, cleanItems, revision);
-        if (!result?.ok) {
-            throw new Error(result?.error || 'Skill grant was cancelled.');
-        }
+        // The desktop shell asks once more in a native dialog it owns.
+        const nativeApi = window.pywebview?.api;
+        // A named bridge capability opts in; older UI calling the old method still gets a terminal result.
+        const result = nativeApi?.request_skill_key_grant_with_job
+            ? await nativeApi.request_skill_key_grant_with_job(name, cleanItems, enableAfterGrant)
+            : nativeApi?.request_skill_key_grant
+                ? await nativeApi.request_skill_key_grant(name, cleanItems)
+                : await apiClient.skillGrants(name, cleanItems, revision, enableAfterGrant);
+        if (!result?.ok) throw new Error(result?.error || 'Skill grant was cancelled.');
         return result;
     }
 
-    async function savePresenceRuntime(form, reset = false) {
-        const name = String(form?.dataset?.skillName || '');
-        const expected = String(form?.dataset?.stateFingerprint || '');
-        if (!name || !expected) throw new Error('Presence runtime state is unavailable. Refresh and retry.');
-        const modelValue = reset ? '' : String(form.elements.model_slot?.value || '').trim();
-        const roundsValue = reset ? '' : String(form.elements.inline_max_rounds?.value || '').trim();
-        const rounds = roundsValue === '' ? null : Number(roundsValue);
-        if (rounds !== null && (!Number.isInteger(rounds) || rounds < 1)) {
-            throw new Error('Inline rounds must be a positive whole number.');
-        }
-        await apiClient.savePresenceRuntime(name, {
-            expected_state_fingerprint: expected,
-            runtime_overrides: {
-                model_slot: modelValue || null,
-                inline_max_rounds: rounds,
-            },
-            ...(!reset ? { workspace_root: String(form.elements.workspace_root?.value || '').trim() } : {}),
-        });
-        showToast(`${name}: Presence runtime ${reset ? 'reset' : 'saved'} for new turns`, 'ok');
+    // A slow owner action answers its running job: the toast is the job's own message, the card follows the queue.
+    function stillWorking(name, result) {
+        if (!result?.pending) return false;
+        showToast(`${name}: ${result.message || 'still working…'} It finishes in the background; you can leave this page.`, 'muted');
+        readInstalled({ quiet: true });
+        return true;
     }
 
-    async function triggerSkillAction(name, action, options = {}) {
-        if (!name || !action) return false;
-        if (action === 'open_widgets') {
-            document.querySelector('[data-nav-page="widgets"]')?.click();
-            return false;
-        }
-        if (action === 'submit_hub') {
-            // The clicked card is the selected-skill identity. It may disappear
-            // from the passive inventory after a manifest edit, while the
-            // selected preflight can still return an agent-repairable state.
-            const outcome = await runSkillPublishFlow(name);
-            if (!outcome.started) return false;
-            showToast(`${name}: publication task ${outcome.task?.task_id || ''} created`, 'ok');
-            emitSkillLifecycle('submit_hub', name);
-            if (typeof ctx.showPage === 'function') {
-                ctx.showPage('chat');
-            } else {
-                document.querySelector('[data-nav-page="chat"]')?.click();
-            }
-            return;
-        }
-        if (action === 'retry_install') {
-            showToast(`${name}: retrying ClawHub install (this may take ~30s)`, 'muted');
-            const result = await postWithFeedback('/api/marketplace/clawhub/install', {
-                slug: name,
-                overwrite: true,
-                auto_review: true,
-            });
-            const tail = result.review_status ? ` — review ${result.review_status}` : '';
-            showToast(
-                result.ok
-                    ? `${name}: install retried${tail}`
-                    : `${name}: install retry failed — ${result.error || 'unknown'}`,
-                result.ok ? 'ok' : 'danger',
-            );
-            if (result.ok) emitSkillLifecycle('retry_install', name, result);
-            return;
-        }
-
-        if (action === 'review' || action === 'rereview') {
-            // No pre-read: the review endpoint re-checks that the skill exists.
-            const ok = await openConfirmDialog({
-                title: action === 'rereview' ? `Re-review ${name}` : `Review ${name}`,
-                body: `Run security review for ${name}? It can take a few minutes and runs in the background.`,
-                confirmLabel: action === 'rereview' ? 'Re-review' : 'Run review',
-            });
-            if (!ok) return false;
-            await reviewSkillInBackground(name);
-            return;
-        }
-
-        // Grant, approve and repair consume the row's keys, hash or findings.
-        const { skills } = await fetchSkills();
-        const skill = (skills || []).find((item) => item.name === name);
-        if (!skill) throw new Error('Skill not found in current catalogue.');
-
-        if (action === 'grant') {
-            const grants = skill.grants || {};
-            const keys = (options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
-            const missingKeys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
-            const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : (grants.requested_permissions || []);
-            const missing = keys.length ? keys : [...missingKeys, ...missingPermissions];
-            const result = await requestMissingKeyGrants(name, missing, skill.content_hash);
-            if (result) {
-                showToast(`${name}: requested grants saved`, 'ok');
-                emitSkillLifecycle('grant', name, result);
-            }
-            return;
-        }
-
-        if (action === 'approve_enable') {
-            const grants = skill.grants || {};
-            const keys = (options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
-            const missingKeys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
-            const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : (grants.requested_permissions || []);
-            const missing = keys.length ? keys : [...missingKeys, ...missingPermissions];
-            if (missing.length) await requestMissingKeyGrants(name, missing, skill.content_hash);
-            await toggleSkillEnabled(name, true);
-            return;
-        }
-
-        if (action === 'repair') {
-            if (repairingSkills.has(name)) {
-                showToast(`${name}: repair is already being queued`, 'muted');
-                return false;
-            }
-            const ok = await openConfirmDialog({
-                title: `Repair and run ${name}`,
-                body: `Start a repair task for ${name}? Ouroboros will repair the selected skill, review it, enable it when its prerequisites are ready, and test the result. The repaired skill stays running unless you stop or disable it. If the task cannot start, chat will show why.`,
-                confirmLabel: 'Repair and run',
-                danger: true,
-            });
-            if (!ok) return false;
-            repairingSkills.add(name);
-            repaintFn();
-            try {
-                const prompt = buildHealPrompt(skill);
-                await postWithFeedback('/api/command', {
-                    cmd: prompt,
-                    task_constraint: { mode: 'normal', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
-                    visible_task_id: `skill_repair_${name}`,
-                });
-                showToast(`${name}: repair request sent to Ouroboros`, 'ok');
-                emitSkillLifecycle('repair', name);
-                if (typeof ctx.showPage === 'function') {
-                    ctx.showPage('chat');
-                } else {
-                    document.querySelector('[data-nav-page="chat"]')?.click();
-                }
-            } finally {
-                repairingSkills.delete(name); // the click handler's render follows
-            }
-            return;
-        }
-
-    }
+    const missingGrantItems = (grants) => [...(grants.missing_keys || grants.requested_keys || []), ...(grants.missing_permissions || grants.requested_permissions || [])];
 
     async function toggleSkillEnabled(name, wantsEnabled) {
-        const result = await postWithFeedback(
-            `/api/skills/${encodeURIComponent(name)}/toggle`,
-            { enabled: wantsEnabled }
-        );
-        const actionLabels = {
-            extension_loaded: 'live',
-            extension_unloaded: 'stopped',
-            extension_already_live: '',
-            extension_inactive: '',
-            extension_load_error: 'load failed',
-        };
-        const friendlyAction = actionLabels[result.extension_action];
-        const tail = friendlyAction ? ` — ${friendlyAction}` : '';
-        showToast(`${name} ${wantsEnabled ? 'turned on' : 'turned off'}${tail}`, 'ok');
+        const result = await postWithFeedback(`/api/skills/${encodeURIComponent(name)}/toggle`, { enabled: wantsEnabled });
+        if (stillWorking(name, result)) return result;
+        const failed = result.extension_action === 'extension_load_error';
+        showToast(`${name} ${wantsEnabled ? 'is on' : 'is off'}${failed ? ' — it couldn’t start' : ''}`, failed ? 'warn' : 'ok');
         emitSkillLifecycle(wantsEnabled ? 'enable' : 'disable', name, result);
         return result;
     }
 
-    async function reviewSkillInBackground(name) {
+    // The server's typed refusal says why a skill cannot turn on; nothing is pre-judged here.
+    async function turnOn(name) {
+        const skill = await currentSkill(name);
+        if (!grantReady(skill)) {
+            const granted = await requestMissingKeyGrants(name, missingGrantItems(skill.grants || {}), skill.content_hash, true);
+            if (stillWorking(name, granted)) return granted;  // its single job also owns the requested Enable
+            if (granted?.setup_error) throw new Error(`Access granted, but ${granted.setup_error}`);
+            if (granted?.enabled === true) {
+                showToast(`${name} is on`, 'ok');
+                emitSkillLifecycle('enable', name, granted);
+                return granted;
+            }
+        }
+        return toggleSkillEnabled(name, true);
+    }
+
+    async function reviewInBackground(name) {
         if (reviewingSkills.has(name)) return null;
         reviewingSkills.add(name);
-        repaintFn();
+        paintInstalled();
         try {
-            showToast(`${name}: security review started; this can take a few minutes`, 'muted');
-            const result = await postWithFeedback(
-                `/api/skills/${encodeURIComponent(name)}/review`,
-                {}
-            );
+            showToast(`${name}: review started. It can take a while; you can leave this page.`, 'muted');
+            const result = await postWithFeedback(`/api/skills/${encodeURIComponent(name)}/review`, {});
             const findings = result.findings?.length ?? 0;
-            const errorTail = result.error ? ` — ${result.error}` : '';
-            showToast(
-                `${name}: review ${result.status}${findings ? ` (${findings} findings)` : ''}${errorTail}`,
-                reviewTone(result.status, result.error)
-            );
+            showToast(`${name}: review ${result.status}${findings ? ` (${plural(findings, 'finding')})` : ''}${result.error ? ` — ${result.error}` : ''}`,
+                reviewTone(result.status, result.error));
             emitSkillLifecycle('review', name, result);
             return result;
         } finally {
-            reviewingSkills.delete(name); // every caller's click handler renders afterwards
+            reviewingSkills.delete(name);
         }
     }
 
-    async function attestSkillReviewInBackground(name, expectedContentHash) {
-        // Owner-attestation: SKIP only the expensive LLM review for the owner's own skill.
-        // The deterministic preflight floor still runs server-side (a 409 surfaces here as a
-        // thrown error caught by the click handler). Reuses the reviewingSkills lock + spinner.
-        if (reviewingSkills.has(name)) return null;
-        reviewingSkills.add(name);
-        repaintFn();
+    async function attest(name) {
+        const skill = await currentSkill(name);
+        if (!skill.content_hash) throw new Error('Skill revision is unavailable. Refresh and retry.');
+        const blocked = skill.review_status === 'blockers' && !reviewReady(skill);
+        // The author is the catalog entry's (the host's cache, never the network).
+        if (skill.install?.source?.id && !catalogEntry(skill)) await store.catalog().catch(() => null);
+        const ok = await openSkipReviewDialog({
+            name, sourceName: installedSourceLabel(skill), owner: catalogEntry(skill)?.owner || '',
+            permissions: skill.permissions || [], label: blocked ? 'Turn on anyway' : 'Skip review',
+        });
+        if (ok !== true) return false;
+        // Skip review skips only the model review: the deterministic file check still runs server-side.
+        const result = await postWithFeedback(`/api/owner/skills/${encodeURIComponent(name)}/attest-review`, { expected_content_hash: skill.content_hash });
+        if (stillWorking(name, result)) return true;
+        showToast(`${name}: ${blocked ? 'turned on anyway' : 'review skipped'}. Your choice is recorded.`, 'warn');
+        emitSkillLifecycle('attest_review', name, result);
+        return true;
+    }
+
+    async function repair(name) {
+        if (repairingSkills.has(name)) return false;
+        const skill = await currentSkill(name);
+        const ok = await openConfirmDialog({
+            title: `Ask Ouroboros to fix ${name}?`,
+            body: `Ouroboros starts a task to fix ${name}, reviews the result, turns it on when it is ready and tests it. The fixed skill counts as changed here. If the task cannot start, chat says why.`,
+            confirmLabel: 'Ask Ouroboros',
+        });
+        if (!ok) return false;
+        repairingSkills.add(name);
+        paintInstalled();
         try {
-            showToast(`${name}: skipping LLM review (owner attestation)…`, 'warn');
-            const result = await postWithFeedback(
-                `/api/owner/skills/${encodeURIComponent(name)}/attest-review`,
-                { expected_content_hash: expectedContentHash }
-            );
-            showToast(`${name}: review skipped — owner-attested`, 'warn');
-            emitSkillLifecycle('attest_review', name, result);
-            return result;
+            await postWithFeedback('/api/command', {
+                cmd: buildHealPrompt(skill),
+                task_constraint: { mode: 'normal', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
+                visible_task_id: `skill_repair_${name}`,
+            });
+            showToast(`${name}: Ouroboros is on it — see chat`, 'ok');
+            emitSkillLifecycle('repair', name);
+            if (typeof ctx.showPage === 'function') ctx.showPage('chat');
         } finally {
-            reviewingSkills.delete(name); // the click handler's render follows
+            repairingSkills.delete(name);
         }
+        return true;
     }
 
-    // Checkbox toggle uses change so keyboard and mouse activation match.
-    const onChange = async (event) => {
-        const target = event.target;
-        if (!target || !target.classList || !target.classList.contains('skills-toggle')) {
+    async function updateSkill(name, skipReview = false) {
+        const skill = await currentSkill(name);
+        if (skipReview) {
+            const result = await updateWithoutReview(skill);
+            if (!result) return false;
+            showToast(`${name}: updating to ${skill.install.update_rejected.version} without review`, 'warn');
+            emitSkillLifecycle('update', name, result);
+            return true;
+        }
+        const update = skill.install?.update_available;
+        if (!update?.digest) throw new Error('No update is waiting for this skill.');
+        let mode = 'replace';
+        // A copy changed here, or one whose original is unknown, asks what to keep (SPEC §7, A03).
+        if (skill.install?.modified || skill.install?.base_known === false) {
+            mode = await openUpdateDialog({
+                name, sourceName: installedSourceLabel(skill), update,
+                installedVersion: skill.install.release?.version, currentVersion: skill.version,
+                baseKnown: skill.install.base_known !== false, editedByOwner: skill.review_gate?.blocking_reason === 'owner_edit',
+            });
+            if (!mode) return false;
+        }
+        // The host refuses when the candidate or the local files changed since this card was read.
+        const result = await skillSourcesApi.updateSkill(name, mode, update.digest, skill.content_hash || '');
+        const merge = result?.base_available === false
+            ? 'Ouroboros is merging your changes into the update without the original version — see chat'
+            : 'Ouroboros is updating it and keeping your changes — see chat';
+        const words = { replace: `updating to ${versionText(update.version)}`, merge, keep: `you keep your version; ${versionText(update.version) || 'this version'} isn’t offered again` };
+        showToast(`${name}: ${words[mode] || 'updated'}`, 'ok');
+        emitSkillLifecycle('update', name, result);
+        return true;
+    }
+
+    async function uninstall(name) {
+        const skill = installedByName()?.get(name);
+        const ok = await openConfirmDialog({
+            title: `Uninstall ${name}?`,
+            body: `Ouroboros loses ${name} and what it adds. Its settings and the keys you allowed are kept, so installing it again restores them.`,
+            confirmLabel: 'Uninstall', danger: true,
+        });
+        if (!ok) return false;
+        const result = await skillSourcesApi.uninstallSkill(name);
+        if (result?.ok === false) throw new Error(result.error || 'Uninstall was refused.');
+        showToast(`${name} uninstalled${skill?.install?.source?.name ? `; it is still in ${skill.install.source.name}` : ''}`, 'ok');
+        emitSkillLifecycle('uninstall', name, result);
+        return true;
+    }
+
+    async function deleteLocal(name, payloadRoot) {
+        const skill = await currentSkill(name);
+        if (!skill.content_hash) throw new Error('Skill revision is unavailable. Refresh and retry.');
+        const ok = await openConfirmDialog({
+            title: `Delete ${name}?`,
+            body: `${name} was made on this computer${skill.published ? '' : ' and isn’t published anywhere'}, so deleting it can’t be undone.`,
+            details: { summary: 'Show the folder', rows: [{ label: 'Folder', value: `data/${payloadRoot || skill.payload_root}` }] },
+            confirmLabel: 'Delete', danger: true,
+        });
+        if (!ok) return false;
+        const result = await apiClient.deleteSkill(name, payloadRoot || skill.payload_root, skill.content_hash);
+        if (stillWorking(name, result)) return true;
+        showToast(result.ok ? `${name} deleted` : `${name}: delete failed — ${result.error}`, result.ok ? 'ok' : 'danger');
+        if (result.ok) emitSkillLifecycle('delete', name, result);
+        return true;
+    }
+
+    async function publish(name) {
+        const skill = installedByName()?.get(name) || await currentSkill(name);
+        const sources = await store.sources().catch(() => []);
+        const choices = publishDestinations(skill, sources);
+        const choice = await openPublishDestinationDialog({ name, choices, changed: Boolean(skill.install) });
+        if (!choice) return false;
+        const destination = destinationFromChoice(choice.value);
+        const outcome = await runSkillPublishFlow(name, { destination, privateRepository: choice.private });
+        if (!outcome.started) return false;
+        showToast(`${name}: publication task ${outcome.task?.task_id || ''} started — see chat`, 'ok');
+        emitSkillLifecycle('submit_hub', name);
+        if (typeof ctx.showPage === 'function') ctx.showPage('chat');
+        return true;
+    }
+
+    // The skill as its card shows it: forgetting names the record the owner saw, never a newer one.
+    const shownSkill = (name) => (snapshot?.rawSkills || []).find((item) => item.name === name) || null;
+
+    async function forgetPublication(name) {
+        const skill = shownSkill(name) || await currentSkill(name);
+        const ok = await openConfirmDialog({
+            title: `Forget the publication record of ${name}?`,
+            body: 'This forgets only this computer’s note of what was sent; the request stays on GitHub.',
+            confirmLabel: 'Forget the record',
+        });
+        if (!ok) return false;
+        await postWithFeedback(`/api/skills/${encodeURIComponent(name)}/publication/clear`, { expected_published: skill.published || {} });
+        showToast(`${name}: publication record forgotten`, 'ok');
+        return true;
+    }
+
+    function openFindings(name) {
+        const card = container.querySelector(`:scope > .skills-card[data-skill="${CSS.escape(name)}"]`);
+        const details = card?.querySelector('.skills-details');
+        if (!details) return;
+        details.open = true;
+        if (installedByName()?.get(name)?.install?.update_rejected) {
+            const history = details.querySelector('.skills-review-history');
+            if (history) history.open = true;
+        }
+        const findings = details.querySelector('[data-skill-findings]');
+        if (findings) findings.open = true;
+        (findings || details).scrollIntoView({ block: 'nearest' });
+    }
+
+    function openInstalledSheet(name, opener) {
+        const skill = installedByName()?.get(name);
+        if (!skill) return;
+        const source = (cache.sourcesValue || []).find((row) => row.id === skill.install?.source?.id) || null;
+        const catalogItem = catalogEntry(skill);
+        const item = catalogItem || {
+            id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
+            name, description: skill.description || '', version: skill.version, permissions: skill.permissions || [],
+            needs_keys: skill.grants?.requested_keys || [], official: Boolean(skill.install?.official), signals: null,
+            category: skill.category || [],
+        };
+        sheet?.close();
+        // The source's entry has the full text; a registry install has no entry to read back.
+        const origin = skill.install?.source;
+        sheet = openSkillDetailSheet({
+            item, installed: skill, source, returnFocus: opener,
+            readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
+        });
+    }
+
+    /** One installed-skill action by name (cards, the menu, Browse and the sheet share it). */
+    async function runInstalledAction(name, action, options = {}) {
+        if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
+        if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
+        if (action === 'read_findings') { openFindings(name); return false; }
+        if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
+        if (action === 'review' || action === 'rereview') {
+            const ok = await openConfirmDialog({
+                title: `Review ${name}?`,
+                body: `Ouroboros reviews ${name} on this computer: its files go to your review models. It can take a while and runs in the background.`,
+                confirmLabel: 'Review',
+            });
+            if (!ok) return false;
+            await reviewInBackground(name);
+            return true;
+        }
+        if (action === 'attest_review') return attest(name);
+        if (action === 'repair') return repair(name);
+        if (action === 'update') return updateSkill(name);
+        if (action === 'update_without_review') return updateSkill(name, true);
+        if (action === 'uninstall') return uninstall(name);
+        if (action === 'delete') return deleteLocal(name, options.payloadRoot);
+        if (action === 'submit_hub') return publish(name);
+        if (action === 'forget_publication') return forgetPublication(name);
+        if (action === 'turn_on') return turnOn(name);
+        if (action === 'grant') {
+            const skill = await currentSkill(name);
+            const keys = String(options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
+            const result = await requestMissingKeyGrants(name, keys.length ? keys : missingGrantItems(skill.grants || {}), skill.content_hash);
+            if (result && !stillWorking(name, result)) {
+                const loaded = result.extension_action === 'extension_loaded';
+                const problem = result.setup_error || result.load_error;
+                showToast(`${name}: access granted${loaded ? ' and it started' : ''}${problem ? `, but it couldn’t start: ${problem}` : ''}`, problem ? 'warn' : 'ok');
+                emitSkillLifecycle('grant', name, result);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    async function updateAll() {
+        const candidates = updateAllCandidates(projected(), cache.sourcesValue);
+        if (candidates.length < 2) return;
+        const lines = candidates.map((skill) => `${skill.name} ${versionText(skill.install.release?.version || skill.version)} → ${versionText(skill.install.update_available.version)}`);
+        const ok = await openConfirmDialog({
+            title: `Update ${plural(candidates.length, 'skill')}?`,
+            body: `${lines.join(', ')}. Skills you changed here are not included; each of those asks what to keep.`,
+            confirmLabel: `Update ${candidates.length}`,
+        });
+        if (!ok) return;
+        let failed = 0;
+        for (const skill of candidates) {
+            try { await skillSourcesApi.updateSkill(skill.name, 'replace', skill.install.update_available.digest, skill.content_hash || ''); }
+            catch (err) { failed += 1; showToast(`${skill.name}: ${err.message || err}`, 'danger'); }
+        }
+        showToast(failed ? `${candidates.length - failed} of ${candidates.length} updates started` : `${plural(candidates.length, 'update')} started`, failed ? 'warn' : 'ok');
+        emitSkillLifecycle('update_all', '');
+        await readInstalled({ quiet: true });
+    }
+
+    // ---- event wiring ---------------------------------------------------------------------------
+    const onClick = async (event) => {
+        if (routeExternalLink(event)) return;
+        if (event.target.closest('.skills-menu-item')) closeMenus({ restoreFocus: true });
+        const mark = event.target.closest('[data-official-mark]');
+        if (mark) {
+            await store.sources().catch(() => null);
+            openOfficialExplanation(mark, (cache.sourcesValue || []).find((source) => source.id === mark.dataset.officialSource) || officialSource());
             return;
         }
+        const goto = event.target.closest('[data-skills-goto]');
+        if (goto) { selectTab(goto.dataset.skillsGoto); return; }
+        const chip = event.target.closest('[data-installed-filter]');
+        if (chip) { filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
+        const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
+        if (menuTrigger) { openSkillMenu(menuTrigger); return; }
+        const actionTarget = event.target.closest('[data-skill-action]');
+        if (!actionTarget || actionTarget.disabled || actionTarget.closest('#skills-pane-browse, #skills-pane-sources')) return;
+        const name = actionTarget.dataset.skill;
+        const action = actionTarget.dataset.skillAction;
+        if (action === 'submit_hub' && actionTarget.dataset.submitDisabled === 'true') {
+            showToast(`${name}: ${actionTarget.dataset.submitReason || 'publishing is not available now'}`, 'warn');
+            return;
+        }
+        actionTarget.disabled = true;
+        let refresh = true;
+        try {
+            refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget }) !== false;
+        } catch (err) {
+            if (err.cancelled) refresh = false;
+            showToast(`${name}: ${err.message || err}`, err.cancelled ? 'warn' : 'danger');
+        } finally {
+            actionTarget.disabled = false;
+            if (refresh) await readInstalled({ quiet: true });
+        }
+    };
+
+    // The switch: change, so keyboard and pointer activation match.
+    const onChange = async (event) => {
+        const target = event.target;
+        if (!target?.classList?.contains('skills-toggle')) return;
         const name = target.dataset.skill;
         if (!name) return;
         const wantsEnabled = Boolean(target.checked);
-        let refreshNeeded = true;
+        let refresh = true;
         target.disabled = true;
         target.dataset.skillPending = 'true';
         try {
-            if (wantsEnabled) {
-                let current = (await fetchSkills()).skills.find((skill) => skill.name === name);
-                if (!current) throw new Error('Skill not found in current catalogue.');
-                if ((current.review_status === 'blockers' && !reviewReady(current)) || (current.load_error && !isMissingGrantLoadError(current))) {
-                    throw new Error('Repair this skill before enabling it.');
-                }
-                if (!reviewReady(current)) {
-                    throw new Error('Run review and wait for a fresh executable review before enabling this skill.');
-                }
-                if (!grantReady(current)) {
-                    const grants = current.grants || {};
-                    const missingKeys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
-                    const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : (grants.requested_permissions || []);
-                    const missing = [...missingKeys, ...missingPermissions];
-                    await requestMissingKeyGrants(name, missing, current.content_hash);
-                }
-            }
-            await toggleSkillEnabled(name, wantsEnabled);
+            if (wantsEnabled) await turnOn(name);
+            else await toggleSkillEnabled(name, false);
             target.setAttribute('aria-checked', wantsEnabled ? 'true' : 'false');
         } catch (err) {
-            if (err.cancelled) refreshNeeded = false;
-            // Roll back to server-truth state on failed enable/disable.
+            if (err.cancelled) refresh = false;
             target.checked = !wantsEnabled;
             target.setAttribute('aria-checked', (!wantsEnabled).toString());
-            showToast(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
+            showToast(`${name}: ${err.message || err}`, err.cancelled ? 'warn' : 'danger');
         } finally {
             target.disabled = false;
             delete target.dataset.skillPending;
-            if (refreshNeeded) renderFn();
+            if (refresh) readInstalled({ quiet: true });
         }
     };
-    const onKeydown = (event) => {
-        const actionTarget = event.target.closest?.('[data-skill-action]');
-        if (!actionTarget) return;
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        actionTarget.click();
-    };
-    const onSubmit = async (event) => {
-        const form = event.target.closest?.('[data-presence-runtime-form]');
-        if (!form) return;
-        event.preventDefault();
-        const submit = form.querySelector('button[type="submit"]');
-        if (submit) submit.disabled = true;
-        try {
-            await savePresenceRuntime(form);
-        } catch (err) {
-            showToast(`${form.dataset.skillName || 'Skill'}: ${err.message || err}`, 'danger');
-        } finally {
-            if (submit) submit.disabled = false;
-            renderFn();
-        }
-    };
-    const onClick = async (event) => {
-        // A portalled menu keeps this same action dispatcher. Restore to the
-        // trigger before a menu action opens its own confirm/input dialog.
-        if (event.target.closest('.skills-menu-item')) closeSkillMenus({ restoreFocus: true });
-        const resetRuntime = event.target.closest('[data-presence-runtime-reset]');
-        if (resetRuntime) {
-            const form = resetRuntime.closest('[data-presence-runtime-form]');
-            resetRuntime.disabled = true;
-            try {
-                await savePresenceRuntime(form, true);
-            } catch (err) {
-                showToast(`${form?.dataset?.skillName || 'Skill'}: ${err.message || err}`, 'danger');
-            } finally {
-                resetRuntime.disabled = false;
-                renderFn();
-            }
-            return;
-        }
-        const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
-        if (menuTrigger) {
-            openSkillMenu(menuTrigger);
-            return;
-        }
-        if (event.target.closest('[data-skill-menu-close]')) {
-            closeSkillMenus();
-            return;
-        }
-        const actionTarget = event.target.closest('[data-skill-action]');
-        if (actionTarget) {
-            const name = actionTarget.dataset.skill;
-            const action = actionTarget.dataset.skillAction;
-            if (action === 'repair' && repairingSkills.has(name)) {
-                return;
-            }
-            actionTarget.disabled = true;
-            let refreshNeeded = true;
-            try {
-                refreshNeeded = await triggerSkillAction(name, action, { keys: actionTarget.dataset.keys || '' }) !== false;
-            } catch (err) {
-                if (err.cancelled) refreshNeeded = false;
-                showToast(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
-            } finally {
-                actionTarget.disabled = false;
-                if (refreshNeeded) renderFn();
-            }
-            return;
-        }
-        const target = event.target.closest('button[data-skill]');
-        if (!target) return;
-        if (target.classList.contains('skills-toggle')) {
-            // Checkbox handler above owns current toggles; ignore legacy buttons.
-            return;
-        }
-        const name = target.dataset.skill;
-        if (target.classList.contains('skills-review')) {
-            if (reviewingSkills.has(name)) return;
-            target.disabled = true;
-            try {
-                await reviewSkillInBackground(name);
-            } catch (err) {
-                showToast(`${name}: ${err.message || err}`, 'danger');
-            } finally {
-                target.disabled = false;
-                renderFn();
-            }
-            return;
-        }
-        if (target.classList.contains('skills-attest-review')) {
-            if (reviewingSkills.has(name)) return;
-            let current;
-            try {
-                current = (await fetchSkills()).skills.find((skill) => skill.name === name);
-            } catch (err) {
-                showToast(`${name}: ${err.message || err}`, 'danger');
-                return;
-            }
-            if (!current?.content_hash) {
-                showToast(`${name}: skill revision unavailable; refresh and retry`, 'warn');
-                return;
-            }
-            const ok = await openConfirmDialog({
-                title: `Skip review for ${name}`,
-                body: `Skip the expensive LLM security review for ${name}? The deterministic safety preflight still runs and refuses an unsafe or invalid skill. Owner-attestation is logged for audit — only skip review for a skill you authored or fully trust.`,
-                confirmLabel: 'Skip review',
-                danger: true,
-            });
-            if (!ok) return;
-            target.disabled = true;
-            try {
-                await attestSkillReviewInBackground(name, current.content_hash);
-            } catch (err) {
-                showToast(`${name}: ${err.message || err}`, 'danger');
-            } finally {
-                target.disabled = false;
-                renderFn();
-            }
-            return;
-        }
-        target.disabled = true;
-        let refreshNeeded = true;
-        try {
-            if (target.classList.contains('skills-next-toggle')) {
-                const wantsEnabled = target.dataset.enabled === 'true';
-                await toggleSkillEnabled(name, wantsEnabled);
-            } else if (target.classList.contains('skills-grant')) {
-                const keys = (target.dataset.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
-                if (!keys.length) {
-                    showToast(`${name}: no requested keys or permissions to grant`, 'warn');
-                } else {
-                    const result = await requestMissingKeyGrants(name, keys);
-                    // Grant may persist even if live extension reconcile fails.
-                    const reason = result.extension_reason;
-                    const action = result.extension_action;
-                    const loadError = result.load_error;
-                    if (reason === 'reconcile_call_failed') {
-                        showToast(
-                            `${name}: grant saved, but server reconcile failed \u2014 toggle disable/enable to retry`,
-                            'warn'
-                        );
-                    } else if (loadError) {
-                        showToast(
-                            `${name}: grant saved, but extension load failed: ${loadError}`,
-                            'warn'
-                        );
-                    } else if (action === 'extension_loaded') {
-                        showToast(`${name}: grant saved and extension loaded`, 'ok');
-                    } else {
-                        showToast(`${name}: requested grants saved`, 'ok');
-                    }
-                }
-            } else if (target.classList.contains('skills-update')) {
-                const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
-                if (source === 'ouroboroshub' && !await confirmHubUpdate(name, hubUpdateFacts(name))) {
-                    refreshNeeded = false;
-                    return;
-                }
-                showToast(`${name}: updating from ${source === 'ouroboroshub' ? 'OuroborosHub' : 'ClawHub'} (this may take ~30s)`, 'muted');
-                const url = source === 'ouroboroshub'
-                    ? `/api/marketplace/ouroboroshub/update/${encodeURIComponent(name)}`
-                    : `/api/marketplace/clawhub/update/${encodeURIComponent(name)}`;
-                const body = {};
-                const result = await postWithFeedback(url, body);
-                const tail = result.review_status ? ` — review ${result.review_status}` : '';
-                showToast(
-                    result.ok
-                        ? `${name}: updated${tail}`
-                        : `${name}: update failed — ${result.error || 'unknown'}`,
-                    result.ok ? 'ok' : 'danger',
-                );
-            } else if (target.classList.contains('skills-submit-hub')) {
-                if (target.dataset.submitDisabled === 'true') {
-                    showToast(`${name}: submit disabled — ${target.dataset.submitReason || 'unknown reason'}`, 'warn');
-                    refreshNeeded = false;
-                    return;
-                }
-                refreshNeeded = await triggerSkillAction(name, 'submit_hub') !== false;
-            } else if (target.classList.contains('skills-uninstall')) {
-                const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
-                const ok = await openConfirmDialog({
-                    title: `Uninstall ${name}`,
-                    body: `Uninstall ${name}? This deletes data/skills/${source}/${name}/.`,
-                    confirmLabel: 'Uninstall',
-                    danger: true,
-                });
-                if (!ok) {
-                    refreshNeeded = false;
-                    return;
-                }
-                const url = source === 'ouroboroshub'
-                    ? `/api/marketplace/ouroboroshub/uninstall/${encodeURIComponent(name)}`
-                    : `/api/marketplace/clawhub/uninstall/${encodeURIComponent(name)}`;
-                const result = await postWithFeedback(url, {});
-                showToast(
-                    result.ok ? `${name}: uninstalled` : `${name}: uninstall failed — ${result.error}`,
-                    result.ok ? 'ok' : 'danger',
-                );
-                if (result.ok) emitSkillLifecycle('uninstall', name, result);
-            } else if (target.classList.contains('skills-delete-local')) {
-                const payloadRoot = target.dataset.payloadRoot || `skills/external/${name}`;
-                const current = (await fetchSkills()).skills.find((skill) => skill.name === name);
-                if (!current?.content_hash) throw new Error('Skill revision is unavailable. Refresh and retry.');
-                const ok = await openConfirmDialog({
-                    title: `Delete ${name}`,
-                    body: `Delete ${name}? This deletes data/${payloadRoot}/ and data/state/skills/${name}/.`,
-                    confirmLabel: 'Delete',
-                    danger: true,
-                });
-                if (!ok) {
-                    refreshNeeded = false;
-                    return;
-                }
-                const result = await apiClient.deleteSkill(name, payloadRoot, current.content_hash);
-                showToast(
-                    result.ok ? `${name}: deleted` : `${name}: delete failed — ${result.error}`,
-                    result.ok ? 'ok' : 'danger',
-                );
-                if (result.ok) emitSkillLifecycle('delete', name, result);
-            }
-        } catch (err) {
-            if (err.cancelled) refreshNeeded = false;
-            showToast(`${name}: ${err.message || err}`, 'danger');
-        } finally {
-            target.disabled = false;
-            closeSkillMenus();
-            if (refreshNeeded) renderFn();
-        }
-    };
-    // A findings block is rendered collapsed with its summary only; its list
-    // is built on the first open from the row already in memory. `toggle`
-    // does not bubble, so the container listens in the capture phase.
-    const onToggle = (event) => {
-        const details = event.target;
-        if (!details?.dataset?.skillFindings || !details.open || details.childElementCount > 1) return;
-        const skill = skillsSnapshot?.rawSkills?.find((row) => row?.name === details.dataset.skillFindings);
-        details.insertAdjacentHTML('beforeend', renderReviewFindingsList(skill));
-    };
-    const handlers = [['change', onChange], ['keydown', onKeydown], ['submit', onSubmit], ['click', onClick], ['toggle', onToggle, true]];
-    handlers.forEach(([type, handler, capture]) => container.addEventListener(type, handler, capture));
-    return { closeMenus: closeSkillMenus,
-        menuFor: card => card.contains(activeMenu?.trigger) ? activeMenu.popover : null,
-        beforeReplace(card) { if (!card || card.contains(activeMenu?.trigger)) closeSkillMenus(); },
-        destroy() {
-        closeSkillMenus();
-        handlers.forEach(([type, handler, capture]) => container.removeEventListener(type, handler, capture));
-    } };
-}
+    // A findings block is rendered collapsed; its list is built on first open
+    // from the row already in memory (`toggle` does not bubble: capture).
+    const onToggle = (event) => fillFindingsOnOpen(event.target, snapshot?.rawSkills);
+    const onSearch = () => applyInstalledFilter();
 
+    // ---- Browse and Sources ---------------------------------------------------------------------
+    const host = {
+        installedByName,
+        installedSkills: () => (snapshot?.rawSkills ? projected() : null),
+        refreshInstalled: () => readInstalled({ quiet: true }),
+        sources: (force) => store.sources(force),
+        sourcesProblem: () => cache.sourcesProblem,
+        catalog: (options) => store.catalog(options),
+        reloadAll: async () => { await store.sources(true).catch(() => null); },
+        runInstalledAction: async (name, action) => {
+            try {
+                const changed = await runInstalledAction(name, action);
+                if (changed !== false) await readInstalled({ quiet: true });
+            } catch (err) {
+                if (!err.cancelled) showToast(`${name}: ${err.message || err}`, 'danger');
+            }
+        },
+        confirmFirstStart: async (sourceId) => {
+            const sources = await store.sources().catch(() => []);
+            if (firstStartAsked || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
+            firstStartAsked = true;
+            await sourcesView.confirmFirstStart();
+        },
+        compare: (item, installed) => openCompareDialog({
+            mine: { name: installed?.name, official: installed?.install?.official, source: installedSourceLabel(installed || {}),
+                version: installed?.version, state: installed?.enabled ? 'On' : 'Off', description: installed?.description },
+            other: { name: item.name, official: item.official, source: item.source_name, owner: item.owner, version: item.version,
+                popularity: popularityText(item), description: item.description,
+                reviewed: (cache.sourcesValue || []).find((row) => row.id === item.source_id)?.trust !== 'trusted' },
+        }),
+        toast: (message, tone) => showToast(message, tone),
+        showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
+        showMadeHere: () => { filter = 'made'; selectTab('installed'); },
+        openBehaviorSettings: () => { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('behavior'); },
+    };
+    const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
+    const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });
 
-function activateTab(tabName) {
-    const panels = document.querySelectorAll('.skills-tab-panel');
-    const chromeRows = document.querySelectorAll('.skills-search-chrome');
-    panels.forEach((panel) => {
-        panel.hidden = panel.dataset.pane !== tabName;
+    function activateTab(tabName) {
+        root.querySelectorAll('.skills-tab-panel').forEach((panel) => { panel.hidden = panel.dataset.pane !== tabName; });
+        root.querySelectorAll('.skills-search-chrome').forEach((row) => { row.hidden = row.dataset.chromePane !== tabName; });
+    }
+
+    async function showActive({ refresh = false } = {}) {
+        if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot) });
+        // Browse and Sources need the installed listing for every card's state.
+        const listing = snapshot ? Promise.resolve() : readInstalled();
+        if (activeTab === 'browse') await Promise.all([browse.show({ refresh }), listing]);
+        else await Promise.all([sourcesView.show({ refresh }), listing]);
+        if (!firstStartAsked) host.confirmFirstStart();
+    }
+
+    function selectTab(tabName) {
+        closeMenus();
+        activeTab = tabName;
+        tabs.select(tabName);
+        activateTab(tabName);
+        paintChrome();
+        showActive();
+    }
+
+    const tabs = bindTabStrip(root.querySelector('.skills-tabs'), {
+        dataAttr: 'data-tab', activeClass: 'is-active',
+        onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
     });
-    chromeRows.forEach((row) => {
-        row.hidden = row.dataset.chromePane !== tabName;
-    });
-}
+    // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
+    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
 
-
-async function renderMarketplacePane() {
-    const pane = document.getElementById('skills-pane-marketplace');
-    if (!pane) return;
-    if (pane.dataset.bootstrapped === 'true') {
-        // Tab entry refreshes installed state without simulating Search.
-        if (typeof pane._marketplaceRefresh === 'function') {
-            return pane._marketplaceRefresh();
-        }
-        return;
-    }
-    pane.innerHTML = '<div class="muted">Loading marketplace…</div>';
-    try {
-        const loading = initMarketplace(pane, document.getElementById('skills-pane-marketplace-chrome'));
-        pane.dataset.bootstrapped = 'true';
-        await loading;
-    } catch (err) {
-        pane.dataset.bootstrapped = '';
-        pane.innerHTML = `<div class="skills-load-error">Failed to load marketplace UI: ${escapeHtml(err.message || err)}</div>`;
-    }
-}
-
-
-async function renderOuroborosHubPane() {
-    const pane = document.getElementById('skills-pane-ouroboroshub');
-    if (!pane) return;
-    if (pane.dataset.bootstrapped === 'true') {
-        if (typeof pane._ouroboroshubRefresh === 'function') {
-            return pane._ouroboroshubRefresh();
-        }
-        return;
-    }
-    pane.innerHTML = '<div class="muted">Loading OuroborosHub…</div>';
-    try {
-        const loading = initOuroborosHub(pane, document.getElementById('skills-pane-ouroboroshub-chrome'));
-        pane.dataset.bootstrapped = 'true';
-        await loading;
-    } catch (err) {
-        pane.dataset.bootstrapped = '';
-        pane.innerHTML = `<div class="skills-load-error">Failed to load OuroborosHub UI: ${escapeHtml(err.message || err)}</div>`;
-    }
-}
-
-
-export function initSkills(ctx) {
-    const page = document.createElement('div');
-    page.innerHTML = skillsPageTemplate();
-    document.getElementById('content').appendChild(page.firstElementChild);
-
-    const container = document.getElementById('skills-list');
-    const emptyEl = document.getElementById('skills-empty');
-    const refreshBtn = document.getElementById('skills-refresh');
-    const reviewingSkills = new Set();
-    const repairingSkills = new Set();
-    let activeTab = 'installed';
-    let refreshGeneration = 0;
-    let actions;
-    let destroyed = false;
-
-    const renderFn = () => {
-        if (destroyed) return;
-        return renderSkillsList(container, emptyEl, reviewingSkills, repairingSkills, actions);
-    };
-    const repaintFn = () => {
-        if (!destroyed) repaintSkillsList(container, reviewingSkills, repairingSkills, actions);
-    };
-    const refreshActive = async () => {
-        if (destroyed) return;
-        const generation = ++refreshGeneration;
+    const onRefresh = async () => {
         refreshBtn.disabled = true;
-        refreshBtn.classList.add('is-loading');
-        const originalText = refreshBtn.textContent || 'Refresh';
         refreshBtn.textContent = 'Refreshing';
         try {
-            await Promise.all([
-                activeTab === 'marketplace' ? renderMarketplacePane()
-                    : activeTab === 'ouroboroshub' ? renderOuroborosHubPane() : renderFn(),
-                new Promise((resolve) => setTimeout(resolve, 250)),
-            ]);
+            if (activeTab === 'installed') await readInstalled({ quiet: true });
+            else if (activeTab === 'browse') await Promise.all([browse.refresh(), readInstalled({ quiet: true })]);
+            else await sourcesView.refresh();
         } catch (err) {
-            if (generation === refreshGeneration) showToast(`Skills view failed: ${err.message || err}`, 'danger');
-            console.warn('skills: render failed', err);
+            showToast(`Skills view failed: ${err.message || err}`, 'danger');
         } finally {
-            if (generation !== refreshGeneration) return;
             refreshBtn.disabled = false;
-            refreshBtn.classList.remove('is-loading');
-            refreshBtn.textContent = originalText === 'Refreshing' ? 'Refresh' : originalText;
+            refreshBtn.textContent = 'Refresh';
         }
     };
-
-    refreshBtn.addEventListener('click', refreshActive);
-    actions = attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx, repaintFn);
-
-    const tabs = bindTabStrip(document.querySelector('#page-skills .skills-tabs'), {
-        dataAttr: 'data-tab', activeClass: 'is-active',
-        onChange(tabName) {
-            actions.closeMenus();
-            activeTab = tabName;
-            activateTab(tabName);
-            refreshActive();
-        },
-    });
-
     const onPageShown = (event) => {
-        actions.closeMenus();
-        if (event.detail?.page === 'skills') {
-            // Fresh catalog snapshot once per page open; re-renders reuse it and
-            // refresh it themselves only when hub facts came back unknown. The
-            // OuroborosHub pane reads the catalog itself, so it is not read twice.
-            tabs.select(activeTab);
-            if (activeTab !== 'ouroboroshub') loadHubCatalog(true);
-            refreshActive();
-        }
+        closeMenus();
+        visible = event.detail?.page === 'skills';
+        if (!visible) { clearTimeout(pollTimer); sheet?.close(); return; }
+        tabs.select(activeTab);
+        store.sources(true).catch(() => null);
+        showActive();
     };
+    let wsTimer = 0;
+    const onLifecycle = () => {
+        if (!visible) return;
+        clearTimeout(wsTimer);
+        wsTimer = setTimeout(() => readInstalled({ quiet: true }), 300);
+    };
+    const unsubscribe = typeof ctx.ws?.on === 'function' ? ctx.ws.on('extension_lifecycle', onLifecycle) : null;
+
+    refreshBtn.addEventListener('click', onRefresh);
+    updateAllBtn.addEventListener('click', updateAll);
+    searchInput.addEventListener('input', onSearch);
+    root.addEventListener('click', onClick);
+    container.addEventListener('change', onChange);
+    container.addEventListener('toggle', onToggle, true);
     window.addEventListener('ouro:page-shown', onPageShown);
+
+    // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
+    // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
+    const onOpenSkills = async (event) => {
+        const { skill = '', query = '', category = '' } = event?.detail || {};
+        closeMenus();
+        if (!await ctx.showPage?.('skills')) return;
+        if (!skill && category) { selectTab('browse'); await browse?.showCategory(category); return; }
+        if (!skill) { selectTab('browse'); await browse?.searchFor(query); return; }
+        selectTab('installed');
+        const found = () => container.querySelector(`.skills-card[data-skill="${CSS.escape(skill)}"]`);
+        if (found()) return found().scrollIntoView({ block: 'nearest' });
+        const observer = new MutationObserver(() => {
+            if (!found()) return;
+            observer.disconnect();
+            found().scrollIntoView({ block: 'nearest' });
+        });
+        observer.observe(document.getElementById('page-skills'), { childList: true, subtree: true });
+        setTimeout(() => observer.disconnect(), 10000);  // an entry that never comes leaves the page as it is
+    };
+    window.addEventListener('ouro:open-skills', onOpenSkills);
+    paintFilters(null);
+
     return { destroy() {
         destroyed = true;
-        refreshGeneration += 1;
-        skillsRenderGeneration += 1;
-        actions.destroy();
-        document.getElementById('skills-pane-marketplace')?._marketplaceDestroy?.();
-        document.getElementById('skills-pane-ouroboroshub')?._ouroboroshubDestroy?.();
+        renderGeneration += 1;
+        clearTimeout(pollTimer);
+        clearTimeout(wsTimer);
+        closeMenus();
+        sheet?.close();
+        browse.destroy();
+        sourcesView.destroy();
         tabs.destroy();
-        refreshBtn.removeEventListener('click', refreshActive);
+        disposeBar();
+        unsubscribe?.();
+        refreshBtn.removeEventListener('click', onRefresh);
+        updateAllBtn.removeEventListener('click', updateAll);
+        searchInput.removeEventListener('input', onSearch);
+        root.removeEventListener('click', onClick);
+        container.removeEventListener('change', onChange);
+        container.removeEventListener('toggle', onToggle, true);
         window.removeEventListener('ouro:page-shown', onPageShown);
+        window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
 }

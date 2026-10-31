@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import body_candidate, subagent_worktrees
+from tests._shared import retire_synthetic_retention
 from tests.body_candidate_support import candidate_commit, git, isolate, make_ctx, make_serving
 
 pytestmark = pytest.mark.serial
@@ -17,6 +18,8 @@ def body(tmp_path, monkeypatch):
     serving = make_serving(tmp_path)
     data = isolate(monkeypatch, tmp_path)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     return serving, data
 
 
@@ -291,11 +294,14 @@ def test_gc_honours_nested_preflight_retention_marker(body):
     nested.mkdir(parents=True)
     (nested / "evidence.txt").write_text("unconfirmed reader")
     assert retain_tree(nested, "teardown unconfirmed")
-    write_task_result(data, "retained", "completed", result="done")
-    subagent_worktrees.prune_orphans(retention_days=0)
-    assert (nested / "evidence.txt").read_text() == "unconfirmed reader"
-    assert pathlib.Path(bound["path"]).exists()  # keep imports and registry discovery too
-    assert body_candidate.find("retained")
+    try:
+        write_task_result(data, "retained", "completed", result="done")
+        subagent_worktrees.prune_orphans(retention_days=0)
+        assert (nested / "evidence.txt").read_text() == "unconfirmed reader"
+        assert pathlib.Path(bound["path"]).exists()  # keep imports and registry discovery too
+        assert body_candidate.find("retained")
+    finally:
+        retire_synthetic_retention(nested, "teardown unconfirmed")  # no process ever ran here
 
 
 @pytest.mark.parametrize("removal", ["remove_worktree", "prune_orphans"])
@@ -316,16 +322,21 @@ def test_own_body_child_copy_removal_disposes_its_sibling_environment(body, monk
                                     "workspace_copy": admitted_copy_metadata(root)})
     env_root = pathlib.Path(body_candidate.process_environment(child, root)["HOME"]).parent
     assert env_root == pathlib.Path(root).with_name(pathlib.Path(root).name + ".env") and env_root.is_dir()
+    nested = env_root / "tmp" / "preflight"
     if retained:
-        nested = env_root / "tmp" / "preflight"
         nested.mkdir(parents=True)
         assert retain_tree(nested, "teardown unconfirmed")
-    if removal == "remove_worktree":
-        assert subagent_worktrees.remove_worktree(task_id="env-child") is True
-    else:
-        assert subagent_worktrees.prune_orphans(retention_days=0)["removed"] == 1
-    assert not pathlib.Path(root).exists()
-    assert env_root.is_dir() is retained  # a nested teardown's retention marker keeps the scratch it names
+    try:
+        if removal == "remove_worktree":
+            assert subagent_worktrees.remove_worktree(task_id="env-child") is True
+        else:
+            from ouroboros.task_results import write_task_result
+            write_task_result(data, "env-child", "completed", result="done")  # the copy's task is proven over
+            assert subagent_worktrees.prune_orphans(retention_days=0, live=lambda _task: False)["removed"] == 1
+        assert not pathlib.Path(root).exists()
+        assert env_root.is_dir() is retained  # a nested teardown's retention marker keeps the scratch it names
+    finally:
+        retire_synthetic_retention(nested, "teardown unconfirmed")  # no process ever ran here
 
 
 def test_gc_compares_to_serving_linked_head_not_common_head(body, tmp_path):
@@ -359,11 +370,14 @@ def test_gc_rechecks_late_retention_and_discard_keeps_missing_checkout_scratch(b
     nested = pathlib.Path(env["TMPDIR"]) / "preflight"
     nested.mkdir()
     assert retain_tree(nested, "unconfirmed after verdict")
-    assert not body_candidate.verdict_holds(row, verdict, data_dir=data)
-    # Scratch retains independent evidence even after a checkout disappears.
-    git(serving, "worktree", "remove", "--force", bound["path"])
-    body_candidate.discard_scratch(row)
-    assert (nested / "OUROBOROS_RETAINED.txt").exists()
+    try:
+        assert not body_candidate.verdict_holds(row, verdict, data_dir=data)
+        # Scratch retains independent evidence even after a checkout disappears.
+        git(serving, "worktree", "remove", "--force", bound["path"])
+        body_candidate.discard_scratch(row)
+        assert (nested / "OUROBOROS_RETAINED.txt").exists()
+    finally:
+        retire_synthetic_retention(nested, "unconfirmed after verdict")  # no process ever ran here
 
 
 def test_foreign_copy_keeps_source_and_explicit_process_environment(body, tmp_path, monkeypatch):

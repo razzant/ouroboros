@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -39,8 +40,11 @@ log = logging.getLogger(__name__)
 # The sweep outcome recorded while an owner-stop episode holds an open intent.
 OWNER_STOP_HOLDING = "owner_stop_finalizing"
 
+# (intent task, control) of each orchestration pass now running in this process.
+_PASSES: set = set()
+_PASSES_LOCK = threading.Lock()
+
 _CHILD_PROJECTION_MAX_ROWS = 20
-_CHILD_PROJECTION_PREVIEW_CHARS = 240
 
 
 def _parse_ts(raw: Any) -> float:
@@ -151,11 +155,11 @@ def running_owner_stop_tasks(drive_root: Any, *, grace_sec: float) -> set:
     Read once per enforcement pass (one small locked projection read), then
     checked per RUNNING row — the typed predicate ``supervisor/queue.py``
     consults before generic spare-withdraw, spare-reset, second-grace,
-    idle-kill, reaping, and retry branches (§12.2 item 8). The task's explicit
+    silence-attention and reaping branches (§12.2 item 8). The task's explicit
     deadline and absolute safety ceiling are checked separately by the queue
     and never inherit this hold.  Within those hard bounds the hold covers the
     whole open-intent window, including the short expiry window before custody
-    consumes the intent, so the generic idle rail cannot clone a retry.
+    consumes the intent, so no generic rail acts on the stopping task.
     ``grace_sec<=0`` means the graceful-stop feature is off (the sweep feeds
     custody immediately), so no hold is needed.
     """
@@ -208,7 +212,9 @@ def sweep_owner_stop_hold(q: Any, task_id: str, intent: Dict[str, Any], *, now: 
 
     True  = the graceful episode holds this tick: descendants (cascade) are
             hard-settled with zero paid turns, the root's grace episode is
-            idempotently armed/held, custody is NOT fed.
+            idempotently armed/held, custody is NOT fed. A pass overlapping
+            one already orchestrating this episode (the ingress kick-off and
+            a sweep tick) only holds: one control and one owner notice.
     False = the generic custody feed proceeds (immediate policy, hardened
             intent, expired deadline, settled root, or a root that never
             started — pending tasks never buy a model turn).
@@ -239,11 +245,18 @@ def sweep_owner_stop_hold(q: Any, task_id: str, intent: Dict[str, Any], *, now: 
         # generic hard path without extending owner authority indefinitely.
         log.warning("owner-stop settled read failed for %s", task_id, exc_info=True)
         return True
+    claim = (task_id, owner_stop_control_id(intent))
+    with _PASSES_LOCK:
+        if claim in _PASSES:
+            return True  # the running pass alone reads, writes and stamps this episode's latch
+        _PASSES.add(claim)
     try:
         return orchestrate_graceful_stop(q, task_id, intent, now=now)
     except Exception:
         log.warning("owner-stop orchestration failed for %s", task_id, exc_info=True)
         return True
+    finally:
+        _PASSES.discard(claim)
 
 
 def _task_hard_bound_reached(q: Any, task_id: str, *, now: float) -> bool:
@@ -328,9 +341,18 @@ def orchestrate_graceful_stop(q: Any, task_id: str, intent: Dict[str, Any], *, n
         # The in-process direct-chat turn has no RUNNING row but drains the
         # same owner mailbox on the canonical drive: arm its episode from the
         # queue-shaped record the chat agent exposes.
+        from ouroboros.task_results import load_task_result
         from supervisor import workers
+        from supervisor.cancel_publication import live_presence_row
+        from supervisor.queue import task_has_live_ownership
 
         turn = workers.direct_chat_turn(physical_task_id)
+        if turn is None and live_presence_row(row := load_task_result(q.DRIVE_ROOT, physical_task_id) or {}) \
+                and task_has_live_ownership(physical_task_id):
+            # A live inline Presence turn the shared owner holds drains this control too (#2012); the
+            # control needs no intake lock: one its author never drains is never read, and custody
+            # settles the intent from that author's own terminal.
+            turn = {**row, _PRESENCE_TURN: True}
         if turn is None:
             # PENDING (never started -> zero turns) or gone (miss lane): feed
             # custody. The sweep's generic path settles both shapes.
@@ -352,6 +374,10 @@ def orchestrate_graceful_stop(q: Any, task_id: str, intent: Dict[str, Any], *, n
         cascade=cascade,
         logical_task_id=task_id,
     )
+
+
+_PRESENCE_TURN = "_owner_stop_presence_turn"
+_PRESENCE_ARMED: set = set()  # controls this process wrote to Presence turns: one control and toast each
 
 
 def _settle_descendants_hard(
@@ -417,11 +443,80 @@ def owner_stop_control_id(intent: Dict[str, Any]) -> str:
     return f"ownerstop:{str(intent.get('request_id') or '')}"
 
 
+def owner_stop_origin(drive_root: Any, task_id: str) -> Dict[str, Any]:
+    """The stop a turn that took the owner-stop rail ended on, for its terminal record.
+
+    Stop now on an in-process turn and Wrap up both end the loop under the one
+    ``owner_requested_finalization`` reason, so the durable intent, still open
+    while the turn publishes its terminal, is where the command is known. The
+    answer is the ``cancel_origin`` a settled cancel records
+    (``cancel_publication._intent_outcome_fields``) plus the effective
+    ``stop_policy``: Stop now pressed during a Wrap up reads ``immediate``. An
+    absent or unreadable intent answers ``{}``, and the record keeps its
+    generic reading instead of an invented command.
+    """
+    from ouroboros.cancel_intents import active_intent, resolve_owner_stop_intent, stop_policy
+    from supervisor.cancel_publication import _intent_outcome_fields
+
+    try:
+        intent = active_intent(drive_root, task_id) or resolve_owner_stop_intent(drive_root, task_id)[1]
+    except Exception:
+        log.debug("owner-stop origin unreadable for %s", task_id, exc_info=True)
+        return {}
+    origin = _intent_outcome_fields(intent).get("cancel_origin") if intent else None
+    return {**origin, "stop_policy": stop_policy(intent)} if origin else {}
+
+
+def owner_stop_ending(record: Dict[str, Any]) -> tuple:
+    """``(command, ending)`` a record of the owner-stop rail reads with; twin: ``ownerStopEnding``.
+
+    The command is the typed stop ``owner_stop_origin`` put on its terminal
+    (``cancel_origin.stop_policy``): ``stop_now`` or ``wrap_up``. The ending is
+    ``stop`` for Stop now and for a Wrap up without a final answer (its own
+    failed execution), ``summary`` for a Wrap up's answer and for every record
+    without a command, which cannot say which button it was; ``""`` for any
+    other reason, except a provider wait ended by its recorded accepted Stop
+    control. The status fold (``project_dialogue.outcome_phase``) reads it.
+    """
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+
+    origin = record.get("cancel_origin") if isinstance(record.get("cancel_origin"), dict) else {}
+    command = {"immediate": "stop_now", "finalize_then_cancel": "wrap_up"}.get(str(origin.get("stop_policy") or ""), "")
+    reason = str(record.get("reason_code") or "")
+    if reason == "provider_unavailable" and command == "stop_now" and origin.get("control_reason") == REASON_OWNER_STOPPED_DIRECT_TURN:
+        return command, "stop"  # the accepted control ended this wait; provider facts remain
+    if reason != REASON_OWNER_REQUESTED_FINALIZATION:
+        return "", ""
+    axes = record.get("outcome_axes") if isinstance(record.get("outcome_axes"), dict) else {}
+    execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    unanswered = command == "wrap_up" and str(execution.get("status") or "") == "failed"
+    return command, "stop" if command == "stop_now" or unanswered else "summary"
+
+
 # The finalize control custody writes for a STOPPED in-process direct-chat turn
 # (immediate policy). The loop's forced-finalization branch recognizes it and
 # ends the turn WITHOUT a further model call: a retained delivery candidate or
 # the typed fallback text — the honest twin of killing a worker.
 REASON_OWNER_STOPPED_DIRECT_TURN = "owner_stopped_direct_chat_turn"
+
+
+def presence_stop_now(owner_ctx: Any) -> bool:
+    """Whether Stop now holds the inline Presence turn whose final answer closes its admission.
+
+    Its custody writes no control and leaves the open intent to the turn (#2012), whose dispatch
+    gate reads it before each call; a call already sent can still return that answer, so each
+    closing admission (the ordinary, the forced, an authored stop's at a hard rail) reads it once
+    more, as ``_handle_model_wait_control`` does. A pooled worker (its Stop is the kill) and a
+    direct turn (custody's control) keep their own rails.
+    """
+    waiter = getattr(owner_ctx, "model_wait_context", None)
+    task = getattr(waiter, "task", None)
+    if getattr(waiter, "worker_slot_held", True) or not (isinstance(task, dict) and task.get("_presence_turn")):
+        return False
+    from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
+
+    intent = active_intent(waiter.canonical_root, waiter.task_id)
+    return isinstance(intent, dict) and stop_policy(intent) == STOP_POLICY_IMMEDIATE
 
 
 def _mark_owner_stop_control_drained(
@@ -626,20 +721,23 @@ def _arm_owner_stop_episode(
             # The in-process direct-chat turn: the caller synthesized
             # ``running_meta`` from the chat agent's record; its armed-control
             # latch lives on that record (``workers.stamp_direct_chat_turn``).
+            # A witnessed Presence turn's latch is ``_PRESENCE_ARMED``.
             candidate = running_meta.get("task") if isinstance(running_meta, dict) else None
-            if not (isinstance(candidate, dict) and candidate.get("_is_direct_chat")):
+            if not (isinstance(candidate, dict) and (candidate.get("_is_direct_chat") or candidate.get(_PRESENCE_TURN))):
                 return False
             direct_turn = candidate
             meta = running_meta
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
         latch = meta if direct_turn is None else task
-        if str(latch.get("finalization_control_msg_id") or "") == control_id:
+        if str(latch.get("finalization_control_msg_id") or "") == control_id or (
+                task.get(_PRESENCE_TURN) and control_id in _PRESENCE_ARMED):
             return True  # already armed; the mailbox drain dedupes by msg_id
         chat_id = int(task.get("chat_id") or 0)
         task_drive = q._task_drive_for_task(task, task_id)
     control_text = REASON_OWNER_REQUESTED_FINALIZATION
     if cascade:
-        projection = _child_result_projection(q, logical_task_id or task_id)
+        projection = _child_result_projection(q, logical_task_id or task_id, receipt_task_id=task_id, stop=(
+            str(intent.get("task_id") or logical_task_id or task_id), str(intent.get("request_id") or "")))
         if projection:
             control_text = f"{control_text}\n{projection}"
     grace_deadline = owner_stop_deadline_ts(intent, queue_grace_sec(q))
@@ -656,7 +754,12 @@ def _arm_owner_stop_episode(
             ),
         )
 
-    if direct_turn is not None:
+    if task.get(_PRESENCE_TURN):
+        # Its drain re-reads the durable intent (handle_finalize_now_entry), so a
+        # hardened Stop now or a settled turn never buys the final turn.
+        if written := _write_control():
+            _PRESENCE_ARMED.add(written)
+    elif direct_turn is not None:
         # Atomic against the turn's completion (its admission lock): a turn
         # that already ended arms nothing — custody settles it on the sweep.
         from supervisor import workers
@@ -737,45 +840,30 @@ def _forensic(q: Any, task_id: str, event: str, intent: Dict[str, Any]) -> None:
         log.debug("owner-stop forensic append failed for %s", task_id, exc_info=True)
 
 
-def _child_result_projection(q: Any, task_id: str) -> str:
-    """Q6=A: the bounded durable child projection for the root's ONE final turn.
+def _child_result_projection(q: Any, task_id: str, *, receipt_task_id: str = "", stop: tuple = ()) -> str:
+    """Q6=A: persist full Wrap up facts, then project the root's ONE bounded final input.
 
-    Built from the existing seams — cascade ancestry enumeration
-    (``terminal_delivery._cascade_descendant_rows``) over durable rows plus the
-    queue snapshot, and each child's own durable result — DELIBERATELY including
-    settled-cancelled children (§12.2 item 4). Bounded: at most
-    ``_CHILD_PROJECTION_MAX_ROWS`` rows with the exact omitted count, each
-    result previewed to ``_CHILD_PROJECTION_PREVIEW_CHARS``. No ledger is added.
-    """
+    Membership is the cascade ancestry walk (``terminal_delivery._cascade_descendant_rows``),
+    DELIBERATELY including settled-cancelled children (§12.2 item 4); the receipt keeps every
+    child and run, the projection counts what it omits. No ledger is added. ``stop`` is the
+    cascade intent's (task id, request id), the identity of the receipt's card row."""
+    from ouroboros.owner_stop_receipt import capture_receipt, receipt_text
+    from supervisor.terminal_delivery import _cascade_descendant_rows
+
     try:
-        from supervisor.terminal_delivery import _cascade_descendant_rows
-        from ouroboros.task_results import load_task_result
-
-        rows = _cascade_descendant_rows(pathlib.Path(q.DRIVE_ROOT), task_id)
+        gaps: list = []
+        rows = _cascade_descendant_rows(pathlib.Path(q.DRIVE_ROOT), task_id, strict=True, gaps=gaps)
+        audit = capture_receipt(pathlib.Path(q.DRIVE_ROOT), receipt_task_id or task_id, rows,
+                                gap="; ".join(gaps), stop=stop)
+        return receipt_text(audit, prompt=True, max_rows=_CHILD_PROJECTION_MAX_ROWS)
     except Exception:
-        log.debug("owner-stop child projection failed for %s", task_id, exc_info=True)
-        return ""
-    if not rows:
-        return ""
-    lines = [
-        "[CHILD_RESULTS] Your subtasks were stopped for this owner-requested "
-        "finalization; their preserved durable results:",
-    ]
-    for index, (tid, status) in enumerate(sorted(rows.items())):
-        if index >= _CHILD_PROJECTION_MAX_ROWS:
-            lines.append(f"- … {len(rows) - _CHILD_PROJECTION_MAX_ROWS} more descendant(s) omitted")
-            break
-        preview = ""
+        log.warning("owner-stop retained-work receipt unavailable for %s", task_id, exc_info=True)
         try:
-            result = load_task_result(pathlib.Path(q.DRIVE_ROOT), tid) or {}
-            status = str(result.get("status") or status or "")
-            preview = " ".join(str(result.get("result") or "").split())
+            audit = capture_receipt(pathlib.Path(q.DRIVE_ROOT), receipt_task_id or task_id, {},
+                                    gap="child_receipt_unavailable", stop=stop)
+            return receipt_text(audit, prompt=True)
         except Exception:
-            preview = ""
-        if len(preview) > _CHILD_PROJECTION_PREVIEW_CHARS:
-            preview = preview[:_CHILD_PROJECTION_PREVIEW_CHARS] + "…"
-        lines.append(f"- {tid} ({status or 'unknown'}): {preview or '(no result text)'}")
-    return "\n".join(lines)
+            return "[CHILD_RESULTS] Retained child work could not be verified; saved work is unknown."
 
 
 def handle_finalize_now_entry(entry, owner_ctx, drive_root, task_id, controls) -> None:

@@ -1,6 +1,7 @@
 """Elasticity through actual assignment, readiness, snapshot and reaper consumers."""
 
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -377,7 +378,8 @@ def test_unauthorized_pending_resume_never_withholds_growth_from_admissible_work
     from ouroboros import owner_pause
     from ouroboros.cancel_intents import request_cancel
     from supervisor import worker_owner_wait
-    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause"}}
+    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause",
+             "budget_paused_sec": 0.0, "sleep_started_at": time.time()}}
     worker_owner_wait.handle_owner_wait(event, workers)
     assert assigning.original.in_q.get_nowait()["phase"] == "parked"
     worker_owner_wait.handle_owner_wait({**event, "phase": "resume", "resume_reason": "control:owner_resume"}, workers)
@@ -786,7 +788,8 @@ def test_owner_pause_resume_or_stop_at_cap_keeps_the_pool_dispatching(assigning,
     from ouroboros import owner_pause
     from supervisor import worker_owner_wait
     owner_pause.install_fence(assigning.root, "owner", request_id="pause-1")
-    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause"}}
+    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause",
+             "budget_paused_sec": 0.0, "sleep_started_at": time.time()}}
     worker_owner_wait.handle_owner_wait(event, workers)
     assert assigning.original.in_q.get_nowait()["phase"] == "parked"
     workers.assign_tasks()  # the lent slot's replacement
@@ -863,6 +866,27 @@ def test_an_ordinary_idle_exit_retires_in_one_reaper_pass_and_is_journaled(assig
     retired, = [row for row in rows if row["type"] == "worker_retired"]
     assert {k: retired[k] for k in ("worker_id", "pid", "process_birth", "token", "replaced")} == {
         "worker_id": 1, "pid": 43, "process_birth": "test-birth", "token": probe["token"], "replaced": False}
+
+
+@pytest.mark.parametrize("retained", [0, 2])
+def test_a_retired_idle_worker_journals_the_dialogue_rows_it_still_held(assigning, monkeypatch, retained):
+    import json
+    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
+    workers.RUNNING.clear()
+    assigning.original.busy_task_id = None
+    surplus = affirm_ready(workers.Worker(1, _ReapedOnJoin(43), InputQueue()))
+    workers.WORKERS[1] = surplus
+    with queue._queue_lock:
+        lifecycle.request_worker_quiescence(surplus)
+    probe = surplus.in_q.get_nowait()
+    lifecycle.handle_worker_quiescent({**probe, "worker_id": 1, "pid": 43, "process_birth": surplus.process_birth,
+                                       "retained_rows": retained}, workers)
+    assert lifecycle.retire_quiescent_worker(surplus)
+    monkeypatch.setattr(lifecycle, "kill_worker_tree", lambda pid, **kw: setattr(surplus.proc, "killed", True))
+    lifecycle.reap_idle_worker(queue._reap_queue.get_nowait())
+    rows = [json.loads(line) for line in (assigning.root / "logs" / "supervisor.jsonl").read_text().splitlines()]
+    retired, = [row for row in rows if row["type"] == "worker_retired"]
+    assert retired.get("dialogue_rows_lost") == (retained or None)
 
 
 def test_an_unready_child_reaped_on_join_continues_its_bounded_step_in_one_pass(assigning, monkeypatch):

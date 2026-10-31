@@ -9,13 +9,13 @@
     "id": "test_degraded_outcomes_render_with_typed_severity",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "const presentation = taskPresentation(terminal || outcome === 'error' ? outcome : 'working');"
+    "value": "const presentation = taskPresentation(terminal || outcome === 'error' ? outcome : 'working',"
   },
   {
     "id": "test_degraded_outcomes_render_with_typed_severity",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "['failed', 'infra_failed'].includes(execution)"
+    "value": "((lifecycle === 'failed' || execution === 'failed') && !unanswered)\n        || execution === 'infra_failed'"
   },
   {
     "id": "test_degraded_outcomes_render_with_typed_severity",
@@ -45,7 +45,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "Show details"
+    "value": "<span class=\"chat-live-toggle\" data-live-toggle>Details</span>"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -93,7 +93,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "...chatStatusCounts(activeDirectActivities, liveCardRecords.values(), (id) => modelWaits.waiting(id))"
+    "value": "return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true, ready: hostStart.ready(),"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -159,7 +159,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "            const changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)"
+    "value": "                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -237,7 +237,7 @@
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "const presentation = taskPresentation(phase || 'done');"
+    "value": "const presentation = taskPresentation(phase || 'done',"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
@@ -405,13 +405,13 @@
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-live-card[data-expanded=\"1\"] > .chat-live-summary-button .chat-live-chevron {"
+    "value": ".chat-live-summary-side[aria-expanded=\"true\"] > .chat-live-chevron {"
   },
   {
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
     "path": "web/style.css",
-    "kind": "contains",
-    "value": ".chat-live-card[data-expanded=\"1\"] > .chat-live-timeline {"
+    "kind": "regex",
+    "value": "\\.chat-live-card\\[data-expanded=\"1\"\\] > \\.chat-live-timeline(?:,[^{,]+)*\\s*\\{\\s*display: flex;"
   },
   {
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
@@ -456,70 +456,58 @@
     "value": "state.activePage !== 'chat'"
   },
   {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": ".chat-live-typing {"
-  },
-  {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": ".chat-live-typing span {"
-  },
-  {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": "animation: typing-bounce"
-  },
-  {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": ".chat-live-card[data-finished=\"1\"] > .chat-live-summary-button .chat-live-typing {"
-  },
-  {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": "animation: thinking-pulse"
-  },
-  {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": ".chat-live-phase[data-motion=\"1\"], .chat-live-phase-secondary[data-motion=\"1\"]"
-  },
-  {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
     "path": "web/modules/task_phase_chip.js",
     "kind": "contains",
-    "value": "export function setLiveCardTypingVisible(record, visible) {"
+    "value": "import { createStatusMark, markView, paintStatusMark } from './status_mark.js';"
   },
   {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "inlineTypingEl: root.querySelector('[data-live-typing]')"
-  },
-  {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
     "path": "web/modules/task_phase_chip.js",
     "kind": "contains",
-    "value": "setLiveCardTypingVisible(record, !record.finished)"
+    "value": "paintStatusMark(mark, markView({ mark: view.mark, owner: view.owner, outcome: view.outcome }))"
   },
   {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "setLiveCardTypingVisible(record, true);"
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
+    "path": "web/modules/task_phase_chip.js",
+    "kind": "not_contains",
+    "value": "setLiveCardTypingVisible"
   },
   {
-    "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
     "path": "web/modules/chat.js",
-    "kind": "contains",
+    "kind": "not_contains",
+    "value": "setLiveCardTypingVisible"
+  },
+  {
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
+    "path": "web/modules/chat.js",
+    "kind": "not_contains",
     "value": "data-live-typing"
+  },
+  {
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
+    "path": "web/style.css",
+    "kind": "not_contains",
+    "value": ".chat-live-phase::before"
+  },
+  {
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
+    "path": "web/style.css",
+    "kind": "not_contains",
+    "value": "live-dot-breathe"
+  },
+  {
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
+    "path": "web/style.css",
+    "kind": "not_contains",
+    "value": ".chat-live-phase-secondary[data-motion"
+  },
+  {
+    "id": "test_live_card_chip_draws_the_shared_status_mark",
+    "path": "web/style.css",
+    "kind": "not_contains",
+    "value": ".chat-live-card .chat-live-typing"
   },
   {
     "id": "test_live_card_timeline_body_renders_markdown",
@@ -530,8 +518,8 @@
   {
     "id": "test_live_card_timeline_body_renders_markdown",
     "path": "web/modules/chat_activity.js",
-    "kind": "not_contains",
-    "value": "escapeHtml(displayBody)"
+    "kind": "regex",
+    "value": "item\\.bodyFormat === 'text'\\s*\\?\\s*escapeHtml\\(displayBody\\)\\s*:\\s*renderMarkdown\\(displayBody, \\{ inlineHeadingBreaks: true \\}\\)"
   },
   {
     "id": "test_live_card_timeline_headline_renders_markdown_for_progress",
@@ -672,22 +660,70 @@
     "value": "bar.value"
   },
   {
-    "id": "test_evolution_tags_table_escapes_untrusted_tag_names",
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
     "path": "web/modules/evolution.js",
     "kind": "contains",
-    "value": "escapeHtmlText(p.tag || '')"
+    "value": "import { escapeHtmlAttr as esc } from './ui_primitives.js';"
   },
   {
-    "id": "test_evolution_tags_table_escapes_untrusted_tag_names",
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
     "path": "web/modules/evolution.js",
     "kind": "contains",
-    "value": "escapeHtmlText(dateStr)"
+    "value": "${esc(version.version)}"
   },
   {
-    "id": "test_evolution_tags_table_escapes_untrusted_tag_names",
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": "${esc(fullDate(version.t))}"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": "Source: ${esc(sourceLabel(version))}"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": ">${esc(words.title)}</h4>"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": ">${esc(words.body)}</p>"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": ">${esc(label.text)}</text>"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
     "path": "web/modules/evolution.js",
     "kind": "not_contains",
-    "value": "<td><code>${p.tag}</code></td>"
+    "value": ">${words.title}<"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "not_contains",
+    "value": ">${words.body}<"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "not_contains",
+    "value": ">${label.text}<"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "not_contains",
+    "value": ">${version.version}<"
   },
   {
     "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
@@ -732,38 +768,38 @@
     "value": "const wasFirstLoad = !historyLoaded;"
   },
   {
-    "id": "test_swarm_and_context_dom_present",
-    "path": "web/modules/chat.js",
+    "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "id=\"chat-swarm\""
+    "value": "id=\"chat-subagents-mode\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
-    "path": "web/modules/chat.js",
+    "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "id=\"chat-context-mode\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
-    "path": "web/modules/chat.js",
+    "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/composer_subagents.js",
     "kind": "contains",
-    "value": "class=\"chat-composer-pills\""
+    "value": "role=\"radio\" tabindex=\"-1\" aria-checked=\"false\" data-mode=\"${mode}\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
     "value": "const CONTEXT_MODES = ['nano', 'low', 'max'];"
   },
   {
-    "id": "test_swarm_and_context_dom_present",
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
     "value": "role=\"radio\" tabindex=\"-1\" aria-checked=\"false\" data-mode=\"${mode}\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
-    "path": "web/modules/chat.js",
+    "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "class=\"chat-send-group\""
   },
@@ -771,7 +807,7 @@
     "id": "test_skill_review_click_guard_prevents_duplicate_posts",
     "path": "web/modules/skills.js",
     "kind": "contains",
-    "value": "if (reviewingSkills.has(name)) return;"
+    "value": "if (reviewingSkills.has(name)) return null;"
   },
   {
     "id": "test_skill_review_click_guard_prevents_duplicate_posts",
@@ -786,52 +822,46 @@
     "value": "reviewingSkills.add(name);"
   },
   {
-    "id": "test_swarm_send_listener_uses_arrow_function",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "sendMessage(swarmArmed())"
+    "id": "test_one_shot_swarm_pill_is_gone",
+    "path": "web/modules/composer.js",
+    "kind": "not_contains",
+    "value": "id=\"chat-swarm\""
   },
   {
-    "id": "test_swarm_send_listener_uses_arrow_function",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "sendBtn.addEventListener('click', () => sendMessage(swarmArmed()))"
+    "id": "test_one_shot_swarm_pill_is_gone",
+    "path": "web/modules/composer.js",
+    "kind": "not_contains",
+    "value": "swarmArmed"
   },
   {
-    "id": "test_swarm_default_off",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "data-armed=\"false\""
+    "id": "test_one_shot_swarm_pill_is_gone",
+    "path": "web/modules/composer.js",
+    "kind": "not_contains",
+    "value": "force_plan"
   },
   {
-    "id": "test_swarm_functions_exist",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "function swarmArmed()"
+    "id": "test_one_shot_swarm_pill_is_gone",
+    "path": "web/modules/composer.js",
+    "kind": "not_contains",
+    "value": "planMode"
   },
   {
-    "id": "test_swarm_functions_exist",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "function setSwarm(armed)"
-  },
-  {
-    "id": "test_swarm_one_shot_disarms_on_send",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "if (planMode) setSwarm(false);"
+    "id": "test_one_shot_swarm_pill_is_gone",
+    "path": "web/style.css",
+    "kind": "not_contains",
+    "value": ".chat-swarm"
   },
   {
     "id": "test_context_segmented_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-context-mode .chat-seg {"
+    "value": ":is(.chat-context-mode, .chat-subagents-mode) .chat-seg {"
   },
   {
     "id": "test_context_segmented_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-context-mode .chat-seg[aria-checked=\"true\"]"
+    "value": ":is(.chat-context-mode, .chat-subagents-mode) .chat-seg[aria-checked=\"true\"]"
   },
   {
     "id": "test_context_segmented_css_exists",
@@ -840,31 +870,25 @@
     "value": ".chat-context-mode[data-context-mode=\"low\"] {"
   },
   {
-    "id": "test_swarm_armed_marker_css",
+    "id": "test_composer_capsules_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-swarm[data-armed=\"true\"]"
+    "value": ".chat-subagents-mode {"
   },
   {
-    "id": "test_composer_pills_css_exists",
-    "path": "web/style.css",
+    "id": "test_composer_capsules_css_exists",
+    "path": "web/ui.css",
     "kind": "contains",
-    "value": ".chat-composer-pills {"
+    "value": ".ui-hint {"
   },
   {
-    "id": "test_composer_pills_css_exists",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": ".chat-swarm {"
-  },
-  {
-    "id": "test_composer_pills_css_exists",
+    "id": "test_composer_capsules_css_exists",
     "path": "web/style.css",
     "kind": "contains",
     "value": ".chat-context-mode {"
   },
   {
-    "id": "test_composer_pills_css_exists",
+    "id": "test_composer_capsules_css_exists",
     "path": "web/style.css",
     "kind": "contains",
     "value": ".chat-send-group {"
@@ -877,7 +901,7 @@
   },
   {
     "id": "test_context_segment_click_handler",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "data-context-mode"
   },
@@ -903,7 +927,7 @@
     "id": "test_history_replay_resyncs_after_reconnect",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "fromReconnect: isReconnect"
+    "value": "isReconnect ? syncHistory({ fromReconnect: true })"
   },
   {
     "id": "test_history_replay_resyncs_after_reconnect",
@@ -949,25 +973,25 @@
   },
   {
     "id": "test_chat_input_disables_autocorrect",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "id=\"chat-input\""
   },
   {
     "id": "test_chat_input_disables_autocorrect",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "autocorrect=\"off\""
   },
   {
     "id": "test_chat_input_disables_autocorrect",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "autocapitalize=\"off\""
   },
   {
     "id": "test_chat_input_disables_autocorrect",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "spellcheck=\"false\""
   },
@@ -1003,13 +1027,13 @@
   },
   {
     "id": "test_chat_composer_uses_two_row_toolbar",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "class=\"chat-text-row\""
   },
   {
     "id": "test_chat_composer_uses_two_row_toolbar",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "class=\"chat-toolbar-row\""
   },
@@ -1050,10 +1074,28 @@
     "value": "data-cancel-run>"
   },
   {
-    "id": "test_cancelled_phase_has_warn_tone",
+    "id": "test_chip_tone_is_the_views_and_stopped_is_neutral",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-live-phase:is(.warn, .alive, .empty, .cancelled)"
+    "value": ".chat-live-phase[data-chip-tone=\"owner\"] {"
+  },
+  {
+    "id": "test_chip_tone_is_the_views_and_stopped_is_neutral",
+    "path": "web/style.css",
+    "kind": "not_contains",
+    "value": ".chat-live-phase:is("
+  },
+  {
+    "id": "test_chip_tone_is_the_views_and_stopped_is_neutral",
+    "path": "web/model_wait.css",
+    "kind": "not_contains",
+    "value": ".chat-live-phase.waiting"
+  },
+  {
+    "id": "test_chip_tone_is_the_views_and_stopped_is_neutral",
+    "path": "web/modules/task_phase_chip.js",
+    "kind": "contains",
+    "value": "export function outcomeTone(outcome) {"
   },
   {
     "id": "test_sync_history_merges_offline_bootstrap_user_rows",
@@ -1071,7 +1113,7 @@
     "id": "test_cancel_run_confirm_and_cascade",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "openTaskControls(btn, record.groupId, {"
+    "value": "openCardControls(btn, record, cardControls(workState, record.groupId).work, {"
   },
   {
     "id": "test_cancel_run_confirm_and_cascade",
@@ -1227,7 +1269,7 @@
     "id": "test_chat_block_chrome_follows_work",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "        const wanted = isMain && work && record.root.dataset.projectBound !== '1'"
+    "value": "portals.syncConvert(record, isMain && work && !isPortal(record) && !(window.__ouroTaskBindings || {})[record.groupId]);"
   },
   {
     "id": "test_chat_block_chrome_follows_work",

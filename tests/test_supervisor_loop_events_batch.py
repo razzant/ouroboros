@@ -5,8 +5,9 @@ event queue non-empty used to hold the loop inside its drain until the queue was
 empty, so an owner message waited behind every queued event; and every ``llm_usage``
 event paid its own ledger render plus STATE_LOCK write. One events pass now drains at
 most N events or T seconds (``runtime_limits``), FIFO, the remainder next turn; bridge
-intake runs every turn; and the compatibility projection is written once per turn
-after intake, kept dirty on failure and retried no more often than a bounded interval.
+intake runs every turn and only polls when the pass stopped at its bound (its 1 s wait
+would idle a turn that has work); and the compatibility projection is written once per
+turn after intake, kept dirty on failure and retried no more often than a bounded interval.
 Every guard is pinned in both directions.
 """
 
@@ -196,3 +197,66 @@ def test_n_llm_usage_events_in_one_turn_produce_one_write_after_intake(monkeypat
     rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 8 and {row["projection_update_status"] for row in rows} == {"deferred"}
     assert ctx.budget_projection_dirty is False
+
+
+class _InboxBridge:
+    """The chat bridge the loop opens, over a real inbox: every intake call records its wait,
+    what it took and the loop thread's clocks at entry, and blocks exactly as the bridge does
+    (``queue.Queue.get`` with that timeout), so an idle tick really waits."""
+
+    def __init__(self, queued=()):
+        self._broadcast_fn = None
+        self._inbox: "queue.Queue" = queue.Queue()
+        for item in queued:
+            self._inbox.put(item)
+        self.calls: list = []
+
+    def get_updates(self, offset, timeout=10):
+        entered, cpu = time.monotonic(), time.thread_time()
+        try:
+            taken = self._inbox.get(timeout=timeout)
+        except queue.Empty:
+            taken = None
+        self.calls.append((timeout, taken, entered, cpu))
+        return []  # what intake took is recorded; routing it is not this test's subject
+
+
+def _ticks(monkeypatch, tmp_path, backlogs, *, queued=(), real_sleep=False):
+    """Run the REAL ``server._run_supervisor`` (its collaborators stubbed by the shutdown suite's
+    harness) for one tick per scripted drain verdict; returns the bridge and the idle sleeps."""
+    import server
+    from supervisor import message_bus as bus_mod
+    from tests.test_server_shutdown import _run, _supervisor_harness
+
+    intake = server._process_bridge_updates
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["ok"] * (len(backlogs) - 1) + ["stop"])
+    bridge, verdicts, sleeps = _InboxBridge(queued), list(backlogs), []
+    monkeypatch.setattr(bus_mod, "LocalChatBridge", lambda _settings: bridge)
+    monkeypatch.setattr(server, "_dialogue_bridge", None)
+    monkeypatch.setattr(server, "_process_bridge_updates", intake)
+    monkeypatch.setattr(server, "drain_worker_events", lambda *_a, **_k: verdicts.pop(0))
+    monkeypatch.setattr(server, "time", SimpleNamespace(
+        sleep=lambda sec: (sleeps.append(sec), time.sleep(sec) if real_sleep else None),
+        monotonic=time.monotonic, time=time.time, thread_time=time.thread_time))
+    _run(rec, server)
+    assert not verdicts, "one tick per scripted drain verdict"
+    return bridge, sleeps
+
+
+def test_a_tick_whose_drain_stopped_at_its_bound_polls_intake_and_an_idle_tick_keeps_its_wait(monkeypatch, tmp_path):
+    """Under a backlog the owner message is still taken in the same tick, without the 1 s wait;
+    an idle tick keeps today's wait, and only it pays the idle sleep."""
+    bridge, sleeps = _ticks(monkeypatch, tmp_path, [True, False, True], queued=["owner message"])
+    assert [(timeout, taken) for timeout, taken, *_ in bridge.calls] == [
+        (0, "owner message"), (1, None), (0, None)], bridge.calls
+    assert sleeps == [0.5]
+
+
+def test_an_idle_loop_waits_on_its_inbox_without_spinning(monkeypatch, tmp_path):
+    """One idle tick, intake to intake, is the inbox wait plus the idle sleep, and the loop
+    thread spends that time blocked: its CPU over the tick stays far below the wall."""
+    bridge, sleeps = _ticks(monkeypatch, tmp_path, [False, False], real_sleep=True)
+    (_t0, _x0, wall0, cpu0), (_t1, _x1, wall1, cpu1) = bridge.calls
+    assert [call[0] for call in bridge.calls] == [1, 1] and sleeps == [0.5, 0.5]
+    assert wall1 - wall0 >= 1.4, "the idle wait and the idle sleep both ran"
+    assert cpu1 - cpu0 < 0.5, f"an idle tick burned {cpu1 - cpu0:.3f}s of CPU in {wall1 - wall0:.3f}s"

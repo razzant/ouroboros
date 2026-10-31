@@ -43,6 +43,7 @@ def _cold_boot(tmp_path, monkeypatch, *, fault="", absent_streams=False, with_tr
     hook.write_bytes((repo / "ouroboros/__init__.py").read_bytes())
     captured = helper / "switch.py"
     captured.write_bytes((repo / "ouroboros/body_switch.py").read_bytes())
+    (helper / "installation_stop.py").write_bytes((repo / "ouroboros/installation_stop.py").read_bytes())
     (serving / ".git/ouroboros-body-adoption").write_text(str(helper), encoding="utf-8")
     old, new = "a" * 40, "b" * 40
     (helper / "handoff.json").write_text(json.dumps({

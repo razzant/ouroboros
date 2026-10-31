@@ -45,6 +45,7 @@ class Api:
 
 class Client:
     updates: list = []
+    edit_result = True
 
     def __init__(self, token, **_kwargs):
         self.sent, self.panels, self.edits, self.toasts = [], [], [], []
@@ -65,7 +66,7 @@ class Client:
 
     async def edit_message_text_with_inline_keyboard(self, chat_id, message_id, text, keyboard, parse_mode="HTML"):
         self.edits.append((chat_id, message_id, text, keyboard))
-        return True
+        return Client.edit_result
 
     async def answer_callback_query(self, callback_query_id, *, text=""):
         self.toasts.append((callback_query_id, text))
@@ -171,9 +172,10 @@ def test_tapped_option_reaches_the_decision_ingress_and_settles_the_card(tmp_pat
         "request_id": "tg:7", "decision_id": "quiz:task-1:q1", "option_index": 1,
     })]
     assert injected == [], "an answer is a decision, never a new chat turn"
-    # The toast and the settled card come from the last constructed client.
+    # The toast and the settled card come from the last constructed client. A reply that
+    # names no delivery fact confirms the record only, never a delivery.
     last = _LAST_CLIENT[-1]
-    assert last.toasts == [("cb", "✅ Answer delivered to the task.")]
+    assert last.toasts == [("cb", "✅ Answer recorded.")]
     assert last.edits == [(42, 555,
                            "Question: Which db?\n1. sqlite\n2. postgres\nContinuing meanwhile: sqlite meanwhile"
                            "\nAnswered: 2. postgres", [])]
@@ -216,14 +218,16 @@ def test_reply_to_the_card_is_the_owners_own_answer(tmp_path, monkeypatch, answe
         "text": answer_text, "reply_to_message": {"message_id": 555},
     }}]
     posts = []
-    injected = _run_poller(plugin, api, monkeypatch, posts)
+    # The host records the owner's words verbatim and answers with that record.
+    injected = _run_poller(plugin, api, monkeypatch, posts,
+                           reply=(200, {"ok": True, "state": "answered", "comment": answer_text}))
 
     assert posts == [("/chat/decision", {
         "request_id": "tg:8", "decision_id": "quiz:task-1:q1", "comment": answer_text,
     })]
     assert injected == []
     last = _LAST_CLIENT[-1]
-    assert last.sent == [(42, "✅ Answer delivered to the task.")]
+    assert last.sent == [], "the card is the receipt of an ordinary text answer"
     assert last.edits[0][2].endswith("\nAnswered: " + answer_text)
 
 
@@ -273,47 +277,53 @@ def test_late_or_unknown_answers_are_toasted_honestly(tmp_path, monkeypatch):
     last = _LAST_CLIENT[-1]
     assert last.toasts == [("cb10", "This question was already answered.")]
     assert last.edits[0][2].endswith("\nAnswered: 1. sqlite")
+    # A problem also gets its one message, as for a text answer (owner's choice, 27 Oct: A).
+    assert last.sent == [(42, _LOST.format(answer="1. sqlite"))]
 
     # The task had finished, but the card outlived it (В17a=A): the host records
-    # the answer AND delivers it into the card's chat, so the tap succeeds and
-    # the card settles exactly as an ordinary answer does.
-    Client.updates = [_callback(11, f"qz:{token}:1")]
-    _run_poller(plugin, api, monkeypatch, [],
-                reply=(200, {"ok": True, "state": "answered", "answered_index": 1,
-                             "answered_after_terminal": True, "forwarded": True}))
-    last = _LAST_CLIENT[-1]
-    assert last.toasts == [("cb11", "✅ The task had already finished — your answer "
-                                   "was delivered to the chat.")]
-    assert last.edits[0][2].endswith("\nAnswered: 2. postgres")
-    assert last.edits[0][3] == []  # the keyboard goes, as for any answer
-
-    # A card whose chat has no owner turn to start (machine/hidden): recorded,
-    # never claimed as delivered.
-    Client.updates = [_callback(16, f"qz:{token}:1")]
-    _run_poller(plugin, api, monkeypatch, [],
-                reply=(200, {"ok": True, "state": "answered", "answered_index": 1,
-                             "answered_after_terminal": True, "forwarded": False,
-                             "reason_code": "hidden_chat"}))
-    assert _LAST_CLIENT[-1].toasts == [
-        ("cb16", "✅ Answer recorded. The task had already finished and this card "
-                 "has no chat to deliver it to."),
-    ]
+    # the answer and says how its delivery stands; the toast repeats that record,
+    # and the card settles exactly as an ordinary answer does. Each case answers a
+    # fresh card: a card remembers a confirmed delivery and never takes it back.
+    late = {"ok": True, "state": "answered", "answered_index": 1, "answered_after_terminal": True}
+    for update_id, reply, toast, tail in (
+        (11, {**late, "forwarded": True, "question_delivery": {"kind": "answer", "state": "delivered"}},
+         "✅ Answer delivered. The task had already finished.", ""),
+        # ``forwarded`` alone proves neither a destination nor a reading: without the
+        # host's delivery fact the toast confirms only the record.
+        (18, {**late, "forwarded": True}, "✅ Answer recorded. The task had already finished.", ""),
+        # A card whose chat has no owner turn to start (machine/hidden): recorded and
+        # still owed, never claimed as delivered.
+        (16, {**late, "forwarded": False, "reason_code": "hidden_chat",
+              "question_delivery": {"kind": "answer", "state": "owed", "reason_code": "hidden_chat"}},
+         "✅ Answer recorded · delivery pending. The task had already finished.",
+         "\nAnswer recorded · delivery pending"),
+    ):
+        api = _send_card(plugin, tmp_path, monkeypatch)
+        Client.updates = [_callback(update_id, f"qz:{token}:1")]
+        _run_poller(plugin, api, monkeypatch, [], reply=(200, reply))
+        last = _LAST_CLIENT[-1]
+        assert last.toasts == [(f"cb{update_id}", toast)]
+        assert last.edits[0][2].endswith("\nAnswered: 2. postgres" + tail)
+        assert last.edits[0][3] == []  # the keyboard goes, as for any answer
+        assert last.sent == []  # an accepted answer's receipt is the card
 
     # A genuinely settled card (already answered by another surface) still 409s.
     Client.updates = [_callback(17, f"qz:{token}:1")]
     _run_poller(plugin, api, monkeypatch, [], reply=(409, {"ok": False, "state": "expired_terminal"}))
     assert _LAST_CLIENT[-1].toasts == [("cb17", "This question has expired — the task moved on.")]
+    assert _LAST_CLIENT[-1].sent == [(42, "This question has expired — the task moved on.")]
 
     # Unknown to the host.
     Client.updates = [_callback(12, f"qz:{token}:0")]
     _run_poller(plugin, api, monkeypatch, [], reply=(404, {"error": "quiz not found"}))
     assert _LAST_CLIENT[-1].toasts == [("cb12", "This question is no longer known to Ouroboros.")]
+    assert _LAST_CLIENT[-1].sent == [(42, "This question is no longer known to Ouroboros.")]
 
-    # Unknown token / out-of-range index: nothing is posted at all.
+    # Unknown token / out-of-range index: nothing is posted at all, and only the tap is told.
     Client.updates = [_callback(13, "qz:deadbeef0000:0"), _callback(14, f"qz:{token}:7")]
     posts = []
     _run_poller(plugin, api, monkeypatch, posts)
-    assert posts == []
+    assert posts == [] and _LAST_CLIENT[-1].sent == []
     assert [t for _cb, t in _LAST_CLIENT[-1].toasts] == ["This question is no longer known to Ouroboros."] * 2
 
 
@@ -363,7 +373,7 @@ def test_owner_commands_keep_dispatch_when_replying_to_quiz(tmp_path, monkeypatc
     api = _send_card(plugin, tmp_path, monkeypatch)
     _settings(tmp_path, TELEGRAM_COMMAND_MODE="full_access")
     message = {"message_id": 602, "chat": {"id": 42, "type": "private"},
-               "from": {"id": 42}, "text": command}
+               "from": {"id": 42}, "text": command, "date": int(plugin._POLL_GENERATION_STARTED) + 1}
     if reply_to_quiz:
         message["reply_to_message"] = {"message_id": 555}
     Client.updates = [{"update_id": 89, "message": message}]
@@ -682,3 +692,209 @@ def test_card_length_is_measured_in_utf16_units_not_code_points():
     client, _message_id, overflowed = _send_card_direct(body)
     assert overflowed and [kind for kind, _ in client.sent] == ["plain", "keyboard"]
     assert client.sent[0][1] == body
+
+
+# --- The card is the receipt: the host's record, never this bridge's attempt ---
+
+_CARD = "Question: Which db?\n1. sqlite\n2. postgres\nContinuing meanwhile: sqlite meanwhile"
+_SAVED = "Answer saved · the task reads it when it continues"
+_PENDING = "Answer recorded · delivery pending"
+_UNKNOWN = "Answer recorded · delivery unknown"
+_LOST = "Not accepted: this question was already answered. Recorded answer: {answer}"
+_NOT_UPDATED = "The question card above could not be updated."
+
+
+def _delivery(state="owed", reason="", **extra):
+    view = {"kind": "answer", "state": state, **({"reason_code": reason} if reason else {})}
+    view.update(extra)
+    return view
+
+
+def _reply_update(update_id, text):
+    return {"update_id": update_id, "message": {
+        "message_id": 600 + update_id, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
+        "text": text, "reply_to_message": {"message_id": 555},
+    }}
+
+
+def _tap_update(update_id, token, index):
+    return {"update_id": update_id, "callback_query": {
+        "id": f"cb{update_id}", "data": f"qz:{token}:{index}", "from": {"id": 42},
+        "message": {"message_id": 555, "chat": {"id": 42, "type": "private"}},
+    }}
+
+
+def _answer(plugin, tmp_path, monkeypatch, update, reply):
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    Client.updates = [update(plugin.telegram_quiz.mint_token("task-1", "q1"))]
+    posts = []
+    assert _run_poller(plugin, api, monkeypatch, posts, reply=reply) == []
+    assert len(posts) == 1 and posts[0][0] == "/chat/decision"
+    return _LAST_CLIENT[-1]
+
+
+@pytest.mark.parametrize("delivery,status", [
+    (_delivery(reason="awaiting_recipient_read"), _SAVED),
+    (_delivery(), _PENDING),
+    (_delivery(reason="quiz_history_write_failed"), _PENDING),
+    (_delivery(reason="late_answer_delivery_unknown"), _UNKNOWN),
+    (_delivery(reason="late_answer_delivery_unknown", dismissed=True), _UNKNOWN),  # dismissed is not delivered
+    (_delivery("delivered"), ""),
+    (None, ""),  # no delivery fact: the record only, and no delivery claim
+], ids=["saved", "pending", "history-pending", "unknown", "dismissed", "delivered", "no-fact"])
+def test_text_answer_is_confirmed_in_its_card_without_a_separate_line(tmp_path, monkeypatch, delivery, status):
+    plugin = _load_plugin()
+    payload = {"ok": True, "state": "answered", "comment": "Use duckdb",
+               **({"question_delivery": delivery} if delivery else {})}
+    last = _answer(plugin, tmp_path, monkeypatch, lambda _token: _reply_update(30, "Use duckdb"), (200, payload))
+    assert last.sent == []
+    assert last.edits == [(42, 555, _CARD + "\nAnswered: Use duckdb" + (f"\n{status}" if status else ""), [])]
+
+
+@pytest.mark.parametrize("delivery,toast,status", [
+    (_delivery(reason="awaiting_recipient_read"), f"✅ {_SAVED}.", _SAVED),
+    (_delivery(reason="late_answer_delivery_unknown"), f"✅ {_UNKNOWN}.", _UNKNOWN),
+    (_delivery("delivered"), "✅ Answer delivered.", ""),
+], ids=["saved", "unknown", "delivered"])
+def test_tap_toasts_the_hosts_receipt_and_the_card_keeps_its_status(tmp_path, monkeypatch, delivery, toast, status):
+    plugin = _load_plugin()
+    payload = {"ok": True, "state": "answered", "answered_index": 1, "question_delivery": delivery}
+    last = _answer(plugin, tmp_path, monkeypatch, lambda token: _tap_update(31, token, 1), (200, payload))
+    assert last.toasts == [("cb31", toast)] and last.sent == []
+    assert last.edits == [(42, 555, _CARD + "\nAnswered: 2. postgres" + (f"\n{status}" if status else ""), [])]
+
+
+@pytest.mark.parametrize("path,recorded,shown", [
+    ("reply", {"comment": "Use duckdb"}, "Use duckdb"),
+    ("reply", {"answered_index": 0, "comment": "only with nightly backups"}, "1. sqlite — only with nightly backups"),
+    ("tap", {"comment": "Use duckdb"}, "Use duckdb"),
+    ("tap", {"answered_index": 0, "comment": "only with nightly backups"}, "1. sqlite — only with nightly backups"),
+    ("tap", {}, ""),
+], ids=["reply-comment", "reply-option-comment", "tap-comment", "tap-option-comment", "tap-no-winner"])
+def test_a_replayed_answer_settles_on_the_hosts_record_not_the_local_attempt(tmp_path, monkeypatch, path, recorded, shown):
+    """A 200 replays what the host recorded for this request: the card shows that record and
+    never invents it from the tapped option or the words this bridge sent."""
+    plugin = _load_plugin()
+    payload = {"ok": True, "duplicate": True, "state": "answered", **recorded,
+               "question_delivery": _delivery("delivered")}
+    update = (lambda _token: _reply_update(32, "Use mysql")) if path == "reply" else (lambda token: _tap_update(32, token, 1))
+    last = _answer(plugin, tmp_path, monkeypatch, update, (200, payload))
+    (edit,) = last.edits
+    assert edit[2] == _CARD + (f"\nAnswered: {shown}" if shown else "\nAnswered.")
+    assert "mysql" not in edit[2] and "Answered: 2. postgres" not in edit[2]
+    assert last.sent == []
+
+
+@pytest.mark.parametrize("recorded,shown", [
+    ({"comment": "Use duckdb"}, "Use duckdb"),
+    ({"answered_index": 1, "comment": "only with nightly backups"}, "2. postgres — only with nightly backups"),
+    ({"answered_index": 0}, "1. sqlite"),
+], ids=["comment", "option-comment", "option"])
+def test_a_losing_text_answer_names_the_recorded_winner_once(tmp_path, monkeypatch, recorded, shown):
+    plugin = _load_plugin()
+    payload = {"ok": False, "error": "quiz_closed", "state": "answered", **recorded,
+               "question_delivery": _delivery("delivered")}
+    last = _answer(plugin, tmp_path, monkeypatch, lambda _token: _reply_update(33, "SQLite please"), (409, payload))
+    assert last.sent == [(42, _LOST.format(answer=shown))]
+    assert last.edits == [(42, 555, _CARD + f"\nAnswered: {shown}", [])]
+    assert all("SQLite please" not in edit[2] for edit in last.edits)
+
+
+@pytest.mark.parametrize("recorded,shown", [
+    ({"comment": "Use duckdb"}, "Use duckdb"),
+    ({"answered_index": 0, "comment": "only with nightly backups"}, "1. sqlite — only with nightly backups"),
+], ids=["comment", "option-comment"])
+def test_a_losing_tap_settles_on_the_whole_recorded_winner(tmp_path, monkeypatch, recorded, shown):
+    plugin = _load_plugin()
+    payload = {"ok": False, "error": "quiz_closed", "state": "answered", **recorded}
+    last = _answer(plugin, tmp_path, monkeypatch, lambda token: _tap_update(34, token, 1), (409, payload))
+    assert last.toasts == [("cb34", "This question was already answered.")]
+    assert last.edits == [(42, 555, _CARD + f"\nAnswered: {shown}", [])]
+    assert last.sent == [(42, _LOST.format(answer=shown))]
+
+
+@pytest.mark.parametrize("path", ["reply", "tap"])
+def test_an_answer_accepted_behind_a_503_is_recorded_and_never_asked_again(tmp_path, monkeypatch, path):
+    """The host accepted the answer and still owes its delivery: no retry request."""
+    plugin = _load_plugin()
+    recorded = {"comment": "Use duckdb"} if path == "reply" else {"answered_index": 1}
+    payload = {"error": "The answer was recorded. Delivery remains pending.", "task_id": "task-1",
+               "state": "answered", "reason_code": "quiz_delivery_failed", **recorded,
+               "question_delivery": _delivery(reason="quiz_delivery_failed")}
+    update = (lambda _token: _reply_update(35, "Use duckdb")) if path == "reply" else (lambda token: _tap_update(35, token, 1))
+    last = _answer(plugin, tmp_path, monkeypatch, update, (503, payload))
+    shown = "Use duckdb" if path == "reply" else "2. postgres"
+    assert last.edits == [(42, 555, _CARD + f"\nAnswered: {shown}\n{_PENDING}", [])]
+    assert last.sent == []
+    assert last.toasts == ([] if path == "reply" else [("cb35", f"✅ {_PENDING}.")])
+
+
+@pytest.mark.parametrize("payload", [
+    {"error": "The answer could not be confirmed. Retry the same answer when storage is available.",
+     "task_id": "task-1", "reason_code": "quiz_answer_unconfirmed"},
+    # Recorded, but by whom is not said: no winner to compare, so no claim that it is this answer.
+    {"error": "The answer was recorded. Delivery remains pending.", "task_id": "task-1", "state": "answered",
+     "reason_code": "quiz_delivery_failed", "question_delivery": _delivery(reason="quiz_delivery_failed")},
+], ids=["unconfirmed", "answered-without-winner"])
+@pytest.mark.parametrize("status", [503, 500])
+@pytest.mark.parametrize("path", ["reply", "tap"])
+def test_an_unconfirmed_answer_says_its_outcome_is_unknown_and_keeps_the_card_open(tmp_path, monkeypatch, path, status, payload):
+    plugin = _load_plugin()
+    update = (lambda _token: _reply_update(36, "Use duckdb")) if path == "reply" else (lambda token: _tap_update(36, token, 1))
+    last = _answer(plugin, tmp_path, monkeypatch, update, (status, payload))
+    line = (f"The answer was not confirmed (HTTP {status}), so it may not be recorded. "
+            "Send the same answer again later.")
+    assert last.edits == []
+    assert (last.sent, last.toasts) == ([(42, line)], [] if path == "reply" else [("cb36", line)])
+
+
+@pytest.mark.parametrize("path", ["reply", "tap"])
+def test_the_same_answer_sent_again_is_its_own_record_not_a_conflict(tmp_path, monkeypatch, path):
+    """After an unconfirmed answer the owner sends the same answer again: the host refuses the
+    new request with its earlier record, which is this very answer, so nothing conflicts."""
+    plugin = _load_plugin()
+    recorded = {"comment": "Use duckdb"} if path == "reply" else {"answered_index": 1}
+    payload = {"ok": False, "error": "quiz_closed", "state": "answered", **recorded,
+               "question_delivery": _delivery(reason="awaiting_recipient_read")}
+    update = (lambda _token: _reply_update(37, "Use duckdb")) if path == "reply" else (lambda token: _tap_update(37, token, 1))
+    last = _answer(plugin, tmp_path, monkeypatch, update, (409, payload))
+    shown = "Use duckdb" if path == "reply" else "2. postgres"
+    assert last.edits == [(42, 555, _CARD + f"\nAnswered: {shown}\n{_SAVED}", [])]
+    assert last.sent == []
+    assert last.toasts == ([] if path == "reply" else [("cb37", f"✅ {_SAVED}.")])
+
+
+@pytest.mark.parametrize("path,code,recorded,first", [
+    ("reply", 200, {"comment": "Use duckdb"}, f"{_SAVED}."),
+    ("tap", 200, {"answered_index": 1}, f"{_SAVED}."),
+    ("reply", 409, {"answered_index": 0}, _LOST.format(answer="1. sqlite")),
+    ("tap", 409, {"answered_index": 0}, _LOST.format(answer="1. sqlite")),
+], ids=["reply", "tap", "reply-conflict", "tap-conflict"])
+def test_a_card_that_could_not_be_updated_is_said_once_and_never_retried(tmp_path, monkeypatch, path, code, recorded, first):
+    plugin = _load_plugin()
+    monkeypatch.setattr(Client, "edit_result", False)
+    payload = {"ok": code == 200, "state": "answered", **recorded,
+               "question_delivery": _delivery(reason="awaiting_recipient_read")}
+    update = (lambda _token: _reply_update(38, "Use duckdb")) if path == "reply" else (lambda token: _tap_update(38, token, 1))
+    last = _answer(plugin, tmp_path, monkeypatch, update, (code, payload))
+    assert len(last.edits) == 1, "a failed card edit is never retried blindly"
+    assert last.sent == [(42, f"{first}\n{_NOT_UPDATED}")]
+
+
+def test_silent_mode_toggle_says_what_silent_mode_now_does(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    _settings(tmp_path)
+    api = Api(tmp_path)
+    for update_id, expected in ((40, "on"), (41, "off")):
+        Client.updates = [{"update_id": update_id, "callback_query": {
+            "id": f"cb{update_id}", "data": "cmd_act:toggle_silent", "from": {"id": 42},
+            "message": {"message_id": 77, "chat": {"id": 42, "type": "private"}}}}]
+        _run_poller(plugin, api, monkeypatch, [])
+        assert plugin._load_settings(api)["TELEGRAM_SILENT_MODE"] == expected
+        (toast,) = [text for _cb, text in _LAST_CLIENT[-1].toasts]
+        assert toast == {
+            "on": "🔕 Silent mode on: replies and progress arrive without sound; questions, files "
+                  "and problems keep their sound.",
+            "off": "🔔 Silent mode off: replies arrive with their usual sound.",
+        }[expected]
+        assert "replace" not in toast

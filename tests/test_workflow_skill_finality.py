@@ -78,7 +78,12 @@ def test_main_receives_terminal_reference_then_finishes_without_second_panel(sub
         findings = [{"item": "bug_hunting", "verdict": "FAIL", "severity": "critical", "reason": "Partial critic finding."}] if partial else []
         actors = ([{"slot_id": "critic1", "status": "responded", "parsed_items": findings},
                    {"slot_id": "critic2", "operation_state": "in_flight", "late_result_pending": True}] if partial else [])
-        return SkillReviewOutcome(skill_name="demo", status="pending", content_hash=compute_content_hash(directory),
+        content_hash = compute_content_hash(directory)
+        # What review_skill projects for a settled wave that formed no verdict: the pending state with the
+        # seats' raw records (the partial feedback an author finish may cite), never a verdict.
+        save_review_state(ctx.drive_root, "demo", SkillReviewState(status="pending", content_hash=content_hash,
+                                                                   findings=findings, raw_actor_records=actors))
+        return SkillReviewOutcome(skill_name="demo", status="pending", content_hash=content_hash,
                                   error="No reviewer quorum: configured route unavailable.",
                                   findings=findings, raw_actor_records=actors)
 
@@ -146,8 +151,9 @@ def test_toggle_schema_states_the_gate_its_enable_owner_obeys(subject, monkeypat
     assert json.loads(skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=False))["enabled"] is False
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     refused = skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=True)
-    assert refused.startswith("⚠️ SKILL_TOGGLE_ERROR") and (
-        "cannot enable until the review gate permits the current bytes: a current executable reviewer verdict\"") in refused
+    # Inverted pin: the refusal is typed (code + one owner sentence); the gate's need moved to ``detail``.
+    assert refused.startswith("⚠️ SKILL_TOGGLE_ERROR") and '"code": "acceptance"' in refused and (
+        '"detail": "a current executable reviewer verdict"') in refused
 
 
 def test_refusals_name_the_authorities_their_gate_admits(subject, monkeypatch):
@@ -167,7 +173,7 @@ def test_refusals_name_the_authorities_their_gate_admits(subject, monkeypatch):
         assert ran.startswith("⚠️ SKILL_EXEC_BLOCKED") and f"Execution needs {needed}. " in ran, ran
         save_enabled(ctx.drive_root, "demo", False)
         toggled = skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=True)
-        assert f"cannot enable until the review gate permits the current bytes: {needed}\"" in toggled, toggled
+        assert '"error": "It turns on after a review passes."' in toggled and f'"detail": "{needed}"' in toggled, toggled
         granted = prepare_skill_grant(load_skill(directory, ctx.drive_root), ctx.drive_root, [])
         assert granted["error"] == f"key and permission grants need the review gate to permit the current bytes: {needed}"
         assert granted["review_gate"]["blocking_reason"] == "review_pending"
@@ -187,7 +193,7 @@ def test_grant_prompt_does_not_ask_for_a_review_the_gate_already_permits(subject
     gate = loaded.review.gate_for(loaded.content_hash)
     assert (loaded.review.status, gate["blocking_reason"]) == ("pending", "author_accepted_advisory")
     refused = skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=True)
-    assert "requested key and permission grants" in refused, "the gate passed; grants are still required"
+    assert "Grant it the keys and permissions" in refused, "the gate passed; grants are still required"
     save_enabled(ctx.drive_root, "demo", True)
     ran = skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py")
     assert ran.startswith("⚠️ SKILL_EXEC_GRANT_REQUIRED") and "inject_chat" in ran
@@ -329,14 +335,12 @@ def test_selected_and_passive_preflight_follow_same_current_authority(subject, m
 
 
 def test_completed_waiter_with_inflight_actor_is_not_unavailable(subject):
-    from ouroboros.skill_review_history import append_history_once
-
+    """A terminal job whose projected record still names a seat in flight is a review still running."""
     reference = _unavailable(subject)
     ctx, _directory, _ = subject
-    append_history_once(ctx.drive_root, "demo", {
-        **reference, "ts": "2026-09-18T10:00:00Z", "status": "pending",
-        "raw_actor_records": [{"slot_id": "critic", "operation_state": "in_flight", "late_result_pending": True}],
-    })
+    save_review_state(ctx.drive_root, "demo", SkillReviewState(
+        status="pending", content_hash=reference["content_hash"],
+        raw_actor_records=[{"slot_id": "critic", "operation_state": "in_flight", "late_result_pending": True}]))
     assert "error" in _finish(subject, reference=reference)
 
 
@@ -400,15 +404,14 @@ def test_prior_substantive_feedback_still_allows_finish_with_another_actor_pendi
 
 
 def test_reserved_operation_without_terminal_actor_does_not_invent_unavailability(subject):
-    from ouroboros.skill_review_runner import _read_review_job
-
+    """A seat still open in the terminal job's projected record (a reserved operation, a late result pending)
+    is a review still running, not an unavailable one: the finish is refused until it settles."""
     reference = _unavailable(subject)
     ctx, _directory, _ = subject
-    path = review_job_state_path(ctx.drive_root, "demo")
-    job = _read_review_job(path)
-    job["review_wave"] = {"chunks": [{"operations": {"critic": "still-unresolved"}}]}
-    _write_review_job(path, job)
-    assert "unresolved physical reviewers" in _finish(subject, reference=reference)["error"]
+    save_review_state(ctx.drive_root, "demo", SkillReviewState(
+        status="pending", content_hash=reference["content_hash"],
+        raw_actor_records=[{"slot_id": "critic", "operation_state": "in_flight", "late_result_pending": True}]))
+    assert "A review still running is not unavailable" in _finish(subject, reference=reference)["error"]
 
 
 def test_author_acceptance_does_not_follow_subsequent_payload_changes(subject, monkeypatch, tmp_path):

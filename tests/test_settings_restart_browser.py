@@ -10,6 +10,7 @@ import pytest
 
 from tests import test_ui_smoke_playwright as smoke
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES
+from tests.ui_console_errors import PageErrors
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -67,8 +68,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
         page = browser.new_page(viewport={"width": width, "height": 1000})
-        errors = []
-        page.on('pageerror', lambda error: errors.append(str(error)))
+        errors = PageErrors(page, engine)
         page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
         page.add_init_script("""const originalSend = WebSocket.prototype.send;
             WebSocket.prototype.send = function(data) {
@@ -227,7 +227,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             open_settings()
             page.locator('[data-settings-tab="agents"]').click()
             expect(page.locator('[data-subagent-field="access"]')).to_have_value('workspace_write')
-            assert errors == []
+            assert errors.unexpected() == [], errors
         except Exception:
             evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
             evidence.mkdir(parents=True, exist_ok=True)

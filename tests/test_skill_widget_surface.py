@@ -64,6 +64,29 @@ def _make_skill(tmp_path: pathlib.Path, monkeypatch, manifest: str, plugin: str)
 _TRIVIAL_PLUGIN = "def register(api):\n    pass\n"
 
 
+def test_explicit_esm_preflight_parses_native_grammar_and_checks_declared_resources(tmp_path, monkeypatch):
+    from ouroboros.tools import skill_preflight as sp
+
+    ctx = _make_ctx(tmp_path)
+    skill_dir = _make_skill(tmp_path, monkeypatch, _extension_manifest(),
+        "def register(api):\n"
+        "    api.register_ui_tab('main', 'Main', render={'kind':'module', 'entry_type':'module', "
+        "'entry':'widget.js', 'assets':['data.bin']})\n")
+    (skill_dir / 'widget.js').write_text("export const where = import.meta.url; await Promise.resolve();")
+    result = json.loads(sp._handle_skill_preflight(ctx, skill='alpha'))
+    assert not result['ok']
+    assert any(row['item'] == 'widget_assets_exist' and not row['ok'] for row in result['widgets'])
+    (skill_dir / 'data.bin').write_bytes(b'\x00\xff')
+    result = json.loads(sp._handle_skill_preflight(ctx, skill='alpha'))
+    row = next(row for row in result['files'] if row['path'] == 'widget.js')
+    assert row['grammar'] == 'module'
+    assert row['ok'] and not row.get('skipped'), row
+    assert result['ok'], result
+    (skill_dir / 'widget.js').write_text('return 1;')  # valid function body, invalid module
+    result = json.loads(sp._handle_skill_preflight(ctx, skill='alpha'))
+    assert not result['ok']
+
+
 # --------------------------------------------------------------------------- F12
 
 

@@ -335,7 +335,8 @@ def _signed_session(data_dir: Path, age_sec: int) -> str:
 
 def _history_notice(page) -> str:
     """The Main feed's persistent history note ("Some saved history is not loaded ..."), if shown."""
-    return page.evaluate("""() => [...document.querySelectorAll('#page-chat .chat-history-status')]
+    return page.evaluate("""() => [...document.querySelectorAll(
+        '#page-chat .chat-history-status, #page-chat .chat-load-older.has-gaps :is(.chat-load-older-note, .chat-history-gap)')]
         .filter(node => !node.hidden).map(node => node.textContent.trim()).join(' | ')""")
 
 
@@ -519,17 +520,19 @@ def test_stop_ends_a_held_task_and_the_core_records_the_stop(stack):
 
 def _seed_late_quiz(core, question: str) -> tuple[str, str]:
     """A question its (completed) task asked in Main, written by the core's own writers."""
-    from ouroboros.owner_quiz import record_asked
+    from ouroboros import dialogue_store
+    from ouroboros.owner_quiz import record_asked, record_publication
     from ouroboros.task_results import write_task_result
 
     task_id, quiz_id = "separate-ui-late-task", "late-q"
     write_task_result(core.data_dir, task_id, "completed", chat_id=1)
     record_asked(core.data_dir, task_id, quiz_id=quiz_id, question=question, options=["Keep", "Change"], chat_id=1)
+    # The publication writer binds the card's address before exposing it; only that address takes a late answer (#1899).
+    record_publication(core.data_dir, task_id, quiz_id, 1)
     quiz = {"quiz_id": quiz_id, "question": question, "state": "open", "chat_id": 1,
             "options": [{"label": "Keep"}, {"label": "Change"}], "asked_at": "2026-10-13T00:00:00Z"}
-    with (core.data_dir / "logs" / "chat.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"ts": "2026-10-13T00:00:00Z", "direction": "out", "chat_id": 1, "text": question,
-                                 "type": "quiz", "task_id": task_id, "quiz": quiz}) + "\n")
+    dialogue_store.append(core.data_dir, "chat", {"ts": "2026-10-13T00:00:00Z", "direction": "out", "chat_id": 1,
+                                                  "text": question, "type": "quiz", "task_id": task_id, "quiz": quiz})
     return task_id, quiz_id
 
 
@@ -838,8 +841,8 @@ def test_update_status_restart_and_panic_are_the_cores_own_process_facts(stack):
             session.shot("2-restarted")
 
             # Panic: the core stops everything and exits; the interface host is untouched.
-            page.locator('[data-chat-command="panic"]').click()
-            page.locator("[data-confirm-ok]").click()
+            page.locator('#page-chat [data-chat-command="panic"]').click()
+            expect(page.locator("[data-confirm-ok]")).to_have_count(0)
             exit_code = core.process.wait_exit(90)
             page.wait_for_function(DISCONNECTED, timeout=30_000)
             after = {"api": session.api("GET", "/api/state", None)["status"],

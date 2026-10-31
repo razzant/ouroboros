@@ -3,14 +3,15 @@
 // Management is DIRECT mechanical control via existing APIs (cancel a task, enable/
 // disable/delete/restore schedules, start/stop background consciousness). Every
 // lifecycle button NAMES its action to the one audited server seam, so the owner's
-// buttons and the agent's tool mean exactly the same thing. Skill rows retain an
-// owner override in the existing schedule store, so a lifecycle resync cannot undo it.
+// buttons and the agent's tool mean exactly the same thing.
 
-import { fetchJson, isStoreMigrating } from './api_client.js';
+import { fetchJson, isStoreMigrating, readStateJson } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
+import { fmt, tr } from './i18n.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { taskCancelPending } from './log_events.js';
 import { waitingModel } from './project_activity.js';
+import { memberState, openWorkControls, resumeTargets, workLine, workOfEpisode, workRowView } from './work_status.js';
 import { censusTaskFacts, censusTaskPhase, paintTaskPhase } from './task_phase_chip.js';
 import {
     ACTION_HURRY,
@@ -35,27 +36,52 @@ function esc(value) {
 
 const getJson = (url) => fetchJson(url, { cache: 'no-store' });
 
+/** How long a task has run, in words (DESIGN §6: quantities in human words): «45s» below a minute, then «9 min»,
+ * «1 h 30 min»; never «1700s». A duration the row does not carry is '' — unknown is never «0s». */
+export function elapsedWords(seconds) {
+    const value = Number(seconds);
+    if (seconds === null || seconds === '' || !Number.isFinite(value)) return '';
+    const total = Math.max(0, Math.round(value));
+    if (total < 60) return `${total}s`;
+    const minutes = Math.round(total / 60);
+    if (minutes < 60) return fmt('{n} min', { n: minutes });
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest ? fmt('{hours} h {minutes} min', { hours, minutes: rest }) : fmt('{n} h', { n: hours });
+}
+
 // Census phases that only say the task is still active.
 const ACTIVE_PHASES = new Set(['working', 'thinking', 'finalizing']);
 
-/** The shared chip for a row whose OWN census facts (its activity_id, never its root's: a
- * child must not borrow a parent's result) know its outcome; null keeps the row's own word.
- * The outcome is the status and an unfinished fact its quieter second one (DESIGN "Status and
- * chips"). A queue row passes its own wait or hold word (`queueFact`, '' for plain running),
+// A row's OWN census facts (its activity_id, never its root's: a child must not borrow a
+// parent's result) as the shared chip reads them. Activity shows no model-call telemetry, so
+// `model_activity` never reaches it.
+function ownCensusView(activity, withHold = true) {
+    const { model_activity: _telemetry, ...own } = activity;
+    if (!withHold) delete own.project_admission_hold;  // the queue line already names it
+    return { own, view: censusTaskPhase(own, null, true, waitingModel(own)) };
+}
+// Those words in one line: the chip's word, then the quieter fact it says beside it.
+function censusWords(activity) {
+    const { view } = ownCensusView(activity);
+    return [view.text, view.secondary].filter(Boolean).join(' · ');
+}
+
+/** The shared chip for a row whose own census facts know its outcome; null keeps the row's own
+ * word. The outcome is the status and an unfinished fact its quieter second one (DESIGN "Status
+ * and chips"). A queue row passes its own wait or hold word (`queueFact`, '' for plain running),
  * which outranks a merely active census phase; membership and controls stay with the queue
- * and census. Activity shows no model-call telemetry, so `model_activity` never reaches it. */
+ * and census. */
 export function ownOutcomePhase(activity, queueFact = null) {
     const facts = activity ? censusTaskFacts(activity) : null;
     if (!facts?.outcome || !(facts.ended || facts.finalizing)) return null;
-    const { model_activity: _telemetry, ...own } = activity;
-    if (queueFact !== null) delete own.project_admission_hold;  // the queue line already names it
-    const view = censusTaskPhase(own, null, true, waitingModel(own));
+    const { own, view } = ownCensusView(activity, queueFact === null);
     return queueFact && (!view.secondary || (ACTIVE_PHASES.has(own.phase) && !view.waiting))
-        ? { ...view, secondary: queueFact, secondaryMotion: false } : view;
+        ? { ...view, secondary: queueFact } : view;
 }
 
-/** An answered root whose late work remains (D10) names its own work, when it answered,
- * and that only the work left after the delivered answer waits — never a generic turn. */
+/** An answered root whose late work remains (its upkeep, or a review its Pause deferred) names
+ * its own work, when it answered, and that only the work after the answer waits — never a generic turn. */
 function lateWorkHtml(a, late) {
     const at = new Date(String(late.answered_at || ''));
     const iso = Number.isNaN(at.getTime()) ? '' : at.toISOString();
@@ -66,22 +92,25 @@ function lateWorkHtml(a, late) {
     return { name: esc(late.title || 'Answered task'), sub: `Remaining work ${state} · answer delivered${when}` };
 }
 
-/** A census-only live root (a direct turn, or an answered root whose late work the owner
- * paused, D10): its phase, and the shared control — Resume once the census says Paused.
+/** A census-only live root (a direct turn, or an answered root whose late work remains):
+ * its state in the chip's own words (never the census code), and the shared control —
+ * Resume only where its work's Resume control targets it (`resume`, work_status.resumeTargets).
  * `slot` marks where the caller paints a known outcome (`ownOutcomePhase`). */
-export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null) {
+export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false) {
     const names = { direct_chat: 'Direct turn', managed_task: 'Managed task' };
     const started = Number(a.started_at) || 0;
-    const elapsed = started > 0 ? ` · ${Math.max(0, Math.round(nowMs / 1000 - started))}s` : '';
+    const spent = started > 0 ? elapsedWords(nowMs / 1000 - started) : '';
+    const elapsed = spent ? ` · ${spent}` : '';
     const late = a.late_work && typeof a.late_work === 'object' ? lateWorkHtml(a, a.late_work) : null;
     const outcome = !late && slot && ownOutcomePhase(a);
     return `<div class="activity-row">
                 <div class="activity-row-main">
                     <span class="activity-name">${late ? late.name : esc(names[a.kind] || 'Live turn')}</span>
-                    <span class="activity-sub">${late ? late.sub : `${outcome ? slot(outcome) : esc(a.phase || '')}${elapsed}`}</span>
+                    <span class="activity-sub">${late ? late.sub : `${outcome ? slot(outcome)
+                        : `<span data-i18n-skip>${esc(censusWords(a))}</span>`}${elapsed}`}</span>
                 </div>
                 <div class="activity-row-actions">
-                    <button type="button" class="btn btn-xs btn-danger" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>
+                    <button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>
                 </div>
             </div>`;
 }
@@ -100,10 +129,6 @@ export function scheduleInstantHtml(value, { timeZone, includeYear = false } = {
     return `<time datetime="${esc(exact)}" title="${esc(exact)}">${esc(local)} (${esc(utc)} UTC)</time>`;
 }
 
-function isSkillManaged(s) {
-    return Boolean(s && (String(s.source || '') === 'skill_manifest' || String(s.skill || '')));
-}
-
 // The server names the lifecycle word; these fall back for an older payload
 // so a row is never silently promoted to "active" by a missing field.
 export function scheduleStatus(s) {
@@ -111,19 +136,48 @@ export function scheduleStatus(s) {
     if (s.status) return String(s.status);
     if (s.delete_requested_at) return 'delete_pending';
     if (once && s.completed_at) return 'consumed';
-    if (isSkillManaged(s) && ['disabled', 'deleted'].includes(String(s.manual_override || ''))) return 'suppressed';
     return s.enabled === false ? 'disabled' : 'active';
 }
 
-// Retained rows — a fired one-shot, a suppressed skill row — are history, not
-// schedules wearing a disabled flag. A deleted row still finishing accepted
-// work is not history: it stays in the standing list until it disappears.
+// Known work in flight keeps a withdrawn row in the standing list. Other
+// withdrawn rows and fired one-shots remain reachable in history.
 export function isRetainedSchedule(s) {
-    return ['consumed', 'suppressed'].includes(scheduleStatus(s));
+    const status = scheduleStatus(s);
+    return status === 'consumed'
+        || (status === 'delete_pending' && Boolean(s.withdrawal) && s.withdrawal.work_in_flight !== true);
 }
 
-export function scheduleRowHtml(s) {
-    const managed = isSkillManaged(s);
+function scheduleTextHtml(s, note, expanded) {
+    const text = String((note ? s.notification?.text : s.task?.text || s.task?.objective)
+        || s.description || s.objective_preview || '').trim();
+    if (!text) return '';
+    const preview = text.split(/\r?\n/)[0].slice(0, 96);
+    if (preview === text) return `<span class="activity-sub" data-i18n-authored>${esc(text)}</span>`;
+    return `<details class="project-ending-details activity-sub" data-schedule-text="${esc(s.id || '')}"${expanded ? ' open' : ''}>
+        <summary data-act="schedule-text" data-id="${esc(s.id || '')}" data-i18n-authored>${esc(preview)}…</summary>
+        <div data-i18n-authored>${esc(text).replace(/\r?\n/g, '<br>')}</div>
+    </details>`;
+}
+
+function scheduleRunHtml(s) {
+    const outcome = s.outcome;
+    const parts = [];
+    if (outcome?.state === 'pending_observation') {
+        parts.push('last run: outcome not observed yet');
+    } else if (outcome?.state) {
+        const quiet = outcome.quiet === true && outcome.notice !== true;
+        const state = quiet && outcome.state === 'completed' ? tr('schedule.outcome.quiet', 'ran · no message') : outcome.state;
+        // The line is the host's notice, else the run's own words (its sentence, or the end of its answer).
+        const line = outcome.line ? ` · ${outcome.notice ? `notice: ${esc(outcome.line)}` : `<span data-i18n-authored>${esc(outcome.line)}</span>`}` : '';
+        parts.push(`last run: ${esc(state)}${outcome.ended_at ? ` · ${scheduleInstantHtml(outcome.ended_at, { includeYear: true })}` : ''}${line}`);
+    }
+    if (s.previous_run_open) {
+        parts.push(`previous run still open${s.previous_run_open.task_id ? `: ${esc(s.previous_run_open.task_id)}` : ''}`);
+    }
+    return parts.map((line) => `<span class="activity-sub">${line}</span>`).join('');
+}
+
+export function scheduleRowHtml(s, expanded = false) {
     const trigger = s.trigger || {};
     const once = String(trigger.type || 'cron') === 'once';
     // One-shot rows have no cron: show the fire instant + a "one-shot" tag. A cron
@@ -131,20 +185,17 @@ export function scheduleRowHtml(s) {
     const timing = once
         ? `one-shot · at/after ${scheduleInstantHtml(trigger.run_at)}`
         : `${esc(trigger.expr || s.cron || '')} (${s.timezone ? esc(s.timezone) : 'server time zone'})`;
-    // A note (kind "notify") is shown to the owner as written, with no task: its
-    // row names it by its own words rather than by a schedule label.
-    const note = String(s.kind || '') === 'notify';
-    const noteText = note ? String(s.notification?.text || '') : '';
+    const note = ['note', 'notify'].includes(s.kind);
     const next = s.next_run_at ? scheduleInstantHtml(s.next_run_at) : '';
     const status = scheduleStatus(s);
     const enabled = status === 'active';
     const consumed = status === 'consumed';
-    const suppressed = status === 'suppressed';
     const pendingDelete = status === 'delete_pending';
     const id = esc(s.id || '');
     // A due occurrence that waits (capacity, a missing folder, an unknown fact) says why.
-    const waiting = s.hold && s.hold.reason
-        ? ` · <span class="activity-tag" title="${esc(s.hold.detail || '')}">waiting: ${esc(s.hold.reason)}</span>` : '';
+    const wait = s.waiting_detail ?? s.hold ?? s.waiting;
+    const waitText = typeof wait === 'string' ? wait : [wait?.reason, wait?.detail].filter(Boolean).join(': ');
+    const waiting = waitText ? ` · <span class="activity-tag">waiting: ${esc(waitText)}</span>` : '';
     // Why the row did not do its job, as stored (a note whose chat write was not
     // confirmed is consumed and never retried, so this is the only place it says so).
     const failed = s.last_error ? ` · <span class="activity-tag">last error: ${esc(s.last_error)}</span>` : '';
@@ -157,12 +208,20 @@ export function scheduleRowHtml(s) {
         origin_owner_paused: 'Original work is paused', owner_restart_in_progress: 'Restart in progress',
         followup_authority_unavailable: 'Original work details unavailable', work_deadline_passed: 'Original hard deadline passed',
         pending_binding_unavailable: 'Fired task awaits verified work binding',
-        followup_result_persistence_unavailable: 'Task record could not be saved',
     };
-    const pendingDetail = pendingDelete ? ` · deletion waits for ${relation === 'independent'
-        ? 'its accepted run to start' : 'its task to finish'}` : '';
-    const statusLabel = pendingDelete ? 'deletion pending' : status;
-    const sub = `${note ? 'reminder · ' : ''}${timing}${next && !consumed && !pendingDelete ? ` · next ${next}` : ''} · ${esc(statusLabel)}${pendingDetail} · ${esc(relation)}${binding}${s.deadline_at ? ` · deadline ${scheduleInstantHtml(s.deadline_at, { includeYear: true })}` : ''}${hold.reason ? ` · ${esc(explanations[hold.reason] || hold.reason)}` : ''}${s.followup_wait ? ` · ${esc(explanations[s.followup_wait] || s.followup_wait)}` : ''}${s.completed_at ? ' · already fired' : ''}${managed && s.skill ? ` · ${esc(s.skill)}` : ''}${waiting}${failed}`;
+    const followupWait = s.waiting_detail?.followup_wait || s.followup_wait;
+    const withdrawal = s.withdrawal;
+    const statusLabel = !pendingDelete ? status : withdrawal?.work_in_flight === true
+        ? 'deletion pending · work in flight' : withdrawal?.restorable === true
+            ? 'withdrawn · restorable' : withdrawal ? 'withdrawn' : 'deletion pending';
+    const destination = s.destination || s.task || {};
+    const address = `${destination.project_id ? ` · project ${esc(destination.project_id)}` : ''}${destination.chat_id != null ? ` · chat ${esc(destination.chat_id)}` : ''}`;
+    const sub = `${note ? 'reminder · ' : s.kind === 'task' ? 'task · ' : ''}${timing}${next && !consumed && !pendingDelete ? ` · next ${next}` : ''} · ${esc(statusLabel)} · ${esc(relation)}${binding}${address}${s.deadline_at ? ` · deadline ${scheduleInstantHtml(s.deadline_at, { includeYear: true })}` : ''}${hold.reason ? ` · ${esc(explanations[hold.reason] || hold.reason)}${hold.detail ? `: ${esc(hold.detail)}` : ''}` : ''}${followupWait ? ` · ${esc(explanations[followupWait] || followupWait)}` : ''}${s.completed_at ? ' · already fired' : ''}${s.skill ? ` · from skill ${esc(s.skill)}` : ''}${waiting}${failed}`;
+    const withdrawalDetail = withdrawal ? [
+        withdrawal.at ? `withdrawn ${scheduleInstantHtml(withdrawal.at, { includeYear: true })}` : '',
+        withdrawal.by ? `by ${esc(withdrawal.by)}` : '',
+        withdrawal.reason ? esc(withdrawal.reason) : '',
+    ].filter(Boolean).join(' · ') : '';
     // The exact hold release stays available wherever a hold exists, including on a
     // deleted row whose accepted task still needs it; it never re-enables the row.
     const holdControl = !hold.hold_id ? ''
@@ -171,34 +230,30 @@ export function scheduleRowHtml(s) {
             : !s.hold_persisted
                 ? '<span class="activity-tag">hold persistence pending</span>'
                 : `<button type="button" class="btn btn-xs btn-default" data-act="schedule-toggle" data-id="${id}" data-action="restore" data-hold-id="${esc(hold.hold_id || '')}">Restore hold</button>`;
-    // A consumed one-shot cannot be re-armed, so it carries no Enable: the
-    // only honest control left is removing the receipt. A suppressed skill
-    // row offers Restore, which asks the server to re-evaluate the skill.
-    // A skill row that is disabled WITHOUT the owner's marker is held back by
-    // its skill's readiness and re-arms on resync; an Enable button there
-    // would offer to lift a suppression nobody applied. A pending deletion can
-    // be explicitly cancelled; naming it Enable would hide that extra effect.
-    const cancelDelete = !hold.hold_id && !(once && s.completed_at)
-        ? `<button type="button" class="btn btn-xs btn-default" data-act="schedule-toggle" data-id="${id}" data-action="restore">Cancel deletion</button>` : '';
-    const readinessHeld = managed && !enabled && !suppressed;
+    // Restore cancels a withdrawal the server calls restorable (not fired, not held);
+    // exact hold release is a separate action.
+    const canRestore = !hold.hold_id && (withdrawal ? withdrawal.restorable === true : !(once && s.completed_at));
+    const restoreWithdrawal = canRestore
+        ? `<button type="button" class="btn btn-xs btn-default" data-act="schedule-toggle" data-id="${id}" data-action="restore">Restore</button>` : '';
     const lifecycle = pendingDelete
-        ? `${holdControl}${cancelDelete}`
+        ? `${holdControl}${restoreWithdrawal}`
         : status === 'waiting'
             ? '<span class="activity-tag">waiting for existing control</span>'
             : hold.hold_id
                 ? holdControl
                 : consumed
                     ? '<span class="activity-tag">consumed once · history</span>'
-                    : readinessHeld
-                        ? '<span class="activity-tag">disabled by skill readiness</span>'
-                        : `<button type="button" class="btn btn-xs btn-default" data-act="schedule-toggle" data-id="${id}" data-action="${suppressed || !enabled ? 'restore' : 'disable'}">${enabled ? 'Disable' : (suppressed ? 'Restore' : 'Enable')}</button>`;
-    return `<div class="activity-row activity-schedule${enabled || hold.hold_id || s.followup_wait ? '' : ' off'}">
+                    : `<button type="button" class="btn btn-xs btn-default" data-act="schedule-toggle" data-id="${id}" data-action="${enabled ? 'disable' : 'restore'}">${enabled ? 'Disable' : 'Enable'}</button>`;
+    return `<div class="activity-row activity-schedule">
         <div class="activity-row-main">
-            <span class="activity-name"${noteText ? ` title="${esc(noteText)}"` : ''}>${esc(noteText || s.name || s.id || 'schedule')}</span>
+            <span class="activity-name" data-i18n-authored>${esc(s.display_name || s.name || s.id || 'schedule')}</span>
+            ${scheduleTextHtml(s, note, expanded)}
             <span class="activity-sub">${sub}</span>
+            ${scheduleRunHtml(s)}
+            ${withdrawalDetail ? `<span class="activity-sub">${withdrawalDetail}</span>` : ''}
         </div>
         <div class="activity-row-actions">${lifecycle}
-           <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-managed="${managed ? '1' : ''}" data-note="${note ? '1' : ''}">Delete</button></div>
+           <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-note="${note ? '1' : ''}">Delete</button></div>
     </div>`;
 }
 
@@ -214,19 +269,14 @@ export function scheduleOutcomeToast(action, outcome) {
     if (outcome.changed === false) return [`Schedule ${action} did not change anything: ${detail}`, 'error'];
     // Restriction refresh can change bookkeeping while REFUSING release.
     // Only typed applied outcomes may produce an applied/success message.
-    if (!['updated', 'deleted', 'delete_deferred', 'suppressed', 'restored_not_ready',
+    if (!['updated', 'withdrawn', 'deleted', 'delete_deferred',
         'hold_released', 'changed_audit_incomplete'].includes(outcome.status)) {
         return [`Schedule ${action} refused: ${detail}`, 'error'];
     }
     if (outcome.audit !== 'recorded') return [`Schedule ${action} applied, but its audit record is incomplete: ${detail}`, 'warn'];
     if (outcome.status === 'delete_deferred') return [`Schedule deletion is pending: ${detail}`, 'info'];
-    if (outcome.status === 'restored_not_ready') {
-        return [`Schedule suppression lifted, but it is not ready to run: ${detail}`, 'warn'];
-    }
     if (outcome.ok !== true) return [`Schedule ${action} changed, but did not finish successfully: ${detail}`, 'warn'];
-    // Name what actually happened: a delete on a skill row is a durable
-    // suppression, and saying "deleted" would claim a removal that did not occur.
-    const done = outcome.status === 'suppressed' ? 'suppressed (kept disabled until restored)' : `${action}d`;
+    const done = outcome.status === 'withdrawn' ? 'withdrawn' : `${action}d`;
     // Lifecycle actions govern FUTURE dispatch; a run already admitted keeps
     // going. Silence here would let the owner read the button as a stop.
     if (outcome.running_or_queued === true) {
@@ -235,16 +285,17 @@ export function scheduleOutcomeToast(action, outcome) {
     if (outcome.running_or_queued === null || outcome.running_or_queued === undefined) {
         return [`Schedule ${done}. Whether a task it already started is still running is unknown.`, 'info'];
     }
-    return outcome.status === 'suppressed' ? [`Schedule ${done}.`, 'info'] : null;
+    return outcome.status === 'withdrawn' ? [`Schedule ${done}.`, 'info'] : null;
 }
 
-export function initActivity({ mount, ws } = {}) {
+export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     if (!mount) return { refresh: () => {} };
     let busy = false;
     let refreshRevision = 0;
     let migrationTimer = null, destroyed = false;
     // Remembered across re-renders: the owner's retained-history disclosure state.
     let historyOpen = false;
+    let expandedSchedules = new Set();
     mount.innerHTML = `<div class="activity-scroll">
         <div class="activity-section" data-activity-section="queue"><h3 class="activity-h">Running &amp; queued</h3></div>
         <div class="activity-section" data-activity-section="background"><h3 class="activity-h">Background</h3></div>
@@ -263,83 +314,51 @@ export function initActivity({ mount, ws } = {}) {
     // Known-outcome chips of the last queue render; paintTaskPhase writes them into
     // their slots once the markup is mounted. The words come from the translation seam.
     let phaseViews = [];
+    // The body the queue was last drawn from: a work's controls come from it, at their exact targets.
+    let lastCensus = null;
     const phaseSlot = (view) => `<span class="activity-phase" data-i18n-skip><span data-activity-phase="${
         phaseViews.push(view) - 1}"></span><span class="chat-live-phase-secondary" hidden></span></span>`;
 
     function renderQueue(queue, census) {
         if (!Array.isArray(queue?.running) || !Array.isArray(queue?.pending)) throw new Error('Queue unavailable');
+        lastCensus = census;
         const { running, pending } = queue;
         const activities = Array.isArray(census?.active_chat_activities) ? census.active_chat_activities : [];
         const phases = new Map(activities.map((a) => [String(a?.activity_id || ''), a?.phase]));
-        const rootPhases = new Map();
-        for (const q of [...running, ...pending]) {
-            const t = q?.task || {}, id = String(q.id || t.id || '');
-            // The census contains roots only; compact pending snapshots may omit retry lineage.
-            if (phases.has(id)) rootPhases.set(String(t.root_task_id || id), phases.get(id));
-        }
+        // Resume is offered only on a task a work's Resume control names (the server's door decision).
+        const resumable = resumeTargets(census);
         phaseViews = [];
-        // #322: the snapshot already carries the pause truth — a member's own
-        // _budget_pause row, or a root fence covering its tree.
-        const liveFences = ((queue && queue.budget_root_fences) || [])
-            .filter((f) => f && ['active', 'paused'].includes(String(f.status || '')));
-        const fencedRoots = new Set(liveFences.map((f) => String(f.root_task_id || '')));
-        // The owner's Pause rides the same latch, typed by its cause: not money.
-        const ownerFencedRoots = new Set(liveFences.filter((f) => f.cause === 'owner_pause')
-            .map((f) => String(f.root_task_id || '')));
-        // #1196: a row whose root fence was lifted keeps a durable HOLD instead —
-        // nothing dispatches it until an explicit selection is recorded, so
-        // showing it as plain "queued" would promise work that cannot start.
-        const heldRow = (t) => Boolean(t && t._budget_pause_hold && !t._budget_pause_hold.selected);
-        const rowBudgetPaused = (q, t, kind) => kind === 'pending' && Boolean(
-            (t && t._budget_pause)
-            || heldRow(t)
-            || fencedRoots.has(String((t && (t.root_task_id || t.id)) || q.id || '')));
         const row = (q, kind) => {
             const t = (q && q.task) || {};
             const id = esc(q.id || t.id || '');
             const label = esc(t.title || t.objective || t.text || q.type || id || 'task');
-            const rt = kind === 'running' && q.runtime_sec != null ? ` · ${Math.round(q.runtime_sec)}s` : '';
-            // The owner's Restart holds never-started work under the same
-            // hold carrier (restart_retention.py): same Resume, its own words.
-            // Work saved before an application stop (saved_work_hold, #1563) has
-            // the census's same "after restart" cause; it is never a money pause.
-            const restartHeld = heldRow(t)
-                && ['owner_restart_hold', 'saved_work_hold'].includes(t._budget_pause_hold.reason);
-            // A held Continue waits on its predecessor's unsettled work, not on money (#1721).
-            const continueHeld = heldRow(t) && t._budget_pause_hold.reason === 'continuation_writer_unsettled';
-            const waiting = q.owner_wait;
-            const warmSleeping = kind === 'running' && waiting?.state === 'waiting'
-                && waiting.reason === 'sleep' && waiting.sleep?.mode === 'warm';
-            const sleeping = t._budget_pause?.reason === 'sleep' || warmSleeping;
-            const ownerPaused = t._budget_pause?.reason === 'owner'
-                || ownerFencedRoots.has(String(t.root_task_id || t.id || q.id || ''));
-            const authorityPaused = t._budget_pause?.reason === 'authority';
-            // Census addresses the current physical retry. Children use that actor's phase,
-            // while a separate late-work row keeps its own identity and controls.
-            const ownId = String(q.id || t.id || ''), rootId = String(t.root_task_id || ownId);
-            const phase = phases.get(ownId) ?? rootPhases.get(rootId) ?? phases.get(rootId);
-            const paused = rowBudgetPaused(q, t, kind) || (ownerPaused && phases.get(ownId) === 'budget_paused');
-            const resumable = paused && (!ownerPaused || phase === 'budget_paused');
-            const kindLabel = phase === 'unknown' ? 'pause status unknown'
-                : phase === 'budget_pausing' ? 'pausing' : restartHeld ? 'held after Restart'
-                : continueHeld ? 'held: earlier work not proven settled'
-                : (paused ? (ownerPaused ? 'paused' : sleeping ? 'sleeping'
-                    : authorityPaused ? 'paused (technical)' : 'paused (budget)') : sleeping ? 'sleeping' : kind);
-            // A result is still the row's own, beside its wait word.
+            const spent = kind === 'running' ? elapsedWords(q.runtime_sec) : '';
+            const rt = spent ? ` · ${spent}` : '';
+            const ownId = String(q.id || t.id || '');
+            const projected = workOfEpisode(census, ownId) || memberState(census, ownId);
+            const view = workRowView(projected || { activity: 'unknown', confirmed: false });
+            const parked = projected?.activity === 'paused';
+            const kindLabel = view.word;
             const outcome = ownId && ownOutcomePhase(activities.find((entry) => entry?.activity_id === ownId),
-                kindLabel === 'running' ? '' : kindLabel);
-            const heldFacts = continueHeld ? heldWorkFacts(t._budget_pause_hold.blockers) : '';
-            const meta = `${outcome ? phaseSlot(outcome) : esc(kindLabel)}${heldFacts ? ` · ${esc(heldFacts)}` : ''}${q.type ? ` · ${esc(q.type)}` : ''}${rt}`;
+                view.outcome || (projected?.activity === 'working' && projected.transition === 'none') ? '' : kindLabel);
+            // The chip already says Finalizing beside its outcome; retain only the work's other facts.
+            const secondary = outcome && view.outcome ? workLine(projected, kindLabel) : view.secondary;
+            // The projection owns the state; the current wait's recorded blockers
+            // keep its specific cause readable after the Continue toast expires.
+            const waiting = t._budget_pause_hold;
+            const heldFacts = projected?.confirmed !== false && projected?.because?.[0]?.code === 'earlier_work_unconfirmed'
+                && waiting?.reason === 'continuation_writer_unsettled' && !waiting.selected ? heldWorkFacts(waiting.blockers) : '';
+            const meta = `${outcome ? phaseSlot(outcome) : esc(kindLabel)}${secondary ? ` · ${esc(secondary)}` : ''}${heldFacts ? ` · ${esc(heldFacts)}` : ''}${q.type ? ` · ${esc(q.type)}` : ''}${rt}`;
             const hold = t.project_admission_hold;
             const projectWait = hold?.label ? ` · ${esc(hold.label)}: ${esc(hold.detail || hold.reason)}` : '';
             // The held cause is what the owner reads before Resume: it wraps, never ellipsized.
-            return `<div class="activity-row${continueHeld ? ' activity-held' : ''}">
+            return `<div class="activity-row${projected?.activity === 'waiting' ? ' activity-held' : ''}">
                 <div class="activity-row-main">
                     <span class="activity-name">${label}</span>
                     <span class="activity-sub">${meta}${projectWait}</span>
                 </div>
                 <div class="activity-row-actions">
-                    <button type="button" class="btn btn-xs btn-danger" data-act="task-control" data-id="${id}"${resumable ? ' data-budget-paused="1"' : ''}${phases.has(ownId) || isRootTaskRow(t, ownId) ? ' data-root="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>
+                    <button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${id}"${parked || resumable.has(ownId) ? ' data-budget-paused="1"' : ''}${resumable.has(ownId) ? ' data-resume="1"' : ''}${phases.has(ownId) || isRootTaskRow(t, ownId) ? ' data-root="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>
                 </div>
             </div>`;
         };
@@ -348,7 +367,7 @@ export function initActivity({ mount, ws } = {}) {
         const known = new Set([...running, ...pending].map((q) => String(q.id || q.task?.id || '')));
         const live = activities.filter((a) => a && !known.has(String(a.activity_id || '')));
         const parts = [...running.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
-            ...live.map((a) => liveActivityRowHtml(a, Date.now(), phaseSlot))];
+            ...live.map((a) => liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || ''))))];
         if (parts.length) return parts.join('');
         return census?.active_chat_activities_complete === true
             ? '<div class="activity-empty">Nothing running or queued.</div>'
@@ -368,19 +387,19 @@ export function initActivity({ mount, ws } = {}) {
         const detail = esc(bg.detail || (enabled ? 'enabled' : 'disabled'));
         const facts = [
             bg.level ? `autonomy ${esc(bg.level)}` : '',
-            enabled && bg.next_wake_at ? `next wake ${esc(formatWhen(bg.next_wake_at))}` : '',
             bg.last_wake_at ? `last wake ${esc(formatWhen(bg.last_wake_at))}${bg.last_wake_outcome ? ` (${esc(bg.last_wake_outcome)})` : ''}` : '',
             allowanceLabel(bg.spent_24h_usd, bg.daily_usd, bg.unknown_unmetered, bg.integrity_degraded)
                 ? `allowance ${esc(allowanceLabel(bg.spent_24h_usd, bg.daily_usd, bg.unknown_unmetered, bg.integrity_degraded))} (24 h)` : '',
-            Number.isFinite(Number(bg.max_tasks)) ? `tasks ${Number(bg.tasks_running || 0)}/${Number(bg.max_tasks)}` : '',
+            Number.isFinite(Number(bg.max_tasks)) ? esc(fmt('own tasks {running}/{max}', { running: Number(bg.tasks_running || 0), max: Number(bg.max_tasks) })) : '',
         ].filter(Boolean).join(' · ');
         return `<div class="activity-row">
             <div class="activity-row-main">
-                <span class="activity-name">Background consciousness</span>
+                <span class="activity-name">Consciousness</span>
                 <span class="activity-sub">${enabled ? 'enabled' : 'disabled'}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
             </div>
             <div class="activity-row-actions">
                 <button type="button" class="btn btn-xs btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws ? '' : ' disabled'}>${enabled ? 'Stop' : 'Start'}</button>
+                <button type="button" class="btn btn-xs btn-ghost" data-act="bg-open" aria-label="Open Dashboard › Consciousness"${openDashboardTab ? '' : ' hidden'}>Details</button>
             </div>
         </div>`;
     }
@@ -389,14 +408,12 @@ export function initActivity({ mount, ws } = {}) {
         if (!Array.isArray(data?.tasks)) throw new Error('Schedules unavailable');
         const tasks = data.tasks;
         if (!tasks.length) return '<div class="activity-empty">No scheduled tasks.</div>';
-        // Retained rows — a fired one-shot, a suppressed skill row — are history,
-        // not schedules wearing a disabled flag. They stay reachable (and
-        // restorable) but collapsed, so the standing schedules are the list.
+        // History stays reachable without padding the standing schedules.
         const standing = [];
         const retained = [];
         for (const s of tasks) (isRetainedSchedule(s) ? retained : standing).push(s);
         const parts = standing.length
-            ? standing.map(scheduleRowHtml)
+            ? standing.map((s) => scheduleRowHtml(s, expandedSchedules.has(String(s.id || ''))))
             : ['<div class="activity-empty">No active or disabled schedules.</div>'];
         if (retained.length) {
             // A refresh rebuilds this markup, so the disclosure carries the state
@@ -404,8 +421,8 @@ export function initActivity({ mount, ws } = {}) {
             // they just opened (and drops the focus they had inside it) reads as
             // the app undoing their action.
             parts.push(`<details class="activity-history" data-activity-history${historyOpen ? ' open' : ''}>
-                <summary>History &amp; suppressed (${retained.length})</summary>
-                ${retained.map(scheduleRowHtml).join('')}
+                <summary>History &amp; withdrawn (${retained.length})</summary>
+                ${retained.map((s) => scheduleRowHtml(s, expandedSchedules.has(String(s.id || '')))).join('')}
             </details>`);
         }
         return parts.join('');
@@ -414,6 +431,8 @@ export function initActivity({ mount, ws } = {}) {
     function rememberDisclosure() {
         const details = mount.querySelector('[data-activity-history]');
         if (details) historyOpen = Boolean(details.open ?? details.hasAttribute('open'));
+        expandedSchedules = new Set([...mount.querySelectorAll('[data-schedule-text]')]
+            .filter((node) => node.open ?? node.hasAttribute('open')).map((node) => node.dataset.scheduleText));
     }
 
     function focusedControl() {
@@ -424,7 +443,8 @@ export function initActivity({ mount, ws } = {}) {
     function restoreFocus(previous) {
         if (!previous) return;
         const target = [...mount.querySelectorAll('[data-act]')].find((el) => (
-            el.dataset.act === previous.act && (el.dataset.id || '') === previous.id));
+            el.dataset.act === previous.act && (el.dataset.id || '') === previous.id
+            && (el.dataset.holdId || '') === previous.holdId));
         if (!target) return;
         // Focus lives inside the disclosure for a retained row: open it rather
         // than focusing a control the owner cannot see.
@@ -439,7 +459,7 @@ export function initActivity({ mount, ws } = {}) {
         const revision = ++refreshRevision;
         rememberDisclosure();
         const focused = focusedControl();
-        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '' };
+        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
         sections.forEach(({ root, status, loaded }) => {
             root.setAttribute('aria-busy', 'true');
             setInlineStatus(status, loaded ? 'Refreshing… Previously loaded values shown.' : 'Loading…');
@@ -448,7 +468,7 @@ export function initActivity({ mount, ws } = {}) {
             // This view renders only the queue; queue_only skips the whole
             // task-results scan server-side (v6.9x P2).
             getJson('/api/tasks?queue_only=1'),
-            getJson('/api/state'),
+            readStateJson(),
             getJson('/api/schedules'),
         ]);
         if (destroyed || revision !== refreshRevision) return;
@@ -510,9 +530,10 @@ export function initActivity({ mount, ws } = {}) {
 
     mount.addEventListener('click', async (event) => {
         const btn = event.target.closest('[data-act]');
-        if (!btn || busy) return;
+        if (!btn || busy || btn.dataset.act === 'schedule-text') return;
         const act = btn.dataset.act;
         const id = btn.dataset.id || '';
+        if (act === 'bg-open') { openDashboardTab?.('consciousness'); return; }
         if (act === 'task-control') {
             // S3 (Q2/HQ1): owner product-wide parity — the SAME three-action
             // dropdown as the Chat card (one shared module: same actions,
@@ -526,9 +547,15 @@ export function initActivity({ mount, ws } = {}) {
             } catch (exc) {
                 if (exc?.status !== 404) showToast(`Could not refresh task state: ${exc?.message || exc}`, 'error');
             }
+            // A work's current episode offers that work's controls: Stop reaches every episode root still
+            // running, Stop earlier attempt the earlier ones, each at the server's exact target.
+            const work = btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
+            if (work && openWorkControls(btn, work, { cancelPending: taskCancelPending(stored), withResume: true,
+                afterAction: refresh })) return;
             openTaskControlMenu(btn, {
                 cancelPending: taskCancelPending(stored),
                 budgetPaused: btn.dataset.budgetPaused === '1',
+                resume: btn.dataset.resume === '1',
                 // A child's Pause would not name its own tree (the server refuses it).
                 wholeTree: btn.dataset.root === '1',
                 busy: taskControlBusy(id),
@@ -569,17 +596,11 @@ export function initActivity({ mount, ws } = {}) {
         btn.disabled = true;
         try {
             if (act === 'schedule-delete') {
-                // A skill-declared schedule cannot be removed: the skill's manifest
-                // would recreate it. Delete SUPPRESSES it durably, and the dialog
-                // says so before anything is sent.
-                const managedRow = btn.dataset.managed === '1';
                 const noun = btn.dataset.note === '1' ? 'reminder' : 'schedule';
                 const confirmedDelete = await openConfirmDialog({
-                    title: managedRow ? 'Suppress skill schedule' : `Delete ${noun}`,
-                    body: managedRow
-                        ? 'This schedule is declared by an installed skill and cannot be removed; Delete keeps it suppressed until you Restore it. Suppress it?'
-                        : `Delete this ${noun}?`,
-                    confirmLabel: managedRow ? 'Suppress' : 'Delete',
+                    title: `Delete ${noun}`,
+                    body: `Delete this ${noun}? It stays restorable for a while and is removed after the retention window once its work has settled. This does not cancel work already started.`,
+                    confirmLabel: 'Delete',
                     danger: true,
                 });
                 if (!confirmedDelete) return;

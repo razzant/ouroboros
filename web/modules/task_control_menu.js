@@ -2,22 +2,27 @@
 // "Wrap up" (soft finalize-then-stop), "Hurry up" (typed task-local hurry
 // control, never a chat message), "Pause"/"Resume" (root-only, whole tree; the
 // request_id survives uncertain or latch_pending replies until a confirmed
-// Pause or Resume retires it) and "Stop now" (hard stop). Dismissing the menu
-// continues the run. While a cancel intent is pending, the only offered action
-// is "Stop now", the monotonic escalation of the same durable stop intent;
-// "Hurry up" is refused then and never offered.
+// Pause or Resume retires it), "Stop earlier attempt" (a work's earlier
+// Continue attempt that still owns live helpers) and "Stop now" (hard stop).
+// Dismissing the menu continues the run. While a cancel intent is pending, the
+// only offered action is "Stop now", the monotonic escalation of the same
+// durable stop intent; "Hurry up" is refused then and never offered.
 //
-// Eligibility gates differ per surface; endpoints, stop policy, request-id
+// Which actions a work offers is the server's decision (`/api/state` works,
+// work_status.js lays them on this menu); endpoints, stop policy, request-id
 // retry and verbatim refusals are shared.
 
 import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
+import { openConfirmDialog } from './confirm_dialog.js';
+import { haptic } from './haptics.js';
 import { showToast } from './toast.js';
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 
 export const ACTION_FINALIZE = 'finalize';
 export const ACTION_HURRY = 'hurry';
 export const ACTION_PAUSE = 'pause';
 export const ACTION_RESUME = 'resume';
+export const ACTION_STOP_EARLIER = 'stop_earlier';
 export const ACTION_STOP_NOW = 'stop_now';
 
 // Logical slots that may host multiple independent cycles (v6.82: shared so
@@ -49,18 +54,13 @@ export function cancelRunEligibility({
         && !REUSABLE_TASK_IDS.has(String(groupId || ''));
 }
 
-export function resumeRunEligibility(record, activity) {
-    return !record?.cancelPendingPolicy && activity?.phase === 'budget_paused'
-        && cancelRunEligibility({ ...record, cancelable: true,
-            converted: record?.root?.dataset?.projectCreated === '1' });
-}
-
-// The direct button and the menu use the same request owner. A historical
-// pause never enables this door; the caller checks its current census on click.
+// The direct button and the menu use the same request owner. Only a work's Resume control enables this door
+// (the server offers it where the Resume door accepts now); the caller re-checks that control on click.
 export function createTaskResumeButton(taskId, { canResume, onSettled = () => {} } = {}) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'btn btn-xs btn-default';
+    // Resume is the one primary of a paused card (its Stop… beside it stays neutral).
+    button.className = 'btn btn-sm btn-primary ui-hit-area';
     button.dataset.resumeRun = '1';
     button.textContent = tr('task.control.resume', 'Resume');
     button.addEventListener('click', async (event) => {
@@ -74,11 +74,13 @@ export function createTaskResumeButton(taskId, { canResume, onSettled = () => {}
 }
 
 // Frozen owner wording (Q2/HQ1) — exact strings, never localized/reworded here.
+// "Stop earlier attempt" stops what still runs of a held Continue's earlier attempt; the Continue itself stays.
 export const TASK_CONTROL_LABELS = Object.freeze({
     [ACTION_FINALIZE]: 'Wrap up',
     [ACTION_HURRY]: 'Hurry up',
     [ACTION_PAUSE]: 'Pause',
     [ACTION_RESUME]: 'Resume',
+    [ACTION_STOP_EARLIER]: 'Stop earlier attempt',
     [ACTION_STOP_NOW]: 'Stop now',
 });
 
@@ -102,18 +104,19 @@ export function isRootTaskRow(task = {}, id = '') {
 
 /**
  * The action set for the current card state (pure — node-testable).
- * `wholeTree` is false for a child: its Pause would not name its own tree.
- * @param {{cancelPending?: boolean, budgetPaused?: boolean, wholeTree?: boolean}} [state]
+ * `wholeTree` is false for a child: its Pause would not name its own tree. `resume` offers Resume in the menu:
+ * only where a work's Resume control targets this task and no Resume button of its own stands beside it.
+ * @param {{cancelPending?: boolean, budgetPaused?: boolean, wholeTree?: boolean, resume?: boolean}} [state]
  * @returns {string[]} ordered action ids
  */
-export function taskControlActions({ cancelPending = false, budgetPaused = false, wholeTree = true, resumeVisible = false } = {}) {
+export function taskControlActions({ cancelPending = false, budgetPaused = false, wholeTree = true, resume = false } = {}) {
     // A pending cancel refuses hurry (HQ1) and a second soft stop is a no-op:
     // the single offered action is the hard escalation of the same intent.
     if (cancelPending) return [ACTION_STOP_NOW];
     // A budget-paused member is not running: nothing to wrap up or hurry.
     // The host-attested pause fact gates the offer; the server re-validates
     // (replay_unsafe and sibling checks answer 409 with the reason).
-    if (budgetPaused) return resumeVisible ? [ACTION_STOP_NOW] : [ACTION_RESUME, ACTION_STOP_NOW];
+    if (budgetPaused) return resume ? [ACTION_RESUME, ACTION_STOP_NOW] : [ACTION_STOP_NOW];
     // Pause saves the WHOLE tree until an explicit Resume: new work is fenced,
     // members' own runs get a stop, launched reviewers finish; Stop still ends it.
     return wholeTree ? [ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_STOP_NOW]
@@ -197,8 +200,27 @@ const HELD_FACTS = {
     running_member: (b) => `task ${b.task_id} is still running`,
     dispatchable_member: (b) => `task ${b.task_id} is queued to run`,
     owned_process: (b) => `a process of task ${b.task_id} is still alive`,
-    model_handoff: () => 'a model request has no recorded result',
-    tool_handoff: (b) => `a tool call of task ${b.task_id} has not returned`,
+    // Mirrors work_stop.model_handoff_words (local_custody_repair.receiver_reason).
+    model_handoff: (b) => ({
+        local_call_live: `a model answer for task ${b.task_id} is awaited by a live worker`,
+        local_completion_unknown: `it is unknown whether the model answer receiver of task ${b.task_id} ended: `
+            + 'its worker cannot be proven ended',
+    })[b.reason] || 'a model request has no recorded result',
+    // Mirrors work_stop.tool_handoff_words: the server classifies (tool_custody.tool_handoff_reason).
+    tool_handoff: (b) => {
+        const tool = b.tool || 'tool';
+        const effects = (Array.isArray(b.effects) && b.effects.length ? b.effects.join(' and ') : 'outside effect');
+        return ({
+            local_call_live: `the ${tool} call of task ${b.task_id} is in a live worker: still running, `
+                + 'or its finished result is not recorded yet',
+            local_completion_unknown: `it is unknown whether the ${tool} call of task ${b.task_id} finished: `
+                + 'its worker cannot be proven ended',
+            owner_ended_effect_unknown: `the ${tool} call of task ${b.task_id} ended with its worker; `
+                + `the outcome of its ${effects} is unknown`,
+            returned_effect_unconfirmed: `the ${tool} call of task ${b.task_id} returned; its ${effects} `
+                + `${Array.isArray(b.effects) && b.effects.length > 1 ? 'are' : 'is'} not confirmed`,
+        })[b.reason] || `a ${tool} call of task ${b.task_id} is held`;
+    },
     merge_operation: (b) => `a merge of task ${b.task_id} is not settled`,
     workspace_executor: (b) => `a workspace process of task ${b.task_id} is not settled`,
     delegated_run: (b) => (b.state === 'running' ? `delegated run ${b.run_id} is running`
@@ -219,17 +241,69 @@ export function heldWorkFacts(blockers, limit = 3) {
         ? `${facts.slice(0, limit).join('; ')}; and ${facts.length - limit} more` : facts.join('; ');
 }
 
-export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast } = {}) {
+// The damaged saved records an accepted Continue or Resume did not wait for (`membership_gaps`: the census
+// tied them to no task; at most 20 named, all counted). The Pause row says the same fact in the transcript
+// (ouroboros/pause_notices.py). Named, never called another task's; whether they belong here is unknown.
+const GAP_WORDS = {
+    continue: ['Continue did not wait for {n} saved task record that could not be read and that nothing ties to '
+        + 'this task ({names}); whether it belongs here is unknown.', 'Continue did not wait for {n} saved task '
+        + 'records that could not be read and that nothing ties to this task ({names}); whether they belong here is unknown.'],
+    resume: ['The Pause did not wait for {n} saved task record that could not be read and that nothing ties to '
+        + 'this task ({names}); whether it belongs here is unknown.', 'The Pause did not wait for {n} saved task '
+        + 'records that could not be read and that nothing ties to this task ({names}); whether they belong here is unknown.'],
+};
+
+/** @returns {string} the gap an accepted `action` ('continue' | 'resume') answered with, '' without one */
+export function membershipGapWords(gaps, action) {
+    const count = gaps?.count;
+    if (!Number.isInteger(count) || count <= 0 || !GAP_WORDS[action]) return '';
+    const names = (Array.isArray(gaps.rows) ? gaps.rows : []).map((row) => String(row?.task_id || '')).filter(Boolean);
+    return fmt(GAP_WORDS[action][count === 1 ? 0 : 1],
+        { n: count, names: [...names, ...(count > names.length ? ['…'] : [])].join(', ') });
+}
+
+/** A warning beside the action's own toast, kept until dismissed: a Continue's gap, or one found after the Pause
+ *  row, has no other on-screen home (docs/DESIGN.md: a warning whose line is its only home stays). */
+export function announceMembershipGap(gaps, action, toast = showToast) {
+    const words = membershipGapWords(gaps, action);
+    if (words) toast(words, 'warn', { ttl: 0, dismissLabel: 'Dismiss notice' });
+    return words;
+}
+
+const KEPT_PAUSED = Symbol('kept_paused');
+
+// Every holder is a held call whose outcome is unknown (the server lists their ids): the owner may go on
+// without their results. They are never run again; the task records the decision (local_custody_repair).
+async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
+    const named = refusal?.body?.acceptable_unknown;
+    if (!Array.isArray(named) || !named.length) throw refusal;
+    const facts = heldWorkFacts(refusal.body.blockers, 5);
+    const one = named.length === 1;
+    const confirmed = await askOwner({
+        title: 'Resume without these results?',
+        body: `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
+            + `never run again, whatever ${one ? 'it' : 'they'} changed outside stays as it is, `
+            + 'and your decision is recorded on the task.',
+        confirmLabel: 'Resume anyway',
+    });
+    return confirmed ? resume(id, { accept_unknown: named, reason: 'The owner resumed without these results.' })
+        : KEPT_PAUSED;
+}
+
+export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast, askOwner = openConfirmDialog } = {}) {
     const id = String(taskId || '').trim();
     if (!id || inFlight.has(id)) return;
     inFlight.add(id);
     try {
-        const ack = await resume(id);
+        const ack = await resume(id).catch((refusal) => resumeWithoutUnknown(id, refusal, { resume, askOwner }));
+        if (ack === KEPT_PAUSED) return;
         if (ack?.ok !== true) throw new Error('Resume acknowledgement is unknown; retry this action.');
         pauseRequestIds.delete(id);
         // An answered root's late work (D10) continues in place; its answer stays delivered.
-        toast(ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
+        toast(ack.tree_only ? 'Resumed. Ouroboros or you choose which helpers continue.'
+            : ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
             : 'Resuming: the task returns to the queue.', 'info');
+        announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record
     } catch (exc) {
         // The server names the refusal (replay_unsafe / fence missing /
         // not budget-paused): show it verbatim instead of a generic failure,
@@ -237,7 +311,7 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         // Handled here, never rethrown: the menu callback is fire-and-forget.
         const facts = heldWorkFacts(exc?.body?.blockers);
         toast(facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
-            ? ' Wait for that work or stop it.' : ''}` : `Resume refused: ${exc?.message || exc}`, 'error');
+            ? ' Wait for that work or stop it.' : ''}` : exc?.body?.message || `Resume refused: ${exc?.message || exc}`, 'error');
     } finally {
         inFlight.delete(id);
     }
@@ -346,6 +420,27 @@ export async function requestStop(taskId, action) {
     } finally {
         inFlight.delete(id);
     }
+}
+
+/**
+ * One owner Stop over a work's targets, in the server's order (a held Continue before its earlier attempt): each
+ * target goes through the existing cascade door (`stopOne`, a card's own path where the caller has one) and the
+ * owner hears one combined result. A target that already ended (404) is settled, not a failure.
+ * @returns {Promise<boolean>} whether every target accepted its Stop
+ */
+export async function requestStopAll(targets, action, { stopOne = requestStop, toast = showToast } = {}) {
+    const ids = [...new Set((Array.isArray(targets) ? targets : []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const failed = [];
+    for (const id of ids) {
+        try { await stopOne(id, action); } catch (exc) {
+            if (exc?.status !== 404) failed.push(exc?.message || String(exc));
+        }
+    }
+    if (failed.length) {
+        toast(failed.length === ids.length ? `Stop failed: ${failed[0]}`
+            : `Stop failed for ${failed.length} of ${ids.length} parts of this work: ${failed[0]}`, 'error');
+    }
+    return !failed.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,13 +580,17 @@ function onMenuKeydown(event) {
 /**
  * Open the three-action dropdown in a viewport-level portal anchored to `anchor`.
  * Dismissing (outside click / Escape) continues the run. Selecting an item
- * closes the menu and invokes `onAction(actionId)`.
+ * closes the menu and invokes `onAction(actionId)`. `actions` (a work's controls,
+ * work_status.js) replaces the card-state set; `pauseTarget` names Pause's task
+ * when the anchor does not; `afterAction` runs once an item's effect settled.
  * @param {HTMLElement} anchor trigger element
- * @param {{cancelPending?: boolean, budgetPaused?: boolean, wholeTree?: boolean, busy?: boolean,
- *     canAct?: (action: string) => boolean, onAction: (action: string) => void}} opts
+ * @param {{cancelPending?: boolean, budgetPaused?: boolean, wholeTree?: boolean, resume?: boolean, busy?: boolean,
+ *     actions?: string[], pauseTarget?: string, canAct?: (action: string) => boolean,
+ *     onAction: (action: string) => void, afterAction?: (action: string) => void}} opts
  */
 export function openTaskControlMenu(anchor, {
-    cancelPending = false, budgetPaused = false, wholeTree = true, resumeVisible = false, busy = false, canAct = () => true, onAction,
+    cancelPending = false, budgetPaused = false, wholeTree = true, resume = false, busy = false, canAct = () => true, onAction,
+    actions = null, pauseTarget = '', afterAction = null,
 } = {}) {
     closeTaskControlMenu();
     if (!anchor?.isConnected || !document.body) return null;
@@ -501,7 +600,7 @@ export function openTaskControlMenu(anchor, {
     const menu = document.createElement('div');
     menu.className = 'task-control-menu';
     menu.setAttribute('role', 'menu');
-    for (const action of taskControlActions({ cancelPending, budgetPaused, wholeTree, resumeVisible })) {
+    for (const action of actions || taskControlActions({ cancelPending, budgetPaused, wholeTree, resume })) {
         const item = document.createElement('button');
         item.type = 'button';
         item.className = `task-control-item${action === ACTION_STOP_NOW ? ' danger' : ''}`;
@@ -514,14 +613,14 @@ export function openTaskControlMenu(anchor, {
             // A portal can outlive the facts that offered it. Its owner rechecks before EVERY effect,
             // including Pause, which dispatches here rather than through onAction.
             if (!canAct(action)) { closeTaskControlMenu(); return; }
+            if (action === ACTION_STOP_NOW || action === ACTION_STOP_EARLIER) haptic('stop');  // a decisive press, felt
             closeTaskControlMenu();
             // Both surfaces' anchors name their task (Activity row `data-id`,
             // chat card root `data-task-id`), so Pause needs no per-surface hook.
-            if (action === ACTION_PAUSE) {
-                pauseTaskAction(anchor.dataset?.id || anchor.closest?.('[data-task-id]')?.dataset?.taskId || '');
-                return;
-            }
-            onAction?.(action);
+            const effect = action === ACTION_PAUSE
+                ? pauseTaskAction(pauseTarget || anchor.dataset?.id || anchor.closest?.('[data-task-id]')?.dataset?.taskId || '')
+                : onAction?.(action);
+            if (afterAction) Promise.resolve(effect).then(() => afterAction(action), () => afterAction(action));
         });
         menu.appendChild(item);
     }
@@ -538,20 +637,18 @@ export function openTaskControlMenu(anchor, {
 }
 
 /**
- * The shared controls of one exact task, from whichever surface shows it (its Chat card, the room's
- * work list): the same actions, eligibility and request owners. `stop` is the caller's own stop path
- * (a card keeps its optimistic chip); the Pause item reads its target from the anchor.
+ * The shared controls of one exact task that no work row speaks for (a card the work projection does not list):
+ * the same request owners, never Resume (only a work's Resume control offers it). `stop` is the caller's own stop
+ * path (a card keeps its optimistic chip); the Pause item reads its target from the anchor.
  */
-export function openTaskControls(anchor, taskId, { record = null, activity = null, cancelPending = false, canAct, stop }) {
+export function openTaskControls(anchor, taskId, { activity = null, cancelPending = false, canAct, stop }) {
     const id = String(taskId || '').trim();
     return openTaskControlMenu(anchor, {
         cancelPending,
         budgetPaused: activity?.phase === 'budget_paused',
-        resumeVisible: resumeRunEligibility(record || { groupId: id }, activity),
         busy: taskControlBusy(id),
         canAct,
-        onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(id)
-            : action === ACTION_RESUME ? resumeTaskAction(id) : stop(action)),
+        onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(id) : stop(action)),
     });
 }
 

@@ -3,6 +3,7 @@
 // bytes only while its record still serves them, a nested file is never addressed by
 // its bare name, a folder offers its `.zip` only where the host's `artifact_archives`
 // confirms it (with the host's count/size), and a stat-only listing says `unverified`.
+// Wrap up's saved work (`wrap_up_document`) leads the row past any number of files, uncounted.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { projectResultArtifacts, resultFilesItemHtml, syncResultFilesItem } from '../modules/result_files.js';
@@ -83,5 +84,35 @@ test('a card keeps one Files row in step with a settled detail only', () => {
     assert.equal(record.items[0].dedupeKey, `files|${TASK}`);
     assert.equal(syncResultFilesItem(record, { status: 'completed', artifacts: RECORDS, artifact_archives: ARCHIVES }), false);
     assert.equal(syncResultFilesItem(record, { status: 'completed', artifacts: [] }), true);
+    assert.deepEqual(record.items, []);
+});
+
+const SAVED = { name: 'work-saved-at-wrap-up-task-files.md', request_id: 'ci_1' };
+
+test("Wrap up's saved work leads the Files row, uncounted and unsized, past any number of files", () => {
+    const many = Array.from({ length: 12 }, (_, index) => ({ name: `f${index}.txt`, size: 1, status: 'ready' }));
+    const view = projectResultArtifacts(TASK, many, null, SAVED);
+    assert.deepEqual(view.wrapUp, { name: SAVED.name, url: `/api/tasks/${TASK}/artifacts/${SAVED.name}?wrap_up=ci_1` });
+    assert.equal(view.fileCount, 12, 'saved work is no counted file');
+    const html = render(view);
+    assert.match(html, /<span class="chat-live-line-time">12 files<\/span>/);
+    assert.match(html, /<div class="chat-live-line-body"><span class="md-li">• <a class="md-link" href="\/api\/tasks\/task-files\/artifacts\/work-saved-at-wrap-up-task-files\.md\?wrap_up=ci_1" download="work-saved-at-wrap-up-task-files\.md">Work saved at Wrap up<\/a> · every saved text<\/span>/);
+    assert.equal((html.match(/class="md-li">•/g) || []).length, 9, 'eight file rows plus the saved work');
+    assert.match(html, /\+4 more files/);
+    const alone = render(projectResultArtifacts(TASK, [], null, SAVED));
+    assert.match(alone, /<span class="chat-live-line-time"><\/span>/, 'no file count is invented');
+    assert.equal((alone.match(/href=/g) || []).length, 1);
+    for (const refused of [{ name: '../x.md', request_id: 'ci_1' }, { name: SAVED.name }, null]) {
+        assert.equal(projectResultArtifacts(TASK, [], null, refused), null, JSON.stringify(refused));
+    }
+});
+
+test('a settled detail naming only saved work still gets its Files row', () => {
+    const record = { groupId: TASK, items: [] };
+    assert.equal(syncResultFilesItem(record, { status: 'running', wrap_up_document: SAVED }), false, 'not settled');
+    assert.equal(syncResultFilesItem(record, { status: 'failed', wrap_up_document: SAVED }), true, 'no file list needed');
+    assert.equal(record.items[0].resultArtifacts.wrapUp.name, SAVED.name);
+    assert.equal(syncResultFilesItem(record, { status: 'failed', artifacts: [], wrap_up_document: SAVED }), false, 'the same view');
+    assert.equal(syncResultFilesItem(record, { status: 'failed', artifacts: [] }), true, 'gone from the detail: gone');
     assert.deepEqual(record.items, []);
 });

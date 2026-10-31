@@ -152,21 +152,26 @@ async def broadcast_ws(msg: dict) -> None:
             log.debug("Failed to emit broadcast_partial_failure event", exc_info=True)
 
 
-def broadcast_ws_sync(msg: dict) -> None:
-    """Thread-safe sync wrapper for broadcasting."""
+def broadcast_ws_sync(msg: dict) -> bool:
+    """Thread-safe sync wrapper for broadcasting. ``True`` when a running server loop took the
+    frame; ``False`` in a process without one (a pooled worker) or once the loop stopped."""
     loop = _event_loop
-    if loop is None:
-        return
+    if loop is None or not loop.is_running():
+        # A stopped loop would hold the coroutine without running it (lost, then never
+        # awaited at close) and a closed one refuses it: neither gets one built.
+        return False
     coro = broadcast_ws(msg)
     try:
         asyncio.run_coroutine_threadsafe(coro, loop)
     except RuntimeError:
-        # A closed or already-stopped loop never schedules the coroutine. The
+        # A loop that closed after the check never schedules the coroutine. The
         # broadcast is deliberately a no-op then, but the coroutine object must
         # still be closed here: dropped un-awaited it emits "coroutine
         # 'broadcast_ws' was never awaited" from whatever code is running when
         # it is collected, blaming an innocent caller for this line.
         coro.close()
+        return False
+    return True
 
 
 async def _dispatch_extension_message(
@@ -294,15 +299,25 @@ async def _dispatch_extension_message(
     return True
 
 
-def _initialization_notice(client_message_id: str = "", chat_id: int = 1) -> str:
-    """The refusal of this socket's frame; it names that frame so only its Sending settles."""
+def _initialization_notice(client_message_id: str = "", chat_id: int = 1, *, reason: str = "") -> str:
+    """The refusal of this socket's frame; it names that frame so only its Sending settles.
+    ``reason`` says in plain words why the message was not saved (no bridge yet: the store is
+    still migrating, or the start failed); a refused acceptance keeps the generic sentence."""
     return json.dumps({
         "type": "chat", "chat_id": chat_id,
         "role": "system", "system_type": "initialization_notice",
-        "content": "⚠️ System is still initializing. Please wait a moment and try again.",
+        "content": reason or "⚠️ System is still initializing. Please wait a moment and try again.",
         "ts": utc_now_iso(),
         **({"client_message_id": client_message_id} if client_message_id else {}),
     })
+
+
+def _no_bridge_notice(websocket: WebSocket, client_message_id: str, chat_id: int) -> str:
+    """The notice for a chat frame that arrived before the dialogue opened."""
+    from ouroboros.server_liveness import boot_notice
+
+    return _initialization_notice(client_message_id, chat_id,
+                                  reason=boot_notice(getattr(websocket.app, "state", None)))
 
 
 async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None, accept,
@@ -320,9 +335,13 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
         await asyncio.wait((previous,))  # its failure was its own notice
     try:
         await run_sync_to_completion(accept)
-    except Exception:
+    except Exception as exc:
+        from ouroboros.store import StoreBusy
+
+        busy = isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy)
+        reason = "⚠️ Your message was not saved: the dialogue store is busy. Please send it again." if busy else ""
         try:
-            await websocket.send_text(_initialization_notice(client_message_id, chat_id))
+            await websocket.send_text(_initialization_notice(client_message_id, chat_id, reason=reason))
         except Exception:
             log.debug("WebSocket closed before its chat failure notice", exc_info=True)
 
@@ -374,6 +393,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
             payload = msg.get("content", "") if msg_type == "chat" else msg.get("cmd", "")
             if msg_type in ("chat", "command") and (payload or (msg_type == "chat" and msg.get("attachments"))):
+
                 try:
                     thread_id = int(msg.get("chat_id") or 1) if msg_type == "chat" else 1
                 except (TypeError, ValueError):
@@ -383,24 +403,28 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     from supervisor.message_bus import try_get_bridge
 
                     bridge = try_get_bridge()
+                    if str(payload).strip().lower().startswith("/panic"):
+                        from ouroboros.panic_source import source_evidence
+                        from ouroboros.server_control import request_panic
+                        evidence = source_evidence(websocket, "chat_command" if msg_type == "chat" else "web_ui_ws",
+                                                   client_surface=msg.get("client_surface"))
+                        if request_panic(bridge, payload, evidence=evidence,
+                                         startup_owner_command=getattr(websocket.app.state, "startup_owner_command", None)):
+                            await websocket.send_text(json.dumps({"type": "panic_accepted"}))
+                        else:
+                            await websocket.send_text(json.dumps({"type": "log", "data": {
+                                "level": "warning", "message": "Panic emergency owner is unavailable."}}))
+                        continue  # Never enter ordered chat acceptance or ordinary command admission.
                     if msg_type == "chat":
-                        # The composer sends slash text as a chat frame. Offer
-                        # Panic to the authenticated socket's emergency door
-                        # before this socket's ordered chat-acceptance tail;
-                        # otherwise an earlier blocked append could delay Stop.
-                        if bridge is not None and bridge.panic.request(payload):
-                            continue
-                        force_plan = bool(msg.get("force_plan"))
                         client_surface = normalize_client_surface(msg.get("client_surface"))
                         task_metadata: dict[str, Any] = {
-                            "force_plan": force_plan,
-                            "force_plan_source": "swarm" if force_plan else "",
+                            "reply_to": msg.get("reply_to", ""),
                         }
                         # Attachment inspection belongs to the ordered acceptance
                         # worker, so this socket can receive Panic during disk I/O.
                         if client_surface is not None:
                             # Sending-surface observables ride task_metadata
-                            # (the force_plan rail): they pass the bus whitelist
+                            # through the bus whitelist
                             # nested, reach direct/ephemeral/queued turns, and
                             # land in chat.jsonl at the canonical-row writer.
                             client_surface["received_at"] = utc_now_iso()
@@ -432,8 +456,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                             controls.add(control)
                             control.add_done_callback(controls.discard)
                             continue
-                    if bridge is None:
-                        raise AssertionError("message bus is not initialized")
+                    if bridge is None:  # the store is still migrating (or the start failed): say so
+                        await websocket.send_text(_no_bridge_notice(
+                            websocket, str(msg.get("client_message_id") or ""), thread_id))
+                        continue
                     if msg_type == "chat":
                         accept = (functools.partial(_accept_with_attachments, bridge, payload, send_kwargs,
                                                     msg["attachments"]) if msg.get("attachments")

@@ -195,7 +195,8 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
         from ouroboros.usage_accounting import usage_breakdown
 
         # Read at display time only: the root's summary rows (unavailable under contention).
-        breakdown = usage_breakdown(drive_root, root_task_id=root_id, allow_stale=True)
+        breakdown = usage_breakdown(pathlib.Path(result.get("budget_drive_root") or drive_root),
+                                    root_task_id=root_id, custody_root=drive_root, allow_stale=True, include_custody=True)
     except Exception:
         log.debug("cost breakdown view unavailable for %s", task_id, exc_info=True)
         return None
@@ -236,5 +237,6 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
         "unknown_unmetered": breakdown.get("unknown_unmetered"),
         "non_final_rows": breakdown.get("non_final_rows"),
         "cost_final": bool(breakdown.get("cost_final")),
+        "cost_custody": breakdown.get("cost_custody"),
         "authority": "physical_attempt_ledger",
     }

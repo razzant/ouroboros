@@ -18,6 +18,7 @@ import pytest
 from ouroboros.project_dialogue import (
     ORIGIN_ADDRESSED_NOTICE_TYPES,
     ROUTING_REFUSAL_CAUSES,
+    WORK_SPEECH_ELSEWHERE_TYPES,
     room_membership,
     routing_refusal_cause,
 )
@@ -45,7 +46,7 @@ REFUSAL_REASONS = (
     "routing_annotation_persist_failed", "source_continuation_publish_failed",
     "confirmation_timeout",
     # steer (supervisor/steering.py)
-    "target_unknown", "direct_chat_turn", "subagent_target", "chat_mismatch",
+    "target_unknown", "direct_chat_turn", "subagent_target",
     "cancel_pending", "target_closed", "target_finished", "acceptance_fence_sealed",
     "mailbox_write_failed",
     # ensure_project_scope (worker_promotion, events_project_routing)
@@ -75,7 +76,8 @@ EXEMPT = {
     # snapshot-persist / rollback reasons (a persist call's audit label, never a receipt)
     "promote_chat_to_task_rejected", "promote_chat_to_task_failed", "promote_chat_to_task",
     "drain_all_pending", "acceptance_fence_owner_message", "evolve_off", "deep_self_review_enqueued",
-    "project_hold_revalidated",
+    "project_hold_revalidated", "schedule_subagent_admitted",
+    "agent_restart_admission", "agent_restart_admission_unconfirmed",
     # the bind-failure events.jsonl row's reason (project_binding_unreadable), never a receipt
     "project_binding_unreadable",
     # success / pseudo reasons on a delivered ensure_project_scope receipt
@@ -165,7 +167,7 @@ def test_producer_literals_are_all_covered_or_exempt():
 
 def test_origin_addressed_notice_types_cover_admission_and_steering():
     assert ORIGIN_ADDRESSED_NOTICE_TYPES == frozenset({
-        "task_not_started", "task_start_unconfirmed", "steer_not_delivered",
+        "task_not_started", "task_start_unconfirmed", "steer_not_delivered", "relay_reply",
     })
 
 
@@ -173,14 +175,15 @@ def test_origin_addressed_notice_types_cover_admission_and_steering():
 def test_origin_addressed_notice_rows_stay_in_the_owners_chat(notice_type):
     """R12: the refused task id is bound to the project it never started in, so
     binding lineage would move the notice out of Main into that project on
-    reload. The notice is addressed to the chat the OWNER wrote in."""
+    reload. The notice is addressed to the chat the OWNER wrote in. A relay's answer
+    is its work's speech too: it stays in that chat and also joins its work's Project."""
     rooms = lambda task_id, parent="", root="": 77 if "refused-task" in (task_id, parent, root) else 0  # noqa: E731
     main = room_membership(1, {77}, [], rooms)
     project = room_membership(77, {77}, [], rooms)
     notice = {"direction": "system", "type": notice_type, "task_id": "refused-task", "chat_id": 1}
 
     assert main(1, notice) is True
-    assert project(1, notice) is False
+    assert project(1, notice) is (notice_type in WORK_SPEECH_ELSEWHERE_TYPES)
     assert project(77, {**notice, "chat_id": 77}) is True
     # An ordinary bound row keeps today's behaviour: lineage moves it to its room.
     ordinary = {"direction": "out", "type": "chat", "task_id": "refused-task", "chat_id": 1}
@@ -215,11 +218,14 @@ def test_cancel_refusal_is_one_system_notice_only_when_no_owner_receipt_can_tell
     }, ctx)
 
     assert drain_owner_entries(tmp_path, "target") == []
-    if labelled or chat_id < 0:
+    if chat_id < 0:
         assert notices == []
     else:
+        # No bridge handed the ACK over, so no owner receipt can tell it, labelled or not: this row is the
+        # notice's carrier, answering no owner row (the host accepted none under "owner-message" here).
         assert notices == [(chat_id, "Review · " + routing_refusal_cause("steer_task", "rejected", "cancel_pending"), {
             "role": "system", "system_type": "steer_not_delivered", "task_id": "target",
+            "progress_meta": {"routing_notice_carrier": "system", "reply_to": {}},
         })]
 
 

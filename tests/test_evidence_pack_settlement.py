@@ -1,275 +1,323 @@
-"""Settlement owes every obligation set but the declared records, an undeclared stored one included; the
-census reads the store once and closes it before any directory probe; new packs put small members first."""
+"""Terminal = packable: a task's loose evidence is packed once its row is terminal, whatever duty, money or
+delivery fact it carries; a task under an open review waits like a live one; later evidence becomes
+the next generation; only the generations an unlink relies on are re-read; a referenced record that is
+neither loose nor packed is reported, never invented; the census reads the store once and closes it
+before any directory probe; new packs put small members first."""
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import lzma
 import pathlib
-import re
-import sqlite3
+import subprocess
+import sys
 import threading
 
 import pytest
 
-from ouroboros import evidence_packer as packer, evidence_packs as packs, obligations, store
+from ouroboros import evidence_packer as packer, evidence_packs as packs, obligations, observability as obs, store
+from ouroboros import usage_store
+from supervisor import terminal_delivery
 from tests.test_evidence_packs import _blob, _handle_path, _loose, _result, _task
 from tests.test_evidence_packs import root as root
 
-REPO = pathlib.Path(__file__).resolve().parents[1]
-_TXN_SET_ARG = {"put_row", "set_rows", "delete_row", "get_row", "replace_set"}  # store.Txn: the set name first
-_MODULE_SET_ARG = {"add", "remove", "members", "members_in", "result_rows"}  # obligations: (root|txn, name, ...)
-_MARKER = re.compile(r"\.(?:put_row|set_rows|delete_row|get_row|replace_set)\(|^\s*(?:from|import)\s.*\bobligations\b", re.M)
-# These pass a caller's set name through or copy every set (import/export); their callers are enumerated.
-_FORWARDERS = {("ouroboros/obligations.py", name) for name in ("members_in", "members", "add", "remove", "result_rows")} | {
-    ("ouroboros/evidence_packs.py", "settlement_obligations"), ("ouroboros/store_import.py", "_reconcile_sets"),
-    ("ouroboros/store_import.py", "_build"), ("ouroboros/store_import.py", "export_facts")}
+LIVE = ("requested", "scheduled", "running", "interrupted")
 
 
-def _own(scope):
-    """The scope's nodes, nested function bodies excluded (each is its own scope)."""
-    stack = list(ast.iter_child_nodes(scope))
-    while stack:
-        node = stack.pop()
-        yield node
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            stack.extend(ast.iter_child_nodes(node))
+def _money(root, task, state, monkeypatch):
+    """One physical attempt of TASK in STATE through the accounting's own writers."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros.usage_journal import IMPORT_REL
+
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    (root / "state").mkdir(exist_ok=True)
+    if not (root / IMPORT_REL).exists():
+        (root / IMPORT_REL).write_text(json.dumps({"completed": True}), encoding="utf-8")
+    reservation = ua.reserve_attempt(ua.AttemptRequest(model="openai/gpt-5.2", provider="openai", reservation_usd=1.0,
+                                                       drive_root=root, task_id=task, root_task_id=task, source="test"))
+    if state != "reserved":
+        ua.mark_dispatched(reservation)
+    if state == "unresolved":
+        ua.mark_unresolved(reservation, "price unknown")
+    usage_store.forget(root)
 
 
-def _constants(tree) -> dict:
-    return {node.targets[0].id: node.value.value for node in tree.body
-            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-            and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)}
-
-
-def _set_name_sites(sources: dict, constants_of):
-    """Every set name an obligations call site reaches (literals, module constants, imported constants,
-    loop tuples, f-strings over them); unresolvable sites outside the declared forwarders."""
-    names, unresolved, forwarders = {}, [], set()
-    for rel, tree in sources.items():
-        own, modules, functions, imported = _constants(tree), set(), set(_MODULE_SET_ARG) if rel == "ouroboros/obligations.py" else set(), {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "ouroboros":
-                modules |= {a.asname or a.name for a in node.names if a.name == "obligations"}
-            elif isinstance(node, ast.ImportFrom) and node.module == "ouroboros.obligations":
-                functions |= {a.asname or a.name for a in node.names if a.name in _MODULE_SET_ARG}
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("ouroboros."):
-                source = constants_of(node.module.replace(".", "/") + ".py")
-                imported.update({a.asname or a.name: source[a.name] for a in node.names if a.name in source})
-        for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
-            loops = {node.target.id: [e.value for e in node.iter.elts] for node in _own(scope)
-                     if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and isinstance(node.iter, (ast.Tuple, ast.List))
-                     and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.iter.elts)}
-
-            def resolve(arg):
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    return [arg.value]
-                if isinstance(arg, ast.Name):
-                    found = loops.get(arg.id) or ([own[arg.id]] if arg.id in own else None)
-                    return found or ([imported[arg.id]] if arg.id in imported else None)
-                if isinstance(arg, ast.JoinedStr):
-                    out = [""]
-                    for part in arg.values:
-                        pieces = [part.value] if isinstance(part, ast.Constant) else resolve(part.value)
-                        if pieces is None:
-                            return None
-                        out = [head + piece for head in out for piece in pieces]
-                    return out
-                return None
-
-            for call in (n for n in _own(scope) if isinstance(n, ast.Call)):
-                func, index = call.func, None
-                if isinstance(func, ast.Attribute) and func.attr in _TXN_SET_ARG:
-                    index = 0
-                elif (isinstance(func, ast.Attribute) and func.attr in _MODULE_SET_ARG and isinstance(func.value, ast.Name)
-                      and func.value.id in modules) or (isinstance(func, ast.Name) and func.id in functions):
-                    index = 1
-                if index is None:
-                    continue
-                resolved = resolve(call.args[index]) if len(call.args) > index else None
-                if resolved is not None:
-                    for name in resolved:
-                        names.setdefault(name, set()).add(f"{rel}:{call.lineno}")
-                elif (rel, getattr(scope, "name", "")) in _FORWARDERS:
-                    forwarders.add((rel, scope.name))
-                else:
-                    unresolved.append(f"{rel}:{call.lineno} {ast.unparse(call)[:80]}")
-    return names, unresolved, forwarders
-
-
-def _repo_sources():
-    cache = {}
-
-    def constants_of(rel):
-        if rel not in cache:
-            path = REPO / rel
-            cache[rel] = _constants(ast.parse(path.read_text(encoding="utf-8"))) if path.is_file() else {}
-        return cache[rel]
-
-    sources = {}
-    for path in [REPO / "server.py", *sorted((REPO / "ouroboros").rglob("*.py")), *sorted((REPO / "supervisor").rglob("*.py"))]:
-        text = path.read_text(encoding="utf-8")
-        if _MARKER.search(text):
-            sources[path.relative_to(REPO).as_posix()] = ast.parse(text)
-    return sources, constants_of
-
-
-def _unclassified(names) -> set:
-    return {name for name in names if (name in obligations.DUTY_SETS) == (name in obligations.RECORD_SETS)}
-
-
-def test_every_set_name_a_writer_can_reach_is_exactly_one_duty_or_record():
-    """A record stops blocking only once named, so every name this body's writers reach is declared."""
-    assert not set(obligations.DUTY_SETS) & set(obligations.RECORD_SETS)
-    assert set(store.FLAG_COLUMNS) <= set(obligations.DUTY_SETS)
-    names, unresolved, forwarders = _set_name_sites(*_repo_sources())
-    assert unresolved == [], "resolve the set name or declare the forwarder"
-    assert forwarders == _FORWARDERS  # the allowance never outlives its code
-    # Constant-routed (WITNESS_SET) and generated (f"custody_{name}") names are reached, not only literals.
-    assert {"local_custody_witnesses", "upgrade_notices", "pause_notice_receipts",
-            "custody_marks", "custody_refused", "custody_open", "pending_drives", "unknowns"} <= set(names)
-    assert _unclassified(set(names) | set(obligations.BOOT_SETS)) == set()
-    # The guard fires: a new set reached through a literal or a constant is unclassified.
-    probe = {"ouroboros/new_owner.py": ast.parse(
-        "from ouroboros import obligations\nNEW = 'fresh_constant_set'\n"
-        "def write(root):\n    obligations.add(root, 'fresh_literal_set', 'id')\n    obligations.add(root, NEW, 'id')\n")}
-    probe_names, probe_unresolved, _ = _set_name_sites(probe, lambda rel: {})
-    assert _unclassified(probe_names) == {"fresh_literal_set", "fresh_constant_set"} and probe_unresolved == []
-
-
-def test_every_set_the_real_producers_store_is_classified(root):
-    from contextlib import closing
-    from ouroboros import delegate_custody as custody, delegate_custody_current as current, local_custody_repair
-    from ouroboros import notice_receipts
-    from tests.test_custody_fold_equivalence import _chain
-
-    rows = [*_chain(), {"type": "delegate_run_start_blocked", "event_id": "review", "task_id": "t6", "source": "review_substrate"}]
-    with closing(sqlite3.connect(":memory:", isolation_level=None)) as conn:  # the live custody reducer
-        conn.row_factory = sqlite3.Row
-        conn.executescript(store._SCHEMA)
-        txn = store.Txn(conn)
-        for row in custody._unique_rows(rows):
-            current._reduce(txn, row, current._loaded(txn, row), {})
-        names = set(txn.set_names())
-        # A review-owned attempt marks nothing: neither the live reducer nor the import fold writes an empty row.
-        assert txn.get_row("custody_marks", "t1") and txn.get_row("custody_marks", "t6") is None
-        assert "t6" not in current.fold(rows)["marks"]
-    _result(root, "t")
-    notice_receipts.record(root, {"direction": "system", "type": sorted(notice_receipts.UPGRADE_TYPES)[0], "chat_id": 1})
-    notice_receipts.record(root, {"direction": "system", "type": notice_receipts.PAUSE_TYPE, "chat_id": 1,
-                                  "card_row_id": "card", "task_id": "t"})
-    assert local_custody_repair.retain_witness(root, "t", reason="test", model_consumers={"c": 1})
-    obligations.drive_started(root, {"id": "t"})
+def _packable(root, task):
     with store.open_store(root, write=False) as txn:
-        names |= set(txn.set_names())
-    assert {"custody_open", "custody_refused", "custody_marks", "delegated_runs", "upgrade_notices",
-            "pause_notice_receipts", "local_custody_witnesses", "pending_drives"} <= names
-    assert _unclassified(names) == set()
+        return packs.task_packable(txn, task)
 
 
-@pytest.mark.parametrize("record", obligations.RECORD_SETS)
-def test_a_record_row_never_blocks_settlement_but_a_duty_row_does(root, record):
-    refs, _ = _task(root, "done", blobs=1)
-    obligations.add(root, record, "done", {"task_id": "done", "request": {"task_id": "done"}})
-    assert packs.task_settled(root, "done")
-    assert packer.run_pass(root)["packed"] == 1 and not pathlib.Path(refs[0]["path"]).exists()
-    refs, _ = _task(root, "owed", blobs=1)
-    obligations.add(root, "custody_open", "invocation:owed", {"request": {"task_id": "owed"}})
-    obligations.add(root, record, "owed", {"task_id": "owed"})
-    assert not packs.task_settled(root, "owed") and packer.run_pass(root)["packed"] == 0
-    assert pathlib.Path(refs[0]["path"]).exists()
+def _rows(root, task_id):
+    log = root / "logs" / "supervisor.jsonl"
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    return [row for row in rows if row.get("type") == "storage_pack" and row.get("task_id") == task_id]
 
 
-UNDECLARED = "future_body_duty"  # declared in neither tuple: an older or newer body's own duty
+BLOCKERS = {
+    "money_reserved": lambda root, t, mp: _money(root, t, "reserved", mp),
+    "money_dispatched": lambda root, t, mp: _money(root, t, "dispatched", mp),
+    "money_unresolved": lambda root, t, mp: _money(root, t, "unresolved", mp),
+    "delivery_pending": lambda root, t, mp: terminal_delivery.register_pending_delivery(
+        root, {"delivery_id": f"owed-{t}", "task_id": t, "chat_id": 1}),
+    "review_pointer_closed": lambda root, t, mp: _result(
+        root, t, review_operations={"op": {"surface": "multi_model_review", "state": "closed"}}),
+    "projection_and_synthesis_owed": lambda root, t, mp: _result(
+        root, t, canonical_terminal_projection_origin="terminal_transition"),
+    "acceptance_debt": lambda root, t, mp: _result(root, t, acceptance_debt={"debt_id": "d1"}),
+    "pending_drive": lambda root, t, mp: obligations.add(root, "pending_drives", t),
+    "custody_open": lambda root, t, mp: obligations.add(root, "custody_open", "invocation:x", {"request": {"task_id": t}}),
+    "undeclared_duty": lambda root, t, mp: obligations.add(root, "future_body_duty", f"work:{t}", {"task_id": t}),
+    "owner_question": lambda root, t, mp: obligations.add(root, "owner_questions", t, {"task_id": t}),
+    "unknowns": lambda root, t, mp: obligations.add(root, "unknowns", f"task:{t}", {"task_id": t, "reason": "result_missing"}),
+    "late_review_mark": lambda root, t, mp: obligations.add(root, "late_review_marks", "m1", {"task_id": t}),
+}
 
 
-def _undeclared_duty(root, writer, task_id):
-    """One duty row this body never declared, owned by TASK_ID, through a real writer; its identity."""
-    identity = f"work:{task_id}"
-    if writer == "add":  # the owner API
-        obligations.add(root, UNDECLARED, identity, {"task_id": task_id})
-    elif writer == "direct":  # a transaction's own row write, as the custody and receipt owners do
-        with store.open_store(root, write=True) as txn:
-            txn.put_row(UNDECLARED, identity, {"request": {"task_id": task_id}})
-    else:  # an older body's set file, read by the boot import that publishes the store
-        from ouroboros.store_import import ensure_current_store, set_file_path
-        from ouroboros.utils import atomic_write_json
-
-        atomic_write_json(set_file_path(root, UNDECLARED), {identity: {"task_id": task_id}})
-        assert ensure_current_store(root, with_children=False)["status"] == "completed"
-    return identity
-
-
-@pytest.mark.parametrize("writer", ["add", "direct", "import"])
-def test_an_undeclared_stored_duty_holds_its_evidence_until_retired(root, writer):
-    """An unknown duty never passes for a record: its owner stays unsettled, the pass packs only the
-    neighbour and every loose byte reads back unchanged; once the row is retired the next pass packs
-    it and the same bytes come from the pack. Declared records on the same task never block."""
-    identity = _undeclared_duty(root, writer, "owed") if writer == "import" else None
-    refs, handle = _task(root, "owed", blobs=2)
-    _task(root, "free", blobs=1)
-    identity = identity or _undeclared_duty(root, writer, "owed")
-    for record in obligations.RECORD_SETS:
-        obligations.add(root, record, "owed", {"task_id": "owed"})
-    with store.open_store(root, write=False) as txn:
-        assert UNDECLARED in txn.set_names() and UNDECLARED not in obligations.DUTY_SETS + obligations.RECORD_SETS
-    raws, handle_raw = [packs.blob_bytes(root, ref) for ref in refs], packs.handle_bytes(root, "owed", handle["path"])
-    assert not packs.task_settled(root, "owed") and packs.task_settled(root, "free")
-    first = packer.run_pass(root)
-    assert (first["packed"], first["unlinked"]) == (1, 2) and not packs.published_generations(root, "owed")
-    assert all(_loose(ref) for ref in refs) and _handle_path(root, "owed", handle).exists()
+@pytest.mark.parametrize("blocker", sorted(BLOCKERS))
+def test_a_terminal_task_packs_whatever_former_blocker_it_carries(root, monkeypatch, blocker):
+    """P1: every fact the old settlement census waited for is irrelevant to packing: the task packs, its
+    loose files go, and every ref and handle reads back byte-identical from the pack."""
+    refs, handle = _task(root, "done", blobs=2)
+    BLOCKERS[blocker](root, "done", monkeypatch)
+    raws, handle_raw = [packs.blob_bytes(root, ref) for ref in refs], packs.handle_bytes(root, "done", handle["path"])
+    assert _packable(root, "done")
+    report = packer.run_pass(root)
+    assert (report["packed"], report["unlinked"], report["faults"]) == (1, 3, 0)
+    assert not any(_loose(ref) for ref in refs) and not _handle_path(root, "done", handle).exists()
     assert [packs.blob_bytes(root, ref) for ref in refs] == raws
-    assert packer.changed_tasks(root) == ["free"]  # its own unlinks moved its directory; the owed task rests
-    packer.run_pass(root)  # that one look
-    obligations.remove(root, UNDECLARED, identity)
-    assert packs.task_settled(root, "owed") and packer.changed_tasks(root) == ["owed"]
-    second = packer.run_pass(root)
-    assert (second["packed"], second["unlinked"]) == (1, 3) and not any(_loose(ref) for ref in refs)
-    assert [packs.blob_bytes(root, ref) for ref in refs] == raws
-    assert packs.handle_bytes(root, "owed", handle["path"]) == handle_raw
+    assert packs.handle_bytes(root, "done", handle["path"]) == handle_raw
+    packer.run_pass(root)  # the look its own unlinks owe
+    assert packer.changed_tasks(root) == []
 
 
-@pytest.mark.parametrize("writer", ["add", "direct"])
-def test_an_undeclared_duty_arriving_before_the_unlink_keeps_every_loose_file(root, monkeypatch, writer):
-    """The duty lands after the census and the pack write, before the unlink section: the section's
-    recheck sees it, nothing loose goes, and the duplicated bytes read the same from both places."""
-    refs, handle = _task(root, "late", blobs=2)
-    raws, verify, arrived = [packs.blob_bytes(root, ref) for ref in refs], packs.verify_pack, []
+@pytest.mark.parametrize("surface", ["task_acceptance", "multi_model_review"])
+def test_a_terminal_task_under_an_open_review_waits_like_a_live_one_until_the_review_closes(root, surface):
+    """P1b, both directions: an open review operation of a terminal task is a live reader (an agent-session
+    reviewer was handed the absolute path of the retained packet), so the task is neither packed nor its
+    shared blob unlinked, the packet path stays, and the task rests; the pointer closing moves its stamp,
+    and the next pass packs and unlinks everything, the packet still readable through the resolver."""
+    from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
 
-    def arrive(*args, **kwargs):
-        if not arrived:
-            arrived.append(_undeclared_duty(root, writer, "late"))
-        return verify(*args, **kwargs)
+    raw = b'{"shared": "evidence"}'
+    done, _ = _task(root, "done", blobs=1, payloads=[raw])
+    refs, handle = _task(root, "reviewed", blobs=2, payloads=[raw, b'{"own": true}'])
+    packet = b'{"goal": "accept the delivered answer", "evidence": "' + b"y" * 4000 + b'"}'
+    ref = store_actor_source_bytes(root, "reviewed", category="context_checkpoints", source_id="review-packet",
+                                   data=packet, extension="json")
+    path = (task_artifact_dir_path(root, "reviewed") / ref["path"]).resolve()  # the absolute path a session reads
+    pointer = {"surface": surface, "state": "dispatched", "retry_key": "task_acceptance:d1",
+               "controller": {"pid": 1, "birth": "b", "session": "s"}}
+    _result(root, "reviewed", acceptance_debt={"debt_id": "d1"}, review_operations={"owner-1": pointer})
+    assert _packable(root, "done") and not _packable(root, "reviewed")
+    report = packer.run_pass(root)
+    assert (report["packed"], report["kept"], report["reading"], report["live"], report["swept"]) == (1, 1, 1, 0, 2)
+    assert report["unlinked"] == 1  # the packed task's own handle; the shared blob stays for the reader
+    assert path.exists() and _loose(refs[0]) and _loose(refs[1]) and _handle_path(root, "reviewed", handle).exists()
+    assert not packs.published_generations(root, "reviewed") and packs.blob_bytes(root, done[0]) == raw
+    packer.run_pass(root)
+    assert packer.changed_tasks(root) == []  # the reviewed task rests until its review fact moves
+    _result(root, "reviewed", acceptance_debt={"debt_id": "d1"}, review_operations={"owner-1": {**pointer, "state": "closed"}})
+    assert packer.changed_tasks(root) == ["reviewed"] and _packable(root, "reviewed")
+    report = packer.run_pass(root)
+    assert (report["packed"], report["unlinked"], report["kept"], report["reading"]) == (1, 4, 0, 0)
+    assert not path.exists() and not any(_loose(r) for r in refs) and not _handle_path(root, "reviewed", handle).exists()
+    assert packs.handle_bytes(root, "reviewed", ref["path"]) == packet
+    assert packs.blob_bytes(root, refs[0]) == raw and packs.blob_bytes(root, refs[1]) == b'{"own": true}'
+
+
+@pytest.mark.parametrize("status", LIVE)
+def test_a_live_task_is_never_packed_and_its_shared_blob_waits_for_its_own_pass(root, status):
+    """P2, both directions: the terminal sharer packs, the live one does not, and the blob they share
+    stays loose until the live row closes; then the live task's own pass packs and unlinks it."""
+    raw = b'{"shared": "window"}'
+    refs, _ = _task(root, "done", blobs=1, payloads=[raw])
+    live, live_handle = _task(root, "live", status=status, blobs=2, payloads=[raw, b'{"own": true}'])
+    assert _packable(root, "done") and not _packable(root, "live")
+    report = packer.run_pass(root)
+    assert (report["packed"], report["kept"], report["live"], report["swept"]) == (1, 1, 1, 2)
+    assert _loose(refs[0]) and all(_loose(ref) for ref in live) and _handle_path(root, "live", live_handle).exists()
+    assert not packs.published_generations(root, "live") and packs.blob_bytes(root, refs[0]) == raw
+    packer.run_pass(root)
+    assert packer.changed_tasks(root) == []  # the live task rests until its status moves
+    _result(root, "live", "completed")
+    assert packer.changed_tasks(root) == ["live"] and _packable(root, "live")
+    report = packer.run_pass(root)
+    assert (report["packed"], report["unlinked"], report["kept"]) == (1, 3, 0)
+    assert not _loose(refs[0]) and not any(_loose(ref) for ref in live)
+    assert packs.blob_bytes(root, refs[0]) == raw and packs.blob_bytes(root, live[1]) == b'{"own": true}'
+
+
+def test_late_evidence_becomes_the_next_generation_and_the_unpacker_restores_both(root):
+    """P3."""
+    refs, handle = _task(root, "task-a", blobs=1)
+    assert packer.run_pass(root)["packed"] == 1
+    late = _blob(root, json.dumps({"message": {"content": "late answer"}}).encode())
+    obs.write_call_manifest(root, task_id="task-a", call_id="late", manifest={"full_payload_ref": late})
+    assert packer.changed_tasks(root) == ["task-a"]
+    report = packer.run_pass(root)
+    assert (report["packed"], report["unlinked"]) == (1, 1)
+    generations = packs.published_generations(root, "task-a")
+    assert [g["generation"] for g in generations] == [1, 2]
+    assert [m["sha256"] for m in generations[1]["members"]] == [late["sha256"]]
+    assert not _loose(late) and packs.blob_bytes(root, late) == json.dumps({"message": {"content": "late answer"}}).encode()
+    assert packs.blob_bytes(root, refs[0]).startswith(b'{"message"')
+    script = root / "observability" / "packs" / packs.UNPACKER_NAME
+    done = subprocess.run([sys.executable, str(script), "task-a"], capture_output=True, text=True, cwd=str(root), check=True)
+    assert "restored 3 file(s) from 2 pack(s)" in done.stdout
+    assert _loose(refs[0]) and _loose(late) and _handle_path(root, "task-a", handle).exists()
+
+
+def test_only_the_generations_an_unlink_relies_on_are_reverified(root, monkeypatch):
+    """P4: a closed older generation is never re-read (a damaged one does not block generation 3);
+    an older generation that still holds a loose member is re-read, and damage there blocks that unlink."""
+    verified = []
+    original = packs.verify_pack
+
+    def verify(path, sidecar):
+        verified.append(path.name)
+        return original(path, sidecar)
+
+    monkeypatch.setattr(packs, "verify_pack", verify)
+    refs, _ = _task(root, "gen", blobs=1)
+    assert packer.run_pass(root)["packed"] == 1 and verified == ["gen.xz"]
+    for number in (2, 3):
+        verified.clear()
+        late = _blob(root, json.dumps({"late": number}).encode())
+        obs.write_call_manifest(root, task_id="gen", call_id=f"late{number}", manifest={"ref": late})
+        if number == 3:
+            pack = packs.packs_dir(root) / "gen.xz"
+            pack.write_bytes(pack.read_bytes()[:-5] + b"XXXXX")  # nothing loose relies on it
+        report = packer.run_pass(root)
+        assert (report["packed"], report["unlinked"], report["faults"]) == (1, 1, 0)
+        assert verified == [f"gen.{number}.xz"] and not _loose(late)
+    assert [g["generation"] for g in packs.published_generations(root, "gen")] == [1, 2, 3]
+    # A busy retry leaves a loose member held only by generation 1: that generation IS re-read, and
+    # damage there keeps the member loose.
+    busy_refs, busy_handle = _task(root, "busy", blobs=1)
+    kept = pathlib.Path(busy_refs[0]["path"])
+    import os
+    unlink = os.unlink
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "unlink", lambda p, *a, **k: (_ for _ in ()).throw(PermissionError("busy")) if pathlib.Path(p) == kept else unlink(p, *a, **k))
+        assert packer.run_pass(root)["busy"] == 1
+    assert kept.exists() and not _handle_path(root, "busy", busy_handle).exists()
+    verified.clear()
+    pack = packs.packs_dir(root) / "busy.xz"
+    pack.write_bytes(b"damaged")
+    report = packer.run_pass(root)
+    assert (report["faults"], report["unlinked"]) == (1, 0) and kept.exists() and verified == ["busy.xz"]
+
+
+def test_missing_records_are_reported_and_the_rest_packs(root):
+    """P5: one blob removed before the pass is a counted gap with its bytes, the rest packs and reads;
+    a task with refs but nothing packable still writes its row."""
+    refs, handle = _task(root, "gap", blobs=3)
+    pathlib.Path(refs[1]["path"]).unlink()
+    gone, gone_handle = _task(root, "gone", blobs=2)
+    for ref in gone:
+        pathlib.Path(ref["path"]).unlink()
+    _handle_path(root, "gone", gone_handle).unlink()
+    report = packer.run_pass(root)
+    assert (report["packed"], report["missing"], report["faults"]) == (1, 3, 0)
+    [row] = _rows(root, "gap")
+    assert (row["missing"], row["missing_bytes"], row["generation"]) == (1, refs[1]["size"], 1)
+    assert packs.blob_bytes(root, refs[0]) and packs.blob_bytes(root, refs[2])
+    with pytest.raises(FileNotFoundError):
+        packs.blob_bytes(root, refs[1])
+    [row] = _rows(root, "gone")
+    assert (row["missing"], row["missing_bytes"], row["generation"]) == (2, sum(ref["size"] for ref in gone), None)
+    assert not packs.published_generations(root, "gone")
+    packer.run_pass(root)
+    assert packer.changed_tasks(root) == []  # a recorded gap is not re-examined until its folder moves
+
+
+@pytest.mark.parametrize("change", ["row_elsewhere", "money", "delivery", "duty", "own_manifest", "own_review"])
+def test_only_this_tasks_own_evidence_defers_its_unlink(root, monkeypatch, change):
+    """P6: a store write elsewhere, money, a delivery or a duty between the census and the section no
+    longer defer the candidate; a new manifest of THIS task during the section still does, and so does a
+    review of THIS task opening then (its reader may hold a loose path): the pack is kept, nothing unlinked."""
+    refs, handle = _task(root, "packing", blobs=1)
+    _task(root, "other", status="running", blobs=1)
+    write = packs.write_pack
+
+    def publish(*args, **kwargs):
+        result = write(*args, **kwargs)
+        if change == "row_elsewhere":
+            _result(root, "other", "running", step=2)
+        elif change == "money":
+            _money(root, "packing", "dispatched", monkeypatch)
+        elif change == "delivery":
+            assert terminal_delivery.register_pending_delivery(root, {"delivery_id": "owed", "task_id": "packing", "chat_id": 1})
+        elif change == "duty":
+            obligations.add(root, "custody_open", "invocation:late", {"request": {"task_id": "packing"}})
+        elif change == "own_review":
+            _result(root, "packing", review_operations={"op": {"surface": "task_acceptance", "state": "dispatched"}})
+        else:
+            late = _blob(root, b'{"late": true}')
+            obs.write_call_manifest(root, task_id="packing", call_id="late", manifest={"ref": late})
+        return result
 
     with monkeypatch.context() as patch:
-        patch.setattr(packs, "verify_pack", arrive)
+        patch.setattr(packs, "write_pack", publish)
         report = packer.run_pass(root)
-    assert arrived and (report["packed"], report["unlinked"]) == (1, 0)
-    assert all(_loose(ref) for ref in refs) and _handle_path(root, "late", handle).exists()
-    assert [packs.blob_bytes(root, ref) for ref in refs] == raws
-    obligations.remove(root, UNDECLARED, arrived[0])
-    assert packer.run_pass(root)["unlinked"] == 3 and not any(_loose(ref) for ref in refs)
-    assert [packs.blob_bytes(root, ref) for ref in refs] == raws
+    assert report["faults"] == 0
+    if change == "own_manifest":
+        assert report["unlinked"] == 0 and _loose(refs[0]) and _handle_path(root, "packing", handle).exists()
+        assert "packing" in packer.changed_tasks(root)
+        assert packer.run_pass(root)["unlinked"] == 3  # generation 2 for the late member, then everything goes
+    elif change == "own_review":
+        assert report["unlinked"] == 0 and _loose(refs[0]) and _handle_path(root, "packing", handle).exists()
+        assert "packing" in packer.changed_tasks(root)
+        assert packer.run_pass(root)["unlinked"] == 0 and _loose(refs[0])  # kept while the review is open
+        _result(root, "packing", review_operations={"op": {"surface": "task_acceptance", "state": "closed"}})
+        assert packer.run_pass(root)["unlinked"] == 2  # the generation already written serves the unlink
+        assert not _loose(refs[0]) and not _handle_path(root, "packing", handle).exists()
+    else:
+        assert report["unlinked"] == 2 and not _loose(refs[0]) and not _handle_path(root, "packing", handle).exists()
+    assert packs.blob_bytes(root, refs[0]).startswith(b'{"message"')
+
+
+def test_a_folder_without_a_store_row_is_neither_packed_nor_kept_but_counted(root):
+    """P7."""
+    raw = b'{"shared": true}'
+    refs, _ = _task(root, "done", blobs=1, payloads=[raw])
+    own = _blob(root, b'{"orphan": true}')
+    calls = root / "observability" / "calls" / "orphan"
+    calls.mkdir(parents=True)
+    (calls / "a.json").write_text(json.dumps({"ref": refs[0]}), encoding="utf-8")
+    (calls / "b.json").write_text(json.dumps({"ref": own}), encoding="utf-8")
+    report = packer.run_pass(root)
+    assert (report["packed"], report["storeless"], report["kept"], report["unlinked"]) == (1, 1, 0, 2)
+    assert not _loose(refs[0]) and packs.blob_bytes(root, refs[0]) == raw  # from the terminal task's pack
+    assert _loose(own) and not packs.published_generations(root, "orphan")
+    packer.run_pass(root)
+    assert packer.changed_tasks(root) == []
+    (calls / "c.json").write_text(json.dumps({"ref": own}), encoding="utf-8")
+    assert packer.changed_tasks(root) == ["orphan"]  # looked at once more, still not packed
+    report = packer.run_pass(root)
+    assert (report["packed"], report["storeless"], report["swept"]) == (0, 1, 1) and _loose(own)
 
 
 def test_census_reads_the_store_once_for_every_loose_task(root, monkeypatch):
     for number in range(24):
         _task(root, f"t{number}", blobs=1, status="running" if number % 2 else "completed")
-    opened, original = [], store.connect
+    # A store transaction leases this thread's persistent connection: count the leases, not the connects.
+    leased, original = [], store.connection
 
-    def connect(path, *args, **kwargs):
+    def connection(path, *args, **kwargs):
         if pathlib.Path(path) == store.store_path(root):
-            opened.append(path)
+            leased.append(path)
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(store, "connect", connect)
+    monkeypatch.setattr(store, "connection", connection)
     assert len(packer.changed_tasks(root)) == 24
-    assert len(opened) == 1  # one short read for every row and duty, not one per task
-    with packer.pack_sweep(root) as sweep:
-        opened.clear()
-        assert len(packer.changed_stamps(root, obligation_rows=sweep.duties, external=sweep.external, seqs=sweep.seqs)) == 24
-    assert opened == []  # the child census reuses the sweep's baseline read
+    assert len(leased) == 1  # one short read for every row, not one per task
+    ids = packer._loose_task_ids(root)
+    rows = packer.task_rows(root, ids)
+    leased.clear()
+    assert len(packer.changed_stamps(root, rows=rows, ids=ids)) == 24
+    assert leased == []  # the child census reuses the pass's one read
 
 
 @pytest.mark.parametrize("operation", ["changed_tasks", "run_pass"])
@@ -303,7 +351,7 @@ def test_a_writer_commits_while_a_census_directory_probe_stalls(root, monkeypatc
     try:
         assert entered.wait(10)
         with store.open_store(root, write=True, wait_sec=1.0) as txn:
-            txn.store_task({**txn.load("stalled"), "updated_at": "2026-10-12T00:00:00+00:00"})
+            txn.store_task({**txn.load("stalled"), "status": "running", "updated_at": "2026-10-12T00:00:00+00:00"})
     finally:
         release.set()
         worker.join(30)
@@ -312,7 +360,7 @@ def test_a_writer_commits_while_a_census_directory_probe_stalls(root, monkeypatc
         assert set(result["value"]) == {"stalled", "other"}
         for task, stamp in result["value"].items():
             packer.record_swept(root, task, stamp)
-        assert packer.changed_tasks(root) == ["stalled"]
+        assert packer.changed_tasks(root) == ["stalled"]  # its status moved after the census read it
     else:
         assert result["value"]["faults"] == 0 and "stalled" in packer.changed_tasks(root)
 

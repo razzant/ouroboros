@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import queue as stdqueue
 import threading
+import time
 
 import pytest
 
@@ -17,52 +18,37 @@ from tests.test_workspace_preparation import env as env, spy_provisions, _WAIT_S
 pytestmark = pytest.mark.serial
 
 
-def test_short_sql_commit_at_entry_keeps_same_event_then_admits_once(env, monkeypatch):
+def test_held_store_at_entry_claims_in_memory_and_admits_once_when_free(env, monkeypatch):
+    """The event loop touches no storage: a request arriving while the store is held is claimed in
+    memory, never re-put, and its lane writes the marker and admits once the store frees."""
     bus = env.ctx.event_queue = stdqueue.Queue()
     event = env.request("entry-busy")
     copies = spy_provisions(monkeypatch)
-    submitted = []
-    real_submit = env.gen.submit
-
-    def submit(job):
-        # The F1 boundary: no preparation FIFO entry without the exact durable marker.
-        row = env.row("entry-busy")
-        assert row[prep.MARKER]["phase"] == prep.QUEUED
-        submitted.append(row[prep.MARKER]["token"])
-        return real_submit(job)
-
-    monkeypatch.setattr(env.gen, "submit", submit)
     with database_reader(env.data, exclusive=True):
         assert env.dispatch_returns(event)
-        retained = bus.get(timeout=2)
-        token = retained[prep._RETRY_TOKEN]
-        assert prep._LIVE[token].task_id == "entry-busy"
-        assert env.dispatch_returns(event)  # duplicate arrival coalesces, no extra retry frame
+        [claim] = [row for row in prep._LIVE.values() if row.task_id == "entry-busy"]
+        assert queue.ADMISSION_RESERVATIONS == {"entry-busy": claim.token}
+        assert env.dispatch_returns(event) and env.dispatch_returns(dict(event))  # duplicates coalesce
         assert env.dispatch_returns({**event, "root_task_id": "foreign", "parent_task_id": "foreign"})
-        assert env.dispatch_returns({**retained, "root_task_id": "foreign", "parent_task_id": "foreign"})
-        assert bus.empty() and submitted == [] and copies == []
-        assert env.dispatch_returns(retained)
-        retained = bus.get(timeout=2)
-        assert retained[prep._RETRY_TOKEN] == token
-        assert submitted == [] and copies == []
-    assert env.dispatch_returns(retained)
+        assert bus.empty() and copies == [] and len(prep._LIVE) == 1
+        assert not env.gen.wait_idle(0.5)  # retrying at the head of its own lane
     assert env.gen.wait_idle(_WAIT_SEC)
-    assert submitted == [token] and copies == ["entry-busy"]
+    assert copies == ["entry-busy"]
     assert env.pending_ids() == ["entry-busy"] and env.row("entry-busy")["status"] == STATUS_SCHEDULED
-    assert env.row("entry-busy")["root_task_id"] == "root"
-    assert not prep._LIVE and queue.ADMISSION_RESERVATIONS == {}
+    assert env.row("entry-busy")["root_task_id"] == "root" and env.row("entry-busy")[prep.MARKER]["token"] == claim.token
+    assert bus.empty() and not prep._LIVE and queue.ADMISSION_RESERVATIONS == {}
     assert not any("not scheduled" in text for _, text, _ in env.ctx.sent)
 
 
 @pytest.mark.parametrize("published", [False, True])
-def test_contended_first_marker_retains_same_claim_and_readback(env, monkeypatch, published):
-    bus = env.ctx.event_queue = stdqueue.Queue()
+def test_contended_first_marker_retries_on_its_lane_with_the_same_token(env, monkeypatch, published):
     event = env.request("marker-busy")
     real_write, real_read = prep.write_task_result, prep.load_task_result
-    armed = [True]
+    armed, attempts = [True], []
 
     def write(*args, **kwargs):
         if kwargs.get("_field_projector") and armed[0]:
+            attempts.append(threading.current_thread().name)
             if published:
                 real_write(*args, **kwargs)
             raise store.StoreBusy("held marker", reason="contention")
@@ -76,31 +62,35 @@ def test_contended_first_marker_retains_same_claim_and_readback(env, monkeypatch
     monkeypatch.setattr(prep, "write_task_result", write)
     monkeypatch.setattr(prep, "load_task_result", read)
     assert env.dispatch_returns(event)
-    retained = bus.get(timeout=2)
-    token = retained[prep._RETRY_TOKEN]
-    assert queue.ADMISSION_RESERVATIONS == {"marker-busy": token}
-    assert not env.gen._jobs and env.gen._thread is None
+    deadline = time.monotonic() + _WAIT_SEC
+    while len(attempts) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    [claim] = [row for row in prep._LIVE.values() if row.task_id == "marker-busy"]
+    assert len(attempts) >= 2 and set(attempts) == {"workspace-preparation"}  # the lane, never the loop
+    assert queue.ADMISSION_RESERVATIONS == {"marker-busy": claim.token} and env.pending_ids() == []
     armed[0] = False
-    assert env.dispatch_returns(retained)
     assert env.gen.wait_idle(_WAIT_SEC)
     assert env.pending_ids() == ["marker-busy"]
-    assert env.row("marker-busy")[prep.MARKER]["token"] == token
+    assert env.row("marker-busy")[prep.MARKER]["token"] == claim.token
 
 
 @pytest.mark.parametrize("seam", ["preflight", "depth", "ready", "final"])
 def test_owned_job_waits_off_q_then_uses_its_one_copy(env, monkeypatch, seam):
     event = env.request("owned-busy")
     copies = spy_provisions(monkeypatch)
-    reached, proceed, busy_seen = threading.Event(), threading.Event(), threading.Event()
-    real_connect = store.connect
+    reached, proceed = threading.Event(), threading.Event()
+    under_q, opened = [], threading.Event()
+    real_connection = store.connection
 
-    def connect(*args, **kwargs):
+    @contextlib.contextmanager
+    def connection(*args, **kwargs):  # every lease, a thread's kept connection included
         if queue._queue_lock._is_owned():
-            assert kwargs.get("wait_sec", 0) == 0
-            busy_seen.set()
-        return real_connect(*args, **kwargs)
+            under_q.append(kwargs.get("wait_sec", 0))
+        opened.set()
+        with real_connection(*args, **kwargs) as conn:
+            yield conn
 
-    if seam in {"preflight", "depth"}:
+    if seam in {"preflight", "depth", "final"}:
         name = {"preflight": "subagent_schedule_preflight", "depth": "parse_schedule_task_depth",
                 "final": "enqueue_subagent_with_scheduled_result"}[seam]
         original = getattr(task_admission, name)
@@ -112,16 +102,6 @@ def test_owned_job_waits_off_q_then_uses_its_one_copy(env, monkeypatch, seam):
             return original(*args, **kwargs)
 
         monkeypatch.setattr(task_admission, name, gated)
-    elif seam == "final":
-        original = prep.PreparationClaim.enter_admission
-
-        def entered(claim):
-            result = original(claim)
-            reached.set()
-            assert proceed.wait(_WAIT_SEC)
-            return result
-
-        monkeypatch.setattr(prep.PreparationClaim, "enter_admission", entered)
     else:
         original = prep._transition
 
@@ -134,18 +114,18 @@ def test_owned_job_waits_off_q_then_uses_its_one_copy(env, monkeypatch, seam):
         monkeypatch.setattr(prep, "_transition", gated)
     assert env.dispatch_returns(event) and reached.wait(_WAIT_SEC)
     with database_reader(env.data, exclusive=True):
-        monkeypatch.setattr(store, "connect", connect)
+        monkeypatch.setattr(store, "connection", connection)
         proceed.set()
-        # READY's ordinary off-loop write may wait in SQLite; Q must still be free.
-        if seam in {"preflight", "depth", "final"}:
-            assert busy_seen.wait(3)
+        # The job's storage acquisitions wait OFF Q, in slices; Q stays free for a control.
+        assert opened.wait(3) and not env.gen.wait_idle(0.5)
         with ThreadPoolExecutor(max_workers=1) as pool:
             def control():
                 with queue._queue_lock:
                     return True
             assert pool.submit(control).result(timeout=3)
-        assert env.pending_ids() == []
+        assert env.pending_ids() == [] and under_q == []
     assert env.gen.wait_idle(_WAIT_SEC)
+    assert under_q == [], "a prepared-child owner opened SQLite while holding Q"
     assert copies == ["owned-busy"] and env.pending_ids() == ["owned-busy"]
     assert env.row("owned-busy")["status"] == STATUS_SCHEDULED
 
@@ -158,13 +138,13 @@ def test_nested_queue_refusal_retries_only_positive_contention(env, monkeypatch,
     copies, reads, tokens = spy_provisions(monkeypatch), [], []
     original = projects_registry.task_project_membership
 
-    def membership(root, task):
+    def membership(root, task, *, bindings_snapshot=None):
         if task.get("id") == "inner-busy":
             reads.append(task["id"])
             tokens.append(queue.ADMISSION_RESERVATIONS.get("inner-busy"))
             if len(reads) == 1:
                 raise store.StoreBusy("held Project read", reason=reason)
-        return original(root, task)
+        return original(root, task, bindings_snapshot=bindings_snapshot)
 
     monkeypatch.setattr(projects_registry, "task_project_membership", membership)
     assert env.dispatch_returns(event) and env.gen.wait_idle(_WAIT_SEC)
@@ -243,8 +223,9 @@ def test_queue_refusal_flag_after_actual_append_never_authorizes_retry(env, monk
     real_view = projects_registry.project_admission_view
     calls = []
     # Use the real queue's guarded append but inject its failing context exit.
-    monkeypatch.setattr(projects_registry, "task_project_membership", lambda root, task: (
-        ("bound", False) if task.get("id") == "post-append" else real_membership(root, task)))
+    monkeypatch.setattr(projects_registry, "task_project_membership", lambda root, task, *, bindings_snapshot=None: (
+        ("bound", False) if task.get("id") == "post-append"
+        else real_membership(root, task, bindings_snapshot=bindings_snapshot)))
     monkeypatch.setattr(projects_registry, "project_admission_view", lambda root, project, **kw: (
         {"project_id": "bound", "project": {"id": "bound"}} if project == "bound"
         else real_view(root, project, **kw)))
@@ -261,7 +242,9 @@ def test_queue_refusal_flag_after_actual_append_never_authorizes_retry(env, monk
     assert calls == ["enter"] and env.pending_ids() == ["post-append"]
     admitted = queue.PENDING[0]
     assert admitted.get("_admission_uncertain") and not admitted.get("_admission_never_admitted")
-    assert env.row("post-append")[prep.MARKER]["phase"] == prep.ADMITTING
+    # The receipt preceded the put and the put happened: the claim is closed, never refused or retried.
+    row = env.row("post-append")
+    assert row["status"] == STATUS_SCHEDULED and row[prep.MARKER]["phase"] == prep.ADMITTED
 
 
 def test_refusal_committed_before_busy_readback_rejoins_its_same_receipt(env, monkeypatch):
@@ -296,7 +279,7 @@ def test_refusal_committed_before_busy_readback_rejoins_its_same_receipt(env, mo
 
 
 @pytest.mark.parametrize("seam", ["entry", "depth", "final"])
-def test_readonly_child_rejoins_real_contention_without_preparation(env, monkeypatch, seam):
+def test_readonly_child_retries_real_contention_on_the_admission_lane(env, monkeypatch, seam):
     bus = env.ctx.event_queue = stdqueue.Queue()
     event = env.readonly("readonly-busy")
     copies = spy_provisions(monkeypatch)
@@ -312,27 +295,23 @@ def test_readonly_child_rejoins_real_contention_without_preparation(env, monkeyp
             return original(*args, **kwargs)
 
         monkeypatch.setattr(task_admission, name, gate)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        if seam != "entry":
-            future = pool.submit(env.dispatch_returns, event)
-            assert reached.wait(_WAIT_SEC)
-        with database_reader(env.data, exclusive=True):
-            if seam == "entry":
-                future = pool.submit(env.dispatch_returns, event)
-            proceed.set()
-            assert future.result(timeout=3)
-            retained = bus.get(timeout=2)
-            assert retained == event
-            assert env.pending_ids() == [] and copies == [] and not prep._LIVE
-    assert env.dispatch_returns(retained)
-    assert env.pending_ids() == ["readonly-busy"] and copies == []
+        assert env.dispatch_returns(event) and reached.wait(_WAIT_SEC)
+    with database_reader(env.data, exclusive=True):
+        if seam == "entry":
+            assert env.dispatch_returns(event)  # the queued marker is the lane's first contended write
+        proceed.set()
+        assert not env.gen.wait_idle(0.5)  # retried at its own owner: one live claim, no bus copy
+        assert bus.empty() and env.pending_ids() == [] and copies == []
+        assert [claim.task_id for claim in prep._LIVE.values()] == ["readonly-busy"]
+    assert env.gen.wait_idle(_WAIT_SEC)
+    assert env.pending_ids() == ["readonly-busy"] and copies == [] and bus.empty()
     row = env.row("readonly-busy")
-    assert row["status"] == STATUS_SCHEDULED and prep.MARKER not in row
+    assert row["status"] == STATUS_SCHEDULED and row[prep.MARKER]["phase"] == prep.ADMITTED
     assert not any("not scheduled" in text for _, text, _ in env.ctx.sent)
 
 
-@pytest.mark.parametrize("owner", ["cancelled", "foreign"])
-def test_deferred_readonly_request_cannot_displace_new_custody(env, monkeypatch, owner):
+@pytest.mark.parametrize("owner", ["cancelled", "foreign_marker"])
+def test_readonly_claim_retrying_contention_never_displaces_new_custody(env, monkeypatch, owner):
     from ouroboros import cancel_intents
     from ouroboros.task_results import write_task_result
     from supervisor import workers
@@ -340,22 +319,29 @@ def test_deferred_readonly_request_cannot_displace_new_custody(env, monkeypatch,
     monkeypatch.setattr(workers, "WORKERS", {})
     bus = env.ctx.event_queue = stdqueue.Queue()
     event = env.readonly("readonly-held")
-    with database_reader(env.data, exclusive=True):
-        assert env.dispatch_returns(event)
-        retained = bus.get(timeout=2)
+    reached, proceed = threading.Event(), threading.Event()
+    original = task_admission.parse_schedule_task_depth
+
+    def gate(*args, **kwargs):
+        if not reached.is_set():
+            reached.set()
+            assert proceed.wait(_WAIT_SEC)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(task_admission, "parse_schedule_task_depth", gate)
+    assert env.dispatch_returns(event) and reached.wait(_WAIT_SEC)
     if owner == "cancelled":
         cancel_intents.request_cancel(env.data, "readonly-held", reason="owner Stop", source="test")
         queue.cancel_task_custody("readonly-held")
         assert env.row("readonly-held")["status"] == "cancelled"
     else:
-        assert task_admission.claim_requested_child(env.ctx, "readonly-held", "foreign-token")
         write_task_result(env.data, "readonly-held", "requested",
                           workspace_preparation={"token": "foreign-token", "phase": "queued"})
     before = env.row("readonly-held")
-    assert env.dispatch_returns(retained)
-    assert env.pending_ids() == [] and env.row("readonly-held") == before
-    if owner == "foreign":
-        assert queue.ADMISSION_RESERVATIONS == {"readonly-held": "foreign-token"}
+    proceed.set()
+    assert env.gen.wait_idle(_WAIT_SEC)
+    assert env.pending_ids() == [] and env.row("readonly-held") == before and bus.empty()
+    assert queue.ADMISSION_RESERVATIONS == {} and not prep._LIVE
 
 
 def test_closed_generation_retains_its_chosen_refusal_across_real_contention(env, monkeypatch):
@@ -378,7 +364,7 @@ def test_closed_generation_retains_its_chosen_refusal_across_real_contention(env
 
     monkeypatch.setattr(prep.PreparationClaim, "refuse", refuse)
     monkeypatch.setattr(task_admission, "persist_never_admitted_refusal", persist)
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(env.request("closed-busy"))
         env.wait_phase("closed-busy", prep.COPYING)
         prep.close_generation(env.gen)

@@ -1,9 +1,13 @@
 """``POST /api/tasks/{task_id}/pause`` — the owner's Pause of a whole task tree.
 
-Owner Batch4 5A. The body carries ONLY a client-generated stable
-``request_id`` (reused on retry: the acknowledgement is idempotent); there is
-no text and no chat side effect. The response is sent only after the root's
-durable fence landed (``supervisor/owner_pause_control.py``); ``state`` is the
+Owner Batch4 5A. The body carries a client-generated stable ``request_id``
+(reused on retry: the acknowledgement is idempotent) and may declare who
+pressed: ``actor`` ``owner`` (the owner's own client) or ``ouroboros``, with
+an optional ``reason``, one sentence the owner reads under the work's name. An
+actor the core does not know declares nobody; any other field is refused. The
+declaration names the Pause's author (``control_actor.pause_author``) and
+grants no power; there is no chat side effect. The response is sent only
+after the root's durable fence landed (``supervisor/owner_pause_control.py``); ``state`` is the
 accepted action state — ``requested`` while members settle, ``paused`` once
 saved, ``released`` on a retry after Resume. A new Pause needs a fresh ID.
 ``202`` with ``latch_pending`` answers a fence that is durable (every launch
@@ -25,10 +29,14 @@ from starlette.responses import JSONResponse
 from ouroboros.gateway._helpers import (
     json_error, json_exception, migrating_error, request_drive_root, request_json_or, run_sync_to_completion,
 )
+from ouroboros.control_actor import PAUSE_AUTHORS
 from ouroboros.task_results import validate_task_id
+from ouroboros.utils import utc_now_iso
 
 _REQUEST_ID_MAX = 128
-_CONFLICTS = frozenset({"not_a_root_task", "cancel_pending", "task_terminal", "root_result_missing"})
+_FIELDS = frozenset({"request_id", "actor", "reason"})
+_CONFLICTS = frozenset({"not_a_root_task", "cancel_pending", "task_terminal", "root_result_missing",
+                        "realtime_pause_unsupported"})
 
 
 async def api_task_pause(request: Request) -> JSONResponse:
@@ -37,19 +45,25 @@ async def api_task_pause(request: Request) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400)
     body = await request_json_or(request, {})
-    if not isinstance(body, dict) or any(key != "request_id" for key in body):
-        return json_error("pause accepts only {\"request_id\"} — it carries no text", 400,
+    if not isinstance(body, dict) or any(key not in _FIELDS for key in body):
+        return json_error("pause accepts only {\"request_id\"}, an optional \"actor\" and \"reason\"", 400,
                           task_id=task_id, reason_code="unexpected_fields")
     request_id = body.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > _REQUEST_ID_MAX:
         return json_error("request_id is required (a stable client-generated id, reused on retry)",
                           400, task_id=task_id, reason_code="request_id_required")
+    reason = body.get("reason", "")
+    if not isinstance(reason, str):
+        return json_error("reason is the declared author's sentence (a string)", 400,
+                          task_id=task_id, reason_code="pause_reason_invalid")
+    actor = body.get("actor")
+    by = {"actor": actor, "text": reason.strip(), "at": utc_now_iso()} if actor in PAUSE_AUTHORS else None
     if migrating := await run_sync_to_completion(migrating_error, request_drive_root(request)):
         return migrating  # P1: the Pause fence is a store row; 503 while the boot import owns the store
     try:
         from supervisor.owner_pause_control import request_owner_pause
 
-        result = await run_sync_to_completion(request_owner_pause, task_id, request_id=request_id.strip())
+        result = await run_sync_to_completion(request_owner_pause, task_id, request_id=request_id.strip(), by=by)
     except Exception as exc:
         return json_exception(exc, 503)
     if result.get("ok"):
@@ -65,6 +79,8 @@ def owner_tree_control_routes() -> list:
     from starlette.routing import Route
 
     from ouroboros.gateway.task_continue import api_task_continue
+    from ouroboros.gateway.task_owner_keep import api_task_owner_keep
 
     return [Route("/api/tasks/{task_id}/pause", endpoint=api_task_pause, methods=["POST"]),
-            Route("/api/tasks/{task_id}/continue", endpoint=api_task_continue, methods=["POST"])]
+            Route("/api/tasks/{task_id}/continue", endpoint=api_task_continue, methods=["POST"]),
+            Route("/api/tasks/{task_id}/owner-keep", endpoint=api_task_owner_keep, methods=["POST"])]

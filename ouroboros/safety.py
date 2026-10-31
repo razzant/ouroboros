@@ -10,20 +10,28 @@ actual execution remain independent of the Cyber advisory decision.
 import ast
 import json
 import logging
-import math
 import pathlib
+import hashlib
+import threading
 import re
 import shlex
 import time
+from collections import OrderedDict
 from typing import Tuple, Dict, Any, List, Optional
 
-from ouroboros.config import get_light_model, get_runtime_mode, get_safety_call_timeout_sec, get_safety_max_tokens, get_safety_mode
+from ouroboros.config import get_safety_model, get_runtime_mode, get_safety_call_timeout_sec, get_safety_max_tokens, get_safety_mode
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
-from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_provider_from_model
-from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
+from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
+from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
+from ouroboros.safety_config import OWNER_RULES_KEY
+
+from ouroboros.safety_records import (
+    _safety_drive_root, _record_safety_usage, _emit_durable_safety_event, _emit_safety_mode_skip, coalesce_verdicts, verdict_history_bytes,
+)
+from ouroboros.consciousness_authority import work_kind, effective_runtime_mode
 
 log = logging.getLogger(__name__)
 
@@ -43,14 +51,11 @@ DEFAULT_POLICY = POLICY_CHECK
 # tool. Each built-in has exactly one home, here or its declaration
 # (invariant-tested).
 TOOL_POLICY: Dict[str, str] = {
-    # Typed host maintenance enforces existing actor/resource/Pause authority.
     "inspect_harness": POLICY_SKIP,
+    "inspect_subagent": POLICY_SKIP,
     "maintain_harness": POLICY_SKIP,
-    # Read-only / trivially safe.
     "read_file": POLICY_SKIP,
     "list_files": POLICY_SKIP,
-    "vcs_status": POLICY_SKIP,
-    "vcs_diff": POLICY_SKIP,
     "chat_history": POLICY_SKIP,
     "recent_tasks": POLICY_SKIP,
     "live_roots": POLICY_SKIP,
@@ -77,13 +82,8 @@ TOOL_POLICY: Dict[str, str] = {
     "extract_video_frames": POLICY_SKIP,
     "browse_page": POLICY_SKIP,
     "browser_action": POLICY_SKIP,
-    "list_github_prs": POLICY_SKIP,
-    "get_github_pr": POLICY_SKIP,
-    "get_github_checks": POLICY_SKIP,
-    "list_github_issues": POLICY_SKIP,
-    "get_github_issue": POLICY_SKIP,
+    "github_read": POLICY_SKIP,
     "plan_task": POLICY_SKIP,
-    "task_acceptance_review": POLICY_SKIP,
     "finish_task": POLICY_SKIP,
     "review_status": POLICY_SKIP,
     "get_task_result": POLICY_SKIP,
@@ -91,12 +91,13 @@ TOOL_POLICY: Dict[str, str] = {
     "wait_task": POLICY_SKIP,
     "wait_tasks": POLICY_SKIP,
     "await_messages": POLICY_SKIP,
+    "continue_in_background": POLICY_SKIP,
+    "pause_task": POLICY_CHECK, "resume_task": POLICY_CHECK, "continue_task": POLICY_CHECK,
     "list_projects": POLICY_SKIP,
     "switch_model": POLICY_SKIP,
     "service_status": POLICY_SKIP,
     "service_logs": POLICY_SKIP,
 
-    # Mutative but separately guarded by sandbox/revert/review gates.
     "write_file": POLICY_SKIP,
     "edit_text": POLICY_SKIP,
     "apply_patch": POLICY_SKIP,
@@ -109,73 +110,49 @@ TOOL_POLICY: Dict[str, str] = {
     "journal_write": POLICY_SKIP,
     "workpad_write": POLICY_SKIP,
     "update_focus": POLICY_SKIP,
-    # Bounded tree-scoped coordination. Tagged child-result dispositions are validated
-    # and persisted only by join_ledger; neither branch has an external/repo effect.
     "tree_note": POLICY_SKIP,
     "tree_read": POLICY_SKIP,
-    "promote_chat_to_task": POLICY_SKIP,
-    "ensure_project_scope": POLICY_SKIP,
-    "route_to_project": POLICY_SKIP,
-    "steer_task": POLICY_SKIP,
+    "start_task": POLICY_CHECK,
+    "move_to_project": POLICY_SKIP,
+    "tell_task": POLICY_CHECK,
     "update_scratchpad": POLICY_SKIP,
     "update_identity": POLICY_SKIP,
+    "update_world": POLICY_SKIP,
     "memory_update_registry": POLICY_SKIP,
     "vcs_pull_ff": POLICY_SKIP,
     "vcs_restore": POLICY_SKIP,
     "vcs_revert": POLICY_SKIP,
     "vcs_rollback": POLICY_SKIP,
 
-    # Control / messaging / internal side effects.
     "schedule_subagent": POLICY_SKIP,
-    # Owner-governed schedule inspection/mutation is narrow, reasoned and audited;
-    # it never edits task payloads or cancels an admitted task.
     "manage_schedules": POLICY_SKIP,
-    # One-shot deferred follow-up through the existing supervisor scheduler: the
-    # future task re-enters normal admission/safety, so registration itself has
-    # no reach beyond what the task already has (same reasoning as schedule_subagent).
-    "schedule_followup": POLICY_SKIP,
-    # Delegated sessions: the access profile is derived HOST-SIDE from the calling
-    # task's own authority and cannot be widened by the model, so the nanny verbs add
-    # no reach beyond what the task already has (same reasoning as schedule_subagent).
+    "schedule_followup": POLICY_CHECK,
     "delegate_start": POLICY_SKIP,
     "delegate_wait": POLICY_SKIP,
     "delegate_cancel": POLICY_SKIP,
-    # Answering a run's question is custody-gated to the task that started it and
-    # carries no authority the task lacks (same reasoning as the verbs above).
     "delegate_answer": POLICY_SKIP,
     "delegate_message": POLICY_SKIP,
     "cancel_task": POLICY_SKIP,
-    # The other half of the same nanny authority (#1196, owner Q9): selecting ONE
-    # of this task's OWN budget-paused descendants to continue under its same id.
-    # The tool only REQUESTS; the supervisor re-checks lineage, the root's live
-    # owner Resume grant, money, Stop/cancel, deadline and lifetime through the
-    # seam the owner's own Resume uses, so it adds no reach the task lacks.
+    "set_task_retention": POLICY_SKIP,  # a retention fact on the owner's own held words; never deletes
     "resume_child_task": POLICY_SKIP,
-    # Parent's explicit decision to abandon a child result: stamps parent_decision +
-    # records the reason on the tree ledger; tree-scoped, no external effect (like cancel_task).
     "discard_child_result": POLICY_SKIP,
     "override_delegation_constraint": POLICY_SKIP,
     "request_restart": POLICY_SKIP,
-    # Provisions (or rebinds) this task's own body candidate under the isolated worktree
-    # root: no serving-tree write, no external effect; the mode gates live in the handler.
     "prepare_self_change": POLICY_SKIP,
     "request_deep_self_review": POLICY_SKIP,
     "set_tool_timeout": POLICY_SKIP,
     "toggle_evolution": POLICY_SKIP,
-    "toggle_consciousness": POLICY_SKIP,
+    "toggle_consciousness": POLICY_CHECK,
     "promote_to_stable": POLICY_SKIP,
     "send_user_message": POLICY_SKIP,
     "send_photo": POLICY_SKIP,
     "send_video": POLICY_SKIP,
     "send_file": POLICY_SKIP,
-    # Structured links cannot exceed the task's existing owner-chat delivery authority.
     "send_links": POLICY_SKIP,
-    "presence_finish": POLICY_SKIP,
     "presence_cancel_work": POLICY_SKIP,
-    "configure_presence": POLICY_SKIP,
-    "initiate_presence": POLICY_SKIP,
+    "configure_presence": POLICY_CHECK,
     "escalate": POLICY_SKIP,
-    "forward_to_worker": POLICY_SKIP,
+    "forward_to_worker": POLICY_CHECK,
     "compact_context": POLICY_SKIP,
     "enable_tools": POLICY_SKIP,
     "preflight_review": POLICY_SKIP,
@@ -184,31 +161,19 @@ TOOL_POLICY: Dict[str, str] = {
     "start_service": POLICY_CHECK_CONDITIONAL,
     "stop_service": POLICY_SKIP,
 
-    # External skill surface.
     "list_skills": POLICY_SKIP,
-    # Review mutates durable skill state but executes no skill subprocess.
     "skill_review": POLICY_SKIP,
-    # Toggle only writes private enabled.json state.
     "toggle_skill": POLICY_SKIP,
-    # skill_exec enforces fresh executable review/enabled/hash; recheck per call.
     "skill_exec": POLICY_CHECK,
     "skill_owner_action": POLICY_CHECK,
-    # Read-only argv-only syntax validator with scrubbed env and per-file caps.
     "skill_preflight": POLICY_SKIP,
 
-    # Conditional: run_command safe-subject whitelist.
     "run_command": POLICY_CHECK_CONDITIONAL,
     "run_script": POLICY_CHECK_CONDITIONAL,
-    # verify_and_record runs the agent's declared `check` command like run_command,
-    # so it carries the same conditional safe-subject gate over that command (FR3).
     "verify_and_record": POLICY_CHECK_CONDITIONAL,
 
-    # Read-only best-of-N comparison of children's returned patches (applies nothing).
     "compare_subagent_patches": POLICY_SKIP,
 
-    # Always LLM-checked built-ins.
-    # Applies a subagent's patch into the live repo/worktree (protected-path + no-commit
-    # gated inside the tool); keep an extra LLM safety look on the integration itself.
     "integrate_subagent_patch": POLICY_CHECK,
     "integrate_delegated_patch": POLICY_CHECK,
     "fetch_pr_ref": POLICY_CHECK,
@@ -218,15 +183,13 @@ TOOL_POLICY: Dict[str, str] = {
     "stage_pr_merge": POLICY_CHECK,
     "generate_evolution_stats": POLICY_CHECK,
     "submit_skill_to_hub": POLICY_CHECK,
-    "comment_on_pr": POLICY_CHECK,
+    "github_write": POLICY_CHECK,
     "pr_merge": POLICY_CHECK,
-    "comment_on_issue": POLICY_CHECK,
-    "close_github_issue": POLICY_CHECK,
-    "create_github_issue": POLICY_CHECK,
 
-    # Consciousness-only built-ins registered outside get_tools().
     "set_next_wakeup": POLICY_SKIP,
+    "place_reply": POLICY_CHECK,
 }
+
 
 # run_command safe-subject whitelist.
 
@@ -453,72 +416,13 @@ def _redact_secrets_in_text(text: str) -> str:
     return redacted
 
 
-# Character budget for the CONVERSATION section of the safety prompt. It was
-# unbounded: every retained round of a long task rode into every light-model safety
-# call, so the prompt grew with the task until the provider rate-limited the safety
-# lane. The tool proposal is the SUBJECT of the check and stays outside this budget.
-_SAFETY_CONTEXT_CHAR_BUDGET = 4000
-_SAFETY_OMISSION_MARKER = "[… {n} older messages omitted]"
-
-# Character budget for the serialized SUBJECT (the proposed call's own arguments).
-# The subject is embedded VERBATIM — truncating it would hide the tail from the
-# reviewer, so an over-budget subject is REFUSED fail-closed instead: one oversized
-# run_script/run_command payload otherwise inflates this prompt past provider
-# limits, and the conversation budget above cannot help because the subject rides
-# outside it. The refusal is a typed policy denial with a working alternative
-# (split the payload into reviewable calls), never a truncated half-reviewed call.
+# The complete proposed call is reviewed verbatim after redaction. An oversize
+# subject is refused with a reshape/split alternative, never truncated.
 _SAFETY_SUBJECT_CHAR_BUDGET = 250_000
 
 
-def _format_messages_for_safety(messages: List[Dict[str, Any]]) -> str:
-    """Format compact safety context, redacting before truncation.
-
-    Bounded by ``_SAFETY_CONTEXT_CHAR_BUDGET``, selected NEWEST-FIRST (the rounds that
-    produced the proposed call are the ones that explain it) and rendered back in
-    chronological order. The marker carries the exact count of dropped messages and its
-    own space is RESERVED INSIDE the budget, so a bounded transcript is never a silent
-    one (BIBLE P1). The per-message 500-char clip keeps its own inline note.
-    """
-    rendered: List[str] = []
-    for m in messages:
-        role = m.get("role", "?")
-        content = m.get("content", "")
-        if not content or role == "tool":
-            continue
-        if isinstance(content, list):
-            content = " ".join(
-                b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-            )
-        text = _redact_secrets_in_text(str(content))
-        if len(text) > 500:
-            omitted = len(text) - 500
-            text = text[:500] + f" [...{omitted} chars omitted]"
-        rendered.append(f"[{role}] {text}")
-    kept: List[str] = []
-    used = 0
-    for idx in range(len(rendered) - 1, -1, -1):
-        # Worst case if this is the last line taken: exactly ``idx`` older ones dropped.
-        reserve = (len(_SAFETY_OMISSION_MARKER.format(n=idx)) + 1) if idx else 0
-        cost = len(rendered[idx]) + (1 if kept else 0)
-        if kept and used + cost + reserve > _SAFETY_CONTEXT_CHAR_BUDGET:
-            break
-        used += cost
-        kept.append(rendered[idx])
-    kept.reverse()
-    dropped = len(rendered) - len(kept)
-    if dropped:
-        kept.insert(0, _SAFETY_OMISSION_MARKER.format(n=dropped))
-    return "\n".join(kept)
-
-
 def _render_subject_json(arguments: Dict[str, Any]) -> str:
-    """Serialize the redacted call arguments exactly as the check prompt embeds them.
-
-    ``ensure_ascii=False`` keeps serialized length ≈ input length: the default
-    \\uXXXX escaping inflates non-ASCII text 6×, which would make the subject
-    budget below a false promise for e.g. Cyrillic scripts. The prompt goes to
-    an LLM; UTF-8 is fine.
-    """
+    'Serialize the redacted call arguments exactly as the check prompt embeds them.'
     safe_args = _redact_secrets_in_arguments(arguments or {})
     try:
         rendered = json.dumps(safe_args, indent=2, default=repr, ensure_ascii=False)
@@ -530,52 +434,181 @@ def _render_subject_json(arguments: Dict[str, Any]) -> str:
     return rendered.encode("utf-8", "replace").decode("utf-8")
 
 
-def _build_check_prompt(
-    tool_name: str,
-    arguments: Dict[str, Any],
-    messages: Optional[List[Dict[str, Any]]] = None,
-    *,
-    args_json: Optional[str] = None,
-    ctx: Optional[Any] = None,
-    resolved_binding: Optional[Any] = None,
-) -> str:
-    if args_json is None:
-        args_json = _render_subject_json(arguments)
-    runtime_mode = get_runtime_mode()
-    prompt = (
-        "Proposed tool call:\n"
-        f"Runtime mode: {runtime_mode}\n"
-        f"Tool: {tool_name}\n"
-        f"Arguments:\n```json\n{args_json}\n```\n"
-    )
-    # The loop already retains exact initial and later directives independently
-    # of transcript compaction. Borrow that source rather than constructing a
-    # second consent summary or rescanning the whole room for every tool call.
-    from dataclasses import asdict, is_dataclass
+# Mandatory evidence and decisive history must fit; omitted SAFE rows are counted.
+_SAFETY_BUNDLE_BYTE_BUDGET = 512_000
+_SAFETY_PRIOR_BYTE_BUDGET = 64_000
+_PRIOR_VERDICTS: OrderedDict[str, dict[str, dict]] = OrderedDict()
+_PRIOR_LOCK = threading.RLock()
 
+
+class _VerdictHistory(dict):
+    """Retained decisive rows plus an explicit count of omitted SAFE verdicts."""
+    omitted_safe = 0
+
+
+class _Assessment(tuple):
+    """Keep the public pair ABI while distinguishing flags from infrastructure holds."""
+    def __new__(cls, allowed, message, *, status="", verdicts=()):
+        result = super().__new__(cls, (allowed, message))
+        result.status, result.verdicts = status, tuple(verdicts)
+        return result
+
+
+def _root_id(ctx):
+    metadata = getattr(ctx, "task_metadata", None) or {}
+    return str(metadata.get("root_task_id") or getattr(ctx, "root_task_id", "") or getattr(ctx, "task_id", "") or "")
+
+
+def clear_safety_work(root_task_id: str) -> None:
+    """Root terminal hook: audit persists, retry authority does not."""
+    with _PRIOR_LOCK:
+        _PRIOR_VERDICTS.pop(str(root_task_id), None)
+
+
+def _subject_digest(tool_name, arguments):
+    # Hash ORIGINAL arguments, not redacted rendering: changed credentials are a new subject too.
+    raw = json.dumps([tool_name, arguments], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _remember(ctx, digest, tool_name, assessment, *, speech_refused=False):
+    root = _root_id(ctx)
+    if not root:
+        return True  # rootless calls never earn a reusable speech flag
+    row = {"digest": digest, "tool": tool_name, "verdicts": assessment.verdicts,
+           "speech_refused": speech_refused}
+    with _PRIOR_LOCK:
+        previous = _PRIOR_VERDICTS.get(root, {})
+        row["verdicts"] = coalesce_verdicts(previous.get(digest, {}).get("verdicts", ()), assessment.verdicts)
+        history = _VerdictHistory({**previous, digest: row})
+        history.omitted_safe = getattr(previous, "omitted_safe", 0)
+        safe_rows = iter([key for key, value in history.items()
+                         if not value.get("speech_refused") and value.get("verdicts")
+                         and all(verdict["status"] == "SAFE" for verdict in value["verdicts"])])
+        while verdict_history_bytes(history) > _SAFETY_PRIOR_BYTE_BUDGET:
+            key = next(safe_rows, None)
+            if key is None:
+                return False  # decisive flags must fit in full
+            history.omitted_safe += sum(1 + verdict.get("repeat_count", 0) for verdict in history.pop(key)["verdicts"])
+        if root not in _PRIOR_VERDICTS and len(_PRIOR_VERDICTS) >= 512:
+            _PRIOR_VERDICTS.popitem(last=False)  # an evicted root earns no speech reissue
+        _PRIOR_VERDICTS[root] = history
+        _PRIOR_VERDICTS.move_to_end(root)
+    return True
+
+
+def _runtime_mode(ctx):
+    return effective_runtime_mode(get_runtime_mode(), getattr(ctx, "task_metadata", None))
+
+
+def _needs_checker(ctx):
+    return bool(str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip()) or (
+        work_kind(getattr(ctx, "task_metadata", None)) == "consciousness"
+        and get_safety_mode("consciousness") == "full")
+
+
+def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
+    _emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": tool_name, "reason": reason, "hold": status})
+    marker = "SAFETY_SUBJECT_TOO_LARGE_BLOCKED" if status == "TOO_LARGE" else "SAFETY_UNAVAILABLE"
+    next_step = ("Reduce the payload or split the work before retrying; complete evidence must fit."
+                 if status == "TOO_LARGE" else "Retry when review is available.")
+    return _Assessment(False, f"⚠️ {marker}: {reason}. This call was not checked. {next_step}", status=status)
+
+
+def _focus_event_source(row, metadata, notes):
+    """A place event's host frame as its typed records when they reproduce that row exactly.
+
+    Each row is compared on its own, so any other row (attachments, images, another turn's frame,
+    a Continue order) stays whole. Notes as they stood at the event are kept only where they differ
+    from those read now."""
+    from ouroboros.presence_context import focus_frame_sources
+
+    typed = (focus_frame_sources(metadata, row.get("content"))
+             if isinstance(row, dict) and row.get("source") == "initial_text" else None)
+    if typed is None:
+        return row
+    at_event, place_id = typed.pop("notes_at_event", None) or [], (metadata.get("focus") or {}).get("place_id")
+
+    def versions(rows):
+        return sorted((str(n.get("text")), str(n.get("author")), str(n.get("at") or "")) for n in rows)
+    if versions(at_event) != versions(n for n in notes if n["place_id"] == place_id):
+        typed["notes_at_event"] = at_event
+    return {**{key: value for key, value in row.items() if key != "content"},
+            "host_frame": "prompts/FOCUS.md showed the mind these records and its allowance",
+            **typed}
+
+
+def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None):
+    """Fixed host evidence, with authorship separate from semantic authorization."""
+    from dataclasses import asdict, is_dataclass
+    from ouroboros.place_guard import call_place_facts
+    from ouroboros.places import load_places
+    from ouroboros.tool_access import canonical_data_root
+
+    metadata = getattr(ctx, "task_metadata", None) or {}
+    kind = work_kind(metadata)
+    focus = metadata.get("focus") or {}
+    place = dict(call_place_facts(ctx, tool_name, arguments) or {})
+    place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
+    # A focus occasions the work; it does not establish where this call lands.
+    # Only these two built-ins take an actual place reference as their subject.
+    referenced = arguments.get("place_id") if tool_name in {"configure_presence", "place_reply"} else None
+    if referenced and referenced not in place_ids:  # a resolved row already names its place
+        place["place_id"] = referenced
+        place_ids.add(referenced)
+    notes = []  # each place's notes once, read now from the canonical store
+    if place_ids:
+        for record in load_places(canonical_data_root(ctx)):
+            if record.place_id not in place_ids:
+                continue
+            if record.place_id == place.get("place_id"):
+                place.update(place_label=record.label, place_state=record.state)
+            notes.extend({"place_id": record.place_id, "text": n.text, "author": n.author,
+                          **({"at": n.at} if n.at else {}),
+                          "standing_delegation": n.author in {"owner", "migration"}} for n in record.notes)
+    if tool_name == "place_reply":  # always a message; resolved rows already carry its route
+        place["effect"] = "message"
+        if not place.get("targets"):
+            place["targets"] = {"destination": arguments.get("destination")}
+    occasion = "unknown"
+    if metadata.get("schedule_writer_kind"):
+        occasion = metadata["schedule_writer_kind"] + "-written schedule"
+    elif focus:
+        occasion = "confirmed owner account" if (focus.get("actor") or {}).get("owner_confirmed") else "person in a place"
+    elif metadata.get("wake_cause") == "own_clock":
+        occasion = "own clock"
+    elif kind == "owner":
+        occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
-    if not isinstance(directives, list):
-        directives = [m for m in (messages or []) if m.get("role") == "user"]
-    facts = {"task_id": getattr(ctx, "task_id", None),
-             "project_id": getattr(ctx, "project_id", None),
-             "owner_directives": directives,
-             "task_contract": getattr(ctx, "task_contract", {}),
-             "task_constraint": getattr(ctx, "task_constraint", None),
-             "resolved_target": resolved_binding}
-    for key in ("task_constraint", "resolved_target"):
-        value = facts[key]
-        if is_dataclass(value):
-            facts[key] = asdict(value)
-        elif isinstance(value, (list, tuple)):
-            facts[key] = [asdict(v) if is_dataclass(v) else v for v in value]
-    prompt += "\nTask sources and physical target (complete; provenance is not consent):\n"
-    prompt += _render_subject_json(facts) + "\n"
-    if messages:
-        context = _format_messages_for_safety(messages)
-        if context.strip():
-            prompt += f"\nConversation context:\n{context}\n"
-    prompt += "\nIs this safe?"
-    return prompt
+    # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
+    sources = directives if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
+    if isinstance(directives, list):
+        sources = [_focus_event_source(row, metadata, notes) for row in sources]
+    target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding
+    with _PRIOR_LOCK:
+        root = _root_id(ctx)
+        history = _PRIOR_VERDICTS.get(root, {})
+        if root in _PRIOR_VERDICTS:
+            _PRIOR_VERDICTS.move_to_end(root)
+        earlier = list(history.values())
+        omitted_safe = getattr(history, "omitted_safe", 0)
+    bundle = {
+        "work": {"kind": kind, "label": "your work" if kind == "owner" else "consciousness",
+                 "root_task_id": _root_id(ctx), "task_id": getattr(ctx, "task_id", ""), "runtime_mode": _runtime_mode(ctx),
+                 "consciousness_autonomy": metadata.get("consciousness_autonomy")},
+        "occasion": {"cause": occasion, "consciousness_cause": metadata.get("consciousness_cause"),
+                     "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
+                     "sources": sources, "retained_host_sources": isinstance(directives, list)},
+        "subject": {"tool": tool_name, "physical_target": target, "place": place},
+        # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``).
+        "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes},
+        "earlier_verdicts": earlier,
+        "earlier_safe_verdicts_omitted": omitted_safe,
+    }
+    return (f"Runtime mode: {_runtime_mode(ctx)}\nHost evidence (provenance is not consent):\n"
+            + _render_subject_json(bundle) + "\nProposed tool call:\nTool: " + tool_name
+            + "\nArguments:\n" + (args_json if args_json is not None else _render_subject_json(arguments))
+            + "\nIs this safe?")
 
 
 def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
@@ -623,7 +656,7 @@ def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
         status = str(obj.get("status") or "").upper()
         if status in {"SAFE", "SUSPICIOUS", "DANGEROUS"}:
             if best is None or rank[status] > rank[str(best.get("status") or "").upper()]:
-                best = obj
+                best = {"status": status, "reason": str(obj.get("reason") or "")}
     return best
 
 
@@ -642,20 +675,6 @@ def _classify_safety_parse_failure(msg: Dict[str, Any], usage: Optional[Dict[str
     return "unparseable"
 
 
-_REMOTE_PROVIDER_KEYS = (
-    "OPENROUTER_API_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "MINIMAX_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "ZAI_API_KEY",
-    "OPENAI_COMPATIBLE_API_KEY",
-    "OPENAI_COMPATIBLE_BASE_URL",  # an endpoint without auth is configured access too
-    "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-    "GIGACHAT_CREDENTIALS",
-    "GIGACHAT_PASSWORD",
-)
-
 _LOCAL_ROUTING_KEYS = (
     "USE_LOCAL_MAIN",
     "USE_LOCAL_HEAVY",
@@ -664,22 +683,11 @@ _LOCAL_ROUTING_KEYS = (
     "USE_LOCAL_FALLBACK",
 )
 
-# Provider-specific API key mapped from ``infer_api_key_type`` result.
-_PROVIDER_KEY_ENV = {
-    "openrouter": "OPENROUTER_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "minimax": "MINIMAX_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "zai": "ZAI_API_KEY",
-    "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
-    "cloudru": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-    "gigachat": "GIGACHAT_CREDENTIALS",
-}
-
 
 def _any_remote_provider_configured() -> bool:
-    return any(str(runtime_setting(k, "") or "").strip() for k in _REMOTE_PROVIDER_KEYS)
+    from ouroboros.provider_models import any_api_connection_configured
+
+    return any_api_connection_configured()
 
 
 def _any_local_routing_enabled() -> bool:
@@ -690,27 +698,17 @@ def _any_local_routing_enabled() -> bool:
 
 
 def _light_model_has_reachable_provider(light_model: str) -> bool:
-    """Return whether the light model's direct provider config is reachable."""
+    """Return whether the light model's connection is reachable (its key, or a keyless endpoint)."""
+    from ouroboros.provider_models import PROVIDER_KINDS, model_has_credentials, parse_model_route, provider_has_credentials
+
+    if parse_model_route(light_model).connection:
+        return model_has_credentials(light_model)
     try:
         from ouroboros.pricing import infer_api_key_type
         key_type = infer_api_key_type(light_model)
     except Exception:  # pragma: no cover — defensive
         return True  # don't over-block on classifier failure
-    if key_type == "gigachat":
-        # GigaChat accepts either an authorization key (OAuth) or user/password.
-        has_creds = bool(str(runtime_setting("GIGACHAT_CREDENTIALS", "") or "").strip())
-        has_basic = bool(str(runtime_setting("GIGACHAT_USER", "") or "").strip()) and bool(
-            str(runtime_setting("GIGACHAT_PASSWORD", "") or "").strip()
-        )
-        return has_creds or has_basic
-    if key_type == "openai-compatible":  # the lane's one endpoint/key pair, blank key = no auth
-        from ouroboros.provider_models import provider_has_credentials
-
-        return provider_has_credentials("openai-compatible")
-    env_key = _PROVIDER_KEY_ENV.get(key_type)
-    if env_key is None:
-        return True
-    return bool(str(runtime_setting(env_key, "") or "").strip())
+    return provider_has_credentials(key_type) if key_type in PROVIDER_KINDS else True
 
 
 def _safety_deadline_epoch(ctx: Optional[Any]) -> Optional[float]:
@@ -731,10 +729,14 @@ def _safety_deadline_epoch(ctx: Optional[Any]) -> Optional[float]:
 
 def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
     """Choose local/remote safety backend; unreachable fallback fails open."""
-    if str(runtime_setting("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1"):
-        return True, False, None
+    selected = get_safety_model()
+    explicit = bool(str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip())
+    local_light = str(runtime_setting("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1")
+    if selected.endswith(" (local)") or (not explicit and local_light):
+        inherited_main = not explicit and not local_light and not str(runtime_setting("OUROBOROS_MODEL_LIGHT", "") or "").strip()
+        return True, inherited_main, None
 
-    light_model = get_light_model()
+    light_model = get_safety_model().removesuffix(" (local)")
     from ouroboros.provider_models import provider_for_model
 
     if provider_for_model(light_model) == "claudexor":
@@ -745,16 +747,16 @@ def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
         # The direct light-model provider needs its own key.
         if _light_model_has_reachable_provider(light_model):
             return False, False, None
-        if _any_local_routing_enabled():
+        if not explicit and _any_local_routing_enabled():
             # Provider mismatch: local is fallback, so local outage is tolerated.
             return True, True, None
         return False, False, (
-            f"Light model provider key missing for {light_model} "
+            f"Safety Supervisor model provider key missing for {light_model} "
             f"(other remote keys are set but they don't cover this provider); "
             "skipping check."
         )
 
-    if _any_local_routing_enabled():
+    if not explicit and _any_local_routing_enabled():
         # Local-only configs should warn, not hard-block, on local outage.
         return True, True, None
 
@@ -835,9 +837,9 @@ def _is_throughput_rate_limit(kind: str, status_code: Optional[int], safe_error:
     """True only for provider THROTTLING, never for a plain outage (408/5xx/timeout).
 
     A KNOWN status code is the authority and the text is never consulted beside it: the
-    shared markers are substrings, so `429`, `rpm` and `tpm` occur inside the request
-    ids, trace ids and hostnames real outages carry ("503 ... (request id: req_1f429ab0)",
-    "504 Gateway Timeout ... rpm-edge-proxy-3"). The text branch therefore runs ONLY when
+    short markers `429`, `rpm` and `tpm` are bounded only by letters and digits, so they
+    still match the separated ids and hostnames real outages carry ("503 ... (request id:
+    req-429-ab0)", "504 Gateway Timeout ... rpm-edge-proxy-3"). The text branch runs ONLY when
     no status code was recoverable at all, which is the case it exists for — a transport
     that raised a bare throttling message.
     """
@@ -868,9 +870,8 @@ def _safety_rate_limit_reason(
 
 
 def _safety_rate_limit_backoff(ctx: Optional[Any]) -> None:
-    """One bounded backoff, capped by the task deadline. Called BETWEEN `model_call_slot`
-    contexts: that primitive caps CONCURRENT calls, so sleeping inside a held slot would
-    park the route for every other thread."""
+    """One bounded backoff, capped by the task deadline. Called BETWEEN physical calls:
+    the provider slot is held only inside a physical send, so this sleep parks no route."""
     delay = _SAFETY_RATE_LIMIT_BACKOFF_SEC
     deadline = _safety_deadline_epoch(ctx)
     if deadline is not None:
@@ -883,11 +884,7 @@ def _rate_limited_outcome(
     ctx: Optional[Any], tool_name: str, error: str, *, local_fallback: bool, arm_latch: bool,
     attempts: int = 2,
 ) -> Tuple[bool, str]:
-    """Terminal outcome of a rate-limited safety check, split by lane. The local-FALLBACK
-    lane keeps its documented fail-open contract (ARCHITECTURE "Safety and runtime mode" case (c): a broken
-    chosen-as-fallback local runtime warns instead of blocking every unknown tool) — a
-    429 there must not be stricter than the RuntimeError beside it. Every other lane
-    blocks with the typed non-verdict outcome below."""
+    'Terminal outcome of a rate-limited safety check, split by lane. The local-FALLBACK'
     if local_fallback:
         log.warning(
             "Safety local-fallback rate-limited for %s; proceeding with warning: %s",
@@ -907,17 +904,7 @@ def _rate_limited_outcome(
 def _safety_unavailable_blocked(
     ctx: Optional[Any], tool_name: str, error: str, *, arm_latch: bool = True, attempts: int = 2,
 ) -> Tuple[bool, str]:
-    """Rate-limited safety lane: BLOCK this one call with a typed non-verdict outcome.
-
-    A 429 is an infrastructure fact about the supervisor, not a verdict about the tool
-    call — reporting it as SAFETY_VIOLATION told the agent its own command was unsafe,
-    sending it hunting for a "safer" rewording of a benign command. The honest outcome
-    keeps `full` mode's owner contract (an unchecked guarded call never executes; the
-    existing fail-open cases stay exactly the ARCHITECTURE-documented no-backend three) while
-    removing the false accusation: the ⚠️ *_UNAVAILABLE prefix classifies as a plain
-    tool ERROR downstream, never as `safety_violation`, and the message itself carries
-    the retry contract (P5: the instruction lives with the fact). Disclosed twice: the
-    result the agent reads, and the durable event an owner can find later (BIBLE P3)."""
+    'Rate-limited safety lane: BLOCK this one call with a typed non-verdict outcome.'
     if arm_latch and attempts >= 2:
         # The latch's documented trigger is a CONFIRMED storm: both attempts 429ed.
         # A deadline-expired single 429 is one data point, not a storm - later
@@ -948,58 +935,10 @@ def _safety_unavailable_blocked(
     )
 
 
-def _safety_drive_root(ctx: Optional[Any]) -> pathlib.Path:
-    """Where this safety call's observability records belong.
-
-    The context owns the answer. Without one, the process's configured data root
-    is the SSOT — never the old cwd-relative ``../data``, which names whatever
-    directory happens to sit beside the current working directory and only
-    resolves to the real root by coincidence of the dev layout (a safety call
-    made with ``ctx=None`` — the extension/MCP dispatch shape — wrote its
-    observability rows there). Read late off the module so test isolation and
-    runtime rebinding are honored, the same resolution order the review
-    surfaces already use.
-    """
-    root = getattr(ctx, "drive_root", None) if ctx is not None else None
-    if root:
-        return pathlib.Path(root)
-    from ouroboros import config
-
-    return pathlib.Path(config.DATA_DIR)
-
-
-def _record_safety_usage(ctx: Optional[Any], usage_payload: Dict[str, Any]) -> None:
-    """Charge a safety call that had no event queue to report on.
-
-    The queue is the normal path; this is the fallback. The ledger writer is
-    INJECTED by the context when it has one (the ``update_budget_from_usage``
-    attribute the supervisor event context already carries), so a caller that
-    owns its own accounting is charged where it lives. A context without one
-    falls back to this process's own supervisor state, imported AT CALL TIME so
-    the safety module — which runs inside every worker and on every tool call —
-    keeps no import-time dependency on the supervisor package, exactly as the
-    six sibling call sites of this writer already do.
-    """
-    sink = getattr(ctx, "update_budget_from_usage", None) if ctx is not None else None
-    if callable(sink):
-        sink(usage_payload)
-        return
-    from supervisor.state import update_budget_from_usage
-
-    update_budget_from_usage(usage_payload)
-
-
 def _subject_too_large_blocked(
     ctx: Optional[Any], tool_name: str, subject_chars: int,
 ) -> Tuple[bool, str]:
-    """Over-budget subject: BLOCK this one call with a typed policy denial.
-
-    Truncating the subject instead would weaken the check — anything past the cut
-    would run unreviewed — and `full` mode's owner contract is that an unchecked
-    guarded call never executes. The `_BLOCKED` first-line marker classifies as a
-    policy denial downstream (never `safety_violation`), and the message carries
-    the working alternative (P5: the instruction lives with the fact). Disclosed
-    twice: the result the agent reads, and the durable event an owner can find."""
+    'Over-budget subject: BLOCK this one call with a typed policy denial.'
     log.error(
         "Safety subject for %s is %d chars (budget %d); refusing the unreviewable call",
         tool_name, subject_chars, _SAFETY_SUBJECT_CHAR_BUDGET,
@@ -1022,21 +961,19 @@ def _subject_too_large_blocked(
 def _safety_model_call(
     *, client: Any, ctx: Optional[Any], tool_name: str, light_model: str,
     use_local: bool, call_type: str, user_prompt: str, on_usage: Any,
+    model_role: str = "safety", effort: str = "low", account: Optional[str] = None,
+    processing: Optional[str] = None, attempts_limit: int = 2, system_prompt: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    """ONE safety model call, with ONE bounded retry when the provider rate-limits it.
-
-    Both wire shapes reach here: a RAISED provider error, and an HTTP-200 whose body
-    carried it (`usage["provider_error"]`) — the production shape, which never raises,
-    so an exception-only check would miss it. A non-rate-limit exception is re-raised
-    unchanged so every existing lane stays byte-identical; two rate-limited attempts
-    raise `_SafetyRateLimited`. A rate-limited attempt's usage is still accounted: the
-    call was physical. The v6.40 per-model self-DoS slot is taken PER ATTEMPT (this is
-    the highest-frequency LIGHT consumer — every tool call on every in-process subagent
-    thread) with the backoff outside it.
-    """
+    'ONE safety model call, with ONE bounded retry when the provider rate-limits it.'
     from ouroboros import model_concurrency
     from ouroboros.llm_observability import chat_observed
     from ouroboros.tools.review_helpers import cached_prompt_blocks
+    if model_role == "safety":
+        from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, resolve_processing_preference
+        if account is None:
+            account = str(model_role_option(MODEL_ACCOUNTS_KEY, "safety"))
+        if processing is None:
+            processing = resolve_processing_preference("safety")
 
     if time.time() < _SAFETY_STORM_UNTIL:
         raise _SafetyRateLimited(
@@ -1044,7 +981,7 @@ def _safety_model_call(
             latched=True,
         )
     reason = ""
-    for attempt in range(2):
+    for attempt in range(attempts_limit):
         if attempt:
             deadline = _safety_deadline_epoch(ctx)
             if deadline is not None and time.time() >= deadline:
@@ -1056,7 +993,8 @@ def _safety_model_call(
         msg: Dict[str, Any] = {}
         usage: Optional[Dict[str, Any]] = None
         try:
-            with model_concurrency.model_call_slot(
+            # The physical sender takes the provider slot; this only carries the deadline.
+            with model_concurrency.model_call_scope(
                 light_model, use_local, _safety_deadline_epoch(ctx)
             ):
                 msg, usage = chat_observed(
@@ -1064,28 +1002,17 @@ def _safety_model_call(
                     drive_root=_safety_drive_root(ctx),
                     task_id=str(getattr(ctx, "task_id", "") or "safety"),
                     call_type=call_type,
-                    # This payload is TOOL-FREE and the send-time cache finalizer may only
-                    # mark a tool schema, so the lane is cacheable only because the CALLER
-                    # declares its own stable prefix, as every review surface does: the
-                    # byte-stable SAFETY.md prompt is the whole prefix (the repair call
-                    # reuses it and reads the cache the first attempt wrote) and the tool
-                    # proposal stays in the unmarked user turn. Transport shape only — text,
-                    # model slot, parsing and fail-closed semantics unchanged; a route that
-                    # cannot carry markers has them stripped back to the identical single
-                    # block. Disclosed residual: on OpenAI-compatible lanes the system
-                    # content goes over the wire as a ONE-ELEMENT block list, so a strict
-                    # self-hosted LIGHT endpoint rejecting array content surfaces as
-                    # SAFETY_VIOLATION (this lane fails CLOSED there), never as a bypass.
+                    # Stable, tool-free SAFETY.md prefix; subject remains uncached.
                     messages=[
                         {"role": "system", "content": cached_prompt_blocks(
-                            _get_safety_prompt(), ttl=_SAFETY_CACHE_TTL)},
+                            (system_prompt if system_prompt is not None else _get_safety_prompt()), ttl=_SAFETY_CACHE_TTL)},
                         {"role": "user", "content": user_prompt},
                     ],
                     model=light_model, use_local=use_local,
-                    max_tokens=get_safety_max_tokens(), reasoning_effort="low",
+                    max_tokens=get_safety_max_tokens(), reasoning_effort=effort,
                     timeout=get_safety_call_timeout_sec(),
-                    model_role="light",
-                    wait_for_resources=not mode_has_unrestricted_agency(get_runtime_mode()),
+                    model_role=model_role, model_account_override=account, processing_preference=processing,
+                    wait_for_resources=not mode_has_unrestricted_agency(_runtime_mode(ctx)),
                     response_format=({"type": "json_object"}
                                      if LLMClient.supports_response_format(light_model, use_local=use_local)
                                      else None),
@@ -1117,61 +1044,30 @@ def _run_llm_check(
     resolved_binding: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Run a single light-model safety check and classify the verdict."""
-    _use_local_light, _is_local_fallback, _skip_reason = _resolve_safety_routing()
-    if _skip_reason is not None:
-        log.warning("Safety backend unavailable for %s: %s", tool_name, _skip_reason)
-        return True, (
-            f"⚠️ SAFETY_WARNING: Safety backend is not configured "
-            f"({_skip_reason.rstrip('.')}). {_UNCHECKED_WARNING_SUFFIX}"
-        )
-
     args_json = _render_subject_json(arguments)
     if len(args_json) > _SAFETY_SUBJECT_CHAR_BUDGET:
-        return _subject_too_large_blocked(ctx, tool_name, len(args_json))
+        return _Assessment(*_subject_too_large_blocked(ctx, tool_name, len(args_json)), status="TOO_LARGE")
     prompt = _build_check_prompt(tool_name, arguments, messages, args_json=args_json,
                                  ctx=ctx, resolved_binding=resolved_binding)
+    if len(prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
+        return _hold(ctx, tool_name, "The complete mandatory evidence bundle is too large", status="TOO_LARGE")
+    _use_local_light, _is_local_fallback, _skip_reason = _resolve_safety_routing()
+    if _skip_reason is not None:
+        if _needs_checker(ctx):
+            return _hold(ctx, tool_name, _skip_reason)
+        return _Assessment(True, f"⚠️ SAFETY_WARNING: Safety backend is not configured ({_skip_reason}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
     client = LLMClient()
-    light_model = get_light_model()
+    system_prompt = _get_safety_prompt()
+    light_model = get_safety_model().removesuffix(" (local)")
     log.info(f"Running safety check on {tool_name} using {light_model} (local={_use_local_light})")
 
     def _emit_safety_usage(usage_payload: Optional[Dict[str, Any]]) -> None:
         if not usage_payload:
             return
-        # Use provider-canonical model identity for cost/events.
-        resolved_model = str(usage_payload.get("resolved_model") or light_model)
-        if _use_local_light:
-            provider = "local"
-            model_name = f"{light_model} (local)"
-        else:
-            provider = str(usage_payload.get("provider") or infer_provider_from_model(light_model))
-            model_name = resolved_model
-        raw_cost = usage_payload.get("cost")
-        cost = None
-        if raw_cost is not None and not isinstance(raw_cost, bool):
-            try:
-                cost = float(raw_cost)
-            except (TypeError, ValueError):
-                cost = None
-            if cost is not None and not (math.isfinite(cost) and cost >= 0):
-                cost = None
-        if raw_cost is not None and cost is None:
-            log.warning("safety usage carried an invalid reported cost (%s); treating as unknown",
-                        type(raw_cost).__name__)
-            usage_payload["cost"] = None
-        if _use_local_light:
-            cost = 0.0
-        elif cost is None:
-            cost = estimate_cost_optional(
-                resolved_model,
-                int(usage_payload.get("prompt_tokens") or 0),
-                int(usage_payload.get("completion_tokens") or 0),
-                cache_usage={
-                    "cached_tokens": int(usage_payload.get("cached_tokens") or 0),
-                    "cache_write_tokens": int(usage_payload.get("cache_write_tokens") or 0),
-                },
-                provider=provider,
-            )
-            usage_payload["cost"] = cost
+        cost, model_name, provider, _estimated = normalize_usage_cost(
+            usage_payload, model=light_model, use_local=_use_local_light,
+            provider=infer_provider_from_model(light_model),
+        )
         _eq = getattr(ctx, "event_queue", None) if ctx is not None else None
         if _eq is not None:
             emit_llm_usage_event(
@@ -1189,31 +1085,28 @@ def _run_llm_check(
         msg, usage = _safety_model_call(
             client=client, ctx=ctx, tool_name=tool_name, light_model=light_model,
             use_local=_use_local_light, call_type="safety_supervisor",
-            user_prompt=prompt, on_usage=_emit_safety_usage,
+            user_prompt=prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
         )
     except _SafetyRateLimited as e:
-        return _rate_limited_outcome(
+        return _Assessment(*_rate_limited_outcome(
             ctx, tool_name, str(e),
-            local_fallback=_use_local_light and _is_local_fallback,
+            local_fallback=_use_local_light and _is_local_fallback and not _needs_checker(ctx),
             arm_latch=not getattr(e, "latched", False),
             attempts=getattr(e, "attempts", 2),
-        )
+        ), status="UNAVAILABLE")
     except Exception as e:
         from ouroboros.llm_claudexor import propagate_model_error
         propagate_model_error(e)
         safe_error = sanitize_tool_result_for_log(f"{type(e).__name__}: {e}")
         # Fallback local outage warns instead of blocking all unknown tools.
-        if _use_local_light and _is_local_fallback:
+        if _use_local_light and _is_local_fallback and not _needs_checker(ctx):
             log.warning(
                 "Safety local-fallback LLM call failed for %s (%s); proceeding with warning",
                 tool_name, safe_error,
             )
-            return True, (
-                f"⚠️ SAFETY_WARNING: Local safety runtime unreachable ({safe_error}). "
-                f"{_UNCHECKED_WARNING_SUFFIX}"
-            )
+            return _Assessment(True, f"⚠️ SAFETY_WARNING: Local safety runtime unreachable ({safe_error}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
         log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
-        return False, f"⚠️ SAFETY_VIOLATION: Safety check failed with error: {safe_error}"
+        return _hold(ctx, tool_name, f"Safety check failed with error: {safe_error}")
 
     result = _parse_safety_response(msg.get("content") or "")
     if result is None:
@@ -1239,18 +1132,18 @@ def _run_llm_check(
             repair_msg, repair_usage = _safety_model_call(
                 client=client, ctx=ctx, tool_name=tool_name, light_model=light_model,
                 use_local=_use_local_light, call_type="safety_supervisor_repair",
-                user_prompt=repair_prompt, on_usage=_emit_safety_usage,
+                user_prompt=repair_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
             )
             result = _parse_safety_response(repair_msg.get("content") or "")
             if result is None:
                 failure_class = _classify_safety_parse_failure(repair_msg, repair_usage)
         except _SafetyRateLimited as e:
-            return _rate_limited_outcome(
+            return _Assessment(*_rate_limited_outcome(
                 ctx, tool_name, str(e),
-                local_fallback=_use_local_light and _is_local_fallback,
+                local_fallback=_use_local_light and _is_local_fallback and not _needs_checker(ctx),
                 arm_latch=not getattr(e, "latched", False),
                 attempts=getattr(e, "attempts", 2),
-            )
+            ), status="UNAVAILABLE")
         except Exception as exc:
             from ouroboros.llm_claudexor import propagate_model_error
             propagate_model_error(exc)
@@ -1262,87 +1155,49 @@ def _run_llm_check(
                 "tool": tool_name,
                 "failure_class": failure_class,
             })
-            return False, (
-                "⚠️ SAFETY_VIOLATION: Safety Supervisor returned unparseable response "
-                f"(class={failure_class}) after one repair retry."
-            )
+            return _hold(ctx, tool_name, f"Safety Supervisor returned unparseable response (class={failure_class}) after one repair retry")
 
-    status = str(result.get("status", "")).upper()
-    reason = result.get("reason", "Unknown")
-
+    verdicts = [{"stage": "first", **result}]
+    row = None
+    if result["status"] != "SAFE":
+        from ouroboros.configured_subagents import normalize_configured_subagents
+        try:
+            catalog, _ = normalize_configured_subagents(runtime_setting("OUROBOROS_SUBAGENTS", "") or {"enabled": False, "items": []})
+        except ValueError as exc:
+            return _hold(ctx, tool_name, f"Second-check roster unavailable after a first-stage flag: {sanitize_tool_result_for_log(str(exc))}")
+        row = next((r for r in catalog.items if r.rechecks_flags and r.enabled), None) if catalog.enabled else None
+    if row is not None:
+        second_prompt = ("You review a flag a first checker raised; overturning it needs a reason.\n"
+                         + prompt + "\nFirst verdict:\n" + _render_subject_json(result))
+        if len(second_prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
+            return _hold(ctx, tool_name, "The mandatory second-check bundle is too large", status="TOO_LARGE")
+        light_model = row.route.target_id.removesuffix(" (local)")
+        _use_local_light = row.route.target_id.endswith(" (local)")
+        try:
+            msg, _ = _safety_model_call(
+                client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
+                call_type="safety_second_check", user_prompt=second_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
+                model_role="subagent:" + row.subagent_id, effort=row.effort or "low",
+                account=row.route.credential_profile_id, processing=row.processing_preference or None, attempts_limit=1)
+            second = _parse_safety_response(msg.get("content") or "")
+        except Exception as exc:
+            from ouroboros.llm_claudexor import propagate_model_error
+            propagate_model_error(exc)
+            return _hold(ctx, tool_name, f"Second check unavailable: {sanitize_tool_result_for_log(str(exc))}")
+        if second is None or (second["status"] == "SAFE" and not str(second.get("reason") or "").strip()):
+            return _hold(ctx, tool_name, "Second check did not return a verdict with a reason")
+        result = second
+        verdicts.append({"stage": "second", "row_id": row.subagent_id, **result})
+    status = result["status"]
+    reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
     if status == "SAFE":
-        return True, ""
-
+        return _Assessment(True, "", status=status, verdicts=verdicts)
     if status == "SUSPICIOUS":
-        log.warning(f"Safety check: {tool_name} is suspicious: {reason}")
-        return True, (
-            f"⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\n"
-            f"Reason: {reason}\n"
-            f"The command was allowed, but consider whether this is the right approach."
-        )
+        return _Assessment(True, "⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\n"
+                           + reasons + "\nThe command was allowed, but consider whether this is the right approach.", status=status, verdicts=verdicts)
+    return _Assessment(False, "⚠️ SAFETY_VIOLATION: The Safety Supervisor blocked this command.\n"
+                       + reasons + "\nReconsider whether and how to proceed.", status=status, verdicts=verdicts)
 
-    # DANGEROUS or unrecognised status: fail safe.
-    log.error(f"Safety check blocked {tool_name}: {reason}")
-    return False, (
-        f"⚠️ SAFETY_VIOLATION: The Safety Supervisor blocked this command.\n"
-        f"Reason: {reason}\n\n"
-        f"You must find a different, safer approach to achieve your goal."
-    )
-
-
-def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> None:
-    """Emit a safety audit event durably AT THE MOMENT of the decision (v6.54.3).
-
-    The canonical durable pattern (mirrors control._emit_swarm_fanout): a DIRECT
-    append into the drive's events.jsonl — the per-worker log sink forwards
-    appended lines to the live dashboard, so no separate queue put is needed and
-    a queued-but-undrained event can never be lost to a worker death (review
-    round 9, P3). The event_queue is only the last resort for contexts with no
-    drive_logs at all."""
-    payload = {
-        "task_id": str(getattr(ctx, "task_id", "") or "") if ctx is not None else "",
-        "ts": utc_now_iso(),
-        **event,
-    }
-    try:
-        drive_logs = getattr(ctx, "drive_logs", None) if ctx is not None else None
-        if callable(drive_logs):
-            from ouroboros.utils import append_jsonl
-
-            if append_jsonl(drive_logs() / "events.jsonl", payload):
-                return
-            # append_jsonl answers whether the row landed (its documented contract for
-            # important events); a False here means the durable half of the disclosure
-            # is missing, so fall through to the queue rather than returning silently.
-            log.error(
-                "durable safety event %s not persisted; falling back to event queue",
-                event.get("type") or "?",
-            )
-        eq = getattr(ctx, "event_queue", None) if ctx is not None else None
-        if eq is not None:
-            eq.put_nowait(payload)
-    except Exception:
-        # The durable audit is a P3 invariant for waved-through safety decisions —
-        # a lost emit must not be TRULY silent. Never fatal (a failed audit write
-        # must not break a task), but escalate to error so the loss is itself
-        # traced (adversarial review r1 #21).
-        log.error("failed to emit durable safety event %s", event.get("type") or "?", exc_info=True)
-
-
-def _emit_safety_mode_skip(ctx: Optional[Any], tool_name: str, mode: str, policy: str) -> None:
-    """Durable audit for a safety LLM check waved through by a non-full owner mode.
-
-    P3: an advisory/off mode is legitimate ONLY while every decision it waves
-    through leaves a loud, durable trace at the moment it happens (review round 1)."""
-    _emit_durable_safety_event(ctx, {
-        "type": "safety_mode_skip",
-        "tool": tool_name,
-        "safety_mode": mode,
-        "policy": policy,
-    })
-
-
-# Public entry point.
 
 def check_safety(
     tool_name: str,
@@ -1363,7 +1218,16 @@ def check_safety(
     declared = declared_policy if isinstance(declared_policy, str) else ""
     policy = TOOL_POLICY.get(tool_name) or (declared if declared in POLICY_VALUES else DEFAULT_POLICY)
 
-    if policy == POLICY_SKIP:
+    from ouroboros.tool_effects import effect_of
+    effect = effect_of(tool_name, ctx=ctx, is_mcp=tool_name.startswith("mcp_"))
+    speech = tool_name == "place_reply" or effect.effect == "message"
+    if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
+        policy = POLICY_CHECK
+    if effect.declared and effect.effect == "read":
+        _emit_durable_safety_event(ctx, {"type": "safety_declared_read_skip", "tool": tool_name,
+                                        "reason": "reviewed tool declaration: read", "source": effect.source})
+        return True, ""
+    if policy == POLICY_SKIP and not speech:
         return True, ""
 
     if policy == POLICY_CHECK_CONDITIONAL:
@@ -1385,36 +1249,56 @@ def check_safety(
             # (adversarial review r1 #19: audit only real deltas vs full mode).
             return True, ""
 
+    cyber = mode_has_unrestricted_agency(_runtime_mode(ctx))
+    digest = _subject_digest(tool_name, arguments)
+    with _PRIOR_LOCK:
+        root = _root_id(ctx)
+        prior = _PRIOR_VERDICTS.get(root, {}).get(digest, {})
+        if root in _PRIOR_VERDICTS:
+            _PRIOR_VERDICTS.move_to_end(root)
+    if speech and prior.get("speech_refused"):
+        _emit_durable_safety_event(ctx, {"type": "safety_sent_despite_check", "tool": tool_name,
+                                       "subject_digest": digest, "verdicts": prior["verdicts"],
+                                       "detail": "sent despite the check"})
+        return True, "⚠️ SAFETY_ADVICE: Identical re-issue; sent despite the check."
+
     # Preserve the selected assessment coverage independently of resource
     # admission. Cyber changes the authority of an assessment, never its verdict.
     # Non-full modes retain their existing disclosed skips.
-    safety_mode = get_safety_mode()
+    safety_mode = get_safety_mode(work_kind(getattr(ctx, "task_metadata", None)))
     if safety_mode != "full":
         skip_llm = safety_mode == "off" or (safety_mode == "light" and policy == POLICY_CHECK_CONDITIONAL)
         if skip_llm:
             _emit_safety_mode_skip(ctx, tool_name, safety_mode, policy)
             return True, ""
 
-    cyber = mode_has_unrestricted_agency(get_runtime_mode())
     try:
-        allowed, message = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding)
+        assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding)
     except Exception as exc:
-        if not cyber:
-            raise
+        from ouroboros.llm_claudexor import propagate_model_error
         from ouroboros.model_wait import propagate_model_control
-
-        propagate_model_control(exc)
-        allowed = False
-        message = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")
+        (propagate_model_control if cyber else propagate_model_error)(exc)
+        assessment = _hold(ctx, tool_name, sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}"))
+    allowed, message = assessment
+    verdicts = getattr(assessment, "verdicts", ())
+    if verdicts:
+        flagged_speech = speech and any(v["status"] != "SAFE" for v in verdicts)
+        if not _remember(ctx, digest, tool_name, assessment, speech_refused=flagged_speech):
+            assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large", status="TOO_LARGE")
+            allowed, message = assessment
+        else:
+            _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
+                                           "subject_digest": digest, "verdicts": verdicts})
+            if flagged_speech:
+                reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
+                return False, ("⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons
+                               + "\nReconsider whether and how to proceed. An identical re-issue sends despite the check.")
+    # Holds cannot earn retry authority. Speech holds bind in every runtime mode.
+    if speech and not allowed:
+        return False, message
     if cyber and not allowed:
-        _emit_durable_safety_event(ctx, {
-            "type": "safety_advisory", "tool": tool_name,
-            "assessment_allowed": False, "assessment": message,
-            "runtime_mode": get_runtime_mode(), "execution_allowed": True,
-        })
-        return True, (
-            "⚠️ SAFETY_ADVICE: Cyber Pro leaves the decision to Ouroboros. "
-            "This independent assessment did not approve the action; it does not veto execution.\n"
-            f"Assessment recorded before execution:\n{message}"
-        )
+        _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
+            "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})
+        return True, ("⚠️ SAFETY_ADVICE: Cyber Pro leaves the decision to Ouroboros. "
+                      "Assessment recorded before execution:\n" + message)
     return allowed, message

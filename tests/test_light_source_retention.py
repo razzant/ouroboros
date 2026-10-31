@@ -1,15 +1,15 @@
 """Light memory operations keep their sources whole.
 
-A scratchpad pass whose prompt cannot fit is retained first and read completely in
-ranges; an answer given before the retained source was read replaces nothing; a
-scratchpad pass never drops blocks written while its Light call ran. (These tests
-outlived the measured-pressure batch they used to sit beside, and the post-task
-reflection they were first written for.)
+A Light operation whose prompt cannot fit is retained first and read completely in
+ranges; an answer given before the retained source was read is refused with its
+response kept. (These tests outlived the measured-pressure batch they used to sit
+beside, the post-task reflection they were first written for, and the post-task
+scratchpad pass that last carried them: #918 retired it. Its check that blocks written
+while its Light call ran are never dropped lives on at the mind's fold:
+``test_scratchpad_fold.py::test_a_concurrent_change_or_append_is_never_lost``.)
 """
 import hashlib
 import json
-
-import pytest
 
 from ouroboros import consolidator as c
 from ouroboros.context_fit import estimate_context_prompt_tokens
@@ -87,63 +87,41 @@ def setup_memory(root):
     return memory, ToolContext(repo_dir=root, drive_root=root, task_id="source-task")
 
 
-def _oversized_scratchpad(memory):
+def _oversized_source():
     text = "BEGINNING original event.\n" + "Decision and counterexample matter. " * 30000
-    blocks = [{"ts": "2026-09-12T10:00:00Z", "source": "task", "content": text},
-              {"ts": "2026-09-12T10:01:00Z", "source": "task", "content": text + "\nDECISIVE FINAL EVENT."},
-              {"ts": "2026-09-12T10:02:00Z", "source": "task", "content": "A later episode."}]
-    memory.mutate_scratchpad_blocks(lambda _: blocks)
-    return blocks
+    return text + "\n" + text + "\nDECISIVE FINAL EVENT.\nA later episode."
 
 
-def test_two_megabyte_scratchpad_source_retained_before_first_fit_and_read_completely(tmp_path, fit):
+def test_a_two_megabyte_source_is_retained_before_first_fit_and_read_completely(tmp_path, fit):
     fit.window = 50000
-    memory, ctx = setup_memory(tmp_path)
-    blocks = _oversized_scratchpad(memory)
-    assert len("".join(block["content"] for block in blocks[:2]).encode()) > 2_000_000
-    actor = SourceReader(tmp_path, fit.window, json.dumps(
-        {"compressed_block": "I retain the original beginning and DECISIVE FINAL EVENT."}))
-    usage = c.consolidate_scratchpad(memory, actor, knowledge_context=ctx)
+    _memory, ctx = setup_memory(tmp_path)
+    source = _oversized_source()
+    assert len(source.encode()) > 2_000_000
+    actor = SourceReader(tmp_path, fit.window, "I retain the original beginning and DECISIVE FINAL EVENT.")
+    content, usage = c._call_consolidation_llm(actor, source, "Light source retention",
+                                              knowledge=c.KnowledgeReadContext(ctx))
     assert not usage.get("_consolidation_errors"), (usage.get("_consolidation_errors"), len(actor.calls), actor.position)
     [ref] = actor.sources
     stored = (tmp_path / ref["read"]["arguments"]["path"]).read_bytes()
     assert ref["sha256"] == hashlib.sha256(stored).hexdigest()
-    assert blocks[0]["content"] in stored.decode() and blocks[1]["content"] in stored.decode()
+    assert stored.decode() == source
     assert actor.received == [stored.decode()]
     assert len(actor.calls) > 5
     assert len(actor.calls[0]["messages"][0]["content"]) < 3000
     assert all(ca["model_role"] == "light" for ca in actor.calls)
-    saved = memory.load_scratchpad_blocks()
-    assert "DECISIVE FINAL EVENT" in saved[0]["content"] and saved[1:] == blocks[2:]
+    assert content == "I retain the original beginning and DECISIVE FINAL EVENT."
 
 
-def test_unread_initial_source_cannot_replace_scratchpad_blocks(tmp_path, fit):
+def test_an_answer_before_the_retained_source_was_read_is_refused(tmp_path, fit):
     fit.window = 24000
-    memory, ctx = setup_memory(tmp_path)
-    blocks = _oversized_scratchpad(memory)
+    _memory, ctx = setup_memory(tmp_path)
 
     class Unread:
         def chat(self, **_kwargs):
             return {"content": '{"compressed_block": "Unread claim"}'}, {"cost": 0.03}
 
-    usage = c.consolidate_scratchpad(memory, Unread(), knowledge_context=ctx)
+    content, usage = c._call_consolidation_llm(Unread(), _oversized_source(), "Light source retention",
+                                              knowledge=c.KnowledgeReadContext(ctx))
     [error] = usage["_consolidation_errors"]
-    assert error["kind"] == "source_incomplete" and error["response_ref"]
+    assert content == "" and error["kind"] == "source_incomplete" and error["response_ref"]
     assert (tmp_path / error["source_ref"]["read"]["arguments"]["path"]).exists()
-    assert memory.load_scratchpad_blocks() == blocks
-
-
-@pytest.mark.parametrize("change_same_source", [False, True])
-def test_scratchpad_pressure_cas_preserves_concurrent_sources(tmp_path, fit, change_same_source):
-    memory, ctx = setup_memory(tmp_path)
-    original = {"ts": "same", "source": "task", "content": "old" * 2000}
-    memory.mutate_scratchpad_blocks(lambda _: [original])
-    newer = {**original, "content": "new concurrent content"}
-    appended = {"ts": "later", "source": "task", "content": "A new episode"}
-    class Concurrent:
-        def chat(self, **_kwargs):
-            memory.mutate_scratchpad_blocks(lambda rows: [newer] if change_same_source else rows + [appended])
-            return {"content": '{"compressed_block":"Short retained understanding."}'}, {"cost": 0.01}
-    c.consolidate_scratchpad(memory, Concurrent(), pressure=True, knowledge_context=ctx)
-    saved = memory.load_scratchpad_blocks()
-    assert saved == [newer] if change_same_source else saved[1:] == [appended]

@@ -1,0 +1,402 @@
+{
+  "snapshots": [],
+  "absences": [],
+  "refreshed_at": null,
+  "resources": [
+    {
+      "target": {
+        "harness": "cursor",
+        "profile_id": "chosen"
+      },
+      "balances": {
+        "value": [
+          {
+            "scope": "personal",
+            "usage_kind": "included",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_included",
+            "label": "Personal included remaining",
+            "amount": "0",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "has_balance": false,
+            "unlimited": false
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_on_demand",
+            "label": "Personal on-demand remaining",
+            "amount": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "has_balance": null,
+            "unlimited": null
+          },
+          {
+            "scope": "team",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_team_on_demand",
+            "label": "Team pool on-demand remaining",
+            "amount": "65433",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "has_balance": true,
+            "unlimited": null
+          }
+        ],
+        "source": "cursor_dashboard",
+        "observed_at": "2026-10-15T13:04:58.000Z",
+        "freshness": "fresh",
+        "last_attempt_at": "2026-10-15T13:04:58.000Z",
+        "last_error": null
+      },
+      "spending": {
+        "value": [
+          {
+            "scope": "personal",
+            "usage_kind": "included",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_included",
+            "label": "Personal included usage",
+            "enabled": true,
+            "used": "2500",
+            "limit": "2500",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Internal dashboard observation; not execution availability"
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_on_demand",
+            "label": "Personal on-demand spending",
+            "enabled": true,
+            "used": "4321",
+            "limit": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Internal dashboard observation; not execution availability"
+          },
+          {
+            "scope": "team",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_team_on_demand",
+            "label": "Team pool on-demand spending",
+            "enabled": true,
+            "used": "34567",
+            "limit": "100000",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Shared team pool; not this account's personal balance"
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "bonus",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_bonus",
+            "label": "Personal bonus usage",
+            "enabled": null,
+            "used": "125",
+            "limit": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Reported spending, not remaining budget"
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "total",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_total",
+            "label": "Personal total usage",
+            "enabled": null,
+            "used": "2625",
+            "limit": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Reported spending, not remaining budget"
+          }
+        ],
+        "source": "cursor_dashboard",
+        "observed_at": "2026-10-15T13:04:58.000Z",
+        "freshness": "fresh",
+        "last_attempt_at": "2026-10-15T13:04:58.000Z",
+        "last_error": null
+      },
+      "resets": {
+        "value": null,
+        "source": null,
+        "observed_at": null,
+        "freshness": "unknown",
+        "last_attempt_at": null,
+        "last_error": null
+      },
+      "diagnostics": {
+        "value": [
+          {
+            "code": "cursor_dashboard_internal_api",
+            "detail": "Internal dashboard schema may change; numeric resources do not establish execution availability"
+          },
+          {
+            "code": "cursor_dashboard_fee_inclusion_unknown",
+            "detail": "The aggregate source does not identify fee inclusion"
+          }
+        ],
+        "source": "cursor_dashboard",
+        "observed_at": "2026-10-15T13:04:58.000Z",
+        "freshness": "fresh",
+        "last_attempt_at": "2026-10-15T13:04:58.000Z",
+        "last_error": null
+      }
+    },
+    {
+      "target": {
+        "harness": "cursor",
+        "profile_id": "healthy-sibling"
+      },
+      "balances": {
+        "value": [
+          {
+            "scope": "personal",
+            "usage_kind": "included",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_included",
+            "label": "Personal included remaining",
+            "amount": "0",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "has_balance": false,
+            "unlimited": false
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_on_demand",
+            "label": "Personal on-demand remaining",
+            "amount": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "has_balance": null,
+            "unlimited": null
+          },
+          {
+            "scope": "team",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_team_on_demand",
+            "label": "Team pool on-demand remaining",
+            "amount": "65433",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "has_balance": true,
+            "unlimited": null
+          }
+        ],
+        "source": "cursor_dashboard",
+        "observed_at": "2026-10-15T13:04:58.000Z",
+        "freshness": "fresh",
+        "last_attempt_at": "2026-10-15T13:04:58.000Z",
+        "last_error": null
+      },
+      "spending": {
+        "value": [
+          {
+            "scope": "personal",
+            "usage_kind": "included",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_included",
+            "label": "Personal included usage",
+            "enabled": true,
+            "used": "2500",
+            "limit": "2500",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Internal dashboard observation; not execution availability"
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_on_demand",
+            "label": "Personal on-demand spending",
+            "enabled": true,
+            "used": "4321",
+            "limit": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Internal dashboard observation; not execution availability"
+          },
+          {
+            "scope": "team",
+            "usage_kind": "on_demand",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_team_on_demand",
+            "label": "Team pool on-demand spending",
+            "enabled": true,
+            "used": "34567",
+            "limit": "100000",
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Shared team pool; not this account's personal balance"
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "bonus",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_bonus",
+            "label": "Personal bonus usage",
+            "enabled": null,
+            "used": "125",
+            "limit": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Reported spending, not remaining budget"
+          },
+          {
+            "scope": "personal",
+            "usage_kind": "total",
+            "period": {
+              "starts_at": "2026-10-01T00:00:00.000Z",
+              "ends_at": "2026-11-01T00:00:00.000Z"
+            },
+            "fee_included": null,
+            "id": "cursor_personal_total",
+            "label": "Personal total usage",
+            "enabled": null,
+            "used": "2625",
+            "limit": null,
+            "unit": "minor",
+            "currency": "USD",
+            "decimal_places": 2,
+            "resets_at": "2026-11-01T00:00:00.000Z",
+            "reason": "Reported spending, not remaining budget"
+          }
+        ],
+        "source": "cursor_dashboard",
+        "observed_at": "2026-10-15T13:04:58.000Z",
+        "freshness": "fresh",
+        "last_attempt_at": "2026-10-15T13:04:58.000Z",
+        "last_error": null
+      },
+      "resets": {
+        "value": null,
+        "source": null,
+        "observed_at": null,
+        "freshness": "unknown",
+        "last_attempt_at": null,
+        "last_error": null
+      },
+      "diagnostics": {
+        "value": [
+          {
+            "code": "cursor_dashboard_internal_api",
+            "detail": "Internal dashboard schema may change; numeric resources do not establish execution availability"
+          },
+          {
+            "code": "cursor_dashboard_fee_inclusion_unknown",
+            "detail": "The aggregate source does not identify fee inclusion"
+          }
+        ],
+        "source": "cursor_dashboard",
+        "observed_at": "2026-10-15T13:04:58.000Z",
+        "freshness": "fresh",
+        "last_attempt_at": "2026-10-15T13:04:58.000Z",
+        "last_error": null
+      }
+    }
+  ],
+  "availability_scope": {
+    "basis": "quota_block",
+    "model": "auto",
+    "requestKind": "text"
+  }
+}

@@ -152,9 +152,39 @@ test('a timeline move keeps the caret of a focused text control instead of clear
     timeline.ownerDocument = { activeElement: input, getSelection: () => selection, createRange: () => ({ setStart() {}, setEnd() {} }) };
     const moving = makeNode('t1', 1);
     moving.contains = () => false;
+    moving.isConnected = true;  // mounted elsewhere in the feed: a move, not a new row
     insertTimelineNode(timeline, moving, typing);
     assert.deepEqual(ids(timeline), ['t1', 't3', 'typing']);
     assert.ok(!calls.some(([name]) => name === 'removeAllRanges'), calls);
     assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 8]);
     assert.deepEqual(calls, [['set', 2, 8, 'forward']]);
+});
+
+test('rows a page moves keep the selection the page read once; each mounted move still restores it', () => {
+    let reads = 0;
+    const start = { isConnected: true }, end = { isConnected: true }, restored = [];
+    const selection = {
+        get rangeCount() { reads += 1; return 1; },
+        getRangeAt: () => ({ startContainer: start, startOffset: 1, endContainer: end, endOffset: 3 }),
+        removeAllRanges() {},
+        addRange(range) { restored.push([range.start, range.end]); },
+    };
+    const typing = makeNode('typing');
+    const timeline = makeTimeline([makeNode('t9', 9), typing]);
+    timeline.ownerDocument = { activeElement: null, getSelection: () => selection,
+        createRange: () => ({ setStart(node, offset) { this.start = [node, offset]; }, setEnd(node, offset) { this.end = [node, offset]; } }) };
+    const kept = { active: null, caret: null, selection, ranges: [[start, 1, end, 3]] };
+    for (const [id, ts] of [['t1', 1], ['t2', 2], ['t3', 3]]) {
+        const moving = makeNode(id, ts);
+        moving.isConnected = true;  // mounted elsewhere in the feed: a move
+        insertTimelineNode(timeline, moving, typing, kept);
+    }
+    assert.deepEqual(ids(timeline), ['t1', 't2', 't3', 't9', 'typing']);
+    assert.equal(reads, 0, 'no selection read per move');
+    assert.equal(restored.length, 3, 'every move gives the selection back');
+    assert.deepEqual(restored[2], [[start, 1], [end, 3]]);
+    const alone = makeNode('t4', 4);
+    alone.isConnected = true;
+    insertTimelineNode(timeline, alone, typing);
+    assert.equal(reads, 1, 'a move outside a page reads the selection itself');
 });

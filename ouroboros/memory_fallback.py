@@ -1,8 +1,9 @@
-"""The fallback memory writer: one signed helper draft of one unit, only while consciousness is off.
+"""One signed Light draft only while consciousness is off (or unknown).
 
-With consciousness on, consciousness seals what it judges ready and this writer makes no
-call. With it off (or its switch unknown) nobody else reads the open memory between the
-owner's turns, so after a root task the Light helper drafts ONE unit, chosen from facts:
+With consciousness off (or unknown), a root whose own start memory lowered to Low while everything
+else fit the window (``crowded_start``: its view fact's Max room, ``memory_floor.crowded_by_memory``)
+comes first: one room's oldest run of unfolded pages, whoever wrote them, folded into a part
+(``max_room_units``); then the existing acting-draft selection:
 
 1. The task's view showed this room's open rows only by address (``shortage_from_trace``,
    ``open_rows``): the room's oldest open segment, up to the newest addressed row (a
@@ -30,20 +31,23 @@ the chronicle: before activation the writer makes no call and creates no file.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import logging
 import pathlib
 from dataclasses import dataclass, field, replace
 from math import ceil, inf
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import row_lineage
 from ouroboros.chronicle_store import ChronicleStore, PublishResult, draft_signer, source_time_span
 from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
-from ouroboros.dialogue_provenance import memory_row_header, render_memory_row, render_row_text, row_class
-from ouroboros.memory_inventory import OpenSegment, ShortageFact, shortage_from_trace
+from ouroboros.dialogue_provenance import (memory_row_header, recorded_finality, render_memory_row, render_row_text,
+                                           row_class)
+from ouroboros.memory_floor import crowded_by_memory
+from ouroboros.memory_inventory import VIEW_TRACE_KEY, OpenSegment, ShortageFact, shortage_from_trace
 from ouroboros.utils import extract_trailing_json_object, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -130,7 +134,7 @@ def _light_fit(binding: Mapping[str, Any]) -> Tuple[Optional[int], Callable[[str
     unknown window is no fitting at all (a provider refusal by size is a receipt).
     """
     try:
-        from ouroboros.capability_evidence import is_known
+        from ouroboros.context_window import resolve_window
         from ouroboros.context_fit import (_route_calibration_ratio, estimate_context_prompt_tokens,
                                            resolve_context_fit_route)
         from ouroboros.provider_models import provider_for_model
@@ -140,13 +144,14 @@ def _light_fit(binding: Mapping[str, Any]) -> Tuple[Optional[int], Callable[[str
         route, evidence = resolve_context_fit_route(
             task, allow_fetch=bool(binding["use_local"]) or provider_for_model(binding["model"]) == "claudexor")
         density = _route_calibration_ratio(None, evidence.route_fp, route["model"])
-        window = int(evidence.window_tokens) if is_known(evidence, require_fresh=True) else None
         from ouroboros.response_limits import ResponseLimit
         reserve = ResponseLimit(**(getattr(evidence, "response_limit", {}) or {})).ceiling(ANSWER_RESERVE_TOKENS)
         if binding["use_local"]:
             from ouroboros.llm_local import local_context_limits
 
             _local_window, reserve = local_context_limits(reserve)
+        scope = route.get("window_observation_fp") or evidence.route_fp
+        window = resolve_window(evidence, reserve, observation_fp=scope, bound=bool(scope))
     except Exception:
         log.debug("fallback writer: Light window unknown", exc_info=True)
         return None, _chars_measure
@@ -155,7 +160,7 @@ def _light_fit(binding: Mapping[str, Any]) -> Tuple[Optional[int], Callable[[str
         return ceil(estimate_context_prompt_tokens([{"role": "user", "content": text}], None,
                                                   provider=route["provider"], reasoning_effort="low") * density)
 
-    return (window - reserve if window else None), measure
+    return window.usable, measure
 
 
 # --- which unit ------------------------------------------------------------------------------------
@@ -244,6 +249,39 @@ def _legacy_units(root: pathlib.Path, store: ChronicleStore) -> Iterator[Fallbac
                                head_sequence=segment.head_sequence)
 
 
+def crowded_start(trace: Any) -> bool:
+    """This root's own start was lowered to Low by memory: the view fact its trace keeps (``VIEW_TRACE_KEY``) names a
+    Max room ``crowded`` while everything but memory fit the window (``memory_floor.crowded_by_memory``). No fact,
+    a held start, a route, or tool schemas that tipped it alone: ``False``."""
+    fact = trace.get(VIEW_TRACE_KEY) if isinstance(trace, Mapping) else None
+    return crowded_by_memory(fact.get("max_room") if isinstance(fact, Mapping) else None)
+
+
+def max_room_units(store: ChronicleStore) -> Iterator[FallbackUnit]:
+    """After a root's start that memory crowded (``crowded_start``): a room's runs of unfolded pages no shown
+    account tells (the view's ``told_map``), oldest first, whoever wrote them, the room holding most such text
+    first; one page is a run too, Light judges whether folding it helps, and a run it kept as it is leaves the
+    next one in turn (``select_unit``). Never an account across rooms: that is the mind's."""
+    from ouroboros.memory_view_account import told_map
+
+    told = set(told_map([{"id": r["id"], "replaces": r["selection"].get("replaces") or (),
+                          "selection_sequence": r["selection"]["sequence"]}
+                         for r in store.accounts() if (r.get("selection") or {}).get("shown")]))
+    sizes: Dict[str, int] = {}
+    for record in store.room_records(None, kinds=("page",)):
+        if not record.get("folded_into") and record["id"] not in told:
+            sizes[str(record["room_id"])] = sizes.get(str(record["room_id"]), 0) + len(str(record.get("current_text") or ""))
+    for room in sorted(sizes, key=lambda room: (-sizes[room], room)):
+        head, run = store.room_head(room), []
+        # A told page ends a run: a part's members are adjacent in the room's unfolded order.
+        for ident in [*_unfolded_run(store, room, "page"), None]:
+            if ident is not None and ident not in told:
+                run.append(ident)
+            elif run:
+                yield FallbackUnit("part", room, f"max:{room}:{run[0]}", member_ids=tuple(run), head_sequence=head)
+                run = []
+
+
 def candidate_units(root: Any, store: ChronicleStore, shortage: Optional[ShortageFact], *,
                     allow_legacy: bool) -> Iterator[FallbackUnit]:
     """Units in consideration order: the shortage's disjoint runs, then old periods."""
@@ -267,12 +305,13 @@ def _refusals(store: ChronicleStore) -> Dict[str, Any]:
 
 def select_unit(root: Any, store: ChronicleStore, shortage: Optional[ShortageFact], *, allow_legacy: bool,
                 binding: Mapping[str, Any], fit: Callable[[], Tuple[Optional[int], Callable[[str], int]]],
+                units: Optional[Iterable[FallbackUnit]] = None,
                 ) -> Optional[Tuple[FallbackUnit, "WriterInput"]]:
     """First readable input/route not already refused, kept or rejected, including untouched suffixes."""
     refusals = _refusals(store)
     part_rooms = {}
     part_units = None
-    for unit in candidate_units(root, store, shortage, allow_legacy=allow_legacy):
+    for unit in units if units is not None else candidate_units(root, store, shortage, allow_legacy=allow_legacy):
         budget, measure = fit()
         records, part_cache = None, None
         if unit.kind == "part":
@@ -383,12 +422,17 @@ def _room_label(root: pathlib.Path, room: str) -> str:
 
 
 def _stamp_line(entry: Mapping[str, Any], lane_rows: int) -> str:
-    """One task as the host recorded it: status, outcome, phase and the source of the stamp."""
+    """One task as the host recorded it: status, outcome, phase, the finality and authority its source
+    recorded (a host facts stamp without one says unknown) and the source of the stamp."""
     facts = [f"status {entry.get('status') or 'not recorded'}"]
     for label, key in (("outcome", "outcome"), ("phase", "outcome_phase"), ("review", "review_verdict"),
                        ("reason", "reason_code"), ("objective", "objective_status")):
         if entry.get(key):
             facts.append(f"{label} {entry[key]}")
+    finality = recorded_finality(entry.get("outcome_final"), entry.get("outcome_authority"),
+                                 host_facts=entry.get("source") == "host_task_facts")
+    if finality:
+        facts.append(finality)
     facts.append(f"stamp from {entry.get('source') or 'nothing recorded'}")
     if lane_rows:
         facts.append(f"{lane_rows} host/child row{'' if lane_rows == 1 else 's'} here")
@@ -655,6 +699,7 @@ class FallbackRun:
     usage: Dict[str, Any] = field(default_factory=dict)
     errors: List[Dict[str, Any]] = field(default_factory=list)
     input_tokens: Optional[int] = None
+    effect: str = ""  # a published draft, measured: what it folded, its characters before and after
 
 
 def _parse(text: str, *, part: bool = False) -> Optional[Dict[str, Any]]:
@@ -732,8 +777,11 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
                 fitted.append(_light_fit(binding))
             return fitted[0]
 
-        chosen = select_unit(root, store, shortage_from_trace(trace), allow_legacy=not task.get("_is_direct_chat"),
-                             binding=binding, fit=fit)
+        shortage, allow_legacy = shortage_from_trace(trace), not task.get("_is_direct_chat")
+        units = (itertools.chain(
+            max_room_units(store), candidate_units(root, store, shortage, allow_legacy=allow_legacy))
+            if crowded_start(trace) else None)
+        chosen = select_unit(root, store, shortage, allow_legacy=allow_legacy, binding=binding, fit=fit, units=units)
         if chosen is None:
             return FallbackRun("nothing")
         unit, draft = chosen
@@ -758,6 +806,10 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
             result = _publish(root, store, unit, draft, answer, usage, bound)
             if result.ok:
                 run.outcome, run.record_id = "published", str((result.record or {}).get("id") or "")
+                if unit.kind == "part":
+                    from ouroboros.tools.chronicle import _fold_effect
+
+                    run.effect = _fold_effect(store, "a helper draft folded", draft.member_ids, answer["text"])
                 phase = "receipt_clear_failed"
                 _set_refusal(store, unit.key, None)
             elif result.reason in CONFLICT_REASONS:

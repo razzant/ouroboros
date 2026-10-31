@@ -382,3 +382,91 @@ def test_a_failed_probe_between_the_candidate_and_the_send_keeps_the_priced_byte
     payload = acting.gateway.uploads[0][0]
     assert payload["nativeContinuation"] == TURN and len(acting.gateway.creates) == 1
     assert acting.tools._ctx.model_turn_state is slot and slot.envelope is None
+
+
+def _sent_images_then_eviction(acting, with_reasoning):
+    """Ten images already sent, then an eleventh evicts six of them (stamped on the live slot)."""
+    from ouroboros import transcript_prefix
+    from ouroboros.context_budget import LIVE_IMAGE_BLOCKS_HIGH_WATER
+    from ouroboros.loop_messages import _append_or_merge_user_content
+    from ouroboros.tools.compact_context import record_context_view
+    from tests.test_reasoning_binding import signed
+
+    ctx, slot = acting.ctx, acting.tools._ctx
+    slot.task_id = ctx.task_id
+    image = deepcopy(ctx.messages[1]["content"][0])
+    ctx.messages[1]["content"] = [deepcopy(image) for _ in range(LIVE_IMAGE_BLOCKS_HIGH_WATER)]
+    if with_reasoning:
+        ctx.messages.append({"role": "assistant", "content": "Prior response", "reasoning_details": [signed("thought")]})
+    before = deepcopy(ctx.messages)
+    record_context_view(slot, before, ctx.tool_schemas)
+    transcript_prefix.observe_send(slot, before, tools=ctx.tool_schemas, round_idx=1)
+    _append_or_merge_user_content(ctx.messages, [deepcopy(image)], slot=slot)
+    assert getattr(slot, transcript_prefix.SANCTION_ATTR) == "image_eviction"
+    return ctx, slot
+
+
+@pytest.mark.parametrize("with_reasoning", [False, True])
+def test_the_forced_final_counts_a_change_once_with_or_without_signed_reasoning(acting, with_reasoning):
+    from ouroboros import transcript_prefix
+    from ouroboros.preflight_receipts import canonical_data_root
+
+    ctx, slot = _sent_images_then_eviction(acting, with_reasoning)
+    assert forced._call_forced_model_once(ctx) and len(acting.gateway.creates) == 1
+    assert ctx.accumulated_usage.get("prompt_prefix_breaks", 0) == 1
+    record = json.loads(transcript_prefix.history_changes_path(canonical_data_root(slot)).read_text())
+    assert record["origins"]["image_eviction"]["count"] == 1
+
+
+def test_a_forced_final_that_never_dispatched_counts_nothing(acting):
+    import time
+
+    from ouroboros import transcript_prefix
+
+    ctx, slot = _sent_images_then_eviction(acting, with_reasoning=False)
+    before = list(getattr(slot, transcript_prefix.DIGEST_ATTR))
+    ctx.deadline_ts = time.time() - 1
+    assert forced._call_forced_model_once(ctx) == "" and not acting.gateway.creates
+    assert getattr(slot, transcript_prefix.DIGEST_ATTR) == before
+    assert ctx.accumulated_usage.get("prompt_prefix_breaks", 0) == 0
+
+
+@pytest.mark.parametrize("stage", ["before_prepare", "after_prepare", "after_forced_send"])
+def test_a_resumed_task_keeps_one_change_and_its_origin(acting, stage):
+    """Pause, quit and Resume carry the send observer's state: a change made before the
+    checkpoint is neither counted again nor left unnamed after the restore, though the
+    resumed request goes out a round later (a parked tool tail runs first)."""
+    from ouroboros import loop, owner_wait, transcript_prefix
+    from ouroboros.loop_messages import _append_or_merge_user_content
+    from ouroboros.preflight_receipts import canonical_data_root
+
+    ctx, slot = _sent_images_then_eviction(acting, with_reasoning=stage != "before_prepare")
+    if stage == "after_prepare":
+        assert transcript_prefix.retire_main_reasoning(ctx) and ctx.accumulated_usage["prompt_prefix_breaks"] == 1
+    elif stage == "after_forced_send":
+        assert forced._call_forced_model_once(ctx) and ctx.accumulated_usage["prompt_prefix_breaks"] == 1
+    state = json.loads(json.dumps(owner_wait.continuation_state(
+        slot, ctx.messages, {}, ctx.accumulated_usage, ctx.round_idx, ctx.tool_schemas, set())))
+    root = canonical_data_root(slot)
+    restored = SimpleNamespace(task_id=ctx.task_id, drive_root=slot.drive_root, budget_drive_root=root,
+                               task_metadata=deepcopy(slot.task_metadata))
+    messages, usage = [], {}
+    owner_wait.restore_continuation_state(SimpleNamespace(_ctx=restored), state, messages, {}, usage, set())
+    resumed = ctx.round_idx + 1
+    _append_or_merge_user_content(messages, "Continue after restart", slot=restored)  # the resumed request only appends
+    assert transcript_prefix.prepare_reasoning_for_send(restored, messages, ctx.tool_schemas,
+                                                        round_idx=resumed, usage=usage) is None
+    loop._record_transcript_prefix(restored, messages, resumed, usage, None, ctx.task_id,
+                                   slot.drive_root / "logs", ctx.tool_schemas)
+    record = json.loads(transcript_prefix.history_changes_path(root).read_text())
+    assert usage["prompt_prefix_breaks"] == 1
+    assert {origin: row["count"] for origin, row in record["origins"].items()} == {"image_eviction": 1}
+    # The facts line names the change beside the request that carried it.
+    carrier = ctx.round_idx if stage == "after_forced_send" else resumed
+    assert "(image_eviction)" in transcript_prefix.history_change_text(usage["_recent_prefix_breaks"], carrier)
+    # The carried identity is spent: a later change of the same message by the same origin still counts.
+    transcript_prefix.sanction_rewrite(restored, "image_eviction")
+    messages[1] = {**messages[1], "content": "An earlier message edited later"}
+    loop._record_transcript_prefix(restored, messages, resumed + 1, usage, None, ctx.task_id,
+                                   slot.drive_root / "logs", ctx.tool_schemas)
+    assert usage["prompt_prefix_breaks"] == 2

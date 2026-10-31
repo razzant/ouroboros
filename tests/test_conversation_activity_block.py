@@ -12,6 +12,8 @@ pin each producer of that one fact.
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -59,10 +61,10 @@ def test_facts_row_writes_the_facts_and_history_replays_them(tmp_path):
         env=None,
         task={"id": "direct-1", "type": "task", "text": "hi", "chat_id": 1, "_is_direct_chat": True},
         usage={"rounds": 3, "cost": 0.0, "typed_routing_action": "promote_chat_to_task"},
-        llm_trace={"tool_calls": [{"tool": "promote_chat_to_task"}], "reasoning_notes": []},
+        llm_trace={"tool_calls": [{"tool": "start_task"}], "reasoning_notes": []},
         drive_logs=drive_logs,
     )
-    row = json.loads((drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    row = json.loads(dialogue_test.log_text(drive_logs / "chat.jsonl").splitlines()[0])
     assert row["summary_kind"] == "host_task_facts" and row["text"] == ""
     assert row["_is_direct_chat"] is True
     assert row["typed_routing_action"] == "promote_chat_to_task"
@@ -177,20 +179,21 @@ def test_census_keeps_the_direct_kind_for_a_post_task_wait(tmp_path, monkeypatch
 # so the client never keeps a list of tool names.
 
 
-def test_the_routing_verb_table_is_the_one_owner_of_the_family():
+def test_the_routing_verb_table_is_the_one_owner_of_the_family(tmp_path):
     from ouroboros.tool_capabilities import ROUTING_VERBS, routing_action_for_tool
     from ouroboros.tools.control_events import _emit_control_event
 
-    assert set(ROUTING_VERBS) == {"promote_chat_to_task", "route_to_project", "steer_task", "ensure_project_scope"}
-    assert routing_action_for_tool(" steer_task ") == "steer_task"
+    assert set(ROUTING_VERBS) == {"start_task", "tell_task", "move_to_project"}
+    assert routing_action_for_tool(" tell_task ") == "tell_task"
     assert routing_action_for_tool("read_file") == "" and routing_action_for_tool(None) == ""
     # The typed action on task_done is keyed by the events those same tools emit.
     for tool, events in ROUTING_VERBS.items():
         for event_type in events:
-            ctx = SimpleNamespace(event_queue=None, pending_events=[], drive_root=".")
-            assert _emit_control_event(ctx, {"type": event_type, "routed_from_main": tool == "route_to_project"}) == "deferred"
-            assert ctx._typed_routing_action_emitted == (tool if event_type == "promote_chat_to_task" else event_type)
-    ctx = SimpleNamespace(event_queue=None, pending_events=[], drive_root=".")
+            # A deferred promote records its emission under the drive root: never the checkout.
+            ctx = SimpleNamespace(event_queue=None, pending_events=[], drive_root=str(tmp_path))
+            assert _emit_control_event(ctx, {"type": event_type}) == "deferred"
+            assert ctx._typed_routing_action_emitted == event_type
+    ctx = SimpleNamespace(event_queue=None, pending_events=[], drive_root=str(tmp_path))
     _emit_control_event(ctx, {"type": "cancel_task"})
     assert not hasattr(ctx, "_typed_routing_action_emitted")
 
@@ -207,7 +210,7 @@ def test_live_tool_call_frames_carry_the_routing_action_stamp(tmp_path):
         _ctx=SimpleNamespace(event_queue=SimpleNamespace(put_nowait=live.append)),
         execute_result=lambda _name, _args: ToolResult(status="ok", code="OK", text="OK"),
     )
-    for index, tool in enumerate(("promote_chat_to_task", "read_file")):
+    for index, tool in enumerate(("start_task", "read_file")):
         _execute_with_timeout(
             tools, {"id": f"call-{index}", "function": {"name": tool, "arguments": "{}"}},
             drive_logs, timeout_sec=5, task_id="turn-1",
@@ -215,8 +218,8 @@ def test_live_tool_call_frames_carry_the_routing_action_stamp(tmp_path):
     frames = [event.get("data") or {} for event in live]
     by_call = {(row["tool_call_id"], row["type"]): row for row in frames
                if row.get("type") in {"tool_call_started", "tool_call_finished"}}
-    assert by_call[("call-0", "tool_call_started")]["routing_action"] == "promote_chat_to_task"
-    assert by_call[("call-0", "tool_call_finished")]["routing_action"] == "promote_chat_to_task"
+    assert by_call[("call-0", "tool_call_started")]["routing_action"] == "start_task"
+    assert by_call[("call-0", "tool_call_finished")]["routing_action"] == "start_task"
     assert "routing_action" not in by_call[("call-1", "tool_call_started")]
     assert "routing_action" not in by_call[("call-1", "tool_call_finished")]
 
@@ -227,7 +230,7 @@ def test_task_metrics_count_the_addressing_calls_from_the_same_table(tmp_path):
     from supervisor.events_worker_reports import _handle_task_metrics
 
     metrics = task_tool_metrics({"tool_calls": [
-        {"tool": "promote_chat_to_task"}, {"tool": "read_file"}, {"tool": "steer_task", "is_error": True},
+        {"tool": "start_task"}, {"tool": "read_file"}, {"tool": "tell_task", "is_error": True},
     ]})
     assert (metrics["tool_calls"], metrics["tool_errors"], metrics["routing_tool_calls"]) == (3, 1, 2)
     assert task_tool_metrics({"tool_calls": [], "loop_evidence_unavailable": True})["routing_tool_calls"] is None

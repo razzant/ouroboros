@@ -55,8 +55,8 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
                 return json_error(err, 400)
             trigger = {"type": "cron", "expr": expr}
         elif trigger_type == "once":
-            # One-shot records (schedule_followup) round-trip through this upsert
-            # when the owner toggles/edits them from the Schedules surface.
+            # One-shot definitions use the same timestamp parser as task-authored
+            # follow-ups; lifecycle controls use the dedicated action endpoint.
             from ouroboros.deadline_utils import parse_deadline_ts
 
             instant = parse_deadline_ts(str(trigger.get("run_at") or "").strip())
@@ -95,10 +95,10 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
         enabled = _enabled_value(body)
         if isinstance(enabled, str):
             return json_error(enabled, 400)
-        # Only the fields the owner authors here. Provenance, run history, the
-        # consumed receipt and a skill row's suppression marker belong to the
-        # runtime and are merged from the CURRENT row inside the write lock —
-        # reading them here would merge a snapshot that is already stale.
+        # Only the fields the owner authors here. Provenance, run history and the
+        # consumed receipt belong to the runtime and are merged from the CURRENT
+        # row inside the write lock — reading them here would merge a snapshot
+        # that is already stale.
         record = {
             "id": str(body.get("id") or "").strip(),
             "name": str(body.get("name") or body.get("id") or "scheduled-task").strip(),
@@ -112,7 +112,7 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
 
         try:
             stored = upsert_scheduled_task(
-                record, drive_root=request_drive_root(request), actor="owner:gateway",
+                record, drive_root=request_drive_root(request), actor="owner:gateway", writer_kind="owner",
                 reason=str(body.get("reason") or "").strip(), new_resource_intent=new_intent)
         except ScheduleRefused as refusal:
             # 409 when the write could not be made SAFELY (its audit is down);
@@ -149,7 +149,7 @@ async def api_schedules_action(request: Request) -> JSONResponse:
         if not reason:
             return json_error("reason is required for a schedule lifecycle action", 400)
         return JSONResponse(mutate_scheduled_task(
-            action, schedule_id, reason=reason, actor="owner:gateway",
+            action, schedule_id, reason=reason, actor="owner:gateway", writer_kind="owner",
             drive_root=request_drive_root(request), expected_hold_id=str(body.get("expected_hold_id") or ""),
             relation=str(body.get("relation") or ""),
         ))
@@ -165,7 +165,7 @@ async def api_schedules_delete(request: Request) -> JSONResponse:
         from supervisor.queue import mutate_scheduled_task
 
         return JSONResponse(mutate_scheduled_task(
-            "delete", schedule_id, reason="owner deleted the schedule", actor="owner:gateway",
+            "delete", schedule_id, reason="owner deleted the schedule", actor="owner:gateway", writer_kind="owner",
             drive_root=request_drive_root(request),
         ))
     except Exception as exc:

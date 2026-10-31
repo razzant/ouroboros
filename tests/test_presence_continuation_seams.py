@@ -7,8 +7,8 @@ store) in a temporary data root; nothing is mocked except where a failure is inj
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
-import os
 import pathlib
 import threading
 import time
@@ -16,7 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import presence_continuation as pc
+from ouroboros import presence_continuation as pc, dialogue_store as ds
+from tests._dialogue import import_all
 from ouroboros.presence_runner import (
     PresenceTurnGate, PresenceTurnLease, _build_task, _read_previous_turn, _write_previous_turn,
     presence_turn_replay, record_continuing_turn,
@@ -29,18 +30,28 @@ OTHER = "telegram:bot-1:room-1:topic-2"
 
 
 def _row(key, text, **extra):
-    return {"ts": "2026-10-06T10:00:00+00:00", "chat_id": 7, "direction": "in", "text": text,
-            "client_message_id": f"telegram:bot-1:{abs(hash(text)) % 1000}", "sender_label": "alex",
+    from ouroboros.presence_runner import _stable_numeric_id
+
+    return {"ts": "2026-10-06T10:00:00+00:00", "chat_id": _stable_numeric_id("presence-conversation", key), "direction": "in", "text": text,
+            "client_message_id": f"telegram:bot-1:{hashlib.sha256(text.encode()).hexdigest()}", "sender_label": "alex",
             "task_id": "turn-x", "transport": {"conversation_key": key}, **extra}
 
 
 def _append(root, *rows, raw: bytes = b""):
     path = pathlib.Path(root) / "logs" / "chat.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "ab") as handle:
+    if ds.present(root):
         for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
-        handle.write(raw)
+            ds.append(root, "chat", row)
+        if raw:
+            with path.open("ab") as handle:
+                handle.write(raw)
+            import_all(root)  # explicit old-body reconciliation of malformed test intervals
+    else:
+        with path.open("ab") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
+            handle.write(raw)
     return path
 
 
@@ -83,7 +94,7 @@ def test_a_lent_lease_reacquires_only_without_a_stop(tmp_path):
 
 
 def test_a_queued_reacquisition_paces_its_stop_reads_and_still_ends(tmp_path, monkeypatch):
-    monkeypatch.setattr("ouroboros.presence_runner._GATE_STOP_POLL_SEC", 0.2)
+    monkeypatch.setattr("ouroboros.conversation_lease._GATE_STOP_POLL_SEC", 0.2)
     gate = PresenceTurnGate(1, state_root=tmp_path / "state")
     holder = gate.acquire(KEY)
     reads, stop_at = [], time.monotonic() + 0.7
@@ -102,12 +113,12 @@ def test_an_ungated_lease_is_not_lendable():
 # --- finding 3: reentry follows the chain from its cursor and names every gap ----------------------
 
 def test_rows_after_the_cursor_follow_a_rotation_into_the_archive(tmp_path):
-    from supervisor.state import rotate_chat_log_if_needed
+    from supervisor.state import rotate_jsonl_log_if_needed
 
     _append(tmp_path, _row(KEY, "before the yield"))
     cursor = pc._chat_cursor(tmp_path)
     _append(tmp_path, _row(KEY, "first after"), _row(OTHER, "another thread"))
-    rotate_chat_log_if_needed(tmp_path, max_bytes=1)
+    rotate_jsonl_log_if_needed(tmp_path, "chat.jsonl", "chat", max_bytes=1)
     # The rotator renames the generation verbatim into archive/ and starts an empty live file.
     assert (tmp_path / "logs" / "chat.jsonl").stat().st_size == 0 and list((tmp_path / "archive").glob("chat_*.jsonl"))
     _append(tmp_path, _row(KEY, "second after"))
@@ -116,15 +127,16 @@ def test_rows_after_the_cursor_follow_a_rotation_into_the_archive(tmp_path):
 
 
 def test_a_log_absent_at_the_yield_reads_every_later_generation(tmp_path):
-    from supervisor.state import rotate_chat_log_if_needed
+    from supervisor.state import rotate_jsonl_log_if_needed
 
     _append(tmp_path, _row(KEY, "old archived"))
-    rotate_chat_log_if_needed(tmp_path, max_bytes=1)
+    rotate_jsonl_log_if_needed(tmp_path, "chat.jsonl", "chat", max_bytes=1)
     time.sleep(1.1)  # archive names carry a one-second UTC stamp
     cursor = pc._chat_cursor(tmp_path)
-    assert cursor["offset"] == 0 and cursor["after_archive"]
+    import_all(tmp_path)
+    assert cursor["gen"] == "dialogue:chat" and cursor["offset"] > 0
     _append(tmp_path, _row(KEY, "new one"))
-    rotate_chat_log_if_needed(tmp_path, max_bytes=1)
+    rotate_jsonl_log_if_needed(tmp_path, "chat.jsonl", "chat", max_bytes=1)
     _append(tmp_path, _row(KEY, "new two"))
     rows, gaps = pc._conversation_rows_since(tmp_path, cursor, KEY)
     assert [row["text"] for row in rows] == ["new one", "new two"] and gaps == []
@@ -138,44 +150,40 @@ def test_unreadable_lines_are_gaps_that_say_whether_they_name_this_conversation(
     _append(tmp_path, _row(KEY, "also kept"), raw=b'{"partial": ')
     rows, gaps = pc._conversation_rows_since(tmp_path, cursor, KEY)
     assert [row["text"] for row in rows] == ["kept", "also kept"]
-    assert [(gap["kind"], gap["mentions_conversation"]) for gap in gaps] == [
-        ("jsonl_malformed", True), ("jsonl_decode_error", False), ("jsonl_non_object", False),
-        ("trailing_row_incomplete", False)]
-    assert all(gap["path"] == "logs/chat.jsonl" and gap["offset"] >= cursor["offset"] for gap in gaps)
+    assert [gap["kind"] for gap in gaps] == [
+        "jsonl_malformed", "jsonl_malformed", "jsonl_non_object", "jsonl_malformed"]
+    assert all(gap["path"] == "state/dialog.sqlite" and gap["offset"] >= cursor["offset"] for gap in gaps)
 
 
-def test_a_same_inode_truncation_below_the_cursor_is_a_gap_not_silence(tmp_path):
-    # Leave ample size difference: event IDs contain process-randomized hash
-    # digits, so replacing "second" with "short" could keep the byte size equal.
-    path = _append(tmp_path, _row(KEY, "first line stays"), _row(KEY, "a much longer second line to remove"))
-    cursor = pc._chat_cursor(tmp_path)
-    inode = os.stat(path).st_ino
-    with open(path, "r+b") as handle:
-        handle.truncate(len(json.dumps(_row(KEY, "first line stays")).encode()) + 1)
-    _append(tmp_path, _row(KEY, "short"))
-    assert os.stat(path).st_ino == inode and os.stat(path).st_size < cursor["offset"]
-    rows, gaps = pc._conversation_rows_since(tmp_path, cursor, KEY)
-    assert rows == [] and [gap["kind"] for gap in gaps] == ["generation_truncated_below_cursor"]
-
-
-def test_a_generation_rewritten_at_the_cursor_or_replaced_is_a_gap(tmp_path):
+def test_frozen_file_rewrites_cannot_change_the_cursor_or_rows(tmp_path):
     path = _append(tmp_path, _row(KEY, "first"), _row(KEY, "second"))
     cursor = pc._chat_cursor(tmp_path)
-    data = path.read_bytes()
-    path.write_bytes(data[:-1] + b" padding to move every later byte\n" + data[-1:])
+    path.write_bytes(b"replacement file\n")
+    assert pc._conversation_rows_since(tmp_path, cursor, KEY) == ([], [])
+    ds.append(tmp_path, "chat", _row(KEY, "new SQL row"))
     rows, gaps = pc._conversation_rows_since(tmp_path, cursor, KEY)
-    assert rows == [] and gaps[0]["kind"] == "generation_rewritten_at_cursor"
-    path.write_bytes(json.dumps(_row(KEY, "a different first line")).encode() + b"\n")
-    assert pc._conversation_rows_since(tmp_path, cursor, KEY) == ([], [{"kind": "cursor_generation_missing"}])
+    assert [row["text"] for row in rows] == ["new SQL row"] and not gaps
+
+
+def test_legacy_generation_byte_cursor_survives_import(tmp_path):
+    from ouroboros.utils import jsonl_generation_signature
+
+    path = _append(tmp_path, _row(KEY, "before"))
+    cursor = {"gen": jsonl_generation_signature(path)["first_line_sha256"], "offset": path.stat().st_size}
+    _append(tmp_path, _row(KEY, "after"))
+    import_all(tmp_path)
+    rows, gaps = pc._conversation_rows_since(tmp_path, cursor, KEY)
+    assert [row["text"] for row in rows] == ["after"] and not gaps
 
 
 def test_the_scan_budget_is_a_disclosed_gap(tmp_path, monkeypatch):
     _append(tmp_path, _row(KEY, "before"))
     cursor = pc._chat_cursor(tmp_path)
-    _append(tmp_path, *[_row(OTHER, "x" * 200) for _ in range(20)], _row(KEY, "too far"))
+    _append(tmp_path, *[_row(OTHER, "x" * 200) for _ in range(20)],
+            _row(KEY, "first " + "x" * 2000), _row(KEY, "too far"))
     monkeypatch.setattr(pc, "_REENTRY_SCAN_BYTES", 1000)
     rows, gaps = pc._conversation_rows_since(tmp_path, cursor, KEY)
-    assert rows == [] and gaps[-1]["kind"] == "scan_budget_exhausted"
+    assert len(rows) == 1 and gaps[-1]["kind"] == "scan_budget_exhausted"
 
 
 def test_the_note_carries_whole_facts_and_names_what_it_cannot_carry(tmp_path, monkeypatch):
@@ -211,7 +219,7 @@ def test_the_note_never_names_a_reader_the_turn_does_not_hold(tmp_path):
     for ceiling, expected in ((with_reader, "chat_history("), (without, "No history reader is among this turn's tools")):
         ctx = SimpleNamespace(task_contract={"capability_ceiling": presence_ceiling_payload(ceiling)})
         note = pc.reentry_note(_binding(tmp_path, cursor), ctx)
-        assert "a malformed line at logs/chat.jsonl byte" in note and expected in note
+        assert "a malformed line at state/dialog.sqlite byte" in note and expected in note
 
 
 # --- finding 1: the projection a successor reads is durable, and a lost pointer is rebuilt ---------
@@ -223,15 +231,15 @@ def test_later_park_retains_child_without_rewriting_initial_or_crossing_source_i
 
     binding = pc.ReviewWaitBinding(None, tmp_path, "author", "source-identity", turn_event())
     write_task_result(tmp_path, "author", "running", metadata={"presence_event_identity": binding.identity})
-    first = pc._persist(binding, {}, "", "panel-1", "first-park")
-    second = pc._persist(binding, {}, "work-late", "panel-2", "second-park")
+    first = pc._persist(binding, "", "review-1", "first-park")
+    second = pc._persist(binding, "work-late", "review-2", "second-park")
     assert second["initial"] == first["initial"] and first["initial"]["work_ref"] == ""
     assert second["child_work_ref"] == "work-late"
     # A later empty observation or host terminal must not withdraw admitted independent work.
-    third = pc._persist(binding, {}, "", "panel-3", "third-park")
+    third = pc._persist(binding, "", "review-3", "third-park")
     assert third["child_work_ref"] == "work-late" and third["initial"] == first["initial"]
     with pytest.raises(ValueError, match="this event's RUNNING row"):
-        pc._persist(replace(binding, identity="another-source"), {}, "unrelated-work", "panel-x", "bad-park")
+        pc._persist(replace(binding, identity="another-source"), "unrelated-work", "review-x", "bad-park")
     assert load_task_result(tmp_path, "author")["presence_continuation"] == third
 
 
@@ -241,7 +249,7 @@ def test_later_child_must_read_back_before_the_park_can_publish(tmp_path, monkey
 
     binding = pc.ReviewWaitBinding(None, tmp_path, "author", "source-identity", turn_event())
     write_task_result(tmp_path, "author", "running", metadata={"presence_event_identity": binding.identity})
-    pc._persist(binding, {}, "", "panel-1", "first-park")
+    pc._persist(binding, "", "review-1", "first-park")
     load = task_results.load_task_result
 
     def missing_child(*args, **kwargs):
@@ -251,7 +259,7 @@ def test_later_child_must_read_back_before_the_park_can_publish(tmp_path, monkey
 
     monkeypatch.setattr(task_results, "load_task_result", missing_child)
     with pytest.raises(ValueError, match="did not read back"):
-        pc._persist(binding, {}, "work-late", "panel-2", "second-park")
+        pc._persist(binding, "work-late", "review-2", "second-park")
 
 
 @pytest.mark.parametrize("failure", ["raises", "lost"])
@@ -286,7 +294,8 @@ def test_a_v1_replay_rebuilds_a_lost_pointer_before_returning_the_envelope(tmp_p
                       presence_continuation=record)
     record_continuing_turn(tmp_path, KEY, task_id, outcome="message", message="Released.", work_ref="",
                            lent_at=record["lent_at"])
-    # The author re-selected its released output at its terminal (silent), and its pointer write was lost.
+    # A pre-fold continuation released its output early; the author re-selected it at its terminal
+    # (silent), and its pointer write was lost. The stored record still replays.
     metadata = {**task["metadata"], "presence_outcome": "silent", "presence_result_text": ""}
     write_task_result(tmp_path, task_id, "completed", metadata=metadata, terminal_origin="model_final",
                       result="Released.")
@@ -328,14 +337,14 @@ def test_a_second_park_and_late_terminal_keep_the_newest_turn_pointer(tmp_path, 
             if task["id"] == first_id:
                 binding = self.review_wait_callback.args[0]
                 ctx = SimpleNamespace(task_metadata=task["metadata"])
-                assert pc._yield_conversation(binding, ctx, {"review_binding": "panel-1"}) == (True, "")
+                assert pc._yield_conversation(binding, ctx, {"review_binding": "review-1"}) is True
                 assert not binding.lease.held()
                 if successor:
                     clock["now"] = "2026-10-06T10:01:00+00:00"
                     assert run(second).text == "Newer reply"
                 assert binding.lease.reacquire(lambda: False)
                 clock["now"] = "2026-10-06T10:02:00+00:00"
-                assert pc._yield_conversation(binding, ctx, {"review_binding": "panel-2"}) == (True, "")
+                assert pc._yield_conversation(binding, ctx, {"review_binding": "review-2"}) is True
                 continued = load_task_result(tmp_path, first_id)["presence_continuation"]
                 assert (continued["first_lent_at"], continued["lent_at"]) == (
                     "2026-10-06T10:00:00+00:00", clock["now"])

@@ -5,9 +5,8 @@ result says about where its work lives, what the Main lane can see, and how a
 chat maps to a project. Nothing here delivers a message or picks a target —
 that judgment belongs to the decision turn (BIBLE P5).
 
-Main's manifest lists each project's registry ``working_dir`` and the last 20
-chat rows with text from every room (people's words whole, other rows
-truncated). Project rooms and Main read recent root results and live roots as
+Main's manifest lists each project's registry ``working_dir`` and addresses of
+the last 20 spoken rows; the memory view holds their text. Project rooms and Main read recent root results and live roots as
 bounded typed projections, never raw result text; a project's last result is
 found through the registry row's ``last_task_result_id`` pointer (stamped by
 roots only), with a bounded scan as fallback.
@@ -16,23 +15,65 @@ roots only), with a bounded scan as fallback.
 from __future__ import annotations
 
 import pathlib
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from ouroboros.server_process import log
 
 
-def _task_belongs_to_chat(ctx: Any, task_id: str, task_obj: Dict[str, Any], chat_id: int) -> bool:
+@dataclass(frozen=True)
+class RootSnapshot:
+    """One owner message's addressable roots, read once and handed on by value.
+
+    ``pairs`` are ``(manifest row, chat ids it belongs to)``: the unsettled RUNNING and PENDING
+    roots in queue order, then the live direct turns. ``gap`` names a read that failed: the
+    roots are then unknown, which the routing metadata says, never an empty room.
+    """
+
+    pairs: tuple = ()
+    gap: str = ""
+
+    def rows(self, chat_id: Optional[int] = None) -> list:
+        """Copies of the rows one chat (``None``: any) may address; a reading direct turn
+        replaces its own queue row."""
+        wanted, out, seen = None if chat_id is None else int(chat_id or 0), [], set()
+        for row, chats in self.pairs:
+            tid = row["task_id"]
+            if row.get("direct_chat") and tid in seen and row.get("room_reader"):
+                out, seen = [kept for kept in out if kept["task_id"] != tid], seen - {tid}
+            if tid in seen or (wanted is not None and wanted not in chats):
+                continue
+            out.append(dict(row))
+            if not row.get("direct_chat"):
+                seen.add(tid)
+        return out
+
+
+def _task_chats(ctx: Any, task_id: str, task: Dict[str, Any]) -> frozenset:
+    """A root's own ``chat_id`` and its bound Project room (0 when unbound); an unreadable fact adds none."""
+    chats = set()
     try:
-        if int(task_obj.get("chat_id") or 0) == int(chat_id or 0):
-            return True
+        chats.add(int(task.get("chat_id") or 0))
     except (TypeError, ValueError):
         pass
     try:
         from ouroboros.projects_registry import project_chat_for_task
 
-        return int(project_chat_for_task(ctx.DRIVE_ROOT, task_id) or 0) == int(chat_id or 0)
+        chats.add(int(project_chat_for_task(ctx.DRIVE_ROOT, task_id) or 0))
     except Exception:
-        return False
+        pass
+    return frozenset(chats)
+
+
+def _late_input_author(task: Dict[str, Any]) -> Dict[str, str]:
+    """``{"late_input_of": author}`` for a head a late answer, or a press on a finished author's
+    card, started (typed provenance), else empty."""
+    from ouroboros.card_store import late_press_ref
+    from ouroboros.owner_quiz import late_answer_ref
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    ref = late_answer_ref(metadata.get("late_answer")) or late_press_ref(metadata.get("card_press"))
+    return {"late_input_of": ref["task_id"]} if ref else {}
 
 
 def _active_direct_roots(ctx: Any) -> list:
@@ -48,65 +89,77 @@ def _active_direct_roots(ctx: Any) -> list:
         with lock:
             turn = direct_chat_turn(entry.activity_id)
             if turn is not None:
+                from ouroboros.room_reader import is_reading
+                reader = is_reading(ctx.DRIVE_ROOT, turn["id"], turn, running=True)
                 roots.append({
                     "task_id": turn["id"], "status": "running",
                     "title": _clip_marked(turn.get("title"), 120),
                     "objective": _clip_marked(turn.get("text"), 600),
                     "project_id": turn["project_id"], "chat_id": turn["chat_id"],
-                    "started_at": turn["_started_at"], "steerable": True, "direct_chat": True,
+                    "started_at": turn["_started_at"], "steerable": True, "direct_chat": True, "room_reader": reader,
+                    **_late_input_author(turn),
                 })
     return roots
 
 
-def _addressable_root_tasks(ctx: Any, chat_id: Optional[int] = None) -> list:
-    """Compact RUNNING+PENDING owner-root manifest, without choosing a target."""
-    out: list = []
-    seen: set[str] = set()
+def addressable_roots(ctx: Any) -> RootSnapshot:
+    """The roots one owner message may address, without choosing a target (``RootSnapshot``).
 
-    def _add(task_id: Any, task_obj: Any, status: str, started_at: Any = None) -> None:
-        tid = str(task_id or "").strip()
-        if not tid or tid in seen or not isinstance(task_obj, dict):
-            return
-        if task_obj.get("_is_direct_chat") or str(task_obj.get("delegation_role") or "") == "subagent":
-            return
-        if chat_id is not None and not _task_belongs_to_chat(ctx, tid, task_obj, int(chat_id or 0)):
-            return
-        # RUNNING can mean only paid post-work remains. A terminal result
-        # cannot drain a new owner/peer message; don't suggest it as steerable.
-        from ouroboros.task_results import load_task_result
+    One typed read gives every root's status and own drive; no result body is decoded. A root
+    its actor's drive reports settled is left out (a split root's child drive: copyback can
+    lag): RUNNING can mean only paid post-work remains, and a terminal result cannot drain a
+    new owner or peer message, so it is never suggested as steerable. The running roots'
+    owner-Pause fences are read in one statement per store and handed to each reader check.
+    """
+    try:
+        from ouroboros.room_reader import is_reading
+        from ouroboros.store_hot_facts import snapshot as hot_facts
         from ouroboros.task_status import SETTLED_STATUSES
-        from supervisor.queue import _task_drive_for_task
+        from ouroboros.task_store import task_drive_status
 
-        if (load_task_result(_task_drive_for_task(task_obj, tid), tid) or {}).get("status") in SETTLED_STATUSES:
-            return
-        objective = str(
-            task_obj.get("objective") or task_obj.get("description") or task_obj.get("text") or ""
-        ).strip()
-        out.append({
-            "task_id": tid,
-            "status": status,
-            "title": _clip_marked(task_obj.get("title"), 120),
-            "objective": _clip_marked(objective, 600),
-            "project_id": str(task_obj.get("project_id") or ""),
-            "started_at": started_at,
-            "steerable": True,
-        })
-        seen.add(tid)
+        queued = [*((tid, row.get("task") if isinstance(row.get("task"), dict) else row, "running",
+                     row.get("started_at")) for tid, row in list(getattr(ctx, "RUNNING", {}).items())
+                    if isinstance(row, dict)),
+                  *((row.get("id"), row, "pending", row.get("queued_at"))
+                    for row in list(getattr(ctx, "PENDING", []) or []) if isinstance(row, dict))]
+        roots = [(str(tid or "").strip(), task, status, started) for tid, task, status, started in queued
+                 if str(tid or "").strip() and isinstance(task, dict) and task.get("delegation_role") != "subagent"]
+        canonical = pathlib.Path(ctx.DRIVE_ROOT) if roots else None  # no root, no store read
+        stored = task_drive_status(canonical, [root[0] for root in roots])
+        drives = [pathlib.Path(str(task.get("child_drive_root") or task.get("drive_root") or "").strip()
+                               or stored.get(tid, ("", ""))[1] or canonical) for tid, task, *_ in roots]
+        statuses = {(canonical, tid): fact[0] for tid, fact in stored.items()}
+        for drive in set(drives) - {canonical}:
+            ids = [root[0] for root, actor in zip(roots, drives) if actor == drive]
+            statuses.update(((drive, tid), fact[0]) for tid, fact in task_drive_status(drive, ids).items())
+        live = [(root, drive) for root, drive in zip(roots, drives)
+                if statuses.get((drive, root[0]), "") not in SETTLED_STATUSES]
+        pairs = []
+        with hot_facts([(drive, str(task.get("root_task_id") or tid))  # a store that cannot answer raises below
+                        for (tid, task, status, _at), drive in live if status == "running"]):
+            for (tid, task, status, started_at), drive in live:
+                objective = str(task.get("objective") or task.get("description") or task.get("text") or "").strip()
+                reader = is_reading(drive, tid, task, running=status == "running",
+                                    fences=getattr(ctx, "BUDGET_ROOT_FENCES", None), drain_ended=False)
+                pairs.append(({
+                    "task_id": tid,
+                    "status": status,
+                    "title": _clip_marked(task.get("title"), 120),
+                    "objective": _clip_marked(objective, 600),
+                    "project_id": str(task.get("project_id") or ""),
+                    "started_at": started_at,
+                    "steerable": True, "room_reader": reader, **_late_input_author(task),
+                }, _task_chats(ctx, tid, task)))
+        pairs += [(row, _task_chats(ctx, row["task_id"], row)) for row in _active_direct_roots(ctx)]
+        return RootSnapshot(tuple(pairs))
+    except Exception as exc:
+        log.warning("Addressable roots are unavailable to this routing read", exc_info=True)
+        return RootSnapshot(gap=type(exc).__name__)
 
-    for tid, running in list(getattr(ctx, "RUNNING", {}).items()):
-        if not isinstance(running, dict):
-            continue
-        task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
-        _add(tid, task_obj, "running", running.get("started_at"))
-    for pending in list(getattr(ctx, "PENDING", []) or []):
-        if isinstance(pending, dict):
-            _add(pending.get("id"), pending, "pending", pending.get("queued_at"))
-    for direct in _active_direct_roots(ctx):
-        if direct["task_id"] not in seen and (
-            chat_id is None or _task_belongs_to_chat(ctx, direct["task_id"], direct, chat_id)
-        ):
-            out.append(direct)
-    return out
+
+def _addressable_root_tasks(ctx: Any, chat_id: Optional[int] = None) -> list:
+    """Compact RUNNING+PENDING owner-root manifest of one chat (``None``: every chat)."""
+    return addressable_roots(ctx).rows(chat_id)
 
 
 def _clip_marked(value: str, limit: int) -> str:
@@ -123,7 +176,7 @@ def _clip_marked(value: str, limit: int) -> str:
 def _chat_running_tasks(ctx: Any, chat_id: int) -> list:
     """Structural snapshot of the owner's RUNNING root tasks in THIS chat (id +
     objective + recency). The decision turn reads this from runtime context to
-    pick a steer_task target by its own judgment — code only exposes the state,
+    pick a tell_task target by its own judgment — code only exposes the state,
     it never auto-chooses (BIBLE P5). Direct native roots are included;
     delegated subagents are not owner roots."""
     return [row for row in _addressable_root_tasks(ctx, chat_id) if row.get("status") == "running"]
@@ -166,6 +219,11 @@ def _task_result_ground_truth(row: Dict[str, Any]) -> Dict[str, Any]:
             "arguments": {"task_id": task_id, "include_authority": True},
         },
     }
+    if isinstance(row.get("promotion_admission"), dict):
+        from ouroboros.promotion_intent import promotion_intent_notice
+        out.update(promotion_admission=dict(row["promotion_admission"]),
+                   promotion_intent_available=bool(row.get("promotion_intent")),
+                   admission_notice=promotion_intent_notice(task_id, row))
     if git:
         out["workspace_git_at_start"] = {
             "head": str(git.get("head") or ""),
@@ -183,13 +241,19 @@ def _task_result_ground_truth(row: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _result_reference(facts: Dict[str, Any]) -> Dict[str, Any]:
+    """A historical result's identity and exact reader, without its evidence body."""
+    return {key: facts[key] for key in ("task_id", "status", "title", "authority_source")}
+
+
 def _is_child_result(facts: Dict[str, Any]) -> bool:
     """A result that is NOT an owner root: it has a parent, or the subagent role.
 
-    ONE predicate for every reader of that fact - the manifest window that skips
-    children (owner decision batch 3, answer 6b=A), the pointer stamp that only a
-    root moves, and the promote receipt, which continues a named child with its
-    root disclosed. Reads a memoized fact row or a full result row.
+    ONE predicate for every reader of that fact - the pointer stamp that only a
+    root moves and the promote receipt, which continues a named child with its
+    root disclosed; the manifest window that skips children (owner decision batch
+    3, answer 6b=A) selects by the same fact over typed columns in the store
+    (``task_store.ROOT_RESULT_WHERE``). Reads a memoized fact row or a full result row.
     """
     return bool(str(facts.get("parent_task_id") or "").strip()) or str(
         facts.get("delegation_role") or "") == "subagent"
@@ -204,42 +268,34 @@ def _recent_root_results(ctx: Any, project_id: str = "") -> tuple:
     offered (owner decision batch 3, answer 6b=A): a swarm wave's children are the
     newest results of ANY kind, so they evicted the owner's own roots from this
     window - which is how a root the same actor had just read stopped being
-    offerable. The typed columns answer both the filter and the count without a
-    body read. The count runs over the WHOLE candidate list, not inside the capped
-    loop: children older than the last shown root are skipped just the same, and
-    counting them only until the cap reported zero while folding them into the
-    cap's own number.
+    offerable. Owner-message intake runs on the supervisor loop, so the store
+    selects only the rows the window can offer (``newest_root_ids``): typed columns,
+    bodies decoded only for the rows shown. The two omissions stay separate and
+    truthful: a project room counts its own roots and children over its own index;
+    Main's scope is the whole store, so its window proves only whether more roots
+    exist (``0`` or ``None``, not counted) and leaves its children uncounted, like
+    the dialogue rows it does not visit.
     """
     from ouroboros.runtime_limits import get_routing_manifest_result_rows
     from ouroboros.store import StoreError
     from ouroboros.task_results import load_task_result
-    from ouroboros.task_store import task_facts
+    from ouroboros.task_store import newest_root_ids, project_result_counts
 
-    results_error = ""
-    try:
-        facts = task_facts(ctx.DRIVE_ROOT, **({"where": "project_id=?", "params": (project_id,)} if project_id else {}))
-        unreadable = False
-    except StoreError as exc:
-        facts, unreadable = {}, True
-        results_error = f"result_store_unreadable: {exc}"
-    pool = sorted(facts, key=lambda task_id: facts[task_id]["ts"] or facts[task_id]["updated_at"], reverse=True)
-    children = sum(1 for task_id in pool if _is_child_result(facts[task_id]))
     cap = get_routing_manifest_result_rows()
-    finals: list = []
-    for task_id in pool:
-        if _is_child_result(facts[task_id]):
-            continue
-        row = load_task_result(ctx.DRIVE_ROOT, task_id)
-        if row is not None:
-            finals.append(_task_result_ground_truth(row))
-        if len(finals) == cap:
-            break
+    try:
+        ids = newest_root_ids(ctx.DRIVE_ROOT, cap + 1, project_id=project_id)
+        counted = project_result_counts(ctx.DRIVE_ROOT, project_id) if project_id else None
+    except StoreError as exc:
+        return [], {"final_results": None, "final_results_error": f"result_store_unreadable: {exc}", "children": None}
+    finals = [_task_result_ground_truth(row) for row in
+              (load_task_result(ctx.DRIVE_ROOT, task_id) for task_id in ids[:cap]) if row is not None]
+    roots, children = counted if counted is not None else (None, None)
     return finals, {
-        # Kept meaning: results cut by the row cap. The children skipped above are
-        # a DIFFERENT omission and are counted as such, never folded in here.
-        "final_results": None if unreadable else max(0, len(pool) - children - len(finals)),
-        "final_results_error": results_error,
-        "children": None if unreadable else children,
+        # Kept meaning: results cut by the row cap. Skipped children are a DIFFERENT
+        # omission, never folded in here.
+        "final_results": max(0, roots - len(finals)) if roots is not None else (0 if len(ids) <= cap else None),
+        "final_results_error": "",
+        "children": children,
     }
 
 
@@ -258,11 +314,11 @@ def _cancel_state_facts(ctx: Any, task_id: str) -> Dict[str, Any]:
         return {}
 
 
-def _project_routing_manifest(ctx: Any, project_id: str) -> Dict[str, Any]:
+def _project_routing_manifest(ctx: Any, project_id: str, roots: Optional[RootSnapshot] = None) -> Dict[str, Any]:
     """The room's bounded HINT for a "continue this work" decision: the project's
     recent ROOT results and the roots still live in it, each with the small typed
     facts that separate the two choices - a settled root is promote's predecessor,
-    a live one is ``steer_task``.
+    a live one is ``tell_task``.
 
     A hint, never the door: promote's predicate admits any settled result, listed
     or not, of any project (ch. 10), so this window may be bounded without
@@ -271,15 +327,16 @@ def _project_routing_manifest(ctx: Any, project_id: str) -> Dict[str, Any]:
     name its own interrupted root at all.
     """
     finals, omissions = _recent_root_results(ctx, project_id)
+    roots = roots if roots is not None else addressable_roots(ctx)
     active = [
         {**row, **_cancel_state_facts(ctx, str(row.get("task_id") or ""))}
-        for row in _addressable_root_tasks(ctx, None)
+        for row in roots.rows()
         if str(row.get("project_id") or "") == project_id
     ]
     return {
-        "final_results": finals,
+        "final_results": [_result_reference(row) for row in finals],
         "active_roots": active[:40],
-        "omissions": {**omissions, "active_roots": max(0, len(active) - 40)},
+        "omissions": {**omissions, "active_roots": None if roots.gap else max(0, len(active) - 40)},
     }
 
 
@@ -299,7 +356,7 @@ def _latest_project_task_result(ctx: Any, project_id: str) -> Optional[Dict[str,
     read FIRST — one indexed row read, immune to how many newer foreign
     results exist. Only when the pointer is absent or stale (missing/foreign
     row) does the fallback run: the project's root rows newest first by the
-    durable ``ts`` (``updated_at`` when ``ts`` is absent, the task id last), read
+    durable ``ts`` (``newest_root_ids``: its own index, never every root), read
     in that order until the first that is not a promote's emitted stub. Only the
     ABSENT-pointer case writes the pointer back: a non-empty pointer that failed
     to resolve is usually a split-drive result in flight (finalization stamps
@@ -308,7 +365,7 @@ def _latest_project_task_result(ctx: Any, project_id: str) -> Optional[Dict[str,
     hit and let the pointer resolve itself."""
     from ouroboros.projects_registry import get_project, update_project
     from ouroboros.task_results import load_task_result
-    from ouroboros.task_store import ROOT_RESULT_WHERE, newest_ids
+    from ouroboros.task_store import newest_root_ids
 
     try:
         pointer = str((get_project(ctx.DRIVE_ROOT, project_id) or {}).get(
@@ -327,7 +384,7 @@ def _latest_project_task_result(ctx: Any, project_id: str) -> Optional[Dict[str,
         )
 
     row = None
-    for task_id in newest_ids(ctx.DRIVE_ROOT, where=f"project_id=? AND {ROOT_RESULT_WHERE}", params=(project_id,)):
+    for task_id in newest_root_ids(ctx.DRIVE_ROOT, project_id=project_id):
         candidate = load_task_result(ctx.DRIVE_ROOT, task_id)
         if candidate is None or _not_a_root_result(candidate):
             continue
@@ -342,17 +399,11 @@ def _latest_project_task_result(ctx: Any, project_id: str) -> Optional[Dict[str,
     return row
 
 
-def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
-    """Bounded canonical facts for one Main-chat LLM routing decision.
-
-    Its recent dialogue is the last 20 rows with text from every room, each in the
-    one rendering memory gives a chat row (``render_row_text``: a quiz answer is
-    ``chose (N) <label>`` and the owner's comment, never the question framed before
-    them): people's words ride whole, every other row under the disclosed bound."""
-    from ouroboros.dialogue_provenance import render_row_text, row_author
-    from ouroboros.gateway._helpers import read_rotated_jsonl_entries
+def _main_routing_manifest(ctx: Any, roots: Optional[RootSnapshot] = None) -> Dict[str, Any]:
+    """Routing identities and exact readers; the memory view owns spoken rows."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_chain import row_address, format_address
     from ouroboros.projects_registry import list_projects
-    from ouroboros.utils import truncate_within_limit
 
     projects = [{
         "project_id": str(row.get("id") or ""),
@@ -363,24 +414,37 @@ def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
         # where a project's work lives (Q8-A).
         "working_dir": str(row.get("working_dir") or ""),
     } for row in list_projects(ctx.DRIVE_ROOT)]
-    roots = _addressable_root_tasks(ctx, None)
+    snapshot = roots if roots is not None else addressable_roots(ctx)
+    roots = snapshot.rows()
     finals, result_omissions = _recent_root_results(ctx)
 
     dialogue_rows: list = []
     root = pathlib.Path(ctx.DRIVE_ROOT)
-    rows, gaps = read_rotated_jsonl_entries(
-        root / "logs" / "chat.jsonl", root / "archive", "chat", 20,
-        lambda row: bool(str(row.get("text") or "").strip()),
-        max_archives=2, include_gaps=True,
-    )
+    upper = before = ds.stream_end(root, "chat")
+    rows, gaps = [], set()
+    while before and len(rows) < 20:
+        page = ds.newest(root, "chat", before=before, limit=20)
+        if not page:
+            before = 0
+            break
+        rows.extend(entry for entry in reversed(page) if str(entry.row.get("text") or "").strip())
+        before = page[0].seq
+    coverage = ds.range_coverage(root, "chat", lower=rows[19].seq if len(rows) >= 20 else 0, upper=upper)
+    if not coverage["imported"]:
+        gaps.add("a segment could not be imported" if coverage["mismatch"] else "history is still importing")
+    if coverage["gaps"]:
+        gaps.add("recorded invalid intervals")
+    rows = [entry.row for entry in reversed(rows[:20])]
     for row in rows:
-        text = render_row_text(row).strip() if str(row.get("text") or "").strip() else ""
+        text = str(row.get("text") or "").strip()
         if text:
             dialogue_rows.append({
                 "ts": str(row.get("ts") or ""),
                 "direction": str(row.get("direction") or ""),
                 "chat_id": row.get("chat_id", 1),
-                "text": text if row_author(row)["kind"] == "human" else truncate_within_limit(text, 500),
+                "chars": len(text),
+                "reader": {"tool": "memory_read", "arguments": {"room_id": str(row.get("chat_id", 1)),
+                    "rows": True, "from": format_address(row_address(row)), "to": format_address(row_address(row))}},
                 "task_id": str(row.get("task_id") or ""),
                 "client_message_id": str(row.get("client_message_id") or ""),
             })
@@ -388,29 +452,32 @@ def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
     return {
         "projects": projects[:40],
         "root_tasks": roots[:40],
-        "final_results": finals,
+        "final_results": [_result_reference(row) for row in finals],
         "recent_canonical_dialogue": dialogue,
         "omissions": {
             "projects": max(0, len(projects) - 40),
-            "root_tasks": max(0, len(roots) - 40),
+            "root_tasks": None if snapshot.gap else max(0, len(roots) - 40),
             **result_omissions,
             # A bounded read cannot count bytes/rows it deliberately did not
             # visit. The exact historical messages remain available by id.
             "dialogue_rows": None,
-            "dialogue_source": "chat_history (canonical chat and archives)",
+            "dialogue_source": "chat_history (state/dialog.sqlite)",
             "dialogue_gaps": sorted(gaps),
         },
     }
 
 
-def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task_metadata: Any) -> Any:
+def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task_metadata: Any,
+                            roots: Optional[RootSnapshot] = None) -> Any:
     """Enrich a chat turn's metadata with the structural facts the decision turn
-    needs: the RUNNING tasks in THIS chat (so it can steer_task the right one
+    needs: the RUNNING tasks in THIS chat (so it can tell_task the right one
     instead of spawning a duplicate) and the originating message id (for idempotent
     steer delivery). P5-clean: surfaces state only; the agent picks the target by
-    judgment among answer / steer_task / promote_chat_to_task / route_to_project."""
+    judgment among answer / tell_task / start_task / move_to_project. ``roots``: the
+    message's one ``addressable_roots`` snapshot, read here when not handed down."""
     md = dict(task_metadata) if isinstance(task_metadata, dict) else {}
-    addressable_here = _addressable_root_tasks(ctx, chat_id)
+    roots = roots if roots is not None else addressable_roots(ctx)
+    addressable_here = roots.rows(chat_id)
     running_here = [row for row in addressable_here if row.get("status") == "running"]
     project_id = str(md.get("project_id") or "").strip() or _project_id_for_registered_chat(
         ctx, chat_id,
@@ -421,7 +488,7 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
         # commonly use a real provider chat id rather than Web's numeric ``1``;
         # keying this decision to ``chat_id == 1`` made their canonical router see
         # neither Projects nor globally addressable roots.
-        main_manifest = _main_routing_manifest(ctx) if is_main_lane else {}
+        main_manifest = _main_routing_manifest(ctx, roots) if is_main_lane else {}
         if main_manifest and not (
             main_manifest.get("projects") or main_manifest.get("root_tasks")
         ):
@@ -429,8 +496,8 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
     except Exception:
         log.warning("Unable to build Main routing manifest", exc_info=True)
         main_manifest = {"error": "routing_manifest_unavailable"} if is_main_lane else {}
-    if not addressable_here and not client_message_id and not main_manifest:
-        return task_metadata
+    if not addressable_here and not client_message_id and not main_manifest and not roots.gap:
+        return md
     if addressable_here:
         md["current_chat"] = {
             "chat_id": int(chat_id or 0),
@@ -440,61 +507,29 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
     if main_manifest:
         md["main_routing_manifest"] = main_manifest
     if project_id:
-        # Ground truth for a project-room "continue" decision (Q8-A): the thread's
-        # most recent task result as a bounded typed projection. Without it the
-        # router turn has only chat memory about where prior work lives.
+        # Name the thread's latest result and its exact reader; prior workspace
+        # and outcome evidence remains in that result instead of riding inline.
         try:
             row = _latest_project_task_result(ctx, project_id)
             if row is not None:
-                md["project_last_task_result"] = _task_result_ground_truth(row)
+                md["project_last_task_result"] = _result_reference(_task_result_ground_truth(row))
         except Exception:
             log.debug("project last-task-result projection failed", exc_info=True)
         try:
-            md["project_routing_manifest"] = _project_routing_manifest(ctx, project_id)
+            md["project_routing_manifest"] = _project_routing_manifest(ctx, project_id, roots)
         except Exception:
             log.warning("Unable to build the project routing manifest", exc_info=True)
     if client_message_id:
         md["client_message_id"] = client_message_id
-    option_roots = (
-        list(main_manifest.get("root_tasks") or [])
-        if is_main_lane and isinstance(main_manifest, dict)
-        else addressable_here
-    )
-    manual_options = [
-        {
-            "action": "steer_task",
-            "task_id": row["task_id"],
-            "status": row["status"],
-            "title": row.get("title") or row.get("objective"),
-            "project_id": str(row.get("project_id") or ""),
-        }
-        for row in option_roots
-        if isinstance(row, dict) and row.get("task_id")
-    ]
-    if is_main_lane and isinstance(main_manifest, dict):
-        manual_options.extend({
-            "action": "new_task_in_project",
-            "project_id": str(row.get("project_id") or ""),
-            "project_name": str(row.get("name") or row.get("project_id") or "Project"),
-            "label": f"New task in {str(row.get('name') or 'Project')}",
-        } for row in list(main_manifest.get("projects") or []) if isinstance(row, dict))
-    elif project_id:
-        manual_options.append({
-            "action": "new_task_in_project",
-            "project_id": project_id,
-            "label": "New task in Project",
-        })
     routing_contract = {
         "llm_first": True,
         "source_lane": "main" if is_main_lane else "project",
         "valid_actions": [
-            "answer_inline", "steer_task", "promote_chat_to_task", "route_to_project",
-            "needs_manual_target",
+            "answer_inline", "tell_task", "start_task", "move_to_project",
         ],
-        "on_uncertain_or_invalid_target": "needs_manual_target",
-        "manual_options": manual_options,
+        # Unknown, never none: the roots of this chat and of Main could not be read now.
+        **({"live_roots_unavailable": roots.gap} if roots.gap else {}),
     }
-    routing_contract["manual_target_tool"] = {"name": "route_to_project", "project_id": ""}
     receipt = _message_routing_receipt(ctx, client_message_id)
     if receipt:
         # DISCLOSURE, not a gate (owner decision B5=A): one owner message became a
@@ -509,7 +544,7 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
             routing_contract["message_routing_acts"] = acts
             routing_contract["message_routing_acts_note"] = (
                 "Recorded routing acts already taken for THIS owner message, oldest first. "
-                "Facts, not a ban: another act stays your choice.")
+                "Each receipt identifies the work and its recorded outcome.")
     md["routing_contract"] = routing_contract
     return md
 
@@ -574,8 +609,8 @@ def _scoped_task_metadata(project_id: str, task_metadata: Any) -> Any:
     """Bind a chat frame's task_metadata to the thread's project via chat_id (the
     SSOT). A registered project chat scopes to its OWN project, overriding any
     client-supplied project_id; a non-project chat DROPS an untrusted client
-    project_id (work is scoped to a project only via the promote_chat_to_task tool,
-    never a raw ws frame). Prevents a stale/malformed frame (chat_id A + project_id
+    project_id (work placement uses durable binding, never a raw ws frame).
+    Prevents a stale/malformed frame (chat_id A + project_id
     B) from rendering in A while loading/writing project B's memory."""
     if project_id:
         return {**(task_metadata or {}), "project_id": project_id}

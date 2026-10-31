@@ -1,13 +1,17 @@
-"""Owner-facing host notices (#1369): the late-review row, the provider terminal
-sentence and the late-evidence carrier, each through its real producer.
+"""Owner-facing host notices (#1369): the provider terminal sentence and the fallback
+notice (#2154) through their real producers, and the readers of old late-review rows.
 
-The record keeps its tokens — slot ids, PASS/FAIL/DEGRADED, the ``⚠️ OMISSION
-NOTE`` marker, the exception repr — in the model mailbox, the typed evidence, the
-``llm_api_error`` event and Logs. The row a person reads says the same facts in
-words and points at the exact record.
+The record keeps its tokens — the exception repr, the provider's typed fields — in the
+``llm_api_error`` event and Logs; the row a person reads says the same facts in words and
+points at the exact record. The retired task acceptance wrote late-review rows and their
+applied records; nothing writes one now, but the stored ones still render: the projection
+bounds an old late note in words, history replays its evidence pointer, and the task
+artifact route serves exactly this task's own old record.
 """
 
 from __future__ import annotations
+
+from tests import _dialogue as dialogue_test
 
 import asyncio
 import json
@@ -15,9 +19,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.acceptance_settlement import (
-    _late_settlement_text, acceptance_settlement_message, late_evidence_fact,
-)
 from ouroboros.loop_transport import provider_failure_hint, provider_terminal_fallback_text
 
 
@@ -27,6 +28,7 @@ REPR = "PermissionDeniedError(\"Error code: 403 - {'error': {'message': 'The API
 
 
 def _run(**overrides):
+    """An old host task-acceptance run, as the retired machine stored it."""
     run = {
         "authority": "host_root", "aggregate_signal": "PASS", "panel_id": "panel_1",
         "request": {"surface": "task_acceptance", "subject": "answer A", "retry_key": "rk"},
@@ -53,225 +55,31 @@ def _run(**overrides):
     return run
 
 
-def _wave():
-    return {"slots": {"triad_w45a8z": "ok", "triad_bkydwq": "ok", "triad_qq11zz": "error", "triad_late01": ""},
-            "verdicts": {"triad_w45a8z": {"verdict": "PASS", "note": LONG_SUMMARY[:400] + "\n⚠️ OMISSION NOTE: truncated at 400 chars; original length 872"},
-                         "triad_bkydwq": {"verdict": "DEGRADED", "note": "The ledger could not be opened from the packet."},
-                         "triad_qq11zz": {"verdict": "", "note": "ClaudexorModelError: engine_busy (HTTP 429)"}},
-            "total": 4}
-
-
 # ---------------------------------------------------------------------------
-# The owner row
+# An old late note on its stored panel
 # ---------------------------------------------------------------------------
 
-def test_owner_row_names_models_and_says_each_outcome_in_words():
-    text = _late_settlement_text(_run(), _wave(), {"reviewed_revision": "delivered"})
-    head, *lines = text.split("\n")
-    assert head == "On the delivered version of this answer, reviewers later passed it."
-    # The observed model leads; a requested-only model is labelled; the cause is quoted.
-    assert lines[0].startswith("- openai/gpt-5.5-2026-09: passed it — The budget section is complete")
-    assert lines[1] == "- anthropic/claude-opus-5-5 (requested): inconclusive — The ledger could not be opened from the packet."
-    # The quoted cause is the engine's own ``failure.safeMessage``, attributed to the engine.
-    assert lines[2] == '- claudexor::codex=gpt-6-astra (requested): unavailable — the engine reported: "The engine is rate limited"'
-    assert lines[3] == "- x/late (requested): still awaited"
-    # No slot id, verdict token, marker, failure code or exception text reaches the person.
-    for internal in ("triad_", "PASS", "DEGRADED", "OMISSION NOTE", "HTTP 429", "ClaudexorModelError", "pending", "error"):
-        assert internal not in "\n".join(lines), internal
+def test_an_old_late_note_is_cut_in_words_and_names_the_record_only_when_stored():
+    """Five reviewers at the per-seat note bound composed a note past the projection's
+    2000-char display bound. The card and the owner's row print the projected note: its
+    cut is said in words, naming the review record only when one is stored, and the raw
+    run keeps every byte."""
+    from ouroboros import review_projection
 
-
-def test_owner_note_shortening_is_said_in_words_without_promising_a_record():
-    """The note is composed before the panel's record is stored, and that store can
-    fail: a reviewer's shortened note says only that it was shortened. The row's
-    record link, offered only for a stored record, is the pointer."""
-    text = _late_settlement_text(_run(), _wave())
-    line = text.split("\n")[1]
-    assert line.endswith("… (shortened)")
-    assert "review record" not in text and "OMISSION NOTE" not in text
-    # The SSOT display bound decides the cut: the same 400-char preview, the same
-    # anti-waste floor (a note barely over the limit passes whole).
-    barely = "x" * 430
-    run = _run(actors=[{**_run()["actors"][0], "parsed": {"verdict": "PASS", "summary": barely}}])
-    whole = _late_settlement_text(run, {"slots": {"triad_w45a8z": "ok"}, "verdicts": {}}).split("\n")[1]
-    assert whole.endswith(barely) and "shortened" not in whole
-
-
-def test_an_engine_cause_the_hosts_bound_cut_is_quoted_as_shortened_without_its_marker():
-    """``run_failure_cause`` bounds the engine's words with the host's model-facing
-    omission marker inside the limit. The owner's quote keeps only the engine's words
-    and says the cut in words; the record keeps the marker. Words that merely mention
-    such a note are the engine's own and stay quoted as written."""
-    from ouroboros.gateways.claudexor import run_failure_cause
-
-    cause = run_failure_cause({"safeMessage": "The reviewer session could not start: its workspace lease expired. " * 9})
-    assert "\n⚠️ OMISSION NOTE: truncated at 512 chars" in cause, "the record keeps the disclosed marker"
-    actor = {**_run()["actors"][2], "reported_cause": cause}
-    wave = {"slots": {"triad_qq11zz": "error"}, "verdicts": {}}
-    line = _late_settlement_text(_run(actors=[actor]), wave).split("\n")[1]
-    kept = cause.split("\n")[0].strip()
-    assert line == f'- claudexor::codex=gpt-6-astra (requested): unavailable — the engine reported: "{kept}…" (shortened)'
-    assert actor["reported_cause"] == cause, "the canonical evidence is unchanged"
-    mention = run_failure_cause({"safeMessage": "Refused. ⚠️ OMISSION NOTE: truncated at 512 chars; original length 900"})
-    quoted = _late_settlement_text(_run(actors=[{**actor, "reported_cause": mention}]), wave).split("\n")[1]
-    assert quoted.endswith(f'the engine reported: "{mention}"') and "shortened" not in quoted
-
-
-def test_the_model_mailbox_keeps_slot_ids_tokens_and_the_disclosed_marker():
-    """The mailbox line is model-facing and stays byte-identical to its contract."""
-    text = acceptance_settlement_message(SimpleNamespace(retry_key="rk"), _wave())
-    assert text.startswith("Acceptance review rk: 3 of 4 reviewer slot(s) have answered")
-    assert "- triad_w45a8z: PASS — " in text and "⚠️ OMISSION NOTE: truncated at 400 chars; original length 872" in text
-    assert "- triad_bkydwq: DEGRADED — The ledger could not be opened from the packet." in text
-    assert "- triad_qq11zz: error — ClaudexorModelError: engine_busy (HTTP 429)" in text
-    assert "- triad_late01: pending" in text
-
-
-def test_reviewer_identity_prefers_observed_then_requested_then_unknown():
-    run = _run(slot_roster=[{"slot_id": "s1"}], actors=[{"slot_id": "s1", "status": "ok", "operation_state": "settled",
-                                                       "parsed": {"verdict": "FAIL", "summary": "Missing tests."}}])
-    text = _late_settlement_text({**run, "aggregate_signal": "FAIL"}, {"slots": {"s1": "ok"}, "verdicts": {}})
-    assert text.split("\n")[1] == "- unknown reviewer: rejected it — Missing tests."
-    # Two seats of one model stay two lines.
-    twin = {**_run()["actors"][0], "slot_id": "s2", "parsed": {"verdict": "PASS", "summary": "Fine."}}
-    text = _late_settlement_text(_run(actors=[_run()["actors"][0], twin]),
-                                 {"slots": {"triad_w45a8z": "ok", "s2": "ok"}, "verdicts": {}})
-    assert "- openai/gpt-5.5-2026-09 (seat 1): passed it" in text and "- openai/gpt-5.5-2026-09 (seat 2): passed it — Fine." in text
-
-
-def test_a_route_target_is_requested_not_observed():
-    """A direct API route copies its own target into ``usage.resolved_model``: what the
-    host sent, not what answered. Only an engine's final-attempt report is observed."""
-    actor = {"slot_id": "s1", "model": "anthropic/claude-opus-5-5", "status": "ok", "operation_state": "settled",
-             "usage": {"provider": "anthropic", "resolved_model": "anthropic/claude-opus-5-5"},
-             "parsed": {"verdict": "PASS", "summary": "Fine."}}
-    run = _run(slot_roster=[{"slot_id": "s1", "model": "anthropic/claude-opus-5-5", "route": "api_chat"}],
-               actors=[actor])
-    line = _late_settlement_text(run, {"slots": {"s1": "ok"}, "verdicts": {}}).split("\n")[1]
-    assert line == "- anthropic/claude-opus-5-5 (requested): passed it — Fine."
-    fact = late_evidence_fact(run, {"source": "terminal_delivery_registry", "state": "unknown", "delivered": []},
-                              settled_at="2026-09-28T00:00:00+00:00")
-    row = fact["reviewer_outputs"][0]
-    assert (row["model"], row["requested_model"]) == ("", "anthropic/claude-opus-5-5")
-
-
-def test_seats_follow_the_recorded_roster_not_the_released_wave_order():
-    """A released wave collects its slots from a set: seat N is still the Nth roster seat."""
-    roster = [{"slot_id": slot, "model": "m/twin", "route": "api_chat"} for slot in ("0", "1", "2")]
-    actors = [{"slot_id": slot, "model": "m/twin", "status": "ok", "operation_state": "settled",
-               "parsed": {"verdict": verdict, "summary": f"Seat {slot}."}}
-              for slot, verdict in (("0", "PASS"), ("1", "PASS"), ("2", "FAIL"))]
-    run = _run(aggregate_signal="FAIL", slot_roster=roster, actors=actors)
-    # A slot the run never recorded keeps its place after the roster.
-    wave = {"slots": {"late": "", "2": "ok", "0": "ok", "1": "ok"}, "verdicts": {}}
-    assert _late_settlement_text(run, wave).split("\n")[1:] == [
-        "- m/twin (requested) (seat 1): passed it — Seat 0.",
-        "- m/twin (requested) (seat 2): passed it — Seat 1.",
-        "- m/twin (requested) (seat 3): rejected it — Seat 2.",
-        "- unknown reviewer: still awaited"]
-
-
-def test_a_long_late_note_is_cut_in_words_and_the_applied_record_keeps_it_whole(tmp_path):
-    """Five reviewers at the per-seat note bound compose a note past the projection's
-    2000-char display bound. The card and the owner's row both print the projected
-    note: its cut is said in words, naming the review record only when one is stored,
-    and the applied record (the raw run) keeps every byte."""
-    from ouroboros import loop, review_projection
-    from ouroboros.task_results import load_task_result, write_task_result
-    from tests.test_acceptance_publication import _context, _source
-
-    roster = [{"slot_id": f"s{i}", "model": f"provider/reviewer-{i}", "route": "api_chat"} for i in range(5)]
-    actors = [{"slot_id": f"s{i}", "model": f"provider/reviewer-{i}", "status": "ok", "operation_state": "settled",
-               "parsed": {"verdict": "PASS", "summary": LONG_SUMMARY}} for i in range(5)]
-    run = _run(slot_roster=roster, actors=actors)
-    note = _late_settlement_text(run, {"slots": {f"s{i}": "ok" for i in range(5)}, "verdicts": {}},
-                                 {"reviewed_revision": "delivered"})
+    note = "\n".join(["On the delivered version of this answer, reviewers later passed it.", *(
+        f"- provider/reviewer-{i} (requested): passed it — {LONG_SUMMARY[:400].rstrip()}… (shortened)"
+        for i in range(5))])
     marker = f"\n⚠️ OMISSION NOTE: truncated at 2000 chars; original length {len(note)}"
     assert len(note) - 2000 > len(marker), "past the 2000-char bound and its anti-waste floor"
-    run["late_settlement"] = {"note": note}
-    write_task_result(tmp_path, "applied", "completed", result="The delivered answer.")
-    trace = {"review_runs": [run]}
-    loop._set_acceptance_decision(trace, {"status": "accepted", "reason": "clean_pass"})
-    review_projection.publish_acceptance_checkpoint(_context(tmp_path), trace)
-    panel = load_task_result(tmp_path, "applied")["review_projection"]["panels"][0]
+    stored = _run(late_settlement={"note": note}, applied_source_status="available")
+    panel = review_projection.compact_review_projection([stored])["panels"][0]
     assert panel["applied_source_status"] == "available"
     assert panel["late_settlement"]["note"] == (
         note[:2000].rstrip() + "… (shortened; the complete text is in the review record)")
-    assert _source(tmp_path, panel)["late_settlement"]["note"] == note
-    unstored = {**run, "applied_source_status": "unavailable"}
+    assert stored["late_settlement"]["note"] == note, "the raw run keeps every byte"
+    unstored = {**stored, "applied_source_status": "unavailable"}
     assert (review_projection.compact_review_projection([unstored])["panels"][0]["late_settlement"]["note"]
             == note[:2000].rstrip() + "… (shortened)")
-
-
-def test_unreadable_unknown_and_not_sent_reviewers_read_as_their_own_states():
-    actors = [
-        {"slot_id": "a", "model": "m/a", "status": "ok", "operation_state": "settled", "raw_text": "I think it is fine.", "parsed": None},
-        {"slot_id": "b", "model": "m/b", "status": "error", "operation_state": "custody_lost", "late_result_pending": True},
-        {"slot_id": "c", "model": "m/c", "status": "not_dispatched", "operation_state": "not_dispatched"},
-        {"slot_id": "d", "model": "m/d", "status": "error", "operation_state": "settled", "error": "Timeout after 600s"},
-    ]
-    wave = {"slots": {"a": "ok", "b": "error", "c": "not_dispatched", "d": "error"},
-            "verdicts": {"a": {"verdict": "DEGRADED", "note": ""}, "d": {"verdict": "", "note": "Timeout after 600s"}}}
-    text = _late_settlement_text(_run(aggregate_signal="DEGRADED", actors=actors), wave)
-    lines = text.split("\n")
-    assert lines[0].startswith("On the reviewed version of this answer (whether it was the delivered one is unknown), "
-                               "reviewers later returned no settled verdict — 1 reviewer's outcome is still unknown.")
-    assert lines[1:] == ["- m/a (requested): answered, but no verdict could be read",
-                         "- m/b (requested): outcome unknown",
-                         "- m/c (requested): not sent",
-                         "- m/d (requested): unavailable"]
-    assert "Timeout" not in text and "DEGRADED" not in text
-
-
-def test_a_slot_without_an_answer_never_reads_as_a_reviewers_inconclusive_verdict():
-    """Through the real wave producer: ``_settled_slot_verdict`` parses a failed,
-    refused or unknown slot's EMPTY text as DEGRADED, the parser's word for no
-    text. Only an answer carries a reviewer's verdict; the slot state speaks for
-    the rest, and the host's error text stays out of the owner's line."""
-    from ouroboros.acceptance_settlement import _collected_wave
-    from ouroboros.review_custody import RELEASED_UNRESOLVED
-    from ouroboros.triad_review import parse_review_findings
-
-    own = '{"verdict": "DEGRADED", "summary": "The ledger could not be opened."}'
-    actors = [
-        {"slot_id": "a", "model": "m/a", "status": "error", "operation_state": "settled",
-         "error": "APIConnectionError('Connection  reset\n by peer')", "transport_status": "provider_transport_error"},
-        {"slot_id": "b", "model": "m/b", "status": "error", "operation_state": "settled",
-         "error": "ClaudexorModelError: engine_busy (HTTP 429)", "reported_cause": "The engine is rate limited"},
-        {"slot_id": "c", "model": "m/c", "status": "not_dispatched", "operation_state": "not_dispatched",
-         "error": "refused before dispatch"},
-        {"slot_id": "d", "model": "m/d", "status": "error", "operation_state": "custody_lost", "late_result_pending": True},
-        {"slot_id": "e", "model": "m/e", "status": "ok", "operation_state": "settled", "raw_text": own,
-         "parsed": parse_review_findings(own)[0], "signal": "DEGRADED", "semantic_verdict": "DEGRADED"},
-        {"slot_id": "f", "model": "m/f", "status": "empty", "operation_state": "settled"},
-        {"slot_id": "g", "model": "m/g", "operation_state": "in_flight"},
-    ]
-    run = _run(aggregate_signal="DEGRADED", actors=actors, slot_roster=[])
-    wave = _collected_wave(run)
-    assert {slot: row["verdict"] for slot, row in wave["verdicts"].items()} == dict.fromkeys("abcef", "DEGRADED")
-    assert wave["slots"]["g"] == ""
-    # A custody-lost slot's outcome is UNKNOWN, not settled (#1547): it carries no
-    # parsed verdict at all, so nothing could mistake it for a reviewer's answer.
-    assert wave["slots"]["d"] == RELEASED_UNRESOLVED and "d" not in wave["verdicts"]
-    lines = _late_settlement_text(run, wave).split("\n")[1:]
-    assert lines == ["- m/a (requested): unavailable",
-                     '- m/b (requested): unavailable — the engine reported: "The engine is rate limited"',
-                     "- m/c (requested): not sent",
-                     "- m/d (requested): outcome unknown",
-                     "- m/e (requested): inconclusive — The ledger could not be opened.",
-                     "- m/f (requested): answered, but no verdict could be read",
-                     "- m/g (requested): still awaited"]
-    for internal in ("APIConnectionError", "Connection", "engine_busy", "refused before", "DEGRADED"):
-        assert internal not in "\n".join(lines), internal
-
-
-def test_late_evidence_fact_names_the_reviewer_identity_additively():
-    fact = late_evidence_fact(_run(), {"source": "terminal_delivery_registry", "state": "unknown", "delivered": []},
-                              settled_at="2026-09-28T00:00:00+00:00")
-    rows = {row["slot_id"]: row for row in fact["reviewer_outputs"]}
-    assert rows["triad_w45a8z"]["verdict"] == "PASS"  # the token stays in the typed evidence
-    assert (rows["triad_w45a8z"]["model"], rows["triad_w45a8z"]["requested_model"]) == ("openai/gpt-5.5-2026-09", "openai/gpt-5.5")
-    assert (rows["triad_bkydwq"]["model"], rows["triad_bkydwq"]["requested_model"]) == ("", "anthropic/claude-opus-5-5")
-    assert set(rows["triad_late01"]) >= {"slot_id", "operation_id", "operation_state", "verdict", "response_ref", "model", "requested_model"}
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +350,147 @@ def test_a_usable_response_clears_stale_provider_fields(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The late-evidence carrier: producer → stored row → history → live frame
+# The fallback notice: chain → task emitter → chat delivery → card and toast
+# ---------------------------------------------------------------------------
+
+# The card's line and the toast, painted by their own readers from the delivered rows.
+_CARD_READERS = """
+import { readFileSync } from 'node:fs';
+import { buildTimelineItemHtml } from './modules/chat_activity.js';
+import { showTaskIncidentToast } from './modules/chat_media.js';
+import { summarizeChatLiveEvent } from './modules/log_events.js';
+import { installDom, restoreDom } from './tests/chat_dom_fixture.js';
+const { live, replay } = JSON.parse(readFileSync(process.env.OURO_TEST_FALLBACK_ROWS, 'utf8'));
+const env = installDom();
+try {
+    const painted = live.map((row) => {
+        const view = summarizeChatLiveEvent(row);
+        const toast = showTaskIncidentToast(row);
+        const shown = toast && { text: toast.textContent, children: toast.children.length };
+        toast?.dispose();
+        return { full: view.fullHeadline, promote: view.promote, toast: shown,
+            line: buildTimelineItemHtml({ ...view, lineKey: 'k' }, { expandedLineKeys: new Set(['k']), groupId: 'g' }) };
+    });
+    process.stdout.write(JSON.stringify({ live: painted, replay: replay.map((row) => summarizeChatLiveEvent(row).fullHeadline) }));
+} finally { restoreDom(env.prior); }
+"""
+
+
+def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path, monkeypatch):
+    """The primary and two candidates refuse, the third answers. Through the real loop, chain
+    and call owner, the task's emitter, chat delivery, history and the card's and toast's own
+    readers, each notice names the route that just failed with only that route's class and
+    sentence, before the next route is dialed: a refused route is never announced as the
+    answer. A provider's markup reaches the owner as inert text, its secret redacted; the
+    record keeps the typed kind; each switch keeps its own toast key."""
+    import os
+    import pathlib
+    import queue
+    import shutil
+    from functools import partial
+
+    from ouroboros import fallback_cooldown, loop
+    from ouroboros.agent import OuroborosAgent
+    from ouroboros.dialogue_import import export_for_older_body
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.tools.registry import ToolRegistry
+    from supervisor import events_chat_delivery, message_bus
+    from tests.group_run import run_in_group
+
+    fallback_cooldown.reset_for_tests()
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "alt/a,alt/b,alt/c")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    # A bare loop has no agent-built context core, as in the chain's own tests.
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
+    monkeypatch.setattr("ouroboros.loop_llm_call.time.sleep", lambda _s: pytest.fail("a refusal is not retried"))
+    secret = "sk-or-" + "fixture" * 6
+    refusals = {
+        "test-model": _BodyError("Error code: 400", status_code=400,
+                                 body={"error": {"message": "Upstream request failed."}}),
+        "alt/a": _BodyError("AuthenticationError('401 invalid_api_key')", status_code=401),
+        "alt/b": _BodyError("Error code: 400", status_code=400, body={"error": {
+            "message": f"Field <img src=x onerror=alert(1)> is not allowed for key {secret}."}}),
+    }
+
+    class _Routes:
+        def __init__(self):
+            self.models = []
+
+        def default_model(self):
+            return "test-model"
+
+        def chat(self, **kwargs):
+            self.models.append(kwargs["model"])
+            if kwargs["model"] in refusals:
+                raise refusals[kwargs["model"]]
+            return {"role": "assistant", "content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1}
+
+    events, llm, work, room = queue.Queue(), _Routes(), tmp_path / "work", tmp_path / "room"
+    work.mkdir()
+    agent = SimpleNamespace(_last_progress_ts=None, _event_queue=events, _current_chat_id=1,
+                            _current_task_id="task-1", tools=SimpleNamespace(_ctx=SimpleNamespace(task_attempt=0)),
+                            _subagent_progress_meta=lambda _event: {})
+    result, _usage, _trace = loop.run_llm_loop(
+        messages=[{"role": "user", "content": "go"}], tools=ToolRegistry(repo_dir=work, drive_root=work), llm=llm,
+        drive_logs=work, emit_progress=partial(OuroborosAgent._emit_progress, agent),
+        incoming_messages=queue.Queue(), task_id="task-1", drive_root=work)
+
+    assert result == "done" and llm.models == ["test-model", "alt/a", "alt/b", "alt/c"], "one call per route"
+    rows = [json.loads(line) for line in (work / "events.jsonl").read_text().splitlines()]
+    assert [(row["model"], row["error_kind"]) for row in rows if row["type"] == "llm_api_error"] == [
+        ("test-model", "bad_request"), ("alt/a", "auth_error"), ("alt/b", "bad_request")], "the record keeps the kind"
+    expected = [
+        'Fallback: test-model → alt/a. Trying the next model after a rejected request. '
+        'The provider said: "Upstream request failed."',
+        "Fallback: alt/a → alt/b. Trying the next model after an authentication or authorization refusal; "
+        "sign-in is still needed there.",
+        "Fallback: alt/b → alt/c. Trying the next model after a rejected request. "
+        'The provider said: "Field <img src=x onerror=alert(1)> is not allowed for key ***REDACTED***."',
+    ]
+    frames = [events.get_nowait() for _ in range(events.qsize())]
+    notes = [frame for frame in frames if frame["text"].startswith("💬 ⚡ Fallback: ")]
+    assert [frame["text"] for frame in notes] == [f"💬 ⚡ {text}" for text in expected]
+
+    (room / "logs").mkdir(parents=True)
+    (room / "logs" / "chat.jsonl").touch()
+    live, bridge = [], message_bus.LocalChatBridge()
+    bridge._broadcast_fn = live.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", room)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_: None)
+    monkeypatch.setattr(events_chat_delivery, "_bound_project_chat_id", lambda *_: 0)
+    delivery = SimpleNamespace(DRIVE_ROOT=room, RUNNING={"task-1": {"task": {"id": "task-1", "_attempt": 0}}},
+                               send_with_budget=message_bus.send_with_budget,
+                               append_jsonl=lambda *_: pytest.fail("delivery raised"))
+    for frame in notes:
+        events_chat_delivery._handle_send_message(frame, delivery)
+    assert [(row["task_incident"], row["toast_once"]) for row in live] == [
+        ("model_lane_switch", f"task-1:model_lane_switch:1:{name}") for name in ("alt/a", "alt/b", "alt/c")]
+    export_for_older_body(room)
+    response = asyncio.run(make_chat_history_endpoint(room)(SimpleNamespace(query_params={"limit": "10"})))
+    replay = [row for row in json.loads(response.body)["messages"] if row.get("is_progress")]
+    assert secret not in json.dumps([live, replay])
+
+    shown = tmp_path / "rows.json"
+    shown.write_text(json.dumps({"live": live, "replay": replay}), encoding="utf-8")
+    node = shutil.which("node")
+    assert node, "Node is required for the real card and toast consumer proof"
+    run = run_in_group([node, "--input-type=module", "-e", _CARD_READERS],
+                       cwd=pathlib.Path(__file__).resolve().parents[1] / "web",
+                       env={**os.environ, "OURO_TEST_FALLBACK_ROWS": str(shown)}, timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr
+    painted = json.loads(run.stdout)
+    assert [view["full"] for view in painted["live"]] == expected == painted["replay"]
+    assert [view["toast"] for view in painted["live"]] == [{"text": text, "children": 0} for text in expected]
+    assert not any(view["promote"] for view in painted["live"]), "a host note never claims the card title"
+    assert all("<img" not in view["line"] for view in painted["live"])
+    assert "Field &lt;img src=x onerror=alert(1)&gt; is not allowed" in painted["live"][2]["line"]
+
+
+# ---------------------------------------------------------------------------
+# The late-evidence carrier: stored row → history, and the record route
 # ---------------------------------------------------------------------------
 
 EVIDENCE = {"task_id": "t1", "panel_id": "panel_1", "settled_at": "2026-09-28T00:06:00+00:00",
@@ -551,37 +499,29 @@ EVIDENCE = {"task_id": "t1", "panel_id": "panel_1", "settled_at": "2026-09-28T00
                            "path": f"source_handles/context_checkpoints/acceptance-{'a' * 64}.json"}}
 
 
-def test_late_evidence_replays_through_the_stored_row_and_history(tmp_path):
+def test_an_old_late_row_replays_its_evidence_pointer_through_history(tmp_path):
+    """A late-review row stored before the fold carries its evidence pointer; history replays
+    it on that row only, and the bus persists the pointer for no row it writes now."""
+    from ouroboros import dialogue_store
     from ouroboros.gateway.history import make_chat_history_endpoint
     from supervisor import message_bus
+    from supervisor.message_ingress import _chat_record
 
+    text = "On the delivered version of this answer, reviewers later passed it."
     meta = {"card_row": "reviews", "card_row_id": "acceptance-late:rk", "late_evidence": EVIDENCE}
-    message_bus.log_chat("system", 1, 0, "On the delivered version of this answer, reviewers later passed it.",
-                         record_type="acceptance_late_settlement", task_id="t1", message_meta=meta, drive_root=tmp_path)
+    _root, old_row = _chat_record("system", 1, 0, text, record_type="acceptance_late_settlement", task_id="t1",
+                                  message_meta=meta, drive_root=tmp_path)
+    old_row["late_evidence"] = dict(EVIDENCE)  # the field the retired writer stored on this row type
+    dialogue_store.append(tmp_path, "chat", old_row)
     message_bus.log_chat("system", 1, 0, "Open delegated execution: run-x.", record_type="custody_notice",
                          task_id="t1", message_meta={**meta, "card_row": "timeline"}, drive_root=tmp_path)
-    stored = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text().splitlines()]
+    stored = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert stored[0]["late_evidence"] == EVIDENCE and "late_evidence" not in stored[1]
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
     rows = {row["text"]: row for row in json.loads(response.body)["messages"]}
-    late = rows["On the delivered version of this answer, reviewers later passed it."]
+    late = rows[text]
     assert late["card_row"] == "reviews" and late["late_evidence"] == EVIDENCE
-    assert "late_evidence" not in rows["Open delegated execution: run-x."], "only the typed late row carries the pointer"
-
-
-def test_the_live_frame_carries_the_late_evidence_pointer(tmp_path, monkeypatch):
-    from supervisor import message_bus
-
-    bridge = message_bus.LocalChatBridge({})
-    frames = []
-    bridge._broadcast_fn = frames.append
-    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_kw: None)
-    bridge.send_message(1, "On the delivered version of this answer, reviewers later passed it.", task_id="t1",
-                        role="system", system_type="acceptance_late_settlement",
-                        progress_meta={"card_row": "reviews", "card_row_id": "acceptance-late:rk", "late_evidence": EVIDENCE})
-    chat, = [row for row in frames if row.get("type") == "chat"]
-    assert chat["card_row"] == "reviews" and chat["late_evidence"] == EVIDENCE
+    assert "late_evidence" not in rows["Open delegated execution: run-x."], "only the stored late row carries the pointer"
 
 
 def test_the_gateway_contract_names_the_pointer_in_both_mirrors():
@@ -596,12 +536,11 @@ def test_the_gateway_contract_names_the_pointer_in_both_mirrors():
 
 
 @pytest.mark.serial
-def test_a_notice_links_its_own_record_after_a_newer_publication_of_its_panel(tmp_path):
-    """A later collection republishes the late panel under a new applied record, while the
-    outbox keeps the FIRST notice and the record it was sent with. The task artifact route
-    resolves that record by this author's host acceptance membership (the reader the
-    notice's own ``read`` selector names); a forged or altered pointer resolves nothing."""
-    import copy
+def test_the_record_route_serves_only_this_tasks_own_old_acceptance_record(tmp_path):
+    """An old late notice keeps linking the applied record it was sent with after a newer
+    publication replaced its panel's ref: the task artifact route resolves that record by
+    this task's host acceptance membership (``task_finalization.host_acceptance_source``);
+    a forged, foreign or altered pointer resolves nothing."""
     import hashlib
     import pathlib
 
@@ -610,42 +549,30 @@ def test_a_notice_links_its_own_record_after_a_newer_publication_of_its_panel(tm
     from starlette.testclient import TestClient
 
     from ouroboros import artifacts, review_projection
-    from ouroboros.acceptance_settlement import _stored_late_settlement, enqueue_late_acceptance_settlement
     from ouroboros.gateway.tasks import api_task_artifact
-    from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor.terminal_delivery import pending_deliveries
-    from tests.test_acceptance_publication import _context
+    from ouroboros.task_results import write_task_result
 
-    ctx = _context(tmp_path)
-    write_task_result(tmp_path, "applied", "completed", result="The delivered answer.")
     run = _run(actors=[actor for actor in _run()["actors"] if actor["operation_state"] == "settled"],
                request={"surface": "task_acceptance", "subject": "answer A", "retry_key": "rk", "task_id": "applied"})
 
-    def collect(settled_at, revision, status):
-        # Each collector stamps its own settlement time on the same settled wave.
-        late = {"note": "On the delivered version of this answer, reviewers later passed it.",
-                "settled_at": settled_at, "reviewed_subject": {"retry_key": "rk", "panel_id": "panel_1"}}
-        trace = {"review_runs": [{**copy.deepcopy(run), "late_settlement": late}],
-                 "_acceptance_publication_revision": revision}
-        panel = _stored_late_settlement(review_projection.publish_acceptance_checkpoint(ctx, trace),
-                                        trace["review_runs"][0])
-        row = load_task_result(tmp_path, "applied")
-        assert enqueue_late_acceptance_settlement(ctx, "applied", "rk", row, panel) == status
-        return panel
-
-    first = collect("2026-09-28T00:06:00+00:00", 0, "announced")
-    # The outbox still owes the first notice, so the republication queues no second one.
-    collect("2026-09-28T00:06:01+00:00", 1, "published")
-    current = load_task_result(tmp_path, "applied")["review_projection"]["panels"][0]
-    notice, = pending_deliveries(tmp_path)
-    ref = notice["progress_meta"]["late_evidence"]["source_ref"]
-    assert ref == first["applied_source_ref"] != current["applied_source_ref"]
-    assert current["late_settlement"] == first["late_settlement"]
-
-    def foreign(record):
+    def record(value):
         return artifacts.store_actor_source_bytes(tmp_path, "applied", category="context_checkpoints",
-                                                  source_id="acceptance", data=json.dumps(record).encode(),
-                                                  extension="json")["path"]
+                                                  source_id="acceptance", data=json.dumps(value).encode(),
+                                                  extension="json")
+
+    def late(settled_at):
+        return {"note": "On the delivered version of this answer, reviewers later passed it.",
+                "settled_at": settled_at, "reviewed_subject": {"retry_key": "rk", "panel_id": "panel_1"}}
+
+    # Two stored publications of one panel, as the retired writer left them: the notice's
+    # record, then a newer one the stored panel now names.
+    ref = record({**run, "late_settlement": late("2026-09-28T00:06:00+00:00"), "publication_revision": 1})
+    newer = record({**run, "late_settlement": late("2026-09-28T00:06:01+00:00"), "publication_revision": 2})
+    assert ref["path"] != newer["path"]
+    panel_run = {**run, "late_settlement": late("2026-09-28T00:06:01+00:00"), "publication_revision": 2,
+                 "applied_source_ref": newer, "applied_source_status": "available"}
+    write_task_result(tmp_path, "applied", "completed", result="The delivered answer.",
+                      review_projection=review_projection.compact_review_projection([panel_run]))
 
     app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
     app.state.drive_root = tmp_path
@@ -654,16 +581,16 @@ def test_a_notice_links_its_own_record_after_a_newer_publication_of_its_panel(tm
             return client.get(f"/api/tasks/applied/artifacts/{name or pathlib.PurePosixPath(path).name}",
                               params={"source": path})
 
-        for published in (ref, current["applied_source_ref"]):
+        for published in (ref, newer):
             response = get(published["path"])
             assert response.status_code == 200, published
             assert hashlib.sha256(response.content).hexdigest() == published["sha256"]
             assert len(response.content) == published["size"]
         forged = [
             f"source_handles/context_checkpoints/acceptance-{'0' * 64}.json",  # no such record
-            foreign({"authority": "worker", "request": {"surface": "task_acceptance", "task_id": "applied"}}),
-            foreign({**run, "request": {**run["request"], "task_id": "another-task"}}),
-            foreign({**run, "request": {**run["request"], "surface": "plan_review"}}),
+            record({"authority": "worker", "request": {"surface": "task_acceptance", "task_id": "applied"}})["path"],
+            record({**run, "request": {**run["request"], "task_id": "another-task"}})["path"],
+            record({**run, "request": {**run["request"], "surface": "plan_review"}})["path"],
             f"source_handles/context_checkpoints/../context_checkpoints/{pathlib.PurePosixPath(ref['path']).name}",
         ]
         for path in forged:
@@ -672,3 +599,42 @@ def test_a_notice_links_its_own_record_after_a_newer_publication_of_its_panel(tm
         stored = artifacts.task_artifact_dir_path(tmp_path, "applied") / ref["path"]
         stored.write_bytes(stored.read_bytes().replace(b"answer A", b"answer B"))
         assert get(ref["path"]).status_code == 404, "altered bytes fail their digest"
+
+
+def test_an_old_records_debt_pinned_source_still_downloads_and_stays_exact(tmp_path):
+    """An older task's acceptance debt pinned the exact subject it owed a historical review of. That
+    machine is gone, but its published link keeps serving those exact bytes (read-only history), and
+    the model's digest reader keeps projecting them; altered bytes or a foreign task resolve nothing."""
+    import hashlib
+    import pathlib
+
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import artifacts
+    from ouroboros.gateway.tasks import api_task_artifact
+    from ouroboros.task_finalization import review_source_projection
+    from ouroboros.task_results import write_task_result
+
+    ref = artifacts.store_actor_source_bytes(tmp_path, "indebted", category="context_checkpoints",
+                                             source_id="acceptance-subject", data=b"the owed subject text",
+                                             extension="txt")
+    write_task_result(tmp_path, "indebted", "completed", result="The delivered answer.",
+                      acceptance_debt={"source_ref": ref, "status": "owed"})
+
+    app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
+    app.state.drive_root = tmp_path
+    with TestClient(app) as client:
+        response = client.get(f"/api/tasks/indebted/artifacts/{pathlib.PurePosixPath(ref['path']).name}",
+                              params={"source": ref["path"]})
+        assert response.status_code == 200 and hashlib.sha256(response.content).hexdigest() == ref["sha256"]
+        owed = "the owed subject text"
+        projected = review_source_projection(tmp_path, "indebted", ref["sha256"], 0, len(owed))
+        assert projected.get("text") == owed and projected["source_ref"] == ref, projected
+        assert review_source_projection(tmp_path, "other", ref["sha256"], 0, len(owed))["status"] == "unavailable"
+        stored = artifacts.task_artifact_dir_path(tmp_path, "indebted") / ref["path"]
+        stored.write_bytes(b"another text")
+        assert client.get(f"/api/tasks/indebted/artifacts/{pathlib.PurePosixPath(ref['path']).name}",
+                          params={"source": ref["path"]}).status_code == 404, "altered bytes fail their digest"
+        assert review_source_projection(tmp_path, "indebted", ref["sha256"], 0, len(owed))["status"] == "unavailable"

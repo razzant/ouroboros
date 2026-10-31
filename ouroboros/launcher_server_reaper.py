@@ -1,4 +1,7 @@
-"""Launcher-owned reaping of same-install stray `server.py` processes.
+"""Launcher process cleanup: startup stray discovery and final recorded-owner teardown.
+
+``kill_runtime_orphans`` is the close/Panic finalizer for recorded server and
+companions. The discovery sweep described below runs only at startup.
 
 A launcher that holds the single-instance pid lock is, by that lock, the only actor entitled to run
 a managed server against this data directory — so any OTHER process running THIS install's
@@ -29,6 +32,7 @@ state files that the single-instance lock exists to protect, with or without thi
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
@@ -59,6 +63,40 @@ _SETTLE_SEC = 0.05
 _CONFIRM_DEADLINE_SEC = 1.0
 
 
+def kill_runtime_orphans(data_dir, cleanup_recorded_server, *, reason: str, log) -> None:
+    """Final cleanup shared by close/Panic, separate from the startup stray sweep.
+
+    Journal the trigger here: stop_agent usually consumed the server row already.
+    Main/Host Service listeners die with their server; companion PIDs/ports remain
+    the disclosed legacy exception. Boot-time Quit never calls this cleanup.
+    """
+    log.info("Tearing down runtime orphans (%s)", reason)
+    cleanup_recorded_server(reason)
+    try:
+        companions = json.loads((data_dir / "state" / "extension_companions.json").read_text(encoding="utf-8"))
+        if isinstance(companions, dict):
+            for item in companions.values():
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    _pl.force_kill_pid(int(item.get("pid") or 0))
+                except (TypeError, ValueError, ProcessLookupError, PermissionError, OSError):
+                    pass
+                for companion_port in item.get("ports") or []:
+                    try:
+                        _pl.kill_process_on_port(int(companion_port))
+                    except (TypeError, ValueError, OSError):
+                        pass
+    except Exception:
+        pass
+    for child in __import__("multiprocessing").active_children():
+        try:
+            _pl.force_kill_pid(child.pid)
+            log.info("Killed orphaned child pid=%d", child.pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 def _path_forms(base, leaf: str = "") -> Set[str]:
     """The literal and the symlink-resolved spelling of a path. A command line or an environment
     carries whatever spelling the launcher passed, which `resolve()` may not reproduce (``/var`` vs
@@ -82,9 +120,9 @@ def _candidate_commands() -> "Optional[dict]":
     the real filter. ``-u <uid>``: other accounts run their own legitimate installs and are
     unsignallable anyway. ``-ww``: BSD ps truncates otherwise and the matcher needs exact argv."""
     try:
-        out = subprocess.run(
+        out = subprocess.run(  # POSIX-only here; the launcher's spawns ask for no window anyway
             ["ps", "-ww", "-u", str(os.getuid()), "-o", "pid=,command="],
-            capture_output=True, text=True, timeout=5,
+            **_pl.merge_hidden_kwargs({"capture_output": True, "text": True, "timeout": 5}),
         )
     except Exception:
         return None

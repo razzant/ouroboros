@@ -1,18 +1,32 @@
 // Chat timeline ordering, keyed item reconciliation and reading anchors.
 // These helpers own no history source, navigation or task authority.
 import { compareHistoryPosition } from './chat_history_replay.js';
+import { foldWaitRow } from './task_checkpoints.js';
+import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
+import { showToast } from './toast.js';
+import { tr } from './i18n.js';
 
 const nodePosition = node => node?.dataset?.historySource
     ? { source: node.dataset.historySource, offset: Number(node.dataset.historyOffset) } : null;
 
 // A feed holding only chrome has no conversation: the history control, the typing
-// indicator, Main's empty-state greeting and an ephemeral notice (the reconnect
-// banner). The loading state and the greeting share this one rule.
+// indicator, Main's empty-state greeting and an ephemeral notice (Restart
+// complete). The loading state and the greeting share this one rule.
 export const feedIsEmpty = messages => Array.from(messages.children).every(node =>
     node.classList.contains('chat-load-older') || node.classList.contains('typing-bubble')
     || node.classList.contains('chat-empty-welcome') || node.dataset.ephemeral === '1');
+
+const GAP_NOTE = 'Some saved history is not loaded. Shown messages may have gaps.';
+const gapNoticeDocs = new WeakSet();
+const defaultGapNotice = (text, messages) => {
+    if (typeof globalThis.document?.getElementById === 'function' && typeof globalThis.document?.createElement === 'function'
+        && globalThis.document?.body?.appendChild) {
+        return showToast(text, 'info', { haptic: false, dismissLabel: 'Dismiss history notice',
+            host: messages.closest('.page, .chat-instance-panel') });
+    }
+};
 
 /**
  * History chrome only; the chat instance retains navigation and reading state.
@@ -25,23 +39,39 @@ export const feedIsEmpty = messages => Array.from(messages.children).every(node 
  * positive gesture at an unambiguous island edge, and the floating scroll-to-latest
  * button remains the only return-to-present control.
  */
-export function createHistoryControls(messagesDiv, statusHost = null) {
+export function createHistoryControls(messagesDiv, statusHost = null, {
+    onGapNotice = defaultGapNotice, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+} = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');
     root.className = 'chat-load-older';
     const button = doc.createElement('button');
     button.type = 'button';
-    button.className = 'chat-load-older-btn';
+    button.className = 'chat-load-older-btn ui-hit-area';
     const note = doc.createElement('span');
     note.className = 'chat-load-older-note';
-    root.append(button, note);
+    const gapNote = doc.createElement('span');
+    gapNote.className = 'chat-history-gap';
+    gapNote.hidden = true;
+    root.append(button, note, gapNote);
     // The recent-window read is the chat's own request, not a pager page, so its
     // in-flight and failed states are carried here and drawn by the same control
     // (issue #1102: an empty feed under a green header read as a dead app, and a
     // failed read looked identical to a slow one).
     let recent = null;
+    let notice = null;
+    let pendingNotice = false;
+    // Hidden hydration still draws the durable edge note. Only a showing room
+    // spends the document's announcement; showing it never reads history again.
+    function showNotice() {
+        if (!pendingNotice || doc.hidden || !isVisible() || gapNoticeDocs.has(doc) || typeof onGapNotice !== 'function') return;
+        gapNoticeDocs.add(doc);
+        notice = onGapNotice(tr('history.gap', GAP_NOTE), messagesDiv);
+    }
     return {
         olderButton: button,
+        showNotice,
+        destroy() { pendingNotice = false; notice?.dispose?.(); notice = null; },
         // Only an EMPTY feed (or a failure already on screen) gets the loading
         // state: an ordinary refresh never puts chrome over a painted transcript.
         // Returns whether there is a state to draw, so a painted feed costs nothing.
@@ -60,23 +90,34 @@ export function createHistoryControls(messagesDiv, statusHost = null) {
             const loading = hydrating || Boolean(snapshot.loading);
             const changedView = error?.body?.reason_code === 'history_view_changed';
             const incomplete = coverage.gaps === true;
+            pendingNotice = snapshot.initialized && !migrating && !error
+                && !(hydrating && feedIsEmpty(messagesDiv)) && incomplete;
+            showNotice();
+            const gapText = incomplete ? tr('history.gap', GAP_NOTE) : '';
             let noteText = migrating ? 'Saved history is being upgraded…' : error ? 'Some saved history could not be loaded.'
                 : hydrating && feedIsEmpty(messagesDiv) ? ''
-                : incomplete ? 'Some saved history is not loaded. Shown messages may have gaps.'
+                : incomplete ? gapText
                 : !hydrating && coverage.complete ? 'Beginning of saved history' : '';
-            if (approximate) noteText += `${noteText ? ' ' : ''}Saved position could not be restored exactly.`;
-            // One note moves into persistent chrome when it describes the reading
-            // window; the ordinary beginning marker belongs at the feed's start.
-            const host = statusHost && noteText && (error || incomplete || approximate) ? statusHost : root;
+            if (approximate) noteText = `${error ? `${noteText} ` : ''}Saved position could not be restored exactly.`;
+            // Failure and approximate restoration move into persistent chrome when it describes the reading
+            // window; the gap explanation and ordinary beginning marker belong at the feed's start.
+            const host = statusHost && noteText && Boolean(error || approximate) ? statusHost : root;
             if (note.parentNode !== host) host.appendChild(note);
             note.classList.toggle('chat-history-status', host === statusHost);
-            const buttonHidden = migrating || (!error && !snapshot.canOlder && !(coverage.horizonGap && !snapshot.canNewer) && !hydrating);
+            // A concurrent read/position problem must not consume the persistent gap explanation.
+            const separateGap = incomplete && Boolean(error || approximate)
+                && !(hydrating && feedIsEmpty(messagesDiv));
+            // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
+            // began ends at its older end: ↓ is the way to the present.
+            const buttonHidden = migrating || (!error && !snapshot.canOlder
+                && !(coverage.horizonGap && !snapshot.away) && !hydrating);
             const fields = [
                 [button, { textContent: hydrating ? 'Loading saved history…' : loading ? 'Loading…'
                     : changedView ? 'Refresh history' : error ? 'Retry loading messages' : 'Load more history',
                     disabled: loading, hidden: buttonHidden }],
                 [note, { textContent: noteText, hidden: !noteText }],
-                [root, { hidden: buttonHidden && (host !== root || !noteText) }],
+                [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
+                [root, { hidden: buttonHidden && (host !== root || !noteText) && !separateGap }],
             ];
             for (const [node, values] of fields) {
                 for (const [key, value] of Object.entries(values)) if (node[key] !== value) node[key] = value;
@@ -195,7 +236,7 @@ export function createHistoryResyncScheduler({
 /**
  * Insert a top-level timeline node chronologically while keeping typing last.
  * Equal timestamps preserve arrival order; timestamp-free nodes append.
- * (Moved verbatim from chat.js — that module sits at its byte ceiling.)
+ * (Moved from chat.js — that module sits at its byte ceiling.)
  */
 // A focused text control keeps its own caret; Chromium mirrors it into the
 // document Selection, so clearing and rebuilding document ranges around a
@@ -223,12 +264,27 @@ function restoreTextControlCaret(active, caret) {
     }
 }
 
-export function insertTimelineNode(messages, node, typing = null) {
+/** The focus, caret and selection a move of mounted nodes would lose, kept to give back after it. Reading the
+ * selection lays the page out in Chromium: a write that moves nothing keeps nothing. */
+export function keepSelection(doc) {
+    const active = doc?.activeElement;
+    const caret = textControlCaret(active);
+    const selection = caret ? null : doc?.getSelection?.();
+    const ranges = Array.from({ length: selection?.rangeCount || 0 }, (_, index) => {
+        const range = selection.getRangeAt(index);
+        return [range.startContainer, range.startOffset, range.endContainer, range.endOffset];
+    });
+    return { active, caret, selection, ranges };
+}
+
+export function insertTimelineNode(messages, node, typing = null, kept = null) {
     const rawNodeTs = node?.dataset?.ts;
     const nodeTs = rawNodeTs == null || rawNodeTs === '' ? NaN : Number(rawNodeTs);
     let before = null;
     if (Number.isFinite(nodeTs)) {
-        for (const child of Array.from(messages?.children || [])) {
+        const children = messages?.children || [];
+        for (let index = 0; index < children.length; index += 1) {
+            const child = children[index];
             if (child === node || child === typing) continue;
             const rawChildTs = child?.dataset?.ts;
             const childTs = rawChildTs == null || rawChildTs === '' ? NaN : Number(rawChildTs);
@@ -242,13 +298,9 @@ export function insertTimelineNode(messages, node, typing = null) {
     const target = before || (typing?.parentNode === messages ? typing : null);
     if (node.parentNode === messages && node.nextElementSibling === target) return { before };
     const doc = messages.ownerDocument;
-    const active = doc?.activeElement;
-    const caret = textControlCaret(active);
-    const selection = caret ? null : doc?.getSelection?.();
-    const ranges = Array.from({ length: selection?.rangeCount || 0 }, (_, index) => {
-        const range = selection.getRangeAt(index);
-        return [range.startContainer, range.startOffset, range.endContainer, range.endOffset];
-    });
+    // Only a mounted row that moves can lose the focus, caret or selection in it; a new row is just inserted. A page
+    // that moves many rows passes the selection it read once (`kept`).
+    const { active, caret, selection, ranges } = node.isConnected ? kept || keepSelection(doc) : { ranges: [] };
     if (target) messages.insertBefore(node, target);
     else messages.appendChild(node);
     if (active && node.contains?.(active) && doc.activeElement !== active) active.focus({ preventScroll: true });
@@ -275,8 +327,9 @@ export function captureLiveCardProjection(record) {
         record.phaseEl?.hidden, record.phaseEl?.className, record.phaseEl?.textContent,
         record.titleEl?.textContent, record.activityEl?.textContent,
         record.metaEl?.innerHTML, record.countEl?.hidden, record.countEl?.textContent,
-        record.inlineTypingEl?.style?.display, record.toggleEl?.textContent,
-        record.summaryButtonEl?.getAttribute?.('aria-expanded'),
+        record.summaryButtonEl?.querySelector?.('[data-live-when]')?.textContent,
+        record.phaseEl?.dataset?.chipTone, record.toggleEl?.textContent,
+        record.disclosureEl?.getAttribute?.('aria-expanded'),
         root.querySelector?.('.chat-live-actions')?.innerHTML || '',
     ];
 }
@@ -287,14 +340,17 @@ export function liveCardProjectionChanged(before, record) {
     return before.some((value, index) => value !== after[index]);
 }
 
+// The expanded state belongs to the card's one disclosure, the "Details" button; the summary band
+// above it is reading content and states nothing (a Main portal hides the button: work_portal.js).
+// Its word stays; `aria-expanded` and the turned chevron say open or closed.
 export function syncLiveCardToggle(record) {
     if (!record?.toggleEl) return;
     const expanded = record.root.dataset.expanded === '1';
-    const text = expanded ? 'Hide details' : 'Show details';
+    const text = 'Details';
     const ariaExpanded = expanded ? 'true' : 'false';
     if (record.toggleEl.textContent !== text) record.toggleEl.textContent = text;
-    if (record.summaryButtonEl?.getAttribute('aria-expanded') !== ariaExpanded) {
-        record.summaryButtonEl?.setAttribute('aria-expanded', ariaExpanded);
+    if (record.disclosureEl && record.disclosureEl.getAttribute('aria-expanded') !== ariaExpanded) {
+        record.disclosureEl.setAttribute('aria-expanded', ariaExpanded);
     }
 }
 
@@ -310,6 +366,16 @@ function timelineItemForAnchor(record, anchor) {
     if (anchor.lineHistoryId) return record.items.find(item => item.historyId === anchor.lineHistoryId) || null;
     if (anchor.lineLifecycleKey) return record.items.find(item => item.dedupeKey === anchor.lineLifecycleKey) || null;
     return record.items.find(item => item.lineKey === anchor.lineKey) || null;
+}
+
+/** A card timeline's scroll before a write: whether it rests at its end, where it is, its newest line. A timeline shows
+ * only while its card is expanded or its episode open (style.css `.chat-live-timeline`); hidden, it shows no scroll, focus
+ * or selection to keep (null: a selection left inside it is not restored), and reading its box would lay out a row
+ * that sleeps (chat_row_sleep.js) on its own. */
+export function timelineScroll(record) {
+    const el = record.timelineEl;
+    if (record.root?.dataset?.expanded !== '1' && !el.parentElement?.open) return null;
+    return { pinned: el.scrollHeight - el.scrollTop - el.clientHeight <= 24, top: el.scrollTop, newest: el.lastElementChild };
 }
 
 export function createLiveCardTimelineRenderer({ withStableViewport, buildTimelineItemHtml, isReplayActive = () => false }) {
@@ -364,22 +430,20 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
         return wrapper.firstElementChild;
     };
-    const render = (record) => {
+    // Where a timeline is scrolled before a write changes it, and the selection it keeps. A caller that changes many
+    // cards measures theirs at once (`render(record, { scroll, kept })`: a page and its release); a timeline whose
+    // scroll an earlier write of this batch still owes keeps the state that write read.
+    const owed = new WeakMap();
+    const render = (record, before = null) => {
         if (defer(record)) return false;
         record._timelineDirty = false;
         reconcileDelegatedItems(record); // replay, page release and reorders re-project per seq
         return withStableViewport(() => {
             const el = record.timelineEl;
-            const pinned = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
-            const prevTop = el.scrollTop, newest = el.lastElementChild;
+            const at = owed.get(el) || before || { scroll: timelineScroll(record) };
+            const { scroll } = at;
             const byKey = new Map(Array.from(el.children).map((node) => [node.dataset.liveLineKey, node]));
-            const active = el.ownerDocument?.activeElement;
-            const caret = textControlCaret(active);
-            const selection = caret ? null : el.ownerDocument?.getSelection?.();
-            const ranges = Array.from({ length: selection?.rangeCount || 0 }, (_, index) => {
-                const range = selection.getRangeAt(index);
-                return [range.startContainer, range.startOffset, range.endContainer, range.endOffset];
-            });
+            const { active, caret, selection, ranges } = scroll ? at.kept || keepSelection(el.ownerDocument) : { ranges: [] };
             let changed = false;
             let moved = false;
             record.items.forEach((item, index) => {
@@ -416,8 +480,15 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
                 }
             }
             // Only a new newest line keeps a pinned timeline at its end; a disclosure
-            // or late full output keeps the line being read where it is.
-            if (changed) el.scrollTop = pinned && el.lastElementChild !== newest ? el.scrollHeight : prevTop;
+            // or late full output keeps the line being read where it is. The scroll is
+            // written once the batch's writes are done, with every other card's (layout_batch.js).
+            if (changed && scroll) {
+                owed.set(el, at);
+                measure(() => {
+                    owed.delete(el);
+                    return scroll.pinned && el.lastElementChild !== scroll.newest ? el.scrollHeight : scroll.top;
+                }, (top) => { el.scrollTop = top; });
+            }
             return changed && Boolean(el.isConnected);
         });
     };
@@ -466,11 +537,21 @@ const CARD_HEADER = [
 ];
 
 // The feed's bounded, separately scrolling boxes: a card timeline, a fetched
-// full output, a Review attempt detail. Each clips what it holds.
+// full output, a Reviews group's Record facts. Each clips what it holds.
 const BOUNDED_BOX = '[data-live-timeline], .chat-live-line-body-full, [data-review-attempt-detail]';
 
+/** An explicit exact-line landing scrolls every clipping owner before the feed. */
+export function revealTimelineNode(node, feed, clearance) {
+    for (let box = node.parentElement; box && box !== feed; box = box.parentElement) {
+        if (box.matches?.(BOUNDED_BOX)) {
+            box.scrollTop += node.getBoundingClientRect().top - box.getBoundingClientRect().top;
+        }
+    }
+    feed.scrollTop += node.getBoundingClientRect().top - feed.getBoundingClientRect().top - clearance;
+}
+
 // A node's own bounded reading box: an expanded line's fetched full output or
-// a Review attempt detail. The owner card timeline is found from the node.
+// a Reviews group's Record facts. The owner card timeline is found from the node.
 function innerBox(node) {
     if (node?.matches?.('[data-review-attempt-detail]')) return node;
     return node?.matches?.('.chat-live-line') ? node.querySelector?.(':scope > .chat-live-line-body-full') || null : null;
@@ -498,6 +579,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             return rect.bottom > messagesRect.top && rect.top < messagesRect.bottom;
         }) || null;
         if (!topNode) return null;
+        const firstShown = nodes.indexOf(topNode);
 
         // A live-card can span several screens while the reader is inside a
         // child summary or timeline line. Preserve that visible boundary, not
@@ -519,7 +601,6 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
                 '.chat-live-actions',
                 '.chat-live-line',
                 '[data-review-section]',
-                '[data-review-section-toggle]',
                 '[data-review-hydrate-status]',
                 '[data-review-group]',
                 '[data-review-attempt]',
@@ -582,7 +663,15 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             }
             return top < bottom;
         };
-        const reading = Array.from(messagesDiv.querySelectorAll?.('.chat-live-line-body-full, [data-review-attempt-detail]') || [])
+        // Such a box sits in its row's flow, so only the rows reaching into the view can hold one: they are searched,
+        // not the whole feed on every capture.
+        const shownRows = [];
+        for (let index = firstShown; index < nodes.length; index += 1) {
+            const rect = nodes[index].getBoundingClientRect();
+            if (rect.top >= messagesRect.bottom) break;
+            if (rect.bottom > messagesRect.top) shownRows.push(nodes[index]);
+        }
+        const reading = shownRows.flatMap(row => Array.from(row.querySelectorAll?.('.chat-live-line-body-full, [data-review-attempt-detail]') || []))
             .map(box => ({ box, rect: box.getBoundingClientRect() }))
             .filter(({ box, rect }) => box.getClientRects().length && shown(box, rect)
                 && (box.scrollTop > 0 || rect.top < messagesRect.top))
@@ -770,6 +859,10 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
 export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKey, headline, inPlaceByKey }) {
     // A delegated observation is its own source record; its projection is per seq.
     if (summary.activity) return appendDelegatedItem(record, summary, { ts, rawTs, syntheticKey, headline });
+    if (summary.waitEpisode) {
+        const { changed, index } = foldWaitRow(record, summary, { ts, sourceTs: rawTs });
+        return { timelineUpdate: !changed ? 'duplicate-skip' : index === -1 ? 'append' : 'patch-at', patchIndex: index };
+    }
     let timelineUpdate = 'none', patchIndex = -1;
     const lastIdx = record.items.length - 1;
     // Full-array dedup keeps routine history syncs from growing Notes.

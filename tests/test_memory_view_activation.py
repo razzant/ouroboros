@@ -47,7 +47,8 @@ def test_a_capture_activates_the_chronicle_exactly_once_and_imports_the_legacy_m
     assert calls == []  # choosing the spec activates nothing
     snapshot = mv.capture_memory_view(tmp_path, MAIN_TASK, spec)
     assert len(calls) == 1 and calls[0] == {}  # one non-waiting activation per capture
-    assert snapshot.active and snapshot.store_status == {"state": "active"}
+    # The first capture after activation reads its open rows live: their stored facts are the job's to fill.
+    assert snapshot.active and snapshot.store_status == {"state": "active", "tail_facts": "filling"}
     assert snapshot.frontier == {"status": "exact", "pos": 10}
     assert ChronicleStore(tmp_path).activation()["kind"] == "activation"
     # The next capture finds the receipt (the fast path) and still activates once.
@@ -68,7 +69,7 @@ def test_an_import_not_completed_leaves_a_view_with_its_reason_and_reads_no_chai
         raise AssertionError("the chain is not read before the import has completed")
 
     monkeypatch.setattr(chat_chain, "iter_rows", no_chain)
-    monkeypatch.setattr(chat_chain, "generation_signatures", no_chain)
+    monkeypatch.setattr(chat_chain, "iter_room_rows", no_chain)
     snapshot = mv.capture_memory_view(tmp_path, MAIN_TASK, spec)
     assert not snapshot.active
     assert snapshot.store_status == {"state": receipt["kind"], "reason": receipt["reason"]}

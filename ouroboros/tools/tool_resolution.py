@@ -9,8 +9,7 @@ from __future__ import annotations
 import inspect
 import os
 import pathlib
-
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from typing import TYPE_CHECKING
 
@@ -371,8 +370,7 @@ _IGNORE_ROOT_ARG_TOOLS: frozenset[str] = frozenset()
 
 
 _GENERIC_VCS_TARGET_TOOLS = frozenset({
-    "vcs_status",
-    "vcs_diff",
+    "vcs_read",
     "vcs_pull_ff",
     "vcs_restore",
     "vcs_revert",
@@ -411,6 +409,8 @@ _VERIFY_RUN_KINDS = frozenset({
 
 
 def _target_binding_operation(name: str, args: dict[str, Any]) -> str | None:
+    if name == "review_change" and str(args.get("subject") or "").strip() == "result":
+        return None  # a result review reads this task's own result, never a workspace target
     operation = _TARGET_BINDING_OPERATIONS.get(name)
     if operation is not None:
         return operation
@@ -562,6 +562,37 @@ def _build_builtin_target_binding(ctx: Any, name: str, args: dict[str, Any]) -> 
             skill_name=skill_name,
         )
 
+    # Repository selection is a dispatch fact, shared by the handler and every
+    # guard. A path filter is resolved inside that selected repository; it must
+    # never choose the repository by itself.
+    if name == "vcs_read":
+        repository = str(args.get("repository") or ".")
+        selected = _one(repository)
+        repo = selected.target_path
+        if not repo.is_dir() or (args.get("repository") and not (repo / ".git").exists()):
+            raise ValueError("repository must name a Git worktree root inside the selected root")
+        path = str(args.get("path") or "")
+        if path:
+            from ouroboros.tools.vcs_read import repository_entry
+
+            normalized_path = repository_entry(
+                ctx, root, repo, path, worktree_spelling=str(args.get("action") or "") in {"status", "diff"})
+            parts = pathlib.PurePosixPath(normalized_path).parts
+            if (pathlib.PurePosixPath(normalized_path).is_absolute() or ".." in parts
+                    or normalized_path.startswith(":") or not normalized_path.strip()):
+                raise ValueError("path must be a literal repository-relative path")
+            # The target is the entry Git reads: matchers that resolve still see a symlink's
+            # current referent, ancestry checks see the entry; confinement uses the referent.
+            target = pathlib.Path(os.path.normpath(repo / normalized_path))
+            if not target.resolve(strict=False).is_relative_to(repo):
+                raise ValueError("path escapes the selected repository")
+        else:
+            target = repo
+        # Preserve the original resource root for Presence grants and relative
+        # protected-artifact policy paths. Git executes only in the selected
+        # worktree, carried separately from those policy coordinates.
+        return replace(selected, target_path=target, repository_path=repo)
+
     if name == "write_file" and args.get("files"):
         return tuple(
             _one(str(item.get("path") or ""))
@@ -676,6 +707,11 @@ def delegate_payload_binding_refusal(ctx: Any, exc: Exception) -> ToolResult:
                  "workspace delegation.", definitely_unrun=True)
 
 
+_VCS_READ_ROOTS = (" vcs_read itself takes root='active_workspace' or 'system_repo' only. A delegated run's private copy "
+                   "is read with read_file/list_files by its path; after the run, its saved result through the run "
+                   "result's patch_read/manifest_read, or vcs_read(action='diff', base=<baseline_id>, head=<result_commit>).")
+
+
 def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResult:
     detail = str(exc)
     if detail.startswith("SKILL_REDIRECT_BLOCKED:"):
@@ -701,8 +737,7 @@ def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResul
         "edit_text": "EDIT_TEXT_ERROR",
         "edit_batch": "EDIT_BATCH_ERROR",
         "apply_patch": "APPLY_PATCH_ERROR",
-        "vcs_status": "GIT_ERROR",
-        "vcs_diff": "GIT_ERROR",
+        "vcs_read": "GIT_ERROR",
         "vcs_pull_ff": "PULL_ERROR",
         "vcs_restore": "RESTORE_ERROR",
         "vcs_revert": "REVERT_ERROR",
@@ -717,8 +752,8 @@ def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResul
     text = f"⚠️ {prefixes.get(name, 'TOOL_ERROR')}: {type(exc).__name__}: {detail}"
     if name == "query_code":
         return ToolResult(status="error", code="TOOL_ARG_ERROR", text=text)
-    if name in {"vcs_status", "vcs_diff"}:
-        return ToolResult(status="ok", code="GIT_ERROR", text=text)
+    if name == "vcs_read":  # the profile's vcs roots above are wider than this reader's own two
+        return ToolResult(status="ok", code="GIT_ERROR", text=text + _VCS_READ_ROOTS)
     if name not in prefixes:
         return ToolResult(status="error", code="TOOL_ERROR", text=text)
     return text
@@ -785,6 +820,9 @@ def _resolve_python_predispatch(
                 "⚠️ PYTHON_INTERPRETER_UNAVAILABLE: Ouroboros could not prove "
                 "the target interpreter for this launch surface "
                 f"({python_resolution.error_reason}). The process was not started."
+                + (" The skill's Python packages need their own environment: toggle_skill enabled=true re-points "
+                   "or reinstalls it; an explicitly named interpreter runs as written."
+                   if python_resolution.error_reason == "skill_env_python_unavailable" else "")
             ),
             meta={"reason": python_resolution.error_reason},
         )

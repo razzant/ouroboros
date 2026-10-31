@@ -528,33 +528,55 @@ def test_recovery_cas_loser_requires_durable_accounting_before_whole_ack(
             return txn.attempt(wire.operation[0])
 
     transition = usage._transition
-    raced, transitions = [], []
-    worker_waiting, release_worker, worker_updated = (threading.Event() for _ in range(3))
-    generated, ack_rows = [], []
+    raced, transitions, race_errors, late_write = [], [], [], []
+    worker_waiting, release_worker, late_write_done, parked = (threading.Event() for _ in range(4))
+    outcome, ack_rows = {}, []
+
+    def checked(ok, message):
+        # The product's accounting may catch an assertion raised here; the test body reads every miss (#1937).
+        if not ok:
+            race_errors.append(message)
+            raise AssertionError(message)
 
     def late_worker_then_transition(reservation, state, **fields):
         transitions.append((state, threading.current_thread().name))
         if state == "unresolved":
             worker_waiting.set()
-            assert release_worker.wait(5), "recovery did not release the late worker"
+            parked.set()
+            checked(release_worker.wait(5), "recovery did not release the late worker")
             try:
-                return transition(reservation, state, **fields)
+                result = transition(reservation, state, **fields)
+                late_write.append("written")  # only once the real write returned
+                return result
+            except BaseException as exc:
+                late_write.append(exc)
+                raise
             finally:
-                worker_updated.set()
+                late_write_done.set()
         # Real ledger writes deterministically occupy the gap between recovery's
         # initial indexed read and its revision-CAS settlement/release.
         if not raced and fields.get("_expected_revision") is not None:
             raced.append(fields["_expected_revision"])
             release_worker.set()
-            assert worker_updated.wait(5), "late worker did not update the ledger"
+            checked(late_write_done.wait(5) and late_write == ["written"],
+                    f"late worker did not update the ledger: {late_write!r}")
             if racing_state == "abandoned":
                 usage.terminalize_abandoned_attempt(reservation, reason="late_owner_terminal")
             elif racing_state == "terminal" and receipt == "released":
-                assert release_pre_dispatch_attempt(reservation, ProviderNotDispatched("never started"))
+                checked(release_pre_dispatch_attempt(reservation, ProviderNotDispatched("never started")),
+                        "the racing release did not commit")
             elif racing_state == "terminal":
                 usage.settle_attempt(reservation, {"input_tokens": 10, "output_tokens": 20})
-            assert original_row()["revision"] > fields["_expected_revision"]
+            checked(original_row()["revision"] > fields["_expected_revision"], "recovery's CAS was not raced")
         return transition(reservation, state, **fields)
+
+    def run_worker():
+        try:
+            outcome["result"] = invoke(ctx)
+        except BaseException as exc:  # an early failure is named at once, not after the startup wait
+            outcome["error"] = exc
+        finally:
+            parked.set()
 
     def no_new_attempt_or_history(*args, **kwargs):
         pytest.fail("recovery must not reserve an attempt or scan usage history")
@@ -563,28 +585,32 @@ def test_recovery_cas_loser_requires_durable_accounting_before_whole_ack(
         ack_rows.append(original_row())
 
     wire.before_ack = durable_before_ack
+    # The stores' lifecycle import and the registry's imports precede the race window.
+    for root in (ctx.drive_root, ctx.budget_drive_root):
+        usage_store.migrate_from_journal(root)
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
     monkeypatch.setattr(usage, "_transition", late_worker_then_transition)
-    worker = threading.Thread(target=lambda: generated.append(invoke(ctx)), name="late-image-worker")
+    worker = threading.Thread(target=run_worker, name="late-image-worker")
     worker.start()
     try:
-        assert worker_waiting.wait(5), f"late update missing: {transitions!r}; result={generated!r}"
+        assert parked.wait(30) and worker_waiting.is_set(), f"late update missing: {transitions!r}; worker={outcome!r}"
         request_id = wire.operation[0]
         before = original_row()
         assert before["state"] == "dispatched"
-        registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
-        registry.set_context(ctx)
         # The original sender is paused before its real unresolved write, not
         # replaced by a fake settlement API or a manually fabricated ledger row.
         monkeypatch.setattr(usage, "reserve_attempt", no_new_attempt_or_history)
         attempts = usage_store.Txn.attempts
         monkeypatch.setattr(usage_store.Txn, "attempts", no_new_attempt_or_history)
+        monkeypatch.setattr(usage_store.Txn, "attempt_rows", no_new_attempt_or_history)
         monkeypatch.setattr(usage_store.Txn, "open_attempts", no_new_attempt_or_history)
         result = registry.execute_result("recover_image", {"request_id": request_id})
     finally:
         release_worker.set()
         worker.join(5)
-    assert not worker.is_alive() and len(generated) == 1
-    assert generated[0].code == "IMAGE_OUTCOME_UNKNOWN"
+    assert not worker.is_alive() and "error" not in outcome and not race_errors, (outcome, race_errors)
+    assert outcome["result"].code == "IMAGE_OUTCOME_UNKNOWN"
     facts = _summary(result.text)
     assert raced == [before["revision"]]
     assert facts["recovered"] is True and facts["operation_id"] == "op-one"

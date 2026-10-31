@@ -48,20 +48,19 @@ def _short_confirmation_window(tmp_path, monkeypatch):
 
 def test_an_unconfirmed_promote_reads_as_a_pending_admission(tmp_path, _short_confirmation_window):
     from ouroboros.task_results import load_task_result
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
     from ouroboros.tools.control_task_results import _get_task_result
 
     ctx = _promote_ctx(tmp_path, _DeadQueue())
-    out = _promote_chat_to_task(ctx, "Continue the racer", title="Racer continuation", workspace="none",
-                                predecessor_task_id="")
-    assert out.startswith("⚠️ PROMOTE_UNCONFIRMED")
+    out = _start_task(ctx, "Continue the racer", title="Racer continuation", workspace="none")
+    assert out.startswith("Accepted, waiting to start:")
     task_id = ctx.event_queue.events[0]["task_id"]
     assert f"get_task_result({task_id})" in out
 
     stub = load_task_result(tmp_path, task_id)
     assert stub["promotion_admission"]["status"] == "emitted"
     assert stub["promotion_admission"]["routing_token"] == ctx.event_queue.events[0]["routing_token"]
-    emitted_at = stub["promotion_admission"]["emitted_at"]
+    emitted_at = stub["promotion_admission"]["prepared_at"]
     assert emitted_at
 
     read = _get_task_result(ctx, task_id)
@@ -78,12 +77,12 @@ def test_a_confirmed_admission_reads_as_the_ordinary_result(tmp_path, _short_con
     """The quiet direction: once the supervisor answers, the pending sentence is
     gone and the result reads exactly as before."""
     from ouroboros.task_results import write_task_result
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
     from ouroboros.tools.control_task_results import _get_task_result
 
     ctx = _promote_ctx(tmp_path, _DeadQueue())
-    _promote_chat_to_task(ctx, "Continue the racer", title="Racer continuation",
-                          workspace="none", predecessor_task_id="")
+    _start_task(ctx, "Continue the racer", title="Racer continuation",
+                          workspace="none")
     event = ctx.event_queue.events[0]
     task_id = event["task_id"]
 
@@ -104,7 +103,7 @@ def test_a_fast_admission_leaves_no_emitted_stub_behind(tmp_path, _short_confirm
     """Guard quiet: the stub only ever initializes ABSENCE, so a supervisor that
     answered before the tool wrote sees its scheduled receipt untouched."""
     from ouroboros.task_results import load_task_result, write_task_result
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
 
     class _FastSupervisor:
         def __init__(self):
@@ -122,8 +121,7 @@ def test_a_fast_admission_leaves_no_emitted_stub_behind(tmp_path, _short_confirm
             )
 
     ctx = _promote_ctx(tmp_path, _FastSupervisor())
-    out = _promote_chat_to_task(ctx, "Build the racer", title="Racer build", workspace="none",
-                                predecessor_task_id="")
+    out = _start_task(ctx, "Build the racer", title="Racer build", workspace="none")
     assert out.startswith("OK: task")
 
     stored = load_task_result(tmp_path, ctx.event_queue.events[0]["task_id"])
@@ -136,10 +134,10 @@ def test_a_late_admission_replaces_the_stub_it_finds(tmp_path, _short_confirmati
     """The other side of the race: the admission receipt is a whole field, so an
     emitted stub written first leaves nothing in the scheduled row."""
     from ouroboros.task_results import load_task_result, write_task_result
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
 
     ctx = _promote_ctx(tmp_path, _DeadQueue())
-    _promote_chat_to_task(ctx, "Build the racer", title="Racer build", workspace="none", predecessor_task_id="")
+    _start_task(ctx, "Build the racer", title="Racer build", workspace="none")
     event = ctx.event_queue.events[0]
 
     write_task_result(
@@ -162,10 +160,10 @@ def test_the_emitted_stub_never_owns_its_own_admissions_id(tmp_path, monkeypatch
     import supervisor.queue as supervisor_queue
     import supervisor.workers as workers
     from ouroboros.task_results import write_task_result
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
 
     ctx = _promote_ctx(tmp_path, _DeadQueue())
-    _promote_chat_to_task(ctx, "Build the racer", title="Racer build", workspace="none", predecessor_task_id="")
+    _start_task(ctx, "Build the racer", title="Racer build", workspace="none")
     event = ctx.event_queue.events[0]
     task_id, token = event["task_id"], event["routing_token"]
 
@@ -205,10 +203,10 @@ def test_a_stub_is_read_around_only_by_the_token_that_wrote_it(tmp_path, monkeyp
     import supervisor.workers as workers
     from ouroboros.routing_wait import is_emitted_admission_stub, is_own_admission_stub
     from ouroboros.task_results import load_task_result
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
 
     ctx = _promote_ctx(tmp_path, _DeadQueue())
-    _promote_chat_to_task(ctx, "Build the racer", title="Racer build", workspace="none", predecessor_task_id="")
+    _start_task(ctx, "Build the racer", title="Racer build", workspace="none")
     task_id = ctx.event_queue.events[0]["task_id"]
     monkeypatch.setattr(supervisor_queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(supervisor_queue, "PENDING", [])
@@ -251,13 +249,13 @@ def test_one_runtime_limit_bounds_both_promote_confirmation_waits():
 def _emit_into(root, monkeypatch):
     """A promote emitted at a supervisor that has not answered: the stub is on disk."""
     from ouroboros.tools import control_events
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
 
     monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0.05)
     monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_POLL_SEC", 0.005)
     ctx = _promote_ctx(root, _DeadQueue())
-    out = _promote_chat_to_task(ctx, "Build the racer", title="Racer build", workspace="none", predecessor_task_id="")
-    assert out.startswith("⚠️ PROMOTE_UNCONFIRMED"), out
+    out = _start_task(ctx, "Build the racer", title="Racer build", workspace="none")
+    assert out.startswith("Accepted, waiting to start:"), out
     return ctx, ctx.event_queue.events[0]
 
 
@@ -313,12 +311,12 @@ def test_the_pending_sentence_never_forbids_a_new_promote_for_ever(tmp_path, _sh
     supervisor restart drops its in-memory queue) and a source can take minutes to
     prepare, and the row cannot tell the two apart; so the sentence gives the facts
     and hands the decision back, with neither a standing ban nor an invented cause."""
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control_routing import _start_task
     from ouroboros.tools.control_task_results import _get_task_result
 
     ctx = _promote_ctx(tmp_path, _DeadQueue())
-    _promote_chat_to_task(ctx, "Continue the racer", title="Racer continuation",
-                          workspace="none", predecessor_task_id="")
+    _start_task(ctx, "Continue the racer", title="Racer continuation",
+                          workspace="none")
     task_id = ctx.event_queue.events[0]["task_id"]
 
     read = _get_task_result(ctx, task_id)
@@ -327,4 +325,4 @@ def test_the_pending_sentence_never_forbids_a_new_promote_for_ever(tmp_path, _sh
     # Facts only: the row cannot tell a lost event from a source still being prepared,
     # so the sentence names the longest honest wait and leaves the judgement to the model.
     assert "did not land" not in read and "within seconds" not in read
-    assert "can stay pending for up to 15 minutes" in read and "NEW task id" in read
+    assert "elapsed time alone cannot prove" in read and "NEW task id" in read

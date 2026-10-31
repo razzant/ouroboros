@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Any, Optional
 
 OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
-    "send_user_message", "send_photo", "send_video", "send_file", "send_links",
+    "send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card",
 })
 
 # One class: an actor's own memory. Reading and revising what I know about my
@@ -21,19 +21,20 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # child's sets below carry it for the child's own drafts only).
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
-    "update_scratchpad", "update_identity", "chat_history",
+    "update_scratchpad", "update_identity", "update_world", "chat_history",
     "memory_read", "memory_mark",
 })
 
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    "inspect_harness", "maintain_harness",
+    "inspect_harness", "inspect_subagent", "maintain_harness",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
     "search_code", "query_code", "query_data", "plan_task",
     "run_command", "run_script",
     "start_service", "service_status", "service_logs", "stop_service",
-    "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
+    "vcs_read", "vcs_commit_reviewed", "commit_reviewed",
+    "github_read", "github_write",
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
     # One-shot deferred follow-up (W=A): core so a root task facing a typed wait
     # instant (e.g. a structurally unreachable review quorum with a known reset)
@@ -45,8 +46,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "wait_task", "wait_tasks", "get_task_result",
     # Serial addressed turns: wait for an unread mailbox entry without spending
     # model rounds (slot held, clamped to the per-call ceiling, delivers nothing).
-    "await_messages",
-    # D#7 soft-join child controls (siblings of steer_task): inspect/decide a child's fate
+    "await_messages", "continue_in_background", "pause_task", "resume_task", "continue_task",
+    # D#7 soft-join child controls (siblings of tell_task): inspect/decide a child's fate
     # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
     "cancel_task", "peek_task", "discard_child_result", "override_delegation_constraint",
     # The same family (#1196, owner Q9): a resumed parent selects each of its OWN
@@ -61,24 +62,25 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # (kept in the core envelope so the anti-freeze ephemeral turn never needs an
     # enable_tools detour to route — though initial_tool_schemas exposes the full
     # set today, this makes the coupling explicit).
-    "list_projects", "route_to_project", "promote_chat_to_task", "steer_task",
-    "ensure_project_scope",
+    "list_projects", "start_task", "tell_task",
+    "move_to_project", "close_project",
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
-    "ocr_pdf", "youtube_transcript", "extract_video_frames",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
     "generate_image", "list_image_models", "recover_image",
     *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
     "switch_model",
     "request_restart", "promote_to_stable", "prepare_self_change",
-    "preflight_review", "advisory_review", "review_change", "review_status", "task_acceptance_review",
+    "preflight_review", "advisory_review", "review_change", "review_status",
     "verify_and_record",
-    # Skill discovery and review are core authoring capabilities.
+    # Skill discovery and review are core capabilities; installing, updating and source changes
+    # load on demand (enable_tools) after a search found something worth it.
     "list_skills", "skill_review", "skill_preflight",
-    "submit_skill_to_hub",
+    "submit_skill_to_hub", "skill_search",
 })
 
 # Meta-tools: always visible alongside core tools
@@ -93,13 +95,14 @@ LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 # by explicit product decision, so this mode is not a remote website sandbox.
 LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness",
+    "inspect_subagent",
     "finish_task",
     # switch_model changes COGNITIVE POWER, not authority: a child that started on
     # the cheap lane and finds the work harder raises itself instead of failing or
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
     "read_file", "list_files", "search_code", "query_code", "query_data",
-    "vcs_status", "vcs_diff",
+    "vcs_read", "github_read",
     # Memory: a child reads, writes knowledge notes and marks in its own name (the
     # host signs both with its focus) and publishes chronicle pages and parts only as
     # drafts signed with its focus (it is not the integrating mind, so tools/chronicle.py
@@ -133,10 +136,22 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     # Bounded media projection: writes derived frames only under artifact_store/video_frames.
-    "ocr_pdf", "youtube_transcript", "extract_video_frames",
-    # Reads this child's own callable catalog (the name-miss answer points here);
-    # it grants nothing, unlike enable_tools, which stays Nano schema selection.
-    "list_available_tools", "list_image_models",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    # This child's own callable catalog (the name-miss answer points here) and the loader
+    # of a permitted schema a route's ceiling or Nano left out; neither grants a tool.
+    "list_available_tools", "enable_tools", "list_image_models",
+})
+
+# A host-minted silence diagnostic (#1376, ``ouroboros/work_diagnostics.py``) reads
+# the observed work and may request the existing lifecycle controls on that one
+# source. It writes no product, delegates nothing and discovers no extension/MCP
+# tool; inherited ceilings still intersect this set at schema and dispatch.
+TASK_DIAGNOSTIC_TOOL_NAMES: frozenset[str] = frozenset({
+    "read_file", "list_files", "search_code", "query_code", "query_data", "vcs_read",
+    "inspect_harness", "chat_history", "recent_tasks", "get_task_result", "peek_task",
+    "tree_read", "knowledge_read", "knowledge_list", "memory_read", "wait_task", "wait_tasks",
+    "await_messages", "forward_to_worker", "pause_task", "resume_task", "continue_task",
+    "finish_task", "list_available_tools", "switch_model",
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -144,8 +159,10 @@ ACTING_SUBAGENT_MODE: str = "acting_subagent"
 # Mutative ("acting") subagents may write inside their assigned write root
 # (isolated self_worktree / shared external_workspace) and run shell/services there.
 # They explicitly CANNOT commit the live body (commit_reviewed /
-# vcs_commit_reviewed), run runtime control, touch the skills lifecycle, enable
-# tools, or write identity or scratchpad (update_identity / update_scratchpad).
+# vcs_commit_reviewed), run runtime control, touch the skills lifecycle, grant
+# themselves tools (enable_tools only loads a schema they may already call), or
+# write identity, the world map or scratchpad (update_identity / update_world /
+# update_scratchpad).
 # Knowledge notes and memory marks they may write in their own name: the host
 # signs both with the child's focus. chronicle_write publishes only their drafts of
 # pages and parts, which the integrating mind accepts or rejects; a note, correction
@@ -154,13 +171,14 @@ ACTING_SUBAGENT_MODE: str = "acting_subagent"
 # explicitly granted per-child via TaskConstraint.external_tool_grants.
 ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness",
+    "inspect_subagent",
     "finish_task",
     # switch_model changes COGNITIVE POWER, not authority: a child that started on
     # the cheap lane and finds the work harder raises itself instead of failing or
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
     "read_file", "list_files", "search_code", "query_code", "query_data",
-    "vcs_status", "vcs_diff",
+    "vcs_read", "github_read",
     "write_file", "edit_text",
     "apply_patch", "edit_batch",
     "run_command", "run_script",
@@ -172,6 +190,9 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",
     "resume_child_task",
     "verify_and_record",
+    # An independent look at the assigned work, never child approval or commit.
+    # review_change admits the physical subject before freezing or dispatching.
+    "review_change",
     "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
     "chat_history",
     "tree_note", "tree_read", "override_delegation_constraint",
@@ -182,8 +203,8 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "integrate_delegated_patch",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
-    "ocr_pdf", "youtube_transcript", "extract_video_frames",
-    "list_available_tools", "list_image_models", "generate_image", "recover_image",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "list_available_tools", "enable_tools", "list_image_models", "generate_image", "recover_image",
 })
 
 def schema_selection_tools_for_context(ctx: object) -> frozenset[str]:
@@ -206,11 +227,12 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness",
+    "inspect_subagent",
     "read_file", "list_files",
     "search_code", "query_code", "query_data", "recent_tasks",
     "web_search", "chat_history",
-    "vcs_status", "vcs_diff", "service_status", "service_logs",
-    "get_task_result", "list_projects", "memory_read",
+    "vcs_read", "service_status", "service_logs",
+    "get_task_result", "list_projects", "memory_read", "search_ui_translations",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -235,7 +257,6 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "commit_reviewed",
     "vcs_commit_reviewed",
     "plan_task",
-    "task_acceptance_review",
     "preflight_review",
     "advisory_review",
     "review_change",
@@ -352,7 +373,8 @@ RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
 EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
     RESULT_VIEW_HEAD_ARG, RESULT_VIEW_TAIL_ARG,
     "max_chars", "max_lines", "start_char", "start_line",
-    "source_start_char", "source_end_char", "offset", "limit",
+    "source_start_char", "source_end_char", "offset", "limit", "tail_lines",
+    "from", "to", "start", "after_seq",  # chronicle row bounds and continuation pages
 })
 
 # Tools whose own affordance IS paging: selects the recovery WORDING of a
@@ -414,10 +436,9 @@ FOREGROUND_MUTATIVE_TOOLS: frozenset[str] = frozenset({
 # verb rides the same receipt rail (``ensure_project_scope`` moves THIS task;
 # its receipt is the Started annotation and the project pointer).
 ROUTING_VERBS: dict[str, frozenset[str]] = {
-    "promote_chat_to_task": frozenset({"promote_chat_to_task"}),
-    "route_to_project": frozenset({"promote_chat_to_task", "routing_manual_target"}),
-    "steer_task": frozenset({"steer_task"}),
-    "ensure_project_scope": frozenset({"ensure_project_scope"}),
+    "start_task": frozenset({"promote_chat_to_task"}),
+    "tell_task": frozenset({"steer_task"}),
+    "move_to_project": frozenset({"ensure_project_scope"}),
 }
 
 
@@ -439,11 +460,13 @@ def routing_action_for_tool(name: object) -> str:
 # set (``FOREGROUND_MUTATIVE_TOOLS``: publication and the file editors) joins it
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
+    "pause_task", "resume_task", "continue_task",
     "maintain_harness",
-    # starting or steering work (steer_task stays: the nanny of a running campaign)
-    "promote_chat_to_task", "schedule_subagent", "schedule_followup", "plan_task",
-    "route_to_project", "ensure_project_scope", "delegate_start", "initiate_presence",
+    # starting or steering work (tell_task stays: the nanny of a running campaign)
+    "start_task", "schedule_subagent", "schedule_followup", "plan_task",
+    "move_to_project", "close_project", "delegate_start", "initiate_presence",
     "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
+    "set_task_retention",
     # writing files, running processes, integrating patches
     "write_file", "edit_text", "apply_patch", "edit_batch",
     "generate_image", "recover_image",
@@ -457,23 +480,20 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # skill payload; an orphan capture may belong to an unrelated earlier task,
     # so a read-only-children rule alone does not cover this path
     "integrate_delegated_patch", "integrate_subagent_patch",
-    # pushes docs/evolution.json to the public dashboard through the GitHub API
+    # writes a local task artifact; Observe does not grant general file writes
     "generate_evolution_stats",
-    # the world beyond the repository: forms, skills, project notes
+    # the world beyond the repository: forms, skills, project notes, the owner's interface wording
+    # and the update description shown to the owner
     "browser_action", "submit_skill_to_hub", "toggle_skill", "skill_owner_action",
-    "journal_write", "workpad_write",
-    "create_github_issue", "comment_on_issue", "comment_on_pr", "close_github_issue", "pr_merge",
+    "skill_install", "skill_update",
+    "journal_write", "workpad_write", "pin_ui_translation", "record_update_description",
+    "github_write", "pr_merge",
 })
 
 
-def completion_control_call(name: str, args: object = None) -> bool:
+def completion_control_call(name: str) -> bool:
     """Host-owned local completion identity, independent of presentation or success."""
-    if name in {"finish_task", "presence_finish"}:
-        return True
-    return name == "task_acceptance_review" and isinstance(args, dict) and (
-        args.get("author_action") in {"finish", "stop"}
-        or args.get("agent_disposition") in {"accepted", "rejected", "partial", "deferred"}
-    )
+    return name in {"finish_task", "presence_finish"}
 
 
 def substantive_tool_calls(calls: object) -> list:
@@ -481,7 +501,20 @@ def substantive_tool_calls(calls: object) -> list:
             and not (call.get("completion_control") and not call.get("is_error"))]
 
 
+# Writes whose successful result is only a receipt of the write: the page, notes, marks and
+# addressed messages a finishing response carries with its answer (owner decision 27.10, "answer
+# first, then chronicle and forwards"). Any other answer from them, and every other tool, is read
+# before a finish; ``update_identity``/``update_world`` stay out: their ok answers can report an
+# edit that did not apply.
+COMPLETION_RECEIPT_TOOLS = frozenset({
+    "chronicle_write", "knowledge_write", "memory_mark", "update_scratchpad", "journal_write",
+    "workpad_write", "update_focus", "tree_note", "tell_task", "forward_to_worker",
+})
+
+
 def completion_observation_calls(calls: object) -> list:
-    """Results a finish must observe; only successful schema bookkeeping is exempt."""
-    return [call for call in substantive_tool_calls(calls)
-            if call.get("is_error") or call.get("tool") not in {"enable_tools", "list_available_tools"}]
+    """Results a finish must observe. Exempt: successful schema bookkeeping, and a receipt
+    write that answered exactly ``OK`` (a warning or a partial write is read first)."""
+    return [call for call in substantive_tool_calls(calls) if call.get("is_error") or not (
+        call.get("tool") in {"enable_tools", "list_available_tools"}
+        or (call.get("tool") in COMPLETION_RECEIPT_TOOLS and call.get("tool_result_code") == "OK"))]

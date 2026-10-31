@@ -166,7 +166,8 @@ def attach_snapshot_init(path: pathlib.Path, *, warnings=None) -> tuple[str, lis
 def clone_project_repo(git_url: str, dest_name: str = "") -> tuple[str, str, str]:
     """Clone ``git_url`` into the durable projects root. Returns
     ``(path, error_code, error_detail)`` — error_code is "" on success,
-    ``invalid_url`` / ``exists`` / ``auth_required`` / ``clone_failed`` otherwise.
+    ``invalid_url`` / ``exists`` / ``auth_required`` / ``clone_failed`` /
+    ``work_root_unavailable`` otherwise.
 
     Atomicity: clones into ``<dest>.tmp.<pid>`` then renames into place, so an
     interrupted clone never leaves a half-usable project folder. Non-interactive:
@@ -176,8 +177,12 @@ def clone_project_repo(git_url: str, dest_name: str = "") -> tuple[str, str, str
     if not valid_git_url(url):
         return "", "invalid_url", "git_url must be an https://, ssh:// or user@host:path git URL"
     from ouroboros.config import get_subagent_projects_root
+    from ouroboros.launch_roots import WorkRootUnavailable
 
-    projects_root = pathlib.Path(get_subagent_projects_root()).expanduser()
+    try:
+        projects_root = pathlib.Path(get_subagent_projects_root()).expanduser()
+    except WorkRootUnavailable as exc:
+        return "", "work_root_unavailable", str(exc)
     projects_root.mkdir(parents=True, exist_ok=True)
     name = re.sub(r"[^a-zA-Z0-9_.-]", "-", str(dest_name or "").strip()).strip("-.") or derive_repo_dir_name(url)
     dest = projects_root / name

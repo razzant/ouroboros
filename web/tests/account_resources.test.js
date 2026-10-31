@@ -5,6 +5,7 @@ import { accountResourcesMarkup, confirmAccountReset, resourceAmount, resourceFa
     resourceReadGap, resetOutcome, resourceSummary } from '../modules/account_resources.js';
 import { createClaudexorStatusStore, mergeAccountResources } from '../modules/claudexor_status_store.js';
 import { quotaSummary } from '../modules/harness_accounts.js';
+import { sessionRouteVerdict } from '../modules/subagent_status_primitives.js';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/account_resources.json', import.meta.url)));
 const target = fixture.receipt.request.target;
@@ -130,6 +131,13 @@ test('reset applied and failed readback remain separate; already_used is not own
     const unconfirmed = { request: fixture.receipt.request, receipt: { ...fixture.receipt, outcome: 'already_used' } };
     assert.equal(resetOutcome(unconfirmed).tone, 'warn');
     assert.match(resetOutcome(unconfirmed).body, /does not confirm/);
+    // In flight or unconfirmed goes on by itself: a quiet message, never amber.
+    for (const receipt of [{ ...fixture.receipt, outcome: 'pending', state: 'running' }, { ...fixture.receipt, outcome: 'unknown' }]) {
+        const outcome = resetOutcome({ request: fixture.receipt.request, receipt });
+        assert.equal(outcome.tone, 'neutral', receipt.outcome);
+    }
+    assert.equal(resetOutcome({ request: fixture.receipt.request, receipt: { ...fixture.receipt, outcome: 'pending',
+        state: 'running' } }).title, 'Reset is in progress');
 });
 
 test('a refresh or reset envelope replaces only the addressed subject, including named default', () => {
@@ -145,6 +153,74 @@ test('a refresh or reset envelope replaces only the addressed subject, including
     assert.equal(merged.resources[0], resources);
     assert.equal(merged.quota[1].constraints[0].used_ratio, 0);
 });
+
+test('quota scope follows replacement, retained quota and mixed-target values as one binding', () => {
+    const scoped = { model: null, requestKind: 'text', basis: 'quota_block' };
+    const held = snapshot();
+    held.availability_scope = scoped;
+    const incoming = atTime('2099-01-01T00:00:00Z', 0.2, 1);
+    assert.equal(mergeAccountResources(held, incoming, target).availability_scope, undefined);
+    incoming.availability_scope = { ...scoped, model: 'new-model' };
+    assert.deepEqual(mergeAccountResources(held, incoming).availability_scope, incoming.availability_scope);
+    const sibling = { ...held.quota[0], subject: { ...held.quota[0].subject, subject_id: 'sibling' } };
+    held.quota.push(sibling);
+    let merged = mergeAccountResources(held, incoming, target);
+    assert.equal(merged.quota[0], sibling);
+    assert.equal(merged.availability_scope, undefined, 'new scope cannot certify retained different-scope rows');
+    incoming.availability_scope = { ...scoped };
+    merged = mergeAccountResources(held, incoming, target);
+    assert.deepEqual(merged.availability_scope, scoped, 'common proven scope survives a partial replacement');
+    delete held.availability_scope;
+    assert.equal(mergeAccountResources(held, incoming, target).availability_scope, undefined,
+        'a new echo cannot certify an unproven retained sibling');
+    held.availability_scope = scoped;
+    const old = atTime('2000-01-01T00:00:00Z', 0.9, 7);
+    old.availability_scope = incoming.availability_scope;
+    merged = mergeAccountResources(held, old, target);
+    assert.equal(merged.quota, held.quota);
+    assert.equal(merged.quota_absences, held.quota_absences);
+    assert.equal(merged.availability_scope, held.availability_scope, 'retained quota keeps its own scope');
+    const absent = { ...incoming, snapshots: [], absences: [{ subject: held.quota[0].subject,
+        observed_at: '2099-01-01T00:00:00Z', reason: 'unavailable' }], availability_scope: undefined };
+    assert.equal(mergeAccountResources(held, absent, target).availability_scope, undefined);
+});
+
+for (const operation of ['refresh', 'reset']) {
+    test(`actual store does not borrow quota scope after unscoped ${operation} replacement`, async () => {
+        // Accepted synthetic response shape, not a claim that the current engine
+        // emits this sequence. The new engine currently decorates both reads alike.
+        let payload = snapshot();
+        payload.harnesses = [{ id: target.harness, enabled: true, status: 'ok', models: ['synthetic'] }];
+        payload.profiles = { profiles: [{ profile: { harness_id: target.harness, profile_id: target.profile_id,
+            enabled: true }, status: { verification: 'passed' } }], harnessAccounts: [] };
+        payload.availability_scope = { model: null, requestKind: 'text', basis: 'quota_block' };
+        payload.quota[0].availability = { state: 'exhausted', resets_at: '2099-01-01T05:00:00Z' };
+        const incoming = atTime('2099-01-01T00:00:00Z', 0.2, 1);
+        incoming.snapshots[0].availability = { state: 'available' };
+        const store = createClaudexorStatusStore({ doc: null, storage: () => null, fetchImpl: async url =>
+            response(url.includes('/status') ? payload : operation === 'reset'
+                ? { ...fixture.receipt, resources: incoming } : incoming) });
+        const actor = { route: { kind: 'agent_session', target_id: target.harness, credential_profile_id: target.profile_id } };
+        const verdict = () => sessionRouteVerdict(actor, { snapshot: store.snapshot, catalogKnown: store.catalogKnown,
+            accountsKnown: store.accountsKnown, quotaKnown: store.quotaKnown });
+        try {
+            await store.refresh();
+            assert.equal(verdict().label, 'Limit reached');
+            if (operation === 'refresh') await store.refreshResources(target);
+            else await store.resetAccount(fixture.receipt.request, { key: 'synthetic-scope-replacement' });
+            assert.equal(store.snapshot.quota[0].availability.state, 'available');
+            assert.equal(store.snapshot.availability_scope, undefined);
+            assert.equal(verdict().label, 'Not checked');
+            // A failed later read retains the quota's binding, not the new body's.
+            payload = { ...payload, availability_scope: { ...payload.availability_scope, model: 'other' },
+                reads: { ...payload.reads, quota: 'failed' }, quota: [], quota_absences: [] };
+            await store.refresh();
+            assert.equal(store.snapshot.availability_scope, undefined);
+            assert.equal(store.quotaKnown, false);
+            assert.equal(verdict().label, 'Not checked');
+        } finally { store.dispose(); }
+    });
+}
 
 test('lost POST response retains exact key/body through remount; recovery spends no new logical operation', async () => {
     const values = new Map();
@@ -516,4 +592,28 @@ test('a full refresh preceding a queued reset cannot freshen its failed readback
     assert.equal(resourceReadGap(store.resourceAction(target)), true);
     assert.match(accountResourcesMarkup(row, store.snapshot, { action: store.resourceAction(target) }), /Last known · 100% used/);
     store.dispose();
+});
+
+test('a temporary model mark is one escaped line per model, only beside a successful account read', async () => {
+    const { capabilityMarkup } = await import('../modules/account_resources.js');
+    const { capabilityMarksReadFailedAt } = await import('../modules/claudexor_status_store.js');
+    const now = Date.now();
+    const mark = (model, state, expiresIn) => ({ harness_id: row.harness, profile_id: row.profile_id,
+        requested_model: model, provider_reason: `<b>${model}</b> is not supported`, state,
+        observed_at: new Date(now - 25 * 60000).toISOString(), expires_at: new Date(now + expiresIn).toISOString() });
+    const payload = { ...snapshot(), profiles: { routing_evidence: { refusals: [], lastService: [], capabilities: [
+        mark('gpt-6.1-sol', 'provisional', 4 * 3600000), mark('gpt-6-astra', 'probe_due', -60000),
+        { ...mark('other', 'confirmed', 3600000), profile_id: 'someone-else' }] } } };
+    const html = capabilityMarkup(row, payload);
+    assert.equal(html.match(/data-model-capability/g).length, 2);
+    assert.match(html, /Cannot serve gpt-6\.1-sol: &lt;b&gt;gpt-6\.1-sol&lt;\/b&gt; is not supported · temporary mark set 25m ago; may be retried in 4h/);
+    assert.match(html, /Cannot serve gpt-6-astra: .* the next request may recheck it/);
+    assert.doesNotMatch(html, /<b>/);
+    // A stale roster cannot assert a current mark; a failed read is one section fact, never "no marks".
+    assert.equal(capabilityMarkup(row, { ...payload, reads: { ...payload.reads, accounts: 'failed' } }), '');
+    assert.equal(capabilityMarksReadFailedAt(payload), '');
+    const failed = { ...snapshot(), profiles: { routing_evidence_read: { state: 'failed', observed_at: '2026-10-21T02:00:00Z' } } };
+    assert.equal(capabilityMarksReadFailedAt(failed), '2026-10-21T02:00:00Z');
+    assert.equal(capabilityMarkup(row, failed), '');
+    assert.equal(capabilityMarksReadFailedAt({ ...failed, reads: { ...failed.reads, accounts: 'failed' } }), '');
 });

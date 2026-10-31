@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from ouroboros.memory import Memory, _SCRATCHPAD_MAX_BLOCKS
+from ouroboros.memory import Memory, scratchpad_block_sha256
 
 
 @pytest.fixture
@@ -26,25 +26,21 @@ class TestScratchpadBlocks:
         blocks = memory.load_scratchpad_blocks()
         assert len(blocks) == 1
 
-    def test_fifo_rotation(self, memory):
-        for i in range(_SCRATCHPAD_MAX_BLOCKS + 3):
+    def test_no_rotation_past_the_former_ten_block_cap(self, memory):
+        # #918 (owner, 29 Oct 2026): the former FIFO evicted "block 0".."block 2" here.
+        for i in range(13):
             memory.append_scratchpad_block(f"block {i}")
         blocks = memory.load_scratchpad_blocks()
-        assert len(blocks) == _SCRATCHPAD_MAX_BLOCKS
-        assert "block 3" in blocks[0]["content"]
+        assert [block["content"] for block in blocks] == [f"block {i}" for i in range(13)]
 
-    def test_eviction_journal(self, memory):
-        for i in range(_SCRATCHPAD_MAX_BLOCKS + 2):
+    def test_append_journal_records_appends_and_no_eviction(self, memory):
+        for i in range(12):
             memory.append_scratchpad_block(f"block {i}")
         journal = memory.journal_path()
         assert journal.exists()
-        lines = [l for l in journal.read_text().strip().split("\n") if l.strip()]
-        evictions = [l for l in lines if '"block_evicted"' in l]
-        appends = [l for l in lines if '"block_appended"' in l]
-        assert len(evictions) == 2
-        assert len(appends) == _SCRATCHPAD_MAX_BLOCKS + 2
-        entry = json.loads(evictions[0])
-        assert entry["type"] == "block_evicted"
+        rows = [json.loads(line) for line in journal.read_text().strip().split("\n") if line.strip()]
+        assert [row["type"] for row in rows] == ["block_appended"] * 12
+        assert rows[-1]["content_len"] == sum(len(f"block {i}") for i in range(12))
 
     def test_regenerate_scratchpad_md(self, memory):
         memory.append_scratchpad_block("first block")
@@ -52,7 +48,9 @@ class TestScratchpadBlocks:
         md = memory.load_scratchpad()
         assert "second block" in md
         assert "first block" in md
-        assert f"{_SCRATCHPAD_MAX_BLOCKS} blocks" in md
+        assert "2 blocks" in md and "/10" not in md
+        for block in memory.load_scratchpad_blocks():
+            assert f"sha256 {scratchpad_block_sha256(block)}" in md
 
     def test_append_block_refuses_retired_legacy_flat_scratchpad(self, memory):
         memory.scratchpad_path().write_text("Legacy scratchpad content here", encoding="utf-8")
@@ -88,39 +86,3 @@ class TestDialogueBlocks:
         blocks_path = memory.drive_root / "memory" / "dialogue_blocks.json"
         blocks_path.write_text("NOT VALID JSON {{{", encoding="utf-8")
         assert memory.load_dialogue_blocks() == []
-
-
-class TestCacheHitRate:
-    def test_cache_hit_rate_computation(self, memory):
-        from ouroboros.context import _compute_cache_hit_rate
-        import types
-
-        events_path = memory.logs_path("events.jsonl")
-        events_path.parent.mkdir(parents=True, exist_ok=True)
-
-        entries = []
-        for i in range(10):
-            entries.append(json.dumps({
-                "type": "llm_round",
-                "prompt_tokens": 1000,
-                "cached_tokens": 600,
-                "cache_hit_rate": 0.6,
-            }))
-        events_path.write_text("\n".join(entries), encoding="utf-8")
-
-        env = types.SimpleNamespace(
-            drive_path=lambda p: memory.drive_root / p,
-        )
-        rate = _compute_cache_hit_rate(env)
-        assert rate is not None
-        assert abs(rate - 0.6) < 0.01
-
-    def test_cache_hit_rate_insufficient_data(self, memory):
-        from ouroboros.context import _compute_cache_hit_rate
-        import types
-
-        env = types.SimpleNamespace(
-            drive_path=lambda p: memory.drive_root / p,
-        )
-        rate = _compute_cache_hit_rate(env)
-        assert rate is None

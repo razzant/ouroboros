@@ -192,3 +192,9 @@ def test_the_guard_is_per_connection_and_leaves_no_hook_behind(loopback):  # noq
         mcp_client._CredentialOriginGuard.client = original
     assert len(seen) == 2 and seen[0] is not seen[1]
     assert all(client.is_closed and len(client.event_hooks["request"]) == 1 for client in seen)
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

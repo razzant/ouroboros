@@ -68,6 +68,8 @@ def quiet_tick(tmp_path, monkeypatch):
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
+    # Not this fixture's duty: the real child's own thread would outlive the test (it has its own tests).
+    monkeypatch.setattr(sm, "_tick_maintenance_child", lambda: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(workers, "WORKERS", {})
@@ -161,11 +163,11 @@ def test_the_delegated_reconciler_reads_its_candidates_before_it_reads_liveness(
     from ouroboros import delegate_custody_reconcile as dcr
 
     live: set[str] = set()
-    run = SimpleNamespace(task_id="late-task", run_id="run-1", settled=False)
+    run = dc.RunCustody(task_id="late-task", run_id="run-1", route_id="fixture", model="m")
     seen: list = []
 
     def reading_candidates(root, where="", params=()):
-        assert (where, params) == ("state=?", ("held",))
+        assert (where, params) == (current.HELD_WHERE, ("held",))
         live.add("late-task")  # admitted while current candidates are read
         return {run.run_id: run}
 
@@ -242,6 +244,10 @@ def test_a_closed_generation_stops_the_sweep_before_its_next_mutation(quiet_tick
                         lambda root, **kw: done.append("reap") or stop.set() or [])
     monkeypatch.setattr(sm, "_reconcile_delegated_runs", lambda live, **kw: done.append("reconcile"))
     monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", lambda live=None: done.append("cursor"))
+    monkeypatch.setattr(sm, "_prune_worktrees", lambda: done.append("worktrees"))
+    monkeypatch.setattr(sm, "_prune_delegated_snapshots", lambda: done.append("snapshots"))
+    monkeypatch.setattr(sm, "_prune_engine_runtimes", lambda: done.append("engine"))
+    monkeypatch.setattr(sm, "_prune_review_checkouts", lambda stop_event=None: done.append("review_checkouts"))
 
     assert sm._CUSTODY_SWEEP_LOCK.acquire(blocking=False)
     sm._run_periodic_custody_sweep(stop)
@@ -252,7 +258,8 @@ def test_a_closed_generation_stops_the_sweep_before_its_next_mutation(quiet_tick
     monkeypatch.setattr(pc, "reap_orphaned_processes", lambda root, **kw: done.append("reap") or [])
     assert sm._CUSTODY_SWEEP_LOCK.acquire(blocking=False)
     sm._run_periodic_custody_sweep(threading.Event())
-    assert done == ["reap", "reconcile", "cursor"], "an open generation runs every step"
+    assert done == ["reap", "reconcile", "cursor", "worktrees", "snapshots", "engine", "review_checkouts"], \
+        "an open generation runs every step, the working copies' retirers after the delegated runs"
 
     done.clear()
     closed = threading.Event()
@@ -308,44 +315,65 @@ def test_reconcile_cadence_is_stamped_when_the_pass_ends(quiet_tick, monkeypatch
 
     sm = quiet_tick
     clock = [1_000_000.0]
-    monkeypatch.setattr(sm.time, "time", lambda: clock[0])
-    monkeypatch.setattr("ouroboros.observability.retry_pending_child_ref_promotions", lambda root, **kwargs: {})
+    monkeypatch.setattr(sm, "time", SimpleNamespace(time=lambda: clock[0]))  # this module's clock only
     monkeypatch.setattr(sm, "_STEP_FAILURES", {})
+    _quiet_reconcile_steps(monkeypatch, sm, [])
+    for leaf in ("supervisor.workspace_preparation.recover_interrupted_preparations",
+                 "ouroboros.review_operation.retire_dead_review_pointers_softly",
+                 "ouroboros.late_review_marks.replay_owed_late_reviews"):
+        monkeypatch.setattr(leaf, lambda root, **kwargs: None)
+    # The tick's other passes are not this cadence's: each opens its own latch at once.
+    monkeypatch.setattr(sm, "_run_schedule_duty", lambda stop_event, latch: latch.release())
+    monkeypatch.setattr(sm, "_run_terminal_duty", lambda root, step, latch, stop_event: latch.release())
     threads = _track_threads(monkeypatch)
-    calls = []
+    calls, entered, release, held = [], threading.Event(), threading.Event(), []
 
-    def slow_pass(**kwargs):
-        calls.append(kwargs)
+    def slow_last_stage():
+        # The pass's LAST stage, held (#2121): a stamp or release placed anywhere earlier shows while it waits.
+        calls.append(threading.current_thread().name)
         clock[0] += 400.0
+        entered.set()
+        held.append(release.wait(5))
         if len(calls) == 2:
             raise RuntimeError("the pass itself failed")
 
-    monkeypatch.setattr(sm, "_periodic_zombie_reconcile", slow_pass)
+    monkeypatch.setattr(sm, "_tick_maintenance_child", slow_last_stage)
     last_custody_reap = [clock[0] + 10_000]  # the 600 s sweep is not due
 
-    def tick(marker):
+    def tick(marker, *, due=False):
+        entered.clear()
+        release.clear()
+        before = marker[0]
         sm._periodic_supervisor_maintenance(last_custody_reap, marker)
-        for thread in threads:
-            thread.join(5)
+        try:
+            if due:
+                assert entered.wait(5), "the due pass reached its last stage"
+                assert marker[0] == before and sm._RECONCILE_SWEEP_LOCK.locked(), "stamped or released before the END"
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(5)
+        assert all(not thread.is_alive() for thread in threads), "a maintenance pass did not end"
 
     marker = [clock[0] - 301]
-    tick(marker)
+    tick(marker, due=True)
     assert len(calls) == 1 and marker[0] == clock[0]  # stamped at the END of the 400 s pass
     tick(marker)
     assert len(calls) == 1, "a pass slower than its cadence must not re-arm on the next tick"
 
     clock[0] += 301.0
     with caplog.at_level(logging.WARNING):
-        tick(marker)
+        tick(marker, due=True)
     assert len(calls) == 2 and marker[0] == clock[0], "a failing pass still stamps when it ends"
     assert not sm._RECONCILE_SWEEP_LOCK.locked(), "and still releases its latch"
     assert any("Periodic reconcile_sweep failed (failure 1 in a row)" in r.getMessage() for r in caplog.records)
     tick(marker)
     assert len(calls) == 2
     clock[0] += 301.0
-    tick(marker)
+    tick(marker, due=True)
     assert len(calls) == 3, "the next eligible run still happens after the cadence"
     assert all(not thread.is_alive() for thread in threads)
+    assert held == [True] * 3 and set(calls) == {"reconcile-maintenance"}, (held, calls)
 
 
 def _quiet_reconcile_steps(monkeypatch, sm, done: list, *, heal=None):
@@ -361,7 +389,12 @@ def _quiet_reconcile_steps(monkeypatch, sm, done: list, *, heal=None):
     monkeypatch.setattr("ouroboros.task_status.reconcile_orphaned_running_tasks", heal or step("orphans"))
     monkeypatch.setattr("ouroboros.projects_registry.reconcile_projects", step("projects"))
     monkeypatch.setattr(sm, "_resume_interrupted_project_deletions", step("deletions"))
-    monkeypatch.setattr("ouroboros.observability.retry_pending_child_ref_promotions", step("child_refs", {}))
+    monkeypatch.setattr(sm, "_run_reconcile_prunes", step("prunes"))
+    monkeypatch.setattr(sm, "_run_drive_custody_pass", step("drives"))
+    monkeypatch.setattr(sm, "_tick_maintenance_child", step("maintenance"))
+    from ouroboros import maintenance
+
+    monkeypatch.setattr(maintenance.child, "_owed", False)  # this process's first look already happened
 
 
 def test_a_slow_reconcile_block_never_holds_the_loop_tick(quiet_tick, monkeypatch):
@@ -399,16 +432,15 @@ def test_a_slow_reconcile_block_never_holds_the_loop_tick(quiet_tick, monkeypatc
             thread.join(5)
     assert all(not thread.is_alive() for thread in threads)
     assert healed == ["reconcile-maintenance"]
-    assert [name for name, _ in done] == ["review_jobs", "projects", "deletions", "child_refs"]
+    assert [name for name, _ in done] == ["review_jobs", "projects", "deletions", "prunes", "drives", "maintenance"]
     assert {thread for _, thread in done} == {"reconcile-maintenance"}
     assert marker[0] > 0.0 and not sm._RECONCILE_SWEEP_LOCK.locked(), "stamped, then released"
 
 
-def test_child_ref_promotion_retries_left_the_cancel_sweep(quiet_tick, monkeypatch):
-    """The child-ref promotion walk (every child drive, a result load each) rode the
-    20 s cancel sweep under ITS latch, so the cancel-intent watchdog could not run again
-    until the walk ended. It now runs AFTER the heal in the reconcile block; a 20 s
-    sweep that is due runs its three steps and nothing else."""
+def test_history_sized_steps_stay_off_the_cancel_sweep(quiet_tick, monkeypatch):
+    """A 20 s sweep that is due runs its own steps and nothing history-sized; the 300 s
+    block heals, settles drives and then only reserves the maintenance child, whose jobs
+    (the child-ref promotion retry among them) never run on a server thread."""
     sm = quiet_tick
     done: list = []
     _quiet_reconcile_steps(monkeypatch, sm, done)
@@ -429,7 +461,7 @@ def test_child_ref_promotion_retries_left_the_cancel_sweep(quiet_tick, monkeypat
     sm._periodic_supervisor_maintenance([time.time()], [0.0])  # the 300 s block alone
     for thread in threads:
         thread.join(5)
-    assert [name for name, _ in done] == ["review_jobs", "orphans", "projects", "deletions", "child_refs"]
+    assert [name for name, _ in done] == ["review_jobs", "orphans", "projects", "deletions", "prunes", "drives", "maintenance"]
     assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "reconcile-maintenance"]
 
 
@@ -458,7 +490,7 @@ def test_a_closed_generation_stops_the_reconcile_block_before_its_next_mutation(
     _quiet_reconcile_steps(monkeypatch, sm, done)
     assert sm._RECONCILE_SWEEP_LOCK.acquire(blocking=False)
     sm._run_periodic_reconcile_sweep(marker, threading.Event())
-    assert [n for n, _ in done] == ["review_jobs", "orphans", "projects", "deletions", "child_refs"]
+    assert [n for n, _ in done] == ["review_jobs", "orphans", "projects", "deletions", "prunes", "drives", "maintenance"]
 
     done.clear()
     closed = threading.Event()
@@ -534,15 +566,17 @@ def test_startup_custody_still_runs_inline_and_starts_no_maintenance_thread(tmp_
 def test_drive_custody_rides_the_reconcile_pass_bounded_and_never_startup(tmp_path, monkeypatch):
     """Child and direct drives are settled by the off-loop reconcile pass through the one
     settlement owner, with the supervisor's probe and ownership interlock, at most
-    DRIVE_SETTLEMENTS_PER_PASS attempts per layout and pass from a memory-only cursor;
-    the startup sweep copies and hashes no child store (readiness waits on nothing)."""
-    from ouroboros import headless, server_maintenance as sm
+    DRIVE_SETTLEMENTS_PER_PASS attempts per layout and pass from a durable cursor (the
+    ``drive_settlement`` job row: a restart continues the lap); the startup sweep copies and
+    hashes no child store (readiness waits on nothing); the moved drives wait in the custody
+    trash for the maintenance child, which deletes them off the serving process."""
+    from ouroboros import headless, maintenance, maintenance_jobs, server_maintenance as sm
+    from ouroboros.task_custody import custody_trash_entries
     from ouroboros.task_results import load_task_result, write_task_result
     from ouroboros.startup_migrations import prepare_startup_state
     prepare_startup_state(tmp_path)
 
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(sm, "_DRIVE_PRUNE_CURSOR", {"headless": "", "direct": ""})
     monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "1")
     monkeypatch.setattr("ouroboros.retention.age_cutoff", lambda *a, **k: 4_000_000_000)
     monkeypatch.setattr(headless, "DRIVE_SETTLEMENTS_PER_PASS", 2)
@@ -566,11 +600,16 @@ def test_drive_custody_rides_the_reconcile_pass_bounded_and_never_startup(tmp_pa
     assert sorted(p.name for p in base.iterdir()) == ["d1", "d2", "d3"], "startup settles no drive"
 
     sm._run_drive_custody_pass()
-    assert sorted(p.name for p in base.iterdir()) == ["d3"] and sm._DRIVE_PRUNE_CURSOR["headless"] == "d2"
+    assert sorted(p.name for p in base.iterdir()) == ["d3"]
+    assert maintenance_jobs.job(tmp_path, "drive_settlement")["cursor"]["headless"] == "d2"
     assert len(interlocks) == 2
+    assert len(custody_trash_entries(tmp_path)) == 2, "the server moved the drives; it deleted nothing"
     sm._run_drive_custody_pass()
-    assert list(base.iterdir()) == [] and sm._DRIVE_PRUNE_CURSOR["headless"] == "d3"
+    assert list(base.iterdir()) == [] and maintenance_jobs.job(tmp_path, "drive_settlement")["cursor"]["headless"] == "d3"
     assert all(load_task_result(tmp_path, name)["status"] == "cancelled" for name in ("d1", "d2", "d3"))
+    assert "custody_trash" in maintenance.due(tmp_path)
+    assert maintenance.run_job(tmp_path, "custody_trash") == {"state": "done", "items": 3}
+    assert custody_trash_entries(tmp_path) == [] and "custody_trash" not in maintenance.due(tmp_path)
 
     closed = threading.Event()
     closed.set()
@@ -580,38 +619,39 @@ def test_drive_custody_rides_the_reconcile_pass_bounded_and_never_startup(tmp_pa
     assert drive.is_dir(), "a closed generation settles nothing"
 
 
-def test_startup_sweeps_only_the_script_fallback_and_owes_the_tree_walk_to_the_first_pass(tmp_path, monkeypatch):
-    """The whole-tree walk for orphaned atomic temp files left the startup path (it delayed
-    readiness by hundreds of thousands of stat calls): startup sweeps only the top-level
-    tmp_scripts fallback, and the first off-loop reconcile pass of the generation sweeps the
-    tree once; a deferred startup owes nothing."""
+def test_startup_sweeps_only_the_script_fallback_and_the_temp_walk_is_the_childs_job(tmp_path, monkeypatch):
+    """The walk for orphaned atomic temp files left the startup path (it delayed readiness by
+    hundreds of thousands of stat calls) and the server process: startup sweeps only the
+    top-level tmp_scripts fallback (no script can be live then), no reconcile pass walks for
+    temps, and the maintenance child's temp_sweep job reaps them in the atomic writers'
+    directories once per installed release, never once per process."""
+    from ouroboros import maintenance
     from ouroboros import server_maintenance as sm
 
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(sm, "_STARTUP_TEMP_SWEEP_OWED", [False])
     monkeypatch.setattr(sm, "_periodic_zombie_reconcile", lambda **kwargs: None)
     monkeypatch.setattr(sm, "_run_drive_custody_pass", lambda stop_event=None: None)
+    monkeypatch.setattr(sm, "_tick_maintenance_child", lambda: None)
     aged = time.time() - 7200
     script = tmp_path / "tmp_scripts" / "script_dead.py"
     orphan = tmp_path / "state" / "deep" / ".state.json.tmp.1.2.abc"
-    for path in (script, orphan):
+    evidence = tmp_path / "observability" / "blobs" / ".blob.json.gz.tmp.abc"  # never walked
+    for path in (script, orphan, evidence):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x", encoding="utf-8")
         os.utime(path, (aged, aged))
 
     sm._startup_prune_sweeps()
-    assert not script.exists() and orphan.exists() and sm._STARTUP_TEMP_SWEEP_OWED == [True]
-
+    assert not script.exists() and orphan.exists()
     assert sm._RECONCILE_SWEEP_LOCK.acquire(blocking=False)
     sm._run_periodic_reconcile_sweep([0.0], threading.Event())
-    assert not orphan.exists() and sm._STARTUP_TEMP_SWEEP_OWED == [False]
+    assert orphan.exists(), "the server process walks for no temp"
 
+    assert maintenance.run_job(tmp_path, "temp_sweep")["items"] == 1
+    assert not orphan.exists() and evidence.exists()
     orphan.write_text("x", encoding="utf-8")
     os.utime(orphan, (aged, aged))
-    assert sm._RECONCILE_SWEEP_LOCK.acquire(blocking=False)
-    sm._run_periodic_reconcile_sweep([0.0], threading.Event())
-    assert orphan.exists(), "the walk runs once per generation, not every pass"
-
-    monkeypatch.setattr(sm, "_STARTUP_TEMP_SWEEP_OWED", [False])
-    sm._startup_prune_sweeps(preserve_task_sources=True)
-    assert sm._STARTUP_TEMP_SWEEP_OWED == [False]
+    assert maintenance.run_job(tmp_path, "temp_sweep") is None, "once per release, not per process or pass"
+    assert orphan.exists()
+    monkeypatch.setattr(maintenance, "_release", lambda: "a newer release")
+    assert maintenance.run_job(tmp_path, "temp_sweep")["items"] == 1 and not orphan.exists()

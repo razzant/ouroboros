@@ -85,7 +85,7 @@ def pool(tmp_path, monkeypatch):
     write_task_result(tmp_path, "owner", "running", result="prepared", total_rounds=7)
     source = store_actor_source_bytes(tmp_path, "owner", category="context_checkpoints",
                                      source_id="wait", data=b'{"effects":"done"}', extension="json")
-    wait = {"wait_id": "wait", "task_attempt": 3, "quiz_id": "quiz", "source_ref": source,
+    wait = {"wait_id": "wait", "task_attempt": 3, "reason": "owner", "quiz_id": "quiz", "source_ref": source,
             "execution_drive_root": str(tmp_path), "started_at": started}
     event = {"type": "owner_wait", "task_id": "owner", "worker_id": 0, "pid": 42,
              "task_attempt": 3, "wait_id": "wait", "phase": "park", "checkpoint": wait}
@@ -195,7 +195,7 @@ def test_owner_wait_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
     queue._enforce_task_timeouts_locked(workers, time.time(), 0, {})
     if hard_axis:
         job = reaps.get_nowait()
-        assert job["terminal_reason"] == hard_axis and not job["will_retry"]
+        assert job["terminal_reason"] == hard_axis and not {"will_retry", "retry_task_id"} & set(job)
     else:
         assert reaps.empty() and "owner" in workers.RUNNING
 
@@ -516,7 +516,7 @@ def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch, fai
 
 @pytest.mark.parametrize("stage", ["resumed", "cold_loading", "ordinary", "other_attempt"])
 def test_idle_timeout_never_clones_a_checkpointed_attempt(pool, monkeypatch, stage):
-    from supervisor import evolution_lifecycle, state, task_reaper
+    from supervisor import evolution_lifecycle, state
 
     if stage == "cold_loading":
         monkeypatch.setattr(state, "budget_remaining", lambda *args, **kwargs: 100)
@@ -543,19 +543,9 @@ def test_idle_timeout_never_clones_a_checkpointed_attempt(pool, monkeypatch, sta
     reaps = stdqueue.Queue()
     monkeypatch.setattr(queue, "_reap_queue", reaps)
     queue._enforce_task_timeouts_locked(workers, time.time() + 1000, 0, {})
-    job = reaps.get_nowait()
-    assert job["terminal_reason"] == "idle_timeout"
-    if job["will_retry"]:
-        requeued, new_attempt, _, _ = task_reaper._enqueue_retry(
-            queue, job["task"], task_id=job["task_id"], retry_task_id=job["retry_task_id"],
-            attempt=job["attempt"], terminal_reason=job["terminal_reason"], recon_fields={},
-        )
-        assert requeued and new_attempt == 4
-        assert workers.PENDING[-1]["id"] != "owner"
-        assert workers.PENDING[-1]["text"] == "work"
-    expected_retry = stage in ("ordinary", "other_attempt")
-    assert job["will_retry"] is expected_retry
-    assert bool(workers.PENDING) is expected_retry
+    assert reaps.empty() and not workers.PENDING
+    assert workers.RUNNING["owner"]["silence_attention"]["state"] == "pending_attention"
+    assert not workers.RUNNING["owner"].get("finalization_requested_at")
 
 
 def test_the_wait_stamp_rides_park_grant_and_restart_handoff_beside_the_task_start(pool):

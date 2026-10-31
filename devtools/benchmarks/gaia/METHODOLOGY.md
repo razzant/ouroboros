@@ -37,26 +37,26 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
   `gpt-5.2`) — pin it to the solve model if the tool is enabled, or a second model
   enters the scaffold. `quality_openrouter_web` sidesteps this by disabling the tool
   and searching through the main-loop native path instead.
-- **Acceptance improvement passes are bounded (2026-08-15).** The owner's shared
-  `OUROBOROS_REVIEW_MAX_CYCLES` (default 2, `unlimited` available) now bounds task
-  acceptance under EVERY policy, including `required`+`blocking`, which was previously
-  unbounded by a local count. Templates here carry no explicit value, so runs use the
-  default of 2 cycles (= 1 improvement pass) and an exhausted cap terminates honestly
+- **Paid result reviews are bounded (2026-08-15).** The owner's shared
+  `OUROBOROS_REVIEW_MAX_CYCLES` (default 2, `unlimited` available) bounds the paid result
+  waves of a root under EVERY policy, including `required`+`blocking`; the result review
+  reads no task-local pass count. `settings_base.json` pins `unlimited`; a run on the
+  shipped default spends at most 2 result waves and an exhausted cap terminates honestly
   with the typed `review_cycles_exhausted` reason instead of looping. Numbers from runs
-  before that change are NOT comparable on this axis; set the key explicitly to restore
-  the old protocol.
-- **Acceptance panels follow the configured review pool (2026-09-02; pool since PR-3).**
-  Task acceptance no longer runs an API-only projection of the reviewer panel: every
-  review-pool row (the review-eligible rows of `OUROBOROS_SUBAGENTS`) runs on its own
+  under another cap are NOT comparable on this axis; declare the key per run.
+- **Result reviews follow the configured review pool (2026-09-02; pool since PR-3).**
+  The result review (`review_change(subject="result")`, forced by the Required floor at a
+  root delivery with produced material) runs no API-only projection of the reviewer
+  panel: every review-pool row (the review-eligible rows of `OUROBOROS_SUBAGENTS`) runs on its own
   delivery (API packet, native inspection episode, or agent session), with per-row
   effort and credential pin. Runs here write three API packet seats on the solve model
   into the roster (`--review-models` substitutes an explicit panel, one packet seat per
-  model), so their acceptance axis is unchanged and comparable with earlier
+  model), so their review axis is unchanged and comparable with earlier
   comma-list runs; a run whose pool has a retrieving row is NOT comparable on the
-  acceptance axis (different evidence view, cost class and — for a session — an
+  review axis (different evidence view, cost class and — for a session — an
   unobserved read set). Declare the pool rows in the run manifest and never overlay
   such a run with API-panel runs.
-- **Acceptance review is required.** GAIA Track A measures the full Ouroboros
+- **Result review is required.** GAIA Track A measures the full Ouroboros
   scaffold chosen for this sprint: `OUROBOROS_TASK_REVIEW_MODE=required`, empty
   memory, and no post-task evolution. Since v6.55.0 the default worker pool is
   `OUROBOROS_MAX_WORKERS=4` — a DISCLOSED scaffold parameter (recorded per run as

@@ -96,6 +96,38 @@ def test_actual_budget_exception_keeps_independent_origin():
     assert state == "not_dispatched"
 
 
+@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+def test_gate_and_status_keep_the_full_cause_without_changing_enforcement(candidate, monkeypatch, enforcement):  # noqa: F811
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, save_state
+    from ouroboros.tools.preflight_review import _handle_review_status
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    cause = "Engine refused this saved request. " * 220 + "END: measured 940000 characters; limit 900000 characters"
+    results = [{"model": f"m/{i}", "slot_id": f"slot_{i}", "verdict": "ERROR", "text": cause,
+                "reported_cause": cause, "failure_code": "native_transcript_cap_exceeded",
+                "failure_details": {"measured": 940000, "limit": 900000, "unit": "characters"}}
+               for i in (1, 2)]
+    error = _dispatch(candidate, monkeypatch, results, [("change",), ("change",)])
+    assert (error is not None) == (enforcement == "blocking")
+    message = error or "\n".join(candidate._review_advisory)
+    assert cause in message and "transient" not in message.lower()
+    assert candidate._last_review_verdict["aggregate"] == "QUORUM_FAILED"
+    state = load_state(candidate.drive_root)
+    state.record_attempt(CommitAttemptRecord(ts="2026-10-25T00:00:00Z", commit_message="candidate", status="blocked",
+        task_id=candidate.task_id, repo_key=make_repo_key(candidate.repo_dir), block_reason="review_quorum",
+        triad_raw_results=candidate._last_triad_raw_results))
+    save_state(candidate.drive_root, state)
+    status = json.loads(_handle_review_status(candidate, task_id=candidate.task_id))
+    assert cause in status["message"] and "retry the commit" not in status["message"].lower()
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
+    coupling = [{"item": item, "verdict": "PASS", "severity": "advisory", "reason": "checked"}
+                for item in sorted(SCOPE_REQUIRED_ITEMS)]
+    answer = json.dumps({"change": json.loads(PASS_ITEM), "change_clean": True, "coupling": coupling})
+    passed = [{"model": f"m/{i}", "slot_id": f"slot_{i}", "text": answer, "verdict": "UNKNOWN"} for i in (1, 2)]
+    assert _dispatch(candidate, monkeypatch, passed, [("change", "coupling"), ("change", "coupling")]) is None
+    assert candidate._last_review_verdict["aggregate"] == "PASS"
+
+
 def test_frozen_failed_actor_with_raw_output_stays_failed():
     from ouroboros.review_custody import _frozen_actor
 

@@ -1,11 +1,13 @@
-"""#1729 / #1730: the owner's Stop stays effective across the retained reap's health transfer.
+"""#1729 / #1730: the owner's Stop stays effective across a retained reap's health transfer.
 
-The idle-timeout reaper retains a reap over pause authority that stays unreadable (its slot
-reserved, its terminal owed) and the health tick hands it back for a replay: retained -> queued ->
-in flight -> retained or settled. The real owners run: the timeout decision, ``reaper_loop`` and
+The reaper retains a hard-bound reap (here the attempt's explicit deadline; neither bound retries)
+whose terminal-file read stays unresolved (its slot reserved, its terminal owed) and the health
+tick hands it back for a replay: retained -> queued -> in flight -> retained or settled. The real
+owners run: the timeout decision (``enforce_task_timeouts``), ``reaper_loop`` and
 ``reap_timed_out_task``, the health tick (``retry_terminal_file_recoveries``), the HTTP Stop
 (``api_task_cancel``), cancellation custody and its watchdog (``sweep_cancel_intents``). Doubled:
-OS processes, model calls, the worker queue's ``put`` and the reaper thread's blocking ``get``.
+OS processes, model calls, the worker queue's ``put``, the reaper thread's blocking ``get`` and the
+failing terminal-file read.
 
 The contract: idle custody settles Cancelled under Q before any replay reads it, and that replay
 publishes it once; a replay out with the reaper keeps the slot, so the recorded Stop answers
@@ -19,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import budget_pause
+from ouroboros import headless
 from ouroboros.task_results import load_task_result
 from supervisor import queue, workers
 from tests.test_execution_clock_resume_handover import clock  # noqa: F401
@@ -28,7 +30,6 @@ from tests.test_retry_pause_identity import (  # noqa: F401
     _owner_stop,
     _paused_hung_attempt,
     _successors,
-    _tick_until_reap_decision,
     reaper,
 )
 from tests.test_swarm_host_admission import host  # noqa: F401
@@ -48,7 +49,7 @@ class _ReapPump(stdqueue.Queue):
 
 
 def _retained_reap(host, monkeypatch, clock, reaper, hung=_paused_hung_attempt):  # noqa: F811
-    """The real reaper loop retains a reap over pause authority unreadable until ``fault.on`` clears.
+    """The real reaper loop retains a deadline reap whose terminal-file read fails until ``fault.on`` clears.
 
     The timeout decision, the health tick and ``reaper_loop`` share one queue, as in production
     (``supervisor.queue`` re-exports the reaper's). ``fault.during`` runs once inside the next read."""
@@ -59,24 +60,29 @@ def _retained_reap(host, monkeypatch, clock, reaper, hung=_paused_hung_attempt):
     monkeypatch.setattr(task_reaper, "reap_queue", pump)
     monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
     hung(host, monkeypatch, clock)
-    real, fault = budget_pause.budget_pause_row, SimpleNamespace(on=True, during=None)
+    real, fault = headless.prepare_terminal_task_files, SimpleNamespace(on=True, during=None)
 
-    def row(root, task_id):
-        if task_id == "held":
+    def prepare(root, task):
+        if str(task.get("id") or "") == "held":
             during, fault.during = fault.during, None
             if during:
                 during()
             if fault.on:
-                raise OSError("pause authority unreadable")
-        return real(root, task_id)
+                raise OSError("terminal files unreadable")
+        return real(root, task)
 
-    monkeypatch.setattr(budget_pause, "budget_pause_row", row)
+    monkeypatch.setattr(headless, "prepare_terminal_task_files", prepare)
     events, respawned = [], []
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
     monkeypatch.setattr(workers, "respawn_worker", lambda wid, *_a, **_k: respawned.append(wid))
     reaper.arm()
-    job, _idle = _tick_until_reap_decision(clock, pump)
-    pump.put(job)  # the decision's own submission, left for the real loop
+    workers.RUNNING["held"]["task"]["deadline_at"] = "2000-01-01T00:00:00+00:00"  # the attempt's hard bound
+    queue.enforce_task_timeouts()  # the bound opens its finalization grace
+    clock[0] += float(queue.FINALIZATION_GRACE_SEC) + 1
+    queue.enforce_task_timeouts()  # the grace ran out: the decision submits the reap
+    [job] = list(pump.queue)
+    assert job["deadline_reached"] and not {"will_retry", "retry_task_id"} & set(job)
+    assert "held" not in workers.RUNNING and workers.WORKERS[0].reaping
 
     def pump_once():
         with pytest.raises(_Drained):
@@ -178,8 +184,8 @@ def test_failed_replay_submission_keeps_retryable_stop_custody(host, monkeypatch
     _cancelled_once(host, retained)
 
 
-def test_stop_ends_a_reap_deferred_on_persistently_unreadable_pause_authority(host, monkeypatch, clock,  # noqa: F811
-                                                                              reaper):  # noqa: F811
+def test_stop_ends_a_reap_deferred_on_persistently_unreadable_terminal_files(host, monkeypatch, clock,  # noqa: F811
+                                                                             reaper):  # noqa: F811
     """A disk fault that never clears keeps the reap deferred — never Failed, never retried — but the
     owner's Stop still ends it: the next health replay settles Cancelled once and frees the slot."""
     from supervisor import task_reaper
@@ -241,10 +247,11 @@ def test_a_health_transfer_inside_the_stop_publishes_one_terminal(host, monkeypa
 
 
 @pytest.mark.parametrize("hung", ["paused", "unpaused"])
-def test_stop_inside_the_replay_that_clears_the_fault_still_wins(host, monkeypatch, clock, reaper, hung):  # noqa: F811
-    """The fault clears in the very replay the Stop lands in. A paused attempt re-parks and the Stop
-    then cancels the parked row; an unpaused one reaches retry admission, where the recorded Stop
-    wins: the dead attempt keeps its honest timeout failure and no successor is admitted."""
+def test_stop_inside_the_replay_that_clears_the_fault_keeps_one_honest_terminal(host, monkeypatch, clock,  # noqa: F811
+                                                                                reaper, hung):  # noqa: F811
+    """The fault clears in the very replay the Stop lands in, which owns the slot and the write: the
+    dead attempt keeps its honest deadline failure, paused or not (a hard bound holds no pause and
+    admits no successor), and the recorded Stop settles over that terminal."""
     from ouroboros.cancel_intents import active_intent
     from supervisor import task_reaper
 
@@ -263,10 +270,7 @@ def test_stop_inside_the_replay_that_clears_the_fault_still_wins(host, monkeypat
     _supervisor_rounds(clock, retained)
     stored = load_task_result(host.root, "held")
     assert not host.pending and "held" not in workers.RUNNING and not _successors(host)
-    if hung == "paused":
-        assert stored["status"] == "cancelled", stored
-    else:
-        assert (stored["status"], stored["reason_code"]) == ("failed", "idle_timeout"), stored
+    assert (stored["status"], stored["reason_code"]) == ("failed", "deadline"), stored
     assert _done(retained.events) == [stored["status"]], "one terminal publication, of the durable truth"
     assert retained.respawned == [0] and not task_reaper._deferred_reap_jobs and retained.pump.empty()
     assert active_intent(host.root, "held") is None

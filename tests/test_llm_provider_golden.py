@@ -90,12 +90,6 @@ _ROUTE_ENV_NAMES = (
 _CLASS_CACHE_NAMES = (
     "_SUPPORTED_PARAMS_CACHE",
     "_CONTEXT_LENGTH_CACHE",
-    "_REJECTED_PARAMS_CACHE",
-    "_REJECTED_PARAMS_LOADED",
-    "_EFFORT_CEILING_CACHE",
-    "_EFFORT_CEILING_LOADED",
-    "_EFFORT_FLOOR_CACHE",
-    "_EFFORT_FLOOR_LOADED",
 )
 
 
@@ -178,7 +172,6 @@ class _FakeResponse:
     def model_dump(self) -> Dict[str, Any]:
         return copy.deepcopy(self._body)
 
-    # probe_oversized_context reads the SDK object shape directly.
     @property
     def choices(self) -> Any:
         raw = self._body.get("choices") or []
@@ -490,7 +483,7 @@ def _install_model_operation_fake(stack: contextlib.ExitStack, recorder: _Record
     gateway.lose_create = bool(spec.get("lose_model_create_reply"))
     gateway.pending = bool(spec.get("cancel_model_after_create"))
     recorder.model_gateway = gateway
-    stack.enter_context(mock.patch.object(llm_claudexor, "ensure_owned_gateway", lambda: gateway))
+    stack.enter_context(mock.patch.object(llm_claudexor, "ensure_owned_gateway", lambda **_kw: gateway))
 
 
 # ---------------------------------------------------------------------------
@@ -577,9 +570,9 @@ def _observe(spec: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in (spec.get("env") or {}).items():
             os.environ[key] = str(value)
 
-        # Durable capability evidence is read through the frozen ``config.DATA_DIR``
-        # constant, so the env override alone would let host state leak into (and a
-        # learned rejection leak out of) a recorded projection.
+        # Route code still reads the frozen ``config.DATA_DIR`` constant (the subscription
+        # lane, stream evidence), so the env override alone would let host state leak into
+        # (and a case's writes leak out of) a recorded projection.
         import ouroboros.config as config_module
 
         stack.enter_context(mock.patch.object(config_module, "DATA_DIR", root))
@@ -593,15 +586,10 @@ def _observe(spec: Dict[str, Any]) -> Dict[str, Any]:
             LLMClient._SUPPORTED_PARAMS_CACHE[model_id] = set(params)
 
         durable = spec.get("durable_evidence") or {}
-        if durable:
-            from ouroboros import capability_evidence as ce
+        if durable:  # rows older releases learned: negative controls, never dispatch authority
+            from tests._shared import write_legacy_capability_rows
 
-            for key, value in (durable.get("effort_ceilings") or {}).items():
-                ce.record_effort_ceiling(root, key, value)
-            for key, value in (durable.get("effort_floors") or {}).items():
-                ce.record_effort_floor(root, key, value)
-            for key, value in (durable.get("rejected_params") or {}).items():
-                ce.record_rejected_params(root, key, value)
+            write_legacy_capability_rows(root, **durable)
 
         _install_fakes(stack, recorder, spec)
 
@@ -761,7 +749,7 @@ def test_golden_covers_every_declared_provider_lane():
     }
     assert ledger_sources >= {
         "llm.chat", "llm.local", "llm.anthropic", "llm.gigachat",
-        "capability_probe", "web_search.openrouter", "web_search.anthropic",
+        "web_search.openrouter", "web_search.anthropic",
     }
 
 

@@ -70,6 +70,35 @@ test('the plan record renders its revisions, participants, contributions, open o
     assert.match(html, /wrong shape/);
 });
 
+test('an ask before any plan is shown as the reading of the request, never as "revision null"', () => {
+    const reading = { schema_version: 3, revisions: [], asks: [{ ask_id: 'a1', ts: 't', revision: null, message: 'How do you read it?',
+        host_added: [], participants: [answered('triad_a', 'm/a', { prose: 'A story, not slides.' })] }] };
+    const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'running', plan_record: reading, plan_objections: fold() }, 'root');
+    assert.equal(group.subject, '');
+    assert.deepEqual(group.attempts.map((a) => a.id), ['ask:a1']);
+    const [ask] = group.attempts;
+    assert.equal(ask.label, 'ask a1 · the reading of the request');
+    assert.match(ask.detailText, /^ask a1 on the reading of the request — «How do you read it\?»/);
+    assert.match(ask.detailText, /triad_a \(m\/a\): answered: A story, not slides\./);
+    assert.doesNotMatch(ask.detailText, /objections?:|advice/);
+    // A reading's points stay out of the fold, so the card shows them as advice with their text, never a bare count.
+    const pointed = { ...reading, asks: [{ ...reading.asks[0], participants: [answered('triad_a', 'm/a', {
+        prose: 'A story.', objections: [{ id: 'o1', text: 'The brief narrows the ask' }] })] }] };
+    const pointedAsk = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'running', plan_record: pointed, plan_objections: fold() }, 'root').attempts[0];
+    assert.match(pointedAsk.detailText, /answered: A story\. — advice, never holds: The brief narrows the ask/);
+    assert.doesNotMatch(pointedAsk.detailText, /1 objection/);
+    assert.doesNotMatch(ask.detailText + ask.label, /revision (null|undefined|0)/);
+    assert.equal(group.verdict, 'no open objection');
+    const body = { ...reading, asks: [{ ...reading.asks[0], host_added: ['triad_b'] }] };
+    const bodyAsk = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'running', plan_record: body, plan_objections: fold() }, 'root').attempts[0];
+    assert.match(bodyAsk.detailText, /a reading about Ouroboros's own body: the host added triad_b/);
+    assert.doesNotMatch(bodyAsk.detailText, /first ask on a body plan/);
+    // The other direction: an ask about a revision keeps its revision label.
+    const planned = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'running', plan_record: RECORD, plan_objections: RECORD_FOLD }, 'root');
+    assert.equal(planned.attempts[1].label, 'ask a1 · revision 1');
+    assert.match(planned.attempts[1].detailText, /^ask a1 on revision 1 — «First look\.»/);
+});
+
 test('an owner-marked objection that stands may hold, and awaited answers keep the group live only while the task runs', () => {
     const record = { ...RECORD, asks: [RECORD.asks[0], {
         ask_id: 'a2', ts: 't', revision: 2, message: '', host_added: [], participants: [

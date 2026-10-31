@@ -166,6 +166,7 @@ def test_effort_facts_render_only_in_logs_live_and_after_reload(engine_ui, root,
         _assert_logs(page, live)
         capture(page, f"{engine}-{width}-logs-live")
         observed = _settle_session(root)
+        ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
         page.reload()
         page.wait_for_selector('#chat-messages', state="attached")
         assert _disclosed(page, '#chat-messages') == []

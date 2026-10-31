@@ -155,7 +155,12 @@ def checkpoint_pending_invocation(
     state: Dict[str, Any],
     on_failure: Callable[[], None],
 ) -> None:
-    """Bind a pending invocation to its durable slot before provider POST."""
+    """Bind a pending invocation to its durable slot before provider POST.
+
+    The binding waits out a busy review-state lock itself. A refusal names its cause: a reserved
+    slot that cannot take this token keeps its own reason (``review_custody_slot_refused``); a
+    review state that could not be written keeps its lock or I/O facts
+    (``review_custody_checkpoint_unwritable``)."""
     if not callable(checkpoint):
         return
     try:
@@ -163,6 +168,7 @@ def checkpoint_pending_invocation(
     except Exception as exc:
         from ouroboros.review_execution import ReviewRouteUnavailable
         from ouroboros.gateways.claudexor import run_failure_cause
+        from ouroboros.review_state import ReservedReviewSlotRefused
 
         cause = str(getattr(exc, "reported_cause", "") or f"{type(exc).__name__}: {exc}")
         try:
@@ -170,11 +176,16 @@ def checkpoint_pending_invocation(
         except Exception as cleanup_error:
             cause += f"; cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}"
         state.pop("pending_invocation_id", None)
-        refusal = ReviewRouteUnavailable(
-            "the delegated review invocation could not be bound to its durable "
-            "commit-review slot before dispatch; no run was started",
-            code="review_custody_checkpoint_unwritable",
-        )
+        if isinstance(exc, ReservedReviewSlotRefused):
+            refusal = ReviewRouteUnavailable(
+                f"the delegated review invocation was refused by its reserved commit-review slot ({exc}); "
+                "no run was started", code="review_custody_slot_refused")
+        else:
+            refusal = ReviewRouteUnavailable(
+                "the delegated review invocation could not be bound to its durable "
+                "commit-review slot before dispatch; no run was started",
+                code="review_custody_checkpoint_unwritable",
+            )
         refusal.reported_cause = run_failure_cause({"safeMessage": cause})
         raise refusal from exc
 
@@ -216,9 +227,125 @@ def validate_producer_invocation(root: Any, token: str, expected: dict, payload:
             and not (token or usage.get("delegated_run_id") or usage.get("delegated_run_started"))):
         return
     invocation = invocation_record(root, token) if token else None
+    if invocation is not None and invocation.get("state") == "legacy_gap":
+        raise ValueError(f"legacy_gap: {invocation['reason']}; completed producer custody needs repair")
+    # A binding names the facts its request carried: a request without a reconciliation
+    # identity binds no root, which is an unbound fact, never a contradiction.
     if not invocation or any(str(invocation.get(k) or "") != str(expected[k] or "")
-                             for k in ("task_id", "root_task_id", "surface", "slot_id", "operation_id")):
+                             for k in ("task_id", "root_task_id", "surface", "slot_id", "operation_id")
+                             if k in expected):
         raise ValueError("completed producer has no exact delegated invocation")
     run_id = str(usage.get("delegated_run_id") or "")
     if run_id and run_id != str(invocation.get("run_id") or ""):
-        raise ValueError("completed producer delegated run mismatch")
+        if not review_continuation_descends_from(root, run_id, invocation):
+            raise ValueError("completed producer delegated run mismatch")
+
+
+def review_continuation_descends_from(root: Any, run_id: str, anchor: dict) -> bool:
+    """Prove that a collected successor belongs to the slot's original invocation."""
+    from ouroboros import delegate_custody as custody
+
+    seen = set()
+    while run_id and run_id not in seen:
+        if run_id == str(anchor.get("run_id") or ""):
+            return True
+        seen.add(run_id)
+        ownership, entry = custody.lookup(root, anchor["task_id"], run_id)
+        if ownership != custody.OWNED or entry is None or not entry.continuation_of:
+            return False
+        record = custody.invocation_record(root, entry.invocation_id)
+        if not record or any(record.get(k) != anchor.get(k)
+                             for k in ("task_id", "root_task_id", "surface", "slot_id", "operation_id")):
+            return False
+        if record.get("request") != {"continueFrom": entry.continuation_of}:
+            return False
+        run_id = entry.continuation_of
+    return False
+
+
+def continue_review_run(gateway: Any, root: Any, entry: Any, detail: dict, invocation: Any,
+                        *, remaining: float, seen: set[str]) -> Any:
+    """One idempotent continuation per stopped run, under the same seat anchor.
+
+    The original slot token stays valid across crashes before or after POST.
+    A deterministic successor invocation records the exact continuation body
+    before sending; recovery joins its started run or replays that same body.
+    No new paid-wave stamp or generic task-delegation authority is introduced.
+    """
+    from types import SimpleNamespace
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_continuation import engine_continues
+    from ouroboros.delegate_collection import record_terminal_money
+    from ouroboros.owner_pause import OwnerPauseRefused, run_operation
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    token = custody.idempotency_key("review_continue", entry.invocation_id, entry.run_id)
+    record = custody.invocation_record(root, token)
+    body = {"continueFrom": entry.run_id}
+    if record:
+        if (record.get("request") != body or record.get("task_id") != entry.task_id
+                or record.get("surface") != invocation.surface or record.get("slot_id") != invocation.slot_id
+                or record.get("operation_id") != invocation.operation_id):
+            raise ReviewRouteUnavailable("Review continuation custody does not match this seat",
+                                         code="review_recovery_request_mismatch")
+        if record["state"] == "failed_definite":
+            return None
+        if record["state"] == "started":
+            run_id, successor = owned_started_review_custody(custody, root, record, entry.task_id)
+            if run_id in seen or successor.continuation_of != entry.run_id:
+                return None
+            return successor
+    else:
+        summary = custody.summary_of(detail)
+        resumable = summary.get("resumable") or detail.get("resumable")
+        if not isinstance(resumable, dict) or not resumable or not engine_continues(gateway):
+            return None
+    from ouroboros.budget_pause import dispatch_fenced
+
+    if remaining <= 0 or dispatch_fenced(entry.task_id):
+        return None
+    if not record:
+        requested = custody.record_start_requested(root,
+            run_id="", task_id=entry.task_id, invocation_id=token, idempotency_key=token,
+            operation_id=invocation.operation_id, request=body, continuation_of=entry.run_id,
+            surface=invocation.surface, slot_id=invocation.slot_id, route=entry.route_id,
+            max_seconds=entry.max_seconds, project_id=entry.project_id, project_owned=entry.project_owned,
+            **{key: getattr(entry, key) for key in ("root_task_id", "parent_task_id", "category", "source",
+                "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root",
+                "target_root")})
+        if not requested:
+            raise ReviewRouteUnavailable("Review continuation request could not be recorded; nothing was sent",
+                                         code="start_request_row_unwritable")
+    # Keep the registration/checking copy alive for the successor. The final
+    # seat settlement retires it; this step records only the stopped run's money.
+    source = SimpleNamespace(drive_root=root, task_id=entry.task_id, root_task_id=entry.root_task_id)
+    try:
+        # A continuation is an ordinary start naming the stopped run; the engine picks native/moved/packet.
+        handle = run_operation(source, lambda: gateway.start_run({"continueFrom": entry.run_id},
+                                                                 idempotency_key=token))
+    except (ClaudexorUnavailable, OwnerPauseRefused) as exc:
+        if isinstance(exc, OwnerPauseRefused) or 400 <= int(getattr(exc, "status_code", 0) or 0) < 500:
+            if not custody.emit(root, custody.START_FAILED, {"invocation_id": token, "task_id": entry.task_id,
+                    "reason": str(getattr(exc, "code", "continuation_refused")), "definite": True,
+                    "surface": invocation.surface, "slot_id": invocation.slot_id}):
+                raise
+            return None  # Caller retains the stopped run's original typed failure.
+        raise  # Ambiguous acceptance remains replayable from the same token.
+    run_id = str(handle.get("runId") or handle.get("jobId") or "")
+    if not run_id or run_id in seen:
+        raise ReviewRouteUnavailable("Review continuation returned no new run handle",
+                                     code="invalid_continuation_handle")
+    record_terminal_money(root, entry, detail)
+    successor = custody.RunCustody(run_id=run_id, invocation_id=token, idempotency_key=token,
+        continuation_of=entry.run_id, ledger_root=str(root),
+        **{key: getattr(entry, key) for key in ("task_id", "route_id", "model", "profile_id", "project_id",
+            "project_owned", "project_persistent", "root_task_id", "parent_task_id", "category", "source",
+            "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root", "target_root")})
+    if not custody.record_started(root, successor, shape={
+            "access": entry.access, "mode": entry.mode, "isolation": entry.isolation,
+            "delegated": entry.delegated, "max_seconds": entry.max_seconds,
+            "surface": invocation.surface, "slot_id": invocation.slot_id}):
+        raise ReviewRouteUnavailable("Review successor start remains pending in custody",
+                                     code="review_continuation_checkpoint_unwritable")
+    return successor

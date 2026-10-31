@@ -9,10 +9,12 @@ Field-tested configuration and operational hazards from the 2026-07-20 full 1-se
 - Model `openrouter/anthropic/claude-sonnet-4.6`, **effort low pinned uniformly** across every
   engine task type (engine defaults drift between releases — v6.71 flipped review effort to
   high; pin them all).
-- Review gate `OUROBOROS_TASK_REVIEW_MODE=required` + `OUROBOROS_REVIEW_ENFORCEMENT=blocking`
-  with **`max_improvement_passes` pinned to 1** (adapter does this automatically; see the
-  review-mode ablation in METHODOLOGY — unbounded convergence is 2.6× the cost for no measured
-  gain on the toolchain-oracle domain, and burns the full per-issue step budget on doomed issues).
+- Review gate `OUROBOROS_TASK_REVIEW_MODE=required` + `OUROBOROS_REVIEW_ENFORCEMENT=blocking`:
+  the host's result review runs at delivery and a FAIL holds the answer. The adapter still pins
+  **`max_improvement_passes` to 1**, which the result review ignores; the paid bound is
+  `OUROBOROS_REVIEW_MAX_CYCLES` (see the review-mode ablation in METHODOLOGY — unbounded
+  convergence is 2.6× the cost for no measured gain on the toolchain-oracle domain, and burns
+  the full per-issue step budget on doomed issues).
 - **`max_workers: 3` in system-params — mandatory at scale.** Worker pool size drives engine
   container RSS: 10 workers ≈ 0.8GB/container, 3 workers ≈ 0.35GB. Capacity formula:
   `concurrent_containers × per-container-RSS ≤ 0.8 × Docker-VM memory limit`
@@ -32,14 +34,16 @@ Field-tested configuration and operational hazards from the 2026-07-20 full 1-se
   the owner deadline, and with no `deadline_at` there is none — the 6h
   `OPERATION_WINDOW_FALLBACK_SEC` belongs to other operations (deep self-review, plan
   review, vision) and is NOT applied to this wait. Set `OUROBOROS_TASK_ABS_CEILING_SEC` if
-  you want a finite per-attempt lifetime (the runtime ships `unlimited`); otherwise the
-  binding rail for a headless CLB solve task is the supervisor's idle reaper
-  (`OUROBOROS_TASK_IDLE_TIMEOUT_SEC`, measured from last real progress), plus Stop/cancel.
-  A dead egress holds the task up to whichever of those is actually set instead of failing
-  it after the burst — and with none of them set it holds indefinitely. The wait is visible
-  as durable `network_wait` events in the isolated server's `events.jsonl`. Note: idle-rail
-  survival via waiting progress notes requires a real chat thread; headless tasks without a
-  `chat_id` keep the idle rail (reaper) as an additional bound on the wait. A transport
+  you want a finite per-attempt lifetime (the runtime ships `unlimited`); otherwise only
+  Stop/cancel and the budget bind a headless CLB solve task. Silence past
+  `OUROBOROS_TASK_IDLE_TIMEOUT_SEC` (measured from last real progress) brings attention,
+  never a stop (#1376): a dated notice to the task and at most one read-only diagnostic per
+  silence episode, charged to the same budget. A dead egress holds the task up to whichever
+  bound is actually set instead of failing it after the burst — and with none of them set it
+  holds indefinitely. The wait is visible as durable `network_wait` events in the isolated
+  server's `events.jsonl`. Note: waiting progress notes count as progress only with a real
+  chat thread, so a headless task without a `chat_id` gets that attention during a long
+  wait. A transport
   death AFTER dispatch (the socket dies mid-request) is repeated by the primary dispatch at
   most twice per round as new physical attempts. One call has one outer attempt budget
   (`OUROBOROS_TRANSIENT_RETRY_MAX` bounds every attempt of the call, repeats included),

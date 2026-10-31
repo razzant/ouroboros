@@ -29,8 +29,8 @@ env = operation_cases.env
 _PERSIST = dict(action="switch", model=OTHER_MODEL, credential_profile_id="", use_local=False, persist_role=True)
 
 
-def _record_stop(root, kind):
-    """Synthetic stop records: Wrap up (finalize-then-stop), Stop now, Panic, or an unreadable stop state."""
+def _record_stop(root, kind, monkeypatch):
+    """Wrap up, Stop now, current-generation Restart, or an unreadable stop state."""
     from ouroboros.cancel_intents import STOP_POLICY_FINALIZE, request_cancel
 
     (root / "state").mkdir(exist_ok=True)
@@ -39,14 +39,15 @@ def _record_stop(root, kind):
                        requested_stop_policy=STOP_POLICY_FINALIZE, allow_settled_target=True)
     elif kind == "immediate":
         request_cancel(root, TASK, reason="owner stop", source="test", allow_settled_target=True)
-    elif kind == "panic":
-        (root / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
+    elif kind == "owner_restart":
+        from tests._work_stop_helpers import live_restart
+        live_restart(root, monkeypatch)
     elif kind == "unknown":
         (root / "state" / "cancel_intents.json").write_text("{not json", encoding="utf-8")
 
 
 @contextlib.contextmanager
-def _persist_remote(f, monkeypatch, surface):
+def _persist_remote(f, monkeypatch, surface, *, launcher=False):
     """A real remote review controller parked on its reviewer wait, its seat saved in Settings,
     and the real decision ingress; ``post`` answers while a concurrent Settings Save holds the lock."""
     from starlette.applications import Starlette
@@ -121,9 +122,12 @@ def _persist_remote(f, monkeypatch, surface):
 
     r.post, r.claimed_then, r.applied_then, r.forge = post, claimed_then, applied_then, forge
     r.unforge = lambda wait_id, forged: _forge(f.root, wait_id, forged, dict(r.pointer), remove=True)
-    child = subprocess.Popen([sys.executable, "-c", _REMOTE_OPERATION, str(f.root), current_custody_session_id(), TASK,
-                              surface],
-                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, cwd=os.getcwd())
+    command = [sys.executable, "-c", _REMOTE_OPERATION, str(f.root), current_custody_session_id(), TASK,
+               surface, str(os.getpid())]
+    if launcher:  # Exercise Windows venv topology on every host: the interpreter is a grandchild.
+        command = [sys.executable, "-c",
+                   "import subprocess, sys; sys.exit(subprocess.call(sys.argv[1:]))", *command]
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, cwd=os.getcwd())
     r.out, reader = _lines(child.stdout)
     executing = {}
     try:
@@ -146,7 +150,7 @@ def _persist_remote(f, monkeypatch, surface):
 
 @pytest.mark.serial
 @pytest.mark.parametrize("surface, stop", [("task_acceptance", ""), ("plan_review", ""),
-                                           ("task_acceptance", "immediate"), ("plan_review", "panic"),
+                                           ("task_acceptance", "immediate"), ("plan_review", "owner_restart"),
                                            ("task_acceptance", "graceful"), ("plan_review", "unknown")])
 def test_a_role_save_that_waits_for_settings_meets_its_own_remote_receipt(env, monkeypatch, surface, stop):
     """A legitimate Settings Save holds the document lock while the owner's switch with
@@ -195,7 +199,7 @@ def test_a_role_save_that_waits_for_settings_meets_its_own_remote_receipt(env, m
                     r.unforge(wait_id, forged)
         # The real operation consumes and applies the exact claim while the save waits.
         switch = _decision(r.row, "persist-remote", **_PERSIST)
-        response = r.post(switch, r.applied_then(lambda *_: _record_stop(f.root, stop)))
+        response = r.post(switch, r.applied_then(lambda *_: _record_stop(f.root, stop, monkeypatch)))
         answer = response.json()
         assert response.status_code == 202, answer
         assert (answer["applied"], answer["duplicate"], answer["state"]) == (True, False, "resolved")
@@ -219,23 +223,25 @@ def test_a_role_save_that_waits_for_settings_meets_its_own_remote_receipt(env, m
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("stop", ["", "graceful", "immediate", "panic", "unknown"])
-def test_a_role_save_for_a_still_waiting_claim_obeys_the_same_stop_record(env, monkeypatch, stop):
+@pytest.mark.parametrize("stop,launcher", [("", False), ("graceful", False), ("immediate", False),
+                                         ("owner_restart", False), ("unknown", False),
+                                         ("owner_restart", True)])
+def test_a_role_save_for_a_still_waiting_claim_obeys_the_same_stop_record(env, monkeypatch, stop, launcher):
     """The controller is live and has not consumed the claim (a row under its own open pointer)
     when a stop record lands while the Settings lock is held. Clear: the role is saved and the
     claim stays pending for its controller. Wrap up (finalize-then-stop) leaves the operation
     live — the claim stays accepted, the reviewer still finishes and the confirmed role save
-    lands, exactly as on the applied path. Stop now, Panic or an unreadable stop state leave
+    lands, exactly as on the applied path. Stop now, Restart or an unreadable stop state leave
     no provably live controller: refused, discarded, nothing saved."""
     from ouroboros.owner_mailbox import KIND_MODEL_WAIT, drain_owner_entries
 
     f = env
-    with _persist_remote(f, monkeypatch, "task_acceptance") as r:
+    with _persist_remote(f, monkeypatch, "task_acceptance", launcher=launcher) as r:
         wait_id = "live-claim"
         forged = r.forge(wait_id)
         try:
             response = r.post(_decision(forged, "persist-live", **_PERSIST),
-                              r.claimed_then(lambda *_: _record_stop(f.root, stop)))
+                              r.claimed_then(lambda *_: _record_stop(f.root, stop, monkeypatch)))
             answer = response.json()
             kept = stop in ("", "graceful")
             if kept:

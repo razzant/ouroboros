@@ -10,7 +10,8 @@ callers and the one same-attempt rebuild, not the helper alone:
   the attempt that transcript belongs to;
 * an owner-wait planned restart resumes the SAME attempt through ``run_llm_loop``:
   the first request after it omits the own-run line exactly when the restored
-  dialogue carries the terminal wake, and names the run when it does not;
+  dialogue carries the terminal wake; otherwise the unread-result line names
+  the output the body collected during the attempt, named at the loop's exit, without acknowledging a wake;
 * the row survives the marker-filtered custody chain and the current closed-run
   receipt, so every custody reader replays the same acknowledgement.
 
@@ -44,6 +45,7 @@ from tests.test_delegated_run_discovery import geo as _geo
 geo = _geo
 TASK = "t-own"
 OWN_LINE = "OWN DELEGATED RUN ENDED — run run-1"
+UNREAD_LINE = "DELEGATED RESULT NEVER READ — run run-1"
 
 
 @pytest.fixture(autouse=True)
@@ -163,13 +165,19 @@ def test_a_same_attempt_cold_resume_keeps_the_restored_wake_and_its_ack(tmp_path
         return {"role": "assistant", "content": "parking for the owner", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", model)
+    if not waited:
+        # The body's collector retains the settled output during the attempt (#2205); the loop's
+        # exit then names the never-read omission.
+        from ouroboros.delegate_collection import collect_terminal
+
+        collect_terminal(tmp_path, "run-1", gateway=engine)
     loop.run_llm_loop(**_loop_kwargs(tmp_path, live, first))
     transcript = live._ctx.messages
     tool_rows = [row for row in transcript if row.get("role") == "tool" and row.get("tool_call_id") == "call-wait"]
     if waited:
         from ouroboros.delegate_supervision import supervision_checkpoint
 
-        wake_id = supervision_checkpoint(live._ctx)["last_acknowledged_wake"]["wake_id"]
+        wake_id = supervision_checkpoint(live._ctx)["runs"]["run-1"]["last_acknowledged_wake"]["wake_id"]
         assert len(tool_rows) == 1 and '"status": "terminal"' in tool_rows[0]["content"]
         assert wake_id in tool_rows[0]["content"]
         assert _acks(tmp_path) == [("run-1", TASK, "1")]
@@ -197,7 +205,8 @@ def test_a_same_attempt_cold_resume_keeps_the_restored_wake_and_its_ack(tmp_path
     cold._ctx.owner_wait_resume = {**wait, "restart_transaction_id": "observed-restart"}
     cold._ctx.owner_wait_callback = lambda *_: None
     rebuilt = _fresh_messages(tmp_path, cold, attempt=1)
-    assert (OWN_LINE in _system_text(rebuilt)) is not waited
+    assert OWN_LINE not in _system_text(rebuilt)
+    assert (UNREAD_LINE in _system_text(rebuilt)) is not waited
 
     sent = []
 
@@ -215,10 +224,16 @@ def test_a_same_attempt_cold_resume_keeps_the_restored_wake_and_its_ack(tmp_path
         # The restored dialogue carries the wake; the reprojected system view does not repeat it.
         assert wake_id in restored and '"status": "terminal"' in restored
         assert OWN_LINE not in _system_text(request)
+        assert UNREAD_LINE not in _system_text(request)
     else:
-        assert '"status": "terminal"' not in restored and OWN_LINE in _system_text(request)
-    # A crash retry is a NEW attempt with a fresh transcript: the line returns there.
-    assert OWN_LINE in _system_text(_fresh_messages(tmp_path, _registry(tmp_path, attempt=2), attempt=2))
+        assert '"status": "terminal"' not in restored
+        assert OWN_LINE not in _system_text(request) and UNREAD_LINE in _system_text(request)
+    assert _acks(tmp_path) == ([("run-1", TASK, "1")] if waited else [])
+    # A crash retry has a fresh transcript: a consumed result's own-run line
+    # returns; a never-read result keeps its D7 line instead, without duplication.
+    retried = _system_text(_fresh_messages(tmp_path, _registry(tmp_path, attempt=2), attempt=2))
+    assert (OWN_LINE in retried) is waited
+    assert (UNREAD_LINE in retried) is not waited
 
 
 # --- the unknown-provider hold ---------------------------------------------------------
@@ -304,18 +319,29 @@ def _crash_retry(tmp_path):
     return task
 
 
-def test_the_startup_receipt_acknowledges_the_replayed_wake_for_the_new_attempt_after_append(
+def _save_delivered_startup(registry, messages):
+    from ouroboros.working_checkpoint import save_ready
+
+    limit = SimpleNamespace(tools=registry, messages=messages, llm_trace={"tool_calls": []},
+                            accumulated_usage={}, owner_msg_seen=set(), round_idx=1,
+                            tool_schemas=[], budget_tail="tool")
+    save_ready(limit)
+
+
+def test_the_startup_receipt_acknowledges_the_replayed_wake_after_incorporated_save(
         tmp_path, ack_spy):
     from ouroboros.subagent_bootstrap import _adopt_recovery_handoff, append_startup_receipt
 
     task = _crash_retry(tmp_path)
     successor = _registry(tmp_path, attempt=2)
-    # ``_prepare_task_context`` order: adopt (bootstrap) -> build the context -> append the receipt.
+    # Bootstrap stages; the restored loop appends and saves before ACK.
     startup = _adopt_recovery_handoff(successor._ctx, task)
     assert json.loads(startup)["status"] == "configured_session_recovered_wake"
     messages = _fresh_messages(tmp_path, successor, attempt=2)
     ack_spy.transcript = messages
     append_startup_receipt(successor._ctx, messages, startup)
+    assert _acks(tmp_path) == [("run-1", TASK, "1")]
+    _save_delivered_startup(successor, messages)
     assert messages[-1]["content"].startswith("[CONFIGURED SESSION STARTUP / WAKE RECEIPT]")
     assert _acks(tmp_path) == [("run-1", TASK, "1"), ("run-1", TASK, "2")]
     assert len(ack_spy.seen) == 1 and ack_spy.seen[0][0] == "2"
@@ -332,6 +358,8 @@ def test_the_first_request_after_a_crash_retry_dates_its_health_snapshot(tmp_pat
     startup = _adopt_recovery_handoff(successor._ctx, task)
     messages = _fresh_messages(tmp_path, successor, attempt=2)
     append_startup_receipt(successor._ctx, messages, startup)
+    assert _acks(tmp_path) == [("run-1", TASK, "1")]
+    _save_delivered_startup(successor, messages)
     receipt = messages[-1]["content"]
     assert '"status": "terminal"' in receipt and '"run_id": "run-1"' in receipt
     # Health is captured before startup appends the receipt. Its historical claim
@@ -343,12 +371,10 @@ def test_the_first_request_after_a_crash_retry_dates_its_health_snapshot(tmp_pat
     assert OWN_LINE not in _system_text(_fresh_messages(tmp_path, successor, attempt=2))
 
 
-# --- D7 for a foreign reader: retained source vs legacy task-drive staging ----------
-# A retained source is readable through the task-result selector, so a foreign
-# reader is not told only the owner can READ it; reading still earns no
-# acknowledgement. The legacy row's wording stays byte for byte.
+# Foreign obligations share one pointer; its exact list preserves every owner/run.
+# A foreign reader receives no instruction to read or acknowledge those runs.
 
-def test_a_foreign_reader_is_told_reading_is_not_acknowledging_only_for_a_retained_source(geo, monkeypatch):
+def test_a_foreign_reader_sees_the_owners_unread_runs_on_one_line_without_a_read_instruction(geo, monkeypatch):
     from ouroboros.context import build_health_invariants
 
     _stage(geo, _top(geo, ROOT), monkeypatch, run_id="run-new")
@@ -362,10 +388,22 @@ def test_a_foreign_reader_is_told_reading_is_not_acknowledging_only_for_a_retain
     env = SimpleNamespace(drive_root=geo.canonical, drive_path=lambda rel="": geo.canonical / rel,
                           repo_path=lambda rel="": geo.repo / rel)
     health = build_health_invariants(env, task_id="intruder", attempt_key="1")
-    line = {run: next(item for item in health.splitlines() if f"NEVER READ — run {run} " in item)
-            for run in ("run-new", "run-old")}
-    assert line["run-old"].endswith(
-        f"(owner task {ROOT}). Only its owner task {ROOT} can read and acknowledge it; "
-        "note the gap honestly instead of attempting the read here.")
-    assert "Only its owner task" not in line["run-new"]
-    assert "Reading permission alone grants no acknowledgement" in line["run-new"]
+    rows = [item for item in health.splitlines() if "OTHER TASKS' DELEGATED WORK" in item]
+    assert len(rows) == 1 and "full owner/run list" in rows[0]
+    assert "Only the owner acknowledges results" in rows[0]
+    assert "read_file" not in rows[0] and "NEVER READ" not in health
+    # Resolve the exact list through the advertised reader as this foreign task.
+    import re
+
+    from ouroboros.tools.query_data import _query_data
+    from ouroboros.tools.registry import ToolContext
+
+    pointer = re.search(r"query_data\(op='blob', sha256='([a-f0-9]{64})'\)", rows[0])
+    assert pointer
+    intruder = ToolContext(repo_dir=geo.repo, drive_root=geo.canonical, task_id="intruder")
+    record = json.loads(_query_data(intruder, op="blob", sha256=pointer.group(1)))
+    assert record["status"] == "ok", record
+    assert record["data"] == {ROOT: {"unread": ["run-new", "run-old"], "patches": [], "yours": []}}
+    owner = build_health_invariants(env, task_id=ROOT, attempt_key="1")
+    assert all(f"NEVER READ — run {run}" in owner for run in ("run-new", "run-old"))
+    assert "read_file" in owner and "OTHER TASKS' DELEGATED WORK" not in owner

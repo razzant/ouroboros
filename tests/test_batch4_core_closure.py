@@ -119,8 +119,8 @@ def test_unreadable_pause_preserves_cause_and_prevents_physical_send(tmp_path, m
 
 
 def test_restart_retains_legacy_unknown_and_saved_zero_dispatch_without_inference(tmp_path, monkeypatch):
+    from ouroboros.work_stop import continuation_refusal
     from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor.events_budget import budget_hold_fact
     from supervisor.queue_transitions import resume_budget_paused_task
     from supervisor.restart_retention import never_started
     from tests.test_restart_retention import _pool_events
@@ -140,7 +140,7 @@ def test_restart_retains_legacy_unknown_and_saved_zero_dispatch_without_inferenc
     assert {t["id"] for t in workers.PENDING} == {"legacy", "zero"}
     assert not any(e.get("type") == "task_done" for e in events)
     held = next(t for t in workers.PENDING if t["id"] == "legacy")
-    assert budget_hold_fact(held)["reason"] == "dispatch_outcome_unknown"
+    assert continuation_refusal(held)["reason"] == "dispatch_outcome_unknown"
     assert held.get("admitted_dispatch") != "none"
     assert resume_budget_paused_task("legacy")["error"] == "dispatch_outcome_unknown"
     # The historical positive pause keeps its original same-generation Resume.
@@ -150,32 +150,35 @@ def test_restart_retains_legacy_unknown_and_saved_zero_dispatch_without_inferenc
     workers.PENDING.clear()
     queue.restore_pending_from_snapshot()
     held = next(t for t in workers.PENDING if t["id"] == "legacy")
-    assert budget_hold_fact(held)["reason"] == "dispatch_outcome_unknown"
+    assert continuation_refusal(held)["reason"] == "dispatch_outcome_unknown"
     assert held.get("admitted_dispatch") != "none"
 
 
-def test_owner_pause_cause_survives_root_selection_but_not_new_budget_pause(tmp_path, monkeypatch):
+def test_member_cause_comes_from_current_fence_without_a_copied_cause(tmp_path, monkeypatch):
     from ouroboros.task_results import load_task_result, write_task_result
     from supervisor.events_budget import (
         BUDGET_HOLD_KEY, _set_root_budget_pause_locked, hold_root_resume_descendants,
     )
-    from supervisor.queue_transitions import budget_pause_fact
+    from ouroboros.work_stop import current_stop
 
     queue, _, workers = _install_queue(tmp_path, monkeypatch)
     child = {"id": "child", "root_task_id": "root", "admitted_dispatch": "none"}
     workers.PENDING.append(child)
     write_task_result(tmp_path, "child", "scheduled", root_task_id="root")
     fence = _set_root_budget_pause_locked("root", {"cause": "owner_pause", "fence_id": "owner-f"})
+    assert current_stop(child, {"budget": queue.BUDGET_ROOT_FENCES})["cause"] == "pause"
     queue.BUDGET_ROOT_FENCES.pop("root")
     hold_root_resume_descendants(queue, "root", fence, {"grant_id": "g1", "generation": 1})
-    assert budget_pause_fact(child)["cause"] == "owner_pause"
-    assert load_task_result(tmp_path, "child")["reason_code"] == "owner_paused"
+    assert current_stop(child)["cause"] == "awaiting_selection"
+    assert "cause" not in child[BUDGET_HOLD_KEY]
+    assert load_task_result(tmp_path, "child")["reason_code"] == "root_fence_lifted_pending_selection"
     # A new monetary pause must not inherit the old owner's cause.
     fence = _set_root_budget_pause_locked("root", {"reason": "budget", "fence_id": "money-f"})
     assert "cause" not in fence
+    assert current_stop(child, {"budget": queue.BUDGET_ROOT_FENCES})["cause"] == "money"
     queue.BUDGET_ROOT_FENCES.pop("root")
     hold_root_resume_descendants(queue, "root", fence, {"grant_id": "g2", "generation": 2})
-    assert child[BUDGET_HOLD_KEY]["cause"] == ""
+    assert "cause" not in child[BUDGET_HOLD_KEY]
     assert child[BUDGET_HOLD_KEY]["root_grant_id"] == "g2"
 
 
@@ -266,7 +269,8 @@ def test_settled_continue_observes_off_lock_and_revalidates_owner_authority(tmp_
                 elif race == "stop":
                     request_cancel(tmp_path, successor, reason="new owner Stop", source="owner")
                 elif race == "panic":
-                    (tmp_path / "state" / "panic_stop.flag").write_text("panic")
+                    from supervisor.events_budget import hold_budget_row
+                    hold_budget_row(task, reason="panic_hold", result_root=tmp_path)
                 elif race == "same_bytes":
                     workers.PENDING[:] = [dict(task)]
                 elif race == "replacement":
@@ -343,7 +347,7 @@ def test_manual_synthetic_hold_gets_fresh_observation_after_mutation(tmp_path, m
             assert queue._queue_lock.acquire(timeout=0.5)
             try:
                 if race == "grant":
-                    root["_budget_pause_hold"]["root_grant_id"] = "replacement-grant"
+                    root["_resume_selection"]["root_grant_id"] = "replacement-grant"
                 elif race == "stop":
                     request_cancel(tmp_path, "child", reason="Stop", source="owner")
                 elif race == "pause":

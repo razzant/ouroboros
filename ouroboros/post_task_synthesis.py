@@ -2,13 +2,13 @@
 
 The best-effort work the post-task orchestrator
 (``agent_task_pipeline._run_post_task_processing_async``) dispatches after a
-task ends: the tool-trace summary, the free host facts row, the fallback
-memory draft (only while consciousness is off) and scratchpad compression,
-plus the shared pre-synthesis usage snapshot and the compact review
-projection. No stage writes lessons, the Pattern Register or the backlog:
-the acting mind authors those (``knowledge_write``). Extracted from
-agent_task_pipeline.py; the pipeline re-exports every name, so historical
-imports and monkeypatch targets keep working."""
+task ends: the tool-trace summary, the free host facts row and the fallback
+memory draft or candidate, plus the shared pre-synthesis usage snapshot and
+the compact review projection. No stage writes lessons or knowledge notes:
+the acting mind authors those (``knowledge_write``); no stage rewrites the
+scratchpad: the mind folds it (#918, ``update_scratchpad`` with ``replaces``).
+Extracted from agent_task_pipeline.py; the pipeline re-exports every name, so
+historical imports and monkeypatch targets keep working."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import logging
 import pathlib
 
 from dataclasses import replace
-from typing import Any, Callable, Dict
+from typing import Any, Dict
 from ouroboros.dialogue_provenance import presence_provenance_fields
 from ouroboros.llm_claudexor import propagate_model_error
 from ouroboros.observability import without_finalization_timing
@@ -77,7 +77,6 @@ def task_tool_metrics(llm_trace: dict) -> dict:
 def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -> dict:
     """Freeze the existing owner corpus and check receipts before actor cleanup."""
     from ouroboros._outcome_receipts import verification_receipt_ledger_row
-    from ouroboros.observability import redact_projection
     from ouroboros.review_evidence_sections import (
         _accept_owner_directives, _accept_verification_summary,
     )
@@ -116,7 +115,7 @@ def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -
         log.warning("Task verification input unavailable for synthesis: %s", task_id, exc_info=True)
     # Copy once into the normal durable completion package. Prompt workers must
     # neither retain mutable actor objects nor re-read a later task's messages.
-    return json.loads(json.dumps(redact_projection(result).value, ensure_ascii=False, default=str))
+    return json.loads(json.dumps(result, ensure_ascii=False, default=str))
 
 
 
@@ -237,10 +236,11 @@ def _pre_synthesis_usage_snapshot(
         from ouroboros.cost_projection import COST_SCOPE_ROOT_TREE, build_cost_presentation
 
         logical_root_id = str(task.get("root_task_id") or task_id)
-        subtree = usage_breakdown(budget_root, root_task_id=logical_root_id)
+        subtree = usage_breakdown(budget_root, root_task_id=logical_root_id, custody_root=env.drive_root, include_custody=True)
         snapshot.update({
             "accounted_upper_bound_usd_with_children": round(float(subtree["accounted_usd"]), 6),
             "cost_presentation": build_cost_presentation(subtree, scope=COST_SCOPE_ROOT_TREE),
+            "cost_custody": subtree.get("cost_custody"),
             "reserved_usd": round(float(subtree["reserved_usd"]), 6),
             "unresolved_upper_bound_usd": round(
                 float(subtree["unresolved_upper_bound_usd"]), 6
@@ -279,7 +279,7 @@ def _compact_review_projection(llm_trace: Dict[str, Any], task: Dict[str, Any] |
 
         records, omitted = task_ledger_records(task or {}, drive_root)
         projection = compact_review_projection(llm_trace.get("review_runs") or [], records=records)
-        if records:
+        if records or omitted == "1+":
             projection["review_records_omitted"] = omitted
         return projection
     except Exception:
@@ -315,7 +315,7 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
         canonical = result_root.resolve(strict=False) == canonical_root.resolve(strict=False)
         files_rescued = rescued_files_fact(task_id, artifact_store_roots(
             canonical_root, task_id, task=task, child_root=None if canonical else result_root))
-        append_canonical_task_summary(canonical_root, {
+        append_canonical_task_summary(canonical_root, retained=True, row={
             "ts": utc_now_iso(), "direction": "system", "type": "task_summary",
             "summary_kind": "host_task_facts", "summary_id": f"task-facts:{task_id}",
             "task_id": task_id, "parent_task_id": str(task.get("parent_task_id") or ""), "root_task_id": str(task.get("root_task_id") or task_id),
@@ -327,12 +327,12 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
             "_is_direct_chat": bool(task.get("_is_direct_chat")), **initiator_meta(task),
             **({"typed_routing_action": str(usage["typed_routing_action"])} if usage.get("typed_routing_action") else {}),
             "text": "", **task_tool_metrics(llm_trace),
-            "rounds": None if usage.get("loop_evidence_unavailable") else int(usage.get("rounds") or 0),
+            "rounds": usage.get("rounds"),
             "outcome_axes": normalize_outcome_axes(usage), "reason_code": str(usage.get("reason_code") or ""),
             "result_ref": {"kind": "task_result", "task_id": task_id, "reader": "get_task_result"},
             "files_rescued": files_rescued,
             **_summary_row_cost_fields(usage), **presence_provenance_fields(task),
-            **({"review_projection": review_projection} if review_projection.get("panels") else {}),
+            **({"review_projection": review_projection} if review_projection.get("panels") or review_projection.get("gaps") or review_projection.get("review_records_omitted") else {}),
         })
     except Exception:
         log.warning("Task facts row was not recorded for %s (non-critical)", task_id, exc_info=True)
@@ -401,8 +401,8 @@ def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_l
                                llm_trace: Dict[str, Any]) -> str:
     """Run the fallback memory draft (``memory_fallback``) inside the root post-task worker.
 
-    With consciousness on it reads one state and makes no call. Otherwise at most one
-    Light call, scoped and billed as consolidation; a refusal with a receipt and a
+    At most one Light call drafts an acting record (consciousness off) or an unsealed
+    failed-work candidate (on), billed as consolidation; a refusal with a receipt and a
     returned failure read ``degraded``, a budget or unknown-provider kind interrupts.
     """
     try:
@@ -428,7 +428,7 @@ def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_l
             append_jsonl(pathlib.Path(drive_logs) / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "memory_fallback_draft", "task_id": str(task.get("id") or ""),
                 "unit": run.unit.describe() if run.unit else None, "outcome": run.outcome, "kind": run.kind or None,
-                "record_id": run.record_id or None, "input_tokens": run.input_tokens,
+                "record_id": run.record_id or None, "input_tokens": run.input_tokens, "effect": run.effect or None,
                 "accounted_upper_bound_usd": round(float(usage["cost"]), 6) if usage.get("cost") is not None else None,
                 "route": observed_route_stamp(usage) if usage else None})
         except Exception:
@@ -440,247 +440,50 @@ def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_l
         return "stage_setup_failed"
 
 
-def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
-    """Run scratchpad consolidation inside the root post-task worker."""
-    try:
-        from ouroboros import consolidator as _c
+# --- a Pause an earlier version saved: ended once by the maintenance pass ---
 
-        should_consolidate = _c.should_consolidate_scratchpad
-        consolidate = _c.consolidate_scratchpad
-        if should_consolidate(memory):
-            _identity = memory.load_identity()
-            from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
+def end_saved_late_phase_pause(env: Any, task: Dict[str, Any], root: pathlib.Path, authority: Dict[str, Any],
+                               *, owner_liveness: Any, claim_guard: Any, stop_requested: Any,
+                               event_queue: Any) -> bool:
+    """End one late phase an earlier version saved as the owner's Pause; True when ended now.
 
-            base_scope = current_usage_scope()
-            scratch_scope = (
-                replace(base_scope, category="consolidation", source="scratchpad_consolidation")
-                if base_scope is not None
-                else UsageScope(
-                    drive_root=env.drive_root,
-                    category="consolidation",
-                    source="scratchpad_consolidation",
-                )
-            )
-
-            with usage_scope(scratch_scope):
-                u = consolidate(memory, llm, _identity)
-            if u and (u.get("cost") or u.get("prompt_tokens")):
-                from supervisor.state import update_budget_from_usage
-                update_budget_from_usage(u)
-            return _post_task_paid_interruption(u.get("_consolidation_errors") if isinstance(u, dict) else [])
-    except Exception as error:
-        propagate_paid_interruption(error)
-        log.debug("Scratchpad consolidation setup failed", exc_info=True)
-        return "stage_setup_failed"
-
-
-# --- owner D10: the root late phase as a saved Pause (post_task_checkpoint.py) ---
-
-def late_phase_step(name: str, run_step: Callable[[], Any]) -> Any:
-    """Run one completed-once step of a stage; a resumed Pause skips a finished one."""
-    from ouroboros.post_task_checkpoint import current_late_phase_run
-
-    late = current_late_phase_run()
-    if late is not None and late.marked(name):
-        return None
-    outcome = run_step()
-    if late is not None:
-        late.mark(name)
-    return outcome
-
-
-def reflection_callback_spec(callback: Any) -> Dict[str, Any] | None:
-    """The one durable shape of the split Project root's canonical chooser entry (an earlier
-    version saved the same shape for its reflection callback; resumed, it receives the sealed final)."""
-    import functools
-
-    if (isinstance(callback, functools.partial) and callback.func is _atp()._run_global_backlog_promotion_only
-            and len(callback.args) == 2):
-        parent_env, parent_task = callback.args
-        return {"drive_root": str(parent_env.drive_root), "repo_dir": str(parent_env.repo_dir),
-                "task": json.loads(json.dumps(parent_task, ensure_ascii=False, default=str))}
-    return None
-
-
-def _late_env(drive_root: Any, repo_dir: Any):
-    from types import SimpleNamespace
-
-    root = pathlib.Path(drive_root)
-    return SimpleNamespace(repo_dir=pathlib.Path(repo_dir), drive_root=root, drive_path=lambda rel, _r=root: _r / rel)
-
-
-def park_late_phase(env: Any, task: Dict[str, Any], stage: str, remaining: list, completed: list,
-                    *, inputs: tuple, state: Dict[str, Any], late: Any) -> bool:
-    """Save the interrupted remainder of a root late phase as the owner's Pause.
-
-    ``inputs`` are the coordinator's frozen inputs (usage, usage snapshot, trace,
-    sealed final, drive logs, the split Project root's canonical chooser entry); ``late``
-    is what the phase already holds (completed steps); the original money scope
-    rides along. One actor-source payload carries them; the checkpoint stays open
-    ``paused``. A payload an earlier version saved may carry more keys (review
-    evidence, a reflection entry and its nominations): resume reads none of them.
-    ``review_evidence`` is still written, empty: an earlier version's resume reads
-    it only after consuming the grant, so its absence would lose the Pause there.
-    Durable copies omit boot-relative timing; live delivery keeps its clocks.
-    False means nothing was saved: the caller keeps its honest ``degraded``.
+    Today a Pause ends the post-answer stages at once, so this saved remainder
+    never runs: its stages are disclosed the way a Pause ends them now
+    (``owner_pause:skipped=…``; a Stop that already reached it keeps
+    ``owner_stopped``, a stage this version no longer has ``stage_retired``),
+    then the tree's Pause settles as after any ended phase, its latch and fence
+    released once nothing else remains. The answer, its status and the saved
+    payload stay; the exact-record compare makes a repeat a no-op.
     """
-    import dataclasses
-    import uuid
-
-    from ouroboros.artifacts import store_actor_source_bytes
-    from ouroboros.owner_pause import read_fence
     from ouroboros.post_task_checkpoint import (
-        post_task_synthesis_is_paused,
-        root_checkpoint_roots,
-        set_root_post_task_checkpoint,
+        post_task_checkpoint_witness, post_task_synthesis_is_terminal,
+        release_post_task_synthesis, reserve_post_task_synthesis,
     )
-    from ouroboros.usage_accounting import current_usage_scope
 
-    roots = root_checkpoint_roots(env, task)
-    task_id = str(task.get("id") or task.get("task_id") or "")
-    if late is None or not roots or not task_id or not stage:
-        return False
-    usage, usage_snapshot, trace, sealed_final, drive_logs, callback = inputs
-    scope = current_usage_scope()
-    try:
-        pause_id = uuid.uuid4().hex
-        payload = {"schema": "ouroboros.late_phase_pause.v1", "task_id": task_id, "stage": stage,
-                   "completed_stages": list(completed), "remaining_stages": list(remaining),
-                   "marks": sorted(late.marks), "drafts": dict(late.drafts), "task": task,
-                   "env": {"drive_root": str(env.drive_root), "repo_dir": str(getattr(env, "repo_dir", "") or "")},
-                   "money_scope": dataclasses.asdict(scope) if scope is not None else None,
-                   "usage": without_finalization_timing(usage),
-                   "usage_snapshot": without_finalization_timing(usage_snapshot), "trace": trace,
-                   "review_evidence": {}, "sealed_final": sealed_final, "drive_logs": str(drive_logs),
-                   "reflection_callback": reflection_callback_spec(callback), **state}
-        ref = store_actor_source_bytes(roots[0], task_id, category="context_checkpoints",
-                                       source_id="late-phase-pause-" + pause_id, extension="json",
-                                       data=json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
-        record = {"pause_id": pause_id, "fence_id": str(read_fence(roots[0], task_id).get("fence_id") or ""),
-                  "paused_at": utc_now_iso(), "stage": stage, "completed_stages": list(completed),
-                  "remaining_stages": list(remaining), "payload_ref": ref,
-                  **({"retired_stages": list(state["retired_stages"])} if state.get("retired_stages") else {})}
-        stored = set_root_post_task_checkpoint(env, task, "paused", pause=record)
-    except Exception:
-        log.warning("Late-phase pause of %s was not saved", task_id, exc_info=True)
-        return False
-    saved = post_task_synthesis_is_paused(((stored or {}).get("root_phase_checkpoint") or {}).get("post_task_synthesis"))
-    if saved:
-        append_jsonl(roots[0] / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "late_phase_paused", "task_id": task_id, "stage": stage,
-            "remaining_stages": list(remaining), "kept_drafts": len(late.drafts)})
-    return saved
-
-
-def revoke_late_phase_grant(drive_root: Any, task_id: str, *, reason: str) -> Dict[str, Any] | None:
-    """Return an unconsumed Resume grant to its pause (Restart, a newer Pause, a failed start)."""
-    from ouroboros.post_task_checkpoint import update_late_phase_pause
-
-    def revoke(record: Dict[str, Any]) -> Dict[str, Any] | None:
-        grant = record.get("grant") if isinstance(record.get("grant"), dict) else {}
-        if not grant or grant.get("consumed_at") or grant.get("revoked_at"):
-            return None
-        return {**record, "grant": {**grant, "revoked_at": utc_now_iso(), "revoke_reason": str(reason)}}
-
-    return update_late_phase_pause(drive_root, task_id, revoke)
-
-
-def resume_paused_late_phase(drive_root: Any, repo_dir: Any, task_id: str) -> bool:
-    """Consume one granted Resume and continue the saved remainder (detached).
-
-    The exact fence the Pause saved is reopened first, as for a loop Resume (a
-    failure consumes nothing and the caller revokes the grant); the grant is
-    then consumed exactly once under the result lock, and a newer owner Pause
-    or a Stop that landed first wins with nothing run. The remainder runs under
-    the saved original money scope and re-reads its CURRENT memory inputs;
-    completed stages, steps and effects do not repeat, and a saved stage this
-    version no longer has is retired and disclosed, never run.
-    """
-    from contextlib import nullcontext
-
-    from ouroboros.artifacts import read_actor_source_bytes
-    from ouroboros.owner_pause import reopen_for_resume
-    from ouroboros.post_task_checkpoint import late_phase_pause_record, update_late_phase_pause
-    from ouroboros.task_results import load_task_result
-    from ouroboros.usage_accounting import UsageScope, usage_scope
-
-    root = pathlib.Path(drive_root).resolve(strict=False)
-    record = late_phase_pause_record(load_task_result(root, task_id, strict=True) or {})
-    grant = record.get("grant") if isinstance(record.get("grant"), dict) else {}
-    if not grant.get("grant_id") or grant.get("consumed_at") or grant.get("revoked_at"):
+    task_id = str(task["id"])
+    checkpoint = authority.get("root_phase_checkpoint") or {}
+    saved = checkpoint.get("post_task_pause") if isinstance(checkpoint.get("post_task_pause"), dict) else {}
+    skipped = [str(stage) for stage in (saved.get("remaining_stages") or [saved.get("stage")]) if stage]
+    retired = [str(stage) for stage in saved.get("retired_stages") or () if stage]
+    reason = f"{'owner_stopped' if saved.get('stopped_at') else 'owner_pause'}:skipped={','.join(skipped)}"
+    if retired:
+        reason += f";stage_retired:skipped={','.join(retired)}"
+    key = reserve_post_task_synthesis(root, task_id, owner_liveness=owner_liveness,
+                                      claim_guard=claim_guard, stop_requested=stop_requested)
+    if key is None:
         return False
     try:
-        payload = json.loads(read_actor_source_bytes(root, task_id, record["payload_ref"]))
-    except Exception:
-        log.warning("Saved late phase of %s is unreadable; its pause is kept", task_id, exc_info=True)
-        revoke_late_phase_grant(root, task_id, reason="pause_source_unreadable")
+        updated = _atp()._publish_root_post_task_checkpoint(
+            env, task, "degraded", expected=post_task_checkpoint_witness(authority), event_queue=event_queue,
+            stop_requested=stop_requested, stop_reason=reason)
+    finally:
+        release_post_task_synthesis(key)
+    if not (updated and post_task_synthesis_is_terminal(
+            (updated.get("root_phase_checkpoint") or {}).get("post_task_synthesis"))):
         return False
-    now = utc_now_iso()
-
-    def consume(current: Dict[str, Any]) -> Dict[str, Any] | None:
-        live = current.get("grant") if isinstance(current.get("grant"), dict) else {}
-        if (current.get("pause_id") != record.get("pause_id") or live.get("grant_id") != grant["grant_id"]
-                or live.get("consumed_at") or live.get("revoked_at") or current.get("stopped_at")):
-            return None
-        return {**current, "grant": {**live, "consumed_at": now}, "resumed_at": now}
-
-    try:
-        if grant.get("fence_id"):
-            # The loop Resume's rule: a newer Pause minted over this grant keeps
-            # its fence, and the remainder parks again at its first paid send.
-            reopen_for_resume(root, task_id, task_id, fence_id=str(grant["fence_id"]), grant_id=grant["grant_id"])
-    except Exception:
-        log.warning("Late-phase Resume of %s lost its fence; the pause is kept", task_id, exc_info=True)
-        return False
-    if update_late_phase_pause(root, task_id, consume) is None:
-        return False
-    env = _late_env(payload["env"]["drive_root"], payload["env"]["repo_dir"] or repo_dir)
-    spec = payload.get("reflection_callback")
-    callback = None
-    if isinstance(spec, dict):
-        import functools
-
-        callback = functools.partial(_atp()._run_global_backlog_promotion_only,
-                                     _late_env(spec["drive_root"], spec["repo_dir"]), spec["task"])
-    money = payload.get("money_scope")
-    scope = UsageScope(**{key: value for key, value in money.items()
-                          if key in UsageScope.__dataclass_fields__}) if isinstance(money, dict) else None
-    append_jsonl(root / "logs" / "events.jsonl", {"ts": now, "type": "late_phase_resumed", "task_id": task_id,
-                                                  "stage": record.get("stage"), "grant_id": grant["grant_id"]})
-    with usage_scope(scope) if scope is not None else nullcontext():
-        _atp()._run_post_task_processing_async(
-            env, payload["task"], payload["usage"], payload["trace"],
-            pathlib.Path(payload["drive_logs"]), blocking=False, on_reflection=callback,
-            sealed_final=payload.get("sealed_final"), resume=payload)
-    return True
-
-
-def stop_paused_late_phase(drive_root: Any, task_id: str) -> bool:
-    """The owner's Stop of a saved remainder: degraded ``owner_stopped``, answer kept.
-
-    Applies only while the phase is still paused and no Resume consumed its
-    grant; otherwise the live phase's own stage gate owns the Stop.
-    """
-    from ouroboros.post_task_checkpoint import set_root_post_task_checkpoint, update_late_phase_pause
-    from ouroboros.task_results import load_task_result
-
-    root = pathlib.Path(drive_root).resolve(strict=False)
-    now = utc_now_iso()
-
-    def stop(record: Dict[str, Any]) -> Dict[str, Any] | None:
-        grant = record.get("grant") if isinstance(record.get("grant"), dict) else {}
-        if grant.get("consumed_at"):
-            return None
-        revoked = {**grant, "revoked_at": now, "revoke_reason": "owner_stopped"} if grant and not grant.get("revoked_at") else grant
-        return {**record, "stopped_at": now, **({"grant": revoked} if grant else {})}
-
-    stopped = update_late_phase_pause(root, task_id, stop)
-    if stopped is None:
-        return False
-    row = load_task_result(root, task_id, strict=True) or {}
-    skipped = ",".join(stopped.get("remaining_stages") or [stopped.get("stage") or ""])
-    retired = ",".join(stopped.get("retired_stages") or ())
-    set_root_post_task_checkpoint(_late_env(root, root.parent), {**row, "id": task_id, "budget_drive_root": str(root)},
-                                  "degraded", stop_reason=f"owner_stopped:skipped={skipped}"
-                                  + (f";stage_retired:skipped={retired}" if retired else ""))
+    append_jsonl(pathlib.Path(root) / "logs" / "events.jsonl", {
+        "ts": utc_now_iso(), "type": "saved_late_phase_ended", "task_id": task_id, "post_task_stop_reason": reason})
+    log.info("Late phase of %s saved by an earlier version ended: %s", task_id, reason)
+    from supervisor.owner_pause_control import late_phase_settled
+    late_phase_settled(root, task_id)
     return True

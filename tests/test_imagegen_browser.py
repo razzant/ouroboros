@@ -1,6 +1,8 @@
 """Generated ordinary artifacts through real Main/Project delivery and SPA replay."""
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import base64
 import io
 import json
@@ -81,7 +83,7 @@ def test_generated_image_delivery_and_reload_in_main_and_project(direct_server_w
                         assert f"Generated for {label}" in page.locator(feed).inner_text()
                         image.scroll_into_view_if_needed()
                         page.screenshot(path=str(evidence / f"image-{label}-{width}.png"))
-                        photo = next(row for row in map(json.loads, (root / "logs" / "chat.jsonl").read_text().splitlines())
+                        photo = next(row for row in map(json.loads, dialogue_test.log_text(root / "logs" / "chat.jsonl").splitlines())
                                      if row.get("type") == "photo" and row.get("task_id") == f"image-{label}")
                         fetched = page.request.get(server["url"] + photo["download_url"])
                         assert fetched.status == 200 and fetched.body() == pixels
@@ -126,7 +128,7 @@ def test_generated_svg_opens_from_its_file_card_as_an_inert_static_image(direct_
     sent = registry.execute_result("send_file", {"file_path": image["absolute_path"], "caption": "Generated vector"})
     assert sent.status == "ok", sent
     _handle_send_document(ctx.pending_events[-1], supervisor)
-    row = next(row for row in map(json.loads, (root / "logs" / "chat.jsonl").read_text().splitlines())
+    row = next(row for row in map(json.loads, dialogue_test.log_text(root / "logs" / "chat.jsonl").splitlines())
                if row.get("task_id") == "image-svg" and row.get("download_url"))
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", tmp_path / "evidence"))
     evidence.mkdir(parents=True, exist_ok=True)

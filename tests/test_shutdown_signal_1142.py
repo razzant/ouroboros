@@ -15,6 +15,8 @@ half must be self-sufficient against it.
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import json
 import os
 import signal
@@ -197,6 +199,9 @@ def _check_real_shutdown(tmp_path, *, launcher_pipe):
         "OUROBOROS_MODEL": model, "OUROBOROS_MODEL_LIGHT": model, "OUROBOROS_MODEL_FALLBACKS": model,
         "OUROBOROS_MAX_WORKERS": 1,
         "OUROBOROS_RUNTIME_MODE": "light",
+        # A fresh root with a ready provider runs the starter installer at boot; an explicit empty
+        # list keeps it from cloning the skill sources from GitHub and installing skills mid-test.
+        "OUROBOROS_STARTER_SKILLS": "[]",
     }), encoding="utf-8")
     # An owner chat is bound, so the false alarm WOULD be written if the crash counter fired.
     from devtools.benchmarks.common.server_runner import seed_owner_state
@@ -267,11 +272,10 @@ def _check_real_shutdown(tmp_path, *, launcher_pipe):
         proc.wait(timeout=10)  # collect the direct child; reap() skips zombies by design
         assert not error, error
 
-    # uvicorn re-raises the captured SIGTERM once the lifespan has completed, so a clean
-    # signalled exit reads -SIGTERM (or 0); -SIGKILL is the launcher fallback this test forbids.
-    expected_codes = (0,) if launcher_pipe else (0, -signal.SIGTERM)
-    assert code in expected_codes, f"graceful exit expected, got {code}"
-    chat_rows = _read_rows(data_dir / "logs" / "chat.jsonl")
+    # The command boundary exits after Uvicorn's replay and main's cleanup unwind.
+    expected_code = 0 if launcher_pipe else 128 + signal.SIGTERM
+    assert code == expected_code, f"graceful exit expected, got {code}"
+    chat_rows = dialogue_test.log_rows(data_dir / "logs" / "chat.jsonl")
     alarms = [row for row in chat_rows if row.get("system_type") == "supervisor_failure"
               or "Supervisor loop died" in str(row.get("text") or "")]
     assert alarms == [], alarms
@@ -279,6 +283,11 @@ def _check_real_shutdown(tmp_path, *, launcher_pipe):
                      if row.get("type") == "server_shutdown"]
     cause = "launcher_quit" if launcher_pipe else "external_signal"
     assert shutdown_rows and shutdown_rows[-1].get("cause") == cause, shutdown_rows
+    # The door's entry, written before any wait, names the same cause the late row confirms.
+    from datetime import datetime
+    entry = json.loads((data_dir / "state" / "shutdown_entry.json").read_text(encoding="utf-8"))
+    assert (entry["cause"], entry["restart_exit"]) == (cause, False), entry
+    assert datetime.fromisoformat(entry["entered_at"]) <= datetime.fromisoformat(shutdown_rows[-1]["ts"])
     assert elapsed < LAUNCHER_STOP_GRACE_SEC, elapsed
 
 

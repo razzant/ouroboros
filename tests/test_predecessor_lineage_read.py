@@ -82,6 +82,7 @@ def geometry(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     (repo / "README.md").write_text("repo readme\n", encoding="utf-8")
     pred_drive = canonical / "task_drives" / PRED
     pred_drive.mkdir(parents=True)

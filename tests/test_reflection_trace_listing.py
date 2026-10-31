@@ -8,8 +8,8 @@ import json
 
 import pytest
 
+from ouroboros._outcome_tool_errors import _OK_TOOL_STATUSES
 from ouroboros.post_task_synthesis import build_trace_summary
-from ouroboros.reflection import _trace_call_errored
 
 REFUSAL = "⚠️ QUIZ_WAIT_BOUND_INVALID: max_wait_minutes applies only to wait_for_answer=true.\nsecond line"
 
@@ -110,5 +110,5 @@ def test_a_successful_untyped_or_autocorrected_call_is_not_a_failure_anywhere():
               "is_error": False, "status": "untyped", "round_id": "e:round:1"},
              {"tool": "run_command", "tool_call_id": "u2", "args": {"cmd": "grep -E x"}, "result": "match",
               "is_error": False, "status": "ok_autocorrected", "round_id": "e:round:2"}]
-    assert not any(_trace_call_errored(call) for call in calls)
+    assert {call["status"] for call in calls} <= _OK_TOOL_STATUSES
     assert build_trace_summary({"tool_calls": calls}).splitlines()[0] == "## Tool trace (2 calls, 0 errors)"

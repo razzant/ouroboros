@@ -158,6 +158,7 @@ def browser_request_block_reason(
     if any(predicate(request) for predicate in (
         _is_context_mode_owner_post, _is_effort_range_owner_post, _is_review_enforcement_post,
         _is_safety_mode_owner_post, _is_owner_skill_attest_post, _is_owner_settings_self_elevation_post,
+        _is_model_wait_owner_post,
     )) and runtime_service_kind(request.url, ctx):
         return "BROWSER_OWNER_CONTROL_BLOCKED: this operation belongs to the owner"
     return ""
@@ -253,7 +254,23 @@ def _is_safety_mode_owner_post(request: Any) -> bool:
     except Exception:
         return False
     path = urllib.parse.unquote(urllib.parse.unquote(parsed.path)).rstrip("/")
-    return method == "POST" and path == "/api/owner/safety-mode"
+    return method == "POST" and path in {"/api/owner/safety-mode", "/api/owner/safety-model", "/api/owner/safety-rules"}
+
+
+def _is_model_wait_owner_post(request: Any) -> bool:
+    """Keeping a waiting role's model is an owner settings write, not a one-off switch."""
+    import json
+    import urllib.parse
+
+    try:
+        path = urllib.parse.unquote(urllib.parse.unquote(urlparse(str(request.url)).path)).rstrip("/")
+        if str(request.method).upper() != "POST" or path != "/api/decisions":
+            return False
+        body = json.loads(request.post_data or "{}")
+        return (isinstance(body, dict) and str(body.get("decision_id", "")).startswith("model_wait:")
+                and body.get("persist_role") is True)
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _is_review_enforcement_post(request: Any) -> bool:
@@ -294,6 +311,19 @@ def _is_owner_settings_self_elevation_post(request: Any) -> bool:
         body = str(request.post_data or "").lower()
     except Exception:
         return False
+    from ouroboros import config
+    from ouroboros.server_runtime import repropose_unedited_slots
+    import json
+    try:
+        proposed = json.loads(request.post_data or "{}")
+        current = config.load_settings()
+        candidate = {**current, **proposed}
+        document = config._settings_integrity.read_settings_json_verified(config.SETTINGS_PATH) or {}
+        repropose_unedited_slots(candidate, document, proposed, current)
+        if config.safety_configuration(current) != config.safety_configuration(candidate):
+            return True
+    except (TypeError, ValueError):
+        return True
     return (
         "ouroboros_post_task_evolution" in body
         or "ouroboros_allow_mutative_subagents" in body

@@ -1,6 +1,6 @@
 """C: verify_and_record after-only artifact-lifecycle FLAG (a check that built then deleted a
 declared deliverable). Flag-only: status stays pass; the structural fact reaches the ledger and
-the advisory acceptance reviewer."""
+the verification summary a result review reads."""
 from __future__ import annotations
 
 from ouroboros.tools.registry import ToolContext
@@ -142,7 +142,7 @@ def test_ledger_preserves_verification_receipt_criterion_id():
     assert entry["criterion_id"] == "claim_1"
 
 
-def test_acceptance_summary_surfaces_and_redacts_missing_after():
+def test_acceptance_summary_surfaces_missing_after():
     from ouroboros.review_evidence import _accept_verification_summary
 
     summary = _accept_verification_summary([
@@ -152,114 +152,6 @@ def test_acceptance_summary_surfaces_and_redacts_missing_after():
     assert summary["artifacts_missing_after_any"] is True
     assert any("out.so" in p for p in summary["artifacts_missing_after"])
     assert summary["count"] == 2
-
-
-def test_acceptance_evidence_links_claims_to_host_receipts(tmp_path):
-    from ouroboros.outcomes import append_verification_receipt
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    ctx, _work = _ctx(tmp_path)
-    ctx.task_contract = {
-        "acceptance_claims": [{
-            "id": "answer",
-            "claim": "final answer is exact",
-            "surface": "FINAL ANSWER",
-            "support": "exact host check",
-            "priority": "must",
-        }]
-    }
-    append_verification_receipt(tmp_path / "drive", "t", {
-        "tool": "verify_and_record",
-        "criterion_id": "answer",
-        "contract_kind": "explicit_command",
-        "status": "pass",
-        "matched": True,
-        "ts": "2026-01-01T00:00:00+00:00",
-    })
-
-    evidence = build_task_acceptance_evidence(ctx, drive_root=tmp_path / "drive", task_id="t")
-    refs = evidence["acceptance_support_refs"]
-    assert refs[0]["criterion_id"] == "answer"
-    assert refs[0]["support_status"] == "supported"
-    assert refs[0]["support_refs"][0]["provenance"] == "host_attested"
-
-
-def test_acceptance_support_refs_use_global_receipt_index(tmp_path):
-    from ouroboros.outcomes import append_verification_receipt
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    ctx, _work = _ctx(tmp_path)
-    ctx.task_contract = {"acceptance_claims": [{"id": "second", "claim": "second claim"}]}
-    append_verification_receipt(tmp_path / "drive", "t", {"status": "pass", "criterion_id": "first"})
-    append_verification_receipt(tmp_path / "drive", "t", {"status": "pass", "criterion_id": "second"})
-
-    evidence = build_task_acceptance_evidence(ctx, drive_root=tmp_path / "drive", task_id="t")
-    assert evidence["acceptance_support_refs"][0]["support_refs"][0]["ref"] == "verification_receipts[1]"
-
-
-def test_acceptance_support_refs_do_not_mark_failed_receipt_supported(tmp_path):
-    from ouroboros.outcomes import append_verification_receipt
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    ctx, _work = _ctx(tmp_path)
-    ctx.task_contract = {"acceptance_claims": [{"id": "answer", "claim": "answer exact"}]}
-    append_verification_receipt(tmp_path / "drive", "t", {
-        "status": "fail",
-        "criterion_id": "answer",
-        "matched": False,
-        "contract_kind": "explicit_command",
-    })
-
-    evidence = build_task_acceptance_evidence(ctx, drive_root=tmp_path / "drive", task_id="t")
-    row = evidence["acceptance_support_refs"][0]
-    assert row["support_refs"]
-    assert row["support_status"] == "linked_failed"
-
-
-def test_acceptance_support_refs_include_artifact_lifecycle(tmp_path):
-    from ouroboros.outcomes import append_verification_receipt
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    ctx, _work = _ctx(tmp_path)
-    ctx.task_contract = {"acceptance_claims": [{"id": "wheel", "claim": "wheel remains present"}]}
-    append_verification_receipt(tmp_path / "drive", "t", {
-        "status": "pass",
-        "criterion_id": "wheel",
-        "matched": True,
-        "contract_kind": "explicit_command",
-        "artifact_lifecycle": [{"path": "dist/pkg.whl", "exists_after": True, "check_surface": "host"}],
-        "artifacts_missing_after": [],
-    })
-
-    evidence = build_task_acceptance_evidence(ctx, drive_root=tmp_path / "drive", task_id="t")
-    ref = evidence["acceptance_support_refs"][0]["support_refs"][0]
-    assert ref["artifact_lifecycle"][0]["path"] == "dist/pkg.whl"
-    assert ref["artifact_lifecycle"][0]["exists_after"] is True
-
-
-def test_acceptance_support_refs_do_not_mark_declared_receipt_supported(tmp_path):
-    from ouroboros.outcomes import append_verification_receipt
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    ctx, _work = _ctx(tmp_path)
-    ctx.task_contract = {"acceptance_claims": [{"id": "risk", "claim": "manual risk accepted"}]}
-    append_verification_receipt(tmp_path / "drive", "t", {
-        "status": "declared",
-        "criterion_id": "risk",
-        "contract_kind": "no_visible_machine_contract",
-    })
-
-    evidence = build_task_acceptance_evidence(ctx, drive_root=tmp_path / "drive", task_id="t")
-    assert evidence["acceptance_support_refs"][0]["support_status"] == "declared_only"
-
-
-def test_acceptance_support_refs_disclose_bounded_claim_text(tmp_path):
-    from ouroboros.review_evidence import _accept_claim_support_refs
-
-    contract = {"acceptance_claims": [{"id": "long", "claim": "x" * 500, "support": "y" * 600}]}
-    refs = _accept_claim_support_refs(contract, [])
-    assert "OMISSION NOTE" in refs[0]["claim"]
-    assert "OMISSION NOTE" in refs[0]["support_expected"]
 
 
 # --- submarine unwind (2026-08-08): observable roots derive from the _POLICY matrix

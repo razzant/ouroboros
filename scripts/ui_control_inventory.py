@@ -9,10 +9,11 @@ and files beside it.
 
 It is review evidence, never a gate on wording: the only red is staleness
 (``tests/test_generated_inventories.py``). Extraction is a plain scan of source text for
-countable facts — a ``<button>`` literal whose text is fixed, a created button with a
-literal ``textContent``, the fixed accessible name of an icon-only button, and every
-``ouro:*`` CustomEvent with the modules that raise it. Interpolated text is counted, not
-listed; it never judges what a control means.
+countable facts — a ``<button>`` or ``<summary>`` literal whose text is fixed (including ``tr`` fallbacks), a created button with a
+literal ``textContent``, the fixed accessible name of an icon-only button, a module's own
+button factory (an arrow function whose template is one ``<button>`` with a parameter as
+its text) called with a literal label, and every ``ouro:*`` CustomEvent with the modules
+that raise it. Interpolated text is counted, not listed; it never judges what a control means.
 """
 from __future__ import annotations
 
@@ -25,13 +26,21 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 UI_CONTROLS_OUT = REPO_ROOT / "docs" / "inventories" / "UI_CONTROL_TEXT_INVENTORY.md"
 
 # A `>` inside a `${…}` expression of an attribute (`${rows.length >= MAX ? 'disabled' : ''}`) is not the tag's end.
-_BUTTON = re.compile(r"<button\b((?:\$\{[^}]*\}|[^>])*)>(.*?)</button>", re.S)
+_BUTTON = re.compile(r"<(?:button|summary)\b((?:\$\{[^}]*\}|[^>])*)>(.*?)</(?:button|summary)>", re.S)
 _ATTR = {name: re.compile(name + r'="([^"]*)"') for name in ("class", "aria-label", "title")}
+# Literal tr fallbacks are fixed host words even though the language is selected at runtime.
+_TRANSLATED = re.compile(r"\$\{(?:escapeHtml\()?tr\((['\"])[^'\"]+\1,\s*(['\"])([^'\"]+)\2\)\)?\}")
 _TAG = re.compile(r"<[^>]+>", re.S)
 _CREATED = re.compile(r"(?:const|let)\s+(\w+)\s*=\s*document\.createElement\('button'\)")
 _EVENT = re.compile(r"new CustomEvent\(\s*['\"`](ouro:[\w:.-]+)['\"`]")
 _LITERAL = r"\s*=\s*(['\"])((?:(?!\1).)+)\1"
 _WINDOW = 900  # characters after `createElement('button')` in which its own text and class are set
+# A module's own button factory: `const button = (label, data, tone = 'btn-default') => `<button … class="btn ${tone}"
+# ${data}>${text(label)}</button>``. Its calls with a literal label are that module's controls; the template is none.
+_FACTORY = re.compile(r"(?:const|let)\s+(\w+)\s*=\s*\(([^()]*)\)\s*=>\s*`<button\b")
+_PARAM = re.compile(r"^\s*(\w+)\s*(?:=\s*(['\"])((?:(?!\2).)*)\2)?\s*$")
+_TEXT_PARAM = re.compile(r"^\$\{(?:\w+\()?(\w+)\)?\}$")  # `${label}` or `${text(label)}`
+_STRING = re.compile(r"^(['\"])((?:(?!\1).)*)\1$")
 
 
 def _sources() -> list[pathlib.Path]:
@@ -48,14 +57,60 @@ def _classes(value: str) -> str:
     return re.sub(r"\$\{[^}]*\}", "…", value).strip() or "(no class)"
 
 
+def _arguments(text: str, start: int) -> list[str]:
+    """The top-level arguments of the call whose opening parenthesis ends at START."""
+    depth, quote, begin, args = 0, "", start, []
+    index = start
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "'\"`":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                return [*args, text[begin:index]]
+            depth -= 1
+        elif char == "," and depth == 0:
+            args.append(text[begin:index])
+            begin = index + 1
+        index += 1
+    return args
+
+
+def _factories(text: str) -> list[tuple[str, list[tuple[str, str | None]], int, str, tuple[int, int]]]:
+    """Each button factory of one source: name, parameters with their literal defaults, the index
+    of the label parameter, the class template and the span of its `<button>` template."""
+    found = []
+    for match in _FACTORY.finditer(text):
+        tag = _BUTTON.match(text, match.end() - len("<button"))
+        params = [_PARAM.match(part) for part in match.group(2).split(",")] if match.group(2).strip() else []
+        text_param = _TEXT_PARAM.match(tag.group(2).strip()) if tag else None
+        names = [param.group(1) for param in params if param]
+        if tag is None or not params or not all(params) or text_param is None or text_param.group(1) not in names:
+            continue
+        defaults = [(param.group(1), param.group(3)) for param in params]
+        classes = (_ATTR["class"].search(tag.group(1)) or [None, ""])[1]
+        found.append((match.group(1), defaults, names.index(text_param.group(1)), classes, tag.span()))
+    return found
+
+
 def scan_controls(text: str) -> tuple[list[tuple[str, str]], int]:
     """``([(label, classes)], interpolated)`` for one source text."""
     rows: list[tuple[str, str]] = []
     interpolated = 0
+    factories = _factories(text)
     for match in _BUTTON.finditer(text):
+        if any(start <= match.start() < end for *_rest, (start, end) in factories):
+            continue  # a factory's template: its calls are the controls
         attrs, inner = match.group(1), match.group(2)
         found = {name: (rx.search(attrs) or [None, ""])[1] for name, rx in _ATTR.items()}
-        label = _clean(inner)
+        label = _clean(_TRANSLATED.sub(lambda match: match[3], inner))
         if not label:  # an icon-only control is named by its fixed accessible name
             spoken = found["aria-label"] or found["title"]
             label = f"[icon] {spoken}" if spoken else ""
@@ -72,6 +127,19 @@ def scan_controls(text: str) -> tuple[list[tuple[str, str]], int]:
             interpolated += 1
             continue
         rows.append((_clean(label.group(2)), _classes(classes.group(2) if classes else "")))
+    for name, params, label_at, template, _span in factories:
+        for call in re.finditer(rf"(?<![\w.]){re.escape(name)}\(", text):
+            args = [_STRING.match(arg.strip()) for arg in _arguments(text, call.end())]
+            label = args[label_at] if label_at < len(args) else None
+            if label is None:
+                interpolated += 1
+                continue
+            classes = template
+            for index, (param, default) in enumerate(params):
+                bound = args[index].group(2) if index < len(args) and args[index] else default if index >= len(args) else None
+                if bound is not None:
+                    classes = classes.replace("${" + param + "}", bound)
+            rows.append((_clean(label.group(2)), _classes(classes)))
     return rows, interpolated
 
 

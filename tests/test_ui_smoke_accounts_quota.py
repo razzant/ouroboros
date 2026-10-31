@@ -40,9 +40,13 @@ def test_accounts_partial_quota_cards(direct_server_with_data):
             "profile": {"harness_id": "claude", "profile_id": profile, "enabled": True},
             "status": {"verification": "passed", "verification_source": "vendor"},
         } for profile in profiles]},
+        # An agent's card takes the engine's verdict for the scope it answered (#1981); the account row reads the
+        # windows themselves. The engine names no verdict for a spent window with no reset.
         "quota": [{"subject": {"harness": "claude", "subject_id": profile},
-                   "freshness": "fresh", "constraints": [example["constraint"]]}
-                  for profile, example in zip(profiles, examples)],
+                   "freshness": "fresh", "constraints": [example["constraint"]],
+                   **({"availability": {"state": state}} if state else {})}
+                  for profile, example, state in zip(profiles, examples, ("", "exhausted", "cooldown"))],
+        "availability_scope": {"model": "fable", "requestKind": "text", "basis": "quota_block"},
         "quota_absences": [], "reads": {"catalog": "ok", "accounts": "ok", "quota": "ok"},
         "unified_accounts": True,
     }

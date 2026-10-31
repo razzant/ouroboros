@@ -1,36 +1,116 @@
 """Process-execution substrate shared by every command-running tool.
 
-Owns the tracked subprocess registry and its panic-time tree kill, the
+Owns the tracked subprocess registry, the one admission/publication protocol
+its producers start children through (``tracked_start``) and the restart
+exit's own finalization scope (``exit_finalization``), its panic-time
+request and the ordinary stop's tree kill, the
 PYTHONPATH scrubbing that keeps an external workspace from shadow-importing
-Ouroboros, the single normalized per-command timeout resolution, the
-return-code and bounded stdout/stderr rendering, and the probe that decides
-whether a resolved cwd is reachable through the workspace executor. The
+Ouroboros, the single normalized per-command timeout resolution (which the
+loop's outer wait reuses, ``command_timeout_for_call``), the return-code and
+bounded stdout/stderr rendering, and the probe that decides whether a
+resolved cwd is reachable through the workspace executor. The
 run_command/run_script handlers and the tool descriptors stay with
 ``tools/shell.py``.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import subprocess
 import threading
-from typing import List
+import time
+from contextlib import contextmanager
+from typing import Any, List, Mapping, Optional
 
 from ouroboros.platform_layer import kill_process_tree, request_process_tree_kill, scrub_repo_from_pythonpath, subprocess_new_group_kwargs
 from ouroboros.config import SETTINGS_DEFAULTS, load_settings, runtime_environ
+from ouroboros.owned_shutdown import stop_begun
 from ouroboros.tools.registry import ToolContext
 from ouroboros.deadline_utils import deadline_remaining_sec
 from ouroboros.workspace_executor import executor_ref_from_ctx
 from ouroboros.workspace_executor import map_host_path as executor_map_host_path
 
+log = logging.getLogger(__name__)
 
-# Tracked process groups let panic kill descendant trees too.
+# Tracked process groups let panic kill descendant trees too. Publication and the Panic request
+# never take a lock: a cleanup holding ``_subprocess_lock`` cannot keep a started child unnamed.
 _active_subprocesses: set = set()
 _subprocess_lock = threading.Lock()
 _panic_requested = False
-_spawning_subprocesses = 0
+_spawning_subprocesses = 0  # admitted starts not yet published, or published into a stop not yet handed over
+_start_settled = threading.Condition()  # guards only that count and its admission check; never held across I/O
+_FINALIZING = threading.local()  # the restart exit's thread inside ``exit_finalization``
 _RUN_SHELL_DEFAULT_TIMEOUT_SEC = 360
+
+
+class CommandAdmissionClosed(RuntimeError):
+    """Emergency Stop or this server generation's begun stop refused a tracked start before its Popen."""
+
+    process_not_started = True
+
+
+@contextmanager
+def tracked_start():
+    """Admit one tracked child and count it from before its Popen until its start settled.
+
+    The yielded ``publish(proc)`` registers the handle Popen returned; producers call it before any
+    durable registration, callback or reader can fail. A child published after Emergency Stop or the
+    generation's stop door began is stopped here by its own starter, outside every lock, before the
+    count is released, so the ordinary stop's wait (``kill_all_tracked_subprocesses``) never ends while
+    that handover is still owed; inside ``exit_finalization`` only Emergency Stop refuses or stops it. A
+    refused or failed start always settles. Never wraps a caller's Popen in a lock: the caller keeps its
+    own Popen, operation-start gate and error provenance.
+
+    Publication adds the handle, then reads the stop facts; a stop sets its fact, then snapshots. So a
+    child is in the stop's snapshot or its publisher saw the stop, with no lock between them; the count
+    is admitted under ``_start_settled``, which the stop's wait reads after its door began."""
+    global _spawning_subprocesses
+    finalizing = getattr(_FINALIZING, "active", False)
+    with _start_settled:
+        refusal = ("Emergency Stop has retired command admission" if _panic_requested else
+                   "this server generation's stop has begun: command admission is closed"
+                   if stop_begun() and not finalizing else "")
+        if not refusal:
+            _spawning_subprocesses += 1
+    if refusal:
+        raise CommandAdmissionClosed(refusal)
+    stopping: list = []
+
+    def publish(proc):
+        _active_subprocesses.add(proc)
+        if _panic_requested or (stop_begun() and not finalizing):
+            stopping.append(proc)
+        return proc
+
+    try:
+        yield publish
+    finally:
+        try:
+            for proc in stopping:  # Panic only requests; the ordinary stop's tree kill is synchronous
+                request_process_tree_kill(proc) if _panic_requested else _kill_process_group(proc)
+        except Exception:
+            log.warning("A child published into a stop was not stopped by its starter; it stays tracked",
+                        exc_info=True)
+        finally:
+            with _start_settled:
+                _spawning_subprocesses -= 1
+                _start_settled.notify_all()
+
+
+@contextmanager
+def exit_finalization():
+    """The restart exit's own finalization (``store_switch.switch_at_restart``), entered after the
+    generation's one stop finished: tracked starts on THIS thread pass that stop's closed admission and
+    publication under their own timeouts. Emergency Stop still refuses and ends them; other threads, and
+    this one after the block, stay refused."""
+    previous = getattr(_FINALIZING, "active", False)
+    _FINALIZING.active = True
+    try:
+        yield
+    finally:
+        _FINALIZING.active = previous
 
 
 def _tracked_subprocess_run(cmd, **kwargs):
@@ -39,7 +119,6 @@ def _tracked_subprocess_run(cmd, **kwargs):
     interpreter, a DOOM framebuffer, raw bytes) surfaces as readable text instead
     of raising UnicodeDecodeError and collapsing the whole call into a
     shell_error."""
-    global _spawning_subprocesses
     timeout = kwargs.pop("timeout", None)
     record_path = None
     if kwargs.get("text") or kwargs.get("universal_newlines"):
@@ -60,19 +139,16 @@ def _tracked_subprocess_run(cmd, **kwargs):
     from ouroboros.tool_custody import external_handoff
     confirmed = external_handoff("shell_process")
     proc = None
-    _spawning_subprocesses += 1
     try:
-        if _panic_requested:
-            raise RuntimeError("Emergency Stop has retired command admission")
         from ouroboros.owner_pause import operation_start
 
-        with operation_start():
+        with tracked_start() as publish, operation_start():
             try:
                 proc = subprocess.Popen(cmd, **kwargs)
             except (OSError, ValueError) as exc:
                 exc.process_not_started = True
                 raise
-        _active_subprocesses.add(proc)  # publish before the spawning owner can exit
+            publish(proc)  # before the spawning owner can exit
         from ouroboros.workspace_executor import _register_process
         if target is not None:  # task scope only; the foreground receipt keeps its own condition below
             record_task_group(*target, proc.pid)
@@ -86,11 +162,7 @@ def _tracked_subprocess_run(cmd, **kwargs):
         if proc is None:
             confirmed()
         raise
-    finally:
-        _spawning_subprocesses -= 1
     try:
-        if _panic_requested:
-            request_process_tree_kill(proc)
         stdout, stderr = proc.communicate(timeout=timeout)
         return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
@@ -110,18 +182,56 @@ def _kill_process_group(proc):
     kill_process_tree(proc)
 
 
-def kill_all_tracked_subprocesses(*, request_only=False):
-    """Request owned kills without locks, or perform ordinary tree cleanup."""
+def kill_all_tracked_subprocesses(*, request_only=False, deadline=None):
+    """Request owned kills without locks (Panic), or stop the tracked children (ordinary cleanup).
+
+    The ordinary stop kills its snapshot through the tree owner. With the generation stop's
+    ``deadline`` (admission is already closed) it also waits, until then, for starts still in flight,
+    stops what they published and confirms each exit; without one it adds no wait. Only handles whose
+    exit it observed leave the registry: a concurrent publication or an unconfirmed kill keeps its
+    name. Returns ``None`` when every child it addressed exited, else the live ``pids`` and the
+    ``unpublished`` starts it could not see, which no durable record names."""
     global _panic_requested
     if request_only:
         _panic_requested = True
         return [request_process_tree_kill(proc) for proc in _active_subprocesses.copy()]
-    with _subprocess_lock:
-        procs = list(_active_subprocesses)
+    procs = list(_active_subprocesses.copy())  # whole-set copies and updates: no publisher waits on this stop
     for proc in procs:
-        _kill_process_group(proc)
-    with _subprocess_lock:
-        _active_subprocesses.clear()
+        if proc.poll() is None:  # a reaped handle's PID may already name another process
+            _kill_process_group(proc)
+    if deadline is not None:
+        with _start_settled:
+            _start_settled.wait_for(lambda: not _spawning_subprocesses, max(0.0, deadline - time.monotonic()))
+        late = [proc for proc in _active_subprocesses.copy() if proc not in procs]
+        for proc in late:  # its starter already handed it to the tree kill; this stop confirms the exit
+            if proc.poll() is None:
+                _kill_process_group(proc)
+        procs += late
+    alive = [proc for proc in procs if not _exit_observed(proc, deadline)]
+    _active_subprocesses.difference_update([proc for proc in procs if proc not in alive])
+    with _start_settled:
+        unpublished = _spawning_subprocesses
+    if alive or unpublished:
+        return {"state": "unconfirmed", "pids": sorted(proc.pid for proc in alive), "unpublished": unpublished}
+    return None
+
+
+def _exit_observed(proc, deadline) -> bool:
+    try:
+        if deadline is not None:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        return proc.poll() is not None
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def unsettled_tracked_children() -> Optional[dict]:
+    """What a joined stop must still disclose, without a wait: tracked children still alive and starts
+    still in flight (a publication after the stop ran is stopped by its starter, not confirmed)."""
+    alive = sorted(proc.pid for proc in _active_subprocesses.copy() if proc.poll() is None)
+    with _start_settled:
+        unpublished = _spawning_subprocesses
+    return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
 
 
 def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
@@ -217,6 +327,25 @@ def _resolve_effective_timeout(
 
     # 4. Floor at 1s.
     return max(1, int(effective))
+
+
+# The handlers that bound their child with ``_resolve_effective_timeout``. The loop's outer
+# wait resolves the same value here and adds its settlement margin, so whatever sets the
+# bound (override, environment, settings, default, ceiling or task deadline) the child's own
+# cleanly reported timeout fires first. The margin covers ordinary settlement, not work after
+# the child: verify_and_record's executor probes can outlast it, and that result then settles
+# late (``late_tool_results``) (#1376). Only these three are aligned here: skill_exec,
+# extensions and MCP keep their own child bounds and outer windows.
+COMMAND_TIMEOUT_TOOLS = frozenset({"run_command", "run_script", "verify_and_record"})
+
+
+def command_timeout_for_call(tool_name: str, args: Mapping[str, Any], ctx: ToolContext | None = None) -> Optional[int]:
+    """The child timeout ``tool_name``'s handler will use for dispatched ``args``, or ``None``
+    when the tool does not bound a child through this resolution. Dispatch has already folded
+    the ``timeout`` alias into ``timeout_sec`` (``tool_resolution._normalize_tool_call_args``)."""
+    if tool_name not in COMMAND_TIMEOUT_TOOLS:
+        return None
+    return _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=args.get("timeout_sec"))
 
 
 # R5 (node-runtime sprint): the render moved to the typed process-facts SSOT

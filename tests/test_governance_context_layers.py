@@ -254,7 +254,98 @@ def test_core_layer_without_a_subject_root_discloses_the_gap(governance_root):
 
 def test_an_unknown_layer_is_refused(governance_root):
     with pytest.raises(ValueError, match="layer"):
-        governance_context(governance_root, surface="triad", layer="skill")
+        governance_context(governance_root, surface="triad", layer="plan")
+
+
+# --- the skill layer (owner 21.10 1A/F1) --------------------------------------------------------
+
+SKILL_RULE_TEXT = {
+    "docs/architecture/10-key-invariants.md": "Key invariant: skill gates do not collapse.",
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": "Companion processes are declared.",
+    "docs/architecture/13-external-skills-layer.md": "The external skills layer binds the payload.",
+    "docs/development/03-module-size-and-complexity.md": "Modules target roughly 1000 lines.",
+}
+PLUGIN_API_TEXT = "class PluginAPI:\n    def register_tool(self): ...\n"
+UI_VALIDATION_TEXT = "WIDGET_START_MODES = ('auto', 'manual', 'retain')\n"
+CREATING_SKILLS_TEXT = "# Creating skills\n\nIntro.\n\n## Manifest schema\n\nFields.\n\n## Lifecycle\n\nSteps.\n"
+
+
+@pytest.fixture()
+def skill_governance_root(governance_root: pathlib.Path) -> pathlib.Path:
+    root = governance_root
+    for rel, text in SKILL_RULE_TEXT.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {rel.rsplit('/', 1)[-1]}\n\n{text}\n", encoding="utf-8", newline="\n")
+    (root / "ouroboros" / "contracts").mkdir(parents=True)
+    (root / "ouroboros" / "contracts" / "plugin_api.py").write_text(PLUGIN_API_TEXT, encoding="utf-8")
+    (root / "ouroboros" / "extension_ui_validation.py").write_text(UI_VALIDATION_TEXT, encoding="utf-8")
+    (root / "docs" / "CREATING_SKILLS.md").write_text(CREATING_SKILLS_TEXT, encoding="utf-8", newline="\n")
+    (root / "docs" / "ARCHITECTURE.md").write_text(
+        "# Architecture\n\nThe map.\n\n## Chapters\n\n- [01-core.md](architecture/01-core.md)\n"
+        "- [10-key-invariants.md](architecture/10-key-invariants.md)\n", encoding="utf-8", newline="\n")
+    return root
+
+
+SKILL_SECTION = "## Skill Review Checklist\n\n| 1 | manifest_schema | x | critical |"
+
+
+def _skill_context(root, *, delivery, facts):
+    return governance_context(root, surface="skill", delivery=delivery, checklist_section_text=SKILL_SECTION,
+                              layer="skill", manifest_facts=facts)
+
+
+@pytest.mark.parametrize("delivery", ["packet", "retrieving"])
+def test_the_skill_layer_tiers_the_rules_and_names_what_each_delivery_did_not_receive(skill_governance_root, delivery):
+    context = _skill_context(skill_governance_root, delivery=delivery, facts={"type": "script", "declares": set()})
+    by_path = {row["path"]: row for row in context.manifest}
+
+    assert context.layer == "skill"
+    assert by_path["docs/CHECKLISTS.md"]["disposition"] == "inline" and by_path["BIBLE.md"]["disposition"] == "inline"
+    assert by_path[f"docs/CHECKLISTS.md#{SHARED_CHECKLIST_SECTION}"]["disposition"] == NOT_APPLICABLE_DISPOSITION
+    assert by_path["docs/CHECKLISTS_ARCHIVE.md"]["disposition"] == NOT_APPLICABLE_DISPOSITION
+    tier2 = "inline" if delivery == "packet" else "required"
+    for path in SKILL_RULE_TEXT:
+        assert (by_path[path]["tier"], by_path[path]["disposition"]) == (2, tier2), path
+    # A script skill declaring nothing owes neither host contract: named, never dropped, never delivered.
+    for path in ("ouroboros/contracts/plugin_api.py", "ouroboros/extension_ui_validation.py"):
+        assert (by_path[path]["tier"], by_path[path]["disposition"]) == (2, "navigation"), path
+    for path in ("docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md", "docs/CREATING_SKILLS.md", "docs/architecture/01-core.md"):
+        assert (by_path[path]["tier"], by_path[path]["disposition"]) == (3, "navigation"), path
+    assert BIBLE_TEXT in context.stable_inline and ARCHIVE_TEXT not in context.stable_inline
+    rules_delivered = all(text in context.selected_inline for text in SKILL_RULE_TEXT.values())
+    assert rules_delivered == (delivery == "packet")
+    assert PLUGIN_API_TEXT.strip() not in context.selected_inline
+    assert ARCH_TEXT not in context.stable_inline + context.selected_inline, "tier 3 is never inlined whole"
+    assert "## Manifest schema" in context.navigation or "Manifest schema" in context.navigation
+    if delivery == "packet":
+        assert "NOT delivered" in context.navigation and "one read away" not in context.navigation
+    else:
+        assert "read each in full" in context.navigation and "one read away" in context.navigation
+        assert "`docs/architecture/10-key-invariants.md`" in context.navigation
+    assert len({row["path"] for row in context.manifest}) == len(context.manifest)
+
+
+@pytest.mark.parametrize("facts, plugin_api, ui", [
+    ({"type": "extension", "declares": set()}, True, True),
+    ({"type": "script", "declares": {"env_from_settings"}}, True, False),
+    ({"type": "instruction", "declares": {"scheduled_tasks"}}, True, False),
+    ({"type": "script", "declares": {"contributes"}}, False, True),
+    ({"type": "script", "declares": {"page_module"}}, False, True),
+    ({"type": "script", "declares": {"ui_tab", "permissions"}}, True, True),
+    ({"type": "instruction", "declares": set()}, False, False),
+])
+def test_host_contracts_follow_the_manifests_facts_in_both_directions(skill_governance_root, facts, plugin_api, ui):
+    context = _skill_context(skill_governance_root, delivery="packet", facts=facts)
+    by_path = {row["path"]: row for row in context.manifest}
+    assert (by_path["ouroboros/contracts/plugin_api.py"]["disposition"] == "inline") is plugin_api
+    assert (by_path["ouroboros/extension_ui_validation.py"]["disposition"] == "inline") is ui
+    assert (PLUGIN_API_TEXT.strip() in context.selected_inline) is plugin_api
+    assert (UI_VALIDATION_TEXT.strip() in context.selected_inline) is ui
+    for path, delivered in (("ouroboros/contracts/plugin_api.py", plugin_api), ("ouroboros/extension_ui_validation.py", ui)):
+        assert ("by manifest facts" in by_path[path]["reason"]) and (by_path[path]["chars"] > 0)
+        if not delivered:
+            assert "declares no" in by_path[path]["reason"]
 
 
 def test_triad_api_messages_core_head_carries_no_constitution():

@@ -4,7 +4,7 @@ The replay sweep (``supervisor.terminal_delivery.replay_pending_deliveries``) an
 bus that owns delivery membership (``supervisor.event_observation.ObservedEventQueue``)
 were built against one interface; this pins them together on the spawn-context
 ``EventQueueManager`` the server uses, so a proxy that does not expose the membership
-methods, or a sweep that counts attempts before the bus admits a copy, fails here.
+methods, or a sweep that spends dispatch attempts on queued copies, fails here.
 
 Owner (14 Oct 2026, 18:56): «не сжигать попытки повторной доставки, пока сообщение уже
 стоит в очереди».
@@ -42,7 +42,7 @@ def test_a_queued_or_handled_answer_is_not_copied_until_the_consumer_releases_it
 
         bus.release_delivery(event["delivery_id"])  # handler returned without a receipt
         assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [event["delivery_id"]]
-        assert bus.qsize() == 1 and _attempts(tmp_path, event["delivery_id"]) == 1
+        assert bus.qsize() == 1 and _attempts(tmp_path, event["delivery_id"]) == 0
         copy = bus.get_nowait()
         assert copy["delivery_id"] == event["delivery_id"] and copy["text"] == event["text"]
 
@@ -80,6 +80,7 @@ def test_the_last_replay_copy_is_not_exhausted_while_it_is_still_outstanding(tmp
     for attempt in range(td._PENDING_MAX_REPLAYS):
         _age(tmp_path)
         assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [did]
+        assert td.record_replay_dispatch(tmp_path, did)
         if attempt < td._PENDING_MAX_REPLAYS - 1:
             assert bus.get_nowait()["delivery_id"] == did
             bus.release_delivery(did)

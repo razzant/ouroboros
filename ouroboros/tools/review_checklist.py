@@ -55,14 +55,23 @@ def load_checklist_layers(layer: str, checklist_path: Optional[Path] = None) -> 
     return f"{core}\n{load_checklist_section(BODY_CHECKLIST_SECTION, checklist_path)}"
 
 
+def _fingerprint(text: str, path: Path) -> dict:
+    raw = path.read_bytes()
+    blob_sha = hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
+    return {"checklist_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "rules_source": {"path": CHECKLIST_RELATIVE_PATH, "sha": blob_sha}}
+
+
 def checklist_fingerprint(layer: str, checklist_path: Optional[Path] = None) -> dict:
     """Which rules ran: ``checklist_hash`` is the sha256 of the layered text,
     ``rules_source.sha`` the git blob id of the checklist file as read from
     the install (HEAD's blob on a clean tree — the installed body's rules
     execute, D31), computed from the bytes themselves without a git call."""
     path = Path(checklist_path) if checklist_path else REPO_ROOT / "docs" / "CHECKLISTS.md"
-    raw = path.read_bytes()
-    blob_sha = hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
-    text_hash = hashlib.sha256(load_checklist_layers(layer, path).encode("utf-8")).hexdigest()
-    return {"checklist_hash": text_hash,
-            "rules_source": {"path": CHECKLIST_RELATIVE_PATH, "sha": blob_sha}}
+    return _fingerprint(load_checklist_layers(layer, path), path)
+
+
+def section_fingerprint(section_name: str, checklist_path: Optional[Path] = None) -> dict:
+    """``checklist_fingerprint`` for a surface judged by one section of its own (the result review)."""
+    path = Path(checklist_path) if checklist_path else REPO_ROOT / "docs" / "CHECKLISTS.md"
+    return _fingerprint(load_checklist_section(section_name, path), path)

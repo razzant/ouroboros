@@ -36,7 +36,7 @@ ROUTE_PLUGIN = (
     "def register(api):\n"
     "    api.register_route('greet', _hello, methods=('GET',))\n"
     "    api.register_tool('greet', lambda ctx: 'hi', description='d', schema={})\n"
-    "    api.register_ws_handler('greet', _hello)\n"
+    "    api.register_ws_handler('greet', lambda msg: {'hello': 'world'})\n"
 )
 
 

@@ -45,7 +45,7 @@ def test_display_diagnostics_preserve_exception_and_private_problem(unknown):
     assert error.reset_at == original["context"]["resetsAt"]
     assert error.model_role == "main" and error.operation_id == "op-1" and error.route == ROUTE
     display = error.display_message
-    assert ("provider_code=string_above_max_length, parameter=instructions" in display[:220]) is (not unknown)
+    assert ("provider_error_type=string_above_max_length, parameter=instructions" in display[:220]) is (not unknown)
     assert "private provider body" not in display and "private-request" not in display
     if unknown:
         assert display == generic
@@ -84,7 +84,6 @@ def test_display_redacts_typed_details_without_mutating_custody():
     ("invalid_request", 400, True, "provider_outcome_unknown", False, "", "context_length_exceeded"),
 ])
 def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code, status, unknown, kind, retry, wait, vendor):
-    from ouroboros.context_compaction import _typed_context_overflow
     from ouroboros.llm_attempt import _is_structured_context_overflow_exception
     from ouroboros.loop_llm_call import classify_llm_exception
     from ouroboros.model_wait import model_wait_reason
@@ -96,7 +95,6 @@ def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code
     assert error.display_message and classify_llm_exception(error) == classified
     assert classified.kind == kind and classified.retry_same_request is retry
     assert model_wait_reason(error) == wait
-    assert _typed_context_overflow(error) is (kind == "context_overflow")
     assert _is_structured_context_overflow_exception(error) is (kind == "context_overflow")
     wrapper = "model_outcome_unknown" if unknown else code
     assert error.code == wrapper and error.problem == problem
@@ -107,7 +105,7 @@ def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code
     expected_type = vendor.strip() if not unknown and code in {"provider_failed", "invalid_request"} and isinstance(vendor, str) else ""
     assert facts[2] == (expected_type or "ClaudexorModelError")
     typed = transport.ClaudexorModelError({"code": "context_length_exceeded", "message": "Controlled refusal"})
-    assert _typed_context_overflow(typed) and classify_llm_exception(typed).kind == "context_overflow"
+    assert classify_llm_exception(typed).kind == "context_overflow"
 
 
 def result(*, outcome="completed", cash=None, knowledge="unknown", route=None, problem=None):
@@ -210,7 +208,7 @@ def setup(tmp_path, monkeypatch):
     from ouroboros import pricing
     monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *_: pytest.fail("Claudexor must not fetch API pricing"))
     gateway = Gateway()
-    monkeypatch.setattr(transport, "ensure_owned_gateway", lambda: gateway)
+    monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **_kw: gateway)
     with ua.usage_scope(ua.UsageScope(drive_root=root, task_id="task-one", root_task_id="task-one")):
         yield root, gateway, LLMClient()
 
@@ -319,6 +317,36 @@ def test_lost_create_reply_rejoins_without_second_physical_attempt(setup):
     assert len(gateway.creates) == 2 and gateway.creates[0] == gateway.creates[1]
     assert len(gateway.accepted_operations) == 1 and len(usage["ledger_attempt_ids"]) == 1
     assert [row["state"] for row in ledger(root)] == ["settled"]
+
+
+@pytest.mark.parametrize("fault", ["stall_then_ready", "deadline", "forbidden"])
+def test_precreate_handshake_waits_only_for_unanswered_transport(setup, monkeypatch, fault):
+    root, gateway, client = setup
+    clock, calls = [0.0], []
+    monkeypatch.setattr(transport, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+
+    def ensure(**bounds):
+        calls.append(bounds)
+        if fault == "forbidden":
+            raise ClaudexorUnavailable("forbidden", "refused", status_code=403)
+        if len(calls) == 1 or fault == "deadline":
+            clock[0] += 0.1
+            raise ClaudexorUnavailable("daemon_unreachable", "handshake unanswered", observation_timeout=True)
+        return gateway
+
+    monkeypatch.setattr(transport, "ensure_owned_gateway", ensure)
+    if fault == "stall_then_ready":
+        answer, _usage = client.chat([], MODEL, timeout=0.3)
+        assert answer["content"] == "Ответ 🐍"
+        assert len(calls) == 2 and len(gateway.creates) == 1
+        assert [row["state"] for row in ledger(root)] == ["settled"]
+    else:
+        with pytest.raises(transport.ClaudexorModelNotDispatched):
+            client.chat([], MODEL, timeout=0.3)
+        assert not gateway.creates and not gateway.uploads
+        assert len(calls) == (1 if fault == "forbidden" else 3)
+        assert all(row["state"] == "released" for row in ledger(root))
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -467,6 +495,17 @@ def test_earlier_dispatched_rotation_cannot_hide_behind_final_not_started(setup)
     assert len(gateway.accepted_operations) == 2
 
 
+@pytest.mark.parametrize("code,label", [("provider_failed", "provider_error_type"), ("invalid_request", "provider_error_type"),
+                                        ("rate_limited", "vendor_code"), ("subscription_window_exhausted", "vendor_code")])
+def test_a_vendor_code_is_labelled_by_the_event_field_only_when_it_fills_that_field(code, label):
+    """The text names provider_error_type only when this error's own type carries the code into that field."""
+    from ouroboros.transport_custody import attempt_custody_event_fields
+
+    error = transport.ClaudexorModelError({"code": code, "message": "m", "context": {"vendorCode": "v1"}})
+    assert error.display_message.startswith(f"{label}=v1")
+    assert (attempt_custody_event_fields(error).get("provider_error_type") == "v1") is (label == "provider_error_type")
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("code,vendor", [("invalid_request", "string_above_max_length"),
     ("invalid_request", "context_length_exceeded"), ("provider_failed", "context_length_exceeded")])
@@ -491,7 +530,7 @@ def test_field_refusal_retains_then_acknowledges_once_with_display(setup, asynch
     assert error.problem == problem and error.body == problem and error.code == code and error.type == vendor
     assert error.status_code == 400 and error.retryable is False
     assert error.operation_id == "op-0" and error.model_role == "main" and error.route == ROUTE
-    assert f"provider_code={vendor}, parameter=input" in error.display_message[:220]
+    assert f"provider_error_type={vendor}, parameter=input" in error.display_message[:220]
     assert error.physical_attempt_capture.state == "settled"
     assert error.usage["claudexor"]["result_custody"]["state"] == "acknowledged"
     assert len(gateway.accepted_operations) == len(gateway.creates) == len(gateway.acks) == 1
@@ -840,13 +879,13 @@ def test_cold_actual_model_call_still_ensures_engine_after_unknown_metadata(setu
     root, gateway, client = setup
     monkeypatch.setattr(owned, "owned_config_dir", lambda: root / "cold-owned")
     evidence = ce.probe(root, provider="claudexor", model=MODEL,
-        allow_fetch=True, allow_generative=False)
+        allow_fetch=True)
     assert evidence.status == ce.STATUS_FAILED and evidence.window_tokens == 0
     assert not ledger(root) and not gateway.creates
     startup = []
     endpoint = wire.DaemonEndpoint("127.0.0.1", 1, "fixture-owned-token")
 
-    def start():
+    def start(**_bounds):
         startup.append("ensure_running")
         return endpoint
 
@@ -955,7 +994,8 @@ def test_pending_operation_has_no_whole_generation_http_deadline(setup, monkeypa
 
     gateway.detail = detail
     ticks = iter(range(100, 10000, 100))
-    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _seconds: None))
+    monkeypatch.setattr(transport, "time", SimpleNamespace(
+        monotonic=lambda: next(ticks) if gateway.creates else 0, sleep=lambda _seconds: None))
     answer, _ = client.chat([{"role": "user", "content": "hi"}], MODEL, timeout=0.001)
     assert observed == 5 and answer == result()["message"]
     assert not gateway.cancels and ledger(root)[-1]["state"] == "settled"

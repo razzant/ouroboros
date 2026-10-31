@@ -17,14 +17,16 @@ def test_native_question_census_agrees_with_current_detail(tmp_path, kind):
     fields = ({'project_id': project['id']} if kind == 'context-main'
               else {'parent_task_id': 'absent'})
     write_task_result(tmp_path, kind, 'completed', chat_id=1, **fields)
-    record_asked(tmp_path, kind, quiz_id='q', question='Which?', options=['A'])
+    asked = record_asked(tmp_path, kind, quiz_id='q', question='Which?', options=['A'])
     record_publication(tmp_path, kind, 'q', 1)
     detail = detail_client(tmp_path).get('/api/tasks/' + kind).json()
     snapshot = main_decisions_snapshot(tmp_path, [], {})
     assert detail['question_rooms']['q'] == {'state': 'known', 'chat_id': 1, 'project_id': ''}
     assert snapshot['current_questions_complete']
     assert snapshot['current_questions_gaps'] == []
-    assert snapshot['current_questions'] == []  # native history, not a second Project mirror
+    # Main's own card is its native history: the census names it in the detail's room, never a Project copy.
+    assert snapshot['current_questions'] == [{'task_id': kind, 'quiz_id': 'q', 'chat_id': 1, 'native': True,
+                                              'quiz_state': 'open', 'ts': asked['asked_at']}]
 
 
 def test_unreadable_binding_is_unknown_in_both_readers(tmp_path, monkeypatch):

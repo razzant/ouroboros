@@ -1,8 +1,8 @@
 """The layered change-review checklist (docs/CHECKLISTS.md): the universal
 `Change Review Checklist` core every reviewed change carries, and the
 `Ouroboros Body Layer` appended only when the subject IS the body
-(`review_body_fact.layer_for`). Pins the loader, the numbering contract, the
-fingerprint and the retirement of the former single-section name."""
+(`review_body_fact.layer_for`). Pins the loader, the numbering contract, and the
+fingerprint."""
 
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ from ouroboros.tools.review_helpers import (
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECKLIST = REPO / "docs" / "CHECKLISTS.md"
-RETIRED_SECTION_NAME = "Repo Commit" + " Checklist"  # spelled apart so this file never carries the name
 ITEM_ROW = re.compile(r"^\| (\d+) \| ([a-z_]+) \|", re.MULTILINE)
 
 
@@ -75,7 +74,7 @@ def test_item_numbering_is_continuous_across_the_layers():
     body_keys = {key for _, key in body_items}
     assert "bible_compliance" not in core_keys
     assert {"bible_compliance", "development_compliance", "version_bump", "self_consistency",
-            "size_cap_paydown"} <= body_keys
+            "size_cap_paydown", "capability_placement", "copy_mechanism"} <= body_keys
     assert {"secrets_check", "code_quality", "security_issues", "tests_affected"} <= core_keys
 
 
@@ -83,16 +82,6 @@ def test_the_core_layer_names_no_body_document():
     core = load_checklist_layers("core")
     for marker in ("BIBLE", "CHECKLISTS_ARCHIVE", "DEVELOPMENT.md", "ARCHITECTURE.md", "DESIGN.md"):
         assert marker not in core, marker
-
-
-def test_the_retired_section_name_is_gone_from_the_executing_code_and_docs():
-    hits: list[str] = []
-    for tree in ("ouroboros", "prompts", "docs"):
-        for path in sorted((REPO / tree).rglob("*")):
-            if path.is_file() and path.suffix in {".py", ".md", ".txt", ".toml", ".json"}:
-                if RETIRED_SECTION_NAME in path.read_text(encoding="utf-8", errors="replace"):
-                    hits.append(path.relative_to(REPO).as_posix())
-    assert hits == [], hits
 
 
 def test_fingerprint_names_the_rules_that_ran():

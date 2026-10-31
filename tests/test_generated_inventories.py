@@ -108,6 +108,29 @@ def test_ui_control_scan_lists_fixed_text_and_only_counts_the_rest():
     assert interpolated == 3
 
 
+def test_ui_control_scan_lists_a_modules_own_button_factory_by_its_literal_calls():
+    from scripts.ui_control_inventory import scan_controls
+
+    rows, interpolated = scan_controls(
+        """
+        const button = (label, data, tone = 'btn-default', key = '') => `<button type="button" class="btn ${tone} btn-sm" ${data} data-key="${attr(data)}"${key ? ` data-i18n-fmt="${attr(key)}"` : ''}>${text(label)}</button>`;
+        ${button('Show what can go', 'data-free-preview')}
+        ${button('Free', 'data-free-go', 'btn-danger', 'storage.free.go')}
+        ${button(goLabel(free, checked), 'data-free-go', 'btn-danger')}
+        const pill = (label) => `<button class="pill">Pin</button>`;
+        ${pill('Unpin')}
+        """
+    )
+    # The factory's template is no control; each call with a literal label is one, with the classes its
+    # arguments and the factory's defaults resolve to. An arrow whose button text is fixed is not a factory.
+    assert rows == [
+        ("Pin", "pill"),
+        ("Show what can go", "btn btn-default btn-sm"),
+        ("Free", "btn btn-danger btn-sm"),
+    ]
+    assert interpolated == 1, "a call whose label is computed is counted, not invented"
+
+
 def test_ui_control_inventory_keeps_siblings_adjacent_and_names_the_one_raiser():
     rendered = inv.build_ui_control_inventory()[0]
     table = [line for line in rendered.splitlines() if line.startswith("| ") and not line.startswith("| text")]

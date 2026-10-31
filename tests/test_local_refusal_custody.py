@@ -79,6 +79,7 @@ def test_pre_effect_argument_refusals_do_not_hold_continue(tmp_path, monkeypatch
     from tests.test_owner_continue import _interrupted, _owner_mail, NONCE
 
     registry, queue, workers, repo = _world(tmp_path, monkeypatch)
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     effects = []
     monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway",
                         lambda *_a, **_kw: effects.append("daemon"))

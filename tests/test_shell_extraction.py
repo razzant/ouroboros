@@ -51,11 +51,9 @@ _MOVED_OWNERS = {
     "_snapshot_declared_outputs": shell_outputs,
     "_get_changed_files": shell_effects,
     "_get_diff_stat": shell_effects,
-    "_protected_runtime_dirty_paths": shell_effects,
     "_record_scratch_fingerprints": shell_effects,
     "_resolve_git_root": shell_effects,
     "_resolve_scratch_abs": shell_effects,
-    "_restore_protected_runtime_paths": shell_effects,
     "_scratch_safety_reason": shell_effects,
     "_shallow_listing": shell_effects,
     "_status_snapshot": shell_effects,
@@ -125,9 +123,13 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # start_service with keep_alive=true is the path that outlives the task. Rolled again
     # (whole review, 2026-10-13): that task-end promise names its limit, local POSIX runs
     # only (Windows has no census; a Docker backend's children live in its container),
-    # paid for inside the same description.
+    # paid for inside the same description. Rolled for #1797 (owner decisions 18 Oct): both
+    # outputs descriptions say a refused declaration stops the call before it starts and that
+    # only outputs accept a relative '../', judged by resolved location. Rolled for the
+    # tool-reuse sprint (20.10): run_script says the selected cwd is not on Python's
+    # import path and that a reusable script lives in a skill payload run with run_command.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "57e457cc5c8689b9fe1bbda510db45cc6e2721d135b32a2f7b3cedc2304d085a"
+        "466aa899d0d740260f9eddb78cb22226ffdebe29e73b0407d5c07bd5636ebd92"
     )
     original = json.loads(schema_bytes)
     for schema in original:

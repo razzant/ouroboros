@@ -78,7 +78,6 @@ def test_vision_query_default_max_tokens():
 def test_summary_and_background_token_budgets():
     """Summary/background paths must stay above the raised floors."""
     from pathlib import Path
-    from ouroboros import context_compaction
 
     from ouroboros import consolidator
 
@@ -97,10 +96,6 @@ def test_summary_and_background_token_budgets():
     # facts row buys no model call, so the synthesis leaf holds no summary call.
     synthesis = Path("ouroboros/post_task_synthesis.py").read_text(encoding="utf-8")
     assert "chat_observed" not in synthesis and 'call_type="task_summary"' not in synthesis
-    # The reflection log is a store only: no automatic lesson or register call remains.
-    assert "chat_observed" not in Path("ouroboros/reflection.py").read_text(encoding="utf-8")
-    assert context_compaction._SUMMARY_OUTPUT_TOKENS == 32_768
-    assert context_compaction._summarizer_spec()["output_budget"] == 32_768
 
 
 def test_native_review_character_and_round_caps_are_retired():
@@ -747,9 +742,9 @@ def test_triad_fit_sizes_against_the_local_route(monkeypatch, tmp_path):
     )
 
 
-def test_update_letter_max_tokens_pinned():
-    """The update letter is ONE short paragraph (owner decision 2026-09-03): its LIGHT
-    one-shot budget stays 1024 and matches the ARCHITECTURE 'LLM output token budgets' row."""
-    from ouroboros.update_letter import UPDATE_LETTER_MAX_TOKENS
+def test_the_update_description_has_no_host_output_budget():
+    """The description is the mind's ordinary work (Ouroboros#2389, owner 28.10): no host one-shot,
+    so no host output budget, length or paragraph limit remains on it."""
+    from ouroboros import update_letter
 
-    assert UPDATE_LETTER_MAX_TOKENS == 1024
+    assert not hasattr(update_letter, "UPDATE_LETTER_MAX_TOKENS")

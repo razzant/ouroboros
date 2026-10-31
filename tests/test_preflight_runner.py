@@ -13,6 +13,7 @@ import time
 import pytest
 
 from ouroboros.platform_layer import force_kill_pid, pid_is_alive
+from ouroboros.test_parallelism import WORKERS_ENV
 from ouroboros.settings_defaults import settings_env_keys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -121,10 +122,10 @@ def two_pass_env(monkeypatch, preflight_timeout_diagnostics):
     """Deterministic env for the real-spawn two-pass tests."""
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", raising=False)
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    # Operator lever (scrubbed before the candidate ever sees it), clamped at the
-    # >=2 floor: the fixture repos below hold 1-3 probe tests, so a full `-n auto`
-    # fan-out would spend minutes on worker startup for nothing.
+    # These tiny fixture repos explicitly need two workers to prove concurrency;
+    # they must not inherit the surrounding battery's full fan-out.
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # These scenarios prove real xdist concurrency.
     # The operator-environment downgrade the scrub must defeat. Every real-spawn
     # test below therefore ALSO proves the parallel lane stayed parallel: if
     # PYTEST_XDIST_AUTO_NUM_WORKERS were inherited, `-n auto` would resolve to one
@@ -149,12 +150,15 @@ def test_two_pass_specs_mirror_ci(monkeypatch):
     parallel, serial = specs
 
     assert parallel.args[:3] == ["tests/", "-m", f"not serial and {pr.LANE_EXCLUSION_EXPR}"]
-    for flag in ("-n", "auto", "--dist", "loadscope", "--max-worker-restart=0",
-                 "--timeout=300", "--timeout-method=thread"):
+    for flag in ("-n", "auto", "--dist", "loadscope", "--max-worker-restart=0", "--timeout=300"):
         assert flag in parallel.args, f"parallel pass lost {flag}"
+    # pytest-timeout picks its own method: SIGALRM fails one test; the thread method (Windows) stops a worker.
+    assert not any(arg.startswith("--timeout-method") for arg in parallel.args)
 
-    # The serial pass is flag-free like CI: no -n, no --dist, no per-test timeout.
-    assert serial.args == ["tests/", "-m", f"serial and {pr.LANE_EXCLUSION_EXPR}", "-q", "--tb=line", "--no-header"]
+    # The serial pass carries the same per-test hang bound like CI, and no xdist flag.
+    # It forces the timeout plugin against a candidate `-p no:timeout`, as the parallel pass does.
+    assert serial.args == ["tests/", "-m", f"serial and {pr.LANE_EXCLUSION_EXPR}", "--timeout=300",
+                           "-p", "timeout", "-q", "--tb=line", "--no-header"]
 
     # `parallel` is read off the argv, not the label: it gates the xdist-only
     # diagnoses so they cannot fire on a pass that never ran a worker.
@@ -187,9 +191,10 @@ def test_the_parallel_pass_forces_the_plugins_and_the_worker_probe(monkeypatch):
     assert " ".join(pr._FORCED_PLUGIN_FLAGS) in joined, "the parallel pass does not force its plugins"
     assert f"-p {pr._WORKER_PROBE_MODULE}" in joined, "the parallel pass carries no worker probe"
 
-    # The serial/legacy passes use neither plugin, so forcing them there would
-    # make a lane that deliberately needs nothing fail on a missing dependency.
-    assert "-p" not in serial.args
+    # The serial pass carries the per-test timeout, so it forces only the timeout
+    # plugin; it never uses xdist and needs no worker probe.
+    assert serial.args.count("-p") == 1 and "timeout" in serial.args
+    assert "xdist" not in serial.args and pr._WORKER_PROBE_MODULE not in serial.args
     assert "-p" not in pr._preflight_pass_specs(["tests/", "-n", "2"])[0].args, (
         "an explicit caller argv must be forwarded verbatim"
     )
@@ -241,7 +246,10 @@ def _ci_pytest_suite_commands(job: str) -> list[tuple[str, str]]:
     )
     assert block, f"ci.yml has no `{job}:` job"
     # `tests/` only — the per-file guard steps run one file and are not the split.
-    return re.findall(r'run: python -m pytest tests/ -m "([^"]+)"(.*)', block.group(1))
+    # Each pass runs under the owned runner, which forwards its pytest arguments unchanged,
+    # behind scripts/ci_retry.py (one retry per failed test, FLAKY recorded).
+    return re.findall(r'run: python (?:scripts/ci_retry\.py .*? -- python )?(?:-m pytest|scripts/run_tests\.py) '
+                      r'tests/ -m "([^"]+)"(.*)', block.group(1))
 
 
 @pytest.mark.parametrize("job", ["quick-test", "full-test-runs"])
@@ -268,9 +276,11 @@ def test_each_ci_job_runs_the_same_split_the_gate_runs(job, monkeypatch):
     assert " ".join(pr.PARALLEL_PASS_FLAGS) in ci_parallel_tail, (
         f"{job}'s parallel pass no longer runs PARALLEL_PASS_FLAGS verbatim: {ci_parallel_tail!r}"
     )
-    # ...and the serial pass stays flag-free, or CI's serial lane would carry a
-    # per-test timeout the gate's serial pass does not.
-    for flag in pr.PARALLEL_PASS_FLAGS:
+    # ...and the serial pass carries the gate's serial flags and none of the xdist ones.
+    assert " ".join(pr.SERIAL_PASS_FLAGS) in ci_serial_tail, (
+        f"{job}'s serial pass no longer runs SERIAL_PASS_FLAGS verbatim: {ci_serial_tail!r}"
+    )
+    for flag in set(pr.PARALLEL_PASS_FLAGS) - set(pr.SERIAL_PASS_FLAGS):
         assert flag not in ci_serial_tail.split(), f"{job}'s serial pass carries {flag}"
 
 
@@ -464,24 +474,22 @@ def test_plugin_verification_ignores_the_candidate_working_directory(tmp_path):
 # ── Parallelism is real, not nominal (unit) ───────────────────────────
 
 
-def test_worker_count_can_never_fall_below_two(monkeypatch):
-    """A "parallel" pass on ONE worker exercises no concurrency at all, yet the
-    argv still says `-n` and the green return is accepted as proof. The count is
-    therefore clamped: the operator lever may only lower it TO the floor."""
+def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypatch):
+    """CPU defaults and operator requests cannot spend unavailable worker slots."""
     from ouroboros import preflight_runner as pr
+    from ouroboros import config, test_parallelism as budget
 
-    monkeypatch.setenv(pr._PREFLIGHT_WORKERS_ENV, "1")
-    assert pr._preflight_worker_count() == 2
-    monkeypatch.setenv(pr._PREFLIGHT_WORKERS_ENV, "0")
-    assert pr._preflight_worker_count() == 2
-    monkeypatch.setenv(pr._PREFLIGHT_WORKERS_ENV, "-4")
-    assert pr._preflight_worker_count() == 2
-    monkeypatch.setenv(pr._PREFLIGHT_WORKERS_ENV, "not-a-number")
-    assert pr._preflight_worker_count() >= 2
-    monkeypatch.setenv(pr._PREFLIGHT_WORKERS_ENV, "3")
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    peak = config.TEST_WORKER_PEAK_RSS_BYTES
+    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setenv(WORKERS_ENV, "1")
+    assert pr._preflight_worker_count() == 1
+    monkeypatch.setenv(WORKERS_ENV, "0")
+    assert pr._preflight_worker_count() == 1
+    monkeypatch.setenv(WORKERS_ENV, "16")
     assert pr._preflight_worker_count() == 3
-    monkeypatch.delenv(pr._PREFLIGHT_WORKERS_ENV, raising=False)
-    assert pr._preflight_worker_count() >= 2
+    monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "2")
+    assert pr._preflight_worker_count() == 2
 
 
 @pytest.mark.parametrize("hostile", [
@@ -507,6 +515,7 @@ def test_external_pytest_controls_never_reach_the_candidate_suite(tmp_path, monk
     from ouroboros.preflight_runner import _preflight_env
 
     key, value = hostile
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")
     monkeypatch.setenv(key, value)
     env = _preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
 
@@ -534,20 +543,6 @@ def test_projected_settings_keys_never_reach_the_candidate_suite(tmp_path, monke
     monkeypatch.setenv(key, "owner-runtime-state")
     env = _preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
     assert env.get(key) != "owner-runtime-state", f"{key} leaked into the candidate suite"
-
-
-def test_the_gate_pins_the_worker_count_it_verified(tmp_path, monkeypatch):
-    """The injected count is the clamped one, not whatever `os.cpu_count()` or
-    the operator environment happened to say."""
-    from ouroboros import preflight_runner as pr
-
-    monkeypatch.setenv(pr._PREFLIGHT_WORKERS_ENV, "3")
-    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "1")
-    env = pr._preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
-    assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "3"
-    # ...and the seam itself is OUROBOROS_*, so the scrub removes it first: a
-    # candidate test can neither read nor re-lower it.
-    assert pr._PREFLIGHT_WORKERS_ENV not in env
 
 
 def test_the_worker_probe_is_prepended_to_pythonpath(tmp_path, monkeypatch):
@@ -672,7 +667,7 @@ def test_classify_skips_xdist_diagnoses_on_a_non_parallel_pass():
     (4, "pytest: error: unrecognized arguments: -n auto --dist loadscope\n",
      "PREFLIGHT_PLUGIN_MISSING", "pyproject.toml", "unrecognized arguments"),
     (1, "worker gw3 crashed while running 'tests/test_x.py::test_y'\n",
-     "PARALLEL_WORKER_CRASH", "@pytest.mark.serial", "worker gw3 crashed"),
+     "PARALLEL_WORKER_CRASH", "nothing recorded why", "worker gw3 crashed"),
 ])
 def test_hard_block_remediation_survives_caller_truncation(
     returncode, output, label, remediation_marker, body_marker
@@ -699,67 +694,102 @@ def test_hard_block_remediation_survives_caller_truncation(
     )
 
 
+_CALLBACK_LINE = ("[gw0] pytest-timeout callback invoked (300s) while running 'tests/test_slow.py::test_slow'; "
+                  "worker subsequently lost\n")
+# A pass's own results.json (tests/ci_evidence.py): the worker recorded dead and its matched crash row.
+_RECORDED = {"worker_crash": {"worker": "gw0"}, "reports": [
+    {"nodeid": "tests/test_slow.py::test_slow", "phase": "crash", "outcome": "failed", "error_type": "WorkerCrash",
+     "worker": "gw0", "timeout_callback_seconds": 300.0}]}
+
+
 def test_per_test_timeout_kill_is_not_told_to_mark_the_test_serial():
-    """`--timeout-method=thread` does not FAIL a slow test — it `os._exit`s the
-    whole worker, which xdist reports with its crash phrasing. The generic
-    remediation would then tell the author to mark a merely-slow test
-    `@pytest.mark.serial`, and the serial pass carries NO per-test timeout, so
-    obeying it moves the hang into the one pass that cannot bound it. Same hard
-    block, different instruction."""
+    """pytest-timeout's thread method does not FAIL a slow test: it `os._exit`s the
+    whole worker, which xdist reports with its crash phrasing. Its banner goes to the
+    worker's stdout, which execnet discards (#1949), so the cause comes from this pass's
+    own crash row, which names the timeout only for the record that worker's callback
+    left. Marking the test serial would only move the hang: the serial pass carries the
+    same per-test timeout. Same hard block, different instruction."""
     from ouroboros.preflight_runner import _classify_pass_result
 
-    output = (
-        "+++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++\n"
-        "~~~~~~~~~~~~~~ Stack of MainThread (123) ~~~~~~~~~~~~~~\n"
-        '  File "tests/test_slow.py", line 4, in test_slow\n'
-        "    time.sleep(600)\n"
-        "+++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++\n"
-        "[gw0] node down: Not properly terminated\n"
-        "worker gw0 crashed and worker restarting disabled\n"
-    )
-    result = _classify_pass_result("parallel", 1, output, 8000, parallel=True)
+    output = (".[gw0] node down: Not properly terminated\n" + _CALLBACK_LINE
+              + "worker gw0 crashed and worker restarting disabled\n"
+              + "worker 'gw0' crashed while running 'tests/test_sl\n")
+    result = _classify_pass_result("parallel", 1, output, 8000, parallel=True, recorded=_RECORDED)
 
     assert result is not None
-    assert "PARALLEL_WORKER_CRASH" in result, "a killed worker is still a hard block"
-    assert "300s per-test limit" in result
+    assert "PARALLEL_WORKER_CRASH" in result, "a lost worker is still a hard block"
     assert "faster or split" in result
     assert "Do NOT mark it @pytest.mark.serial" in result, (
-        "the serial pass has no per-test timeout, so the wrong instruction relocates the hang"
+        "the serial pass carries the same per-test timeout, so the wrong instruction only relocates the hang"
     )
-    assert "Find the test that spawns a real process" not in result, (
-        "the generic crash remediation must not be emitted for a timeout kill"
-    )
-    assert "never a flake/retry" not in result
-    # The evidence the author needs is still there.
-    assert "time.sleep(600)" in result
+    assert "nothing recorded why" not in result and "never a flake/retry" not in result
+    assert "tests/test_slow.py::test_slow" in result  # The evidence the author needs is still there.
 
 
-def test_signal_method_timeout_banner_also_avoids_the_serial_remediation():
-    """The signal method spells the same event `Failed: Timeout >300.0s`. Pinned
-    so the diagnosis stays right if `--timeout-method` is ever changed."""
+@pytest.mark.parametrize("evidence", [
+    # The thread method's banner never reaches the controller from a worker; text alone proves nothing.
+    "+++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++\n",
+    # The signal method fails its test and the worker lives on: that line cannot explain a crash.
+    "E   Failed: Timeout >300.0s\n",
+    _CALLBACK_LINE.replace("[gw0]", "[gw1]"),  # another worker's timeout
+    _CALLBACK_LINE,  # even the dead worker's own line: any test can print it
+], ids=["thread-banner", "signal-failure", "another-worker", "dead-workers-line"])
+def test_timeout_text_beside_a_crash_does_not_name_its_cause(evidence):
+    """Printed text names no cause. A banner, a signal-method failure or a controller
+    line beside the crash leave it unknown without the pass's own record, and an
+    unknown cause asks for a diagnosis instead of prescribing serial."""
     from ouroboros.preflight_runner import _classify_pass_result
 
-    output = "E   Failed: Timeout >300.0s\nworker gw2 crashed while running 'tests/test_slow.py::test_slow'\n"
+    output = evidence + "worker gw0 crashed while running 'tests/test_x.py::test_y'\n"
     result = _classify_pass_result("parallel", 1, output, 8000, parallel=True)
 
     assert "PARALLEL_WORKER_CRASH" in result
-    assert "Find the test that spawns a real process" not in result
-    assert "300s per-test limit" in result
+    assert "nothing recorded why" in result and "faster or split" not in result
 
 
-def test_genuine_crash_still_gets_the_mark_it_serial_remediation():
-    """The timeout branch must not swallow the ordinary case: a worker that dies
-    with no pytest-timeout banner is the real-process/port/global-state class,
-    and `@pytest.mark.serial` IS the fix for it."""
+@pytest.mark.parametrize("change", [
+    {"worker_crash": None}, {"worker_crash": {"worker": "gw1"}}, {"reports": []},
+    {"reports": 1}, {"reports": "malformed"},
+    {"reports": [{**_RECORDED["reports"][0], "timeout_callback_seconds": None}]},
+    {"reports": [{**_RECORDED["reports"][0], "timeout_callback_seconds": "300"}]},
+    {"reports": [{**_RECORDED["reports"][0], "worker": None}]},
+    {"reports": [*_RECORDED["reports"], {**_RECORDED["reports"][0], "worker": "gw1", "timeout_callback_seconds": None}]},
+], ids=["no-dead-worker", "dead-worker-unmatched", "no-crash-row", "integer-reports", "string-reports", "unmatched-row", "malformed-seconds",
+        "row-without-worker", "one-of-two-unmatched"])
+def test_a_crash_names_a_timeout_only_from_its_own_recorded_rows(change):
+    from ouroboros.preflight_runner import _classify_pass_result
+
+    output = "worker gw0 crashed and worker restarting disabled\n" + _CALLBACK_LINE
+    assert "faster or split" in _classify_pass_result("parallel", 1, output, 8000, parallel=True, recorded=_RECORDED)
+    result = _classify_pass_result("parallel", 1, output, 8000, parallel=True, recorded={**_RECORDED, **change})
+    assert "nothing recorded why" in result and "faster or split" not in result
+
+
+def test_a_pass_without_its_own_readable_results_has_no_record(tmp_path):
+    from ouroboros import preflight_runner as pr
+
+    assert pr._recorded_session(tmp_path) is None  # no controller of this pass located one
+    pr._results_pointer(tmp_path).write_text(str(tmp_path / "evidence"), encoding="utf-8")
+    assert pr._recorded_session(tmp_path) is None  # located, never exported
+    (tmp_path / "evidence").mkdir()
+    for torn in ("{torn", "[]"):
+        (tmp_path / "evidence" / "results.json").write_text(torn, encoding="utf-8")
+        assert pr._recorded_session(tmp_path) is None
+
+
+def test_unrecorded_crash_asks_for_a_diagnosis_before_any_serial_mark():
+    """A worker that dies with no record of why may be a native crash, an OS kill,
+    an os._exit or a timeout nothing recorded. Serial fixes only the shared-resource
+    class, so the gate asks for the cause first and never for a retry."""
     from ouroboros.preflight_runner import _classify_pass_result
 
     output = "worker gw0 crashed and worker restarting disabled\n"
     result = _classify_pass_result("parallel", 1, output, 8000, parallel=True)
 
     assert "PARALLEL_WORKER_CRASH" in result
-    assert "@pytest.mark.serial" in result
+    assert "nothing recorded why" in result and "Rerun the test" in result
     assert "never a flake/retry" in result
-    assert "300s per-test limit" not in result
+    assert "faster or split" not in result
 
 
 def test_crash_diagnosis_keeps_the_full_pytest_output():
@@ -872,11 +902,11 @@ def test_crash_pattern_still_matches_the_mid_line_short_summary_form():
 
 
 def test_a_genuine_crash_is_not_reclassified_by_timeout_text_elsewhere_in_the_output():
-    """`_crash_remediation` INVERTS the instruction, so its patterns must be as
-    tight as the crash patterns. Matching a bare `Timeout >30s` anywhere in the
-    pass output let one unrelated test's assertion text rewrite a real crash's
-    remediation into "make it faster, do NOT mark it serial" — the one
-    instruction that leaves the real-process test breaking every parallel run."""
+    """The timeout instruction INVERTS the serial one, so no output text may select
+    it. Matching a bare `Timeout >30s` anywhere in the pass output let one
+    unrelated test's assertion text rewrite a real crash's remediation into
+    "make it faster, do NOT mark it serial" — the one instruction that leaves
+    the real-process test breaking every parallel run."""
     from ouroboros.preflight_runner import _classify_pass_result
 
     output = (
@@ -887,9 +917,9 @@ def test_a_genuine_crash_is_not_reclassified_by_timeout_text_elsewhere_in_the_ou
     result = _classify_pass_result("parallel", 1, output, 8000, parallel=True)
 
     assert "PARALLEL_WORKER_CRASH" in result
-    assert "@pytest.mark.serial" in result, "a real crash lost its mark-it-serial fix"
+    assert "nothing recorded why" in result, "a real crash lost its request for a diagnosis"
     assert "never a flake/retry" in result
-    assert "300s per-test limit" not in result
+    assert "faster or split" not in result
 
 
 def test_diagnosis_keeps_the_failure_summary_tail_when_output_is_cut():
@@ -931,7 +961,7 @@ def test_pass_header_reports_that_pass_s_own_duration():
     assert "parallel pass, exit 1, 140s" in preflight_runner._classify_pass_result(
         "parallel", 1, "boom", 8000, parallel=False, elapsed=140.0
     )
-    src = inspect.getsource(preflight_runner.run_hermetic_pytest)
+    src = inspect.getsource(preflight_runner._run_hermetic_pytest)
     assert "pass_started = time.monotonic()" in src
     assert "elapsed = time.monotonic() - pass_started" in src
 
@@ -950,6 +980,13 @@ def test_classify_green_and_empty_pass():
 # diff/env plumbing — with `_execute_pytest_pass` stubbed, so the budget and
 # pass contracts are pinned WITHOUT depending on pytest-xdist being installed
 # in the interpreter running this file.
+
+
+def _pin_preflight_root(monkeypatch, temp_root):
+    """Pin only the gate's scratch root; its evidence and lane logs keep their own directories."""
+    real = tempfile.mkdtemp
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda *a, **k: str(temp_root)
+                        if k.get("prefix") == "ouroboros-preflight-" else real(*a, **k))
 
 
 @pytest.fixture
@@ -1225,7 +1262,7 @@ def test_a_caller_supplied_parallel_argv_is_not_blocked_for_missing_worker_evide
 
 
 def test_a_pass_whose_tree_cannot_be_proven_gone_blocks_even_when_it_exits_zero(
-    tmp_path, two_pass_env, stub_passes
+    tmp_path, two_pass_env, stub_passes, monkeypatch
 ):
     """The container's failure reason has to reach the verdict, or it is inert.
 
@@ -1242,23 +1279,26 @@ def test_a_pass_whose_tree_cannot_be_proven_gone_blocks_even_when_it_exits_zero(
     second pass runs — a tree that may still be alive must not be handed one.
     """
     from ouroboros import preflight_runner as pr
+    from tests._shared import retire_synthetic_gate_hold
 
-    events = stub_passes([
-        (0, "1 passed", "the live process table could not be enumerated"),
-        (0, "1 passed"),
-    ])
+    reason = "the live process table could not be enumerated"
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    events = stub_passes([(0, "1 passed", reason), (0, "1 passed")])
     repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
 
-    result = pr.run_hermetic_pytest(repo, timeout=120)
+    try:
+        result = pr.run_hermetic_pytest(repo, timeout=120)
 
-    assert result is not None, "a green pass over an unprovable teardown returned green"
-    assert "PREFLIGHT_CONTAINMENT_FAILED" in result, result
-    assert "the live process table could not be enumerated" in result, (
-        "the diagnosis must carry the container's own reason"
-    )
-    assert [event[0] for event in events].count("pass") == 1, (
-        "the serial pass ran on top of a tree that could not be proven gone"
-    )
+        assert result is not None, "a green pass over an unprovable teardown returned green"
+        assert "PREFLIGHT_CONTAINMENT_FAILED" in result, result
+        assert reason in result, "the diagnosis must carry the container's own reason"
+        assert [event[0] for event in events].count("pass") == 1, (
+            "the serial pass ran on top of a tree that could not be proven gone"
+        )
+    finally:
+        retire_synthetic_gate_hold(repo, temp_root, reason)  # the stubbed pass proved no process
 
 
 @pytest.mark.parametrize("lane", ["proven", "pass_reported", "pass_raised", "node_reported", "node_raised"])
@@ -1277,7 +1317,7 @@ def test_the_hermetic_tree_is_deleted_only_after_every_lane_proved_its_teardown(
 
     temp_root = (tmp_path / "preflight-root").resolve()
     temp_root.mkdir()
-    monkeypatch.setattr(tempfile, "mkdtemp", lambda *a, **k: str(temp_root))
+    _pin_preflight_root(monkeypatch, temp_root)
     worktree = temp_root / "repo"
     unproven = "pid 4242 was still alive after the reap"
 
@@ -1313,11 +1353,16 @@ def test_the_hermetic_tree_is_deleted_only_after_every_lane_proved_its_teardown(
         assert worktree.is_dir(), "the worktree was deleted under processes not proven gone"
         assert f"worktree {worktree.as_posix()}\n" in registered, registered
         marker = (temp_root / RETENTION_MARKER).read_text(encoding="utf-8")
-        assert marker.startswith("hermetic preflight: "), marker
+        # The gate records its reason first; the hermetic release owner adds its own line.
+        assert any(line.startswith("hermetic preflight: ") for line in marker.splitlines()), marker
         assert (unproven in marker) == lane.endswith("_reported"), marker
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
-                       cwd=str(repo), capture_output=True)
+        # Every lane here is a stub: retire only the reason it was told to report.
+        from tests._shared import retire_synthetic_gate_hold
+        reason = unproven if lane.endswith("_reported") else (
+            "the node lane did not return, so its teardown is unconfirmed" if lane == "node_raised"
+            else "the parallel pass did not return, so its teardown is unconfirmed")
+        retire_synthetic_gate_hold(repo, temp_root, reason)
 
 
 def test_the_retention_notice_precedes_the_body_and_stays_inside_the_budget():
@@ -2579,8 +2624,8 @@ def test_the_pre_commit_baseline_is_head_only_after_a_deliberate_removal(tmp_pat
 
 
 def test_a_timed_out_pass_reports_what_the_killed_child_had_already_flushed(tmp_path, two_pass_env, stub_passes):
-    """The serial pass carries no per-test timeout, so a serial hang is exactly
-    the case with no other evidence of WHICH test hung — and the post-kill
+    """A hang the per-test timeout cannot interrupt (blocked C code under SIGALRM)
+    leaves no other evidence of WHICH test hung — and the post-kill
     `communicate` already collects that evidence. Discarding it left the operator
     with "the serial pass timed out" and nothing else."""
     from ouroboros.preflight_runner import run_hermetic_pytest
@@ -2595,20 +2640,11 @@ def test_a_timed_out_pass_reports_what_the_killed_child_had_already_flushed(tmp_
     assert "test_hangs_here" in result, "the killed pass's own output was collected then thrown away"
 
 
-def test_a_second_timeout_keeps_the_excerpt_the_first_one_already_carried(tmp_path, monkeypatch):
-    """The retry `communicate` is a bonus source of evidence, not the only one.
+def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_path, monkeypatch):
+    """Timeout still preserves the last test; file-backed output needs no pipe retry.
 
-    On timeout the pass kills the tree and calls `communicate(timeout=10)` again
-    to collect what pytest flushed. That retry can itself time out — an escaped
-    grandchild holding the inherited pipe open is the exact case the code
-    anticipates — and seeding the excerpt as `""` meant the diagnosis then carried
-    nothing at all, losing the last-test evidence it exists to preserve. The FIRST
-    `TimeoutExpired` already carries that output (as raw bytes, since
-    `communicate` joins the partial reads before applying text-mode decoding), so
-    it is the seed and the retry may only enrich it.
-
-    The container is also reaped BEFORE the retry, not only after: the descendant
-    that would make the retry hang is precisely the one the container can kill.
+    Replaces the old communicate-timeout simulation. A real detached child that
+    holds inherited stdio is covered by test_test_storage's direct-exit witness.
     """
     from ouroboros import preflight_runner as pr, process_containment
 
@@ -2621,21 +2657,18 @@ def test_a_second_timeout_keeps_the_excerpt_the_first_one_already_carried(tmp_pa
         stderr = None
 
         def communicate(self, timeout=None):
-            order.append("communicate")
-            raise subprocess.TimeoutExpired(
-                "pytest", timeout,
-                output=b"tests/test_a.py .\ntests/test_hangs_here.py ",
-                stderr=b"",
-            )
+            pytest.fail("stdio EOF must not be awaited")
 
         def poll(self):
             return 1
 
         def wait(self, timeout=None):
-            return 1
+            order.append("wait")
+            raise subprocess.TimeoutExpired("pytest", timeout)
 
     class _FakeContainer:
         def spawn(self, argv, **kwargs):
+            kwargs["stdout"].write(b"tests/test_a.py .\ntests/test_hangs_here.py ")
             return _StuckProc()
 
         def reap(self):
@@ -2645,8 +2678,8 @@ def test_a_second_timeout_keeps_the_excerpt_the_first_one_already_carried(tmp_pa
         def close(self):
             order.append("close")
 
-    monkeypatch.setattr(process_containment, "ProcessContainer", _FakeContainer)
-    monkeypatch.setattr(pr, "_terminate_preflight_tree", lambda proc, temp_root: None)
+    monkeypatch.setattr(process_containment, "ProcessContainer", lambda **options: _FakeContainer())
+    monkeypatch.setattr(pr, "_terminate_preflight_tree", lambda proc, temp_root: order.append("terminate"))
 
     returncode, output, reap_error = pr._execute_pytest_pass(
         sys.executable, tmp_path, tmp_path, ["tests/"], 0.01
@@ -2657,8 +2690,8 @@ def test_a_second_timeout_keeps_the_excerpt_the_first_one_already_carried(tmp_pa
     assert "test_hangs_here" in output, (
         "both collections timed out and the excerpt was thrown away with them"
     )
-    assert order[:3] == ["communicate", "reap", "communicate"], (
-        f"the container was not reaped before the retry that it unblocks: {order}"
+    assert order[:3] == ["wait", "terminate", "reap"], (
+        f"the container was not reaped before reading the logs: {order}"
     )
 
 
@@ -3071,7 +3104,7 @@ def test_hermetic_pytest_reaps_owned_children_and_preserves_unrelated_process(
 
     temp_root = (tmp_path / "preflight-root").resolve()
     temp_root.mkdir()
-    monkeypatch.setattr(tempfile, "mkdtemp", lambda *a, **k: str(temp_root))
+    _pin_preflight_root(monkeypatch, temp_root)
     marker = tmp_path / "owned.pid"
     repo = _make_repo(tmp_path, {
         "tests/test_leaks_a_child.py": f"""
@@ -3130,8 +3163,8 @@ def test_hermetic_pytest_reaps_owned_children_and_preserves_unrelated_process(
 
 @requires_preflight_plugins
 def test_worker_crash_is_hard_block(tmp_path, two_pass_env):
-    """A dead xdist worker is a HARD BLOCK with mark-it-serial remediation, never
-    an ordinary failure and never a retryable flake. Fail-fast: no pass 2."""
+    """A dead xdist worker is a HARD BLOCK whose unrecorded cause is to be diagnosed,
+    never an ordinary failure and never a retryable flake. Fail-fast: no pass 2."""
     from ouroboros.preflight_runner import run_hermetic_pytest
 
     marker_serial = tmp_path / "ran_serial.txt"
@@ -3160,9 +3193,74 @@ def test_worker_crash_is_hard_block(tmp_path, two_pass_env):
 
     assert result is not None, "a crashed worker must block the commit"
     assert "PARALLEL_WORKER_CRASH" in result, result
-    assert "@pytest.mark.serial" in result, result
+    assert "nothing recorded why" in result, result
     assert "never a flake/retry" in result, result
     assert not marker_serial.exists(), "fail-fast broken: the serial pass ran after a red pass 1"
+
+
+def _gate_pass(tmp_path, monkeypatch, source):
+    """One red gate run through its own loop, nonce probe and parallel pass, over a candidate whose
+    plugins are this checkout's tests/conftest.py and whose pytest-timeout method is the thread one
+    (Windows' default): (verdict, every record the loop read for its classifier)."""
+    from ouroboros import preflight_runner as pr
+
+    repo = _make_repo(tmp_path, {
+        "pytest.ini": _FIXTURE_PYTEST_INI + "timeout_method = thread\n", "tests/test_case.py": source,
+        "conftest.py": f"import sys\nsys.path.insert(0, {str(REPO_ROOT)!r})\npytest_plugins = ['tests.conftest']\n"})
+    read, original = [], pr._recorded_session
+    monkeypatch.setattr(pr, "_recorded_session", lambda root: read.append(original(root)) or read[-1])
+    return pr.run_hermetic_pytest(repo, timeout=120), read
+
+
+@requires_preflight_plugins
+def test_thread_timeout_worker_loss_is_named_from_the_callback_record(tmp_path, monkeypatch, two_pass_env):
+    """#1949 through the gate's own loop: the thread method's banner dies with the worker's
+    stdout, so the cause reaches the gate as this pass's crash row, which its controller
+    attributed from the record that worker's callback left and the loop hands its classifier."""
+    result, _ = _gate_pass(tmp_path, monkeypatch, """
+        import time
+        import pytest
+        @pytest.mark.timeout(2)
+        def test_slow():
+            time.sleep(60)
+        class TestOther:
+            def test_quick(self):
+                pass
+    """)
+    assert "PARALLEL_WORKER_CRASH" in result and "faster or split" in result, result
+    assert "pytest-timeout callback invoked (2s) while running '" in result, result  # its readable display
+
+
+@requires_preflight_plugins
+def test_a_printed_timeout_line_names_no_cause_for_another_workers_crash(tmp_path, monkeypatch, two_pass_env):
+    """A test prints the controller's timeout line, for both worker ids, straight to the
+    controller's stderr while its neighbour's worker calls os._exit. That pass's crash row
+    names no timeout, so the printed line attributes nothing and the cause stays unknown."""
+    flag = tmp_path / "printed"
+    result, read = _gate_pass(tmp_path, monkeypatch, f"""
+        import os, sys, time
+        from pathlib import Path
+        def test_prints_the_line(capsys):
+            with capsys.disabled():
+                sys.stderr.write("\\n" + "".join(
+                    f"[gw{{n}}] pytest-timeout callback invoked (2s) while running "
+                    f"'tests/test_case.py::TestNeighbour::test_exits'; worker subsequently lost\\n" for n in (0, 1)))
+            Path({str(flag)!r}).write_text("printed", encoding="utf-8")
+        class TestNeighbour:
+            def test_exits(self):
+                deadline = time.monotonic() + 30
+                while not Path({str(flag)!r}).exists():
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+                os._exit(3)
+    """)
+    assert "[gw0] pytest-timeout callback invoked (2s)" in result, result  # the printed line reached the gate
+    assert len(read) == 1 and read[0] is not None, result  # the loop read this pass's own record
+    crashes = [row for row in read[0]["reports"] if row["phase"] == "crash"]
+    assert [(row["nodeid"], "timeout_callback_seconds" in row) for row in crashes] == [
+        ("tests/test_case.py::TestNeighbour::test_exits", False)], read
+    assert "PARALLEL_WORKER_CRASH" in result and "nothing recorded why" in result, result
+    assert "faster or split" not in result
 
 
 @requires_preflight_plugins
@@ -3277,7 +3375,8 @@ def test_hermetic_pytest_timeout_invokes_full_tree_reaper():
     assert "reap_error = container.reap()" in returning, (
         "the reap result cannot reach the caller, so containment fails open"
     )
-    assert "return returncode, output, reap_error" in returning
+    # The tuple's spelling may change; test_pass_returns_observed_reap_and_export_status
+    # exercises the three-value caller contract, including a failed reap.
     assert "container.reap()" in teardown
     assert "container.close()" in teardown
 
@@ -3290,6 +3389,47 @@ def test_hermetic_pytest_timeout_invokes_full_tree_reaper():
     assert "kill_process_group_id" in reaper_src
     # Platform-specific process discovery stays behind platform_layer helpers.
     assert "collect_descendant_pids" in reaper_src
+
+
+@pytest.mark.parametrize("export_error", [False, True])
+def test_pass_returns_observed_reap_and_export_status(tmp_path, monkeypatch, export_error):
+    """Even a green child must return its first reap failure; export status is separate."""
+    from types import SimpleNamespace
+    from ouroboros import preflight_runner, process_containment
+    from ouroboros.test_environment import RETENTION_MARKER
+
+    calls = []
+
+    class Container:
+        def spawn(self, *_args, **kwargs):
+            calls.append("spawn")
+            kwargs["stdout"].write(b"observed output\n")
+            return SimpleNamespace(wait=lambda **_kw: 0, poll=lambda: 0)
+
+        def reap(self):
+            calls.append("reap")
+            return "child could not be proven gone" if calls.count("reap") == 1 else ""
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(process_containment, "ProcessContainer", lambda **options: Container())
+    if export_error:
+        def unreadable(_root):
+            raise OSError("diagnostic probe unavailable")
+        monkeypatch.setattr(preflight_runner, "_controller_diagnostics", unreadable)
+    try:
+        result = preflight_runner._execute_pytest_pass(sys.executable, tmp_path, tmp_path, [], 1)
+        code, output, containment = result
+        assert code == 0 and output == "observed output\n"
+        assert containment == "child could not be proven gone"
+        assert bool(result.evidence_errors) is export_error
+        if export_error:
+            assert "diagnostic probe unavailable" in result.evidence_errors[0]
+        assert calls == ["spawn", "reap", "reap", "close"]
+    finally:
+        # No process was spawned: retire this test's synthetic export-failure marker.
+        (tmp_path / RETENTION_MARKER).unlink(missing_ok=True)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX marker-membership reaping")
@@ -3801,7 +3941,7 @@ def test_resolve_preflight_timeout_env_override(monkeypatch):
 def test_hermetic_pytest_prefers_agent_python_env():
     from ouroboros import preflight_runner
 
-    runner_src = inspect.getsource(preflight_runner.run_hermetic_pytest)
+    runner_src = inspect.getsource(preflight_runner._run_hermetic_pytest)
     assert 'os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable' in runner_src
     # ...and every pass is actually spawned with that resolved interpreter.
     pass_src = inspect.getsource(preflight_runner._execute_pytest_pass)

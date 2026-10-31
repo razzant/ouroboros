@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Optional
 from ouroboros.config import (
     SETTINGS_DEFAULTS, defaults_for_settings_document, normalize_settings_raw, serialize_settings,
 )
+from ouroboros.settings_scales import EFFORT_FORMAT_KEY, normalize_effort_document
 from ouroboros.update_channels import get_managed_update_fetch_timeout_sec, normalize_update_channel
 from ouroboros.utils import atomic_write_json, write_text_atomic
 
@@ -117,7 +118,7 @@ def masked_secret_status(settings: Dict[str, Any]) -> Dict[str, bool]:
 
 _COLAB_MODEL_OVERRIDE_KEYS = frozenset({
     "OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION",
-    "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS",
+    "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS", "OUROBOROS_MODEL_SAFETY",
 })
 
 
@@ -163,8 +164,8 @@ def build_colab_settings(
     # renamed key is already present as its default and the customization under the
     # former key is lost, then written back to Drive as the owner's choice. Private
     # sentinel keys stay out of the document.
-    loaded = {k: v for k, v in normalize_settings_raw(document).items() if not str(k).startswith("_")} if document else {}
-    settings.update(loaded)
+    loaded = {k: v for k, v in normalize_settings_raw(document).items() if not str(k).startswith("_") or k == EFFORT_FORMAT_KEY} if document else {}
+    settings.update(normalize_effort_document(loaded))
     if github_repo:
         settings["GITHUB_REPO"] = github_repo
     settings["TOTAL_BUDGET"] = float(total_budget)
@@ -219,6 +220,11 @@ def export_colab_env(repo_dir: pathlib.Path, data_dir: pathlib.Path, settings_pa
     # export it explicitly here and respect an explicit override.
     start_method = (os.environ.get("OUROBOROS_WORKER_START_METHOD") or "forkserver").strip().lower()
     env = {"OUROBOROS_APP_ROOT": str(pathlib.Path(data_dir).parent), "OUROBOROS_REPO_DIR": str(repo_dir), "OUROBOROS_DATA_DIR": str(data_dir), "OUROBOROS_SETTINGS_PATH": str(settings_path), "OUROBOROS_WORKER_START_METHOD": start_method, "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(repo_dir)}
+    # Disposable worktrees stay on local disk, never Drive FUSE, for existing and new installs alike;
+    # a new install's projects (their git clones included) and Deliverables follow APP_ROOT onto Drive
+    # so they persist with its memory (#1239). A saved setting or the operator's own export wins.
+    if not os.environ.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT"):
+        env["OUROBOROS_SUBAGENT_WORKTREE_ROOT"] = os.path.expanduser(os.path.join("~", "Ouroboros", "subagent_worktrees"))
     os.environ.update(env)
     return env
 
@@ -437,54 +443,92 @@ def _gateway_request(host: str, port: int) -> Callable[..., tuple]:
     return _call
 
 
+def wait_for_dialogue(call: Callable[..., tuple], *, alive: Optional[Callable[[], bool]] = None,
+                      timeout: Optional[float] = None, report: Callable[[str], Any] = print) -> Dict[str, Any]:
+    """Wait until the server accepts owner messages: ``/api/health`` answers and its ``boot``
+    says ``dialogue_ready`` (an older core without ``boot`` counts as ready at its first 200), or
+    the boot is ``ready`` without them (no model provider configured yet).
+
+    No clock decides that a live server failed: the wait ends when the dialogue is ready, when
+    the boot reports ``failed`` (its error is returned), when ``alive`` says the server process
+    is gone, or at ``timeout`` for a caller that owns its own bound. Each phase change is
+    printed once (``report``), so the notebook shows where the start is.
+    """
+    deadline = None if timeout is None else time.time() + timeout
+    last_phase = ""
+    while deadline is None or time.time() < deadline:
+        if alive is not None and not alive():
+            return {"ok": False, "error": "server exited before it became ready"}
+        try:
+            code, payload = call("GET", "/api/health")
+        except Exception:
+            code, payload = 0, {}
+        boot = payload.get("boot") if code == 200 and isinstance(payload, dict) else None
+        if code == 200 and not isinstance(boot, dict):
+            return {"ok": True, "boot": None}
+        if isinstance(boot, dict):
+            phase = f"{boot.get('phase')} (dialogue_ready={boot.get('dialogue_ready')}, tasks_ready={boot.get('tasks_ready')})"
+            if phase != last_phase:
+                report(f"Ouroboros boot: {phase}")
+                last_phase = phase
+            if boot.get("phase") == "failed":
+                return {"ok": False, "error": f"server start failed: {boot.get('error') or 'unknown'}", "boot": boot}
+            if boot.get("dialogue_ready") is True:
+                return {"ok": True, "boot": boot}
+            if boot.get("phase") == "ready":  # no model provider yet, or the dialogue's opening failed
+                report("Ouroboros is ready, but its chat is not accepting messages yet: configure a model "
+                       "provider, or see the failed boot step in /api/health")
+                return {"ok": True, "boot": boot}
+        time.sleep(1.0)
+    return {"ok": False, "error": "server did not become ready"}
+
+
 def ensure_native_telegram_live(
     host: str = "127.0.0.1",
     port: int = 8765,
     *,
     settings: Optional[Dict[str, Any]] = None,
-    timeout: float = 180.0,
+    timeout: Optional[float] = None,
     request: Optional[Callable[..., tuple]] = None,
+    alive: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
-    """Grant, enable, and configure the bundled native Telegram skill.
+    """Grant, enable, and configure the built-in Telegram skill.
 
-    The native payload is seeded and hash-trusted by the launcher. Headless
+    The starter selection installs the built-in with its install record (trusted
+    by default, so the gate admits exactly those bytes). Headless
     Colab only performs the same owner-policy steps the Skills UI would perform:
     grant the API-projected missing items when persisted auto-grant is enabled,
     enable the skill, then save its Telegram settings. It never installs from a
-    marketplace or runs a skill review.
+    marketplace or runs a skill review. ``alive`` reports whether the server
+    process still runs (the notebook's subprocess); ``timeout`` is a caller's own
+    bound, never this function's verdict about a live server.
     """
     settings = settings or {}
     call = request or _gateway_request(host, port)
     status: Dict[str, Any] = {"ok": False, "skill": "telegram", "steps": []}
 
-    # 1. Wait until the server accepts loopback requests (the gateway client has
-    #    no built-in retry, and the notebook starts the server as a subprocess).
-    deadline = time.time() + timeout
-    ready = False
-    while time.time() < deadline:
-        try:
-            code, _ = call("GET", "/api/health")
-            if code == 200:
-                ready = True
-                break
-        except Exception:
-            pass
-        time.sleep(1.0)
-    if not ready:
-        status["error"] = "server did not become ready"
+    # 1. Wait until the server accepts owner messages (the gateway client has no
+    #    built-in retry, and the notebook starts the server as a subprocess).
+    waited = wait_for_dialogue(call, alive=alive, timeout=timeout)
+    if not waited["ok"]:
+        status["error"] = waited["error"]
         return status
     status["steps"].append("ready")
+    deadline = None if timeout is None else time.time() + timeout
 
     if not str(settings.get("TELEGRAM_BOT_TOKEN") or "").strip():
         status["warning"] = "TELEGRAM_BOT_TOKEN is empty; Telegram cannot poll messages"
 
     quoted = urllib.parse.quote("telegram")
 
-    # 2. Discover the launcher-seeded native skill and read its authoritative
-    #    grant/conflict projection. Missing native payloads are packaging errors,
-    #    not a reason to fall back to a Hub install.
+    # 2. Discover the built-in skill (installed by the starter selection) and read
+    #    its authoritative grant/conflict projection. A missing built-in is a
+    #    packaging or starter-selection error, not a reason to fall back to a Hub install.
     skill = None
-    while time.time() < deadline:
+    while deadline is None or time.time() < deadline:
+        if alive is not None and not alive():
+            status["error"] = "server exited before the skill index answered"
+            return status
         try:
             code, payload = call("GET", "/api/extensions")
         except Exception:
@@ -503,15 +547,13 @@ def ensure_native_telegram_live(
             and code < 400
             and candidate is not None
             and str(candidate.get("source") or "").lower() == "native"
-            and str(candidate.get("review_profile") or "") == "native_seed"
             and candidate.get("executable_review") is True
-            and candidate.get("review_stale") is False
         ):
             skill = candidate
             break
         time.sleep(1.0)
     if skill is None:
-        status["error"] = "bundled native skill 'telegram' did not reach a fresh executable native-trust verdict"
+        status["error"] = "built-in skill 'telegram' is not installed with an executable acceptance basis"
         return status
     conflict = skill.get("conflict") if isinstance(skill.get("conflict"), dict) else None
     if conflict:
@@ -562,6 +604,10 @@ def ensure_native_telegram_live(
         if (isinstance(code, int) and code >= 400) or err:
             status["error"] = f"grant failed: {err or f'HTTP {code}'}"
             return status
+        if isinstance(payload, dict) and (payload.get("pending") or payload.get("setup_error")):
+            status.update(pending=bool(payload.get("pending")), job_id=payload.get("job_id", ""),
+                          error=payload.get("setup_error", ""), warning=payload.get("message", "Skill setup is still running."))
+            return status
         status["steps"].append("granted")
 
     # 4. Enable through the canonical lifecycle endpoint.
@@ -573,6 +619,9 @@ def ensure_native_telegram_live(
     err = str((payload or {}).get("error") or "") if isinstance(payload, dict) else ""
     if (isinstance(code, int) and code >= 400) or err:
         status["error"] = f"enable failed: {err or f'HTTP {code}'}"
+        return status
+    if isinstance(payload, dict) and payload.get("pending"):
+        status.update(pending=True, job_id=payload.get("job_id", ""), warning=payload.get("message", "Skill setup is still running."))
         return status
     status["steps"].append("enabled")
 

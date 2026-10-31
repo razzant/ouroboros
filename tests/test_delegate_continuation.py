@@ -1,18 +1,21 @@
-"""Continuation of a settled delegated run: ``delegate_start(continue_from=<run_id>)``.
+"""Continuation of a finished delegated run: ``delegate_start(continue_from=<run_id>)``.
 
-Four floor invariants gate it (own task line, settled, no pending-ambiguous
-apply, authority does not widen); every other fact — any settled cause, an
+Four floor invariants gate it (own task line, observed terminal, no pending-ambiguous
+apply, authority does not widen); every other fact — any terminal cause, an
 unread result, another actor, a changed or partial work order — is ADVICE in
 the continuing child's prompt and a fact in the parent's started payload. The
 engine continues the stopped work (``continueFrom``); a writing continuation
 runs in the predecessor's undisposed snapshot and supersedes its capture, so
-one cumulative patch is integrated once (closes #1489).
+one cumulative patch is integrated once (closes #1489). A predecessor whose
+checkout was released after its saved capture gets it back from its result
+commit at the hand-over (``tests/test_delegated_released_copies.py``).
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -276,13 +279,23 @@ def test_prompt_states_tree_facts_and_advice_and_no_session_claim():
     assert "DIRECTLY" in direct and "read-only" not in direct
     advised = continuation.continuation_prompt({**base, "advice": ["result_unread", "executor_changed"]}, "")
     assert "never read" in advised and "different actor" in advised
+    # An empty writer result closed itself: the successor hears that nothing changed, never "DIRECTLY".
+    empty = continuation.continuation_prompt({**base, "prior_access": "workspace_write", "workspace": "fresh",
+                                              "prior_patch_disposition": custody.NO_CHANGES}, "")
+    assert "changed no files" in empty and "DIRECTLY" not in empty
+    # A checkout restored from the saved result says what is not in it.
+    restored = continuation.continuation_prompt({**base, "workspace": "same_snapshot", "checkout": "recreated"}, "")
+    assert "SAME private snapshot" in restored and "restored from the saved result" in restored
+    assert ".review-evidence/ files are not here" in restored and "restored" not in same
 
 
 # --------------------------------------------------------------------------- delegate_start wiring
 
 def _start(tmp_path, monkeypatch, *, acting, run_id, prompt="finish the remaining work", start_kwargs=None,
-           capabilities=("continueFrom",), engine_version="3.22.0", start_error=None, task_id=None, access=None):
-    """Run _delegate_start against a stub engine; returns (last request, payload, ctx, calls)."""
+           capabilities=("continueFrom",), engine_version="3.22.0", start_error=None, task_id=None, access=None,
+           harness_row=None):
+    """Run _delegate_start against a stub engine; returns (last request, payload, ctx, calls).
+    ``harness_row`` adds fields to the route's catalog row (a negotiated access-control grant)."""
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
 
@@ -293,7 +306,7 @@ def _start(tmp_path, monkeypatch, *, acting, run_id, prompt="finish the remainin
         def agent_capabilities(self, **_kw):
             return {"runControlKeys": list(capabilities), "harnesses": [{
                 "id": "some-route", "enabled": True, "status": "ok",
-                "accessProfilesSupported": ["readonly", "workspace_write"]}]}
+                "accessProfilesSupported": ["readonly", "workspace_write"], **(harness_row or {})}]}
         def quota_snapshots(self): return []
         def find_project_id(self, root): return "prj-existing"
         def register_project(self, root): return "prj-new"
@@ -391,14 +404,24 @@ def test_argument_refusals_precede_the_daemon(tmp_path):
 def _snapshot_count():
     from ouroboros import subagent_worktrees
 
-    return sum(1 for row in subagent_worktrees._load_registry(None, strict=True, op="test")
+    return sum(1 for row in subagent_worktrees._records(op="test")
                if row.get("kind") == subagent_worktrees._KIND_DELEGATED_EXEC)
 
 
-def test_readonly_continuation_starts_while_the_writers_patch_awaits_disposition(tmp_path, monkeypatch):
+@pytest.mark.parametrize("auxiliary_supported", [False, True])
+def test_readonly_continuation_starts_while_the_writers_patch_awaits_disposition(
+        tmp_path, monkeypatch, auxiliary_supported):
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+    from ouroboros import test_environment
 
-    first, _p, ctx, _calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-writer")
+    scratch_parent = tmp_path / "temp"
+    scratch_parent.mkdir()
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: scratch_parent)
+    row = {"writeMechanism": "fs_sandbox", "accessControl": {
+        "auxiliaryWritableRoots": auxiliary_supported}}
+    first, _p, ctx, _calls = _start(
+        tmp_path, monkeypatch, acting=True, run_id="run-writer", harness_row=row)
+    assert bool(first["execution"].get("auxiliaryWritableRoots")) is auxiliary_supported
     snapshot_root = pathlib.Path(first["execution"]["workspaceRoot"])
     (snapshot_root / "waiting.txt").write_text("pending disposition\n", encoding="utf-8")
     _settle(tmp_path, "run-writer", ctx.task_id)
@@ -410,17 +433,33 @@ def test_readonly_continuation_starts_while_the_writers_patch_awaits_disposition
 
     request, payload, _ctx, calls = _start(
         tmp_path, monkeypatch, acting=True, run_id="run-reader", access="readonly",
-        start_kwargs={"continue_from": "run-writer"})
+        start_kwargs={"continue_from": "run-writer"}, harness_row=row)
     assert payload["status"] == "started", payload
     assert len(calls) == 1 and request["access"] == "readonly" and request["mode"] == "ask"
-    assert request["continueFrom"] == "run-writer" and "execution" not in request
+    assert request["continueFrom"] == "run-writer"
+    # A missing execution object inherits the writer's live geometry and cache grant.
+    # Lowering must instead read the current source, keeping the unaccepted patch separate.
+    assert request["execution"] == {
+        "isolation": "envelope", "delegated": False,
+        **({"auxiliaryWritableRoots": []} if auxiliary_supported else {}),
+    }
+    assert request["scope"]["root"] == str(pathlib.Path(ctx.workspace_root).resolve())
+    assert request["scope"]["root"] != str(snapshot_root)
+    assert "workspaceRoot" not in request["execution"]
     assert "wait for your supervisor's decision" in request["prompt"]
     pred, succ = (custody.replay(tmp_path)[rid] for rid in ("run-writer", "run-reader"))
     assert succ.continuation_of == pred.run_id and not succ.capture_id and not succ.snapshot_id
     assert pred.patch_captured and not pred.patch_disposed and not pred.superseded_by
     assert [row.run_id for row in custody.undisposed_patches(tmp_path)] == [pred.run_id]
     assert _snapshot_count() == count and patch.read_bytes() == original
-    assert (snapshot_root / "waiting.txt").read_text(encoding="utf-8") == "pending disposition\n"
+    # The writer's checkout went with its saved capture; its result stays as commit C.
+    from ouroboros.subagent_worktrees import find_execution_snapshot
+
+    record = find_execution_snapshot(pred.snapshot_id)
+    assert not snapshot_root.exists() and record["result_sha"] == capture["result_commit"]
+    shown = subprocess.run(["git", "show", f"{record['result_sha']}:waiting.txt"], cwd=ctx.workspace_root,
+                           check=True, capture_output=True, text=True).stdout
+    assert shown == "pending disposition\n"
 
 
 def test_a_writing_continuation_runs_in_the_predecessors_snapshot_and_supersedes_its_capture(tmp_path, monkeypatch):
@@ -557,7 +596,7 @@ def test_a_pending_hand_over_blocks_dispositions_and_a_second_claim(tmp_path):
     pred = custody.replay(tmp_path)["run-pred"]
     assert "CONTINUATION_PENDING" in continuation.disposition_refusal(tmp_path, pred)
     claim, refusal = claimed_start_request(
-        tmp_path, claim_target="", payload_busy=lambda *_a: "", task_id="t-a", invocation_id="inv-2",
+        tmp_path, task_id="t-a", invocation_id="inv-2",
         continuation_of="run-pred", capture_id="inv-2", snapshot_id="snap-1")
     assert claim is False and refusal["reason"] == continuation.REFUSAL_SUPERSEDED
     assert refusal["pending_invocation_id"] == "inv-1"
@@ -567,7 +606,7 @@ def test_a_pending_hand_over_blocks_dispositions_and_a_second_claim(tmp_path):
                                                            "snapshot_id": "snap-1", "disposition": "rejected"})
     custody._CUSTODY.clear()
     claim, refusal = claimed_start_request(
-        tmp_path, claim_target="", payload_busy=lambda *_a: "", task_id="t-a", invocation_id="inv-3",
+        tmp_path, task_id="t-a", invocation_id="inv-3",
         continuation_of="run-pred", capture_id="inv-3", snapshot_id="snap-1")
     assert claim is False and refusal["reason"] == continuation.REFUSAL_SNAPSHOT_RELEASED
 
@@ -622,19 +661,25 @@ def test_a_continuation_retried_after_an_unknown_outcome_replays_its_lineage(tmp
     assert state["run-first"].superseded_by == "run-next"
 
 
-def test_empty_retry_of_an_ordinary_start_still_requires_the_recorded_prompt(tmp_path, monkeypatch):
+def test_empty_retry_of_an_ordinary_start_replays_the_recorded_request(tmp_path, monkeypatch):
+    """#1614: the retained invocation IS the request, so '' reuses it; whitespace is text."""
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     lost = ClaudexorUnavailable("daemon_unreachable", "connection reset", status_code=503)
     _select_transport_access(monkeypatch, "readonly")   # a read-only child (#1609)
-    _r, unknown, _ctx, _calls = _start(
+    original, unknown, _ctx, _calls = _start(
         tmp_path, monkeypatch, acting=False, run_id="run-first", prompt="original work", start_error=lost)
     invocation = unknown["pending_invocation_id"]
     request, refusal, _ctx, calls = _start(
-        tmp_path, monkeypatch, acting=False, run_id="run-first", prompt="",
+        tmp_path, monkeypatch, acting=False, run_id="run-first", prompt=" ",
         start_kwargs={"retry_of": invocation})
     assert refusal["reason"] == "retry_prompt_mismatch" and request is None and calls == []
-    assert [row["invocation_id"] for row in custody.pending_invocations(tmp_path)] == [invocation]
+    request, payload, _ctx, calls = _start(
+        tmp_path, monkeypatch, acting=False, run_id="run-first", prompt="",
+        start_kwargs={"retry_of": invocation})
+    assert payload["status"] == "started" and payload["invocation_id"] == invocation
+    assert calls == [original] and request["prompt"] == "original work"
+    assert custody.pending_invocations(tmp_path) == []
 
 
 def test_an_unavailable_snapshot_lock_is_a_typed_claim_refusal(tmp_path, monkeypatch):
@@ -649,7 +694,7 @@ def test_an_unavailable_snapshot_lock_is_a_typed_claim_refusal(tmp_path, monkeyp
 
     monkeypatch.setattr(platform_layer, "acquire_exclusive_file_lock", broken)
     claim, refusal = claimed_start_request(
-        tmp_path, claim_target="", payload_busy=lambda *_a: "", task_id="t-a", invocation_id="inv-1",
+        tmp_path, task_id="t-a", invocation_id="inv-1",
         continuation_of="run-pred", capture_id="inv-1", snapshot_id="snap-1")
     assert claim is False and refusal["reason"] == "continuation_handover_busy"
     assert "lock directory unwritable" in refusal["detail"]
@@ -706,18 +751,6 @@ def test_the_terminal_payload_carries_resumable_and_one_line_per_continued_try()
 
 # --------------------------------------------------------------------------- unchanged neighbours
 
-@pytest.mark.parametrize("chapter,marker,codes", [
-    ("development/06-rules-by-change-class.md", "- `continue_from`", (
-        continuation.REFUSAL_SNAPSHOT_MISSING, continuation.REFUSAL_SNAPSHOT_RELEASED,
-        "continuation_handover_busy")),
-    ("architecture/06-agent-core.md", "**Continuation**", (continuation.REFUSAL_SNAPSHOT_MISSING,)),
-])
-def test_continuation_docs_name_the_snapshot_custody_refusals(chapter, marker, codes):
-    text = (pathlib.Path(__file__).resolve().parents[1] / "docs" / chapter).read_text(encoding="utf-8")
-    paragraph = text[text.index(marker):].split("\n\n", 1)[0]
-    assert all(f"`{code}`" in paragraph for code in codes)
-    assert "refuses ONLY on the four floors" not in paragraph
-
 
 def test_requested_cap_is_clamped_by_the_deadline_and_the_remaining_lifetime(tmp_path, monkeypatch):
     """The cap basis is still RECORDED beside the number (a fact for the parent),
@@ -764,5 +797,5 @@ def test_no_resume_causes_are_untouched_by_the_continuation_seam():
 
 @pytest.mark.parametrize("cause", ["vendor_limit", "pool_exhausted"])
 def test_receipt_lines_tolerate_partial_rows(cause):
-    line = continuation._receipt_line("run-1", {"carrier": "native", "cause": cause})
+    line = continuation._receipt_line(frozenset({"run-1"}), {"carrier": "native", "cause": cause})
     assert line.startswith("try None (?): native after " + cause) and "model unattested" in line

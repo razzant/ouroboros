@@ -33,7 +33,8 @@ def reveal_settings(tmp_path, monkeypatch):
     for key in config.SETTINGS_DEFAULTS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("OUROBOROS_SETTINGS_SHA256", raising=False)
-    settings = {
+    settings = {  # an install that already carries the consciousness level: loading runs no one-time copy
+        "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
         "ANTHROPIC_API_KEY": "sk-ant-api03-fixture-complete-tail",
         "CUSTOM_BRIDGE_TOKEN": "custom-fixture-kept-complete",
         "MCP_SERVERS": [
@@ -107,6 +108,9 @@ def test_saved_key_wins_over_environment_and_absent_builtin_is_empty(reveal_sett
     {"mcp_server_id": False}, {"mcp_server_id": ""},
     {"key": "ANTHROPIC_API_KEY", "mcp_server_id": "first-server"},
     {"key": "ANTHROPIC_API_KEY", "extra": True},
+    {"connection": "openrouter@claude-credits"}, {"connection": "", "field": "api_key"},
+    {"connection": "openrouter@claude-credits", "field": 7},
+    {"connection": "openrouter@claude-credits", "field": "api_key", "key": "OPENROUTER_API_KEY"},
 ])
 def test_invalid_selector_is_refused_without_value(reveal_settings, body):
     with TestClient(reveal_settings.app) as client:
@@ -130,6 +134,55 @@ def test_nonsecret_or_missing_identity_is_not_revealable(reveal_settings, monkey
     assert response.json()["code"] == "secret_not_found"
     assert "value" not in response.json()
     assert "unrelated-process-secret-fixture" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+
+
+_ADDED_KEY = "sk-or-v1-synthetic-added-key-complete-tail"
+
+
+def _save_added_keys(case):
+    case.settings["OUROBOROS_CONNECTIONS"] = [
+        {"kind": "openrouter", "name": "claude-credits", "label": "Claude credits", "api_key": _ADDED_KEY},
+        {"kind": "openai-compatible", "name": "local-vllm", "label": "Local vLLM",
+         "base_url": "http://127.0.0.1:8000/v1", "api_key": ""},
+    ]
+    case.path.write_text(json.dumps(case.settings), encoding="utf-8")
+
+
+def test_added_api_key_is_read_by_its_connection_and_secret_field(reveal_settings):
+    case = reveal_settings
+    _save_added_keys(case)
+    before = case.path.read_bytes()
+    with TestClient(case.app) as client:
+        assert _ADDED_KEY not in client.get("/api/settings").text
+        shown = client.post("/api/settings/secret", json={"connection": "openrouter@claude-credits", "field": "api_key"})
+        assert shown.status_code == 200
+        assert shown.json() == {"value": _ADDED_KEY}
+        assert shown.headers["cache-control"] == "no-store"
+        keyless = client.post("/api/settings/secret",
+                              json={"connection": "openai-compatible@local-vllm", "field": "api_key"})
+        assert keyless.json() == {"value": ""}
+        assert _ADDED_KEY not in client.get("/api/settings").text
+    assert case.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("body", [
+    {"connection": "openrouter@missing", "field": "api_key"},
+    {"connection": "openrouter", "field": "api_key"},  # the built-in key is read by its ``key``
+    {"connection": "openrouter@default", "field": "api_key"},
+    {"connection": "anthropic@claude-credits", "field": "api_key"},  # the name belongs to another kind
+    {"connection": "openai-compatible@local-vllm", "field": "base_url"},  # not a secret field
+    {"connection": "openrouter@claude-credits", "field": "label"},
+    {"connection": "claudexor@claude-credits", "field": "api_key"},
+    {"connection": "openrouter@Claude Credits", "field": "api_key"},
+])
+def test_added_api_key_selector_reads_only_a_saved_secret_field(reveal_settings, body):
+    _save_added_keys(reveal_settings)
+    with TestClient(reveal_settings.app) as client:
+        response = client.post("/api/settings/secret", json=body)
+    assert response.status_code == 404
+    assert response.json()["code"] == "secret_not_found"
+    assert _ADDED_KEY not in response.text
     assert response.headers["cache-control"] == "no-store"
 
 

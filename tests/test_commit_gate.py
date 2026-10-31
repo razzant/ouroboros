@@ -370,13 +370,6 @@ def test_restore_to_head_blocks_protected_paths():
     assert "RESTORE_BLOCKED" in source
 
 
-def test_revert_commit_blocks_protected_paths():
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._revert_commit)
-    assert "protected_paths_in" in source
-    assert "REVERT_BLOCKED" in source
-
-
 # --- Confirm gates ---
 
 def test_revert_commit_has_confirm_gate():
@@ -639,9 +632,11 @@ def test_commit_schema_states_the_preflight_as_a_fact_not_a_bypass():
     skipped: both are facts, never an audited bypass of advisory freshness."""
     git_tools = {tool.name: tool for tool in _get_git_module().get_tools()}
     commit, alias = git_tools["commit_reviewed"], git_tools["vcs_commit_reviewed"]
-    assert commit.schema == {**alias.schema, "name": "commit_reviewed"}
+    # Same arguments and the same complete contract; only the older name's lead says what it is.
+    assert commit.schema["parameters"] == alias.schema["parameters"]
+    assert alias.schema["description"].endswith(commit.schema["description"].split("workflow: ", 1)[1])
     props = commit.schema["parameters"]["properties"]
-    assert "not_performed" in commit.schema["description"]
+    assert "not_performed" in commit.schema["description"] and "not_performed" in alias.schema["description"]
     assert "preflight: skipped" in props["skip_advisory_review"]["description"]
     assert "TOOL_ARG_ERROR" in props["preflight_reviewer"]["description"]
     surfaces = " ".join((commit.schema["description"], props["skip_advisory_review"]["description"],

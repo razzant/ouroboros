@@ -1,6 +1,6 @@
-"""S15-S17 — Ф4 wave 3a of the deep-integration suite (v7next plan §8).
+"""S15-S16 — Ф4 wave 3a of the deep-integration suite (v7next plan §8).
 
-Review surfaces and acceptance, keyless throughout, on the wave-1/2 skeleton.
+Review surfaces, keyless throughout, on the wave-1/2 skeleton.
 Every scenario asserts DURABLE artifacts (never an HTTP 200 alone, never a
 harness exit code) and synchronizes by durable-event polling:
 
@@ -21,14 +21,8 @@ harness exit code) and synchronizes by durable-event polling:
   other bytes is never carried forward. (The advisory-freshness contract
   retired with the advisory pipeline, decision 3A: a preflight is one named
   ``review_change(surface=preflight)`` look, never a commit precondition.)
-* S17 — ACCEPTANCE LOOP (required + blocking): the terminal runs the real
-  acceptance dialogue — panel 1 rejects with an actionable capsule, the loop
-  feeds the improvement note back, the agent reworks, panel 2 accepts clean
-  (``accepted``/clean pass, both paid identities on the durable wallet). The
-  folded A-material invariants hold live: a REWORK that changes nothing is a
-  FREE replay — the identical paid identity is refused without buying a third
-  panel (``finalized_unaccepted`` / identical refusal, acceptance stub calls
-  unchanged) — the keyless instance of the $0-refusal class.
+* S17 (the acceptance loop) retired with the task-acceptance machine: a
+  task's result is reviewed by ``review_change(subject="result")``.
 
 Covered by the other waves (manifest in ``tests/system_e2e/harness.py``):
 delegated transport S11-S12, skills lifecycle S13 (wave 3b), self-evolution
@@ -171,34 +165,29 @@ W3A_TRIAD_RED = json.dumps([{
 }])
 
 
-W3A_ACCEPT_REJECT = json.dumps({
-    "verdict": "FAIL",
-    "outcome_tier": "best_effort",
-    "completion_coach": "Resubmit the final answer with the W3A_DONE marker line included.",
-    "dialogue_status": "continue_actionable",
-    "criteria_used": [{"criterion": "final answer carries the W3A_DONE marker",
-                       "status": "missing", "evidence_refs": []}],
-    "findings": [{"severity": "critical", "item": "missing_marker",
-                  "evidence": "the candidate final answer does not contain the W3A_DONE marker line",
-                  "recommendation": "Add the W3A_DONE marker line to the final answer and resubmit.",
-                  "disposition_kind": "new"}],
-    "summary": "stub acceptance reviewer: scripted reject round.",
-})
+_OWNER_SOURCE_RE = re.compile(r'"owner_source_sha256": "([0-9a-f]{64})"')
 
-# The clean accept cites a section that is ALWAYS host-attested in the packet
-# (review_evidence.build_task_acceptance_evidence writes verification_summary
-# unconditionally), so the supported criterion's evidence_ref resolves by the
-# exact-match vocabulary and the clean bar is reachable keyless.
-W3A_ACCEPT_PASS = json.dumps({
-    "verdict": "PASS",
-    "outcome_tier": "solved",
-    "completion_coach": "Nothing further; the marker is present.",
-    "dialogue_status": "continue_actionable",
-    "criteria_used": [{"criterion": "final answer carries the W3A_DONE marker",
-                       "status": "supported", "evidence_refs": ["verification_summary"]}],
-    "findings": [],
-    "summary": "stub acceptance reviewer: scripted clean accept.",
-})
+
+def _completion_step(full_answer: str, *, answer_form: str):
+    """Select complete bytes or an offered answer hash after host feedback (shared with wave 5 and
+    the waiting-controls browser test; the acceptance loop that first used it retired)."""
+    def step(body: dict) -> dict:
+        text = body_text(body)
+        assert any(row.get("function", {}).get("name") == "finish_task"
+                   for row in body.get("tools", [])), "finish_task was not offered"
+        arguments = {"action": "finish"}
+        if answer_form == "answer":
+            arguments["answer"] = full_answer
+        else:
+            selector = hashlib.sha256(full_answer.encode("utf-8")).hexdigest()
+            assert selector in re.findall(r"(?:retained as |answer_sha256=)([0-9a-f]{64})", text), (
+                "The complete answer must be offered before selecting its hash", selector)
+            arguments["answer_sha256"] = selector
+        found = _OWNER_SOURCE_RE.findall(text)
+        if found:
+            arguments["acceptance_subject"] = {"owner_source_sha256": found[-1]}
+        return {"tool": "finish_task", "arguments": arguments}
+    return step
 
 
 def _tool_rows(oracle: ArtifactOracle, tool_name: str) -> list:  # result rows only: not a call's start / wait end
@@ -559,166 +548,6 @@ def test_s16_rejects_post_verdict_mutation(tmp_path_factory):
             assert "advisory_review" not in kinds, kinds
             assert kinds.count("triad_review") == len(KEYLESS_PACKET_ROWS), kinds
             assert kinds.count("two_part_review") == len(KEYLESS_REVIEW_ROWS) - len(KEYLESS_PACKET_ROWS), kinds
-            review_script.assert_consumed()
-        finally:
-            server.stop()
-
-
-# ===========================================================================
-# S17 — acceptance loop (required + blocking)
-# ===========================================================================
-
-S14_ANSWER_V1 = "Final answer: the summary is drafted (first pass)."
-S14_ANSWER_V2 = "Final answer: the summary is complete. W3A_DONE"
-
-
-_OWNER_SOURCE_RE = re.compile(r'"owner_source_sha256": "([0-9a-f]{64})"')
-
-
-def _completion_step(full_answer: str, *, answer_form: str):
-    """Select complete bytes or an offered answer hash after host feedback."""
-    def step(body: dict) -> dict:
-        text = body_text(body)
-        assert any(row.get("function", {}).get("name") == "finish_task"
-                   for row in body.get("tools", [])), "finish_task was not offered"
-        arguments = {"action": "finish"}
-        if answer_form == "answer":
-            arguments["answer"] = full_answer
-        else:
-            selector = hashlib.sha256(full_answer.encode("utf-8")).hexdigest()
-            assert selector in re.findall(r"(?:retained as |answer_sha256=)([0-9a-f]{64})", text), (
-                "The complete answer must be offered before selecting its hash", selector)
-            arguments["answer_sha256"] = selector
-        found = _OWNER_SOURCE_RE.findall(text)
-        if found:
-            arguments["acceptance_subject"] = {"owner_source_sha256": found[-1]}
-        return {"tool": "finish_task", "arguments": arguments}
-    return step
-
-
-def _s14_settings(stub) -> dict:
-    return keyless_settings(
-        stub,
-        OUROBOROS_TASK_REVIEW_MODE="required",
-        OUROBOROS_REVIEW_ENFORCEMENT="blocking",
-    )
-
-
-def _keep_until_acceptance_settled(full_answer: str, *, wave_ordinal: int, answer_form: str):
-    """Keep the same answer through quorum wakes until the intended wave settles.
-
-    A final-slot notification can arrive during Main's response to the quorum
-    wake. The host then drains it in another round, reusing the paid verdict.
-    That round still belongs to this phase, not the stub's exhausted fallback.
-    """
-    keep = _completion_step(full_answer, answer_form=answer_form)
-    waits = {"rounds": 0}
-
-    def step(body: dict):
-        frames = re.findall(
-            r"Acceptance review (task_acceptance:[0-9a-f]+): (\d+) of (\d+) reviewer slot\(s\)",
-            body_text(body),
-        )
-        settled = {wave for wave, answered, total in frames if answered == total}
-        if len(settled) >= wave_ordinal:
-            return keep(body)
-        waits["rounds"] += 1
-        if waits["rounds"] > _WAIT_ROUNDS_MAX:
-            return {"final": (
-                "E2E_SCRIPT_ERROR: acceptance wave "
-                f"{wave_ordinal} did not settle after {waits['rounds']} round(s)")}
-        return _Again(keep(body))
-
-    return step
-
-
-@pytest.mark.integration
-@pytest.mark.serial
-@pytest.mark.parametrize("answer_form", ["answer", "answer_sha256"])
-def test_s17_acceptance_reject_rework_accept(e2e_clone, tmp_path_factory, answer_form):
-    require_lane(LANE_MOCK)
-    root = tmp_path_factory.mktemp("s14")
-    review_script = ReviewScript({
-        "acceptance": [W3A_ACCEPT_REJECT] * 3 + [W3A_ACCEPT_PASS] * 3,
-    })
-    # Both answer forms retain V2 through separate quorum/final-slot wakes; repeated collection must
-    # not buy a third panel or exhaust the script. A new hash is selectable only once the whole response was held.
-    stub = _HoldingStubModel(
-        [{"final": S14_ANSWER_V1}, *([{"final": S14_ANSWER_V2}] if answer_form == "answer_sha256" else []),
-         _completion_step(S14_ANSWER_V2, answer_form=answer_form),
-         _keep_until_acceptance_settled(S14_ANSWER_V2, wave_ordinal=2, answer_form=answer_form)],
-        review_script=review_script,
-    )
-    with stub:
-        server = start_server(e2e_clone, root, _s14_settings(stub))
-        try:
-            task_id = submit_running(
-                server, "Summarize the w3a acceptance smoke and finish with the W3A_DONE marker.")
-            result = server.wait_task(task_id, timeout=600)
-            assert result.get("status") == "completed", result
-            oracle = ArtifactOracle(server.data_root)
-            stored = wait_durable_result(oracle, task_id)
-
-            # The dialogue converged on the REWORKED answer, accepted clean.
-            assert "W3A_DONE" in str(stored.get("result") or ""), stored.get("result")
-            review_axis = (stored.get("outcome_axes") or {}).get("review") or {}
-            decision = review_axis.get("acceptance_decision") or {}
-            assert decision.get("status") == "accepted", review_axis
-            signals = review_axis.get("aggregate_signals") or []
-            assert "PASS" in signals and "FAIL" not in signals, review_axis
-
-            # Paid-identity invariant: BOTH candidate identities were paid for —
-            # the durable wallet carries two distinct claims.
-            wallet = stored.get("task_acceptance_review_accounting") or {}
-            claims = wallet.get("claims_by_binding") or {}
-            assert len(claims) == 2, wallet
-
-            # Exactly two panels of three slots each hit the model; the
-            # scripted reject AND accept rounds were fully served.
-            assert stub.kinds().count("acceptance") == 6, stub.kinds()
-            review_script.assert_consumed()
-        finally:
-            server.stop()
-
-
-@pytest.mark.integration
-@pytest.mark.serial
-@pytest.mark.parametrize("answer_form", ["answer", "answer_sha256"])
-def test_s17_acceptance_identical_rework_is_free_replay_refusal(
-        e2e_clone, tmp_path_factory, answer_form):
-    require_lane(LANE_MOCK)
-    root = tmp_path_factory.mktemp("s14b")
-    review_script = ReviewScript({"acceptance": [W3A_ACCEPT_REJECT] * 3})
-    # Explicitly select the unchanged answer after rejection; both selection
-    # forms must replay its paid verdict at $0 without a new panel.
-    stub = _HoldingStubModel(
-        [{"final": S14_ANSWER_V1},
-         _keep_until_acceptance_settled(S14_ANSWER_V1, wave_ordinal=1, answer_form=answer_form)],
-        review_script=review_script,
-    )
-    with stub:
-        server = start_server(e2e_clone, root, _s14_settings(stub))
-        try:
-            task_id = submit_running(
-                server, "Summarize the w3a acceptance smoke and finish with the W3A_DONE marker.")
-            server.wait_task(task_id, timeout=600)  # terminal status asserted durably below
-            oracle = ArtifactOracle(server.data_root)
-            stored = wait_durable_result(oracle, task_id)
-
-            # Free-replay invariant ($0-refusal class): the unchanged paid
-            # identity is refused WITHOUT a second paid panel — exactly one
-            # panel of three calls ever hit the model, and exactly one claim
-            # sits on the durable wallet.
-            assert stub.kinds().count("acceptance") == 3, stub.kinds()
-            wallet = stored.get("task_acceptance_review_accounting") or {}
-            claims = wallet.get("claims_by_binding") or {}
-            assert len(claims) == 1, wallet
-
-            # The terminal is the honest typed refusal, not a silent accept.
-            review_axis = (stored.get("outcome_axes") or {}).get("review") or {}
-            decision = review_axis.get("acceptance_decision") or {}
-            assert decision.get("status") == "finalized_unaccepted", review_axis
-            assert "identical" in str(decision.get("reason") or ""), decision
             review_script.assert_consumed()
         finally:
             server.stop()

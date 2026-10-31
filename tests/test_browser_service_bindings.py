@@ -64,7 +64,9 @@ def test_bound_socket_publishes_actual_port_and_cleans_only_its_binding(tmp_path
         assert runtime_service_kind(f"http://127.0.0.1:{port}/anything", ctx) == "main"
         assert runtime_service_kind(f"http://127.0.0.2:{port}/api/settings", ctx) == ""
         old = server_process.read_service_bindings(tmp_path)["main"]
-        replacement = server_process.record_service_binding(tmp_path, "main", "127.0.0.1", port + 1, pid=os.getpid())
+        replacement_port = port - 1 if port == 65535 else port + 1
+        replacement = server_process.record_service_binding(
+            tmp_path, "main", "127.0.0.1", replacement_port, pid=os.getpid())
         server_process.clear_service_binding(tmp_path, "main", old)
         assert server_process.read_service_bindings(tmp_path)["main"] == replacement
     # The old context's finalizer also cannot erase the replacement.

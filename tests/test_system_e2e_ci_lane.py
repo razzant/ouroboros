@@ -32,27 +32,22 @@ def _workflow() -> dict:
     return yaml.safe_load(CI_PATH.read_text(encoding="utf-8"))
 
 
-def test_pull_requests_and_ouroboros_pushes_share_one_full_browser_lane():
-    """The PR lane is no longer the narrow Publish proof: it is the whole marker lane.
+def test_manual_and_release_callers_share_one_full_browser_lane():
+    """Both entries call the complete marker lane, never a narrow Publish proof.
 
-    `ci.yml` matches pull requests, manual runs and tags and delegates to the
-    reusable lane; every `ouroboros` push reaches the SAME job through its own
-    path-filter-free workflow. Nothing here may pull the costly system-e2e
-    scenarios into a pull request.
+    Dormant PR job predicates do not restore the removed workflow trigger.
     """
     shared_path = REPO_ROOT / ".github" / "workflows" / "ui-browser.yml"
     push_path = REPO_ROOT / ".github" / "workflows" / "ui-browser-push.yml"
     caller = _workflow()["jobs"]["ui-smoke"]
     assert " ".join(caller["if"].split()) == (
-        "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'"
-        " || startsWith(github.ref, 'refs/tags/v')"
+        "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
     )
     assert caller["uses"] == "./.github/workflows/ui-browser.yml"
     assert "steps" not in caller, "the browser steps belong to the shared lane"
 
     push = yaml.safe_load(push_path.read_text(encoding="utf-8"))
-    assert set(_triggers(push)) == {"push", "workflow_dispatch"}
-    assert _triggers(push)["push"] == {"branches": ["ouroboros"]}
+    assert set(_triggers(push)) == {"workflow_dispatch"}
     assert _triggers(push)["workflow_dispatch"]["inputs"]["diagnostic"]["options"] == ["full", "viewport", "inflight"]
     assert push["jobs"]["ui-smoke"]["uses"] == caller["uses"]
 
@@ -127,15 +122,18 @@ def test_the_lane_runs_the_keyless_suite_on_a_throwaway_root():
     assert steps[1]["with"]["install-project"] == "false"
     run_steps = [step for step in steps if "run" in step]
     assert len(run_steps) == 2
-    expected = [("tests/system_e2e/", "OUROBOROS_E2E_DEEP"),
-                ("tests/test_e2e_cancellation_scenarios.py", "OUROBOROS_E2E_CANCEL")]
+    expected = [("tests/system_e2e/", "OUROBOROS_E2E_DEEP", "scenarios"),
+                ("tests/test_e2e_cancellation_scenarios.py", "OUROBOROS_E2E_CANCEL", "cancellation")]
     # All four roots, all under the runner's temp: a scenario server that
     # escaped its isolation could otherwise write into the checkout.
     roots = ["OUROBOROS_APP_ROOT", "OUROBOROS_REPO_DIR", "OUROBOROS_DATA_DIR",
              "OUROBOROS_SETTINGS_PATH"]
-    for run_step, (target, lane) in zip(run_steps, expected):
+    for run_step, (target, lane, label) in zip(run_steps, expected):
+        # Each pass runs behind scripts/ci_retry.py: one retry per failed scenario, FLAKY recorded.
+        evidence = f'"${{{{ runner.temp }}}}/ci-evidence/{label}"'
         assert run_step["run"].strip() == (
-            f'python -m pytest {target} -o addopts="" -o faulthandler_timeout=540 -q'
+            f"python scripts/ci_retry.py --evidence-dir {evidence} --accepted tests/accepted_failures.json -- "
+            f'python -m pytest {target} -o addopts="" -o faulthandler_timeout=540 -q --ci-evidence-dir={evidence}'
         )
         env = run_step["env"]
         assert env[lane] == "mock"
@@ -191,9 +189,9 @@ def test_the_lane_asks_for_no_secret():
 def test_a_schedule_would_not_wake_the_paid_provider_lane():
     """A scheduled run would report the default branch in github.ref. The leading
     event guard keeps any schedule off the paid lane whatever ref conditions
-    follow it; the push workflow that serves branch pushes has no schedule."""
+    follow it; the standalone manual wrapper has no schedule."""
     for name in ("integration-test", "integration-optional"):
         condition = " ".join(str(_workflow()["jobs"][name]["if"]).split())
         assert condition.startswith("github.event_name != 'schedule'"), condition
     push = yaml.safe_load((CI_PATH.parent / "provider-canary-push.yml").read_text(encoding="utf-8"))
-    assert list(push.get("on", push.get(True))) == ["push"]
+    assert list(push.get("on", push.get(True))) == ["workflow_dispatch"]

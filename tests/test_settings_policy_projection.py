@@ -30,7 +30,7 @@ def test_policy_projection_distinguishes_restart_and_next_task(monkeypatch):
     import ouroboros.gateway.settings as gateway
 
     monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
-    monkeypatch.setattr(config, "get_safety_mode", lambda: "full")
+    monkeypatch.setattr(config, "get_safety_mode", lambda kind="owner": "full")
     monkeypatch.setattr(config, "normalize_runtime_mode", lambda value: str(value or "advanced"))
     monkeypatch.setattr(config, "normalize_safety_mode", lambda value: str(value or "full"))
     monkeypatch.setattr(gateway, "_has_started_agent_tasks", lambda: True)

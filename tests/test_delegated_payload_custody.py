@@ -115,7 +115,9 @@ def test_a_no_op_apply_is_refused_typed_even_with_no_recorded_result_hash(
     assert "✅" not in out and "provable non-mutation" in out
     # PC-F09: the consequence and the closing move are named at the point of need.
     assert "decision='reject'" in out
-    assert "Done with warnings" in out and "delegated_custody_unreconciled" in out
+    # #1583: the debt is named as the list beside the task's own reason, never as its reason.
+    assert "Done with warnings" in out and "delegated_runs_unreconciled beside your own reason" in out
+    assert "reason delegated_custody_unreconciled" not in out
     # Nothing disposed, no reconcile queued, and the apply intent is RESOLVED.
     assert entry.patch_disposed == ""
     assert entry.patch_apply_pending is False
@@ -172,7 +174,8 @@ def test_apply_hash_mismatch_receipt_names_a_followable_recovery(
     assert "acknowledge_ambiguous=true after inspection" in out, out
     assert "decision='acknowledge_ambiguous'" not in out, out
     assert "decision='reject'" in out, out
-    assert "Done with warnings" in out and "delegated_custody_unreconciled" in out
+    assert "Done with warnings" in out and "delegated_runs_unreconciled beside your own reason" in out
+    assert "reason delegated_custody_unreconciled" not in out
     custody._CUSTODY.clear()
 
 
@@ -216,73 +219,23 @@ def _held_payload(tmp_path, monkeypatch):
     return ctx, skill
 
 
-def test_settled_run_of_a_terminal_owner_releases_the_payload(tmp_path, monkeypatch):
-    from ouroboros.task_results import STATUS_FAILED, write_task_result
+@pytest.mark.parametrize("owner_status", ["running", "failed", "unknown"])
+def test_existing_capture_never_blocks_another_payload_start(tmp_path, monkeypatch, owner_status):
+    from ouroboros.task_results import write_task_result
+    from ouroboros.gateways import claudexor as gw
+    from tests.test_delegated_skill_payload import _StartStub
 
-    ctx, skill = _held_payload(tmp_path, monkeypatch)
-    data = tmp_path / "data"
+    _held_payload(tmp_path, monkeypatch)
+    if owner_status != "unknown":
+        write_task_result(tmp_path / "data", "t-payload", owner_status)
     second = _other_task_ctx(tmp_path, monkeypatch)
-
-    # While the owner is LIVE the lock holds and the refusal names the owner.
-    write_task_result(data, "t-payload", "running")
-    refused = json.loads(_exact_payload_start(
-        second, "second", root="skill_payload", bucket="external",
-        skill_name="alpha"))
-    assert refused["reason"] == "payload_delegation_busy", refused
-    assert refused["holder_owner_task_id"] == "t-payload", refused
-    assert "owner task is still live" in refused["detail"]
-    assert "delegate_wait it and integrate_delegated_patch its capture" \
-        not in refused["detail"]
-
-    # Once the owner task is terminal the payload is free again.
-    write_task_result(data, "t-payload", STATUS_FAILED)
-    started, _ = _start_payload_run(second, monkeypatch)
+    class Another(_StartStub):
+        def start_run(self, request, *, idempotency_key=""):
+            return {"runId": "run-p2"}
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda: Another({}))
+    started = json.loads(_exact_payload_start(second, "second", root="skill_payload", bucket="external", skill_name="alpha"))
     assert started["status"] == "started", started
-    custody._CUSTODY.clear()
-
-
-def test_pending_invocation_of_a_terminal_owner_releases_the_payload(
-        tmp_path, monkeypatch):
-    """The second projection: a worker death between the accepted POST and the
-    STARTED row leaves only a request row, which had NO liveness axis at all."""
-    from ouroboros.task_results import STATUS_FAILED, write_task_result
-
-    _payload_ctx(tmp_path, monkeypatch)     # installs the runtime env for this tmp
-    skill = _seed_skill(tmp_path / "data")
-    data = tmp_path / "data"
-    assert custody.emit(data, custody.START_REQUESTED, {
-        "invocation_id": "inv-dead", "task_id": "t-dead",
-        "authority_source": "skill_payload", "target_root": str(skill.resolve()),
-        "request": {"mode": "agent"},
-    })
-    second = _other_task_ctx(tmp_path, monkeypatch)
-
-    write_task_result(data, "t-dead", "running")
-    refused = json.loads(_exact_payload_start(
-        second, "second", root="skill_payload", bucket="external",
-        skill_name="alpha"))
-    assert refused["reason"] == "payload_delegation_busy", refused
-    assert refused["holder"] == "inv-dead", refused
-    # A pending holder has no replayed run row, so the owner must come off the
-    # invocation record — `custody.lookup` alone answers UNKNOWN here.
-    assert refused["holder_owner_task_id"] == "t-dead", refused
-
-    write_task_result(data, "t-dead", STATUS_FAILED)
-    started, _ = _start_payload_run(second, monkeypatch)
-    assert started["status"] == "started", started
-    custody._CUSTODY.clear()
-
-
-def test_unprovable_owner_terminality_keeps_the_payload_locked(tmp_path, monkeypatch):
-    """Fail-closed: no task_result row at all means unknown, and unknown keeps
-    the lock. There is deliberately no time-based release."""
-    ctx, skill = _held_payload(tmp_path, monkeypatch)
-    second = _other_task_ctx(tmp_path, monkeypatch)
-    refused = json.loads(_exact_payload_start(
-        second, "second", root="skill_payload", bucket="external",
-        skill_name="alpha"))
-    assert refused["reason"] == "payload_delegation_busy", refused
-    assert "terminality cannot be proven" in refused["detail"]
+    assert not custody.replay(tmp_path / "data")["run-p1"].patch_disposed
     custody._CUSTODY.clear()
 
 

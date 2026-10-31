@@ -216,3 +216,55 @@ def test_owner_row_drops_only_empty_categories_and_shared_text_keeps_its_bytes()
     assert terminal_custody_notice_text(unknown) == terminal_host_notice_text(unknown) == unavailable
     assert _child_result_sha256(unknown) == "dd261cdf1be1f0fe34839dc19abafe911b37989e7bbd006a59dec16608b1574a"
     assert terminal_custody_notice_text(_audit(terminal_runs=[{"run_id": "ok", "state": "succeeded"}])) == ""
+
+
+def test_delivery_snapshot_keeps_unknown_custody_without_global_fallback(tmp_path, monkeypatch):
+    from ouroboros import delegate_custody_current as current, store
+
+    reads = []
+    write_task_result(tmp_path, "own", "running")
+
+    def unavailable(root, task_id):
+        reads.append(task_id)
+        raise store.StoreBusy("fixture contention")
+
+    monkeypatch.setattr(current, "task_snapshot", unavailable)
+    monkeypatch.setattr(current, "snapshot", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("delivery fell back to unrelated custody")))
+    usage = {}
+    event = prepare_terminal_send_event(
+        tmp_path, {"id": "own", "chat_id": 1}, "Answer.", usage,
+        {"type": "send_message", "text": "Answer."}, presence=False,
+    )
+    assert reads == ["own"]
+    assert usage["delegate_terminal_reconciliation"]["audit_status"] == "failed"
+    assert usage["delegate_terminal_reconciliation"]["unreconciled"] == [
+        "delegated_run_state_unknown:snapshot_unavailable"]
+    assert "could not be verified" in event["terminal_custody_notice"]
+    assert event["text"] == "Answer."
+
+
+def test_loop_exit_defers_only_annotation_and_resets_its_scope_on_failure(tmp_path, monkeypatch):
+    import pytest
+    from ouroboros.delegate_custody_reconcile import defer_loop_exit_audit
+
+    calls, usage = [], {}
+
+    def reconcile(root, task_id, **kwargs):
+        calls.append(("release", task_id))
+        return [{"run_id": "released", "action": "settled"}]
+
+    monkeypatch.setattr(custody, "reconcile_task_runs", reconcile)
+    monkeypatch.setattr(delegate_terminal, "_audit_task_custody",
+                        lambda root, task_id, result, **kw: calls.append(("audit", task_id)))
+    monkeypatch.setattr(delegate_terminal, "record_terminal_reconciliation",
+                        lambda root, task_id, result, **kw: calls.append(("record", task_id)))
+    with pytest.raises(RuntimeError, match="before delivery"):
+        with defer_loop_exit_audit(usage):
+            assert custody.release_task_runs(tmp_path, "first") == [{"run_id": "released", "action": "settled"}]
+            assert calls == [("release", "first")]
+            raise RuntimeError("before delivery")
+    assert usage["delegate_terminal_reconciliation"]["outcomes"] == [{"run_id": "released", "action": "settled"}]
+    assert usage["delegate_terminal_reconciliation"]["audit_status"] == "pending"
+    custody.release_task_runs(tmp_path, "second")
+    assert calls == [("release", "first"), ("release", "second"), ("audit", "second"), ("record", "second")]

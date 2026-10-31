@@ -15,6 +15,7 @@ saw at import time.
 from __future__ import annotations
 
 import datetime
+import functools
 import logging
 import os
 import pathlib
@@ -117,6 +118,36 @@ class IndexLockRefusal(subprocess.CalledProcessError):
 _LOCK_REFUSAL = re.compile(r"fatal: Unable to create '(.+)': File exists\.")
 
 
+def effective_index_path() -> pathlib.Path:
+    """Ask Git, including linked worktrees and an inherited GIT_INDEX_FILE."""
+    rc, path, error = _go().git_capture(["git", "rev-parse", "--path-format=absolute", "--git-path", "index"])
+    if rc != 0:
+        raise RuntimeError(error or "Git could not locate its index")
+    if len(path.splitlines()) == 1 and pathlib.Path(path).is_absolute():
+        return pathlib.Path(path)
+    # Git < 2.31 echoes the unknown --path-format flag and still exits zero.
+    # Resolve the per-worktree Git directory, retaining alternate-index semantics.
+    alternate = os.environ.get("GIT_INDEX_FILE")
+    if alternate:
+        index = pathlib.Path(alternate)
+    else:
+        rc, git_dir, error = _go().git_capture(["git", "rev-parse", "--git-dir"])
+        if rc != 0 or len(git_dir.splitlines()) != 1:
+            raise RuntimeError(error or "Git could not locate its directory")
+        index = pathlib.Path(git_dir) / "index"
+    return (_go().current_repo_dir() / index).absolute()
+
+
+def observe_index_lock() -> dict:
+    """An observation only: existence never establishes ownership or removal authority."""
+    path = pathlib.Path(str(effective_index_path()) + ".lock")
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        return {"path": str(path), "exists": False}
+    return {"path": str(path), "exists": True, "inode": stat.st_ino, "size": stat.st_size}
+
+
 def _index_lock_refused(cmd, result) -> bool:
     """This attempt died acquiring this checkout's index lock (C-locale Git, first stderr line)."""
     if result.returncode != 128 or [str(part) for part in cmd[:2]] not in (["git", "reset"], ["git", "checkout"]):
@@ -124,8 +155,8 @@ def _index_lock_refused(cmd, result) -> bool:
     stderr = result.stderr.decode("utf-8", "replace") if isinstance(result.stderr, bytes) else str(result.stderr or "")
     match = _LOCK_REFUSAL.fullmatch((stderr.splitlines() or [""])[0].strip())
     try:
-        return bool(match) and pathlib.Path(match.group(1)).resolve() == (_go()._git_dir() / "index.lock").resolve()
-    except OSError:
+        return bool(match) and pathlib.Path(match.group(1)).resolve() == pathlib.Path(str(effective_index_path()) + ".lock").resolve()
+    except (OSError, RuntimeError):
         return False
 
 
@@ -358,6 +389,13 @@ def _target_lacks_store(sha: str) -> bool:
 
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+    receipt = _bootstrap_receipt()
+    if reason == "bootstrap" and receipt and receipt.get("branch") == branch:
+        if receipt == _bootstrap_snapshot():
+            _record_checkout_facts({"current_branch": branch, "current_sha": receipt["head"]},
+                                   invalidate_bootstrap=False)
+            return True, "unchanged bootstrap"
+    _forget_bootstrap_receipt()
     before_head = _go().git_capture(["git", "rev-parse", "HEAD"])[1].strip()
     managed_meta = _go()._read_managed_repo_meta()
     fetch_remote = ""
@@ -575,13 +613,12 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         if synced == fingerprint:
             return True, "unchanged:" + source
         from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-        from ouroboros.tools.shell import _active_subprocesses, _subprocess_lock
+        from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
 
-        proc = subprocess.Popen(
-            cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
-        )
-        with _subprocess_lock:
-            _active_subprocesses.add(proc)
+        with tracked_start() as publish:
+            proc = publish(subprocess.Popen(
+                cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
+            ))
         try:
             returncode = proc.wait(timeout=120)
         except subprocess.TimeoutExpired:
@@ -622,15 +659,78 @@ def import_test() -> Dict[str, Any]:
         log.info("Skipping import_test in frozen (PyInstaller) mode — modules are bundled.")
         return {"ok": True, "skipped": "frozen"}
 
+    before = _bootstrap_snapshot()
+    if before and before == _bootstrap_receipt():  # this exact clean snapshot passed an earlier boot's smoke: record it
+        _SMOKED["head"] = before["head"] if before["branch"] == _go().BRANCH_DEV and _go()._is_launcher_managed_repo() else ""
+        return {"ok": True, "skipped": "unchanged_bootstrap"}
+    _forget_bootstrap_receipt()
+    _SMOKED.clear()
+    head = _clean_dev_head()  # read before the smoke: a commit landing during it is not what passed
     r = subprocess.run(
         [sys.executable, "-c", "import ouroboros, ouroboros.agent; print('import_ok')"],
         cwd=str(_go().REPO_DIR),
         capture_output=True, text=True,
     )
+    if r.returncode == 0 and head == _clean_dev_head():
+        _SMOKED["head"] = head
     if r.returncode != 0:
         _forget_dependency_fingerprint()  # a broken environment is re-synced next time, never skipped
+    elif before and before == _bootstrap_snapshot():
+        from ouroboros.utils import atomic_write_json
+        try:
+            atomic_write_json(_bootstrap_receipt_path(), before)
+        except OSError:
+            log.warning("Bootstrap receipt not recorded; the next boot verifies again", exc_info=True)
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,
             "returncode": r.returncode}
+
+
+_SMOKED: Dict[str, str] = {}  # this process's passing smoke of a clean, launcher-managed dev checkout
+
+
+def _clean_dev_head() -> str:
+    """HEAD of a clean, launcher-managed dev checkout, else ``""``: what a passing smoke proves for
+    ``advance_recovery_point`` (an update being finalized, its receipt kept off, counts)."""
+    out = [_go().git_capture(["git", *args]) for args in (["rev-parse", "--abbrev-ref", "HEAD"], ["status", "--porcelain"],
+                                                         ["rev-parse", "HEAD"])]
+    clean = not any(rc for rc, _o, _e in out) and out[0][1].strip() == _go().BRANCH_DEV and not out[1][1].strip()
+    return out[2][1].strip() if clean and _go()._is_launcher_managed_repo() else ""
+
+
+def advance_recovery_point(ready: bool) -> str:
+    """After a ready boot, ``update-ref`` the local recovery branch (never pushed; Save recovery point moves it at
+    once) to the commit this process's smoke proved, never live HEAD; returns it, ``""`` when nothing moved."""
+    head, ref = _SMOKED.get("head", ""), f"refs/heads/{_go().BRANCH_STABLE}"
+    if not ready or not head or _go().git_capture(["git", "rev-parse", "--verify", "--quiet", ref])[1].strip() == head:
+        return ""
+    rc, _out, err = _go().git_capture(["git", "update-ref", ref, head])
+    if rc != 0:
+        log.warning("Recovery point not advanced to %s: %s", head[:12], err)
+        return ""
+    _go().append_jsonl(_go().current_drive_root() / "logs" / "supervisor.jsonl",
+                       {"ts": _go().utc_now_iso(), "type": "recovery_point_advanced", "ref": ref, "to": head})
+    return head
+
+
+def _recovery_checkout(reason: str) -> Tuple[bool, str]:
+    """The recovery point, checked out through the store-switch owner: a target that cannot read this
+    installation's stores is never started automatically (a typed failure; the owner restores); one that can
+    gets the stores handed off, then the branch is checked out as before (the dev branch is never rewritten)."""
+    from ouroboros import store_switch
+
+    repo, stable, why = _go().REPO_DIR, _go().BRANCH_STABLE, f"{reason}_fallback_stable"
+    target = store_switch.rev_parse(repo, stable)
+    if target and any(store_switch.switch_needs(repo, target).values()):
+        _rc, dev_head, _ = _go().git_capture(["git", "rev-parse", "HEAD"])
+        return False, (f"recovery_point_predates_stores: {_go().BRANCH_DEV} {dev_head.strip()[:12] or '?'} failed its "
+                       f"import smoke and the recovery point {stable} ({target[:12]}) cannot read this "
+                       "installation's stores, so it was not started; use Restore on the Updates page")
+    if not target:  # nothing to examine: the checkout itself reports it
+        return _checkout_outcome(stable, why, "rescue_and_reset")
+    ok, message, _deferred = store_switch.switch_or_reset(_go().current_drive_root(), repo, target_sha=target, target_ref=stable,
+                                                          reason=why, door="safe_restart_fallback",
+                                                          reset=lambda: _checkout_outcome(stable, why, "rescue_and_reset"))
+    return ok, message
 
 
 def _forget_dependency_fingerprint() -> None:
@@ -735,9 +835,10 @@ def safe_restart(
         },
     )
 
-    ok_s, err_s = _checkout_outcome(_go().BRANCH_STABLE, f"{reason}_fallback_stable", "rescue_and_reset")
+    ok_s, err_s = _recovery_checkout(reason)
     if not ok_s:
-        return False, f"Failed checkout {_go().BRANCH_STABLE}: {err_s}"
+        return False, (err_s if err_s.startswith("recovery_point_predates_stores")
+                       else f"Failed checkout {_go().BRANCH_STABLE}: {err_s}")
 
     deps_ok_s, deps_msg_s = _go().sync_runtime_dependencies(reason=f"{reason}_fallback_stable")
     if not deps_ok_s:
@@ -750,10 +851,14 @@ def safe_restart(
     return False, "Both branches failed import (dev and stable)"
 
 
-def _record_checkout_facts(facts: dict) -> None:
+def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True) -> None:
     """Field-update the checkout projection (#1307): never a stale whole-state write."""
     from supervisor.state import StateUnavailable
 
+    if invalidate_bootstrap:
+        # Restore and managed rollback also reach this seam, including a reset
+        # back to the same HEAD. They must never inherit an earlier smoke receipt.
+        _forget_bootstrap_receipt()
     try:
         _go().update_state(lambda live: live.update(facts))
     except StateUnavailable:
@@ -768,15 +873,128 @@ def _record_checkout_facts(facts: dict) -> None:
 
 
 def _dependency_fingerprint(req_path, cmd):
-    """Actual requirement bytes, install target/environment and interpreter."""
+    """Actual requirement bytes, install target/environment and interpreter. A packaged host
+    (``OUROBOROS_BUNDLE_DIR`` with its bundle manifest) counts by content: paths inside the bundle are relative
+    to it in every field and its identity (``_packaged_host``, app version, ``sys.version``) is hashed, so the
+    same app moved, remounted or re-extracted keeps its receipt while another app or Python re-syncs; paths
+    outside it (the userbase, a container's venv), flags and the requirements digest stay as they are."""
     import hashlib
     import json
     import site
     import sysconfig
     source = req_path.read_bytes() if req_path.exists() else b"openai>=1.0.0\nrequests"
-    facts = {"requirements_sha256": hashlib.sha256(source).hexdigest(), "command": cmd,
-             "interpreter": [sys.executable, sys.version, sys.prefix, sys.base_prefix],
-             "target": [site.getuserbase(), sysconfig.get_path("purelib")],
-             "environment": {key: os.environ.get(key, "") for key in
+    purelib = sysconfig.get_path("purelib")
+    bundle = os.environ.get("OUROBOROS_BUNDLE_DIR", "").strip()
+    host = _packaged_host(bundle, purelib) if bundle else {}
+
+    def at(value):
+        relative = _inside_bundle(value, bundle) if host else None
+        return value if relative is None else "<bundle>/" + relative
+
+    facts = {"requirements_sha256": hashlib.sha256(source).hexdigest(), "command": [at(part) for part in cmd],
+             "interpreter": [at(sys.executable), sys.version, at(sys.prefix), at(sys.base_prefix)],
+             "target": [at(site.getuserbase()), at(purelib)],
+             "environment": {key: at(os.environ.get(key, "")) for key in
                              ("PYTHONUSERBASE", "PIP_TARGET", "PIP_PREFIX", "PIP_USER", "PIP_CONFIG_FILE", "VIRTUAL_ENV")}}
+    if host:
+        facts["host"] = {**host, "app_version": os.environ.get("OUROBOROS_APP_VERSION", "")}
     return hashlib.sha256(json.dumps(facts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _inside_bundle(value, bundle):
+    """``value``'s path relative to the bundle root when it is an absolute path inside it (lexically or
+    resolved), else ``None``: flags, external destinations and other volumes stay as they are."""
+    if not isinstance(value, str) or not os.path.isabs(value):
+        return None
+    for root, text in ((bundle, value), (os.path.realpath(bundle), os.path.realpath(value))):
+        try:
+            relative = os.path.relpath(os.path.abspath(text), os.path.abspath(root))
+        except ValueError:  # another Windows drive
+            continue
+        if relative != os.pardir and not relative.startswith(os.pardir + os.sep):
+            return relative.replace(os.sep, "/")
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _packaged_host(bundle, purelib):
+    """The packaged host's identity, read once per process (``{}`` without a bundle manifest); distributions come from
+    the bundle's own purelib folder names (``name-version.dist-info``), never a venv the sync itself writes."""
+    import platform
+    from ouroboros.utils import read_json_dict
+    manifest = read_json_dict(pathlib.Path(bundle) / "repo_bundle_manifest.json") or {}
+    if not manifest:
+        return {}
+    try:
+        names = ([entry.rsplit(".", 1)[0] for entry in os.listdir(purelib) if entry.endswith((".dist-info", ".egg-info"))]
+                 if _inside_bundle(purelib, bundle) is not None else [])
+    except OSError:
+        names = []
+    return {"cache_tag": sys.implementation.cache_tag, "machine": platform.machine(),
+            "source_sha": manifest.get("source_sha", ""), "bundle_sha256": manifest.get("bundle_sha256", ""),
+            "distributions": sorted("==".join(name.rsplit("-", 1)) for name in names)}
+
+
+def _bootstrap_receipt_path() -> pathlib.Path:
+    return _go().DRIVE_ROOT / "state" / "git_bootstrap.json"
+
+
+def _bootstrap_receipt() -> dict:
+    from ouroboros.utils import read_json_dict
+    return read_json_dict(_bootstrap_receipt_path()) or {}
+
+
+def _forget_bootstrap_receipt() -> None:
+    # Invalidation must finish before a tree mutation can reuse the same HEAD.
+    _bootstrap_receipt_path().unlink(missing_ok=True)
+
+
+def _bootstrap_snapshot() -> Optional[dict]:
+    """Current clean checkout and dependency identity; unknown/active work is no proof.
+
+    Transaction markers (including corrupt ones) force the ordinary bootstrap.
+    Reads are addressed; no history or remote fetch participates in the proof.
+    The receipt this snapshot is compared with is written only by a successful
+    import smoke; a failed or interrupted smoke certifies no later boot.
+    """
+    import json
+    from supervisor.update_merge import UPDATE_TX_MARKER_NAME
+    from ouroboros.body_adoption import holds_checkout
+
+    try:
+        repo, drive = _go().REPO_DIR, _go().DRIVE_ROOT
+        if (_go()._bootstrap_pin_marker_path().exists() or _go()._update_intent_marker_path().exists()
+                or holds_checkout(drive, repo)):
+            return None
+        git_dir = _go()._git_dir()
+        if git_dir.is_file():
+            rc, path, _ = _go().git_capture(["git", "rev-parse", "--absolute-git-dir"])
+            if rc or not path:
+                return None
+            git_dir = pathlib.Path(path.strip())
+        if any((git_dir / name).exists() for name in
+               (_go().BOOTSTRAP_PIN_MARKER_NAME, _go().UPDATE_INTENT_MARKER_NAME,
+                UPDATE_TX_MARKER_NAME, "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                "rebase-apply", "rebase-merge", "sequencer")):
+            return None
+        campaign_path = drive / "state" / "evolution_campaign.json"
+        if campaign_path.exists():
+            campaign = json.loads(campaign_path.read_text(encoding="utf-8"))
+            tx = campaign.get("active_transaction")
+            if campaign.get("status") in {"active", "paused"} and isinstance(tx, dict) and not tx.get("commit_sha"):
+                return None
+        rc, dirty, _ = _go().git_capture(["git", "status", "--porcelain"])
+        if rc or dirty:
+            return None
+        rc, head, _ = _go().git_capture(["git", "rev-parse", "HEAD"])
+        if rc or not head:
+            return None
+        rc, branch, _ = _go().git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        if rc or not branch:
+            return None
+        cmd, _, requirements = _dependency_install_plan(repo)
+        return {"schema_version": 1, "repo": str(repo.resolve()), "head": head.strip(),
+                "branch": branch.strip(), "dependencies": _dependency_fingerprint(requirements, cmd)}
+    except Exception:
+        log.debug("Bootstrap identity unavailable; running the ordinary checks", exc_info=True)
+        return None

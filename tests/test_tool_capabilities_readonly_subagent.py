@@ -25,7 +25,13 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
     )
 
     assert registry.get_schema_by_name("write_file") is None
-    assert registry.get_schema_by_name("enable_tools") is None
+    # #1860: the schema selector reaches the child in every context mode; it loads only schemas
+    # this profile may call (allow_enable governs skill enabling, not schema loading).
+    assert registry.get_schema_by_name("enable_tools") is not None
+    from ouroboros.tools.tool_discovery import bind_resident_schemas
+    resident = []
+    bind_resident_schemas(registry, resident)
+    assert "Hidden by policy" in registry.execute("enable_tools", {"tools": "write_file"}) and not resident
     assert registry.get_schema_by_name("schedule_subagent") is not None
     # switch_model changes COGNITIVE POWER, not authority: a child that started cheap and
     # found the work harder raises its own strength, and nothing about its sandbox moves.
@@ -35,8 +41,8 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
     assert "LOCAL_READONLY_SUBAGENT_BLOCKED" not in registry.execute("switch_model", {})
     monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("MCP touched")))
     assert "LOCAL_READONLY_SUBAGENT_BLOCKED" not in registry.execute("list_files", {"path": "."})
-    assert registry.get_schema_by_name("vcs_status") is not None
-    assert "TOOL_ACCESS_BLOCKED" not in registry.execute("vcs_status", {"root": "system_repo"})
+    assert registry.get_schema_by_name("vcs_read") is not None
+    assert "TOOL_ACCESS_BLOCKED" not in registry.execute("vcs_read", {"action": "status", "root": "system_repo"})
     # Memory written in the child's own name is open (signed with its focus), chronicle
     # pages only as its drafts (tests/test_child_chronicle_drafts.py); identity and
     # scratchpad stay with the integrating parent.
@@ -47,12 +53,11 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
         "edit_text",
         "update_scratchpad",
         "update_identity",
+        "update_world",
         "commit_reviewed",
         "preflight_review",
-        "task_acceptance_review",
         "skill_review",
         "request_restart",
-        "enable_tools",
         "run_command",
         "skill_exec",
         "list_skills",
@@ -69,6 +74,8 @@ def test_local_readonly_subagent_allows_enabled_extension_tool(tmp_path, monkeyp
     from tests._shared import clean_extension_runtime_state
     from tests.test_extension_loader import _mark_isolated_deps_installed, _prepare_extension
 
+    # Read-only children of either work kind may use an enabled, checked extension.
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     clean_extension_runtime_state()
     plugin = (

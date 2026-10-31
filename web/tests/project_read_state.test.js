@@ -1,4 +1,4 @@
-// Project unread (DESIGN "Project unread dot"): a Project revision is read only
+// Project unread (DESIGN "Unread"): a Project revision is read only
 // when a history read that STARTED after the revision was observed has been
 // painted in a visible room whose reader is at the newest messages. These run
 // the real createChatInstance consumer against a scripted history server.
@@ -868,8 +868,9 @@ for (const hidden of [true, false]) {
 }
 
 // Its newest message on the opening read's own page, an unread reopening has nothing to
-// reach: the read re-anchors the outgrown chain as a plain reopening's does. One older
-// than that page is reached on the re-anchored chain, with no second return to the present.
+// reach: the read re-anchors the outgrown chain at itself (no second read of the same
+// page) as a plain reopening's does. One older than that page is reached on the
+// re-anchored chain, with no second return to the present.
 for (const reopened of ['read', 'unread', 'unread, newest older']) {
     test(`a kept room grown past its chain is re-anchored when reopened ${reopened}`, async (t) => {
         const deep = reopened.endsWith('older');
@@ -887,8 +888,8 @@ for (const reopened of ['read', 'unread', 'unread, newest older']) {
         r.instance.cancelHistoryPaint();
         const paint = await r.instance.refreshHistory({ revision: 2 });
         await quiet();
-        assert.deepEqual([r.reads.length - reads, r.pageReads, paint.read, r.messages.scrollTop === 0], [2, deep ? [1, 2] : [], !deep, deep],
-            'the read, then the chain re-anchored at it; only a newest message older than its page is walked to and landed on');
+        assert.deepEqual([r.reads.length - reads, r.pageReads, paint.read, r.messages.scrollTop === 0], [1, deep ? [1, 2] : [], !deep, deep],
+            'one read, the chain re-anchored at it; only a newest message older than its page is walked to and landed on');
     });
 }
 

@@ -1,25 +1,16 @@
-"""Create, import, reconcile and export the current-facts store.
+"""Publish/import/export current facts; ordinary boots only open published stores.
 
-``ensure_current_store(root)`` is the only function that creates or imports a store:
-the sibling build with ``synchronous=FULL``, ``meta`` (provenance, counts, the freeze
-instant, the per-file content baseline: size, mtime_ns and sha256 of every frozen
-``task_results/*.json``) written before publication, publish by ``os.replace`` plus a
-directory fsync, the generation stamp after; a published but unstamped store is
-accepted by its own ``meta``; the lock tier is re-probed on every boot and governs an
-EXISTING store too: a header naming the other tier is re-tiered in place (application id
-and ``meta.lock_tier``) under the import lock before any writer opens it, so the open
-mode follows what the kernel enforces today, and every underived flag (a missing column, a row an
-older body wrote) is derived (``_derive_flag_columns``); every own child drive down the tree (``descendant_drives``,
-over ``task_custody.own_child_drives``) gets its own store by the same code; inadmissible rows are quarantined at import
-through the existing emitter; the cancel-latch migration runs as the first pass.
-Reconciliation (a published store found at boot) is per row against the baseline: a
-changed file replaces its row, a deleted file moves its row to quarantine, a new file is
-imported, an untouched row keeps the DB version, a row changed on both sides lets the
-file win and keeps the DB version in ``meta.conflicts``; a full rebuild happens ONLY
-after a proven complete export. A file whose size and mtime_ns equal its baseline is
-untouched without being read (one listing plus one stat per boot; a rewrite that preserves
-both is the disclosed residual); a stat-changed file is compared by sha256, so a touch with
-the same bytes stays untouched; edits to obligation set files alone are not detected.
+First import builds a FULL-synchronous sibling, publishes by rename and directory
+fsync, then stamps the generation. Reads never import; a missing stamped store is
+lost. Only a completed export permits a full rebuild. Boot reads metadata and the
+NULL-flag index; child headers trigger only required WAL handoffs, without frozen-result reads. A
+changed/unknown previous body schedules ``legacy_reconcile`` once per observation; the maintenance job
+or ``python -m ouroboros.store_import --reconcile-legacy [--root PATH]`` runs it.
+
+Reconciliation retains the per-file size/mtime/hash baseline: changed files win,
+deletions quarantine the SQL version, SQL-only changes survive, conflicts retain
+the previous SQL document. Same-size/same-mtime edits and set-file-only changes
+remain outside this legacy detector's contract. Manual edits require the CLI.
 """
 
 from __future__ import annotations
@@ -33,10 +24,10 @@ import pathlib
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import obligations as o
-from ouroboros import store
+from ouroboros import store, store_journal, store_task_cards
 from ouroboros.store import (
     GENERATION, GENERATION_KEY, IMPORT_LOCK_NAME, LOCK_NAME, PUBLISHED, TIER_ENFORCED, TIER_NAME,
     StoreLost, Txn, document_text, supervisor_row, utc_stamp,
@@ -52,13 +43,17 @@ from ouroboros.utils import append_jsonl, atomic_write_json, machine_json, utc_n
 Record = Tuple[str, Dict[str, Any]]
 
 
+def _null_flags(columns) -> str:
+    return " OR ".join(f"{column} IS NULL" for column in store.FLAG_COLUMNS.values() if not columns.get(column)) or "0"
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _own_children(root: pathlib.Path) -> List[pathlib.Path]:
+def _own_children(root: pathlib.Path, *, scan_results: bool = True) -> List[pathlib.Path]:
     """The own child drives of every task ONE root knows (result files and drive directories)."""
-    ids = {path.stem for path in task_results_dir(root, create=False).glob("*.json")}
+    ids = {path.stem for path in task_results_dir(root, create=False).glob("*.json")} if scan_results else set()
     for base in (root / HEADLESS_TASKS_DIR, root / TASK_DRIVES_DIR):
         if base.is_dir():
             ids.update(child.name for child in base.iterdir() if child.is_dir() and not child.is_symlink())
@@ -69,80 +64,282 @@ def _own_children(root: pathlib.Path) -> List[pathlib.Path]:
     return drives
 
 
-def descendant_drives(root: Any) -> List[pathlib.Path]:
+def descendant_drives(root: Any, *, scan_results: bool = True) -> List[pathlib.Path]:
     """Every own child drive down the tree (a child's drive names its own children the same
     way), parents before children: the one walk the import, the switch, the export, the
     retirement and the recovery all use."""
     found: List[pathlib.Path] = []
     pending = [pathlib.Path(root)]
     while pending:
-        children = _own_children(pending.pop(0))
+        children = _own_children(pending.pop(0), scan_results=scan_results)
         found.extend(children)
         pending.extend(children)
     return found
 
 
-def ensure_current_store(root: Any, *, with_children: bool = True, rederive: bool = False) -> Dict[str, Any]:
-    """Idempotent boot import; returns its logs/supervisor.jsonl report. Details above.
-    ``rederive`` (the explicit rebuild) derives every nullable flag again from its document."""
+def _mount_identity(directory: pathlib.Path) -> dict:
+    """Device and enclosing mount, including Linux bind mounts (platform substrate)."""
+    from ouroboros.platform_layer import is_mount_point
+
+    directory = directory.resolve()
+    mount = directory
+    while mount.parent != mount and not is_mount_point(mount):
+        mount = mount.parent
+    return {"st_dev": directory.stat().st_dev, "mount_point": str(mount)}
+
+
+def _lock_tier(root: pathlib.Path, recorded: Any = None) -> dict:
+    from ouroboros import platform_layer as platform
+
+    identity = _mount_identity(root / "state")
+    lock = root / "state" / LOCK_NAME
+    known = isinstance(recorded, dict) and all(recorded.get(key) == value for key, value in identity.items())
+    if known and recorded.get("tier") in (TIER_ENFORCED, TIER_NAME):
+        platform.kernel_file_locks_enforced(lock, known=(recorded["tier"] == TIER_ENFORCED, recorded.get("errno")))
+        return recorded
+    enforced = platform.kernel_file_locks_enforced(lock, known=(None, None))
+    verified, refused = platform._KERNEL_LOCK_TIER.get(os.path.realpath(str(lock.parent)), (None, None))
+    # A directory where no probe file could be created is still undecided. Do not
+    # persist its identity as proof: a later open must retry the actual probe.
+    return {"tier": TIER_ENFORCED if enforced else TIER_NAME,
+            **(identity if verified is not None else {}), "errno": refused}
+
+
+def _schedule_legacy(root: pathlib.Path, last: dict, job: dict, body_sha: str) -> bool:
+    """Read the previous body's stamp BEFORE supervisor git bootstrap overwrites it.
+    server._run_supervisor calls require_published before _bootstrap_supervisor_repo.
+    One reconcile per observation, the observation being the stamp's change: a bootstrap that
+    never stamps ``current_sha`` (the local-dev start of Docker images, Colab and source checkouts)
+    shows every boot the same unknown or stale stamp, and a job already recorded for it, finished
+    included, is not scheduled again; once a boot saw another stamp (``last_observed``, written only
+    when it changes), a return to an older body's stamp is a new excursion and is reconciled."""
+    from ouroboros import maintenance_jobs
+
+    try:
+        previous = json.loads((root / "state/state.json").read_text(encoding="utf-8")).get("current_sha")
+    except (OSError, ValueError, AttributeError):
+        previous = None
+    reason = ("state_unreadable" if not isinstance(previous, str) or not previous else
+              "last_store_body_missing" if not last.get("sha") else
+              "body_changed" if previous != last["sha"] else "")
+    seen = job.get("last_observed", job.get("observed_sha"))
+    if not reason:
+        if job.get("observed_sha") and seen != previous:  # the current body's own stamp after an older
+            maintenance_jobs.record(root, "legacy_reconcile", last_observed=previous)  # one: its return is new
+        return job.get("state") in {"pending", "running"}
+    if job.get("state") in {"pending", "running", "failed", "done"} and job.get("observed_sha") == previous == seen:
+        return job.get("state") in {"pending", "running"}
+    maintenance_jobs.record(root, "legacy_reconcile", state="pending", reason=reason,
+                            observed_sha=previous, last_observed=previous, body_sha=body_sha, cursor=None, done=0,
+                            total=None, error=None, waiting_on=None)
+    return True
+
+
+def note_current_stamp(root: Any) -> None:
+    """After the supervisor's bootstrap stamped ``current_sha`` (this body's own): the legacy job sees
+    that observation now, so an older body that runs next and stamps its SHA again is a new excursion
+    even when no boot of this body read the stamp in between. Writes only when it changes."""
+    from ouroboros import maintenance_jobs
+
+    root = pathlib.Path(root)
+    try:
+        stamp = json.loads((root / "state/state.json").read_text(encoding="utf-8")).get("current_sha")
+        job = maintenance_jobs.job(root, "legacy_reconcile") or {}
+    except (OSError, ValueError, AttributeError, store.StoreError):
+        return  # an unreadable stamp or store observes nothing
+    if (isinstance(stamp, str) and stamp and job.get("observed_sha")
+            and job.get("last_observed", job.get("observed_sha")) != stamp):
+        maintenance_jobs.record(root, "legacy_reconcile", last_observed=stamp)
+
+
+def ensure_current_store(root: Any, *, with_children: bool = True, rederive: bool = False,
+                         body_sha: Optional[str] = None, initialize_journal: bool = False) -> Dict[str, Any]:
+    """Open a published root in one read transaction. Import absent roots once.
+    ``body_sha`` runs the legacy detector; only ``initialize_journal`` authorizes the boot's journal
+    selection before producers start, including compatibility of existing child stores.
+    ``rederive`` is the explicit historical repair, never an ordinary startup."""
     root = pathlib.Path(root)
     path = store.store_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    with store.process_lock(path), store.name_lock(root, IMPORT_LOCK_NAME, timeout_sec=600.0, stale_sec=600.0):
-        for name in os.listdir(path.parent):
-            if name.startswith(path.name + ".import-"):
-                with contextlib.suppress(OSError):
-                    (path.parent / name).unlink()  # an unfinished import never published: redone from scratch
-        report, quarantined = _ensure(root, path, rederive=rederive)
+    with store.process_lock(path):
+        report, quarantined = _ensure(root, path, rederive=rederive, body_sha=body_sha,
+                                      initialize_journal=initialize_journal)
+    report["opened_ms"] = round((time.monotonic() - started) * 1000, 3)
+    if initialize_journal and with_children:
+        store_journal.prepare_children(root)
     emit_quarantine_event(root, quarantined)
-    if with_children:
-        report["drives"] = {str(drive): ensure_current_store(drive, with_children=False, rederive=rederive)["status"]
-                            for drive in descendant_drives(root)}
+    report["drives"] = {}
+    importing = report.pop("_import_job", {}) or {}
+    if with_children and (report["status"] == "completed" or rederive or importing.get("state") in {"pending", "running", "failed"}):
+        from ouroboros import maintenance_jobs
+
+        with store.name_lock(root, "current_store_import.lock", timeout_sec=600.0):
+            importing = maintenance_jobs.job(root, "current_store_import") or {}
+            cursor, done = importing.get("cursor") or ".", int(importing.get("done") or 1)
+            derive_children = rederive or bool(importing.get("rederive"))
+            drive = root
+            try:
+                maintenance_jobs.record(root, "current_store_import", state="running", cursor=cursor, done=done,
+                                        error=None, waiting_on=None)
+                drives = sorted(descendant_drives(root), key=lambda path: path.relative_to(root).as_posix())
+                maintenance_jobs.record(root, "current_store_import", total=1 + len(drives))
+                for drive in drives:
+                    relative = drive.relative_to(root).as_posix()
+                    if relative <= cursor:
+                        continue
+                    report["drives"][str(drive)] = ensure_current_store(drive, with_children=False, rederive=derive_children)["status"]
+                    done += 1
+                    maintenance_jobs.record(root, "current_store_import", cursor=relative, done=done)
+                maintenance_jobs.record(root, "current_store_import", state="done")
+            except BaseException as exc:
+                maintenance_jobs.record(root, "current_store_import",
+                                        state="failed" if isinstance(exc, Exception) else "pending",
+                                        error=f"{type(exc).__name__}: {exc}", waiting_on={"drive": str(drive)})
+                raise
     report["duration_seconds"] = round(time.monotonic() - started, 3)
     supervisor_row(root, "current_store_import", {"phase": report["status"],
                                                   **{key: value for key, value in report.items() if key != "drives"}})
     return report
 
 
-def _ensure(root: pathlib.Path, path: pathlib.Path, *, rederive: bool = False) -> Tuple[Dict[str, Any], list]:
+def _ensure(root: pathlib.Path, path: pathlib.Path, *, rederive: bool = False,
+            body_sha: Optional[str] = None, initialize_journal: bool = False) -> Tuple[Dict[str, Any], list]:
     from ouroboros.platform_layer import kernel_file_locks_enforced
     from ouroboros.startup_migrations import stamp
 
     state, header = store.probe(root)
-    tier = TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / LOCK_NAME) else TIER_NAME
     if state == "present":
+        if header == TIER_NAME:
+            # The header already requires the name protocol. Take that lock for the
+            # initial snapshot; only its recorded mount identity can authorize reuse.
+            kernel_file_locks_enforced(root / "state" / LOCK_NAME, known=(False, None))
+        if initialize_journal and store.wal_file(path):
+            # The boot leaves a WAL file this runtime must not share, under the tier it is used with,
+            # before its own read refuses it; choosing WAL waits for a published phase below.
+            _select_journal(root, path, header)
+        with store.open_store(root, write=False) as txn:
+            facts = {key: txn.meta(key) for key in ("phase", "generation", "lock_tier", "schema_version",
+                     "legacy_results", "last_store_body", "job:legacy_reconcile", "job:current_store_import", "export")}
+            derive = rederive or _flags_need_derivation(txn)
+        tier_record = _lock_tier(root, facts["lock_tier"])
+        tier = tier_record["tier"]
         retiered = {"retiered_from": header} if header != tier else {}
-        with store.open_store(root, write=True, service=True) as txn:  # opened under the header's protocol, left under today's
-            if retiered:
-                txn.conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
-                txn.set_meta("lock_tier", tier)
-            flags = _derive_flag_columns(txn, rederive=rederive)  # before any row write needs the column
-            phase = txn.phase()
-            if phase == PUBLISHED:
-                _upgrade_review_collection(txn)
-                report, quarantined = _reconcile(root, txn)
-            export = txn.meta("export") or {}
+        phase = facts["phase"] or PUBLISHED
         if phase == PUBLISHED:
+            last = facts["last_store_body"] or {}
+            scheduled = body_sha is not None and _schedule_legacy(root, last, facts["job:legacy_reconcile"] or {}, body_sha)
+            changed_body = body_sha is not None and last.get("sha") != body_sha
+            upgrade = int(facts["schema_version"] or 1) < store.SCHEMA_VERSION
+            flags, quarantined = {}, []
+            report = {"status": "unchanged", "changed": 0, "new": 0, "deleted": 0, "results": facts["legacy_results"]}
+            if derive or upgrade or retiered or tier_record != facts["lock_tier"] or changed_body or facts["legacy_results"] is None:
+                with store.name_lock(root, IMPORT_LOCK_NAME, timeout_sec=600.0, stale_sec=600.0):
+                    if retiered and header == TIER_ENFORCED:  # out of WAL under the tier in use, before the header names another
+                        store.prepare_handoff(path, header, seam=False)
+                    if retiered:  # the header changes in place: read it every time until the new tier commits
+                        known = (str(path), store.file_identity(path))
+                        store._TIERS[known] = None
+                    with store.open_store(root, write=True, service=True) as txn:
+                        if txn.phase() != PUBLISHED:
+                            raise store.StoreRetired("store entered export during boot preparation")
+                        if retiered:
+                            txn.conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
+                        if tier_record != facts["lock_tier"]:
+                            txn.set_meta("lock_tier", tier_record)
+                        if derive:
+                            flags = _derive_flag_columns(txn, rederive=rederive)
+                        if upgrade:
+                            _upgrade_review_collection(txn)
+                        if rederive:
+                            report, quarantined = _reconcile(root, txn)
+                            facts["job:current_store_import"] = {"state": "pending", "rederive": True, "updated_at": utc_now_iso()}
+                            txn.set_meta("job:current_store_import", facts["job:current_store_import"])
+                        elif facts["legacy_results"] is None:
+                            report["results"] = len(txn.meta("baseline") or {})
+                            txn.set_meta("legacy_results", report["results"])
+                        if changed_body:
+                            txn.set_meta("last_store_body", {"sha": body_sha, "at": utc_now_iso()})
+                    if retiered:
+                        store._TIERS[known] = tier
+            if initialize_journal:  # explicit boot ownership, independent of legacy reconciliation
+                report["journal_selected"] = _select_journal(root, path, tier)
             if not store.generation_stamped(root):
-                stamp(root, **{GENERATION_KEY: GENERATION})  # the stamp a crash after publication never wrote
+                stamp(root, **{GENERATION_KEY: GENERATION})
             _latches_into_intents(root, report.pop("latched", []))
-            return {**report, "lock_tier": tier, **retiered, **flags}, quarantined
-        if export.get("status") != "completed":
-            return {"status": "switch_pending", "phase": phase, "lock_tier": tier, **retiered}, []  # the seam resumes it
-        stamp(root, **{GENERATION_KEY: None})  # before the rename: absent + stamped is always a loss
-        os.replace(path, path.with_name(f"{path.name}.exported-{utc_stamp()}"))  # a full rebuild after a proven complete export
+            return {**report, "lock_tier": tier, **retiered, **flags,
+                    "_import_job": facts["job:current_store_import"],
+                    "legacy_reconcile": "scheduled" if scheduled else "not_needed"}, quarantined
+        if (facts["export"] or {}).get("status") != "completed":
+            # An interrupted export can still need old-writer obligation flags.
+            # Its review schema/version stays unpublished until it returns to PUBLISHED.
+            if derive or retiered or tier_record != facts["lock_tier"]:
+                with store.name_lock(root, IMPORT_LOCK_NAME, timeout_sec=600.0, stale_sec=600.0):
+                    if retiered and header == TIER_ENFORCED:  # as above: the old tier converts first
+                        store.prepare_handoff(path, header, seam=False)
+                    if retiered:  # as above: read every time until the new tier commits
+                        known = (str(path), store.file_identity(path))
+                        store._TIERS[known] = None
+                    with store.open_store(root, write=True, service=True) as txn:
+                        if derive:
+                            _derive_flag_columns(txn, rederive=rederive)
+                        if retiered:
+                            txn.conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
+                        if tier_record != facts["lock_tier"]:
+                            txn.set_meta("lock_tier", tier_record)
+                    if retiered:
+                        store._TIERS[known] = tier
+            return {"status": "switch_pending", "phase": phase, "lock_tier": tier, **retiered,
+                    "legacy_reconcile": "not_needed"}, []
     elif store.generation_stamped(root):
         raise StoreLost(f"current store missing beside its completed stamp: {path}")
-    return _build_and_publish(root, path, tier)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raced = False
+    with store.name_lock(root, IMPORT_LOCK_NAME, timeout_sec=600.0, stale_sec=600.0):
+        # Another process may have published while this first-touch writer waited.
+        if state == "absent" and store.probe(root)[0] == "present":
+            raced = True
+        else:
+            tier_record = _lock_tier(root)
+            if state == "present":
+                stamp(root, **{GENERATION_KEY: None})
+                os.replace(path, path.with_name(f"{path.name}.exported-{utc_stamp()}"))
+            for name in os.listdir(path.parent):
+                if name.startswith(path.name + ".import-"):
+                    with contextlib.suppress(OSError):
+                        (path.parent / name).unlink()
+            report, quarantined = _build_and_publish(root, path, tier_record["tier"], lock_tier_record=tier_record)
+    if raced:
+        return _ensure(root, path, rederive=rederive, body_sha=body_sha, initialize_journal=initialize_journal)
+    scheduled = body_sha is not None and _schedule_legacy(root, {}, {}, body_sha)
+    if body_sha is not None:
+        with store.open_store(root, write=True, service=True) as txn:
+            txn.set_meta("last_store_body", {"sha": body_sha, "at": utc_now_iso()})
+    return {**report, "legacy_reconcile": "scheduled" if scheduled else "not_needed"}, quarantined
+
+
+def _select_journal(root: pathlib.Path, path: pathlib.Path, tier: str) -> bool:
+    """``store_journal.configure_journal`` for the boot, a name-tier file under its name lock."""
+    with store.name_lock(root, LOCK_NAME, timeout_sec=store.STORE_WAIT_SEC) if tier == TIER_NAME \
+            else contextlib.nullcontext():
+        return store_journal.configure_journal(path, tier)
 
 
 def _upgrade_review_collection(txn: Txn) -> None:
-    """Schema only: old bodies stay unknown until the ordinary collector visits them.
+    """Schema only: old bodies stay unknown until their ordinary maintenance owner visits them.
     DDL and its version commit together; an interrupted upgrade is retried in place."""
-    if "review_collection_pending" not in {row["name"] for row in txn.conn.execute("PRAGMA table_info(tasks)")}:
-        txn.conn.execute("ALTER TABLE tasks ADD COLUMN review_collection_pending INTEGER")
-    txn.conn.execute(store.REVIEW_COLLECTION_INDEX)
+    columns = {row["name"] for row in txn.conn.execute("PRAGMA table_info(tasks)")}
+    for column, index in (("review_collection_pending", store.REVIEW_COLLECTION_INDEX),
+                          ("plan_collection_pending", store.PLAN_COLLECTION_INDEX)):
+        if column not in columns:
+            txn.conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} INTEGER")
+        txn.conn.execute(index)
+    if "drive_retention_at" not in columns:
+        txn.conn.execute("ALTER TABLE tasks ADD COLUMN drive_retention_at TEXT")
+    for index in store.ROOT_WINDOWS:  # schema 8: root windows and terminal_seq, built once, committed with the version
+        txn.conn.execute(index)
+    if "terminal_seq" not in columns:  # rows written terminal before it carry no count (nothing to look at again)
+        txn.conn.execute("ALTER TABLE tasks ADD COLUMN terminal_seq INTEGER")
+    txn.conn.execute(store.TERMINAL_SEQ_INDEX)
     if int(txn.meta("schema_version") or 1) < store.SCHEMA_VERSION:
         txn.set_meta("schema_version", store.SCHEMA_VERSION)
 
@@ -152,8 +349,22 @@ def upgrade_current_schema(root: Any) -> None:
     The ordinary write gate and inherited acquisition budget also govern this DDL:
     a caller under a queue/launch lock cannot acquire an extra long import lock."""
     with store.open_store(root, write=True) as txn:
-        _derive_flag_columns(txn)  # all prior flags must exist before the version advances
-        _upgrade_review_collection(txn)
+        if _flags_need_derivation(txn):
+            _derive_flag_columns(txn)  # all prior flags must exist before the version advances
+        if int(txn.meta("schema_version") or 1) < store.SCHEMA_VERSION:
+            _upgrade_review_collection(txn)
+
+
+def _flags_need_derivation(txn: Txn) -> bool:
+    """An empty partial index proves there are no old-writer NULLs without scanning tasks.
+    Missing columns/index need one schema preparation; old REPLACE writers maintain this index too."""
+    columns = {row["name"]: row["notnull"] for row in txn.conn.execute("PRAGMA table_info(tasks)")}
+    if not set(store.FLAG_COLUMNS.values()) <= columns.keys():
+        return True
+    if not txn.conn.execute("SELECT 1 FROM sqlite_master WHERE name='tasks_underived_flags'").fetchone():
+        return True
+    return txn.conn.execute(
+        f"SELECT task_id FROM tasks INDEXED BY tasks_underived_flags WHERE {_null_flags(columns)} LIMIT 1").fetchone() is not None
 
 
 def _derive_flag_columns(txn: Txn, *, rederive: bool = False) -> Dict[str, Any]:
@@ -162,8 +373,8 @@ def _derive_flag_columns(txn: Txn, *, rederive: bool = False) -> Dict[str, Any]:
     column wrote through its own column list (``INSERT OR REPLACE``: a rollback's writes, its new
     tasks) holds NULL whatever ``meta.schema_version`` says. Each such row takes the predicate
     every later write applies (``result_memberships``) over its document; an undecodable body is
-    owed (unknown is never absence) until its next write recomputes it. Cost: one narrow pass over
-    ``tasks`` per boot, a body decode per underived row; ``rederive`` (the explicit rebuild)
+    owed (unknown is never absence) until its next write recomputes it. A partial index selects
+    only underived rows; ``rederive`` (the explicit rebuild)
     forgets every nullable flag first, so it decodes every body. Only complete schema
     preparation publishes the version; this flag-only step may also run during export."""
     columns = {record["name"]: record["notnull"] for record in txn.conn.execute("PRAGMA table_info(tasks)")}
@@ -172,13 +383,17 @@ def _derive_flag_columns(txn: Txn, *, rederive: bool = False) -> Dict[str, Any]:
         column = store.FLAG_COLUMNS[name]
         txn.conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} INTEGER")
         txn.conn.execute(f"CREATE INDEX tasks_{column} ON tasks({column}) WHERE {column}=1")
+    if added:
+        txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_flags")
+    predicate = _null_flags(columns)
+    txn.conn.execute(f"CREATE INDEX IF NOT EXISTS tasks_underived_flags ON tasks(task_id) WHERE {predicate}")
     nullable = {name: column for name, column in store.FLAG_COLUMNS.items() if not columns.get(column)}
     if not nullable:
         return {}
     if rederive:
         txn.conn.execute(f"UPDATE tasks SET {', '.join(f'{column}=NULL' for column in nullable.values())}")
     underived = [record["task_id"] for record in txn.conn.execute(
-        f"SELECT task_id FROM tasks WHERE {' OR '.join(f'{column} IS NULL' for column in nullable.values())}")]
+        f"SELECT task_id FROM tasks INDEXED BY tasks_underived_flags WHERE {predicate}")]
     for task_id in underived:
         try:
             names = o.result_memberships(txn.load(task_id) or {})
@@ -190,7 +405,7 @@ def _derive_flag_columns(txn: Txn, *, rederive: bool = False) -> Dict[str, Any]:
             **({"flag_rows_derived": len(underived)} if underived else {})}
 
 
-def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tuple[Dict[str, Any], list]:
+def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str, *, lock_tier_record: dict) -> Tuple[Dict[str, Any], list]:
     from ouroboros.startup_migrations import boot_admissions, migrate_cancel_latches, stamp
 
     sets = _read_sets(root)
@@ -216,6 +431,7 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
     tmp = path.with_name(f"{path.name}.import-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
         _build(tmp, tier, root, records, sets, baseline, provenance, folded,
+               lock_tier_record=lock_tier_record,
                sets_baseline=sets_baseline, chain_offset=folded.get("chain_offset", 0),
                occupied={**_quarantined_occupied(root, [task_id for task_id, _ in records]),
                          **{row["task_id"]: row["reason"] for row in quarantined}, **refused})
@@ -264,11 +480,12 @@ def _custody_rows(root: pathlib.Path, records: List[Record]) -> Tuple[Dict[str, 
         raise _unreadable(exc, chain, "custody chain") from exc
     folded = {**fold(rows), "chain_offset": offset}  # the boundary: what an old body appends later is P6' input
     owed = {task_id for task_id, document in records if document.get("delegated_runs_unreconciled")}
-    receipts: Dict[str, Dict[str, Any]] = {}
+    receipts: Dict[str, Dict[str, Any]] = {tid: {"task_id": tid, "cost_revision": revision}
+                                        for tid, revision in folded["cost_revisions"].items()}
     for rid, (facts, _hold) in folded["runs"].items():
         task_id = str(facts.get("task_id") or "")
         if facts.get("settled") and task_id in owed:
-            receipts.setdefault(task_id, {"task_id": task_id, "closed_runs": {}})["closed_runs"][rid] = facts
+            receipts.setdefault(task_id, {"task_id": task_id}).setdefault("closed_runs", {})[rid] = facts
     return folded, {"custody_open": folded["open"], "delegated_runs": receipts}
 
 
@@ -277,6 +494,8 @@ def _merge_receipts(held: Dict[str, Dict[str, Any]], folded: Dict[str, Dict[str,
     for task_id, facts in folded.items():
         entry = merged.setdefault(task_id, {"task_id": task_id})
         entry["closed_runs"] = {**facts.get("closed_runs", {}), **entry.get("closed_runs", {})}
+        if facts.get("cost_revision"):
+            entry["cost_revision"] = max(facts["cost_revision"], entry.get("cost_revision", 0))
     return merged
 
 
@@ -308,7 +527,9 @@ def _baseline_entry(path: pathlib.Path, raw: bytes, document: Optional[Dict[str,
         return {**entry, "refused": reason}  # remembered, so an untouched refused file stays untouched
     if reason == "latch_stamped":
         entry["latch_stamped"] = True
-    return {**entry, "body_sha256": sha256_hex(document_text(document).encode("utf-8"))}  # the whole projected document
+    # The whole projected document in the shape ``load`` returns (its card values last): the same bytes
+    # ``_projected`` hashes, so a stored row is no false conflict against its own file.
+    return {**entry, "body_sha256": sha256_hex(document_text(store_task_cards.canonical(document)).encode("utf-8"))}
 
 
 def _read_result(path: pathlib.Path) -> Optional[bytes]:
@@ -441,14 +662,15 @@ def _sets_baseline(files: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dic
 def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Record], sets: Dict[str, Any],
            baseline: Dict[str, Any], provenance: Dict[str, Any], folded: Optional[Dict[str, Any]] = None, *,
            sets_baseline: Optional[Dict[str, Any]] = None, chain_offset: int = 0,
-           occupied: Optional[Dict[str, str]] = None) -> None:
+           occupied: Optional[Dict[str, str]] = None, lock_tier_record: Optional[dict] = None) -> None:
     from ouroboros.delegate_custody_current import CHAIN_BOUNDARY, write_fold
 
     with contextlib.closing(store.connect(tmp, tier, create=True)) as conn:
         conn.execute("PRAGMA synchronous = FULL")
-        conn.executescript(store._SCHEMA)
+        # executescript commits a pending transaction; BEGIN must be inside the script.
+        conn.executescript("BEGIN IMMEDIATE;\n" + store._SCHEMA)
+        _derive_flag_columns(Txn(conn, root))  # prepare the empty NULL index before publishing
         conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
-        conn.execute("BEGIN IMMEDIATE")
         txn = Txn(conn, root)
         for task_id, document in records:
             txn.store_task(document, pending_drive=bool(o.pending_drive(root, task_id, document)))
@@ -456,9 +678,11 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
             txn.replace_set(name, rows)
         if folded:
             write_fold(txn, folded, replace=False)  # the sets above already hold the fold's open rows
-        for key, value in (("schema_version", store.SCHEMA_VERSION), ("lock_tier", tier), ("generation", GENERATION),
+        for key, value in (("schema_version", store.SCHEMA_VERSION), ("lock_tier", lock_tier_record or tier), ("generation", GENERATION),
                            ("phase", PUBLISHED), ("import", provenance), ("freeze_utc", utc_now_iso()),
-                           ("baseline", baseline), ("sets_baseline", sets_baseline or {}), (CHAIN_BOUNDARY, chain_offset),
+                           ("job:current_store_import", {"state": "pending", "cursor": ".", "done": 1,
+                                                         "total": None, "updated_at": utc_now_iso()}),
+                           ("baseline", baseline), ("legacy_results", len(baseline)), ("sets_baseline", sets_baseline or {}), (CHAIN_BOUNDARY, chain_offset),
                            (OCCUPIED, occupied or {})):
             txn.set_meta(key, value)
         store.commit(conn)
@@ -475,6 +699,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     """P6' per-row reconciliation; stat prefilter and same-stat residual: module docstring.
     Stat-changed bytes are hashed; a matching digest refreshes only the stored stat."""
     baseline: Dict[str, Dict[str, Any]] = txn.meta("baseline") or {}
+    baseline_changed = False
     present: Dict[str, Tuple[pathlib.Path, Optional[bytes]]] = {}
     changed: List[str] = []
     for path in sorted(task_results_dir(root, create=False).glob("*.json")):
@@ -495,12 +720,17 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
             changed.append(path.stem)
         else:
             baseline[path.stem] = {**entry, "size": stat[0], "mtime_ns": stat[1]}  # touched, same bytes
+            baseline_changed = True
     fresh = sorted(task_id for task_id in present if task_id not in baseline)
     deleted = sorted(task_id for task_id in baseline if task_id not in present)
     counts = {"changed": len(changed), "new": len(fresh), "deleted": len(deleted), "results": len(baseline)}
     if not (changed or fresh or deleted):
-        txn.set_meta("baseline", baseline)
-        txn.set_meta(OCCUPIED, {**_quarantined_occupied(root, txn.task_ids()), **(txn.meta(OCCUPIED) or {})})
+        if baseline_changed:
+            txn.set_meta("baseline", baseline)
+        occupied = txn.meta(OCCUPIED) or {}
+        recovered = {**_quarantined_occupied(root, txn.task_ids()), **occupied}
+        if recovered != occupied:
+            txn.set_meta(OCCUPIED, recovered)
         return {"status": "unchanged", **counts}, []
     sets = _read_sets(root)  # validate before any result is moved into quarantine
     now = utc_now_iso()
@@ -540,7 +770,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     moved = _reconcile_sets(txn, sets)  # the old body maintained the set files too
     legacy = _apply_legacy_custody(root, txn)
     occupied = {**_quarantined_occupied(root, txn.task_ids()), **occupied}
-    for key, value in (("baseline", baseline), ("freeze_utc", now), ("conflicts", conflicts), (OCCUPIED, occupied),
+    for key, value in (("baseline", baseline), ("legacy_results", len(baseline)), ("freeze_utc", now), ("conflicts", conflicts), (OCCUPIED, occupied),
                        ("reconciled", {"at": now, **counts, "quarantined": len(quarantined), "refused": refused,
                                        "conflicts": len(conflicts), "set_rows": moved, "legacy_custody": legacy})):
         txn.set_meta(key, value)
@@ -651,6 +881,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
     with store.open_store(root, write=True, service=True) as txn:  # T2: the baseline follows what was written
         refused = {task_id: entry for task_id, entry in (txn.meta("baseline") or {}).items() if entry.get("refused")}
         txn.set_meta("baseline", {**refused, **entries})
+        txn.set_meta("legacy_results", len(refused.keys() | entries.keys()))
         txn.set_meta("sets_baseline", _sets_baseline(_read_sets(root)))
         txn.set_meta("export_manifest", {**manifest, "status": "completed", "completed_at": utc_now_iso()})
     return {"results": len(task_ids), "written": written, "removed": len(stale), "bytes": total, "sets": len(names)}
@@ -676,6 +907,7 @@ def absorb_own_export(root: Any, txn: Txn) -> Dict[str, Any]:
         if _read_result(task_result_path(root, task_id)) is None:
             baseline.pop(task_id, None)
     txn.set_meta("baseline", baseline)
+    txn.set_meta("legacy_results", len(baseline))
     files = _read_sets(root)
     sets_baseline = dict(txn.meta("sets_baseline") or {})
     for name, identity in manifest.get("sets", {}).items():  # a set file this export wrote is its own, not an old body's
@@ -684,3 +916,85 @@ def absorb_own_export(root: Any, txn: Txn) -> Dict[str, Any]:
     txn.set_meta("sets_baseline", sets_baseline)
     txn.set_meta("export_manifest", {**manifest, "status": "abandoned", "adopted": adopted, "at": utc_now_iso()})
     return {"adopted": adopted, "planned": len(manifest.get("results", {}))}
+
+
+def run_legacy_reconcile(root: Any, *, progress: Optional[Callable[[dict], None]] = None,
+                         should_stop: Optional[Callable[[], bool]] = None) -> dict:
+    """Run a pending job (or a first explicit invocation); a done job stays done.
+
+    The CLI queues a fresh pass after a done job, otherwise resumes. Stop keeps a pending
+    cursor; failures keep it with the drive/error for repair. No lifespan/supervisor
+    caller runs this function. Publication and ordinary writer gates still apply.
+    """
+    from ouroboros import maintenance_jobs
+    from ouroboros.startup_migrations import migrate_question_publications
+
+    root = pathlib.Path(root)
+    ensure_current_store(root, with_children=False)
+    with store.name_lock(root, "legacy_reconcile.lock", timeout_sec=store.STORE_WAIT_SEC):
+        row = maintenance_jobs.job(root, "legacy_reconcile") or {}
+        if row.get("state") == "done":
+            return row
+
+        def record(**facts):
+            updated = maintenance_jobs.record(root, "legacy_reconcile", **facts)
+            if progress is not None:
+                progress(updated)
+            return updated
+
+        cursor, done = str(row.get("cursor") or ""), int(row.get("done") or 0)
+        if should_stop is not None and should_stop():
+            return record(state="pending", cursor=cursor, done=done)
+        drive = root
+        try:
+            drives = [root, *sorted(descendant_drives(root), key=lambda path: path.relative_to(root).as_posix())]
+            total = len(drives)
+            row = record(state="running", cursor=cursor, done=done, total=total, error=None, waiting_on=None)
+            for drive in drives:
+                relative = drive.relative_to(root).as_posix()
+                if relative <= cursor:
+                    continue
+                if should_stop is not None and should_stop():
+                    return record(state="pending")
+                report = ensure_current_store(drive, with_children=False)
+                if report["status"] != "completed":
+                    with store.open_store(drive, write=True) as txn:
+                        report, quarantined = _reconcile(drive, txn)
+                    emit_quarantine_event(drive, quarantined)
+                    _latches_into_intents(drive, report.pop("latched", []))
+                done += 1
+                row = record(cursor=relative, done=done, **({"root_report": report} if drive == root else {}))
+            if should_stop is not None and should_stop():
+                return record(state="pending")
+            # Legacy asks can be introduced by this pass after the generation was stamped.
+            publications = migrate_question_publications(root, legacy=True)
+            return record(state="done", question_publications=publications)
+        except BaseException as exc:
+            maintenance_jobs.record(root, "legacy_reconcile",
+                                    state="failed" if isinstance(exc, Exception) else "pending",
+                                    error=f"{type(exc).__name__}: {exc}", waiting_on={"drive": str(drive)})
+            raise
+
+
+def main() -> None:
+    import argparse
+    from ouroboros import maintenance_jobs
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reconcile-legacy", action="store_true", required=True)
+    parser.add_argument("--root", type=pathlib.Path, default=None)
+    args = parser.parse_args()
+    if args.root is None:
+        from ouroboros.config import resolve_data_dir
+        args.root = resolve_data_dir()
+    ensure_current_store(args.root, with_children=False)
+    current = maintenance_jobs.job(args.root, "legacy_reconcile") or {}
+    if current.get("state") not in {"pending", "running", "failed"}:
+        maintenance_jobs.record(args.root, "legacy_reconcile", state="pending", reason="explicit_command",
+                                cursor=None, done=0, total=None, error=None, waiting_on=None)
+    run_legacy_reconcile(args.root, progress=lambda row: print(json.dumps({"job": "legacy_reconcile", **row}), flush=True),
+                         should_stop=lambda: False)
+
+
+if __name__ == "__main__":
+    main()

@@ -12,6 +12,7 @@ import urllib.request
 from ouroboros.marketplace import AllowlistRedirectHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -77,6 +78,18 @@ class ClawHubSkillSummary:
     stats: Dict[str, Any] = field(default_factory=dict)
     is_plugin: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)
+
+    def catalog_facts(self) -> Dict[str, Any]:
+        """Normalize ClawHub's author and millisecond update time at the adapter boundary."""
+        publisher = self.raw.get("publisher") if isinstance(self.raw.get("publisher"), dict) else {}
+        facts: Dict[str, Any] = {"owner": str(self.raw.get("ownerHandle") or publisher.get("handle") or "").strip()}
+        stamp = self.raw.get("updatedAt")
+        if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and stamp > 0:
+            try:
+                facts["updated_at"] = datetime.fromtimestamp(stamp / 1000, timezone.utc).isoformat()
+            except (OverflowError, OSError, ValueError):
+                pass
+        return facts
 
     def to_dict(self) -> Dict[str, Any]:
         return {

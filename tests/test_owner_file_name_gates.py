@@ -195,8 +195,8 @@ def test_a_declared_key_deck_output_is_actually_registered(tmp_path):
     the deck in the task artifact store, no ``ARTIFACT_OUTPUT_ERROR`` in the
     rendered result, and a published tool result that still classifies as ``OK``,
     which is what keeps the task from being degraded by the export. The dotenv
-    negative stays beside it: a declared dotenv tail is still refused, and
-    that refusal IS an artifact-output error.
+    negative stays beside it: a declared dotenv tail is still refused, now
+    before the command runs (#1797), so nothing is written or exported.
     """
     from ouroboros.artifacts import registered_task_artifact
     from ouroboros.tools.registry import ToolContext
@@ -241,8 +241,8 @@ def test_a_declared_key_deck_output_is_actually_registered(tmp_path):
     assert zipfile.is_zipfile(record["path"])
 
     # The negative control on the SAME path, so the assertions above are not
-    # vacuous: a declared credential leaf still refuses, and that refusal is
-    # exactly the artifact-output error the deck must not produce.
+    # vacuous: a declared credential leaf still refuses, before the process
+    # starts, while the deck above passes the same pre-launch check.
     build_dotenv = "open('prod.env', 'w').write('TOKEN=x\\n')\n"
     token = _install_tool_result_sidecar(ctx, sentinel)
     try:
@@ -253,10 +253,12 @@ def test_a_declared_key_deck_output_is_actually_registered(tmp_path):
     finally:
         _restore_tool_result_sidecar(token)
 
-    assert "ARTIFACT_OUTPUT_ERROR" in refused
+    assert "RESOURCE_POLICY_BLOCKED" in refused and "nothing ran" in refused
     assert "credential-like output prod.env" in refused and "dotenv secret" in refused
     assert isinstance(refused_result, ToolResult)
-    assert refused_result.code == "ARTIFACT_OUTPUT_ERROR"
+    assert refused_result.code == "RESOURCE_POLICY_BLOCKED"
+    assert refused_result.meta.get("operation_outcome") == "completed_no_effect"
+    assert not (ctx.task_drive_root() / "prod.env").exists()
     assert registered_task_artifact(drive, ctx.task_id, "prod.env") is None
 
 

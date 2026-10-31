@@ -48,25 +48,26 @@ def test_bridge_preflight_checks_executing_review_mode(tmp_path, monkeypatch):
     assert calls == [("GET", "/api/settings")] * 2
 
 
-def test_real_gui_producer_receipt_precedes_result_admission(tmp_path):
+def test_real_gui_producer_receipt_is_the_results_produced_work(tmp_path):
+    """A GUI action becomes produced work (the Required result floor's trigger) only once the producer's own
+    receipt says it executed; describing the action in prose produces nothing."""
     from tests.test_unix_computer_use_remote_backends import _osworld_impl
     from tests.test_acceptance_produced_material import context
-    from ouroboros.acceptance_material import retain_acceptance_material
     from ouroboros.extension_surface_names import extension_surface_name
-    from ouroboros.loop_acceptance import _task_acceptance_eligible
+    from ouroboros.tools.review_result import produced_material
     calls = []
     _module, impl = _osworld_impl(tmp_path, calls, [{"status": 200,
         "result": {"status": "success", "returncode": 0, "output": ""}}])
-    ctx, trace = context(tmp_path), {"tool_calls": []}
-    retain_acceptance_material(ctx, trace, '{"action":"click", "x":10, "y":20}')
-    assert not calls and not _task_acceptance_eligible("required", trace, False)[0]
-    receipt = impl.click(x=10, y=20)
+    ctx = context(tmp_path)
+    ctx._execution_trace = {"tool_calls": []}
+    assert not calls and produced_material(ctx)["effects"] == []
+    receipt = impl.click(x=10, y=20, raw=True)
     assert calls and json.loads(receipt)["ok"] is True
-    trace["tool_calls"].append({"tool": extension_surface_name("unix_computer_use", "click"),
-                                 "result": receipt, "is_error": False, "tool_call_id": "gui-executed"})
-    retained = retain_acceptance_material(ctx, trace, "Action finished.")
-    assert retained["observed_effects"] and _task_acceptance_eligible("required", trace, False)[0]
-    assert "objective" not in retained  # input execution does not certify success
+    tool = extension_surface_name("unix_computer_use", "click")
+    ctx._execution_trace["tool_calls"].append({"tool": tool, "result": receipt, "is_error": False,
+                                               "tool_call_id": "gui-executed"})
+    effects = produced_material(ctx)["effects"]
+    assert [effect["tool"] for effect in effects] == [tool]
 
 
 def test_cl_launcher_requests_required_in_settings_and_child_env(tmp_path, monkeypatch):

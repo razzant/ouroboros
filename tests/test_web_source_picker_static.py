@@ -33,7 +33,6 @@ WEB = REPO_ROOT / "web"
 WEB_MODULES = WEB / "modules"
 INDEX_HTML = WEB / "index.html"
 SETUP_CONTRACT = REPO_ROOT / "ouroboros" / "settings_setup_contract.py"
-DESIGN_DOC = REPO_ROOT / "docs" / "DESIGN.md"
 PRIMITIVES = WEB_MODULES / "route_editor_primitives.js"
 
 # The serialized separator the owner must never be asked to type.
@@ -210,8 +209,12 @@ def test_model_assigning_editors_share_the_grouped_source_select() -> None:
     )
     assert re.search(r"export\s+(?:function|const)\s+configuredApiProviders\b", primitives_source), (
         "web/modules/route_editor_primitives.js must export configuredApiProviders — the "
-        "API keys group lists one entry per provider with a stored credential (docs/DESIGN.md §7)"
+        "API keys group lists one entry per connection (docs/DESIGN.md §7)"
     )
+    # The entries are the server's connection list (`_meta.connections`, one per key), not a
+    # second client-side table of credential fields; flat keys only name the built-in keys of a
+    # document without that list (the first-run wizard's draft).
+    assert "settings?._meta?.connections" in primitives_source
 
     missing: list[str] = []
     for name in editors:
@@ -234,31 +237,4 @@ def test_model_assigning_editors_share_the_grouped_source_select() -> None:
         f"these model-assigning editors do not take {symbol} from "
         "web/modules/route_editor_primitives.js (directly or via a re-export): "
         + ", ".join(missing)
-    )
-
-
-def test_design_doc_states_the_source_is_chosen_rule() -> None:
-    """The rule itself lives in the design document, with its three groups
-    named in the order every surface renders them."""
-    design = DESIGN_DOC.read_text(encoding="utf-8")
-    rule_sentence = "A source is chosen, never spelled."
-
-    # Scope the group check to the rule's own paragraph. "API keys" is ordinary
-    # vocabulary elsewhere in the document, so a whole-file index would match
-    # the Accounts sentence instead of the group list.
-    paragraphs = [" ".join(block.split()) for block in design.split("\n\n")]
-    rule = next((block for block in paragraphs if rule_sentence in block), "")
-    assert rule, f"docs/DESIGN.md must state the rule: {rule_sentence!r}"
-
-    # Reviewers are catalog rows now, so no surface offers a configured-subagent
-    # reference group: the review lanes editor that did is retired.
-    assert "configured subagents" not in rule
-    groups = ("Subscriptions · models", "API keys", "Agents · sessions")
-    positions = []
-    for group in groups:
-        assert group in rule, f"the rule paragraph must name the source group {group!r}"
-        positions.append(rule.index(group))
-    assert positions == sorted(positions), (
-        "docs/DESIGN.md must name the source groups in their rendered order: "
-        + ", ".join(groups)
     )

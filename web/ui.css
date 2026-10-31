@@ -3,18 +3,18 @@
 :root {
     --native-color-scheme: dark;
     --neutral-rgb: 255, 255, 255;
-    --shell-rgb: 13, 11, 15;
-    --composer-rgb: 26, 21, 32;
-    --composer-hover-rgb: 38, 25, 34;
-    --modal-rgb: 18, 20, 26;
-    --menu-rgb: 12, 14, 18;
-    --media-rgb: 6, 7, 10;
-    --wizard-panel-rgb: 20, 18, 28;
-    --wizard-rgb: 11, 9, 16;
-    --code-bg: #121016;
+    --shell-rgb: 15, 15, 17;
+    --composer-rgb: 26, 27, 28;
+    --modal-rgb: 20, 21, 22;
+    --menu-rgb: 17, 18, 19;
+    --media-rgb: 9, 9, 10;
+    --wizard-panel-rgb: 21, 22, 23;
+    --wizard-rgb: 9, 9, 10;
+    --code-bg: #0b0b0c;
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-    --bg-primary: #0d0b0f;
-    --bg-secondary: #1a1520;
+    --control-disabled-opacity: 0.55;
+    --bg-primary: #0f0f11;
+    --bg-secondary: #1a1b1c;
     --bg-card: rgba(var(--neutral-rgb), 0.06);
     --bg-hover: rgba(var(--neutral-rgb), 0.08);
     /* Type scale + foreground semantics: docs/DESIGN.md. Four sizes, no fifth. */
@@ -29,13 +29,13 @@
     --line-meta: 1.35;
     --line-body: 1.5;
     --line-title: 1.3;
-    --text-primary: #e2e8f0;
-    --text-secondary: rgba(var(--neutral-rgb), 0.54);
-    --text-meta: rgba(var(--neutral-rgb), 0.68);
-    --text-disabled: rgba(var(--neutral-rgb), 0.38);
+    --text-primary: #efeff2;
+    --text-secondary: rgba(var(--neutral-rgb), 0.58);
+    --text-meta: rgba(var(--neutral-rgb), 0.7);
+    --text-disabled: rgba(var(--neutral-rgb), 0.46);
     --text-muted: var(--text-disabled);  /* legacy alias */
-    --accent: #c93545;
-    --accent-light: #f07a86;
+    --accent: #f45152;
+    --accent-light: #fe7d85;
     --accent-dim: rgba(201, 53, 69, 0.15);
     /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
     --accent-04: rgba(201, 53, 69, 0.04);
@@ -43,94 +43,121 @@
     --accent-08: rgba(201, 53, 69, 0.08);
     --accent-10: rgba(201, 53, 69, 0.10);
     --accent-12: rgba(201, 53, 69, 0.12);
+    --accent-14: rgba(201, 53, 69, 0.14);
     --accent-18: rgba(201, 53, 69, 0.18);
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
     --accent-35: rgba(201, 53, 69, 0.35);
     --accent-45: rgba(201, 53, 69, 0.45);
     --accent-55: rgba(201, 53, 69, 0.55);
-    --accent-65: rgba(201, 53, 69, 0.65);
     /* Project identity (vivid fuchsia): a converted task card, its sidebar marker,
        and the project panel header share this so "this is a project" reads as a
        deliberate state — never the red task accent (looked like an error, P3) and
        never the blue owner voice. The old calm-indigo sat next to the user-message
        blue and the two blurred together; fuchsia is unmistakably its own role.
-       Base is legible-on-dark fuchsia-400; every tint shares the SAME hue (C7.3). */
-    --project: #e879f9;
-    --project-08: rgba(232, 121, 249, 0.08);
-    --project-12: rgba(232, 121, 249, 0.12);
-    --project-18: rgba(232, 121, 249, 0.18);
+       Base is a light fuchsia that reads on the room and under its veil on a garnet or sapphire voice; in light
+       every tint shares the SAME hue (C7.3), in dark the fills are neutral veils carrying the fuchsia ink (a dark
+       fuchsia tint reads as mauve). */
+    --project: #ee90fa;
+    --project-08: rgba(255, 255, 255, 0.07);
+    --project-12: rgba(255, 255, 255, 0.1);
+    --project-18: rgba(255, 255, 255, 0.14);
     /* User / owner voice: the owner's chat bubble + sender accents. Tokenized so
        the hue lives in one place and stays clear of the project fuchsia (C7.2). */
-    --user-bubble-from: rgba(80, 120, 190, 0.14);
-    --user-bubble-to: rgba(55, 85, 155, 0.12);
+    --user-bubble-from: rgba(71, 128, 210, 0.24);
+    --user-bubble-to: rgba(71, 128, 210, 0.18);
     --user-border: rgba(110, 150, 210, 0.18);
     --user-glow: rgba(160, 190, 245, 0.04);
-    --user-sender: rgba(155, 185, 240, 0.95);
-    --user-text: rgba(215, 230, 255, 0.96);
-    /* System / owner-control voice: amber notices (system bubble + sender). Same
-       hue as the system role, tokenized so it tracks one source (C7.2). */
-    --system-bubble-bg: rgba(245, 158, 11, 0.12);
-    --system-border: rgba(245, 158, 11, 0.45);
-    --system-sender: rgba(245, 158, 11, 0.9);
-    --system-text: rgba(255, 240, 210, 0.78);
+    --user-sender: #a0c6ff;
+    --user-text: #efeff2;
+    /* System / owner-control voice (system bubble + sender), tokenized so it tracks one source (C7.2): in dark a
+       neutral body with a gold name, since gold goes olive as a dark fill; in light an amber tint. */
+    --system-bubble-bg: rgba(255, 255, 255, 0.055);
+    --system-sender: #f7cb58;
+    --system-text: #efeff2;
     /* Assistant / agent voice: the assistant bubble's sender + body tints,
        tokenized like the user/system voices above (C7.2). */
-    --assistant-sender: rgba(250, 125, 125, 0.95);
-    --assistant-text: rgba(255, 235, 238, 0.96);
+    --assistant-sender: #feaaae;
+    --assistant-text: #efeff2;
+    /* A reply quote's author ink when Ouroboros is quoted: its sender colour, and the voice's readable word inside
+       the dark Ouroboros voice (its material, after the light block). */
+    --quote-assistant-ink: var(--assistant-sender);
     --blue: #3b82f6;
-    --amber: #f59e0b;
-    --amber-dim: rgba(245, 158, 11, 0.15);
-    --green: #22c55e;
-    --green-dim: rgba(34, 197, 94, 0.15);
+    --amber: #f7cb58;
+    --amber-dim: rgba(255, 255, 255, 0.07);
+    /* The saturated ok hue of dots, tracks and switches (status text reads --status-ok-fg); light restates its own. */
+    --green: #2fd359;
+    --green-dim: rgba(255, 255, 255, 0.07);
     --red: #ef4444;
-    --red-dim: rgba(239, 68, 68, 0.15);
+    --red-dim: rgba(255, 255, 255, 0.07);
     --divider: rgba(var(--neutral-rgb), 0.06);
     --surface-border: rgba(var(--neutral-rgb), 0.08);
     --surface-border-soft: rgba(var(--neutral-rgb), 0.06);
     --surface-card: rgba(var(--neutral-rgb), 0.03);
     --surface-card-soft: rgba(var(--neutral-rgb), 0.025);
     --surface-control: rgba(var(--neutral-rgb), 0.04);
-    /* Chart chrome (grid lines, tick/legend text). Chart.js paints to a canvas
-       and cannot read CSS, so these tokens are the SSOT that theme_palette.js
-       copies into every mounted instance — the canvas twin of --diagram-*. */
+    /* Chart chrome (grid lines, tick/legend text) and the four default series of a
+       chart the host draws (widgets, living cards), in the owner's order; a fifth
+       series takes the first again. Chart.js paints to a canvas and cannot read CSS,
+       so these tokens are the SSOT that theme_palette.js copies into every mounted
+       instance — the canvas twin of --diagram-*. */
     --chart-grid: rgba(var(--neutral-rgb), 0.10);
-    --chart-text: #a8b0bd;
+    --chart-text: #a4a4a4;
+    --chart-series-1: #ee6780;
+    --chart-series-2: #60a5fa;
+    --chart-series-3: #3fdca3;
+    --chart-series-4: #fbbf24;
     /* The native select arrow is a data-URI, so its stroke cannot read a token
        at paint time; the whole image is the token instead. Painting a near-white
        arrow on the light surface is what made the arrows look washed out. */
-    --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%23e2e8f0' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%23efeff2' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     --diagram-font: Inter, system-ui, sans-serif;
-    --diagram-bg: #151318;
-    --diagram-primary: #25222c;
-    --diagram-primary-text: #f4eef7;
-    --diagram-border: #6f6678;
-    --diagram-line: #9b90a6;
-    --diagram-secondary: #302b39;
-    --diagram-tertiary: #19171d;
+    --diagram-bg: #131415;
+    --diagram-primary: #212223;
+    --diagram-primary-text: #efeff2;
+    --diagram-border: #717171;
+    --diagram-line: #989898;
+    --diagram-secondary: #28292a;
+    --diagram-tertiary: #151617;
     --ui-card-bg: var(--surface-card);
     --ui-card-bg-soft: var(--surface-card-soft);
     --ui-card-border: var(--surface-border);
     --ui-modal-bg: rgba(var(--modal-rgb), 0.98);
+    /* A live task card's lift off the transcript: soft in light (a near-black shadow that suits the
+       dark shell reads as grime on white), one plain shadow in dark (no light along the edge). */
+    --live-card-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     /* Status triples: fg/bg/border named together, never derived
-       (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on
-       near-black; the saturated --green/--amber/--red stay for dots, tracks and
-       other large indicators. */
-    --status-ok-fg: #6ee7b7;
-    --status-ok-bg: var(--green-dim);
-    --status-ok-border: rgba(34, 197, 94, 0.28);
-    --status-warn-fg: #fcd34d;
-    --status-warn-bg: var(--amber-dim);
-    --status-warn-border: rgba(245, 158, 11, 0.30);
-    --status-error-fg: #fca5a5;
-    --status-error-bg: var(--red-dim);
-    --status-error-border: rgba(239, 68, 68, 0.30);
-    --status-info-fg: #93c5fd;
+       (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on the dark room, where a status body
+       is a neutral veil carrying the hue's ink (a dark tint of green, amber or red goes olive or brown); inside the
+       dark Ouroboros voice the body is that voice's opaque capsule step and the red ink its readable word (the
+       material, after the light block). The red ink is a step lighter than the crimson word; the saturated
+       --green/--amber/--red stay for dots, tracks and other large indicators. */
+    --status-ok-fg: #83e499;
+    --status-ok-bg: rgba(255, 255, 255, 0.08);
+    --status-ok-border: rgba(255, 255, 255, 0.1);
+    --status-warn-fg: #f7cb58;
+    --status-warn-bg: rgba(255, 255, 255, 0.08);
+    --status-warn-border: rgba(255, 255, 255, 0.1);
+    --status-error-fg: #fe9498;
+    --status-error-bg: rgba(255, 255, 255, 0.08);
+    --status-error-border: rgba(255, 255, 255, 0.1);
+    --status-info-fg: #a0c6ff;
+    /* A warning or a failure on a row whose body cannot show it: on dark the body stays a neutral veil, so the row's
+       words (a field: its hairline) take the hue's ink. The light block unsets both: there the tinted body says it,
+       and each reader falls back to its own ink. */
+    --status-warn-word: var(--status-warn-fg);
+    --status-error-word: var(--status-error-fg);
     --status-neutral-fg: var(--text-meta);
     --status-neutral-bg: rgba(var(--neutral-rgb), 0.06);
     --status-neutral-border: rgba(var(--neutral-rgb), 0.12);
-    --focus-accent-border: rgba(201, 53, 69, 0.4);
-    --focus-accent-ring: var(--accent-10);
+    /* A work's live word and its chip body (the Working chip): the crimson word on its tint, and inside the dark
+       Ouroboros voice a pulse ink on the voice's capsule step. Panic's word: the crimson word on dark, the failure
+       ink on light. */
+    --status-live-fg: var(--accent-light);
+    --status-live-bg: var(--accent-10);
+    --panic-ink: var(--accent-light);
+    --focus-accent-border: #fe7d85;
+    --focus-accent-ring: rgba(211, 45, 67, 0.28);
     --radius-xs: 3px;
     --radius-sm: 8px;
     /* In-between radius used by chips, counters, and fade rules. */
@@ -153,15 +180,100 @@
     /* Floating chrome (the recipe at the end): one height for a floating group's text controls, and the
        group's inset, which its negative margin cancels so grouping moves no control. */
     --chrome-control-h: 30px;
-    --chrome-sheet-shadow: 0 18px 22px -16px rgba(0, 0, 0, 0.6);
-    --chrome-shade-shadow: 0 16px 20px -16px rgba(40, 18, 48, 0.34);
     --chrome-navigation-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
     --chrome-inset: calc(var(--space-1) + 1px);
+    /* Airy dopamine seed (DESIGN.md design bible): the dark values; the light theme's follow in its block. One set of
+       recipes reads them in both themes. The dark theme draws the same roles its own way: a deep graphite room, each
+       neutral height a white veil over what lies under it, the voices as deep opaque sapphire and cherry at one
+       weight (a tint over black turns brown), gold only as a rail and a word, controls as glass over what scrolls
+       under them; inside a voice its own opaque steps (the voice materials, after the light block). */
+    --elev-rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28);
+    --elev-float: 0 2px 8px rgba(0, 0, 0, 0.45), 0 18px 44px rgba(0, 0, 0, 0.5);
+    --row-lift-dim: rgba(0, 0, 0, 0.45);  /* the feed under a row lifted by a long press */
+    --radius-object: 18px;
+    --radius-inner: 12px;
+    --radius-sheet: 24px;
+    --surface-object: rgba(255, 255, 255, 0.055);
+    /* The object's colour as one opaque paint (its veil over --bg-primary), for marks that must cover what they
+       cross: a chart's label halos and dot rings. */
+    --surface-object-opaque: #1c1c1f;
+    --surface-capsule: rgba(255, 255, 255, 0.09);
+    --surface-capsule-hover: rgba(255, 255, 255, 0.135);
+    --chip-float: linear-gradient(var(--surface-capsule), var(--surface-capsule)), rgba(var(--shell-rgb), 0.98);
+    --chip-float-hover: linear-gradient(var(--surface-capsule-hover), var(--surface-capsule-hover)), rgba(var(--shell-rgb), 0.98);
+    /* The opaque neutral sheet (DESIGN principle 2): the capsule's step over the room's own ink, fully opaque,
+       for a list of rows that must stay readable over any bubble. Both themes read it through these two tokens. */
+    --sheet-float: linear-gradient(var(--surface-capsule), var(--surface-capsule)), rgb(var(--shell-rgb));
+    /* The popups' backing, the same way opaque: the float colour over the room's ink, for menus and dialogs. */
+    --popup-float: linear-gradient(var(--surface-float), var(--surface-float)), rgb(var(--shell-rgb));
+    --surface-float: rgba(32, 32, 34, 0.92);
+    --surface-tray: rgba(var(--neutral-rgb), 0.045);
+    --surface-side: #0f0f11;
+    --glass: blur(18px);
+    --voice-owner: #103e7f;
+    --voice-ouroboros: #76162b;
+    --voice-ouroboros-card: #76162b;
+    /* A note between works (DESIGN "Replies"): the voice one quiet step back toward the room, its hover a step less;
+       the cards peeking below a stack's front card are that material flattened toward the room again, each level
+       more. Flat colours: the ledges carry the rest shadow, which an opacity would fade with them. Written as values
+       (the voice at 74 % / 84 % over the room; the note at 84 % / 66 %), since older WebKit has no color-mix(). */
+    --voice-ouroboros-note: #5b1424;
+    --voice-ouroboros-note-hover: #661527;
+    --relay-ledge-1: #4f1321;
+    --relay-ledge-2: #41121e;
+    --tone-crimson: #d32d43;
+    --tone-crimson-hover: #c32a3f;
+    /* The crimson tone's ink: white on the solid crimson. Its hover deepens rather than lightens, and so does its
+       press (--press-solid), so the white keeps 4.5:1 at rest, on hover and pressed. */
+    --tone-crimson-ink: #ffffff;
+    /* The soft crimson: a chosen option or card (a filter, a segment, a switched-on capsule, the current step of
+       setup), Material 3's tonal step below the filled crimson of the primary action, the chosen place and a count. */
+    --tone-crimson-soft: #872236;
+    --tone-crimson-soft-ink: #ffdfe1;
+    /* The crimson tone without its fill, for a chosen control that has no body (Read aloud while it speaks, the
+       Official mark): on dark that is the crimson word, since the tone's own ink is white. */
+    --tone-crimson-word: var(--accent-light);
+    /* The chosen place's left mark: on the solid crimson it is the fill's white ink (the accent would vanish into
+       the fill). */
+    --place-mark: var(--tone-crimson-ink);
+    --tone-green: rgba(255, 255, 255, 0.16);
+    --tone-green-hover: rgba(255, 255, 255, 0.2);
+    --tone-red: rgba(255, 255, 255, 0.09);
+    --tone-red-hover: rgba(255, 255, 255, 0.135);
+    --tone-amber: rgba(255, 255, 255, 0.09);
+    --tone-amber-hover: rgba(255, 255, 255, 0.135);
+    --tone-quiet-hover: rgba(var(--neutral-rgb), 0.08);
+    /* The owner's recorded answer (DESIGN "Quiz card"): on dark the chosen option of a settled question is the owner's
+       sapphire under white ink, keeps its rest lift and shows the `Your choice` word (--chosen-answer-cue-display; its
+       accessible name says so in every theme); the `You answered` word and its dot take the owner's blue. The asker's
+       recommendation is a word of its own. On dark the controls held while an answer is sent (--quiz-held-opacity)
+       and a message still waiting for its echo (--message-pending-opacity) keep full ink: their words carry the
+       state. */
+    --tone-chosen-answer: #235193;
+    --tone-chosen-answer-ink: #ffffff;
+    --tone-chosen-answer-detail: #dce9fc;
+    --tone-chosen-answer-shadow: var(--elev-rest);
+    --chosen-answer-cue-display: inline;
+    --tone-recommended: #ffc2c6;
+    --tone-recorded-answer: var(--user-sender);
+    --tone-recorded-mark: var(--user-sender);
+    --quiz-held-opacity: 1;
+    --message-pending-opacity: 1;
+    /* A state changes colour, never height: hover and press deepen a capsule's own fill (a press lightens on dark). */
+    --press: brightness(1.12);
+    /* A press on a solid fill under white ink (the primary action, the chosen tab) deepens instead. */
+    --press-solid: brightness(0.9);
+    --motion-tone: background 0.12s ease, box-shadow 0.12s ease, color 0.12s ease, filter 0.12s ease;
+    /* The one curve anything that moves rides: the iOS sheet curve (DESIGN §10 "Motion"; shell_motion.js reads it). */
+    --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
+    /* How long it runs: a surface coming in, a surface going out, a fade (a finger's release sets its own speed). */
+    --motion-open: 340ms;
+    --motion-close: 280ms;
+    --motion-fade: 180ms;
     --widget-fault-status-max-width: min(240px, 35vw);
     /* App shell: persistent desktop sidebar + optional project detail pane. */
     --sidebar-width: 280px;
     --project-panel-width: clamp(340px, 36vw, 440px);
-    --nav-item-radius: 10px;
     /* One hover fill for an item in a popup menu or a picker list. Six menus
        used five different fills (0.04 / 0.06 / 0.08 / an accent tint / an
        undeclared --surface-2), so the same gesture looked like a different
@@ -185,7 +297,6 @@
        share of the visual viewport height below, so the navigation column keeps
        its height whatever the project count. Distinct from the fixed Updates
        window above: one is a page-local list, this one follows the viewport. */
-    --nav-projects-list-max-height: calc(var(--vvh) * 0.38);
     /* Chat media (DESIGN "Chat attachments"): a whole single photo keeps its own
        ratio up to this height, a bubble carrying several media stops at this
        width, and a staged composer file shows a thumbnail of this size. */
@@ -195,18 +306,54 @@
     --chat-photo-min-box: calc(var(--touch-target-min) + 14px);
     --chat-media-bubble-max: 520px;
     --chat-attach-thumb-size: 28px;
-    /* The smallest comfortable touch target for a coarse pointer (a phone). */
+    /* Message fields (DESIGN §3, "Quiz card"): the composer's control height, which a question's Send shares; the one
+       cap a message field grows to before it scrolls (chat_input_sizing.js reads it as the field's max-height); and
+       the row a question's voice line and head share, its × as tall as the row. */
+    --composer-control-height: 32px;
+    --message-field-max-height: 140px;
+    --quiz-row-height: 28px;
+    /* The smallest comfortable touch target; a coarse pointer (a phone) raises it to a finger's 44px (below). */
     --touch-target-min: 36px;
+    /* The hit extension's inset (the recipe below): out only on the sides that fall short of the touch minimum. The
+       percentage resolves where it is used, against the control's own box. */
+    --ui-hit-inset: min(0px, calc((100% - var(--touch-target-min)) / 2));
     --vvh: 100dvh;
+    /* The shell's insets (DESIGN "Shell"): the system's safe area, reported by the browser as env() and inside
+       Telegram as --tg-safe-area-inset-* (the SDK writes them inline; host_telegram.js mirrors its object; the same
+       inset, so the larger wins, never the sum), plus Telegram's own controls over the content
+       (--tg-content-safe-area-inset-*). Outside Telegram the Telegram tokens rest at 0. */
+    --tg-safe-area-inset-top: 0px;
+    --tg-safe-area-inset-bottom: 0px;
+    --tg-content-safe-area-inset-top: 0px;
+    --tg-content-safe-area-inset-bottom: 0px;
+    --inset-top: calc(max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top)) + var(--tg-content-safe-area-inset-top));
+    --inset-bottom: calc(max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom)) + var(--tg-content-safe-area-inset-bottom));
+    /* The shell's stacking order (DESIGN "Shell"), lowest first: Main's floating header, the sidebar column (on a
+       phone the drawer, which lies under the room), the room (on a phone the card the drawer pushes aside), the
+       sidebar's resize handle, the Project panel over the content area (its scrim beneath it; the stack layout's
+       full-width Project a step above), the reply mark of a message being swiped, a sent draft rising into its feed
+       (send_flight.js), the drawer's way back (its clear
+       scrim over the room's visible quarter); popovers (.ui-popup) stay the top of everything. */
+    --z-page-header: 5;
+    --z-sidebar: 10;
+    --z-room: 15;
+    --z-resize-handle: 20;
+    --z-project-scrim: 55;
+    --z-project-panel: 58;
+    --z-project-layer: 60;
+    --z-row-reply-mark: 62;
+    --z-send-flight: 64;
+    --z-drawer-scrim: 68;
+    --z-popover: 1200;
+    /* Quote panel glass (DESIGN "Replies"): the shell colour at one alpha, so a quote reads lighter than the bubble it sits in. */
+    --quote-glass: rgba(var(--shell-rgb), 0.7);
 }
 
 :root[data-theme="light"] {
-    --chrome-sheet-shadow: 0 18px 22px -18px rgba(24, 16, 32, 0.38);
     --native-color-scheme: light;
     --neutral-rgb: 32, 35, 43;
     --shell-rgb: 255, 255, 255;
     --composer-rgb: 244, 245, 248;
-    --composer-hover-rgb: 248, 237, 239;
     --modal-rgb: 255, 255, 255;
     --menu-rgb: 250, 251, 253;
     --media-rgb: 244, 245, 248;
@@ -219,21 +366,25 @@
     --text-meta: #555d69;
     --text-secondary: #626977;
     --text-disabled: #89909b;
-    --accent-light: #a82c3b;
+    --accent-light: #bf2f40;
     --project: #8f2499;
     --user-sender: #24558d;
     --user-text: #233b58;
     --system-sender: #805000;
     --system-text: #58451f;
-    --assistant-sender: #a82c3b;
+    --assistant-sender: #bf2f40;
     --assistant-text: #35272c;
     --status-ok-fg: #176b49;
     --status-warn-fg: #805300;
     --status-error-fg: #b42332;
     --status-info-fg: #24558d;
-    --focus-accent-border: #a82c3b;
+    --focus-accent-border: #bf2f40;
     --chart-grid: rgba(var(--neutral-rgb), 0.14);
     --chart-text: #4a515d;
+    --chart-series-1: #c0284c;
+    --chart-series-2: #2c68d0;
+    --chart-series-3: #1e9c76;
+    --chart-series-4: #bd6a00;
     --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%2320232b' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     --diagram-bg: #ffffff;
     --diagram-primary: #f3e8ec;
@@ -242,7 +393,147 @@
     --diagram-line: #66606e;
     --diagram-secondary: #edf0f5;
     --diagram-tertiary: #f5f6f8;
+    --live-card-shadow: 0 6px 20px rgba(var(--neutral-rgb), 0.06), 0 1px 3px rgba(var(--neutral-rgb), 0.05);
+    /* Airy dopamine seed, light values (the dark ones are in :root): white objects and capsules on two soft shadows. */
+    --elev-rest: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06);
+    --elev-float: 0 2px 6px rgba(28, 33, 51, 0.06), 0 18px 44px rgba(28, 33, 51, 0.11);
+    --row-lift-dim: rgba(16, 18, 28, 0.24);
+    --surface-object: #ffffff;
+    --surface-object-opaque: var(--surface-object);
+    --surface-capsule: #ffffff;
+    --surface-capsule-hover: #f5f6f8;
+    --chip-float: var(--surface-capsule);
+    --chip-float-hover: var(--surface-capsule-hover);
+    --surface-float: #ffffff;
+    --surface-tray: rgba(var(--neutral-rgb), 0.03);
+    --surface-side: #fafbfc;
+    --glass: none;
+    --voice-owner: #e9eef9;
+    --voice-ouroboros: #fdf2f4;
+    --voice-ouroboros-card: #fff8f9;
+    /* The note between works: the work card's rose as a value under the note's own name (the card's token stays the
+       card's), hovering to the voice; on white a card behind lies in the front card's shadow, a deeper step of the
+       accent ladder, not a paler one. */
+    --voice-ouroboros-note: #fff8f9;
+    --voice-ouroboros-note-hover: var(--voice-ouroboros);
+    --relay-ledge-1: #faebec;  /* the accent at 10 % over white */
+    --relay-ledge-2: #f7e3e5;  /* the accent at 14 % over white */
+    /* The crimson tone is the accent ladder's; its hover stops at 14 % so the ink keeps 4.5:1 on it. */
+    --tone-crimson: var(--accent-10);
+    --tone-crimson-hover: var(--accent-14);
+    /* One step deeper than the accent text, so a tonal capsule keeps 4.5:1 on a voice-tinted backing too. */
+    --tone-crimson-ink: #b52b3b;
+    /* One pale crimson for both strengths: on white a tint is already quiet. */
+    --tone-crimson-soft: var(--tone-crimson);
+    --tone-crimson-soft-ink: var(--tone-crimson-ink);
+    --tone-crimson-word: var(--tone-crimson-ink);
+    --place-mark: var(--accent);
+    --tone-green: rgba(34, 197, 94, 0.14);
+    --tone-green-hover: rgba(34, 197, 94, 0.22);
+    --tone-red: rgba(239, 68, 68, 0.10);
+    --tone-red-hover: rgba(239, 68, 68, 0.16);
+    --tone-amber: rgba(245, 158, 11, 0.18);
+    --tone-amber-hover: rgba(245, 158, 11, 0.26);
+    --tone-quiet-hover: rgba(28, 33, 51, 0.06);
+    --press: brightness(0.95);
+    --press-solid: var(--press);
+    /* The light theme's own values of tokens the dark seed in :root sets differently (hues, status triples, the
+       System voice, the owner's quote tint, the Project's tints). */
+    --user-bubble-from: rgba(80, 120, 190, 0.14);
+    --user-bubble-to: rgba(55, 85, 155, 0.12);
+    --system-bubble-bg: rgba(245, 158, 11, 0.12);
+    --accent: #c93545;
+    --focus-accent-ring: var(--accent-10);
+    --amber: #f59e0b;
+    --green: #22c55e;
+    --amber-dim: rgba(245, 158, 11, 0.15);
+    --status-warn-bg: var(--amber-dim);
+    --status-warn-border: rgba(245, 158, 11, 0.30);
+    --red-dim: rgba(239, 68, 68, 0.15);
+    --status-error-bg: var(--red-dim);
+    --status-error-border: rgba(239, 68, 68, 0.30);
+    --green-dim: rgba(34, 197, 94, 0.15);
+    --status-ok-bg: var(--green-dim);
+    --status-ok-border: rgba(34, 197, 94, 0.28);
+    --status-warn-word: initial;
+    --status-error-word: initial;
+    --project-08: rgba(232, 121, 249, 0.08);
+    --project-12: rgba(232, 121, 249, 0.12);
+    --project-18: rgba(232, 121, 249, 0.18);
+    /* The answer roles and Panic's word on white: the ok pair flat for the chosen answer (only its accessible name says
+       `Your choice`), meta words and the ok dot for `You answered`, the faded held controls and pending message. */
+    --panic-ink: var(--status-error-fg);
+    --tone-chosen-answer: var(--tone-green);
+    --tone-chosen-answer-ink: var(--status-ok-fg);
+    --tone-chosen-answer-detail: var(--text-meta);
+    --tone-chosen-answer-shadow: none;
+    --chosen-answer-cue-display: none;
+    --tone-recommended: var(--status-ok-fg);
+    --tone-recorded-answer: var(--text-meta);
+    --tone-recorded-mark: var(--green);
+    --quiz-held-opacity: .75;
+    --message-pending-opacity: .78;
 }
+
+/* The dark voices' materials (DESIGN principle 2 and the seed table). Inside the Ouroboros voice (its answers and its
+   work cards, finished ones too) trays and capsules are opaque lighter steps of that voice under opaque readable ink,
+   and the tones and status bodies take those steps, so a word keeps its contrast at rest, hover and press. A custom
+   property resolves where it is declared, so the aliases :root computed (the legacy muted ink, the card bodies, the
+   crimson word, the failure word) are restated here. Inside the owner's voice its links, focus and quiet words take
+   the owner's readable blue. A light document keeps every inherited value. */
+:root:not([data-theme="light"]) :is(.chat-bubble.assistant, .chat-live-card) {
+    --text-primary: #fcf9f9;
+    --assistant-text: var(--text-primary);
+    --text-secondary: #ebd9da;
+    --text-meta: #f2e4e5;
+    --text-disabled: #e1cbcc;
+    --text-muted: var(--text-disabled);
+    --surface-capsule: #8f263a;
+    --surface-capsule-hover: #9e3044;
+    --surface-tray: #832336;
+    --surface-card: var(--surface-tray);
+    --surface-card-soft: var(--surface-tray);
+    --surface-control: var(--surface-tray);
+    --ui-card-bg: var(--surface-card);
+    --ui-card-bg-soft: var(--surface-card-soft);
+    --status-neutral-bg: var(--surface-capsule);
+    --status-neutral-fg: var(--text-secondary);
+    --tone-quiet-hover: var(--surface-capsule);
+    --tone-green: var(--surface-capsule);
+    --tone-green-hover: var(--surface-capsule-hover);
+    --tone-red: var(--surface-capsule);
+    --tone-red-hover: var(--surface-capsule-hover);
+    --tone-amber: var(--surface-capsule);
+    --tone-amber-hover: var(--surface-capsule-hover);
+    --status-ok-bg: var(--surface-capsule);
+    --status-warn-bg: var(--surface-capsule);
+    --status-error-bg: var(--surface-capsule);
+    --status-live-fg: #ffb3b7;
+    --status-live-bg: var(--surface-capsule);
+    --accent-light: #ffc2c6;
+    --accent-08: var(--surface-capsule);
+    --accent-10: var(--surface-capsule);
+    --accent-18: var(--surface-capsule-hover);
+    --tone-crimson-word: var(--accent-light);
+    --quote-assistant-ink: var(--accent-light);
+    --focus-accent-border: var(--accent-light);
+    --status-error-fg: var(--accent-light);
+    --status-error-word: var(--status-error-fg);
+    --project: #f6c4fc;
+    --project-08: var(--surface-capsule);
+    --project-12: var(--surface-capsule-hover);
+    --project-18: var(--surface-capsule-hover);
+    --status-info-fg: #b6d4ff;
+}
+:root:not([data-theme="light"]) .chat-bubble.user {
+    --accent-light: var(--user-sender);
+    --tone-crimson-word: var(--accent-light);
+    --focus-accent-border: var(--accent-light);
+    --text-disabled: var(--user-sender);
+    --text-muted: var(--text-disabled);
+}
+/* Code stays on the room's neutral material inside either voice. */
+.md-code-block { --tone-quiet-hover: var(--bg-hover); }
 
 .ouro-ui { font-family: var(--font-sans); color-scheme: var(--native-color-scheme); }
 .muted { color: var(--text-meta); }
@@ -322,7 +613,7 @@
 
 .btn:disabled {
     cursor: not-allowed;
-    opacity: 0.55;
+    opacity: var(--control-disabled-opacity);
     transform: none;
     box-shadow: none;
 }
@@ -381,7 +672,7 @@
 
 
 .ui-chip,
-:where(.status-badge, .skills-status-chip, .mcp-server-status, .evo-runtime-pill, .evo-runtime-chip) {
+:where(.status-badge, .mcp-server-status) {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -396,7 +687,7 @@
 }
 
 .ui-status,
-:where(.settings-inline-status, .marketplace-status, .wizard-runtime-status) {
+:where(.settings-inline-status, .wizard-runtime-status) {
     color: var(--text-secondary);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
@@ -411,8 +702,8 @@
        and make the loudest thing on the panel the one that says "connected".
      - `.ui-chip[data-tone]` — a status CHIP: the full triple, because the chip
        itself is the status and has nothing else to carry it.
-   Tone is a STATE and must outrank the `.muted` utility: `#mp-status` carries
-   both classes, so a :where()-wrapped tone (specificity 0) would lose to it. */
+   Tone is a STATE and must outrank the `.muted` utility: a status that carries
+   both classes would lose to it under a :where()-wrapped tone (specificity 0). */
 .ui-chip[data-tone="ok"] {
     color: var(--status-ok-fg);
     background: var(--status-ok-bg);
@@ -438,40 +729,45 @@
 
 .ui-status[data-tone="ok"],
 .settings-inline-status[data-tone="ok"],
-.settings-test-result[data-tone="ok"],
-.marketplace-status[data-tone="ok"] { color: var(--status-ok-fg); }
+.settings-test-result[data-tone="ok"] { color: var(--status-ok-fg); }
 .ui-status[data-tone="warn"],
 .settings-inline-status[data-tone="warn"],
-.settings-test-result[data-tone="warn"],
-.marketplace-status[data-tone="warn"] { color: var(--status-warn-fg); }
+.settings-test-result[data-tone="warn"] { color: var(--status-warn-fg); }
 .ui-status[data-tone="danger"],
 .ui-status[data-tone="error"],
 .settings-inline-status[data-tone="danger"],
 .settings-inline-status[data-tone="error"],
 .settings-test-result[data-tone="danger"],
-.settings-test-result[data-tone="error"],
-.marketplace-status[data-tone="danger"] { color: var(--status-error-fg); }
+.settings-test-result[data-tone="error"] { color: var(--status-error-fg); }
 /* `muted` is a tone the code emits but no rule named. */
 .ui-status[data-tone="neutral"],
 .ui-status[data-tone="muted"],
 .settings-inline-status[data-tone="neutral"],
-.settings-inline-status[data-tone="muted"],
-.marketplace-status[data-tone="muted"] { color: var(--status-neutral-fg); }
+.settings-inline-status[data-tone="muted"] { color: var(--status-neutral-fg); }
 
-/* Status sentences share one dot anatomy in every consumer. */
+/* A status sentence's own dot, one anatomy in every consumer (docs/DESIGN.md "Status marks"). CSS draws it, not
+   status_mark.js, because ui.css and ui_primitives.js reach skill authors on their own; it takes the marks' fact
+   size and the saturated hues (ok green, warn amber, error red, any other tone the neutral meta ink) while the
+   sentence keeps its word tone. */
 .ui-status[data-tone]:not(:empty)::before,
-.settings-inline-status[data-tone]:not(:empty)::before {
+.settings-inline-status[data-tone]:not(:empty)::before,
+.wizard-runtime-status[data-tone]:not(:empty)::before {
     content: "";
     display: inline-block;
     flex: 0 0 auto;
-    width: 6px;
-    height: 6px;
+    width: var(--mark-fact);
+    height: var(--mark-fact);
     margin-right: 7px;
     border-radius: 999px;
-    background: currentColor;
+    background: var(--text-meta);
     vertical-align: middle;
     position: relative;
     top: -1px;
+}
+:is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="ok"]:not(:empty)::before { background: var(--green); }
+:is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before { background: var(--amber); }
+:is(.ui-status, .settings-inline-status, .wizard-runtime-status):is([data-tone="danger"], [data-tone="error"]):not(:empty)::before {
+    background: var(--red);
 }
 
 
@@ -543,7 +839,9 @@ textarea.ui-control { resize: vertical; }
     .btn:hover, .btn:active { transform: none; }
 }
 
-/* Measured popup placement is shared; menu/listbox interaction stays separate. */
+/* Measured popup placement and its floating material are shared; menu/listbox interaction stays separate. The paint
+   belongs to the popup itself, so a menu, a dialog and a listbox are one backed sheet on
+   the float shadow: a role below chooses layout, never paint. */
 .ui-popup {
     position: fixed;
     margin: 0;
@@ -556,7 +854,14 @@ textarea.ui-control { resize: vertical; }
     max-height: var(--ui-popup-max-height);
     overflow-y: auto;
     overscroll-behavior: contain;
-    z-index: 1200;
+    z-index: var(--z-popover);
+    border: 1px solid transparent;
+    border-radius: var(--radius-object);
+    background: var(--popup-float);
+    color: var(--text-primary);
+    box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
 }
 .ui-model-chooser { display: block; min-width: 0; }
 .ui-model-chooser > .ui-control { width: 100%; }
@@ -564,11 +869,6 @@ textarea.ui-control { resize: vertical; }
     width: var(--ui-popup-anchor-width);
     margin: 0;
     padding: var(--space-1);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
-    background: var(--ui-modal-bg);
-    color: var(--text-primary);
-    box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
     list-style: none;
 }
 .ui-model-option, .ui-model-empty {
@@ -583,18 +883,13 @@ textarea.ui-control { resize: vertical; }
 .ui-model-option[aria-selected="true"] { color: var(--accent-light); background: var(--accent-12); }
 .ui-model-empty { color: var(--text-meta); }
 
-/* One menu surface; callers retain only domain meaning such as danger. */
+/* One menu layout on that sheet; callers retain only domain meaning such as danger. */
 .ui-popup[role="menu"] {
     display: flex;
     flex-direction: column;
     width: max-content;
     min-width: min(160px, var(--ui-popup-max-width));
     padding: var(--space-1);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
-    background: var(--ui-modal-bg);
-    color: var(--text-primary);
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
 }
 .ui-popup [role^="menuitem"] {
     flex: 0 0 auto;
@@ -618,7 +913,7 @@ textarea.ui-control { resize: vertical; }
 .ui-popup [role^="menuitem"][aria-disabled="true"] { color: var(--text-disabled); background: transparent; cursor: default; }
 .ui-popup [role^="menuitem"]:is(.danger, .files-context-item-danger) { color: var(--status-error-fg); }
 
-.ui-control[aria-invalid="true"] { border-color: var(--status-error-border); }
+.ui-control[aria-invalid="true"] { border-color: var(--status-error-word, var(--status-error-border)); }
 .ui-field-help[data-tone="error"] { color: var(--status-error-fg); }
 
 .ui-control-code {
@@ -628,20 +923,97 @@ textarea.ui-control { resize: vertical; }
 }
 
 .ui-popup[hidden], dialog.ui-popup:not([open]) { display: none; }
+/* A popup grows a little from where it was opened as it fades in (--ui-popup-origin, ui_interactions.js measures it),
+   and its picture leaves the same way when it closes. Reduced motion: at once. */
+.ui-popup:not([hidden]) {
+    transform-origin: var(--ui-popup-origin, 50% 0);
+    animation: ui-popup-in var(--motion-fade) var(--ease-sheet);
+}
+@keyframes ui-popup-in { from { opacity: 0; transform: scale(0.96); } }
+@media (prefers-reduced-motion: reduce) {
+    .ui-popup:not([hidden]) { animation: none; }
+}
+
+/* ---- The one hint (DESIGN "Hints", ui_hint.js) ---------------------------------------------------------------------
+   What a control says about itself, on the popups' floating material: it stands above its control and over the page,
+   out of the flow, so showing it, changing its words or hiding it moves nothing. A line of meaning in the meta ink (the
+   value's word primary), a rule line in the secondary ink, and at most one action in the accent ink. */
+.ui-hint {
+    position: absolute;
+    z-index: 1;
+    bottom: calc(100% + var(--space-2));
+    inset-inline-start: var(--ui-hint-shift, 0px);
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(28rem, calc(100vw - 4 * var(--space-2)));
+    max-width: min(28rem, 100cqi);
+    max-height: var(--ui-hint-room, none);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-lg);
+    background: var(--popup-float);
+    box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
+    color: var(--text-meta);
+    font-family: var(--font-sans);
+    font-size: var(--type-meta);
+    font-weight: 500;
+    line-height: var(--line-meta);
+    letter-spacing: 0;
+    text-align: start;
+    white-space: normal;
+}
+.ui-hint[hidden], .ui-hint [hidden] { display: none; }
+.ui-hint[data-side="below"] { bottom: auto; top: calc(100% + var(--space-2)); }
+.ui-hint[data-cramped="true"] { overflow-y: auto; overscroll-behavior: contain; }
+.ui-hint-line, .ui-hint-rule { margin: 0; }
+.ui-hint-word { margin-inline-end: var(--space-2); color: var(--text-primary); font-weight: 600; }
+.ui-hint-rule { margin-top: 2px; color: var(--text-secondary); }
+.ui-hint-action {
+    display: block;
+    margin-top: var(--space-1);
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-light);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+.ui-hint-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+.ui-hint:not([hidden]) { animation: ui-hint-in var(--motion-fade) var(--ease-sheet); }
+@keyframes ui-hint-in { from { opacity: 0; transform: translateY(3px); } }
+@media (prefers-reduced-motion: reduce) {
+    .ui-hint:not([hidden]) { animation: none; }
+}
 
 /* ---- Floating chrome ----------------------------------------------------------------------------------------------
    Controls that float over scrolling content (Main's header group) share one box: height, baseline and the pill
    corner; words, width, weight and tone stay the control's own (DESIGN §5). The group is invisible at rest and its
-   padding is cancelled by an equal negative margin, so grouping moves no control; what it discloses hangs from it
-   absolutely, so opening moves no target either. An attached sheet continues the group's edges and the group becomes
-   its lid. Readability belongs to the floating surface's own layer (Main: `.chat-page-header::before`, page ink under
-   everything readable, fading only below it); state tints are laid on that layer, never instead of it. */
+   padding is cancelled by an equal negative margin, so grouping moves no control. A room's separate capsules keep
+   their own reading backing, and what a bar discloses hangs under its capsules as one work list (room_work.css),
+   never as a box glued to one control or one group. */
 @media (pointer: coarse) {
-    /* A coarse pointer (a phone) raises the whole family together to the shared touch minimum. */
-    :root { --chrome-control-h: var(--touch-target-min); }
+    /* A coarse pointer (a phone) raises the shared touch minimum to a finger's 44px, and the whole family with it. */
+    :root { --touch-target-min: 44px; --chrome-control-h: var(--touch-target-min); }
 }
+/* ---- Touch hit extension ----------------------------------------------------------------------------------------
+   A small control keeps its look and, under a finger, gains an invisible hit area centred on it and at least the
+   touch minimum each way: the pseudo-element reaches out only on the sides that fall short (a 32px-tall capsule
+   gains 6px above and below, nothing sideways). Composition keeps at least that overshoot between neighbouring
+   controls, so hit areas never overlap (the composer rows part by --space-2). The one recipe, inset by the one
+   --ui-hit-inset; controls add the class, and style.css gives a page's links the same extension. */
+.ui-hit-area { position: relative; }
+@media (pointer: coarse) {
+    .ui-hit-area::after {
+        content: "";
+        position: absolute;
+        inset: var(--ui-hit-inset);
+    }
+}
+
 .ui-chrome-group {
-    --chrome-edge: rgba(var(--neutral-rgb), 0.16);
     position: relative;
     box-sizing: border-box;
     display: flex;
@@ -665,23 +1037,117 @@ textarea.ui-control { resize: vertical; }
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
 }
-/* Open: the group squares its foot and backs its controls; the sheet takes its sides and the rest of the edge. */
-.ui-chrome-group[data-disclosure="open"] {
-    background: var(--bg-primary);
-    border-color: var(--chrome-edge);
-    border-bottom-color: transparent;
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+
+/* ---- One control, three tones (DESIGN.md design bible) ---------------------------------------------------------
+   Everything pressable with a body is a capsule standing on the rest shadow, in every state and either theme:
+   neutral (the capsule surface), tonal (its hue's fill and that fill's ink: the crimson for the primary action, the
+   chosen tab or place and a count, the soft crimson for a chosen option or card, green for save, red for danger, amber
+   for the owner's turn). A quiet control (ghost, link, filter) has no body and no shadow. A state changes colour,
+   never height: hover deepens the fill a step, a press deepens it again
+   (--press), a chosen one takes its tone; what cannot be pressed now loses its shadow. `.ui-chrome-control` stays
+   geometry only (a floating control's own tone is its page's): page styles map their controls onto these tones and
+   add no fourth recipe and no outline. These recipes are the product documents' own (their root is `.ouro-ui`);
+   `:where` keeps the specificity, and an author frame that sets `data-theme` keeps the overridable base recipe. */
+:root[data-theme]:where(.ouro-ui) .btn { border-color: transparent; border-radius: var(--pill-radius); font-weight: 600; transition: var(--motion-tone); }
+:root[data-theme]:where(.ouro-ui) :is(.btn-default, .btn-secondary) {
+    border-color: transparent; background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest);
 }
-.ui-chrome-sheet {
-    position: absolute;
-    z-index: 40;
-    top: 100%;
-    left: -1px;
-    right: -1px;
-    box-sizing: border-box;
-    background: var(--bg-primary);
-    border: 1px solid var(--chrome-edge);
-    border-top: 0;
-    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-    box-shadow: var(--chrome-sheet-shadow);
+:root[data-theme]:where(.ouro-ui) :is(.btn-default, .btn-secondary):not(:disabled):hover { border-color: transparent; background: var(--surface-capsule-hover); }
+:root[data-theme]:where(.ouro-ui) .btn-ghost { border-color: transparent; background: transparent; box-shadow: none; }
+:root[data-theme]:where(.ouro-ui) .btn-ghost:not(:disabled):hover { background: var(--tone-quiet-hover); }
+:root[data-theme]:where(.ouro-ui) .btn-primary { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); }
+:root[data-theme]:where(.ouro-ui) .btn-primary:not(:disabled):hover { background: var(--tone-crimson-hover); }
+:root[data-theme]:where(.ouro-ui) .btn-save { background: var(--tone-green); color: var(--status-ok-fg); box-shadow: var(--elev-rest); }
+:root[data-theme]:where(.ouro-ui) .btn-save:not(:disabled):hover { background: var(--tone-green-hover); }
+:root[data-theme]:where(.ouro-ui) .btn-danger { border-color: transparent; background: var(--tone-red); color: var(--status-error-fg); box-shadow: var(--elev-rest); }
+:root[data-theme]:where(.ouro-ui) .btn-danger:not(:disabled):hover { border-color: transparent; background: var(--tone-red-hover); }
+:root[data-theme]:where(.ouro-ui) .btn:hover { transform: none; }
+:root[data-theme]:where(.ouro-ui) :is(.btn, .theme-choice):not(:disabled):active { transform: none; filter: var(--press); }
+:root[data-theme]:where(.ouro-ui) .btn-primary { --press: var(--press-solid); }
+:root[data-theme]:where(.ouro-ui) .btn-ghost:not(:disabled):active { box-shadow: none; }
+/* A capsule over content uses the same geometry, focus and disabled state, on glass. */
+:root[data-theme]:where(.ouro-ui) .btn-float {
+    background: var(--surface-float); color: var(--text-primary); box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
+}
+@media (hover: hover) {
+    :root[data-theme]:where(.ouro-ui) .btn-float:not(:disabled):hover { filter: var(--press); }
+}
+:root[data-theme]:where(.ouro-ui) .btn-float:not(:disabled):active { filter: var(--press) var(--press); }
+:root[data-theme]:where(.ouro-ui) .btn:disabled { box-shadow: none; }
+/* The Appearance choice is one control in both documents (the SPA and the served setup page load only this sheet
+   in common): neutral capsules, the chosen one in the soft crimson, all standing. */
+:root[data-theme]:where(.ouro-ui) .theme-choice {
+    border-color: transparent; border-radius: var(--pill-radius); background: var(--surface-capsule); box-shadow: var(--elev-rest);
+    transition: var(--motion-tone);
+}
+:root[data-theme]:where(.ouro-ui) .theme-choice:hover { border-color: transparent; background: var(--surface-capsule-hover); }
+:root[data-theme]:where(.ouro-ui) .theme-choice[aria-checked="true"] { border-color: transparent; background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+:root[data-theme]:where(.ouro-ui) :is(.ui-chip, .status-badge) { border-color: transparent; }
+
+/* ---- Status marks (docs/DESIGN.md "Status marks") --------------------------------------------------------------
+   One small family for every surface, created and painted by web/modules/status_mark.js and drawn only here. The
+   shape says what the work does (three moving dots, the same dots still, the pause's two bars, a faint ring, one dot);
+   the hue says whether there is something for the owner. Dots are 4px, a single fact 7px; no halos, shadows or glyphs.
+   Only the moving dots animate. The ink hue is the surface's own ink (a chosen row's selection colour included);
+   --mark-ink is the hook a surface sets to give its marks another ink, and --mark-ok the one for its ok dot (a settled
+   question's recorded answer, style.css "Quiz card"). */
+:root {
+    --mark-dot: 4px;
+    --mark-gap: 3px;
+    --mark-fact: 7px;
+    --mark-wave: status-mark-bounce;  /* a sheet that hides marks rests their wave with none */
+    --mark-ink: currentColor;
+    --mark-unread: var(--accent-light);
+    --mark-owner: var(--amber);
+    --mark-ok: var(--green);
+}
+:root[data-theme="light"] { --mark-unread: var(--accent); }
+.status-mark {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    gap: var(--mark-gap);
+    min-height: var(--mark-fact);
+    color: var(--mark-ink);
+    line-height: 0;
+    pointer-events: none;
+}
+.status-mark[hidden] { display: none; }
+.status-mark > i {
+    display: block;
+    flex: none;
+    width: var(--mark-dot);
+    height: var(--mark-dot);
+    border-radius: 50%;
+    background: currentColor;
+}
+/* The moving dots type: a wave 150 ms apart that lifts each dot 4px and a little larger (owner 20.10 2A). A sheet
+   that hides marks rests their wave with `--mark-wave: none` (the closed phone drawer), never by painting them. */
+.status-mark[data-shape="moving"] > i { animation: var(--mark-wave) 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+.status-mark[data-shape="moving"] > i:nth-child(2) { animation-delay: 0.15s; }
+.status-mark[data-shape="moving"] > i:nth-child(3) { animation-delay: 0.3s; }
+.status-mark[data-shape="still"] { opacity: 0.4; }
+.status-mark[data-shape="still"][data-hue="unread"] { opacity: 0.6; }
+.status-mark[data-shape="pause"] { opacity: 0.7; }
+.status-mark[data-shape="pause"][data-hue="unread"] { opacity: 1; }
+.status-mark[data-shape="ring"] { opacity: 0.55; }
+.status-mark[data-shape="ring"][data-hue="unread"] { opacity: 0.6; }
+.status-mark[data-shape="pause"] > i { width: 2px; height: 8px; border-radius: 1px; }
+.status-mark:is([data-shape="pause"], [data-shape="ring"], [data-shape="dot"]) > i:nth-child(3),
+.status-mark:is([data-shape="ring"], [data-shape="dot"]) > i:nth-child(2) { display: none; }
+.status-mark:is([data-shape="ring"], [data-shape="dot"]) > i { width: var(--mark-fact); height: var(--mark-fact); }
+.status-mark[data-shape="ring"] > i { box-sizing: border-box; background: transparent; border: 1px solid currentColor; }
+.status-mark[data-hue="unread"] { color: var(--mark-unread); }
+.status-mark[data-hue="owner"] { color: var(--mark-owner); }
+.status-mark[data-hue="ok"] { color: var(--mark-ok); }
+.status-mark[data-hue="failed"] { color: var(--red); }
+.status-mark[data-hue="neutral"] { color: var(--text-meta); }
+@keyframes status-mark-bounce {
+    0%, 52%, 100% { transform: translateY(0) scale(1); opacity: 0.55; }
+    26% { transform: translateY(-4px) scale(1.18); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .status-mark[data-shape="moving"] > i { animation: none; }
 }

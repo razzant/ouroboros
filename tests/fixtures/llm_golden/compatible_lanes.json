@@ -41,6 +41,7 @@
               }
             ],
             "max_tokens": 1024,
+            "prompt_cache_key": "ouroboros-f4478f5bc311f13b19a95414d4c87888",
             "reasoning_effort": "medium",
             "extra_body": {
               "cache": {
@@ -48,15 +49,15 @@
               }
             }
           },
-          "value_sha256": "491c5d7a1ff5a61a397fecdf4f531ed846e6e6ebc219b72ad13fcc7bbaba7fb9"
+          "value_sha256": "a58d5ffcdf43938c1a53481da73a260b8980f841eb62db3e352d6f3e0c2359a9"
         },
         "sends": [],
         "unused_script_steps": 0
       }
     },
     {
-      "id": "compatible.payload.no_prompt_cache_key",
-      "route": "only the direct OpenAI route gets prompt_cache_key",
+      "id": "compatible.payload.cache_hints",
+      "route": "openai-compatible keeps block markers and gets the governance prompt_cache_key",
       "spec": {
         "env": {
           "OPENAI_COMPATIBLE_API_KEY": "compatible-fixture-key",
@@ -97,7 +98,10 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "stable policy prefix"
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
                   }
                 ]
               },
@@ -107,9 +111,10 @@
               }
             ],
             "max_tokens": 1024,
+            "prompt_cache_key": "ouroboros-f4478f5bc311f13b19a95414d4c87888",
             "reasoning_effort": "medium"
           },
-          "value_sha256": "876f2ff1fecb13c50fcd09d52258798decddb32dfe0fc0e6b31f66184da91e60"
+          "value_sha256": "54f87037b626a85e3719b8bb850b9ef2607bbd84f84d2b0e8075906b112188ea"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -203,7 +208,7 @@
               "reason_code": "requested_wire_form",
               "source_profile_fingerprint": "a0ab391ed3f0c3385b29ad33ec5728f09076fe273105479b63f8fc1752afb38e",
               "accepted_profile_fingerprint": "a0ab391ed3f0c3385b29ad33ec5728f09076fe273105479b63f8fc1752afb38e",
-              "candidate_sha256": "80a7b76daae46aa773c7d5a2e636bda671bc3b5cf9d0b415d80e4aca04544a5e",
+              "candidate_sha256": "08437b193a466a863c4ec0fcc1955c755d5bcfe337248fbe2247638790db0e37",
               "ladder_ordinal": 1,
               "applied_actions": [],
               "task_local": false,
@@ -235,9 +240,10 @@
                 }
               ],
               "model": "glm-5",
+              "prompt_cache_key": "ouroboros-f4478f5bc311f13b19a95414d4c87888",
               "reasoning_effort": "medium"
             },
-            "payload_sha256": "80a7b76daae46aa773c7d5a2e636bda671bc3b5cf9d0b415d80e4aca04544a5e"
+            "payload_sha256": "08437b193a466a863c4ec0fcc1955c755d5bcfe337248fbe2247638790db0e37"
           }
         ],
         "pricing_calls": [
@@ -260,8 +266,8 @@
             "source": "llm.chat",
             "model": "openai-compatible/glm-5",
             "provider": "openai-compatible",
-            "candidate_raw_sha256": "80a7b76daae46aa773c7d5a2e636bda671bc3b5cf9d0b415d80e4aca04544a5e",
-            "candidate_raw_size_bytes": 162,
+            "candidate_raw_sha256": "08437b193a466a863c4ec0fcc1955c755d5bcfe337248fbe2247638790db0e37",
+            "candidate_raw_size_bytes": 226,
             "candidate_measurement_kind": "canonical_json_v1",
             "state": "settled",
             "transitions": 3,

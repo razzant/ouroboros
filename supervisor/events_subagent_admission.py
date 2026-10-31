@@ -279,8 +279,10 @@ def _compose_subagent_text(
             # schedule time, when the executor is unknown — it states WHERE
             # changes land, never that the child executes them natively itself
             # (the dispatch-time executor note owns execution framing).
-            "All changes land inside the write root only. Do NOT commit, run review / "
-            "runtime / skills lifecycle, enable tools, or write identity or scratchpad. "
+            "All changes land inside the write root only. Do NOT commit, run review gates / "
+            "runtime / skills lifecycle, grant yourself tools, or write identity or scratchpad. "
+            "You may optionally ask independent reviewers about work in your write root with "
+            "review_change; it never approves, commits or integrates that work. "
             + _CHILD_MEMORY_SENTENCE + " Your "
             "Git changes are recorded as a workspace.patch; ordinary-folder outputs use their "
             "registered file artifacts. Isolated self_worktree changes are applied; shared "
@@ -490,9 +492,9 @@ def _resolve_subagent_constraint(
             )
     if surface == "genesis":
         try:
-            from ouroboros import subagent_worktrees
+            from ouroboros import genesis_project
 
-            handle = subagent_worktrees.provision_genesis_project(
+            handle = genesis_project.provision_genesis_project(
                 repo_dir=ctx.REPO_DIR,
                 task_id=tid,
                 parent_task_id=parent_task_id,
@@ -509,7 +511,7 @@ def _resolve_subagent_constraint(
             except Exception:
                 stray = []
             if stray:
-                subagent_worktrees.remove_genesis_project(handle.path)
+                genesis_project.remove_genesis_project(handle.path, task_id=str(tid))
                 return readonly, workspace_root, workspace_mode, (
                     f"Subagent rejected: freshly provisioned genesis root is not empty "
                     f"({len(stray)} stray entries) — possible provisioning collision."

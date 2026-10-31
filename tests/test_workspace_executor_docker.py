@@ -145,6 +145,7 @@ def test_docker_executor_run_script_uses_backend_script_path(tmp_path, monkeypat
 
 
 def test_docker_executor_accepts_backend_absolute_write_targets_and_outputs(tmp_path, monkeypatch):
+    import json
     import ouroboros.safety as safety_mod
     import ouroboros.tools.shell as shell_mod
 
@@ -158,13 +159,21 @@ def test_docker_executor_accepts_backend_absolute_write_targets_and_outputs(tmp_
     data.mkdir()
     captured: dict[str, object] = {}
 
-    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None):
+    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, executor=None):
+        assert executor.container_name == "pinned-container-id"
         captured["cmd"] = list(cmd)
         captured["env_overlay"] = env_overlay
         (workspace / "backend-output.txt").write_text("ok\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="wrote\n", stderr="", backend_trace={"executor_id": "pb-container"}, args=list(cmd))
 
     monkeypatch.setattr(shell_mod, "executor_execute", fake_execute)
+    def probe(argv):
+        if argv[0] == "inspect":
+            return json.dumps({"id": "pinned-container-id", "running": True, "network": "none",
+                               "mounts": [{"Type": "bind", "Source": str(workspace), "Destination": "/workspace"}]})
+        assert argv[:2] == ["exec", "pinned-container-id"]
+        return "/workspace/backend-output.txt\0"
+    monkeypatch.setattr("ouroboros.workspace_executor_paths._docker_output_probe", probe)
     ctx = ToolContext(
         repo_dir=system_repo,
         drive_root=data,

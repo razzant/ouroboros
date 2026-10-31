@@ -44,7 +44,8 @@ def test_owner_can_enable_max_without_main_route_capability_ack(tmp_path, monkey
     response = TestClient(app).post("/api/owner/context-mode", json={"mode": "max"})
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"ok": True, "context_mode": "max"}
+    assert response.json()["ok"] is True and response.json()["context_mode"] == "max"
+    assert response.json()["project_id"] == "" and response.json()["cognition"]["context_mode"] == "max"
     stored = json.loads(settings_path.read_text(encoding="utf-8"))
     assert stored["OUROBOROS_CONTEXT_MODE"] == "max"
     assert stored["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] == "false"
@@ -52,8 +53,8 @@ def test_owner_can_enable_max_without_main_route_capability_ack(tmp_path, monkey
     assert os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] == "false"
 
 
-def test_bare_env_low_cannot_author_owner_low_while_busy(tmp_path, monkeypatch):
-    """Sizing-only env Low must not bypass the owner-intent idle guard."""
+def test_owner_can_author_low_during_work_despite_bare_env_low(tmp_path, monkeypatch):
+    """The owner writes the next actor's choice; active actors keep their snapshots."""
     from ouroboros import config as cfg
     from ouroboros.gateway import settings as gateway_settings
 
@@ -77,9 +78,9 @@ def test_bare_env_low_cannot_author_owner_low_while_busy(tmp_path, monkeypatch):
     app.state.drive_root = tmp_path
     response = TestClient(app).post("/api/owner/context-mode", json={"mode": "low"})
 
-    assert response.status_code == 409, response.text
-    assert not settings_path.exists()
-    assert cfg.get_owner_context_mode() == "max"
+    assert response.status_code == 200, response.text
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_CONTEXT_MODE"] == "low"
+    assert cfg.get_owner_context_mode() == "low"
 
 
 def test_main_route_resolution_remains_available_to_dispatch_fit():

@@ -207,6 +207,7 @@ class _ReconcileMixin:
         deliverable accounting from a completed sparse frame that must become
         an explicit infra row.
         """
+        from ouroboros.install_identity import acting_as
         from ouroboros.store import StoreError
         from ouroboros.task_store import read_document
 
@@ -214,7 +215,8 @@ class _ReconcileMixin:
         if root is None:
             return None
         try:
-            value = read_document(root, gateway_task_id)
+            with acting_as(root):  # the isolate is its own install; this harness launched it
+                value = read_document(root, gateway_task_id)
         except StoreError:
             return None
         if not isinstance(value, Mapping):

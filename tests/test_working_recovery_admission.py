@@ -168,10 +168,11 @@ def test_scope_less_recovered_work_stamps_before_handoff_and_cannot_stamp_twice(
 
 
 @pytest.mark.parametrize("scope", ["project", "main"])
-def test_real_new_id_idle_retry_preserves_its_attempt_and_reaches_assignment(
+def test_a_stored_new_id_timeout_retry_keeps_its_attempt_and_reaches_assignment(
     host, tmp_path, monkeypatch, scope,  # noqa: F811
 ):
-    from supervisor import task_reaper
+    """A pre-upgrade new-ID successor (no producer mints one now) restored with its saved work."""
+    from tests._silence_reaper_support import historical_successor
 
     original = _running(host, tmp_path, monkeypatch, scope)
     original["_attempt"] = 3
@@ -179,9 +180,7 @@ def test_real_new_id_idle_retry_preserves_its_attempt_and_reaches_assignment(
     _, limit = _loop_ctx(host.root, "held", attempt=3)
     wc.save_round(limit, "post_batch")
     workers.RUNNING.clear()
-    answer = task_reaper._enqueue_retry(queue, original, task_id="held", retry_task_id="held-retry",
-                                       attempt=3, terminal_reason="idle_timeout", recon_fields={})
-    assert answer[0] is True and answer[1] == 4, answer
+    historical_successor(original, 3, "held-retry")
     [retry] = host.pending
     assert retry["id"] == "held-retry" and retry["_attempt"] == 4
     stored = load_task_result(host.root, "held-retry")
@@ -267,7 +266,7 @@ def _real_loop_resumes(host, monkeypatch, task, round_idx):  # noqa: F811
     monkeypatch.setattr(loop, "_load_working_recovery", lambda *a, **k: pytest.fail("working source read"))
     monkeypatch.setattr(loop, "_dispatch_round_model", lambda call, *a, **k: (
         seen.extend(call.messages) or ({"role": "assistant", "content": "continued", "tool_calls": []}, 0.0)))
-    kwargs = _loop_kwargs(host.root, registry, [])
+    kwargs = _loop_kwargs(host.root, registry, [], llm=SimpleNamespace(default_model=lambda: "m"))  # the pause checkpoint ran on Main
     kwargs["task_id"] = "held"
     result, _usage, _trace = loop.run_llm_loop(**kwargs)
     assert result == "continued"

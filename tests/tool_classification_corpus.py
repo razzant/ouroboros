@@ -119,14 +119,6 @@ def repo_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
 
 
-def _string_constants(tree: ast.AST) -> Iterator[str]:
-    """Every string literal, including the literal parts of f-strings (an
-    ``ast.JoinedStr`` holds its constant runs as ``ast.Constant`` children)."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            yield node.value
-
-
 def _sources(root: pathlib.Path) -> Iterator[tuple[str, ast.AST]]:
     for path in sorted((root / "ouroboros").rglob("*.py")):
         rel = path.relative_to(root).as_posix()
@@ -138,54 +130,27 @@ def _sources(root: pathlib.Path) -> Iterator[tuple[str, ast.AST]]:
             continue
 
 
-def harvested_identifiers(root: pathlib.Path | None = None) -> tuple[str, ...]:
-    """Every ``⚠️ IDENTIFIER`` a producer can emit, harvested from the tree."""
-    found: set[str] = set(_INTERPOLATED_IDENTIFIERS)
-    for _rel, tree in _sources(root or repo_root()):
-        for value in _string_constants(tree):
-            found.update(match.group(1) for match in _MARKER_RE.finditer(value))
-    return tuple(sorted(found))
+class ProducerHarvest(NamedTuple):
+    """Immutable facts from one candidate read; no source buffers or ASTs escape."""
+
+    identifiers: tuple[str, ...]
+    native_codes: tuple[str, ...]
+    native_pairs: tuple[tuple[str, str], ...]
 
 
-def harvested_native_codes(root: pathlib.Path | None = None) -> tuple[str, ...]:
-    """Every ``ToolResult`` code a producer publishes NATIVELY, whether or not its
-    text is a literal.
+def harvest_producers(root: pathlib.Path | None = None) -> ProducerHarvest:
+    """Read the current tree once for all three independent coverage oracles.
 
-    ``harvested_native_pairs`` sees only producers whose first line is statically
-    known, so a producer that assembles its text at runtime — every extension and
-    MCP terminal, the protected-write refusal, the binding-error family — was
-    invisible to the differential: its code could change status without a single
-    corpus case moving. This is the set the coverage assertion closes over.
+    Tests may share this value for a session. There is deliberately no path-keyed
+    cache: a new call, including a golden-generation call, reads the live tree.
     """
-    found: set[str] = set()
-    for _rel, tree in _sources(root or repo_root()):
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-            if name not in _NATIVE_CALLS:
-                continue
-            code = ""
-            for keyword in node.keywords:
-                if keyword.arg == "code" and isinstance(keyword.value, ast.Constant):
-                    code = str(keyword.value.value)
-            for arg in node.args:
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and _CODE_RE.fullmatch(arg.value):
-                    code = code or arg.value
-            if code:
-                found.add(code)
-    return tuple(sorted(found))
-
-
-def harvested_native_pairs(root: pathlib.Path | None = None) -> tuple[tuple[str, str], ...]:
-    """Every ``(code, identifier)`` pair a producer publishes with a statically
-    known text. This is the axis the text corpus cannot see: where a producer's
-    code and its own first line disagree, the cutover changes the answer even
-    though no identifier moved."""
+    identifiers: set[str] = set(_INTERPOLATED_IDENTIFIERS)
+    codes: set[str] = set()
     pairs: set[tuple[str, str]] = set()
     for _rel, tree in _sources(root or repo_root()):
         for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                identifiers.update(match.group(1) for match in _MARKER_RE.finditer(node.value))
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
@@ -210,9 +175,26 @@ def harvested_native_pairs(root: pathlib.Path | None = None) -> tuple[tuple[str,
                         text = literal
                         break
             marker = _MARKER_RE.match(text.strip())
+            if code:
+                codes.add(code)
             if code and marker:
                 pairs.add((code, marker.group(1)))
-    return tuple(sorted(pairs))
+    return ProducerHarvest(tuple(sorted(identifiers)), tuple(sorted(codes)), tuple(sorted(pairs)))
+
+
+def harvested_identifiers(root: pathlib.Path | None = None) -> tuple[str, ...]:
+    """Every ``⚠️ IDENTIFIER`` a producer can emit, harvested from the tree."""
+    return harvest_producers(root).identifiers
+
+
+def harvested_native_codes(root: pathlib.Path | None = None) -> tuple[str, ...]:
+    """Native codes, including producers whose assembled text has no literal marker."""
+    return harvest_producers(root).native_codes
+
+
+def harvested_native_pairs(root: pathlib.Path | None = None) -> tuple[tuple[str, str], ...]:
+    """Native code/identifier pairs; a producer's code and text may disagree."""
+    return harvest_producers(root).native_pairs
 
 
 def _leading_literal(node: ast.AST) -> str:
@@ -307,6 +289,8 @@ _PRODUCER_SHAPES = (
     ("root_required_active_workspace", "write_file", "⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE: absolute path '/w/x.txt' is under the active workspace.", "ROOT_REQUIRED_ACTIVE_WORKSPACE", (("required_root", "active_workspace"),)),
     ("root_required_user_files", "write_file", "⚠️ ROOT_REQUIRED_USER_FILES: an absolute home path is outside root='active_workspace'.", "ROOT_REQUIRED_USER_FILES", ()),
     ("resource_constraint", "read_file", "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks it.", "RESOURCE_CONSTRAINT_BLOCKED", ()),
+    # tools/tool_discovery.py::enable_tools: a load none of which fits the route's schema ceiling.
+    ("tool_schema_limit", "enable_tools", "⚠️ TOOL_SCHEMA_LIMIT: nothing new fits this request.\n⚠️ This route carries at most 128 tool schemas per request, so the next request leaves out: mcp_svc__ping. They stay callable; enable_tools loads them later.", "TOOL_SCHEMA_LIMIT", ()),
     # tools/registry_core.py::ToolRegistry._execute_legacy_text (owner Batch4): the
     # owner paused the tree before this call's launch handoff; nothing ran.
     ("owner_pause_not_started", "knowledge_read", "⚠️ OWNER_PAUSE_NOT_STARTED: NOT STARTED — the owner paused this task tree before this operation was launched. Nothing ran; it may be issued again after Resume. (owner_pause)", "OWNER_PAUSE_NOT_STARTED", (("owner_pause_not_started", True),)),
@@ -319,7 +303,7 @@ _PRODUCER_SHAPES = (
     ("resource_policy", "read_file", "⚠️ RESOURCE_POLICY_BLOCKED: task_contract.resource_policy protects 'blackbox'.", "RESOURCE_POLICY_BLOCKED", ()),
     ("cognitive_redirect", "write_file", "⚠️ COGNITIVE_TOOL_REQUIRED: cognitive memory is not written via 'write_file'.", "COGNITIVE_TOOL_REQUIRED", ()),
     ("extension_reported_failure", "ext_1_demo_screenshot", '{"ok": false, "error": "HTTP 500"}', "TOOL_REPORTED_FAILURE", (("dynamic_provider", True),)),
-    ("git_error_untyped_text", "vcs_status", "git refusal text without any marker", "GIT_ERROR", ()),
+    ("git_error_untyped_text", "vcs_read", "git refusal text without any marker", "GIT_ERROR", ()),
     ("review_blocked_untyped_text", "commit_reviewed", "review rejection text without any marker", "REVIEW_BLOCKED", ()),
     ("executor_crash", "write_file", "⚠️ TOOL_ERROR (write_file): RuntimeError: boom", "EXECUTOR_ERROR", ()),
     ("outer_timeout", "read_file", "⚠️ TOOL_TIMEOUT (read_file): exceeded 120s limit.", "TOOL_TIMEOUT", (("timeout_sec", 120),)),
@@ -446,12 +430,6 @@ _PRODUCER_SHAPES = (
     ("followup_data_root_unresolved", "schedule_followup",
      "ERROR: FOLLOWUP_DATA_ROOT_UNRESOLVED: task drive root is not under the owner data root",
      "TOOL_ERROR", ()),
-    ("followup_cap_reached", "schedule_followup",
-     "ERROR: FOLLOWUP_CAP_REACHED: this task already holds 2 pending follow-up(s) of the "
-     "2 allowed: followup-root-1-a1b2c3 (fires at/after 2030-01-01T00:00:00+00:00); "
-     "followup-root-1-d4e5f6 (fires at/after 2030-02-01T00:00:00+00:00). Each fires once; "
-     "wait for one to fire, or the owner can disable/delete records from the Schedules surface.",
-     "RESOURCE_CONSTRAINT_BLOCKED", ()),
     ("followup_persist_failed", "schedule_followup",
      "ERROR: FOLLOWUP_PERSIST_FAILED: OSError: [Errno 28] No space left on device",
      "TOOL_ERROR", ()),
@@ -476,12 +454,14 @@ _PRODUCER_SHAPES = (
 )
 
 
-def build_corpus(root: pathlib.Path | None = None) -> tuple[Case, ...]:
-    """Every classified input, in a stable order."""
-    root = root or repo_root()
+def build_corpus(
+    root: pathlib.Path | None = None, *, producers: ProducerHarvest | None = None,
+) -> tuple[Case, ...]:
+    """Every classified input, in a stable order; optionally reuse one explicit read."""
+    producers = harvest_producers(root) if producers is None else producers
     cases: list[Case] = []
 
-    for identifier in harvested_identifiers(root):
+    for identifier in producers.identifiers:
         for shape, detail in _DETAIL_SHAPES:
             cases.append(Case(
                 key=f"ident:{identifier}:{shape}",
@@ -531,7 +511,7 @@ def build_corpus(root: pathlib.Path | None = None) -> tuple[Case, ...]:
             text=envelope + body,
         ))
 
-    for code, identifier in harvested_native_pairs(root):
+    for code, identifier in producers.native_pairs:
         cases.append(Case(
             key=f"native:{code}:{identifier}",
             subject=f"native:{code}:{identifier}",

@@ -268,16 +268,23 @@ def test_boot_backfill_adds_the_envelope_to_a_flat_only_kill_row(tmp_path):
     assert events_path.read_bytes() == events_before
 
 
-def test_lock_timeout_refresh_is_false_and_emits_no_evidence(tmp_path, monkeypatch):
+@pytest.mark.parametrize("ledger", ["imported", "cold"])
+def test_lock_timeout_refresh_is_false_and_emits_no_evidence(tmp_path, monkeypatch, ledger):
     """R3 honesty: a refresh whose write never landed returns False and emits
-    NO custody evidence — the event may not claim a heal the store refused —
-    and the row heals on the next boot."""
+    NO custody or cost evidence — the event may not claim a heal the store refused —
+    and the row heals on the next boot. The money read the custody debt owes may be
+    a cold usage store's first: its one-time import records itself, nothing else."""
+    import json
+
     import ouroboros.task_results as task_results_mod
+    from ouroboros import usage_store
 
     _emit_started(tmp_path, "run-7", "t-lock2")
     _emit_settled(tmp_path, "run-7", "t-lock2")
     _stale_terminal_result(tmp_path, "t-lock2",
                            delegated_runs_unreconciled=["run-7"])
+    if ledger == "imported":
+        usage_store.migrate_from_journal(tmp_path)  # what the server does at boot, before any sweep
     events_path = tmp_path / "logs" / "events.jsonl"
     events_before = events_path.read_bytes()
 
@@ -286,7 +293,13 @@ def test_lock_timeout_refresh_is_false_and_emits_no_evidence(tmp_path, monkeypat
 
     monkeypatch.setattr(task_results_mod, "patch_document", _timeout)
     assert delegate_terminal.refresh_terminal_reconciliation(tmp_path, "t-lock2") is False
-    assert events_path.read_bytes() == events_before
+    if ledger == "imported":
+        assert events_path.read_bytes() == events_before
+    else:
+        events_after = events_path.read_bytes()
+        assert events_after.startswith(events_before)
+        added = [json.loads(line)["type"] for line in events_after[len(events_before):].splitlines()]
+        assert added == ["usage_import_completed"], added
     assert load_task_result(tmp_path, "t-lock2")["delegated_runs_unreconciled"] == ["run-7"]
 
     monkeypatch.undo()
@@ -353,7 +366,7 @@ def test_same_boot_sweep_settlement_is_cleared_in_the_same_generation(tmp_path, 
     monkeypatch.setattr(server_mod, "DATA_DIR", tmp_path)
 
     def fake_reconcile(drive_root, *, running_task_ids, gateway_factory,
-                       recoverable_task_ids, replay_pending):
+                       recoverable_handles, replay_pending):
         _emit_settled(tmp_path, "run-5", "t-late")
         return []
 

@@ -1,13 +1,12 @@
-"""The update letter: range material, the accounted LIGHT call, storage, and projection."""
+"""The update description: range material, the facts-only check, storage and projection.
+
+The writer, the owner request and the tool live in tests/test_update_description.py."""
 
 from __future__ import annotations
 
 import json
 import pathlib
 import subprocess
-import threading
-import time
-
 import pytest
 
 from ouroboros import update_letter as ul
@@ -86,6 +85,17 @@ def history_repo(tmp_path):
 # material
 # ---------------------------------------------------------------------------
 
+
+def test_local_history_preview_is_bounded_and_names_the_complete_range():
+    local = [{'sha': f'{i:040x}', 'date': '2026-10-21', 'subject': f'local subject {i}'} for i in range(50)]
+    material = {'base_sha': 'f' * 40, 'target_sha': 'e' * 40, 'local_commits': local}
+    text = ul.material_text(material)
+    assert text.count('- ') == ul.LOCAL_SUBJECT_PREVIEW
+    assert '30 older local subjects omitted' in text
+    assert f"git log {material['target_sha']}..{material['base_sha']}" in text
+    assert 'not incoming changes' in text and 'do not prove unique code' in text
+    assert len(material['local_commits']) == 50  # the collector's complete input is not changed
+
 def test_material_recovers_rows_from_commit_diffs_and_lists_range_commits(history_repo):
     repo = history_repo["repo"]
     material = ul.collect_range_material(history_repo["base"], history_repo["c4"], git=_capture_for(repo))
@@ -103,7 +113,10 @@ def test_material_recovers_rows_from_commit_diffs_and_lists_range_commits(histor
     assert material["versions"] == {"base": "1.0.0", "target": "1.4.0"}
     assert set(material) == {"base_sha", "target_sha", "commits", "bodies_omitted",
                              "omitted_commit_chunks", "releases", "omitted_rows",
-                             "omitted_row_commits", "rows_summarized", "versions"}
+                             "omitted_row_commits", "rows_summarized", "versions",
+                             "local_commits", "omitted_local_chunks", "first_parent_commits"}
+    assert material["first_parent_commits"] == material["commits"]  # this history is linear
+    assert material["local_commits"] == [] and material["omitted_local_chunks"] == 0
 
 
 def test_material_keeps_every_commit_subject_and_bounds_only_the_bodies(history_repo):
@@ -283,7 +296,7 @@ def test_split_row_keeps_three_cells_only():
 
 
 # ---------------------------------------------------------------------------
-# generation
+# check facts
 # ---------------------------------------------------------------------------
 
 def _status(**over):
@@ -298,6 +311,7 @@ def _status(**over):
 
 def _material():
     return {
+        "base_sha": "a" * 40, "target_sha": "b" * 40,
         "commits": [{"sha": "b" * 40, "date": "2026-09-03", "subject": "s", "body": ""}],
         "releases": [{"version": "6.114.0", "date": "2026-09-01", "text": "row", "commit": "b" * 40}],
         "bodies_omitted": 0, "omitted_rows": 0,
@@ -305,177 +319,26 @@ def _material():
     }
 
 
-@pytest.fixture
-def letter_env(tmp_path, monkeypatch):
-    drive = tmp_path / "data"
-    repo = tmp_path / "repo"
-    (drive / "state").mkdir(parents=True)
-    (drive / "memory").mkdir()
-    repo.mkdir()
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "test/light")
-    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
-    monkeypatch.setattr("ouroboros.provider_models.model_has_credentials", lambda model: True)
-    calls = []
+def _no_model(monkeypatch):
+    """Any model construction or send during a check is a failure of the contract."""
+    def refuse(*_a, **_k):
+        raise AssertionError("a check must never call a model")
 
-    class FakePlan:
-        initial_mode = "max"
-
-        def __init__(self, task):
-            self.task = task
-
-        def messages_for(self, mode):
-            return [{"role": "system", "content": f"identity:{mode}"}, {"role": "user", "content": self.task["text"]}]
-
-    def fake_plan(env, memory, task):
-        calls.append(("context", task))
-        return FakePlan(task)
-
-    monkeypatch.setattr(ul, "_fit_plan", fake_plan)
-    return {"drive": drive, "repo": repo, "calls": calls}
+    monkeypatch.setattr("ouroboros.llm.LLMClient.__init__", refuse)
+    monkeypatch.setattr("ouroboros.llm_observability.chat_observed", refuse)
 
 
-def test_write_letter_ready_record_carries_attempt_and_versions(letter_env, monkeypatch):
-    seen = {}
-
-    def fake_chat(client, *, drive_root, **kwargs):
-        seen.update(kwargs)
-        return {"content": "  One short paragraph.  "}, {"ledger_attempt_ids": ["att-1", "att-2"]}
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-
-    assert record["state"] == "ready" and record["text"] == "One short paragraph."
-    assert record["attempt_id"] == "att-2" and record["attempt_ids"] == ["att-1", "att-2"]
-    assert record["model"] == "test/light"
-    assert record["key"]["base_sha"] == "a" * 40 and record["checked_head_sha"] == "a" * 40
-    assert record["target_version"] == "6.114.0" and record["error_kind"] == ""
-    assert seen["model"] == "test/light" and seen["max_tokens"] == ul.UPDATE_LETTER_MAX_TOKENS
-    assert seen["reasoning_effort"] == "low" and seen["tools"] is None
-    task = letter_env["calls"][0][1]
-    assert task["id"] == ul.SYSTEM_TASK_ID and task["model"] == "test/light"
-    assert "[UPDATE LETTER REQUEST]" in task["text"] and "6.114.0" in task["text"]
-    assert "ONE short paragraph" in seen["messages"][-1]["content"]
+def _git_versions(argv):
+    if argv[:2] == ["git", "show"]:
+        return 0, "6.114.0", ""
+    return 1, "", ""
 
 
-def test_write_letter_stores_the_model_s_shape_without_policing_it(letter_env, monkeypatch):
-    # The shape is the mind's ceiling, not a host gate (owner decision; reviewed three
-    # times): an oddly shaped answer is stored and shown, never edited and never thrown
-    # away. What bounds it is the output budget, and the panel's sanitizing renderer.
-    odd = "# A heading\n\n- one\n- two\n\nAnd a second paragraph."
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: ({"content": odd}, {"ledger_attempt_ids": ["att"]}))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "ready" and record["text"] == odd
-    # Nothing in the module promises the host enforces one paragraph.
-    source = (pathlib.Path(ul.__file__)).read_text(encoding="utf-8")
-    floor = source.split("Floor (host code):", 1)[1].split("Ceiling", 1)[0]
-    assert "paragraph" not in floor, "the floor must not claim a shape the host does not enforce"
+def _runs(conclusion):
+    return {"status": "observed", "reason": "", "runs": [{"sha": "b" * 40, "status": "completed",
+                                                          "conclusion": conclusion, "url": "u"}],
+            "absent_shas": [], "missing_shas": []}
 
-
-def test_write_letter_shares_one_ceiling_between_the_slot_wait_and_the_call(letter_env, monkeypatch):
-    # The slot wait spends the SAME budget the provider call does: a busy slot must not
-    # hand the transport a second full window.
-    monkeypatch.setattr(ul, "_letter_timeout_sec", lambda: 10.0)
-    import ouroboros.model_concurrency as mc
-    from contextlib import contextmanager
-
-    @contextmanager
-    def slow_slot(model, use_local, deadline_ts=None):
-        monkeypatch.setattr(ul.time, "time", lambda: real_now + 7.0)
-        yield
-
-    real_now = ul.time.time()
-    monkeypatch.setattr(mc, "model_call_slot", slow_slot)
-    seen = {}
-
-    def fake_chat(client, *, drive_root, **kwargs):
-        seen.update(kwargs)
-        return {"content": "A paragraph."}, {"ledger_attempt_ids": ["att"]}
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "ready"
-    assert 2.5 < seen["timeout"] < 3.5, f"the call gets what the slot left, not 10s: {seen['timeout']}"
-
-
-def test_write_letter_reports_a_ceiling_spent_on_the_slot_as_a_timeout(letter_env, monkeypatch):
-    monkeypatch.setattr(ul, "_letter_timeout_sec", lambda: 10.0)
-    import ouroboros.model_concurrency as mc
-    from contextlib import contextmanager
-
-    real_now = ul.time.time()
-
-    @contextmanager
-    def exhausting_slot(model, use_local, deadline_ts=None):
-        monkeypatch.setattr(ul.time, "time", lambda: real_now + 11.0)
-        yield
-
-    monkeypatch.setattr(mc, "model_call_slot", exhausting_slot)
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call past the ceiling")))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "failed" and record["error_kind"] == "timeout"
-    assert "waiting for a model slot" in record["error_text"]
-
-
-def test_write_letter_reads_the_global_budget_from_its_one_resolver(letter_env, monkeypatch):
-    # An absent TOTAL_BUDGET is the product default, a non-positive value is the owner's
-    # "no limit": both answers belong to settings_setup_contract.resolve_total_budget_usd,
-    # the resolver every other reader uses — never an inline env read with its own fallback.
-    monkeypatch.setattr("ouroboros.settings_setup_contract.resolve_total_budget_usd", lambda: 123.5)
-    seen = {}
-
-    class Scope:
-        def __init__(self, **kwargs):
-            seen.update(kwargs)
-
-    import ouroboros.usage_accounting as ua
-    monkeypatch.setattr(ua, "UsageScope", Scope)
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: ({"content": "A paragraph."}, {"ledger_attempt_ids": ["att"]}))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "ready" and seen["global_limit_usd"] == 123.5
-
-
-def test_write_letter_without_light_credentials_fails_typed_and_never_calls(letter_env, monkeypatch):
-    monkeypatch.setattr("ouroboros.provider_models.model_has_credentials", lambda model: False)
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "failed" and record["error_kind"] == "no_credentials"
-    assert "test/light" in record["error_text"] and record["text"] == ""
-
-
-@pytest.mark.parametrize("exc, kind", [
-    (TimeoutError("slow"), "timeout"),
-    (RuntimeError("boom"), "provider_unavailable"),
-])
-def test_write_letter_failures_are_typed(letter_env, monkeypatch, exc, kind):
-    def fake_chat(client, *, drive_root, **kwargs):
-        raise exc
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "failed" and record["error_kind"] == kind
-    assert "boom" in record["error_text"] or "slow" in record["error_text"]
-
-
-def test_write_letter_budget_exhausted_is_typed(letter_env, monkeypatch):
-    from ouroboros.usage_accounting import BudgetExceeded
-
-    def fake_chat(client, *, drive_root, **kwargs):
-        raise BudgetExceeded("global budget exhausted")
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["error_kind"] == "budget_exhausted"
-
-
-def test_write_letter_empty_response_is_typed(letter_env, monkeypatch):
-    monkeypatch.setattr(ul, "_chat", lambda client, *, drive_root, **kw: ({"content": "   "}, {}))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "failed" and record["error_kind"] == "empty_response"
-
-
-# ---------------------------------------------------------------------------
-# refresh seam
-# ---------------------------------------------------------------------------
 
 def test_refresh_writes_nothing_without_a_successful_check(tmp_path, monkeypatch):
     drive = tmp_path / "data"
@@ -496,121 +359,154 @@ def test_refresh_records_the_checked_head_even_without_an_update(tmp_path, monke
     assert fact["status"] == "up_to_date" and fact["letter"] is None
 
 
-def test_refresh_writes_record_and_keeps_last_good_on_failure(tmp_path, monkeypatch):
+def test_a_check_records_material_and_facts_without_a_model_or_a_description(tmp_path, monkeypatch):
+    # A first check of a new range: the material goes beside the record, the record stays small,
+    # and nothing is authored — the panel offers Write, the Runtime context points at the sources.
     drive = tmp_path / "data"
+    _no_model(monkeypatch)
+    monkeypatch.setattr(ul, "_default_git", lambda: _git_versions)
     monkeypatch.setattr(ul, "collect_range_material", lambda base, target, **k: _material())
-    ready = {"schema": 1, "key": ul._key_from_status(_status()), "checked_head_sha": "a" * 40,
-             "state": "ready", "text": "first letter", "author_version": "6.113.5",
-             "target_version": "6.114.0", "model": "m", "written_at": "t1", "attempt_id": "att-1",
-             "error_kind": "", "error_text": "", "last_good": None}
-    monkeypatch.setattr(ul, "write_letter", lambda status, material, **k: dict(ready))
+    monkeypatch.setattr("ouroboros.update_qualification.post_merge_checks", lambda commits, url: _runs("success"))
     record = ul.refresh_after_check(_status(), drive_root=drive)
-    assert record["state"] == "ready" and ul.read_record(drive)["text"] == "first letter"
-
-    failed = dict(ready, key=ul._key_from_status(_status(latest_sha="c" * 40)),
-                  state="failed", text="", error_kind="timeout", written_at="t2")
-    monkeypatch.setattr(ul, "write_letter", lambda status, material, **k: dict(failed))
-    record = ul.refresh_after_check(_status(latest_sha="c" * 40), drive_root=drive)
-    assert record["state"] == "failed" and record["last_good"]["text"] == "first letter"
-    stored = json.loads(ul.record_path(drive).read_text())
-    assert stored["last_good"]["text"] == "first letter"
-
-    # An applied update (available=False) leaves the letter untouched.
-    kept = ul.refresh_after_check(_status(available=False, latest_sha="a" * 40), drive_root=drive)
-    assert kept["last_good"]["text"] == "first letter"
-
-    # A newer target whose letter fails still carries the older good letter (D-KEEP).
-    moved = dict(failed, key=ul._key_from_status(_status(latest_sha="d" * 40)), target_version="6.115.0")
-    monkeypatch.setattr(ul, "write_letter", lambda status, material, **k: dict(moved))
-    record = ul.refresh_after_check(_status(latest_sha="d" * 40), drive_root=drive)
-    assert record["last_good"]["text"] == "first letter"
-    view = ul.project_letter(record, head_sha="a" * 40, latest_sha="c" * 40)
-    assert view["text"] == "first letter" and view["target_version"] == "6.114.0"
-    assert view["state"] == "failed" and view["has_last_good"] is True
+    assert record["state"] == "none" and record["text"] == "" and _revision(record) == 0
+    assert record["checked_key"]["target_sha"] == "b" * 40 and record["checked_target_version"] == "6.114.0"
+    assert record["qualification"]["target_sha"] == "b" * 40
+    material = json.loads(ul.material_path(drive).read_text())
+    assert material["key"] == record["checked_key"] and material["commits"] == 1
+    assert "Commits in this range" in material["text"] and 'vcs_read(root="system_repo", action="show"' in material["text"]
+    assert len(ul.record_path(drive).read_bytes()) < 8000, "the hot record never carries the material"
+    view = ul.project_letter(record, head_sha="a" * 40, latest_sha="b" * 40)
+    assert view["state"] == "none" and view["text"] == "" and view["checked_key"]["target_sha"] == "b" * 40
+    cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": True, "behind": 3, "checked_at": "t",
+                                      "update_channel": "stable"}}
+    monkeypatch.setenv("OUROBOROS_UPDATE_CHANNEL", "stable")
+    fact = ul.official_update_projection("a" * 40, drive_root=drive, state=cache)
+    assert fact["status"] == "update_available" and fact["letter"]["state"] == "none"
+    assert fact["description_sources"] == ul.DESCRIPTION_SOURCES
+    assert fact["target"] == {"version": "6.114.0", "sha": "b" * 40}
 
 
-def test_refresh_records_a_typed_failure_when_the_range_cannot_be_read(tmp_path, monkeypatch):
+def _revision(record):
+    return record.get("revision") or 0
+
+
+def test_a_same_range_check_refreshes_runs_and_never_stales_the_description(tmp_path, monkeypatch):
+    # Owner 28.10: a new post-merge run is a fact about the same range, not a reason to call the
+    # description stale or to write it again; the material is reused, not collected again.
+    drive = tmp_path / "data"
+    _no_model(monkeypatch)
+    monkeypatch.setattr(ul, "_default_git", lambda: _git_versions)
+    collected = []
+    monkeypatch.setattr(ul, "collect_range_material", lambda base, target, **k: collected.append(target) or _material())
+    monkeypatch.setattr("ouroboros.update_qualification.post_merge_checks", lambda commits, url: _runs("in_progress"))
+    ul.refresh_after_check(_status(), drive_root=drive)
+    record = dict(ul.read_record(drive), state="ready", text="what changes", revision=4, written_at="t-written",
+                  key=ul._key_from_status(_status()))
+    ul.atomic_write_json(ul.record_path(drive), record)
+    monkeypatch.setattr("ouroboros.update_qualification.post_merge_checks", lambda commits, url: _runs("failure"))
+    after = ul.refresh_after_check(_status(), drive_root=drive)
+    assert collected == ["b" * 40], "the same range's material is reused"
+    assert after["qualification"]["github"]["runs"][0]["conclusion"] == "failure"
+    assert (after["text"], after["revision"], after["written_at"]) == ("what changes", 4, "t-written")
+    view = ul.project_letter(after, head_sha="a" * 40, latest_sha="b" * 40)
+    assert view["description_current"] is True and view["relation"] == "pending"
+
+
+def test_a_moved_target_keeps_the_old_text_with_its_own_range(tmp_path, monkeypatch):
     drive = tmp_path / "data"
     (drive / "state").mkdir(parents=True)
-    good = _record(text="the letter about 6.114.0")
-    ul.atomic_write_json(ul.record_path(drive), good)
+    ul.atomic_write_json(ul.record_path(drive), _record(text="about b", revision=2))
+    _no_model(monkeypatch)
+    monkeypatch.setattr(ul, "_default_git", lambda: _git_versions)
+    monkeypatch.setattr(ul, "collect_range_material",
+                        lambda base, target, **k: dict(_material(), target_sha=target))
+    monkeypatch.setattr("ouroboros.update_qualification.post_merge_checks", lambda commits, url: _runs("success"))
+    record = ul.refresh_after_check(_status(latest_sha="c" * 40), drive_root=drive)
+    assert record["text"] == "about b" and record["key"]["target_sha"] == "b" * 40 and record["revision"] == 2
+    assert record["checked_key"]["target_sha"] == "c" * 40 and record["qualification"]["target_sha"] == "c" * 40
+    assert json.loads(ul.material_path(drive).read_text())["key"]["target_sha"] == "c" * 40
+    view = ul.project_letter(record, head_sha="a" * 40, latest_sha="c" * 40)
+    assert view["relation"] == "superseded" and view["description_current"] is False
+    assert view["key"]["target_sha"] == "b" * 40 and view["target_version"] == "6.114.0"
+
+
+def test_an_unreadable_range_is_a_check_fact_and_the_description_stays(tmp_path, monkeypatch):
+    drive = tmp_path / "data"
+    (drive / "state").mkdir(parents=True)
+    ul.atomic_write_json(ul.record_path(drive), _record(text="the description of 6.114.0", revision=1))
+    monkeypatch.setattr(ul, "_default_git", lambda: _git_versions)
     monkeypatch.setattr(ul, "collect_range_material",
                         lambda *a, **k: (_ for _ in ()).throw(ul.MaterialUnavailable("git log failed (rc=128)")))
-    monkeypatch.setattr(ul, "write_letter",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no model call without material")))
     record = ul.refresh_after_check(_status(latest_sha="c" * 40), drive_root=drive)
-    assert record["state"] == "failed" and record["error_kind"] == "material_unavailable"
-    assert "git log failed" in record["error_text"]
-    # D-KEEP: the previous good letter survives an unreadable range.
-    assert record["last_good"]["text"] == "the letter about 6.114.0"
-    view = ul.project_letter(record, head_sha="a" * 40, latest_sha="b" * 40)
-    assert view["text"] == "the letter about 6.114.0" and view["has_last_good"] is True
+    assert record["state"] == "ready" and record["text"] == "the description of 6.114.0" and record["revision"] == 1
+    assert record["material_error"]["kind"] == "material_unavailable" and "git log failed" in record["material_error"]["text"]
+    view = ul.project_letter(record, head_sha="a" * 40, latest_sha="c" * 40)
+    assert view["error_kind"] == "material_unavailable" and view["latest_failed_key"]["target_sha"] == "c" * 40
+    assert view["text"] == "the description of 6.114.0" and view["relation"] == "superseded"
+    assert not ul.material_path(drive).exists()
+    # A later readable check clears the fact; the description is still untouched.
+    monkeypatch.setattr(ul, "collect_range_material", lambda base, target, **k: dict(_material(), target_sha=target))
+    monkeypatch.setattr("ouroboros.update_qualification.post_merge_checks", lambda commits, url: _runs("success"))
+    record = ul.refresh_after_check(_status(latest_sha="c" * 40), drive_root=drive)
+    assert "material_error" not in record and record["text"] == "the description of 6.114.0"
 
 
-def test_mark_checked_takes_the_same_lock_as_the_writer(tmp_path, monkeypatch):
-    # A no-update check that read the record before a letter landed must not write its
-    # stale copy back over it: every record write goes through the one lock.
+def test_check_facts_land_on_whatever_the_record_holds_when_they_are_written(tmp_path, monkeypatch):
+    # Git and GitHub are read outside the record lock; a description saved meanwhile (a direct
+    # turn, a wake or the requested task) is compared on write and stays whole.
+    drive = tmp_path / "data"
+    monkeypatch.setattr(ul, "_default_git", lambda: _git_versions)
+    ul.refresh_after_check(_status(available=False, latest_sha="a" * 40), drive_root=drive)
+    ul.atomic_write_json(ul.record_path(drive), dict(ul.read_record(drive), checked_key=ul._key_from_status(_status())))
+
+    def collect(base, target, **_k):
+        saved = ul.save_description("written while the check read Git", base, target, 0,
+                                    author={"task_id": "turn1", "model": "m"}, drive_root=drive, git=_git_versions)
+        assert saved["outcome"] == "saved"
+        return _material()
+
+    monkeypatch.setattr(ul, "collect_range_material", collect)
+    monkeypatch.setattr("ouroboros.update_qualification.post_merge_checks", lambda commits, url: _runs("success"))
+    record = ul.refresh_after_check(_status(), drive_root=drive)
+    assert record["text"] == "written while the check read Git" and record["revision"] == 1
+    assert record["author"]["task_id"] == "turn1" and record["qualification"]["target_sha"] == "b" * 40
+
+
+def test_a_check_waits_for_the_record_lock_and_writes_nothing_past_it(tmp_path, monkeypatch):
+    # The lock is the file the worker's tool takes too: a held one is never bypassed.
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
     drive = tmp_path / "data"
     (drive / "state").mkdir(parents=True)
-    monkeypatch.setattr(ul, "_letter_timeout_sec", lambda: 0.2)
-    monkeypatch.setattr(ul, "_default_git", lambda: (lambda argv: (0, "6.114.0", "")))
-    assert ul._REFRESH_LOCK.acquire(blocking=False)
+    ul.atomic_write_json(ul.record_path(drive), _record(text="kept"))
+    before = ul.record_path(drive).read_bytes()
+    monkeypatch.setattr(ul, "RECORD_LOCK_WAIT_SEC", 0.2)
+    monkeypatch.setattr(ul, "_default_git", lambda: _git_versions)
+    lock = ul.record_path(drive).parent / ul.LOCK_REL.name
+    fd = acquire_exclusive_file_lock(lock, timeout_sec=1.0)
     try:
-        assert ul.refresh_after_check(_status(available=False, latest_sha="a" * 40), drive_root=drive) is None
-        assert not ul.record_path(drive).exists(), "the letterless mark must not bypass the lock"
+        assert ul.refresh_after_check(_status(available=False, latest_sha="a" * 40), drive_root=drive)["text"] == "kept"
+        assert ul.record_path(drive).read_bytes() == before
     finally:
-        ul._REFRESH_LOCK.release()
-    assert ul.refresh_after_check(_status(available=False, latest_sha="a" * 40), drive_root=drive)["state"] == "none"
+        release_exclusive_file_lock(lock, fd)
+    assert ul.refresh_after_check(_status(available=False, latest_sha="a" * 40), drive_root=drive)["checked_key"]
 
 
 def test_refresh_is_single_flight(tmp_path, monkeypatch):
-    # A held lock is waited for (bounded by the letter timeout), never bypassed by a
-    # second physical write; past the bound the current record is returned as it is.
+    # A held check is waited for (bounded by the fetch ceiling), never doubled; past the bound
+    # the current record is returned as it is.
     drive = tmp_path / "data"
     monkeypatch.setattr(ul, "collect_range_material", lambda *a, **k: (_ for _ in ()).throw(AssertionError("busy")))
-    monkeypatch.setattr(ul, "_letter_timeout_sec", lambda: 0.2)
-    assert ul._REFRESH_LOCK.acquire(blocking=False)
+    monkeypatch.setattr("ouroboros.update_channels.get_managed_update_fetch_timeout_sec", lambda: 0.2)
+    assert ul._CHECK_FLIGHT.acquire(blocking=False)
     try:
         assert ul.refresh_after_check(_status(), drive_root=drive) is None
     finally:
-        ul._REFRESH_LOCK.release()
-
-
-def test_refresh_waits_for_and_shares_the_in_flight_letter(tmp_path, monkeypatch):
-    # Two fetching checks for the same key (two dashboards clicking Check): the second
-    # returns the letter the first just wrote instead of paying for a second one.
-    drive = tmp_path / "data"
-    (drive / "state").mkdir(parents=True)
-    monkeypatch.setattr(ul, "collect_range_material",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("the waiter must share, not rewrite")))
-    monkeypatch.setattr(ul, "_letter_timeout_sec", lambda: 5.0)
-    status = _status()
-    key = ul._key_from_status(status)
-    assert ul._REFRESH_LOCK.acquire(blocking=False)
-
-    def writer():
-        time.sleep(0.2)
-        record = _record(key=key)
-        ul.atomic_write_json(ul.record_path(drive), record)
-        ul._note_written(key, drive, record)
-        ul._REFRESH_LOCK.release()
-
-    threading.Thread(target=writer, daemon=True).start()
-    record = ul.refresh_after_check(status, drive_root=drive)
-    assert record["text"] == "letter" and record["key"] == key and not ul._REFRESH_LOCK.locked()
-
-    # The share is per DATA ROOT too: the same key against another root is not the same letter.
-    other = tmp_path / "other"
-    (other / "state").mkdir(parents=True)
-    monkeypatch.setattr(ul, "collect_range_material", lambda *a, **k: _material())
-    monkeypatch.setattr(ul, "write_letter", lambda *a, **k: _record(key=key, text="the other root's letter"))
-    assert ul._REFRESH_LOCK.acquire(blocking=False)
-    threading.Thread(target=lambda: (time.sleep(0.2), ul._REFRESH_LOCK.release()), daemon=True).start()
-    assert ul.refresh_after_check(status, drive_root=other)["text"] == "the other root's letter"
+        ul._CHECK_FLIGHT.release()
 
 
 def test_mark_checked_records_the_official_target_version(tmp_path, monkeypatch):
-    # An up-to-date check (latest == HEAD, no letter) still names the official target's
+    # An up-to-date check (latest == HEAD, no description) still names the official target's
     # version, so the Runtime fact can say which version "up to date" means.
     drive = tmp_path / "data"
     monkeypatch.setattr(ul, "_default_git",
@@ -628,7 +524,6 @@ def test_refresh_never_raises(tmp_path, monkeypatch):
     drive = tmp_path / "data"
     monkeypatch.setattr(ul, "collect_range_material", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git down")))
     assert ul.refresh_after_check(_status(), drive_root=drive) is None
-
 
 # ---------------------------------------------------------------------------
 # projection
@@ -836,248 +731,7 @@ def test_official_update_projection_never_raises(tmp_path):
     assert fact["status"] == "unchecked"
 
 
-class _Projection:
-    def __init__(self, fits, label):
-        self.fits_known_window = fits
-        self.label = label
-
-    def system_message(self):
-        return {"role": "system", "content": self.label}
-
-
-class _Plan:
-    def __init__(self, preferred, max_fits, low_fits):
-        self.initial_mode = preferred
-        self.max_projection = _Projection(max_fits, "max")
-        self.low_projection = _Projection(low_fits, "low")
-
-    def projection(self, mode):
-        return self.low_projection if mode == "low" else self.max_projection
-
-    def messages_for(self, mode):
-        return [self.projection(mode).system_message(), {"role": "user", "content": "req"}]
-
-
-def test_write_letter_sends_the_owner_mode_and_retries_low_only_on_an_actual_overflow(letter_env, monkeypatch):
-    # DEVELOPMENT "Context mode": predicted pressure never swaps in Low — the owner's mode is
-    # sent, and ONE same-route Low retry follows an ACTUAL provider overflow.
-    class Overflow(RuntimeError):
-        ledger_attempt_ids = ["att-max"]
-
-    monkeypatch.setattr(ul, "_fit_plan", lambda env, memory, task: _Plan("max", False, True))
-    real_classify = ul._classify
-    monkeypatch.setattr(ul, "_classify", lambda exc: ("context_overflow", "overflow") if isinstance(exc, Overflow) else real_classify(exc))
-    sent = []
-
-    def fake_chat(client, *, drive_root, **kwargs):
-        sent.append(kwargs["messages"][0]["content"])
-        if len(sent) == 1:
-            raise Overflow("prompt is too long")
-        return {"content": "A Low paragraph."}, {"ledger_attempt_ids": ["att-low"]}
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert sent == ["max", "low"], "Max first (even though the plan says it will not fit), Low only after the overflow"
-    assert record["state"] == "ready" and record["attempt_ids"] == ["att-max", "att-low"]
-
-    # A second overflow is the typed failure — never a third, strictly-smaller call.
-    sent.clear()
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: (_ for _ in ()).throw(Overflow("still too long")))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "failed" and record["error_kind"] == "context_overflow"
-
-    # Owner Low: nothing smaller to retry with, so the overflow is typed at once.
-    monkeypatch.setattr(ul, "_fit_plan", lambda env, memory, task: _Plan("low", True, True))
-    calls = []
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(Overflow("too long")))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["error_kind"] == "context_overflow" and len(calls) == 1
-
-
-def test_write_letter_treats_an_http_200_body_error_as_the_provider_s_verdict(letter_env, monkeypatch):
-    # OpenRouter serves 429/5xx/context_length_exceeded INSIDE an HTTP 200; llm.py keeps that
-    # in usage["provider_error"]. Never "the model returned no text" — and a body overflow
-    # earns the same ONE Low retry a raised overflow does.
-    monkeypatch.setattr(ul, "_fit_plan", lambda env, memory, task: _Plan("max", False, True))
-    overflow = {"code": "context_length_exceeded", "type": "invalid_request_error",
-                "kind": "provider_error", "message": "prompt too long"}
-    sent = []
-
-    def body_overflow_then_low(client, *, drive_root, **kwargs):
-        sent.append(kwargs["messages"][0]["content"])
-        if len(sent) == 1:
-            return {"content": ""}, {"ledger_attempt_ids": ["att-max"], "provider_error": dict(overflow)}
-        return {"content": "A Low paragraph."}, {"ledger_attempt_ids": ["att-low"]}
-
-    monkeypatch.setattr(ul, "_chat", body_overflow_then_low)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert sent == ["max", "low"] and record["state"] == "ready"
-    assert record["attempt_ids"] == ["att-max", "att-low"] and record["attempt_id"] == "att-low"
-
-    # Overflow again on the Low call: typed, never a third call.
-    sent.clear()
-
-    def body_overflow_always(client, *, drive_root, **kwargs):
-        sent.append(kwargs["messages"][0]["content"])
-        return {"content": ""}, {"ledger_attempt_ids": [f"att-{len(sent)}"], "provider_error": dict(overflow)}
-
-    monkeypatch.setattr(ul, "_chat", body_overflow_always)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert sent == ["max", "low"] and record["state"] == "failed"
-    assert record["error_kind"] == "context_overflow" and record["attempt_ids"] == ["att-1", "att-2"]
-
-    # A raised overflow whose Low retry is served with a body overflow: still one retry.
-    class Overflow(RuntimeError):
-        ledger_attempt_ids = ["att-raised"]
-
-    real_classify = ul._classify
-    monkeypatch.setattr(ul, "_classify", lambda exc: ("context_overflow", "x") if isinstance(exc, Overflow) else real_classify(exc))
-    sent.clear()
-
-    def raise_then_body_overflow(client, *, drive_root, **kwargs):
-        sent.append(kwargs["messages"][0]["content"])
-        if len(sent) == 1:
-            raise Overflow("too long")
-        return {"content": ""}, {"ledger_attempt_ids": ["att-low"], "provider_error": dict(overflow)}
-
-    monkeypatch.setattr(ul, "_chat", raise_then_body_overflow)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert sent == ["max", "low"] and record["error_kind"] == "context_overflow"
-    assert record["attempt_ids"] == ["att-raised", "att-low"]
-
-    # A rate-limit / transient body error is a provider failure carrying its code, no retry.
-    sent.clear()
-    limited = {"code": 429, "kind": "rate_limit", "message": "rate limited"}
-    monkeypatch.setattr(ul, "_chat", lambda client, *, drive_root, **kw: (sent.append(kw["messages"][0]["content"])
-                        or ({"content": ""}, {"ledger_attempt_ids": ["att"], "provider_error": dict(limited)})))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert sent == ["max"] and record["state"] == "failed"
-    assert record["error_kind"] == "provider_unavailable" and "429" in record["error_text"]
-    assert record["attempt_ids"] == ["att"] and record["text"] == ""
-
-
-@pytest.mark.parametrize("body, kind", [
-    # A generic 400 whose MESSAGE is the overflow (the shape OpenRouter forwards for many routes).
-    ({"code": 400, "type": "invalid_request_error", "kind": "provider_error",
-      "message": "prompt is too long: 250000 tokens > 128000 maximum"}, "context_overflow"),
-    # Output/body-size rejections take precedence: shrinking the prompt cannot fix them.
-    ({"code": 400, "type": "invalid_request_error", "kind": "provider_error",
-      "message": "max_tokens 65536 exceeds maximum context length 32768"}, "provider_unavailable"),
-    # A rate limit that happens to mention the context window is still a rate limit —
-    # by the transport's structured kind, whichever code shape it came with.
-    ({"code": 429, "kind": "rate_limit",
-      "message": "rate limit exceeded for this context window tier"}, "provider_unavailable"),
-    ({"code": "rate_limit_exceeded", "kind": "provider_transient",
-      "message": "rate limit exceeded for the context window tier"}, "provider_unavailable"),
-    # A token count containing "429" is not a rate limit: no text guard re-reads it as one.
-    ({"code": 400, "type": "invalid_request_error", "kind": "provider_error",
-      "message": "prompt is too long: 429000 tokens > 128000 maximum"}, "context_overflow"),
-    ({"code": 502, "kind": "provider_transient", "message": "upstream unavailable"}, "provider_unavailable"),
-    # A structured transient verdict wins over overflow-shaped wording: an outage, not an overflow.
-    ({"code": 503, "kind": "provider_transient",
-      "message": "context window shard temporarily unavailable"}, "provider_unavailable"),
-    ({"code": "context_length_exceeded", "message": ""}, "context_overflow"),
-    (None, ""), ("not a dict", ""),
-])
-def test_body_error_kind_uses_the_shared_overflow_vocabulary(body, kind):
-    assert ul._body_error_kind(body) == kind
-
-
-def test_write_letter_retries_low_on_a_generic_400_whose_message_is_the_overflow(letter_env, monkeypatch):
-    monkeypatch.setattr(ul, "_fit_plan", lambda env, memory, task: _Plan("max", False, True))
-    sent = []
-
-    def generic_400_then_low(client, *, drive_root, **kwargs):
-        sent.append(kwargs["messages"][0]["content"])
-        if len(sent) == 1:
-            return {"content": ""}, {"ledger_attempt_ids": ["att-max"], "provider_error": {
-                "code": 400, "type": "invalid_request_error", "kind": "provider_error",
-                "message": "prompt is too long: 250000 tokens > 128000 maximum"}}
-        return {"content": "A Low paragraph."}, {"ledger_attempt_ids": ["att-low"]}
-
-    monkeypatch.setattr(ul, "_chat", generic_400_then_low)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert sent == ["max", "low"] and record["state"] == "ready" and record["attempt_ids"] == ["att-max", "att-low"]
-
-
-def test_write_letter_keeps_the_attempt_ids_of_a_call_that_raised(letter_env, monkeypatch):
-    # usage_accounting attaches the accounted attempt ids to the exception of a failed call;
-    # the record keeps them, so a failed letter still points at what it cost.
-    class Boom(RuntimeError):
-        ledger_attempt_ids = ["att-boom"]
-
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: (_ for _ in ()).throw(Boom("boom")))
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "failed" and "boom" in record["error_text"]
-    assert record["attempt_ids"] == ["att-boom"] and record["attempt_id"] == "att-boom"
-
-
-def test_write_letter_treats_an_output_budget_cut_as_a_typed_failure(letter_env, monkeypatch):
-    # A reply stopped by the output budget is a partial cognitive artifact (BIBLE P1):
-    # never stored as ready, always named for what it is.
-    shapes = [
-        ({"content": "This update brings…", "finish_reason": "length"}, {"ledger_attempt_ids": ["att"]}),
-        ({"content": "This update brings…", "stop_reason": "max_tokens"}, {"ledger_attempt_ids": ["att"]}),
-        # llm.py keeps the OpenAI-compatible marker in usage["response_finish_reason"]
-        ({"content": "This update brings…"}, {"ledger_attempt_ids": ["att"], "response_finish_reason": "length"}),
-    ]
-    for msg, usage in shapes:
-        monkeypatch.setattr(ul, "_chat", lambda *a, _m=msg, _u=usage, **k: (dict(_m), dict(_u)))
-        record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-        assert record["state"] == "failed" and record["error_kind"] == "output_truncated", (msg, usage)
-        assert str(ul.UPDATE_LETTER_MAX_TOKENS) in record["error_text"] and record["text"] == ""
-    monkeypatch.setattr(ul, "_chat", lambda *a, **k: ({"content": "Done.", "finish_reason": "stop"}, {"ledger_attempt_ids": ["att"]}))
-    assert ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])["state"] == "ready"
-
-
-def test_write_letter_local_only_install_inherits_the_local_route(letter_env, monkeypatch):
-    # A local-only install leaves the LIGHT slot empty, so it inherits the local Main route.
-    # Asking the remote credential gate about it would refuse a letter it can write.
-    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
-    monkeypatch.setattr("ouroboros.provider_models.review_model_uses_local", lambda model: True)
-    monkeypatch.setattr(
-        "ouroboros.provider_models.model_has_credentials",
-        lambda model: (_ for _ in ()).throw(AssertionError("a local route asks no remote gate")),
-    )
-    seen = {}
-
-    def fake_chat(client, *, drive_root, **kwargs):
-        seen.update(kwargs)
-        return {"content": "A local paragraph."}, {"ledger_attempt_ids": ["att"]}
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "ready" and seen["use_local"] is True
-
-
-def test_write_letter_local_light_route_skips_the_credential_gate(letter_env, monkeypatch):
-    monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
-    monkeypatch.setattr("ouroboros.provider_models.model_has_credentials",
-                        lambda model: (_ for _ in ()).throw(AssertionError("local route must not ask")))
-    seen = {}
-
-    def fake_chat(client, *, drive_root, **kwargs):
-        seen.update(kwargs)
-        return {"content": "local paragraph"}, {}
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "ready" and seen["use_local"] is True
-    assert letter_env["calls"][0][1]["use_local_model"] is True
-
-
-def test_write_letter_context_overflow_is_typed(letter_env, monkeypatch):
-    from ouroboros.llm import LocalContextTooLargeError
-
-    def fake_chat(client, *, drive_root, **kwargs):
-        raise LocalContextTooLargeError("too big")
-
-    monkeypatch.setattr(ul, "_chat", fake_chat)
-    record = ul.write_letter(_status(), _material(), drive_root=letter_env["drive"])
-    assert record["state"] == "failed" and record["error_kind"] == "context_overflow"
-
-
-def test_boot_check_writes_the_letter_before_the_readiness_broadcast(monkeypatch):
+def test_boot_check_records_the_facts_before_the_readiness_broadcast(monkeypatch):
     import server
     import supervisor.git_ops as git_ops
     import supervisor.update_merge as update_merge
@@ -1093,6 +747,3 @@ def test_boot_check_writes_the_letter_before_the_readiness_broadcast(monkeypatch
     server._boot_managed_update_tasks()
 
     assert calls == [("letter", "b" * 40), ("update_status_ready", "")]
-    # And at boot the local model server is started BEFORE the check that may need it.
-    source = pathlib.Path(server.__file__).read_text(encoding="utf-8")
-    assert source.index('name="local-model-autostart"') < source.index('name="boot-managed-update"')

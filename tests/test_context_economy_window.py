@@ -152,7 +152,8 @@ def test_an_escaped_unasked_log_keeps_its_eighth_beside_a_plain_chosen_page(tmp_
 def test_a_chosen_page_the_window_cannot_hold_fills_it_at_its_own_density(tmp_path, page, log):
     messages, receipt, sent = _mixed(tmp_path, page, log, window=65_000)
     assert receipt["status"] == "projected" and _view_json(messages[0]["content"])["omitted_ranges"]
-    assert 65_000 * 0.97 <= sent <= 65_000  # only the window cut it, not the neighbour's density
+    assert 65_000 * 0.97 <= sent <= 65_000  # no start allowance is reapplied after a chosen read
+    assert _view_json(messages[0]["content"])["facts"]["cut_reason"] == "chosen_body_exceeds_usable_input"
     assert _view_json(messages[1]["content"])["shown_ranges"] == []
 
 
@@ -168,15 +169,25 @@ def _facts(monkeypatch, **usage):
 
 
 def test_the_facts_line_names_window_room_and_target_excess_apart(monkeypatch):
+    # A measured input: this conversation's round 2 was accepted at 290,000 tokens (``context_anchor``).
     base = {"_context_prompt_estimate": 300_000, "_context_reply_allowance_tokens": 65_536,
-            "_context_response_reserve_tokens": 65_536, "_context_target_total_tokens": 250_000}
+            "_context_response_reserve_tokens": 65_536, "_context_target_total_tokens": 250_000,
+            "_context_anchor_input_tokens": 290_000, "_context_anchor_round": 2}
     line = _facts(monkeypatch, **base, _context_capacity_total_tokens=500_000)
-    assert "free 134,464" in line and "over target 115,536" in line and "reply floor" not in line
+    assert "free ~134,464" in line and "over target 115,536" in line and "reply floor" not in line
+    assert "round 2 accepted 290,000, +10,000 since" in line
     unknown = _facts(monkeypatch, **base, _context_capacity_total_tokens=None)
     assert "window unknown" in unknown and "free unknown" in unknown and "over target 115,536" in unknown
     nano = _facts(monkeypatch, **{**base, "_context_prompt_estimate": 60_000, "_context_response_reserve_tokens": 8_192,
                                   "_context_target_total_tokens": 85_000}, _context_capacity_total_tokens=200_000)
-    assert "free 74,464" in nano and "target room 16,808 (reply floor 8,192)" in nano
+    assert "predicted free ~131,808 (reply floor 8,192)" in nano and "target room 16,808 (reply floor 8,192)" in nano
+    cold = _facts(monkeypatch, **{**base, "_context_anchor_input_tokens": None}, _context_capacity_total_tokens=500_000)
+    assert "predicted free ~134,464" in cold and "cold chars/4 estimate" in cold
+    assert "reply reservation 65,536" in cold
+    witness = _facts(monkeypatch, **{**base, "_context_anchor_input_tokens": None,
+                                   "_context_measurement_basis": "fresh_model_usage"},
+                     _context_capacity_total_tokens=500_000)
+    assert "predicted free ~134,464" in witness and "fresh same-model" in witness
 
 
 # --- #1728: a technical rebind keeps the sent view while it fits -----------------------------------
@@ -194,7 +205,7 @@ def _wire(monkeypatch, messages):
     return [m for m in payload["messages"] if m["role"] == "system"]
 
 
-def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted"):
+def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None):
     import ouroboros.context
     from ouroboros import context_fit
     from ouroboros.loop_model_call import _rebind_context_fit_plan
@@ -202,9 +213,10 @@ def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="ass
 
     root.mkdir(parents=True, exist_ok=True)
     registry = ToolRegistry(repo_dir=root, drive_root=root)
+    registry._ctx._accumulated_usage = usage
     evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window)
     monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m2", "provider": "p"}, evidence))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a: ratio)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     rebound, mode = _rebind_context_fit_plan(plan, registry, messages, model="m2", use_local=False, start_mode="low",
                                              tool_schemas=[])
     events = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -253,10 +265,40 @@ def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_by_th
     floor = rebound.projection("low").memory_facts["floor"]
     assert mode == "low" and event["view_kept"] is False and messages[0] == rebound.projection("low").system_message()
     assert all(floor["steps"].get(step, 0) >= count for step, count in old["steps"].items())  # nothing unfolds
-    assert sum(floor["steps"].values()) > sum(old["steps"].values())
+    # The first host view pays this one-token shortfall before any additional memory step.
+    assert rebound.projection("low").memory_facts["host_sections_addressed"]
+    assert floor["steps"] == old["steps"]
     assert floor["by_budget"] == old["by_budget"] and floor["budget_allowance_tokens"] is None  # no target refold
     assert floor["allowance_tokens"] == floor["physical_allowance_tokens"]  # no working margin reapplied
     assert messages[1:] == _long_tail(low)[1:]  # the actual tail is never touched
+
+
+@pytest.mark.parametrize("same_route", [True, False])
+def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monkeypatch, same_route):
+    """Acceptance keeps the window known, raises its lower bound and never crosses accounts."""
+    from ouroboros.context_anchor import record_input_anchor
+    from ouroboros import capability_evidence as ce
+    from tests.test_memory_view_modes import _built
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = plan(1_000_000, preferred="low", tool_schemas=[])
+    messages = _long_tail(low)
+    measured = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536,
+                                       tool_schemas=[], start_mode="low", current_messages=messages)
+    tight = measured.projection("low").estimated_tokens + low.output_reserve_tokens - 1
+    accepted = tight + 80_000
+    usage = {"_last_round_cache_usage": {"prompt_tokens": accepted, "provider": "p"},
+             "_context_raw_input_tokens": accepted}
+    record_input_anchor(usage, SimpleNamespace(model="m2", provider="p", output_reserve_tokens=65_536,
+        route_fp=f"r-{tight}" if same_route else "another-account"), round_idx=7)
+    old = low.projection("low").memory_facts["floor"]
+    rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=tight, usage=usage)
+    assert mode == "low" and event["view_kept"] is same_route
+    # An accepted input above the stated total replaces it as an input bound; the reply stays beside it.
+    assert rebound.window_tokens == (accepted + 65_536 if same_route else tight)
+    assert rebound.projection("low").memory_facts["floor"]["steps"] == old["steps"]
+    assert bool(rebound.projection("low").memory_facts.get("host_sections_addressed")) is not same_route
 
 
 @pytest.mark.parametrize("owner,ran,mode", [
@@ -283,7 +325,7 @@ def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_t
     registry._ctx.owner_wait_callback = lambda *_a: None
     evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=1_000_000)
     monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(ouroboros.loop, "get_context_mode", lambda: owner)
     state = {"messages": copy.deepcopy(restored), "trace": {}, "usage": {}, "seen": [], "owner_directives": [],
              "route": {"active_model": "m", "active_effort": "high", "active_use_local": False, "active_context_mode": ran},
@@ -304,7 +346,7 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
     grows them): ``(ctx, gateway, tools, events, plan(window), windows)``. ``windows`` maps an account
     to the window its evidence reports (0: unknown);
     the primary pins account-a, its configured fallback account-b, and every production rebind reads it."""
-    from ouroboros import context, context_compaction, fallback_cooldown, loop, loop_model_call, loop_transport
+    from ouroboros import capability_evidence as ce, context, fallback_cooldown, loop_transport
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
     from ouroboros.tool_policy import initial_tool_schemas
     from tests._memory_view_context import world
@@ -320,12 +362,14 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: False)
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: pytest.fail("no probe"))
-    monkeypatch.setattr(loop, "_run_main_reclaim", loop_model_call._run_main_reclaim)  # the ladder's own helper rung
-    monkeypatch.setattr(context_compaction, "_call_summarizer", lambda *_a, **_kw: pytest.fail("no helper model"))
     windows = {}
 
+    def options(account):
+        return dict(source_id="codex", credential_profile_id=account, account_fingerprint=f"fingerprint-{account[-1]}")
+
     def evidence(account, window):
-        return SimpleNamespace(route_fp=f"capacity-{account}-{window}", status="confirmed" if window else "unprobeable",
+        fp = ce.route_fingerprint(provider="claudexor", model=MODEL, base_url="", options=options(account))
+        return SimpleNamespace(route_fp=fp, status="confirmed" if window else "unprobeable",
                                stale=False, window_tokens=window, source_id="codex", source="advertised",
                                credential_profile_id=account, account_fingerprint=f"fingerprint-{account[-1]}")
 
@@ -333,7 +377,7 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
         explicit = task.get("credential_profile_id")
         account = (explicit if explicit is not None else "account-b" if task["model_role"] == "fallback:0"
                    else "account-a") or (task.get("model_route") or {}).get("credentialProfileId") or "account-a"
-        return {"model": MODEL, "provider": "claudexor"}, evidence(account, windows[account])
+        return {"model": MODEL, "provider": "claudexor", "options": options(account)}, evidence(account, windows[account])
 
     monkeypatch.setattr(context, "_context_fit_route", route)
     tools = _loop_tools(ctx, owner)
@@ -348,7 +392,8 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
 
     def plan(window):
         built = context._build_context_fit_plan(env, core, task, preferred_mode=owner_mode, tool_schemas=schemas,
-            route_resolver=lambda *_a, **_kw: ({"model": MODEL, "provider": "claudexor"}, evidence("account-a", window)))
+            route_resolver=lambda *_a, **_kw: ({"model": MODEL, "provider": "claudexor", "options": options("account-a")},
+                                               evidence("account-a", window)))
         return dataclasses.replace(built, model_role="main", model_route=copy.deepcopy(ROUTE))
 
     return ctx, gateway, tools, events, plan, windows
@@ -388,11 +433,14 @@ def test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the
     round's facts line names the acting one."""
     from ouroboros.send_clock import CLOCK_NOTE_PREFIX
     from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.memory_view import snapshot_json
+    from tests import _memory_view_synthetic as syn
 
-    ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path)
+    ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path,
+                                                       view=snapshot_json(syn.actor("main")))
     roomy = plan(900_000)
     full = roomy.projected_tokens_with_tools("low", initial_tool_schemas(tools, context_mode="low"))
-    width = {"roomy": 900_000, "tight": full + roomy.output_reserve_tokens + 12_000}  # holds the request, not the margins
+    width = {"roomy": 900_000, "tight": max(180_000, full + roomy.output_reserve_tokens + 8_000)}
     assert "### Physical floor" in plan(width["tight"]).low_projection.system_content_json  # its view was narrowed
     windows.update({"account-a": width[primary], "account-b": width[fallback]})
     built = plan(width[primary])
@@ -420,7 +468,7 @@ def test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the
     notice = next(row["content"] for row in sent if str(row["content"]).startswith("[SYSTEM NOTICE]"))
     facts = [row["content"] for row in sent if str(row["content"]).startswith("[CONTEXT_FACTS]")]
     assert f"window {width[fallback]:,}" in facts[-1] and "target 250,000" in facts[-1]  # the acting route, fresh
-    assert (f"This Low view retains memory cuts for the window ({width['tight']} tokens)." in notice) == (primary == "tight")
+    assert ("### Physical floor" in notice) == bool(built.low_projection.memory_facts["floor"]["steps"])
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]
     assert [(row["window_tokens"], row["view_kept"]) for row in rebound] == [(width[fallback], True), (width[primary], True)]
 
@@ -446,8 +494,8 @@ def _unfolded(plan, addressed, message):
 
 
 def _shown_low(main_call, monkeypatch, tmp_path, cut):
-    """The owner's Low view on account-a as the waiting Main call's transcript, cut by that window alone
-    (``window``) or by the Low budget too (``budget``: this room's retold records about five times as long):
+    """The owner's Low view on account-a, with the window or the Low target setting its one start budget
+    (``budget``: this room's retold records about five times as long):
     ``(ctx, tools, events, windows, built)``. Account-b reports a 100,000-token window."""
     from ouroboros.memory_view import snapshot_json
     from ouroboros.tool_policy import initial_tool_schemas
@@ -460,7 +508,7 @@ def _shown_low(main_call, monkeypatch, tmp_path, cut):
     ctx, _gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, view=snapshot_json(actor))
     windows.update({"account-a": 150_000 if cut == "window" else 1_000_000, "account-b": 100_000})
     built = plan(windows["account-a"])
-    assert built.initial_mode == "low" and (built.low_projection.memory_facts["floor"]["by_budget"] > 0) is (cut == "budget")
+    assert built.initial_mode == "low" and built.low_projection.memory_facts["floor"]["by_budget"] > 0
     ctx.tools, ctx.context_fit_plan, ctx.active_context_mode = tools, built, "low"
     ctx.tool_schemas = initial_tool_schemas(tools, context_mode="low")
     ctx.messages[:] = [*built.messages_for("low"), result()["message"],  # the shown Low view, then the round's tail
@@ -468,7 +516,8 @@ def _shown_low(main_call, monkeypatch, tmp_path, cut):
                        {"role": "tool", "tool_call_id": "b", "content": "completed review B"}]
     tools._ctx.context_fit_plan, tools._ctx.messages, tools._ctx.active_context_mode = built, ctx.messages, "low"
     tools._ctx.event_queue = events
-    whole_view = plan(10_000_000).messages_for("max")[0]  # nothing addressed: the check sees all but F3
+    from ouroboros.memory_view import render_room, render_story
+    whole_view = {"story": render_story(actor), "room": render_room(actor)}  # the unfloored source, not an unsent mode
     addressed = _addressed(built, "low")
     assert addressed and not _unfolded(built, addressed, ctx.messages[0])
     assert set(_unfolded(built, addressed, whole_view)) == {pair for pair in addressed if pair[0] != "F3"}
@@ -515,10 +564,10 @@ def test_an_account_reprepare_that_selects_nano_narrows_the_shown_low_view_and_k
     assert floor["mode_switch"] == {"from": "low", "to": "nano"} and floor["budget_allowance_tokens"] is None
     # Provenance: what the Low budget took stays the Low budget's, never a Nano budget's; no budget, no target.
     assert floor["by_budget"] == shown_floor["by_budget"]
-    assert floor["target_tokens"] == (OWNER_LOW_TARGET_TOKENS if cut == "budget" else None)
+    assert floor["target_tokens"] == OWNER_LOW_TARGET_TOKENS
     sent = json.dumps(ctx.messages[0], ensure_ascii=False)
-    assert ("and the Low mode budget (250000 tokens)." in sent) is (cut == "budget")
-    assert "This Nano view retains memory cuts for the window (100000 tokens)" in sent and "Nano mode budget" not in sent
+    assert "the Low mode budget (250000 tokens)." in sent and "Nano mode budget" not in sent
+    assert "for the window (100000 tokens)" in sent
     assert "cannot hold Low with even the shortest view of my memory; this task runs in Nano." in sent  # began in Low
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]
     assert [(row["effective_mode"], row["window_tokens"], row["view_kept"]) for row in rebound] == [
@@ -534,7 +583,7 @@ def test_a_second_narrowing_in_nano_still_names_what_the_low_budget_took(main_ca
     from ouroboros import loop
     from ouroboros import memory_floor as mf
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS, OWNER_LOW_TARGET_TOKENS
-    from ouroboros.loop_model_call import _apply_overflow_rung
+    from ouroboros.loop_round_limits import _coarsen_memory_view
 
     ctx, _tools, events, windows, built = _shown_low(main_call, monkeypatch, tmp_path, "budget")
     by_budget = built.low_projection.memory_facts["floor"]["by_budget"]
@@ -551,8 +600,7 @@ def test_a_second_narrowing_in_nano_still_names_what_the_low_budget_took(main_ca
         assert ("context_fit_route_rebound", False) in kinds
     else:  # the same route refuses the request by 5,000 tokens
         window, fit = 100_000, loop._measure_round_main_fit(ctx, automatic_pass_used=False)
-        refused = dataclasses.replace(fit, measurement=dataclasses.replace(fit.measurement, capacity_deficit_tokens=5_000))
-        assert _apply_overflow_rung(ctx, "memory", refused) is True
+        assert _coarsen_memory_view(ctx, fit, saving=5_000) is True  # the floor's memory step, sized by the refusal
     after = ctx.context_fit_plan
     floor = after.projection("nano").memory_facts["floor"]
     assert ctx.active_context_mode == "nano" and ctx.messages[0] == after.projection("nano").system_message()
@@ -566,22 +614,22 @@ def test_a_second_narrowing_in_nano_still_names_what_the_low_budget_took(main_ca
 
 
 def test_a_selected_lower_view_with_an_unsent_ones_counts_still_carries_the_shown_budget(main_call, monkeypatch, tmp_path):
-    """#1728 provenance when counts coincide. The plan also holds a Nano view for account-b's window rendered
-    from Nano's own level (as a rebind starting in Nano renders it) and never sent: its mode line says the
-    window lowered Low, and no budget took anything in it. The shown Low view then moves to Nano and its
-    narrowing lands on the same counts. The selected view is the shown one's, with its budget provenance."""
+    """Unsent book forms share the start's memory choices. Selecting Nano later preserves the shown
+    Low budget provenance, including when another projection already has the same floor counts."""
     from ouroboros.context_budget import OWNER_LOW_TARGET_TOKENS
 
     ctx, _tools, _events, _windows, built = _shown_low(main_call, monkeypatch, tmp_path, "budget")
     frame = dict(window_tokens=100_000, known_window=True, ratio=1.0, output_reserve=built.output_reserve_tokens,
                  tool_schemas=ctx.tool_schemas, current_messages=ctx.messages)
     unsent = built.reproject_for_route(**frame, start_mode="nano").nano_projection.memory_facts["floor"]
-    assert unsent["by_budget"] == 0 and unsent["mode_switch"] == {"from": "low", "to": "nano"}
+    assert unsent["by_budget"] == built.low_projection.memory_facts["floor"]["by_budget"]
+    assert unsent["mode_switch"] == {"from": "low", "to": "nano"}
     prepared = built.reproject_for_route(**frame, start_mode="nano")
     moved = dataclasses.replace(built, nano_projection=prepared.nano_projection).reproject_for_route(
         **frame, start_mode="low")
     floor = moved.projection("nano").memory_facts["floor"]
-    assert moved.initial_mode == "nano" and floor["steps"] == unsent["steps"]  # the same counts
+    assert moved.initial_mode == "nano"
+    assert _addressed(built, "low") <= _addressed(moved, "nano")
     assert floor["by_budget"] == built.low_projection.memory_facts["floor"]["by_budget"]
     assert floor["target_tokens"] == OWNER_LOW_TARGET_TOKENS
     assert "and the Low mode budget (250000 tokens)." in moved.projection("nano").system_content_json
@@ -640,7 +688,7 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
         assert not _unfolded(built, addressed, tools._ctx.messages[0])
 
 
-# --- the refusal rung still narrows when the estimate fits ------------------------------------------
+# --- the floor's memory step still narrows when the estimate fits -----------------------------------
 
 def _refusal_ctx(tmp_path, plan):
     from ouroboros import memory_floor as mf
@@ -656,10 +704,10 @@ def _refusal_ctx(tmp_path, plan):
 
 
 def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, monkeypatch):
-    from ouroboros import capability_evidence, loop
+    from ouroboros import loop
     from ouroboros import memory_floor as mf
     from ouroboros.context_fit import measure_main_fit
-    from ouroboros.loop_model_call import _apply_overflow_rung
+    from ouroboros.loop_round_limits import _coarsen_memory_view
     from ouroboros.memory_view import snapshot_from_json
     from tests.test_memory_view_modes import _built
 
@@ -667,15 +715,15 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     built = plan(10_000_000)  # a startup view with every element whole
     events = []
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: events.append(_a[-1]))
-    monkeypatch.setattr(capability_evidence, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
     ctx = _refusal_ctx(tmp_path, built)
-    fit = measure_main_fit(built, ctx.messages, [], drive_root=tmp_path, profile="owner_max", rendered_mode="max",
+    fit = measure_main_fit(built, ctx.messages, [], profile="owner_max", rendered_mode="max",
                            round_id="e:round:1")
     assert fit.measurement.capacity_deficit_tokens == 0  # the estimate says it fits; the provider refused
     assert built.projection("max").memory_facts["floor"]["steps"] == {}
-    assert _apply_overflow_rung(ctx, "memory", fit) is True  # still a strict narrowing: at least one element
+    assert _coarsen_memory_view(ctx, fit) is True  # still a strict narrowing: at least one element
     first = ctx.context_fit_plan.projection("max")
-    assert first.memory_facts["floor"]["steps"] and first.estimated_tokens < built.projection("max").estimated_tokens
+    assert first.memory_facts["host_sections_addressed"] and first.memory_facts["floor"]["steps"] == {}
+    assert first.estimated_tokens < built.projection("max").estimated_tokens
     assert ctx.messages[0] == first.system_message() and ctx.tools._ctx.context_fit_plan is ctx.context_fit_plan
     assert [e["checkpoint_kind"] for e in events] == ["context_memory_coarsened"]
     # A measured deficit is saved in full, from the level the refused view showed: nothing it addressed comes back.
@@ -683,8 +731,7 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     kept = {(step, ident) for step, ids in mf.kept_level(snapshot, first.memory_facts).addressed for ident in ids}
     left = sum(whole - short for step, ident, whole, short in mf.degradable_elements(snapshot) if (step, ident) not in kept)
     deficit = max(1, left // 2)
-    refused = dataclasses.replace(fit, measurement=dataclasses.replace(fit.measurement, capacity_deficit_tokens=deficit))
-    assert _apply_overflow_rung(ctx, "memory", refused) is True
+    assert _coarsen_memory_view(ctx, fit, saving=deficit) is True  # the measured target, from the level shown
     second = ctx.context_fit_plan.projection("max")
     assert all(second.memory_facts["floor"]["steps"].get(step, 0) >= count
                for step, count in first.memory_facts["floor"]["steps"].items())
@@ -694,22 +741,17 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     tool_ctx, trace = ctx.tools._ctx, ctx.tools._ctx._execution_trace
     assert tool_ctx.memory_view_facts == trace[VIEW_TRACE_KEY] == mf.trace_facts(second.memory_facts)
     everything = sum(whole for _step, _ident, whole, _short in mf.degradable_elements(snapshot))
-    shortest = dataclasses.replace(fit, measurement=dataclasses.replace(fit.measurement,
-                                                                        capacity_deficit_tokens=everything))
-    assert _apply_overflow_rung(ctx, "memory", shortest) is True
+    assert _coarsen_memory_view(ctx, fit, saving=everything) is True
     kept = tool_ctx.memory_view_facts
     assert kept == trace[VIEW_TRACE_KEY] == mf.trace_facts(ctx.context_fit_plan.projection("max").memory_facts)
-    assert _apply_overflow_rung(ctx, "memory", shortest) is False  # every element is already an address
+    assert _coarsen_memory_view(ctx, fit, saving=everything) is False  # every element is already an address
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
 
 
-def test_a_low_retry_after_memory_narrowing_keeps_every_address_the_refused_max_request_showed(
+def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
         main_call, monkeypatch, tmp_path):
-    """#1728 on the production refusal ladder, owner Max with rich memory. The owner's long words while the task
-    ran take the request past the window; the provider refuses it by size, the memory rung narrows the shown Max
-    view by the deficit, and the provider refuses again; the Low rung drops the books. The Low request the gateway
-    receives shows my memory as the refused Max request did -- the Low view prepared at startup and never sent does
-    not come back -- only the books and the mode its floor note names change, and every turn is resent."""
+    """The production pre-send passes preserve continuity: narrow Max's memory before lowering its books,
+    keep those addresses in Low instead of resurrecting the startup view, and send every owner word."""
     from ouroboros import context_fit, memory_floor as mf
     from ouroboros.memory_inventory import shortage_from_trace
     from ouroboros.memory_view import snapshot_from_json, snapshot_json
@@ -730,29 +772,27 @@ def test_a_low_retry_after_memory_narrowing_keeps_every_address_the_refused_max_
     full_low = built.reproject_transcript(ctx.messages, "low")
     assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) + \
         built.output_reserve_tokens <= window  # after dropping books the original, uncut memory would fit
-    refusal = result(outcome="failed", problem={"code": "context_length_exceeded", "message": "This model's maximum "
-                     f"context length is {window} tokens. However, your messages resulted in {window + 20_000} tokens."})
-    gateway.results = [refusal, copy.deepcopy(refusal), _answer(ROUTE, {"role": "assistant", "content": "Kept."})]
-    gateway.dispatch = ["response_received"] * 3
+    first = copy.deepcopy(ctx.messages)
+    gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
+    gateway.dispatch = ["response_received"]
     tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)  # as the start records it
     text, _usage, trace = _run(ctx, tools, events, built)
 
-    first, refused, low = (payload["messages"] for payload, _key in gateway.uploads)
+    [low] = [payload["messages"] for payload, _key in gateway.uploads]
     kinds = [row.get("checkpoint_kind") for row in _drained(events)]
-    assert text == "Kept." and len(gateway.creates) == 3 and tools._ctx.active_context_mode == "low"
-    assert kinds.index("context_memory_coarsened") < kinds.index("context_fit_low_retry")
+    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
+    assert kinds.index("context_memory_coarsened") < kinds.index("context_fit_low_retry")  # one pass: memory, then books
 
     def shows(sent, whole):
         return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(sent, ensure_ascii=False)
 
     elements = mf.floor_elements(snapshot_from_json(built.core.memory_view_json))
-    narrowed = {(step, ident) for step, ident, whole, _short in elements if shows(first, whole) and not shows(refused, whole)}
+    narrowed = {(step, ident) for step, ident, whole, _short in elements if shows(first, whole) and not shows(low, whole)}
     assert {step for step, _ident in narrowed} >= {"F1", "F1b"}  # the deficit took more than one element
-    assert not [(step, ident) for step, ident, whole, _short in elements if (step, ident) in narrowed and shows(low, whole)]
     # Max sends [books, handbook, story, rooms notice, turns...]; Low [book navigation, story, rooms notice, turns...].
-    assert len(json.dumps(low[0])) < len(json.dumps(refused[0])) and low[1] == refused[2]  # the story: the same bytes
-    assert json.dumps(low[2]).replace("This Low view", "This Max view") == json.dumps(refused[3])
-    assert low[3:-2] == refused[4:-1]  # every turn resent; one facts line appended, the clock row replaced
+    assert len(json.dumps(low[0])) < len(json.dumps(first[0]))
+    from ouroboros.transcript_prefix import message_digest
+    assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
     note = low[2]["content"]
     assert f"This Low view retains memory cuts for the window ({window} tokens)." in note
     assert "does not hold all of my memory" not in note and "cannot hold" not in note
@@ -761,7 +801,7 @@ def test_a_low_retry_after_memory_narrowing_keeps_every_address_the_refused_max_
     sent_fact = mf.trace_facts(tools._ctx.context_fit_plan.projection("low").memory_facts)
     assert trace[VIEW_TRACE_KEY] == tools._ctx.memory_view_facts == sent_fact
     assert sent_fact["floor"]["mode"] == "low" and sent_fact["floor"]["steps"].keys() >= {"F1", "F1b"}
-    assert shortage_from_trace(trace).kind == "narrative"  # the old pages the Low request showed by pointer
+    assert shortage_from_trace(trace).kind == "open_rows"  # open conversation now survives beyond the late note cuts
     # A later fitting route keeps this historical note and every address without reasserting a new shortage.
     after = tools._ctx.context_fit_plan
     rebound = after.reproject_for_route(window_tokens=window * 2, known_window=True, ratio=1.0,
@@ -773,20 +813,114 @@ def test_a_low_retry_after_memory_narrowing_keeps_every_address_the_refused_max_
     assert _addressed(rebound, "low") == _addressed(after, "low")
 
 
-def test_a_giant_chosen_read_on_an_unknown_window_recovers_from_the_providers_size_refusal_by_its_exact_source(
+@pytest.mark.parametrize("owner_mode", ["low", "nano"])
+def test_a_chosen_read_above_target_reaches_the_model_inside_the_known_window(
+        main_call, monkeypatch, tmp_path, owner_mode):
+    """A real requested read crosses batch delivery and the next physical admission unchanged."""
+    from ouroboros.context_anchor import REFUSED_INPUTS_KEY
+    from ouroboros.context_budget import OWNER_LOW_TARGET_TOKENS
+
+    task_text = "Read giant.txt whole and report its LAST line verbatim. Keep the old API alive."
+    ctx, gateway, tools, events, plan, windows = _native(
+        main_call, monkeypatch, tmp_path, task_text=task_text, owner_mode=owner_mode)
+    windows["account-a"] = 1_000_000
+    built = plan(windows["account-a"])
+    ctx.messages[:] = built.messages_for(owner_mode)
+    giant = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(20_000))
+    giant += "LAST LINE: keep the old API alive\n"
+    (ctx.drive_root / "giant.txt").write_text(giant, encoding="utf-8")
+    read = {"id": "chosen-read", "type": "function", "function": {"name": "read_file", "arguments": json.dumps(
+        {"path": "giant.txt", "start_line": 1, "max_lines": 30_000})}}
+    gateway.results = [
+        _answer(ROUTE, {"role": "assistant", "content": "Reading it.", "tool_calls": [read]}),
+        _answer(ROUTE, {"role": "assistant", "content": "LAST LINE: keep the old API alive"})]
+    gateway.dispatch = ["response_received"] * 2
+    text, usage, trace = _run(ctx, tools, events, built)
+
+    assert text == "LAST LINE: keep the old API alive" and len(gateway.creates) == 2
+    assert OWNER_LOW_TARGET_TOKENS < usage["_context_prompt_estimate"] < 1_000_000 - built.output_reserve_tokens
+    second = gateway.uploads[1][0]["messages"]
+    shown = next(row["content"] for row in second if row.get("tool_call_id") == "chosen-read")
+    header, *rows = shown.rstrip("\n").split("\n")
+    assert "lines 1–20001 of 20001" in header
+    assert "".join(row.split("\t", 1)[1] + "\n" for row in rows) == giant
+    assert all(any(task_text in json.dumps(row, ensure_ascii=False) for row in payload["messages"])
+               for payload, _key in gateway.uploads)
+    assert [call["tool"] for call in trace["tool_calls"]] == ["read_file"]
+    assert not usage.get(REFUSED_INPUTS_KEY)
+    assert not any(row.get("checkpoint_kind") == "context_reclaim_emergency" for row in _drained(events))
+    assert tools._ctx.active_context_mode == owner_mode
+
+
+@pytest.mark.parametrize("owner_mode,window", [("low", 300_000), ("nano", 300_000), ("max", 400_000)])
+def test_a_window_bounded_chosen_read_survives_next_host_rows_and_source_shrink(
+        main_call, monkeypatch, tmp_path, owner_mode, window):
+    import functools
+
+    from ouroboros.context_anchor import REFUSED_INPUTS_KEY
+    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.send_clock import CLOCK_NOTE_PREFIX
+
+    ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode=owner_mode,
+                                                       task_text="Read giant.txt whole, including its last line.")
+    windows.update({"account-a": window, "account-b": 1_000_000})
+    built = plan(window)
+    ctx.messages[:] = built.messages_for(owner_mode)
+    giant = "".join(f"row {n:07d}: payload payload payload payload payload\n" for n in range(20_000))
+    giant += "LAST LINE: keep the old API alive\n"
+    path = ctx.drive_root / "giant.txt"
+    path.write_text(giant, encoding="utf-8")
+    read_file, originals = tools._entries["read_file"].handler, []
+
+    @functools.wraps(read_file)
+    def shrinking_source(*args, **kwargs):
+        answer = read_file(*args, **kwargs)
+        originals.append(str(answer))
+        path.write_text("The source has since shrunk.\n", encoding="utf-8")
+        return answer
+
+    tools.override_handler("read_file", shrinking_source)
+    read = {"id": "chosen-read", "type": "function", "function": {"name": "read_file", "arguments": json.dumps(
+        {"path": "giant.txt", "start_line": 1, "max_lines": 30_000})}}
+    gateway.results = [
+        _answer(ROUTE, {"role": "assistant", "content": "Reading.", "tool_calls": [read]}),
+        _answer(ROUTE, {"role": "assistant", "content": "Read the bounded view."})]
+    gateway.dispatch = ["response_received"] * 2
+    text, usage, trace = _run(ctx, tools, events, built)
+    assert text == "Read the bounded view." and len(gateway.creates) == 2
+    sent = gateway.uploads[1][0]
+    shown = next(row["content"] for row in sent["messages"] if row.get("tool_call_id") == "chosen-read")
+    if window < 400_000:
+        view = _view_json(shown)
+        assert view["shown_ranges"] and view["omitted_ranges"]
+        assert view["facts"]["cut_reason"] == "chosen_body_exceeds_usable_input"
+        assert artifacts.read_actor_source_bytes(ctx.drive_root, ctx.task_id, _source_ref(shown)).decode() == originals[0]
+    else:
+        assert shown == originals[0]  # the body alone fits: the surrounding request must recover first
+    assert "row 0000000" in shown and "LAST LINE: keep the old API alive" in shown
+    assert len(originals) == 1 and len(path.read_text()) < 100
+    assert any(str(row.get("content", "")).startswith("[CONTEXT_FACTS]") for row in sent["messages"])
+    assert any(str(row.get("content", "")).startswith(CLOCK_NOTE_PREFIX) for row in sent["messages"])
+    delivery = trace["tool_result_delivery"][0]
+    active_window = windows[sent["account"]["profileId"]]
+    assert bounded_prompt_tokens_for_payload(sent, 0) + usage["_context_response_reserve_tokens"] < active_window
+    assert delivery["whole_tokens"] + delivery["reserve_tokens"] > window
+    assert not usage.get(REFUSED_INPUTS_KEY)
+    assert gateway.uploads[0][0]["account"] == {"mode": "pin", "profileId": "account-a"}
+    assert any(row.get("checkpoint_kind") == "context_fit_refused" for row in _drained(events))
+
+
+def test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engine_refusal(
         main_call, monkeypatch, tmp_path):
-    """#1727 A on the production send, its named cost included. The window is unknown, so a page the mind asked
-    for arrives as chosen, far past the Low target; the provider then refuses that request by its actual size
-    (a synthetic refusal) and the production ladder recovers on the same route: the unconfirmed giant body
-    becomes its exact checkpointed source with the read that reaches it, the owner's task text stays the same
-    bytes in every send, and the read ran once -- one strictly smaller resend, no tool executed again."""
+    """Claudexor's private engine message is no provider-authored numeric limit. With no usable-input
+    fact the chosen body stays whole, including on the configured fallback's larger known window."""
     import functools
 
     from ouroboros.context_budget import OWNER_LOW_TARGET_TOKENS
 
     task_text = "Read giant.txt whole and report its LAST line verbatim. Keep the old API alive."
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, task_text=task_text)
-    windows["account-a"] = 0  # no fresh window evidence anywhere
+    windows.update({"account-a": 0, "account-b": 1_000_000})
     built = plan(0)
     ctx.messages[:] = built.messages_for("low")
     giant = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(20_000))
@@ -821,23 +955,15 @@ def test_a_giant_chosen_read_on_an_unknown_window_recovers_from_the_providers_si
     # The pre-send measurement saw the target deficit (no window to fit) and concealed nothing for it.
     facts = [row["content"] for row in refused if str(row["content"]).startswith("[CONTEXT_FACTS]")][-1]
     assert "window unknown" in facts and "free unknown" in facts and "over target" in facts
-    # The refusal was recovered on the same route by one strictly smaller resend.
+    # No fact justified cutting the chosen body; the configured fallback holds it whole.
     assert text == "LAST LINE: keep the old API alive" and len(gateway.creates) == 3
-    assert [payload["account"] for payload, _key in gateway.uploads] == [{"mode": "pin", "profileId": "account-a"}] * 3
-    assert len(json.dumps(retry)) < len(json.dumps(refused)) // 10
-    assert not any(row.get("tool_call_id") == "giant-read" for row in retry)
+    assert [payload["account"]["profileId"] for payload, _key in gateway.uploads] == ["account-a", "account-a", "account-b"]
+    assert next(row["content"] for row in retry if row.get("tool_call_id") == "giant-read") == shown
     # The owner's operative words are the same bytes in every send.
     task = [[row for row in sent if task_text in json.dumps(row, ensure_ascii=False)] for sent in (first, refused, retry)]
     assert task[0] == task[1] == task[2] and len(task[0]) == 1
-    # The body is its exact source: the rescue names the read that reaches it, and that source holds the bytes sent.
-    rescue = next(row for row in retry if "Late source-only rescue" in json.dumps(row))["content"][0]["text"]
-    reference = json.loads(rescue.split("Source reference: ", 1)[1].split("\n", 1)[0])["checkpoint_ref"]
-    checkpoint = json.loads(artifacts.read_actor_source_bytes(ctx.drive_root, "task-one", reference))
-    assert next(row["content"] for row in checkpoint["messages"] if row.get("tool_call_id") == "giant-read") == shown
-    # No duplicate effect: the loop executed the read once; the rescue's own read is a new, explicit one.
+    assert "Late source-only rescue" not in json.dumps(retry)
     assert len(runs) == 1 and [call["tool"] for call in trace["tool_calls"]] == ["read_file"]
-    page = tools.execute(reference["read"]["tool"], reference["read"]["arguments"])
-    assert reference["path"] in page.split("\n", 1)[0] and "LAST LINE: keep the old API alive" in page and len(runs) == 2
 
 
 # --- #1527: Nano sends the task text while the request physically fits --------------------------------

@@ -48,11 +48,13 @@ def build_onboarding_html(settings: dict, host_mode: str = "desktop", *, fresh_i
     return render_onboarding_html(build_setup_bootstrap(settings, normalized_host_mode, fresh_install=fresh_install))
 
 
-def render_onboarding_html(bootstrap: dict) -> str:
-    """The wizard page carrying exactly ``bootstrap`` (the object ``GET /api/onboarding/bootstrap`` returns)."""
-    return _read_asset(_TEMPLATE_PATH).replace(
+def render_onboarding_html(bootstrap: dict, head: str = "") -> str:
+    """The wizard page carrying exactly ``bootstrap`` (the object ``GET /api/onboarding/bootstrap`` returns);
+    ``head`` leads its ``<head>`` (the appearance scope a served page names before its ``theme.js``)."""
+    page = _read_asset(_TEMPLATE_PATH).replace(
         "__ONBOARDING_BOOTSTRAP__", _bootstrap_script_json(bootstrap)
     )
+    return page.replace("<head>", "<head>" + head, 1) if head else page
 
 
 def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dict, str | None]:

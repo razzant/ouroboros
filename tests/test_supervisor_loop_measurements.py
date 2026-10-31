@@ -277,9 +277,15 @@ def _run_custody_tick(monkeypatch, *, failing_step=None):
         lambda: type("_D", (), {"clear_start_failure_latch": lambda self, **_k: False})(),
     )
     monkeypatch.setattr(sm, "threading", SimpleNamespace(Thread=tracked))
+    from ouroboros.maintenance import child as maintenance_child
+
     sm._periodic_supervisor_maintenance([0.0], [time.time()])
     for thread in threads:
         thread.join(5)
+    # A process's first pass also reserves its one maintenance child, whose thread may spawn
+    # a due job's process; a slow runner is still inside it at teardown. Join it here, as its owner.
+    if maintenance_child._thread is not None:
+        maintenance_child._thread.join(60)
     assert all(not thread.is_alive() for thread in threads)
 
 
@@ -640,6 +646,108 @@ def test_stack_rows_parse_windows_drives_and_colons_inside_paths():
     assert server_liveness._innermost_repo_frame(["not a stack row"]) == ""
 
 
+def test_a_runtime_prefix_holds_only_whole_path_components(monkeypatch):
+    """A frame is inside the runtime only below a whole component of a prefix: a sibling
+    ``<prefix>-other`` is an ordinary outside frame, returned as its row spells it."""
+    from types import SimpleNamespace
+
+    from ouroboros import server_liveness
+
+    monkeypatch.setattr(server_liveness, "sys", SimpleNamespace(prefix="/opt/py", base_prefix="C:\\Python311"))
+    for runtime, sibling in (("/opt/py/lib/python3.11/threading.py:1 in wait", "/opt/py-other/x.py"),
+                             ("C:\\Python311\\Lib\\threading.py:1 in wait", "C:\\Python311-other\\x.py")):
+        assert server_liveness._innermost_repo_frame([runtime]) == "", runtime
+        assert server_liveness._innermost_repo_frame([f"{sibling}:3 in f", runtime]) == f"{sibling}:f"
+
+
+def test_a_symlinked_prefix_is_the_runtime_where_it_resolves(monkeypatch, tmp_path):
+    """Homebrew's base prefix is its ``opt`` symlink while the standard library loads from the
+    Cellar it resolves to (in its venvs too): a stalled wait there names its caller, never
+    ``threading.py:wait``."""
+    from types import SimpleNamespace
+
+    from ouroboros import server_liveness
+
+    cellar = tmp_path.resolve() / "Cellar" / "python@3.11" / "3.11.15_1"
+    cellar.mkdir(parents=True)
+    opt = tmp_path.resolve() / "opt" / "python@3.11"
+    opt.parent.mkdir()
+    try:
+        opt.symlink_to(cellar, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(server_liveness, "sys", SimpleNamespace(prefix=str(tmp_path / "venv"), base_prefix=str(opt)))
+    stdlib = (cellar / "lib" / "python3.11" / "threading.py").as_posix()
+    waits = [f"{stdlib}:629 in wait", f"{stdlib}:327 in wait"]  # outermost first, like _loop_thread_stack
+    assert server_liveness._innermost_repo_frame(["/srv/app/turn.py:7 in stalls", *waits]) == "/srv/app/turn.py:stalls"
+    assert server_liveness._innermost_repo_frame(waits) == ""
+    assert server_liveness._innermost_repo_frame([f"{opt.as_posix()}/lib/python3.11/threading.py:1 in wait"]) == ""
+
+
+@pytest.mark.parametrize("path", ["<legitimate>/worker.py", "<legitimate>\\worker.py", "<unfinished.py", "<folder>/worker>"])
+def test_real_stack_paths_starting_with_angle_brackets_keep_attribution(path):
+    from ouroboros import server_liveness
+
+    assert server_liveness._innermost_repo_frame([f"{path}:2 in hold"]) == f"{path}:hold"
+
+
+def test_a_pseudo_filename_never_names_the_stalled_frame(monkeypatch, tmp_path):
+    """``<frozen importlib._bootstrap>`` and ``<string>`` name no file. On real stacks a thread inside a
+    slow import of a module outside the repository, a second thread waiting on that module's import lock
+    and a thread blocked in exec'd code each fold to their repository caller; with no repository frame on
+    the stack, to the slow module and to the callers' own files."""
+    import sys
+    from types import SimpleNamespace
+
+    from ouroboros import config, server_liveness
+
+    gate = SimpleNamespace(entered=threading.Event(), release=threading.Event())
+    monkeypatch.setitem(sys.modules, "stall_probe_gate", gate)
+    slow = tmp_path / "stall_probe_slow_import.py"
+    slow.write_text("import stall_probe_gate as gate\ngate.entered.set()\ngate.release.wait(10)\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def imports_slowly():
+        __import__("stall_probe_slow_import")
+
+    def waits_on_the_import_lock():
+        __import__("stall_probe_slow_import")
+
+    def runs_exec_code():
+        exec(compile("gate.release.wait(10)", "<string>", "exec"), {"gate": gate})
+
+    callers = (imports_slowly, waits_on_the_import_lock, runs_exec_code)
+    threads = [threading.Thread(target=caller, daemon=True) for caller in callers]
+
+    def innermost(thread):
+        return (server_liveness._loop_thread_stack(thread.ident) or [""])[-1]
+
+    def folded():
+        return [server_liveness._innermost_repo_frame(server_liveness._loop_thread_stack(t.ident)) for t in threads]
+
+    sys.modules.pop("stall_probe_slow_import", None)
+    try:
+        threads[0].start()
+        assert gate.entered.wait(10)
+        for thread in threads[1:]:
+            thread.start()
+        _wait_until(lambda: innermost(threads[1]).endswith(" in acquire")
+                    and innermost(threads[0]).endswith(" in wait") and innermost(threads[2]).endswith(" in wait"))
+        assert innermost(threads[1]).startswith("<frozen importlib._bootstrap>"), innermost(threads[1])
+        assert all(any(row.startswith("<") for row in server_liveness._loop_thread_stack(t.ident)) for t in threads)
+        here = Path(__file__).resolve()
+        monkeypatch.setattr(config, "REPO_DIR", here.parents[1])
+        assert folded() == [f"tests/{here.name}:{caller.__name__}" for caller in callers]
+        monkeypatch.setattr(config, "REPO_DIR", tmp_path / "elsewhere")
+        assert folded() == [f"{slow.as_posix()}:<module>",
+                            *(f"{PurePath(c.__code__.co_filename).as_posix()}:{c.__name__}" for c in callers[1:])]
+    finally:
+        gate.release.set()
+        for thread in threads:
+            thread.join(10)
+        sys.modules.pop("stall_probe_slow_import", None)
+
+
 def test_a_recurring_step_failure_backs_off_to_powers_of_two_and_reports_recovery(monkeypatch, caplog):
     """Failures 1, 2, 4, 8 of one periodic step are WARNING with the traceback; the ones between
     are DEBUG; the first success afterwards is one INFO naming the streak."""
@@ -667,9 +775,12 @@ def test_a_due_cadence_finding_its_latch_held_journals_the_duty_stall_with_its_s
     journals it once with the pass thread's stack (its threshold is the pass's cadence, never
     the loop deadline), and the pass's end journals the closing row."""
     import ouroboros.server_maintenance as sm
+    from ouroboros import update_generation_facts
 
     monkeypatch.setattr(sm, "_DUTIES", {})
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
+    observed = []  # the after-update facts count each journaled stall once
+    monkeypatch.setattr(update_generation_facts, "observe_duty_overrun", observed.append)
     release = threading.Event()
 
     def _slow_custody_pass(stop_event, latch):
@@ -685,7 +796,7 @@ def test_a_due_cadence_finding_its_latch_held_journals_the_duty_stall_with_its_s
         assert sm._CUSTODY_SWEEP_LOCK.locked() and not journal
         last_custody[0] = 0.0  # the next cadence is due while the pass still runs...
         sm._periodic_supervisor_maintenance(last_custody, last_reconcile)
-        assert not journal, "...but the pass has not run a cadence yet: a due tick alone is no stall"
+        assert not journal and not observed, "...but the pass has not run a cadence yet: a due tick alone is no stall"
         sm._DUTIES[id(sm._CUSTODY_SWEEP_LOCK)]["since"] -= 601  # now it has outlived its cadence
         sm._periodic_supervisor_maintenance(last_custody, last_reconcile)
         sm._periodic_supervisor_maintenance(last_custody, last_reconcile)  # journaled once, not per tick
@@ -699,6 +810,7 @@ def test_a_due_cadence_finding_its_latch_held_journals_the_duty_stall_with_its_s
     assert stall["duty"] == "custody-maintenance" and stall["cadence_sec"] == 600
     assert any("_slow_custody_pass" in frame for frame in stall["stack"]), stall
     assert journal[1][1]["duty"] == "custody-maintenance" and journal[1][1]["running_sec"] >= 0
+    assert observed == ["custody-maintenance"]
 
 
 def test_a_reconcile_pass_just_started_after_an_old_end_stamp_is_not_a_stall(monkeypatch, journal):

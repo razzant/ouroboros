@@ -228,7 +228,7 @@ def test_the_server_composes_the_served_interface_and_applies_it_in_the_lifespan
     import server
 
     paths = [getattr(route, "path", "") for route in server.routes]
-    assert paths[0] == "/" and paths[-2:] == ["/onboarding/static", "/static"]
+    assert paths[0] == "/" and paths[-3:] == ["/auth", "/onboarding/static", "/static"]
     assert isinstance(server.served_ui, ServedUI) and server.routes[0].endpoint is server.index_page
     source = (REPO / "server.py").read_text(encoding="utf-8")
     lifespan = source[source.index("async def lifespan(app):"):]

@@ -977,12 +977,16 @@ def test_api_route_preserves_typed_domain_status_and_exact_response_shape(monkey
     }
 
 
-def test_authoritative_tool_uses_shared_parser_and_never_gateway_cache():
+def test_authoritative_tool_uses_shared_destination_resolver_and_never_gateway_cache():
+    from ouroboros.gateway import skill_publish as preflight
     from ouroboros.tools import skill_publish as authoritative
 
+    # One resolver binds the destination for the preflight answer and the publishing tool.
+    for module in (authoritative, preflight):
+        source = inspect.getsource(module)
+        assert "resolve_publish_destination" in source
+        assert "_parse_hub_destination" not in source
     source = inspect.getsource(authoritative)
-    assert "parse_skill_publish_destination" in source
-    assert "_parse_hub_destination" not in source
     assert "gateway.skill_publish" not in source
     assert "_PREFLIGHT_SCAN_CACHE" not in source
 

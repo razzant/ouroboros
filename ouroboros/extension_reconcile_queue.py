@@ -286,6 +286,8 @@ def _mark_failed(
         })
         failed_path = path.parent / "failed" / path.name
         atomic_write_json(failed_path, payload)
+        from ouroboros.maintenance_retirement import artifact_changed
+        artifact_changed(drive_root)
         try:
             path.unlink()
         except FileNotFoundError:
@@ -308,7 +310,7 @@ def prune_failed_reconcile_markers(
     fact that survives it. Age by file mtime (written at the final failure); a
     refused unlink keeps the file and reports.
     """
-    from ouroboros.retention import age_cutoff, get_gc_retention_days
+    from ouroboros.retention import age_cutoff, get_gc_retention_days, keep_until
 
     if retention_days is None:
         retention_days = get_gc_retention_days()
@@ -321,7 +323,9 @@ def prune_failed_reconcile_markers(
         return report
     for path in entries:
         try:
-            if path.stat().st_mtime >= cutoff:
+            stamp = path.stat().st_mtime
+            if stamp >= cutoff:
+                keep_until(report, stamp, retention_days)
                 report["kept"] += 1
                 continue
             path.unlink()
@@ -354,6 +358,10 @@ def process_extension_reconcile_requests(
                 repo_path=repo_path,
                 retry_load_error=True,
             )
+            if state.get("reason") == "live_call_active":
+                processed.append({"skill": skill, "action": state["action"],
+                                  "reason": state["reason"], "marker_removed": False})
+                continue
             companion_state = ensure_companions_running(
                 skill,
                 pathlib.Path(drive_root),

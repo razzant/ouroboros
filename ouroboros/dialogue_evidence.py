@@ -16,7 +16,7 @@ from ouroboros.project_dialogue import (
     room_membership, source_refs_for_project, latest_chat_annotations,
 )
 from ouroboros.projects_registry import list_reserved_projects, RoomResolver
-from ouroboros.utils import jsonl_archive_segments, jsonl_generation_signature, utc_now_iso
+from ouroboros.utils import utc_now_iso
 
 # Structural producer fields, not a semantic selection of what counts as an
 # instruction. Binary media is deliberately represented by its delivered name.
@@ -27,6 +27,7 @@ _ROW_FACTS = (
     "status", "reason_code", "outcome", "outcome_axes", "terminal_host_notice", "task_terminal_status", "summary_kind",
     "lifecycle", "quiz", "actions", "title", "filename", "caption", "mime",
     "project_origin_projection", "presence_provenance", "attachment_gap",
+    "reply_to", "relay", "reply_to_relay",  # the host-resolved relations: what a row replies to, the owner words a relay quotes
 )
 
 
@@ -68,29 +69,22 @@ def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, p
     return result
 
 
-def _progress_source(root: pathlib.Path, matches) -> tuple[list, dict]:
-    from ouroboros.memory import Memory
+def _progress_source(root: pathlib.Path, chat_id: int) -> tuple[list, dict]:
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_chain import room_rows
 
-    live = root / "logs" / "progress.jsonl"
-    rows, gaps, generations = [], [], []
-    try:
-        paths = [*jsonl_archive_segments(live, strict=True), live]
-        before = [jsonl_generation_signature(path) for path in paths]
-        for path, signature in zip(paths, before):
-            if not path.exists():
-                continue
-            entries, errors = Memory._read_chat_generation(path)
-            gaps.extend(errors)
-            generations.append({"path": str(path), **signature})
-            rows.extend(row for row in entries if matches(_chat_id(row), row))
-        after_paths = [*jsonl_archive_segments(live, strict=True), live]
-        stable = paths == after_paths and before == [jsonl_generation_signature(path) for path in after_paths]
-        if not stable:
-            gaps.append({"kind": "progress_changed_during_capture"})
-    except OSError as exc:
-        stable = False
-        gaps.append({"kind": "progress_unreadable", "error": type(exc).__name__})
-    return rows, {"generations": generations, "gaps": gaps, "snapshot_stable": stable}
+    upper = ds.stream_end(root, "progress")
+    coverage = ds.range_coverage(root, "progress", upper=upper)
+    rows = [entry.row for entry in room_rows(root, chat_id, stream="progress", upper=upper)]
+    gaps = []
+    if coverage["pending"]:
+        gaps.append({"kind": "history_importing", "detail": "Dialogue history is still importing"})
+    if coverage["mismatch"]:
+        gaps.append({"kind": "history_import_failed", "detail": "A segment could not be imported"})
+    if coverage["gaps"]:
+        gaps.append({"kind": "recorded_invalid_intervals", "count": coverage["gaps"]})
+    return rows, {"generations": ([{"path": str(ds.path(root)), "size": upper}] if upper else []),
+                  "gaps": gaps, "snapshot_stable": coverage["imported"]}
 
 
 def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
@@ -109,8 +103,8 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
         return None
     refs = source_refs_for_project(root, chat_id) if chat_id in projects else []
     matches = room_membership(chat_id, set(projects), refs, RoomResolver(root))
-    rows, coverage = Memory(root).read_chat_generations(predicate=lambda row: matches(_chat_id(row), row))
-    if chat_id not in projects and chat_id not in {0, 1} and not rows:
+    rows, coverage = Memory(root).read_chat_generations(room_id=chat_id, predicate=lambda row: matches(_chat_id(row), row))
+    if chat_id not in projects and chat_id not in {0, 1} and not rows and not coverage["gaps"]:
         return None
     annotations = latest_chat_annotations(root)
     from ouroboros.chat_chain import iter_room_rows, source_row_id  # D06->D15 is lazy-only
@@ -119,7 +113,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     # An activated chronicle records the lineage epoch: an outgoing row before it is signed by
     # its task result, never assumed mine. That rule needs each room row's stream position.
     lineage, positions = row_lineage(root), {}
-    if lineage:
+    if lineage and coverage["snapshot_stable"]:
         for address, _row, pos in iter_room_rows(root, chat_id):
             positions.setdefault(address["row_sha256"], pos)
     source_rows = []
@@ -162,7 +156,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
         if not any(entry_matches_source_ref(row, [origin["ref"]]) for row in rows):
             source_rows.append(_row_projection({**origin["ref"], "direction": "in", "text": origin["text"],
                                                "project_origin_projection": True}, "retained_origin", len(source_rows) + 1))
-    progress, progress_coverage = _progress_source(root, matches)
+    progress, progress_coverage = _progress_source(root, chat_id)
     source_rows.extend(_row_projection(row, "progress", i, root) for i, row in enumerate(progress, 1))
     mailbox_coverage = {"included": bool(task_id), "complete": True}
     # steering.py constructs this exact delivery id from the canonical client
@@ -171,11 +165,12 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
                         if row.get("direction") == "in" and row.get("client_message_id")}
     if task_id:
         from ouroboros.owner_mailbox import (
-            KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE,
+            KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE,
             deliver_task_message, drain_owner_entries,
         )
         entries = drain_owner_entries(pathlib.Path(mailbox_root or root), task_id, include_acknowledged=True,
-                                      kinds={KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE}, _read_status=mailbox_coverage)
+                                      kinds={KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_CARD_INPUT, KIND_TASK_MESSAGE},
+                                      _read_status=mailbox_coverage)
         for i, entry in enumerate(entries, 1):
             row = {**entry, "task_id": task_id}
             if entry.get("kind") in {KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED}:
@@ -233,10 +228,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     }
     header = {"chat_id": chat_id, "label": label, "rows": len(unique), "coverage": source_header_coverage}
     text = "\n".join(json.dumps(row, ensure_ascii=False, default=str) for row in [header, *unique]) + "\n"
-    from ouroboros.tools.review_helpers import redact_prompt_secrets
-
-    text, redacted = redact_prompt_secrets(text)
-    return {**header, "coverage": source_coverage, "captured_at": utc_now_iso(), "rows": [json.loads(line) for line in text.split("\n")[1:-1]], "text": text, "secrets_redacted": redacted,
+    return {**header, "coverage": source_coverage, "captured_at": utc_now_iso(), "rows": [json.loads(line) for line in text.split("\n")[1:-1]], "text": text,
             "sha256": sha256(text.encode()).hexdigest(), "bytes": len(text.encode())}
 
 

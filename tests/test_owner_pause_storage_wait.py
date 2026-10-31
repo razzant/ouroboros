@@ -94,9 +94,7 @@ def test_existing_controls_remain_distinct_while_the_database_is_busy(boundary, 
     root, ctx, limit = boundary
     task = {"id": "same"}
     hooks = {}
-    if control == "panic":
-        (root / "state/panic_stop.flag").touch()
-    elif control == "deadline":
+    if control == "deadline":
         task["deadline_at"] = "2000-01-01T00:00:00+00:00"
     else:
         hooks["owner_control"] = lambda: control
@@ -115,7 +113,7 @@ def test_existing_controls_remain_distinct_while_the_database_is_busy(boundary, 
 
 @pytest.mark.parametrize("kind", ["uninspectable", "unknown_rollback", "lost", "malformed", "permission"])
 def test_non_contention_keeps_existing_authority_semantics(boundary, monkeypatch, kind):
-    from ouroboros import task_store
+    from ouroboros import store_hot_facts
 
     _root, ctx, _limit = boundary
     error = {"uninspectable": store.StoreBusy("denied", reason="uninspectable"),
@@ -126,7 +124,7 @@ def test_non_contention_keeps_existing_authority_semantics(boundary, monkeypatch
         error.rollback_confirmed = False
     def fail(*_args, **_kwargs):
         raise error
-    monkeypatch.setattr(task_store, "signature", fail)
+    monkeypatch.setattr(store_hot_facts, "controls", fail)  # the one addressed control read
     _sleep(monkeypatch, lambda _: pytest.fail("not positive contention"))
     if isinstance(error, store.StoreBusy):
         with pytest.raises(store.StoreBusy) as raised:

@@ -234,6 +234,39 @@ def test_an_accounts_period_is_the_union_of_its_sources_and_it_seals_no_row(tmp_
     assert mi.record_period(store, {**account, "sources": []}, _units(tmp_path)) == mi.Period(None, -1, "rows")
 
 
+def test_a_parts_period_reads_no_retelling_whose_unit_holds_its_rows(tmp_path, monkeypatch):
+    """A part over retold sections is dated by their units' rows, as when each section is read whole; the
+    retellings themselves are not read."""
+    rooms = shared.world(tmp_path)
+    alpha = str(rooms["alpha"])
+    store = ChronicleStore(tmp_path)
+    sections = [f"legacy-b00-r{alpha}", f"legacy-b01-r{alpha}"]
+    part = store.get(_part(tmp_path, alpha, sections)["id"])
+    units = _units(tmp_path)
+    assert all(units[section].ts_span for section in sections)
+    read, real = [], ChronicleStore.get
+    monkeypatch.setattr(ChronicleStore, "get", lambda self, record_id: read.append(record_id) or real(self, record_id))
+    period = mi.record_period(store, part, units)
+    assert period.span and period.source == "rows" and not set(read) & set(sections)
+    monkeypatch.setattr(mi, "_member", lambda get, _units, member_id: get(member_id))  # every member read whole
+    assert mi.record_period(store, part, units) == period and set(sections) <= set(read)
+
+
+def test_a_capture_reads_the_legacy_pointers_once_for_all_its_readers(tmp_path, monkeypatch):
+    from ouroboros.chronicle_store import capture
+
+    shared.world(tmp_path)
+    store = ChronicleStore(tmp_path)
+    expected = store.legacy_pointer_rows()
+    calls, real = [], ChronicleStore.legacy_pointer_rows
+    monkeypatch.setattr(ChronicleStore, "legacy_pointer_rows", lambda self: calls.append(1) or real(self))
+    monkeypatch.setattr(mi, "_UNITS", {})  # the units are counted anew
+    with capture(tmp_path):
+        assert mi.legacy_units(store, tmp_path) and mi.legacy_pointers(store) == expected
+    assert calls == [1]
+    assert mi.legacy_pointers(store) == expected and calls == [1, 1]  # outside a capture each call reads
+
+
 # --- open segments --------------------------------------------------------------------------------
 
 def _shas(entries):
@@ -448,3 +481,26 @@ def test_the_inventory_imports_no_model_client_and_reads_projects_lazily():
     assert {"ouroboros.project_dialogue", "ouroboros.projects_registry"} <= nested
     assert not {"ouroboros.project_dialogue", "ouroboros.projects_registry"} & top
     assert mi.VIEW_TRACE_KEY == "memory_view"
+
+
+def test_private_main_contact_stays_in_mains_inventory_like_canonical_history(tmp_path):
+    """F5: a Presence root's private question is Main's however its work is bound, in canonical membership and
+    in the memory inventory alike; an ordinary question of the same bound work is its Project's."""
+    from ouroboros import memory_inventory as mi
+    from ouroboros.project_dialogue import room_membership
+    from ouroboros.projects_registry import RoomResolver, bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+
+    alpha = create_project(tmp_path, "alpha", name="Alpha")
+    write_task_result(tmp_path, "teller", "running", chat_id=1, title="teller")
+    bind_task_to_project(tmp_path, "teller", alpha["id"], alpha["chat_id"], origin={"absent": "system"})
+    contact = {"task_id": "teller", "binding_id": "place-binding", "source_event_id": "external-1"}
+    private = {"chat_id": 1, "direction": "out", "type": "quiz", "task_id": "teller", "ts": "2026-10-01T00:03:00Z",
+               "text": "Private owner question", "quiz": {"quiz_id": "private-q", "presence_contact": contact}}
+    ordinary = {**private, "quiz": {"quiz_id": "plain-q"}, "text": "Ordinary question"}
+    facts = mi.membership_facts(tmp_path)
+    for row, expected in ((private, [1]), (ordinary, [alpha["chat_id"]])):
+        canonical = [chat for chat in (1, alpha["chat_id"]) if room_membership(
+            chat, {alpha["chat_id"]}, [], RoomResolver(tmp_path))(1, row)]
+        assert canonical == expected
+        assert mi.rooms_of_row(mi.row_meta(row), facts) == {str(chat) for chat in expected}

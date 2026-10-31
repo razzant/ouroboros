@@ -31,6 +31,7 @@ from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 
 from ouroboros.openai_chat_custom import CustomToolProjectionError
 from ouroboros.request_wire_contract import (
+    CACHE_HINT_FIELDS,
     NESTED_REASONING_FIELD,
     OPTIONAL_REQUEST_FIELDS,
     OPTIONAL_SAMPLING_FIELDS,
@@ -51,6 +52,7 @@ from ouroboros.request_wire_receipts import (
     WireCandidateSpec,
     bind_wire_candidate,
     bind_wire_compatibility_receipt,
+    cache_hint_holders,
     observe_wire_semantics,
 )
 from ouroboros.request_wire_resolution import resolve_wire_actions
@@ -752,6 +754,8 @@ def _context_overflow_evidence(error: Any) -> bool:
 
 
 def _field_is_present(payload: Mapping[str, Any], field: str) -> bool:
+    if field in CACHE_HINT_FIELDS:
+        return bool(cache_hint_holders(payload, field))
     if field != NESTED_REASONING_FIELD:
         return field in payload
     extra = payload.get("extra_body")
@@ -814,6 +818,12 @@ def _classify_action(
         return None
     candidate = registered.candidate
     profile = candidate.accepted_profile
+    payload = candidate.physical_payload()
+    hint = _named_cache_hint(payload, evidence, low)
+    if hint:  # before every value guard: a refused part echoes its marker as the refused value
+        return PendingWireAction(profile, {
+            "kind": "drop_field", "fields": [hint], "reason_code": "provider_unsupported_field",
+        })
     thinking_refused = (profile.reasoning_carrier == "reasoning_effort" and not evidence.param
                         and bool(_THINKING_REFUSAL.search(low)))
     if not low or not (evidence.value_constraint or thinking_refused or any(marker in low for marker in (
@@ -822,7 +832,6 @@ def _classify_action(
         *_MANDATORY_MARKERS,
     ))):
         return None
-    payload = candidate.physical_payload()
     current_effort = payload_effort(payload)
     if _parameter_filter_refusal(evidence):
         # The typed refusal never falls through to the prose heuristics: the sampling knobs
@@ -937,12 +946,51 @@ def _classify_action(
     if "stream" in named and "stream_options" in payload and "stream_options" not in named:
         named.append("stream_options")
     if not named:
-        return None
+        hint_free = _field_less_hint_drop(payload, evidence, low)
+        return PendingWireAction(profile, hint_free) if hint_free is not None else None
     return PendingWireAction(profile, {
         "kind": "drop_field",
         "fields": named,
         "reason_code": "provider_unsupported_field",
     })
+
+
+# A refusal of a request field, said of a cache hint the message or its path names.
+_HINT_REFUSAL_MARKERS = (*_CAPABILITY_REJECTION_MARKERS, *_VALUE_REJECTION_MARKERS, "unknown field", "extra_forbidden")
+# A request-schema validator's own wording: with no field of ours named it may still mean a marker.
+_SCHEMA_VALIDATION_MARKERS = ("extra inputs", "extra_forbidden", "input should be")
+
+
+def _named_cache_hint(payload: Mapping[str, Any], evidence: _WireRejection, low: str) -> str:
+    """The narrowest prompt-cache hint carrier a refusal names and the request carries, else "".
+
+    A ``ttl`` beside ``cache_control`` names only the ttl keys, a ``tools.N.cache_control`` path
+    only the tool markers, any other ``cache_control`` every marker. A drop that still fails
+    composes into the next one inside the same call; ``prompt_cache_key`` is an ordinary
+    optional field of the loop in ``_classify_action``.
+    """
+    named = f"{evidence.param} {low}"
+    if "cache_control" not in named or not any(marker in low for marker in _HINT_REFUSAL_MARKERS):
+        return ""
+    for field, implicated in (
+        ("cache_control.ttl", "ttl" in _error_tokens(named)),
+        ("tools.cache_control", re.search(r"\btools\W+(?:\d+\W+)?cache_control\b", named) is not None),
+        ("cache_control", True),
+    ):
+        if implicated and _field_is_present(payload, field):
+            return field
+    return ""
+
+
+def _field_less_hint_drop(payload: Mapping[str, Any], evidence: _WireRejection, low: str) -> Optional[Dict[str, Any]]:
+    """One marker-free retry for a schema-validation refusal that names no field of ours while
+    the request carries markers (a strict server refusing the one-part text list a marked row
+    became, say). Like every reactive drop it is learned only if that retry succeeds; when it
+    fails too, the markers are gone and the provider's own error stands."""
+    if (evidence.status in {400, 422} and any(marker in low for marker in _SCHEMA_VALIDATION_MARKERS)
+            and _field_is_present(payload, "cache_control")):
+        return {"kind": "drop_field", "fields": ["cache_control"], "reason_code": "provider_unsupported_field"}
+    return None
 
 
 def _parameter_filter_refusal(evidence: _WireRejection) -> bool:

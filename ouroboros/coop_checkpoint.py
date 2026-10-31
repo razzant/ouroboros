@@ -24,8 +24,9 @@ def _run_git(cmd: Sequence[str], cwd: pathlib.Path) -> "subprocess.CompletedProc
     """Bounded git call returning the full CompletedProcess (checkpoint-commit path).
     A timeout/spawn failure returns a synthetic rc=124 result — callers treat any
     non-zero rc as a fail-soft skip, so this never raises."""
+    from ouroboros.git_observation import host_git_env
     try:
-        return subprocess.run(list(cmd), cwd=str(cwd), capture_output=True, text=True, timeout=60)
+        return subprocess.run(list(cmd), cwd=str(cwd), capture_output=True, text=True, timeout=60, env=host_git_env())
     except Exception as exc:  # noqa: BLE001 — includes TimeoutExpired
         return subprocess.CompletedProcess(list(cmd), 124, stdout="", stderr=f"{type(exc).__name__}: {exc}")
 
@@ -70,11 +71,15 @@ def _task_tree_coop_roots(drive_root: pathlib.Path, root_task_id: str) -> List[p
     readonly-mode child never qualifies regardless of fields."""
     from ouroboros.config import get_subagent_projects_root
     from ouroboros.headless import task_is_readonly_subagent
+    from ouroboros.launch_roots import WorkRootUnavailable
     from ouroboros.task_status import find_child_tasks
     from ouroboros.tool_access import path_is_relative_to
 
-    projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
     out: List[pathlib.Path] = []
+    try:
+        projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
+    except WorkRootUnavailable:  # an undecided default root qualifies no tree for a commit
+        return out
     try:
         children = find_child_tasks(
             pathlib.Path(drive_root), parent_task_id=str(root_task_id), root_task_id=str(root_task_id)

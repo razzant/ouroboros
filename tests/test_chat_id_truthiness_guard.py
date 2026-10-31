@@ -60,11 +60,12 @@ ALLOWED = {
         "chat_id means 'the event carried no chat' and the owner chat is the "
         "fallback address, not the hidden partition.",
     ),
-    ("supervisor/terminal_delivery.py", "if not tid or not core_text or not chat_id:"): (
+    ("supervisor/terminal_delivery.py", "if not tid or not (core_text or quiet) or not chat_id:"): (
         1,
         "lineage_chat_id() again: 0 means the run was never homed, and pushing "
         "an unhomed answer into a partition with no reader would add rows to the "
-        "chat log a benchmark parses for its final answer.",
+        "chat log a benchmark parses for its final answer. A wake's silent finish "
+        "(#1814) changed only the answer condition, not this chat test.",
     ),
 }
 

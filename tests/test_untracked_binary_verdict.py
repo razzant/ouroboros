@@ -14,6 +14,8 @@ import os
 import pathlib
 import subprocess
 
+import pytest
+
 from ouroboros import workspace_patch_capture as capture
 
 
@@ -103,22 +105,41 @@ def test_batch_verdict_matches_git_for_every_path_class(tmp_path):
     assert objects.startswith("5 objects"), objects
 
 
-def test_capture_asks_one_process_and_never_one_per_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize("extra_files", [0, 24])
+@pytest.mark.parametrize("empty_files", [False, True])
+def test_capture_asks_one_process_and_never_one_per_file(tmp_path, monkeypatch, extra_files, empty_files):
     repo, rels = _fixture_repo(tmp_path)
+    if not empty_files:
+        for rel in list(rels):
+            if rel.startswith("empty."):
+                (repo / rel).unlink()
+                rels.remove(rel)
+    for number in range(extra_files):
+        rel = f"extra-{number}.md"
+        (repo / rel).write_text("text\n", encoding="utf-8")
+        rels.append(rel)
     calls: list = []
     real_run = subprocess.run
 
     def spy(cmd, *args, **kwargs):
-        calls.append(list(cmd))
+        calls.append((list(cmd), kwargs.get("env", {}).get("GIT_INDEX_FILE")))
         return real_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(capture.subprocess, "run", spy)
     artifacts, manifest = capture.write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
 
     assert manifest["status"] == "ready_with_changes", manifest["errors"]
-    numstat_calls = [c for c in calls if "--no-index" in c and "--numstat" in c]
+    numstat_calls = [c for c, _index in calls if "--no-index" in c and "--numstat" in c]
     assert numstat_calls == [], "the per-file --no-index --numstat spawn is back"
-    assert sum(1 for c in calls if c[:2] == ["git", "diff"] and "--numstat" in c) == 2  # inventory + empty-file pass
+    diffs = [(c, index) for c, index in calls if c[:2] == ["git", "diff"] and "--numstat" in c]
+    # DW7's content inventory reads the host index; verdicts use a scratch index.
+    host_index = os.environ.get("GIT_INDEX_FILE")
+    assert [c for c, index in diffs if index == host_index] == [[
+        "git", "diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-color", manifest["base_ref"], "--",
+    ]]
+    verdicts = [(c, index) for c, index in diffs if index != host_index]
+    assert len(verdicts) == 1 + int(empty_files), "one batch plus an empty-file pass, never one per file"
+    assert len({index for _c, index in verdicts}) == 1
     excluded = {row["path"]: row["reason"] for row in manifest["untracked_excluded"]}
     expected_binary = {rel for rel in rels if _oracle(repo, rel)}
     assert {rel for rel, reason in excluded.items() if reason == "binary file"} == expected_binary

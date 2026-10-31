@@ -14,6 +14,7 @@ import {
     prettyLogEvent,
     summarizeLogEvent,
 } from './log_events.js';
+import { outcomeTone } from './task_phase_chip.js';
 
 export function initLogs({ ws, state, mount }) {
     const MAX_LOGS = 500;
@@ -321,6 +322,11 @@ export function initLogs({ ws, state, mount }) {
         if (settles || !record.terminal) {
             record.phase.textContent = view.phase || 'info';
             record.phase.className = `log-phase ${view.phase || 'info'}`;
+            // A settled headline is the task's outcome and takes the cards' tone (Stopped neutral, Done with
+            // warnings green); until then it is the latest event's phase in its level's colour.
+            const tone = settles ? outcomeTone(view.phase) : '';
+            if (tone) record.phase.dataset.chipTone = tone;
+            else delete record.phase.dataset.chipTone;
             record.headline.textContent = view.headline || 'Task activity';
         }
         if (settles) record.terminal = true;

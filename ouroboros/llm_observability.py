@@ -74,7 +74,7 @@ def chat_observed(
 
     root = _root(drive_root)
     call_id = new_call_id(call_type)
-    traced_kwargs = {key: value for key, value in kwargs.items() if key != "model_context_observer"}
+    traced_kwargs = dict(kwargs)
     persist_observed_call(
         root,
         task_id=task_id or call_type,

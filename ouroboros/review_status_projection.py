@@ -1,19 +1,19 @@
 """Commit-review status projection over the durable review-state records.
 
-Boundary: this leaf reads ``review_state`` records (runs, commit attempts,
-obligations, commit-readiness debts) and renders the semantic read-model plus the
+Boundary: this leaf reads ``review_state`` records (commit attempts, obligations,
+commit-readiness debts; the retired advisory lane's archive only by its address) and renders the semantic read-model plus the
 human-facing ``review_status`` payload and one-line message. It knows nothing
-about task-acceptance packets and must never import ``ouroboros.review_evidence``
-— the dependency runs the other way, which keeps the module a leaf like
-``review_evidence_refs``.
+about other evidence and must never import ``ouroboros.review_evidence`` — the
+dependency runs the other way, which keeps the module a leaf. It also owns the read-only join of a split-drive task's
+canonically held ``review_change`` attempts that ``review_evidence`` shares.
 """
 
 from __future__ import annotations
 
 import pathlib
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
+from ouroboros.utils import truncate_review_artifact
 
 
 def build_review_projection(
@@ -24,72 +24,47 @@ def build_review_projection(
     tool_name: str = "",
     task_id: str = "",
     attempt: int | None = None,
-    snapshot_hash_fn: Any = None,
     reader_task_id: str = "",
+    canonical_root: Any = None,
 ) -> Dict[str, Any]:
     """Build the semantic read-model shared by review_status-style renderers.
 
     ``task_id`` is a record FILTER; ``reader_task_id`` is the calling task, the
-    only identity the stale-marker attribution may be relative to.
+    only identity the stale-marker attribution may be relative to, and the one
+    whose ``review_change`` rows ``canonical_root`` holds: they join this drive's
+    rows before any filter, so every filter reads the drive's own view. The
+    retired advisory lane's rows are only named where they are kept
+    (``advisory_run_archive``), never read as freshness, guidance or debt.
     """
-    from ouroboros.review_state import (
-        compute_snapshot_hash,
-        load_state,
-        make_repo_key,
-    )
+    from ouroboros.review_state import load_state, make_repo_key
 
     drive_root_path = pathlib.Path(drive_root)
     repo_dir_path = pathlib.Path(repo_dir) if repo_dir else None
     state = load_state(drive_root_path)
+    state.attempts, canonical_unreadable = with_canonical_change_attempts(
+        state.attempts, canonical_root, drive_root_path, reader_task_id)
     repo_filter = repo_key or (make_repo_key(repo_dir_path) if repo_dir_path is not None else None)
     tool_filter = tool_name or None
     task_filter = task_id or None
-    runs = state.filter_advisory_runs(
-        repo_key=repo_filter,
-        tool_name=tool_filter,
-        task_id=task_filter,
-        attempt=attempt,
-    )
     attempts = state.filter_attempts(
         repo_key=repo_filter,
         tool_name=tool_filter,
         task_id=task_filter,
         attempt=attempt,
     )
-    latest = runs[-1] if runs else None
     selected_attempt = attempts[-1] if attempts else (
         None if (repo_filter or tool_filter or task_filter or attempt is not None) else state.latest_attempt()
     )
-    try:
-        if repo_dir_path is None:
-            raise ValueError("repo_dir unavailable")
-        hasher = snapshot_hash_fn or compute_snapshot_hash
-        current_hash = hasher(repo_dir_path, "", paths=latest.snapshot_paths if latest else None)
-        hash_mismatch = bool(
-            latest
-            and latest.status in {"fresh", "bypassed", "skipped", "parse_failure", "preflight_blocked", "tests_preflight_blocked", "error", "pending"}
-            and latest.snapshot_hash != current_hash
-        )
-    except Exception:
-        current_hash = ""
-        hash_mismatch = False
-    matching_run = state.find_by_hash(current_hash, repo_key=repo_filter) if current_hash else None
-    effective_is_fresh = bool(state.is_fresh(current_hash, repo_key=repo_filter) if current_hash else False)
-    stale_matches_repo = state.last_stale_repo_key in ("", repo_filter)
-    stale_from_edit = bool(hash_mismatch or (state.last_stale_from_edit_ts and stale_matches_repo))
-    effective_status = matching_run.status if matching_run else ("stale" if latest else "none")
-    stale_ts = (state.last_stale_from_edit_ts if state.last_stale_from_edit_ts and stale_matches_repo
-                else ("now (hash mismatch)" if hash_mismatch else None))
-    stale_reason = ((state.last_stale_reason if stale_matches_repo else "")
-                    or ("Current snapshot hash no longer matches the latest advisory run." if hash_mismatch else None))
-    marker_attributed = stale_matches_repo
+    # Without a preflight look nothing is fresh or stale: a stale marker no look precedes
+    # was written by the retired advisory lane and stays history in the file (owner decision).
+    stale_from_edit, effective_status, stale_ts, stale_reason, marker_attributed = False, "none", None, None, False
     look = _preflight_look(state, drive_root_path, repo_dir_path, repo_filter or "")
     if look is not None:
-        # The author's preflight is the look the legacy runs used to be (D5-002): a
+        # The author's preflight is the checkout's look (D5-002): a
         # marker written before the look does not stale it; a worktree that moved
         # since the look does, with the editor named when a mutation was recorded.
         stale_from_edit = bool(look["stale_from_edit"])
-        effective_status = "stale" if stale_from_edit else "fresh"
+        effective_status = "unknown" if look.get("unreadable") else "stale" if stale_from_edit else "fresh"
         marker_attributed = bool(look["marked"])
         stale_ts = (state.last_stale_from_edit_ts if look["marked"]
                     else ("now (worktree moved)" if look["tree_moved"] else None))
@@ -111,16 +86,9 @@ def build_review_projection(
             "task_id": task_filter,
             "attempt": attempt,
         },
-        "runs": runs,
         "attempts": attempts,
-        "latest_run": latest,
-        "matching_run": matching_run,
-        "guidance_run": matching_run or latest,
         "selected_attempt": selected_attempt,
-        "current_hash": current_hash,
         "effective_status": effective_status,
-        "effective_hash": matching_run.snapshot_hash[:12] if matching_run and matching_run.snapshot_hash else None,
-        "effective_is_fresh": effective_is_fresh,
         "stale_from_edit": stale_from_edit,
         "stale_from_edit_ts": stale_ts,
         "stale_reason": stale_reason,
@@ -132,7 +100,53 @@ def build_review_projection(
         "open_debts": open_debts,
         "retry_anchor": "commit_readiness_debt" if open_debts else None,
         "advisory_overrides": advisory_overrides,
+        "canonical_attempts_unreadable": canonical_unreadable,
+        "advisory_run_archive": _advisory_run_archive(state, drive_root_path),
     }
+
+
+_ARCHIVE_NOTE = (
+    "The retired advisory pre-review lane, kept as recorded: `advisory_runs` and the commit_readiness_debts "
+    "it minted (source advisory_review with a readiness_warning:advisory: fingerprint, and advisory_stale "
+    "copies of the stale marker). History only, never current freshness, guidance or debt, as is a stale "
+    "marker no preflight look precedes. Read it with read_file(path=<path>, start_char/max_chars) or, "
+    "on your own drive, query_data(op='json', kind='advisory_review', select='advisory_runs')."
+)
+
+
+def _advisory_run_archive(state: Any, drive_root: pathlib.Path) -> Dict[str, Any]:
+    """Where this store keeps the retired advisory lane's rows and the debts they minted
+    (owner decision: archive only); ``{}`` when it keeps none. ``path`` is the file this
+    projection read, so a split child's own drive is never mistaken for another root."""
+    from ouroboros.review_state import _STATE_RELPATH
+
+    if not state.advisory_runs and not state.archived_advisory_debts:
+        return {}
+    return {"path": str(drive_root.resolve(strict=False) / _STATE_RELPATH), "advisory_runs": len(state.advisory_runs),
+            "advisory_debts": len(state.archived_advisory_debts), "note": _ARCHIVE_NOTE}
+
+
+def with_canonical_change_attempts(attempts: List[Any], canonical_root: Any, drive_root: Any,
+                                   task_id: str) -> Tuple[List[Any], str]:
+    """``attempts`` (this task's drive rows) plus the ``review_change`` rows its canonical
+    root holds for it (``review_change_custody.review_state_root``), and why that root
+    could not be read ("" when it was). The canonical row wins an identity both roots
+    hold (a move interrupted between its two saves). Reading moves nothing; an
+    unreadable canonical state is named, never read as no rows."""
+    if not canonical_root or not task_id or (
+            pathlib.Path(canonical_root).resolve() == pathlib.Path(drive_root).resolve()):
+        return attempts, ""
+    from ouroboros.review_state import _STATE_RELPATH, _load_state_unlocked
+    from ouroboros.review_state_records import _attempt_identity_tuple, _attempt_order_key
+
+    try:
+        state = _load_state_unlocked(pathlib.Path(canonical_root), strict_attempt_authority=True)
+    except (OSError, TypeError, ValueError) as exc:
+        return attempts, f"{pathlib.Path(canonical_root) / _STATE_RELPATH} unreadable ({type(exc).__name__}: {exc})"
+    owned = state.filter_attempts(task_id=task_id, tool_name="review_change")
+    held = {_attempt_identity_tuple(row) for row in owned}
+    return (sorted([*(row for row in attempts if _attempt_identity_tuple(row) not in held), *owned],
+                   key=_attempt_order_key) if owned else attempts), ""
 
 
 _TREE_MOVED_REASON = "The worktree no longer matches the tree the preflight read."
@@ -143,13 +157,16 @@ def _preflight_look(state: Any, drive_root: pathlib.Path, repo_dir: pathlib.Path
     and whether the worktree moved since it: by the stale marker a recorded mutation
     wrote after the look, or by the live tree against the tree the record bound.
     ``None`` when the checkout has no look; a tree that cannot be read compares as
-    unmoved (the marker still speaks)."""
+    unmoved (the marker still speaks). A look that cannot be read is named
+    (``unreadable``), never read as no look: the checkout's marker still speaks."""
     try:
         from ouroboros.review_ledger import latest_preflight_record
 
         record = latest_preflight_record(drive_root, repo_key=repo_key)
-    except Exception:
-        record = None
+    except Exception as exc:
+        marked = bool(state.last_stale_from_edit_ts and state.last_stale_repo_key in ("", repo_key))
+        return {"unreadable": f"{type(exc).__name__}: {exc}", "marked": marked, "tree_moved": False,
+                "stale_from_edit": marked}
     if not record:
         return None
     look_ts = str(record.get("ts") or "")
@@ -184,14 +201,12 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
     open_debts = list(projection.get("open_debts") or [])
     payload: Dict[str, Any] = {
         "latest_advisory_status": projection["effective_status"],
-        "latest_advisory_hash": projection["effective_hash"],
         "stale_from_edit": projection["stale_from_edit"],
         "stale_from_edit_ts": projection["stale_from_edit_ts"],
         "stale_reason": projection["stale_reason"],
         **{key: projection.get(key, "") for key in ("stale_task_id", "stale_attribution", "stale_repo_key")},
         "preflight": projection.get("preflight"),
         "filters": projection["filters"],
-        "advisory_runs": [_review_status_run_to_dict(run) for run in reversed(projection.get("runs") or [])],
         "attempts": [_review_status_attempt_to_dict(item) for item in reversed(projection.get("attempts") or [])],
         "selected_commit_attempt": _review_status_attempt_payload(selected_attempt),
         "open_obligations": [_review_status_obligation_to_dict(item) for item in open_obligations],
@@ -216,6 +231,10 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
                 ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint")}}
             payload["next_step"] = ("Read the returned findings. You may revise and request another permitted review, stop, or call "
                 "commit_reviewed with this review_reference and an explicit author_disposition/rationale to commit the current attributed candidate without a new panel. Independent checks still apply.")
+    if projection.get("canonical_attempts_unreadable"):
+        payload["canonical_attempts_unreadable"] = projection["canonical_attempts_unreadable"]
+    if projection.get("advisory_run_archive"):
+        payload["advisory_run_archive"] = projection["advisory_run_archive"]
     payload["message"] = payload["status_summary"]
     # Persistent advisory-enforcement visibility (BIBLE P3 loud-advisory bound):
     # how many blocking-grade signals advisory enforcement waved through.
@@ -232,76 +251,6 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
             "scope_raw_result": dict(selected_attempt.scope_raw_result or {}),
         }
     return payload
-
-
-def _run_failure_reason(run: Any) -> str | None:
-    """Typed cause for a non-parseable advisory run. Diagnostics only.
-
-    Never consumed by the commit gate, freshness, or debt: it exists so a
-    repeated deterministic failure is visible after the FIRST attempt instead of
-    reading as a generic ``parse_failure`` for hours.
-    """
-    if str(getattr(run, "status", "") or "") != "parse_failure":
-        return None
-    from ouroboros.triad_review import empty_array_is_verified_clean
-
-    raw = str(getattr(run, "raw_result", "") or "").strip()
-    if not raw:
-        return "empty_response"
-    if empty_array_is_verified_clean(raw):
-        # A contract-compliant clean verdict was still rejected: that is a
-        # regression of the sentinel contract, not a model failure. Asking the
-        # shared predicate — not a second substring test — is what keeps this
-        # diagnostic honest when the contract changes.
-        return "clean_sentinel_rejected"
-    if raw.startswith("[") or raw.startswith("```"):
-        return "malformed_array"
-    return "non_json_prose"
-
-
-def _review_status_run_to_dict(run: Any) -> Dict[str, Any]:
-    findings = [
-        item for item in (getattr(run, "items", []) or [])
-        if isinstance(item, dict) and str(item.get("verdict", "")).upper() == "FAIL"
-    ]
-    data = {
-        "snapshot_hash": str(getattr(run, "snapshot_hash", ""))[:12],
-        "critical_findings": sum(1 for item in findings if str(item.get("severity", "")).lower() == "critical"),
-        "total_findings": len(findings),
-        "attempt": int(getattr(run, "attempt", 0) or 0) or None,
-    }
-    for key in ("commit_message", "status", "ts", "snapshot_summary"):
-        data[key] = str(getattr(run, key, "") or "")
-    for key in ("bypass_reason", "repo_key", "tool_name", "task_id"):
-        data[key] = str(getattr(run, key, "") or "") or None
-    # Already persisted per run, previously dropped from the projection: without
-    # these the owner sees repeated identical statuses with no usable cause.
-    data["failure_reason"] = _run_failure_reason(run)
-    execution = getattr(run, "execution", {}) or {}
-    data["failure_phase"] = str(execution.get("failure_phase") or "") or None
-    data["failure_code"] = str(execution.get("failure_code") or "") or None
-    if execution:
-        data["execution"] = {key: str(execution[key]) for key in (
-            "invocation_id", "pending_invocation_id", "operation_id", "operation_state", "fingerprint",
-        ) if isinstance(execution.get(key), str)}
-        intent = execution.get("intent")
-        if isinstance(intent, dict):
-            # Exact host-authored rejoin inputs, never the private reviewer prompt
-            # or its raw answer; use the existing public secret redactor.
-            data["execution"]["intent"] = {key: sanitize_tool_result_for_log(intent[key]) for key in (
-                "commit_message", "goal", "scope", "review_rebuttal",
-            ) if isinstance(intent.get(key), str)}
-    data["model_used"] = str(getattr(run, "model_used", "") or "") or None
-    duration = getattr(run, "duration_sec", None)
-    data["duration_sec"] = round(float(duration), 2) if duration else None
-    prompt_chars = getattr(run, "prompt_chars", None)
-    data["prompt_chars"] = int(prompt_chars) or None if prompt_chars else None
-    # Deliberately NO raw excerpt here: raw_result is untrusted reviewer output
-    # that can echo secret-bearing diff content, and this projection is returned
-    # to the active model. The typed reason above is derived, not raw, and the
-    # complete text stays in the durable advisory run record addressed by the
-    # snapshot_hash/ts already on this row.
-    return data
 
 
 def _review_status_attempt_payload(ca: Any) -> Dict[str, Any] | None:
@@ -349,14 +298,20 @@ def _review_status_attempt_to_dict(item: Any) -> Dict[str, Any]:
 
 
 def _review_status_actor_summary(attempt: Any) -> Dict[str, Any]:
+    from ouroboros.review_records import TYPED_FAILURE_FACT_KEYS
+
+    def actor(row):
+        return {key: row[key] for key in ("slot_id", "model_id", "status", *TYPED_FAILURE_FACT_KEYS,
+                                          "response_ref") if key in row}
+
     scope_raw = getattr(attempt, "scope_raw_result", None) or {}
     return {
         "triad_actors": [
-            {"model_id": r.get("model_id", "?"), "status": r.get("status", "?")}
+            actor(r)
             for r in (getattr(attempt, "triad_raw_results", None) or [])
         ],
         "scope_actor": (
-            {"model_id": scope_raw.get("model_id", "?"), "status": scope_raw.get("status", "?")}
+            actor(scope_raw)
             if scope_raw.get("status") else None
         ),
     }
@@ -407,8 +362,14 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
             "review_late_result_pending": (
                 f"Review NOT_PERFORMED: {NOT_PERFORMED_PHRASES['review_late_result_pending']}; no verdict is counted yet. "
                 "The pending result settles into the ledger when it lands; retry the commit afterwards."),
+            "result_unanswered": (
+                f"Review NOT_PERFORMED: {NOT_PERFORMED_PHRASES['result_unanswered']}. A result review counts only a "
+                "PASS/FAIL answer; each seat's error is recorded in the attempt."),
+            "skill_unanswered": (
+                f"Review NOT_PERFORMED: {NOT_PERFORMED_PHRASES['skill_unanswered']}. A skill review counts only a "
+                "PASS/FAIL answer; each seat's error is recorded in the attempt, and the skill stays pending."),
             "critical_findings": "Reviewers found critical issues. Repair or rebut (review_rebuttal) the findings listed, then re-run commit_reviewed.",
-            "review_quorum": "Not enough review models responded. Retry — usually transient.",
+            "review_quorum": "Not enough reviewers answered; the recorded seat causes follow below.",
             "parse_failure": "Review models could not produce parseable output. Retry the commit.",
             "infra_failure": "Infrastructure failure. Check block_details.",
             "scope_blocked": "Scope reviewer blocked the commit. Address scope review findings.",
@@ -419,15 +380,29 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
             "overlap_guard": "Another reviewed attempt is still active. Wait or expire it before retrying.",
             "attempt_cap_reached": "The same staged diff was review-blocked repeatedly. Change the diff or rebut via review_rebuttal.",
             "identical_diff_refused": "This exact staged diff was already review-blocked. Change the diff or supply a NEW review_rebuttal (identical bytes are never re-reviewed for pay).",
-            "review_cycles_exhausted": "This task tree spent its paid review cycles (OUROBOROS_REVIEW_MAX_CYCLES). Finalize honestly or ask the owner to raise the cap.",
+            "review_cycles_exhausted": "This task tree spent its paid review cycles (OUROBOROS_REVIEW_MAX_CYCLES). Under Advisory decide whether what was reviewed is enough; under Blocking only the owner may raise the cap.",
             "review_subject_binding_mismatch": "The reviewed managed subject is not the tree this commit would write. Re-stage the intended candidate and retry so review and commit describe the same tree.",
         }
         label = "BLOCKED" if ca.status == "blocked" else "FAILED"
+        what = {"review_result": "result review", "review_skill": "skill review"}.get(getattr(ca, "tool_name", ""), "commit")
+        if what == "result review":  # a result is revised and delivered again, never committed
+            reason_map.update(
+                critical_findings="Reviewers found critical issues in the result. Revise it or answer the findings, then deliver again.",
+                review_late_result_pending=(
+                    f"Review NOT_PERFORMED: {NOT_PERFORMED_PHRASES['review_late_result_pending']}; no verdict is counted yet. "
+                    "The next delivery of the same result collects it at $0."))
         current = (
-            f"Last commit {label} ({ca.block_reason or 'unclassified'}): "
+            f"Last {what} {label} ({ca.block_reason or 'unclassified'}): "
             f"{reason_map.get(ca.block_reason, ca.block_reason or 'unknown')}"
             f"  |  {current}"
         )
+        if ca.block_reason == "review_quorum":
+            from ouroboros.review_records import review_failure_summary
+            current += "\n" + "\n".join(review_failure_summary(row) for row in (ca.triad_raw_results or [])
+                                         if row.get("status") != "responded")
     if projection.get("open_debts"):
         current = f"{current}  |  Commit-readiness debt: {len(projection['open_debts'])}"
+    if projection.get("canonical_attempts_unreadable"):
+        current = (f"{current}  |  This task's canonically held review_change attempts are not listed: "
+                   f"{projection['canonical_attempts_unreadable']}")
     return current

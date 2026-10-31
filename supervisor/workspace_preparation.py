@@ -1,36 +1,55 @@
-"""Off-loop workspace preparation for acting ``schedule_subagent`` children.
+"""The supervisor generation's off-loop owner of admission persistence.
 
-An acting child's write surface (an isolated current-tree copy, a genesis
-project, or an external workspace's Git binding) costs lock waits, Git, copy
-and index work. The supervisor event loop only claims the producer's REQUESTED
-row for one preparation token (the existing admission reservation map) and
-commits the durable ``workspace_preparation`` marker on that row; one FIFO
-thread per supervisor generation then runs the existing schedule owner with the
-claim (``events_schedule_task._handle_schedule_task(..., preparation=claim)``).
-Command and event draining never wait on a copy, and physical preparations stay
-serialized in acceptance order. A host that never opened
-a generation (a direct caller of the handler) keeps the historical inline path.
-Positive entry contention keeps the unaccepted event on its original transport;
-after marker acceptance, acquisition waits retain the same FIFO stack off Q.
+Every ``schedule_subagent`` request is claimed on the event loop in memory only
+(the existing admission reservation map under Q, nothing read or written in
+storage) and handed to one of two FIFO lanes of the supervisor generation,
+which run the existing schedule owner with the claim
+(``events_schedule_task._handle_schedule_task(..., preparation=claim)``).
+The copy lane keeps every write surface that may copy or create a root (an
+isolated current-tree copy, a genesis project) in acceptance order. The
+admission lane never copies: it validates existing folders, admits read-only
+children whole, and runs the final admission step of every claim (the durable
+receipt, the enqueue under Q, the notice), so a readonly child or a copied
+child's admission never waits behind another task's copy (a child admitted on a
+folder may write it while a copy of that folder still waits: the copy then
+starts from those writes, and one landing during the copy is refused by its
+whole-tree diff, both as in the other order). The same lane persists worker
+launch marks (``worker_assignment``) and warm owner-wait Resumes
+(``worker_owner_wait``): one owner for everything that must land in storage
+before a queue put, outside Q. Command and event draining wait on none of it,
+and the bus is never re-put: a storage acquisition gap is retried here, at the
+head of its own lane (``PreparationGeneration.wait_store``: the existing 0.25 s
+slice, the caller's controls re-read between slices). A host that never opened a
+generation (a direct caller of the handler) keeps the historical inline path.
 
-The marker carries the token, the owning process (pid and birth) and
+The marker on the row carries the token, the owning process (pid and birth) and
 generation, the phase and, once the copy returned, the owned resource handle.
 Phases are positive facts written before their effect: ``queued`` (claimed,
 nothing started), ``copying`` (physical work may have begun), ``ready`` (the copy
-returned), ``admitting`` (committed before the final enqueue+receipt interlock
-is entered); the scheduled receipt (``admitted``) or the never-admitted refusal
-(``refused``) closes it. Stop, Pause, a closed generation or lost ownership is
-read before the copy starts and again after it returns; the final enqueue
-revalidates Project binding, root fences and the token under Q.
+returned), ``admitting`` (committed before the receipt; the SCHEDULED receipt is
+written under it, outside Q, before the queue put); the put retires it to
+``admitted`` and the never-admitted refusal to ``refused``. A readonly child
+copies nothing and goes ``queued`` → ``admitting``. Stop, Pause, a closed
+generation or lost ownership is read before the copy starts and again after it
+returns; the final enqueue revalidates memory only under Q: the token, root
+fences, slot accounting, Project binding.
 
 ``recover_interrupted_preparations`` (startup after queue restore, and the
 periodic reconcile pass) settles ``queued``/``copying``/``ready`` as never admitted
-only once the recorded owner positively ended; ``admitting`` or unreadable
-authority stays unresolved on the existing ``unknowns`` carrier, never inferred
-unsent from an absent queue row. Disposal is exact: only the recorded handle of
-this token, only after its refusal receipt and the copy's return; anything else
-stays registered residue for the existing worktree retention. Recovery never
-re-copies or dispatches.
+only once the recorded owner positively ended; ``admitting`` on a REQUESTED row
+(no receipt) or unreadable authority stays unresolved on the existing
+``unknowns`` carrier, never inferred unsent from an absent queue row. A SCHEDULED
+receipt still ``admitting`` whose owner ended and which the restored queue does
+not hold was never put (every put is preceded by a published locator snapshot
+naming the row), so it is refused never admitted once the saved queue is in this
+process's custody; ``admitted`` and absent is a gap on ``unknowns``. A REQUESTED
+row without any marker (its event died with its bus) is refused never admitted
+once the stamped producer and bus owner both provably ended, or, for a row that
+predates the stamp, once its parent is terminal; otherwise it stays held
+(``requested_by``: ``ouroboros/tools/control_scheduling.py``). Disposal is exact:
+only the recorded handle of this token, only after its refusal receipt and the
+copy's return; anything else stays registered residue for the existing worktree
+retention. Recovery never re-copies or dispatches.
 """
 
 from __future__ import annotations
@@ -47,7 +66,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
 
-from ouroboros.task_results import STATUS_REQUESTED, load_task_result, write_task_result
+from ouroboros.task_results import STATUS_REQUESTED, STATUS_SCHEDULED, load_task_result, write_task_result
 from ouroboros.store import StoreBusy
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -63,8 +82,10 @@ INTERRUPTED_BY_RESTART = "preparation_interrupted_by_restart"
 INTERRUPTED_BY_GENERATION_EXIT = "preparation_interrupted_by_generation_exit"
 EXECUTOR_UNAVAILABLE = "preparation_executor_unavailable"
 ADMISSION_UNCERTAIN = "workspace_preparation_admission_uncertain"
+# A request whose event died with the bus that carried it, or whose parent ended first (no marker).
+REQUEST_LOST = "request_lost_with_server"
+REQUEST_ORPHANED = "request_orphaned_by_parent"
 _RESOURCE_KEYS = ("surface", "path", "branch", "created_at", "base_sha")
-_RETRY_TOKEN = "_workspace_preparation_token"
 _DETAILS = {
     MARKER_UNWRITABLE: ("Subagent not scheduled: its workspace preparation could not record its progress "
                         "durably; it was never admitted and is not retried automatically."),
@@ -75,6 +96,10 @@ _DETAILS = {
                                      "retried automatically."),
     EXECUTOR_UNAVAILABLE: ("Subagent not scheduled: the workspace preparation worker could not start; "
                            "it was never admitted."),
+    REQUEST_LOST: ("Subagent not scheduled: the server that received its request ended before admitting it; "
+                   "it was never admitted and is not retried automatically."),
+    REQUEST_ORPHANED: ("Subagent not scheduled: its request was never admitted and its parent task has ended; "
+                       "it is not retried automatically."),
 }
 _AUTHORITY_UNKNOWN = ("Subagent not scheduled: its durable result is unreadable, so its preparation was not "
                       "started and the existing authority was preserved.")
@@ -97,28 +122,6 @@ class PreparationStopped(Exception):
         super().__init__(refusal["detail"])
 
 
-def defer_schedule_event(ctx: Any, event: Dict[str, Any]) -> bool:
-    """Retain an unaccepted schedule on its existing transport, before any effect."""
-    try:
-        from supervisor.workers import get_event_q
-        endpoint = getattr(ctx, "event_queue", None)
-        if endpoint is None:
-            endpoint = get_event_q(create=False)
-        endpoint.put(event)
-        return True
-    except Exception:
-        log.warning("Schedule request %s could not retain its event transport", event.get("task_id"), exc_info=True)
-        from supervisor.events_schedule_task import _reject_schedule_task
-        _reject_schedule_task(
-            ctx, tid=str(event.get("task_id") or ""), chat_id=event.get("chat_id"),
-            delegation_role=str(event.get("delegation_role") or "subagent"), parent_id=event.get("parent_task_id"),
-            root_task_id=str(event.get("root_task_id") or event.get("task_id") or ""),
-            role=str(event.get("role") or ""), result_fields={}, persist_result=False,
-            reason_code="scheduled_result_authority_unknown",
-            detail="Subagent not scheduled: its event transport is unavailable; the request remains unconfirmed.")
-        return False
-
-
 def _process_owner() -> Dict[str, Any]:
     """This process's recorded identity, read once per process (``ps`` on macOS)."""
     if _OWNER.get("pid") != os.getpid():
@@ -129,12 +132,25 @@ def _process_owner() -> Dict[str, Any]:
     return dict(_OWNER)
 
 
-class PreparationGeneration:
-    """One supervisor generation's FIFO preparation owner: one daemon thread at a time.
+COPY_LANE, ADMISSION_LANE = "workspace-preparation", "workspace-preparation-validation"
+VALIDATION_LANE = ADMISSION_LANE  # the admission lane's historical name (existing folders validate there)
+# The resolver of these surfaces only validates an existing folder and reads its
+# Git HEAD (``_resolve_subagent_constraint``): no copy, no shared worktree lock.
+_VALIDATION_SURFACES = frozenset({"external_workspace"})
 
-    ``submit`` never waits: it appends and starts the thread when none runs; the
-    thread drains jobs in order and exits when the queue is empty. Closing never
-    joins: a running copy keeps its custody until it returns.
+
+class PreparationGeneration:
+    """One supervisor generation's admission owner: two FIFO lanes, one daemon thread each at a time.
+
+    The copy lane keeps every surface that may copy or create a write root in
+    acceptance order; the admission lane runs only steps that copy nothing (an
+    existing folder's validation, a readonly child, every claim's final
+    admission step, launch marks, warm Resumes), so none of them waits behind
+    another task's copy, and their storage writes are serialized in one place. A
+    claim's later cleanup joins its own lane, after its job. ``submit`` never
+    waits: it appends and starts the lane's thread when none runs; the thread
+    drains in order and exits when the lane is empty. Closing never joins: a
+    running copy keeps its custody until it returns.
     """
 
     def __init__(self, stop: Optional[Callable[[], bool]] = None):
@@ -142,51 +158,116 @@ class PreparationGeneration:
         self.owner = _process_owner()
         self._stop = stop
         self._closed = threading.Event()
+        self._pauses = 0  # process-ending stops under way, each its own (``pause_admission``)
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)
-        self._jobs: collections.deque = collections.deque()
-        self._thread: Optional[threading.Thread] = None
+        self._jobs = {lane: collections.deque() for lane in (COPY_LANE, VALIDATION_LANE)}
+        self._threads: Dict[str, Optional[threading.Thread]] = dict.fromkeys(self._jobs)
 
     def closed(self) -> bool:
         """Closed explicitly, or its server generation / process stop or restart was requested."""
         return self._closed.is_set() or bool(self._stop is not None and self._stop())
 
+    def launches_closed(self) -> bool:
+        """Closed, or paused by a stop under way: no worker launch or warm Resume starts a durable step
+        (a child's admission reads ``closed`` alone and is queued as ever)."""
+        return self._pauses > 0 or self.closed()
+
+    def pause(self, resume: bool = False) -> None:
+        """Count one stop's pause (or end one): a door that finished never lifts another's."""
+        with self._lock:
+            self._pauses = max(0, self._pauses - 1) if resume else self._pauses + 1
+
     def close(self) -> None:
         self._closed.set()
 
-    def submit(self, job: Callable[[], None]) -> bool:
-        """Queue ``job`` behind earlier ones; False when no thread could start for it."""
+    def lane_idle(self, lane: str, timeout: Optional[float] = None) -> bool:
+        """Wait until ``lane`` holds no job and runs none (a stop's bounded wait; never the lane itself)."""
+        with self._idle:
+            return self._idle.wait_for(lambda: self._threads[lane] is None and not self._jobs[lane], timeout)
+
+    def submit(self, job: Callable[[], None], lane: str = COPY_LANE) -> bool:
+        """Queue ``job`` behind earlier ones of its lane; False when no thread could start for it."""
         with self._lock:
-            self._jobs.append(job)
-            if self._thread is not None:
+            self._jobs[lane].append(job)
+            if self._threads[lane] is not None:
                 return True
-            thread = threading.Thread(target=self._drain, name="workspace-preparation", daemon=True)
-            self._thread = thread
+            thread = threading.Thread(target=self._drain, args=(lane,), name=lane, daemon=True)
+            self._threads[lane] = thread
             try:
                 thread.start()
             except Exception:
                 log.warning("Workspace preparation thread could not start", exc_info=True)
-                self._thread = None
-                self._jobs.clear()  # no thread ran, so the queue held only this job
+                self._threads[lane] = None
+                self._jobs[lane].clear()  # no thread ran, so the lane held only this job
                 return False
             return True
 
     def on_executor(self) -> bool:
-        return self._thread is threading.current_thread()
+        return threading.current_thread() in self._threads.values()
+
+    def current_lane(self) -> str:
+        """The lane whose thread runs the caller, else an empty string."""
+        current = threading.current_thread()
+        return next((lane for lane, thread in self._threads.items() if thread is current), "")
+
+    def wait_store(self, operation: Callable[[], Any], *, controls: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+                   retryable: Optional[Callable[[], bool]] = None,
+                   busy: Optional[Callable[[BaseException], bool]] = None) -> Any:
+        """Keep a lane job's place across a known-unsent acquisition gap, outside every Q scope.
+
+        Callers wrap one read/CAS/interlock, never a copy or arbitrary handler.
+        ``busy`` names the exceptions that are such a gap (default: confirmed
+        store contention; reads pass any ``StoreBusy``, launches the schedule
+        owner's ``contention``). ``controls`` is re-read between slices and its
+        refusal ends the job typed (``PreparationStopped``); ``retryable`` closes
+        the gate before any possible queue handoff. Off a lane thread nothing
+        waits: the gap propagates to the caller's own owner.
+        """
+        from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
+        from ouroboros.store import acquisition_budget
+        from supervisor import queue
+
+        gap = busy or store_contention
+        while True:
+            try:
+                with acquisition_budget(ACQUISITION_SLICE_SEC):  # one slice per attempt, controls between
+                    return operation()
+            except Exception as exc:
+                if not gap(exc) or not self.on_executor() or retryable is not None and not retryable():
+                    raise
+                if queue._queue_lock._is_owned():
+                    raise RuntimeError("Preparation acquisition wait still owns Q") from exc
+                if controls is not None:
+                    try:
+                        refusal = controls()
+                    except StoreBusy as control_gap:
+                        if not store_contention(control_gap):
+                            raise
+                    else:
+                        if refusal is not None:
+                            raise PreparationStopped(refusal) from exc
+                    self._closed.wait(ACQUISITION_SLICE_SEC)
+                else:
+                    # Closing forbids new execution, not finishing this same
+                    # refusal receipt. The closed event would spin here.
+                    threading.Event().wait(ACQUISITION_SLICE_SEC)
 
     def wait_idle(self, timeout: Optional[float] = None) -> bool:
         """Wait until nothing is queued or running (tests, diagnostics; never the event loop)."""
         with self._idle:
-            return self._idle.wait_for(lambda: self._thread is None and not self._jobs, timeout)
+            return self._idle.wait_for(
+                lambda: not any(self._threads.values()) and not any(self._jobs.values()), timeout)
 
-    def _drain(self) -> None:
+    def _drain(self, lane: str) -> None:
+        jobs = self._jobs[lane]
         while True:
             with self._lock:
-                if not self._jobs:
-                    self._thread = None
+                if not jobs:
+                    self._threads[lane] = None
                     self._idle.notify_all()
                     return
-                job = self._jobs.popleft()
+                job = jobs.popleft()
             try:
                 job()
             except Exception:
@@ -208,10 +289,48 @@ def start_generation(*, stop: Optional[Callable[[], bool]] = None) -> Preparatio
 
 
 def close_generation(generation: Optional[PreparationGeneration] = None) -> None:
-    """Close without waiting: queued claims never start; a running copy keeps its custody."""
+    """Close without waiting: queued launches and Resumes refuse before any durable step; a running
+    copy keeps its custody."""
     target = generation if generation is not None else _CURRENT[0]
     if target is not None:
         target.close()
+
+
+def pause_admission(timeout: Optional[float] = None) -> bool:
+    """A process-ending stop's first step (owner Restart, planned restart, Update, Quit), before it reads
+    the queue or writes its own restrictions: the open generation starts no new launch or warm Resume
+    (``launches_closed``), and the stop waits, at most ``STOP_ADMISSION_DRAIN_SEC``, for the admission
+    lane to empty, so a launch or Resume already writing its marks hands over to the pool it reserved
+    while that pool still runs (``worker_assignment``, ``worker_owner_wait``). True when the lane emptied
+    in time. ``resume_admission`` reopens it."""
+    from ouroboros.runtime_limits import STOP_ADMISSION_DRAIN_SEC
+    from supervisor import queue
+
+    generation = _CURRENT[0]
+    if generation is None:
+        return True
+    generation.pause()
+    if generation.on_executor() or queue._queue_lock._is_owned():
+        log.error("A stop paused admission from the admission lane or under Q; it cannot wait for the lane")
+        return False
+    if generation.lane_idle(ADMISSION_LANE, STOP_ADMISSION_DRAIN_SEC if timeout is None else timeout):
+        return True
+    log.warning("A stop proceeds while the admission lane still writes; a launch it commits after the pool "
+                "stops restores as possibly dispatched")
+    return False
+
+
+def resume_admission() -> None:
+    """The stop that paused admission did not end this process: its pause ends (another stop's stays)."""
+    generation = _CURRENT[0]
+    if generation is not None:
+        generation.pause(resume=True)
+
+
+def current_generation() -> Optional[PreparationGeneration]:
+    """The open generation whose admission lane persists launch marks and warm Resumes; None keeps
+    a caller's historical inline path (a host that never opened one)."""
+    return _CURRENT[0]
 
 
 def _requests_preparation(evt: Dict[str, Any]) -> bool:
@@ -220,75 +339,90 @@ def _requests_preparation(evt: Dict[str, Any]) -> bool:
 
 
 def _no_store_wait():
-    """The short event-entry claim/marker/refusal never waits under Q."""
+    """The short event-entry refusal never waits under Q."""
     from ouroboros.store import acquisition_budget
     return acquisition_budget(0)
 
 
-def accept(evt: Dict[str, Any], ctx: Any, route: Dict[str, Any]) -> bool:
-    """Claim an acting child's preparation for this generation's FIFO; False keeps the inline path.
+def accept(evt: Dict[str, Any], ctx: Any, route: Dict[str, Any], *, admission: Optional[Callable] = None) -> bool:
+    """Claim a subagent request for this generation's lanes; False keeps the inline path.
 
-    Event-loop work only, all without a storage wait: the short reservation
-    under Q, the durable ``queued`` marker before FIFO entry, a nonblocking
-    submit. Positive contention retains this same request on the existing event
-    transport; it has not entered the preparation FIFO. A duplicate coalesces
-    with its live claim. Hard unreadability retains the existing typed refusal.
+    Event-loop work only, memory only: the reservation under Q (the row's own
+    freshness is read on the lane) and a nonblocking submit. A duplicate
+    coalesces with its live claim; an id another owner holds is ignored. The
+    event is consumed here and never re-put: the lane retries its own storage
+    gaps at the head of its queue. An already-composed host child supplies its
+    admission callback; on this lane it runs inline under the same claim.
     """
-    generation = _CURRENT[0]
+    generation = current_generation()
     if (generation is None or str(route.get("delegation_role") or "") != "subagent"
-            or not str(evt.get("task_id") or "").strip() or not _requests_preparation(evt)):
+            or not str(evt.get("task_id") or "").strip()):
         return False
     with _STATE_LOCK:
-        retry = str(evt.get(_RETRY_TOKEN) or "")
-        claim = _LIVE.get(retry) if retry else None
-        if retry and (claim is None or claim.task_id != str(evt.get("task_id") or "")
-                      or {key: value for key, value in evt.items() if key != _RETRY_TOKEN} != claim.event):
-            return True  # an ended generation's frame cannot mint a new owner
-        if claim is None:
-            if any(value.task_id == str(evt["task_id"]) for value in _LIVE.values()):
-                return True
-            claim = PreparationClaim.live(generation, evt, ctx, route)
-            _LIVE[claim.token] = claim
-        elif claim.submitted:
+        if any(value.task_id == str(evt["task_id"]) for value in _LIVE.values()):
             return True
+        claim = PreparationClaim.live(generation, evt, ctx, route)
+        _LIVE[claim.token] = claim
     from supervisor.task_admission import claim_requested_child
 
-    submitted = deferred = False
-    with _no_store_wait():
-        try:
-            if not claim_requested_child(claim.ctx, claim.task_id, claim.token):
-                log.info("Ignoring replayed schedule event for task %s", claim.task_id)
-                return True
-            if claim.generation.closed():
-                claim.refuse(_DETAILS[INTERRUPTED_BY_GENERATION_EXIT], INTERRUPTED_BY_GENERATION_EXIT)
-                return True
-            landed = _transition(claim.ctx.DRIVE_ROOT, claim.task_id, claim.token, claim.queued_marker, expected=None)
-            if landed is not True:
-                claim.unrecorded(landed)
-                return True
-            submitted = claim.submitted = claim.generation.submit(functools.partial(_run, claim))
-            if not submitted:
-                claim.refuse(_DETAILS[EXECUTOR_UNAVAILABLE], EXECUTOR_UNAVAILABLE)
-            return True
-        except Exception as exc:
-            if store_contention(exc):
-                deferred = defer_schedule_event(claim.ctx, {**claim.event, _RETRY_TOKEN: claim.token})
-            else:
-                log.warning("Preparation claim of %s found unreadable authority", claim.task_id, exc_info=True)
-                claim.disclose_unknown()
-            return True
-        finally:
-            if not submitted and not deferred:
-                claim.release()
-                _finish(claim)
-
-
-def _run(claim: "PreparationClaim") -> None:
-    """The FIFO job: the existing schedule owner, on this thread, under the claim."""
+    submitted = False
     try:
-        from supervisor.events_schedule_task import _handle_schedule_task
+        if not claim_requested_child(claim.ctx, claim.task_id, claim.token):
+            log.info("Ignoring replayed schedule event for task %s", claim.task_id)
+            return True
+        if claim.generation.closed():
+            _refuse_at_entry(claim, INTERRUPTED_BY_GENERATION_EXIT)
+            return True
+        if admission is not None and generation.current_lane() == claim.lane:
+            submitted = claim.submitted = True
+            _run(claim, admission=admission)
+        else:
+            submitted = claim.submitted = claim.generation.submit(functools.partial(_run, claim, admission=admission), claim.lane)
+        if not submitted:
+            _refuse_at_entry(claim, EXECUTOR_UNAVAILABLE)
+        return True
+    finally:
+        if not submitted:
+            claim.release()
+            _finish(claim)
 
-        _handle_schedule_task(claim.event, claim.ctx, preparation=claim)
+
+def _refuse_at_entry(claim: "PreparationClaim", reason: str) -> None:
+    """A request no lane can take: the typed refusal, zero-wait on the event loop; a contended write
+    leaves the REQUESTED row to the never-delivered recovery rule (its stamp names this server)."""
+    try:
+        with _no_store_wait():
+            claim.refuse(_DETAILS[reason], reason)
+    except Exception:
+        log.warning("Entry refusal of %s (%s) was not recorded; recovery settles the request",
+                    claim.task_id, reason, exc_info=True)
+
+
+def _run(claim: "PreparationClaim", *, admission: Optional[Callable] = None) -> None:
+    """The lane job: the ``queued`` marker, then the existing schedule owner under the claim."""
+    from supervisor.events_schedule_task import _handle_schedule_task
+
+    def step() -> None:
+        landed = claim.store_gate(functools.partial(
+            _transition, claim.ctx.DRIVE_ROOT, claim.task_id, claim.token, claim.queued_marker, expected=None))
+        if landed is not True:
+            claim.unrecorded(landed)
+            return
+        if admission is None:
+            _handle_schedule_task(claim.event, claim.ctx, preparation=claim)
+        else:
+            admission(claim)
+
+    _guarded(claim, step)
+
+
+def _guarded(claim: "PreparationClaim", step: Callable[[], None], owner: Any = None) -> None:
+    """One lane step under the claim: a typed stop refuses, a failure before the admission boundary
+    refuses, and the claim ends unless the step handed its continuation to the admission lane.
+    The end belongs to one invocation: a hand-over names the next one before its job can start."""
+    owner = claim.ender = owner or object()
+    try:
+        step()
     except PreparationStopped as exc:
         # Raised only by a proven-unsent store gate, never around enqueue or copy.
         try:
@@ -304,8 +438,9 @@ def _run(claim: "PreparationClaim") -> None:
             except Exception:
                 log.warning("Preparation refusal of %s failed", claim.task_id, exc_info=True)
     finally:
-        claim.release()
-        _finish(claim)
+        if claim.ender is owner:
+            claim.release()
+            _finish(claim)
 
 
 def _finish(claim: "PreparationClaim") -> None:
@@ -321,51 +456,48 @@ class PreparationClaim:
                  generation: Optional[PreparationGeneration], generation_token: str,
                  owner: Dict[str, Any], event: Optional[Dict[str, Any]] = None, surface: str = "",
                  resource: Optional[Dict[str, Any]] = None, claimed_at: str = "",
-                 unidentified_residue: bool = False):
+                 unidentified_residue: bool = False, acting: bool = True):
         self.task_id, self.ctx, self.route, self.token = task_id, ctx, route, token
         self.generation, self.generation_token, self.owner = generation, generation_token, dict(owner)
-        self.event, self.surface = event or {}, surface
+        self.event, self.surface, self.acting = event or {}, surface, acting
         self.resource = dict(resource or {})
         self.claimed_at = claimed_at or utc_now_iso()
         self.unidentified_residue = unidentified_residue
         self.crossed = False
         self.submitted = False
+        self.ender: Any = None  # the lane invocation that ends this claim
         self.queued_marker = self.marker(QUEUED)
         self.refusal_receipt = uuid.uuid4().hex
 
+    @property
+    def lane(self) -> str:
+        """A copying surface takes the copy lane; a readonly child or an existing folder the admission lane."""
+        return COPY_LANE if self.acting and self.surface.strip().lower() not in _VALIDATION_SURFACES else ADMISSION_LANE
+
     def store_gate(self, operation: Callable[[], Any], *, controls: bool = True,
-                   retryable: Optional[Callable[[], bool]] = None) -> Any:
-        """Keep this FIFO stack across a known-unsent acquisition, outside every Q scope.
+                   retryable: Optional[Callable[[], bool]] = None,
+                   busy: Optional[Callable[[BaseException], bool]] = None) -> Any:
+        """This claim's place on its lane across a known-unsent acquisition (``wait_store``); its
+        controls are the root latches and the generation. Without a generation nothing waits."""
+        if self.generation is None:
+            return operation()
+        return self.generation.wait_store(operation, controls=self._control_refusal if controls else None,
+                                          retryable=retryable, busy=busy)
 
-        Callers wrap one read/CAS/interlock, never a copy or arbitrary handler.
-        ``retryable`` closes the gate before any possible queue handoff.
-        """
-        from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
-        from supervisor import queue
-
-        while True:
-            try:
-                return operation()
-            except StoreBusy as exc:
-                if (not store_contention(exc) or self.generation is None or not self.generation.on_executor()
-                        or retryable is not None and not retryable()):
-                    raise
-                if queue._queue_lock._is_owned():
-                    raise RuntimeError("Preparation acquisition wait still owns Q") from exc
-                if controls:
-                    try:
-                        refusal = self._control_refusal()
-                    except StoreBusy as control_gap:
-                        if not store_contention(control_gap):
-                            raise
-                    else:
-                        if refusal is not None:
-                            raise PreparationStopped(refusal) from exc
-                    self.generation._closed.wait(ACQUISITION_SLICE_SEC)
-                else:
-                    # Closing forbids new execution, not finishing this same
-                    # refusal receipt. The closed event would spin here.
-                    threading.Event().wait(ACQUISITION_SLICE_SEC)
+    def admit(self, step: Callable[[], None]) -> None:
+        """Run the admission step on the admission lane: inline there (or without a generation);
+        from the copy lane it is handed over behind earlier admission steps, never behind a copy.
+        An admission lane whose thread cannot start keeps this claim's step on the copy lane (still
+        off the event loop, with the same gate), so one lane's failure refuses no prepared child."""
+        if self.generation is None or self.generation.current_lane() != COPY_LANE:
+            step()
+            return
+        current, handover = self.ender, object()
+        self.ender = handover  # before the job can start: from here its invocation ends the claim
+        if not self.generation.submit(functools.partial(_guarded, self, step, handover), ADMISSION_LANE):
+            self.ender = current
+            log.warning("Admission lane unavailable; %s is admitted on its copy lane", self.task_id)
+            step()
 
     @classmethod
     def live(cls, generation: PreparationGeneration, evt: Dict[str, Any], ctx: Any,
@@ -374,7 +506,7 @@ class PreparationClaim:
         return cls(task_id=str(evt.get("task_id") or "").strip(), ctx=ctx, route=dict(route),
                    token=uuid.uuid4().hex, generation=generation, generation_token=generation.token,
                    owner=generation.owner, event=copy.deepcopy(evt),
-                   surface=str(requested.get("surface") or ""))
+                   surface=str(requested.get("surface") or ""), acting=_requests_preparation(evt))
 
     @classmethod
     def recovered(cls, drive_root: Any, row: Dict[str, Any], marker: Dict[str, Any]) -> "PreparationClaim":
@@ -383,7 +515,8 @@ class PreparationClaim:
 
         tid = str(row.get("task_id") or "")
         phase = str(marker.get("phase") or "")
-        resource = marker.get("resource") if phase == READY and isinstance(marker.get("resource"), dict) else {}
+        # The copy returned once the marker says ``ready``; ``admitting`` keeps that same handle.
+        resource = marker.get("resource") if phase in {READY, ADMITTING} and isinstance(marker.get("resource"), dict) else {}
         route = {"chat_id": row.get("chat_id"), "delegation_role": "subagent",
                  "parent_id": row.get("parent_task_id"), "role": str(row.get("role") or ""),
                  "root_task_id": str(row.get("root_task_id") or row.get("parent_task_id") or tid)}
@@ -449,7 +582,7 @@ class PreparationClaim:
         generation = self.generation
         if generation is None:
             cleanup()
-        elif (generation.on_executor() or not generation.closed()) and generation.submit(cleanup):
+        elif (generation.on_executor() or not generation.closed()) and generation.submit(cleanup, self.lane):
             return
         else:
             log.info("Refused preparation %s (%s) retains its resources for ordinary retention: "
@@ -468,10 +601,13 @@ class PreparationClaim:
         Returns the resolver's tuple, or None once a control, a closed
         generation or lost ownership ended the claim (its refusal or
         abandonment already done). Controls are read before the copy starts
-        and again after it returns; a copy is never interrupted mid-way.
+        and again after it returns; a copy is never interrupted mid-way. A
+        readonly child's resolver is pure: no copy phases, one control read.
         """
         if not self._may_proceed():
             return None
+        if not self.acting:
+            return resolve(None)
         landed = self.store_gate(functools.partial(
             _transition, self.ctx.DRIVE_ROOT, self.task_id, self.token, self.marker(COPYING), expected=(QUEUED,)))
         if landed is not True:
@@ -492,9 +628,20 @@ class PreparationClaim:
     def enter_admission(self) -> Optional[bool]:
         """Commit ``admitting`` before the admission path: True crossed, False lost, None unknown."""
         landed = self.store_gate(functools.partial(
-            _transition, self.ctx.DRIVE_ROOT, self.task_id, self.token, self.marker(ADMITTING), expected=(READY,)))
+            _transition, self.ctx.DRIVE_ROOT, self.task_id, self.token, self.marker(ADMITTING),
+            expected=(READY,) if self.acting else (QUEUED,)))
         self.crossed = landed is not False
         return landed
+
+    def close_admitted(self) -> None:
+        """After the queue put: retire ``admitting`` on the SCHEDULED receipt, best effort (recovery retires
+        it too once the queue holds the row); the put, not this write, is the admission."""
+        try:
+            self.store_gate(functools.partial(
+                _transition, self.ctx.DRIVE_ROOT, self.task_id, self.token, self.marker(ADMITTED),
+                expected=(ADMITTING,), status=STATUS_SCHEDULED), controls=False)
+        except Exception:
+            log.info("Admitted marker of %s stays for recovery to retire", self.task_id, exc_info=True)
 
     def release(self) -> None:
         from supervisor import queue
@@ -593,8 +740,8 @@ class PreparationClaim:
 
 
 def _transition(drive_root: Any, task_id: str, token: str, marker: Dict[str, Any], *,
-                expected: Optional[tuple]) -> Optional[bool]:
-    """Write ``marker`` only onto this token's still-requested row (``expected`` phases).
+                expected: Optional[tuple], status: str = STATUS_REQUESTED) -> Optional[bool]:
+    """Write ``marker`` only onto this token's row still in ``status`` (``expected`` phases).
 
     ``expected=None`` is the first claim: the row may not carry any marker yet.
     True: the marker landed. False: the row left this token (progressed, or
@@ -602,19 +749,18 @@ def _transition(drive_root: Any, task_id: str, token: str, marker: Dict[str, Any
     """
     def project(current: Dict[str, Any], incoming: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         held = current.get(MARKER)
-        if current and str(current.get("status") or "") != STATUS_REQUESTED:
+        if current and str(current.get("status") or "") != status:
             return None
         if expected is None:
             if held is not None:
                 return None
         elif not (isinstance(held, dict) and held.get("token") == token and held.get("phase") in expected):
             return None
-        return {**incoming, MARKER: marker, "status": STATUS_REQUESTED}
+        return {**incoming, MARKER: marker, "status": status}
 
     write_error = None
     try:
-        write_task_result(drive_root, task_id, STATUS_REQUESTED, _field_projector=project,
-                          strict_existing_dict=True)
+        write_task_result(drive_root, task_id, status, _field_projector=project, strict_existing_dict=True)
     except Exception as exc:
         write_error = exc
         if not store_contention(exc):
@@ -627,9 +773,9 @@ def _transition(drive_root: Any, task_id: str, token: str, marker: Dict[str, Any
         log.warning("Preparation marker for %s is unreadable", task_id, exc_info=True)
         return None
     held = stored.get(MARKER) if isinstance(stored.get(MARKER), dict) else None
-    if str(stored.get("status") or "") == STATUS_REQUESTED and held == marker:
+    if str(stored.get("status") or "") == status and held == marker:
         return True
-    if stored and (str(stored.get("status") or "") != STATUS_REQUESTED
+    if stored and (str(stored.get("status") or "") != status
                    or held is not None and held.get("token") != token
                    or expected is None and held is not None):
         return False
@@ -649,7 +795,7 @@ def _row_references(row: Dict[str, Any], resource: Dict[str, Any]) -> bool:
 
 def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
     """Remove exactly the copy ``resource`` names; a different or unknown holder is kept."""
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project, subagent_worktrees
 
     surface, path = str(resource.get("surface") or ""), str(resource.get("path") or "")
     try:
@@ -665,7 +811,7 @@ def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
                                   check=False) if pathlib.Path(path).is_dir() else None
             if head is None or head.returncode != 0 or head.stdout.strip() != str(resource.get("base_sha") or ""):
                 return "retained_not_owned"
-            return "removed" if subagent_worktrees.remove_genesis_project(path) else "retained_remove_failed"
+            return "removed" if genesis_project.remove_genesis_project(path, task_id=task_id) else "retained_remove_failed"
     except Exception:
         log.warning("Prepared copy %s of %s was kept: disposal failed", path, task_id, exc_info=True)
         return "retained_remove_failed"
@@ -701,14 +847,18 @@ def _interruption_reason(marker: Dict[str, Any]) -> str:
 
 
 def recover_interrupted_preparations(drive_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, list]:
-    """Settle preparations whose recorded owner positively ended (startup and periodic reconcile).
+    """Settle requests whose recorded owner positively ended (startup and periodic reconcile).
 
-    Selects only REQUESTED rows carrying a marker (the status-indexed read). A
+    Selects REQUESTED and SCHEDULED rows (the status-indexed read). A
     ``queued``/``copying``/``ready`` marker becomes the typed never-admitted
     refusal through the schedule refusal owner, then only its recorded copy is
     disposed; the queue's own admission of the token retires the marker; an
-    ``admitting`` marker stays unresolved on ``unknowns``. A live owner, a
-    foreign reservation or unreadable authority is left alone.
+    ``admitting`` marker on a REQUESTED row stays unresolved on ``unknowns``,
+    while on a SCHEDULED receipt the restored queue does not hold it proves the
+    put was never entered (``_never_put``). A REQUESTED row without a marker is
+    settled only once its request provably cannot arrive (``_request_ended``).
+    A live owner, a foreign reservation or unreadable authority is left alone;
+    a SCHEDULED row without a marker belongs to the queue restore.
     """
     from ouroboros import obligations
     from ouroboros.task_store import list_documents
@@ -718,20 +868,22 @@ def recover_interrupted_preparations(drive_root: Any, *, stop: Optional[Callable
                                "errors": []}
     try:
         _retire_resolved_gaps(root, obligations)
-        rows = list_documents(root, statuses=[STATUS_REQUESTED])
+        rows = list_documents(root, statuses=[STATUS_REQUESTED, STATUS_SCHEDULED])
     except Exception as exc:
         log.warning("Preparation recovery could not read requested rows", exc_info=True)
         report["errors"].append(f"requested_rows_unreadable:{type(exc).__name__}")
         return report
     for row in rows:
         marker = row.get(MARKER)
-        if not isinstance(marker, dict) or not str(marker.get("token") or ""):
+        marked = isinstance(marker, dict) and bool(str(marker.get("token") or ""))
+        if not marked and str(row.get("status") or "") != STATUS_REQUESTED:
             continue
         if stop is not None and stop():
             break
         tid = str(row.get("task_id") or "")
         try:
-            report[_recover_one(root, row, marker, obligations)].append(tid)
+            outcome = _recover_one(root, row, marker, obligations) if marked else _recover_unmarked(root, row)
+            report[outcome].append(tid)
         except Exception:
             log.warning("Preparation recovery of %s failed; it stays for the next pass", tid, exc_info=True)
             report["errors"].append(tid)
@@ -753,19 +905,77 @@ def _recover_one(root: pathlib.Path, row: Dict[str, Any], marker: Dict[str, Any]
             queued = meta.get("task") if isinstance(meta.get("task"), dict) else {"id": tid}
     if reserved and reserved != token:
         return "live"
-    phase = str(marker.get("phase") or "")
+    phase, status = str(marker.get("phase") or ""), str(row.get("status") or "")
     if queued is not None:
         if phase == ADMITTING and str(queued.get("_admission_owner_token") or "") == token:
             _transition(root, tid, token, {**marker, "phase": ADMITTED, "updated_at": utc_now_iso(),
-                                           "retired_by": "recovery"}, expected=(ADMITTING,))
+                                           "retired_by": "recovery"}, expected=(ADMITTING,), status=status)
         return "admitted"  # the queue owns admitted work
-    if phase in UNSENT_PHASES:
+    if phase in UNSENT_PHASES or _never_put(status, phase):
         reason = _interruption_reason(marker)
         confirmed = PreparationClaim.recovered(root, row, marker).refuse(_DETAILS[reason], reason)
         return "settled" if confirmed else "retained"
     obligations.add(root, "unknowns", f"task:{tid}", {
         "task_id": tid, "reason": ADMISSION_UNCERTAIN, "phase": phase, "preparation_token": token})
     return "uncertain"
+
+
+def _never_put(status: str, phase: str) -> bool:
+    """A SCHEDULED receipt still ``admitting`` that the restored queue does not hold: every queue put is
+    preceded by a published locator snapshot naming the row, so once this process took the saved
+    queue into custody and found no row, the put was never entered. An unrestored saved queue proves
+    nothing (the row may be waiting in it)."""
+    from supervisor.queue_snapshot import saved_queue_unowned
+
+    return status == STATUS_SCHEDULED and phase == ADMITTING and not saved_queue_unowned()
+
+
+def _recover_unmarked(root: pathlib.Path, row: Dict[str, Any]) -> str:
+    """A REQUESTED row no claim ever marked: refuse it once its event provably cannot arrive."""
+    from supervisor import queue
+    from supervisor.events_schedule_task import _reject_schedule_task
+
+    tid = str(row.get("task_id") or "")
+    with _STATE_LOCK:
+        claimed = any(claim.task_id == tid for claim in _LIVE.values())
+    with queue._queue_lock:
+        held = (claimed or tid in queue.ADMISSION_RESERVATIONS or tid in queue.RUNNING
+                or any(isinstance(item, dict) and str(item.get("id") or "") == tid for item in queue.PENDING))
+    if held:
+        return "live"
+    reason = _request_ended(root, row)
+    if not reason:
+        return "live"
+    claim = PreparationClaim.recovered(root, row, {})
+    route = claim.route
+    confirmed = _reject_schedule_task(
+        claim.ctx, tid=tid, chat_id=route.get("chat_id"), delegation_role="subagent",
+        parent_id=route.get("parent_id"), root_task_id=route["root_task_id"], role=route["role"],
+        result_fields={"parent_task_id": route.get("parent_id"), "root_task_id": route["root_task_id"],
+                       "delegation_role": "subagent", "role": route["role"]},
+        detail=_DETAILS[reason], reason_code=reason, extra_fields={"admission_outcome": "never_admitted"})
+    return "settled" if confirmed else "retained"
+
+
+def _request_ended(root: pathlib.Path, row: Dict[str, Any]) -> str:
+    """Why the request can no longer arrive: its stamped producer and bus owner both ended
+    (``requested_by``), or, for a row that predates the stamp, its parent is terminal; else ''."""
+    from ouroboros.local_custody_repair import owner_ended
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
+
+    stamp = row.get("requested_by") if isinstance(row.get("requested_by"), dict) else None
+    if stamp is not None:
+        ended = (owner_ended(stamp.get("pid"), stamp.get("birth"))
+                 and owner_ended(stamp.get("host_pid"), stamp.get("host_birth")))
+        return REQUEST_LOST if ended else ""
+    parent = str(row.get("parent_task_id") or "")
+    if not parent:
+        return ""
+    try:
+        parent_row = load_task_result(root, parent, strict=True) or {}
+    except Exception:
+        return ""
+    return REQUEST_ORPHANED if str(parent_row.get("status") or "") in _TRULY_TERMINAL_STATUSES else ""
 
 
 def _retire_resolved_gaps(root: pathlib.Path, obligations: Any) -> None:
@@ -775,7 +985,7 @@ def _retire_resolved_gaps(root: pathlib.Path, obligations: Any) -> None:
             continue
         current = load_task_result(root, str(facts.get("task_id") or ""), strict=True) or {}
         held = current.get(MARKER) if isinstance(current.get(MARKER), dict) else {}
-        if (str(current.get("status") or "") != STATUS_REQUESTED
+        if (str(current.get("status") or "") not in {STATUS_REQUESTED, STATUS_SCHEDULED}
                 or held.get("token") != facts.get("preparation_token")):
             obligations.remove(root, "unknowns", identity)
 

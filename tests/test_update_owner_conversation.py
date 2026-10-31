@@ -132,7 +132,8 @@ def test_direct_lane_refuses_while_the_tree_is_being_materialized(tx_repo, monke
     assert len(notices) == 1 and LOCK_NOTICE in notices[0]
 
 
-def test_native_turn_reaches_execution_while_the_resolver_holds_the_repo(tx_repo, monkeypatch):
+@pytest.mark.parametrize('live', [False, True])
+def test_native_turn_reaches_execution_while_the_resolver_holds_the_repo(tx_repo, monkeypatch, live):
     import supervisor.state as state
 
     tx = _write_tx("assisted_resolution")
@@ -145,9 +146,13 @@ def test_native_turn_reaches_execution_while_the_resolver_holds_the_repo(tx_repo
         lambda agent, chat_id, text, image_data, **kw: turns.append((agent, text, kw)),
     )
 
-    lane.handle_chat_direct(1, "why did the merge conflict?")
+    turn = object() if live else None
+    lane.handle_chat_direct(1, "why did the merge conflict?", realtime_turn=turn)
 
-    assert turns == [(None, "why did the merge conflict?", {"task_constraint": None, "task_metadata": None})]  # construction belongs to registered execution
+    expected = {"task_constraint": None, "task_metadata": None}
+    if live:
+        expected['realtime_turn'] = turn
+    assert turns == [(None, "why did the merge conflict?", expected)]  # construction belongs to registered execution
     assert notices == []
 
 
@@ -194,7 +199,7 @@ def test_main_steers_the_resolver_through_the_mailbox_while_the_gate_is_closed(
     tx_repo, tmp_path, monkeypatch,
 ):
     import supervisor.queue as supervisor_queue
-    from ouroboros.owner_mailbox import drain_owner_messages
+    from ouroboros.owner_mailbox import drain_owner_entries
     from supervisor.steering import _handle_steer_task
 
     tx = _write_tx("assisted_resolution")
@@ -219,7 +224,7 @@ def test_main_steers_the_resolver_through_the_mailbox_while_the_gate_is_closed(
         "client_message_id": "steer-owner-1",
     }, handler_ctx)
 
-    assert drain_owner_messages(tmp_path, RESOLVER_ID) == [
+    assert [e["text"] for e in drain_owner_entries(tmp_path, RESOLVER_ID)] == [
         "Keep our local config.py changes; take upstream for loop.py.",
     ]
 

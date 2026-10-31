@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import pathlib
-import subprocess
 import types
 from typing import Callable
 
@@ -134,11 +133,19 @@ def _install_transaction_fakes(
     )
     loaded = types.SimpleNamespace(review=review, source=SKILL_SOURCE_EXTERNAL)
     monkeypatch.setattr(skill_publish, "_validate_local_skill", lambda *_args: ("demo", loaded))
-    monkeypatch.setattr(
-        skill_publish,
-        "get_ouroboroshub_catalog_url",
-        lambda: "https://raw.githubusercontent.com/hub/project/main/catalog.json",
-    )
+    from ouroboros.skill_publish_destination import PublishDestination
+
+    monkeypatch.setattr(skill_publish, "resolve_publish_destination", lambda *_a, **_k: PublishDestination(
+        "hub", "hub", "project", "main", "skills", "ouroboros", "Ouroboros"))
+    monkeypatch.setattr(skill_publish, "fetch_upstream_file", lambda *_a, **_k: None)  # an older hub: no hub.json
+    monkeypatch.setattr(skill_publish, "fetch_branch_head", lambda _ctx, _owner, _repo, branch: (BASE_SHA, branch or "main"))
+    monkeypatch.setattr(skill_publish, "fetch_repository", lambda *_a: {"default_branch": "main", "can_push": False})
+    monkeypatch.setattr(skill_publish, "fetch_tree_paths", lambda *_a: [])
+
+    def no_merge(*_args):
+        raise AssertionError("only a git destination this account may push to merges its request")
+
+    monkeypatch.setattr(skill_publish, "merge_pull_request", no_merge)
     monkeypatch.setattr(skill_publish, "capture_skill_publish_snapshot", lambda _loaded: snapshot)
     monkeypatch.setattr(
         skill_publish,
@@ -164,7 +171,7 @@ def _install_transaction_fakes(
         attempt.mark("fork_ready", repository="alice/project", actor="alice")
         attempt.mark("fork_synced", repository="alice/project", actor="alice")
 
-    def branch(*_args):
+    def branch(*_args, **_kwargs):
         events.append(("mutation", "branch"))
         return BASE_SHA
 
@@ -300,7 +307,7 @@ def test_failed_publication_writes_no_receipt_and_no_flag(monkeypatch, tmp_path)
 def test_publish_failure_projection_uses_confirmed_transport_progress(monkeypatch, tmp_path, failure):
     from ouroboros import skill_publish_github as github
     from ouroboros.skill_publish_result import apply_skill_publish_receipt_veto, extract_skill_publish_result_metadata
-    from ouroboros.tools.github import GhResult
+    from ouroboros.skill_publish_client import GitHubError
 
     ctx, _events, _captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=_snapshot())
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_SYNTHETIC1234567890")
@@ -308,30 +315,30 @@ def test_publish_failure_projection_uses_confirmed_transport_progress(monkeypatc
     monkeypatch.setattr(skill_publish, "ensure_branch", github.ensure_branch)
     requests = []
 
-    def transport(args, _ctx, **_kwargs):
-        requests.append(args)
-        if args[:2] == ["repo", "view"]:
-            return GhResult(True, '{"name":"project"}', 0, None, "")
-        if "/repos/alice/project/merge-upstream" in args:
-            return (GhResult(False, "⚠️ GH_ERROR: sync rejected", 1, None, "exit")
-                    if failure == "fork_sync" else GhResult(True, "{}", 0, None, ""))
-        if args[1] == "/repos/alice/project/git/ref/heads/submit/demo-v1.0.0":
-            return GhResult(False, "⚠️ GH_ERROR: not found", 1, 404, "exit")
-        assert args[3] == "/repos/alice/project/git/refs"
-        return GhResult(False, "⚠️ GH_TIMEOUT: exceeded 30s.", None, None, "timeout")
+    def transport(method, path, **_kwargs):
+        requests.append((method, path))
+        if path == "/repos/alice/project":
+            return {"name": "project"}
+        if path.endswith("/merge-upstream"):
+            raise GitHubError("sync rejected", http_status=403)
+        if "/git/ref/heads/" in path:
+            raise GitHubError("Not Found", http_status=404)
+        assert method == "POST" and path == "/repos/alice/project/git/refs"
+        if failure == "fork_sync":
+            raise GitHubError("Object missing", http_status=422)
+        raise GitHubError("exceeded 30s", failure="timeout")
 
-    monkeypatch.setattr(github, "_gh_run", transport)
+    monkeypatch.setattr(github, "request", transport)
     result = _submit(ctx)
     assert result["ok"] is False
-    expected_stage = "fork_ready" if failure == "fork_sync" else "fork_synced"
-    assert result["completed_stage"] == expected_stage
+    assert result["completed_stage"] == "fork_ready"  # the fork is never synchronized up front
     assert result["reason_code"] == f"{failure}_failed"
     outcome = {"outcome_axes": {"objective": {"status": "degraded"}, "review": {"status": "degraded"}}}
     apply_skill_publish_receipt_veto(outcome, {
         "type": "skill_publish", "metadata": {"skill_publish_target": {"skill": "demo", "repository": "hub/project"}},
     }, {"tool_calls": [{"tool": "submit_skill_to_hub", **extract_skill_publish_result_metadata(json.dumps(result))}]})
     assert outcome["outcome_axes"]["objective"]["status"] == ("fail" if failure == "fork_sync" else "degraded")
-    assert len(requests) == (2 if failure == "fork_sync" else 4)
+    assert len(requests) == 4 if failure == "fork_sync" else len(requests) == 3
 
 
 def test_high_payload_finding_blocks_before_any_github_or_mutation(monkeypatch, tmp_path):
@@ -600,9 +607,12 @@ def test_confirmation_failure_is_parseable_and_calls_nothing(tmp_path):
     assert not {"error_detail", "github_status", "github_operation"} & result.keys()
 
 
-@pytest.mark.parametrize("long_stderr", [False, True])
-def test_github_failure_envelope_is_reached_from_the_subprocess_boundary(monkeypatch, tmp_path, long_stderr):
-    """Real repository preparation + real transport; only the gh process is fake."""
+@pytest.mark.parametrize("long_message", [False, True])
+def test_github_failure_envelope_is_reached_from_the_https_boundary(monkeypatch, tmp_path, long_message):
+    """Real repository preparation and branch creation + real client; only HTTPS is fake.
+
+    The fork never saw the destination commit, GitHub refuses the branch (422), and the one
+    synchronization that follows fails."""
     from ouroboros import skill_publish_github
     from ouroboros.skill_publish_result import _bounded_text, extract_skill_publish_result_metadata
 
@@ -611,40 +621,46 @@ def test_github_failure_envelope_is_reached_from_the_subprocess_boundary(monkeyp
     monkeypatch.setattr(
         skill_publish, "prepare_publish_repository", skill_publish_github.prepare_publish_repository,
     )
+    monkeypatch.setattr(skill_publish, "ensure_branch", skill_publish_github.ensure_branch)
     commands = []
 
-    def run(cmd, **_kwargs):
-        commands.append(cmd)
-        if cmd[1:3] == ["repo", "view"]:
-            return subprocess.CompletedProcess(cmd, 0, '{"name":"project"}', "")
-        assert cmd[1:4] == ["api", "-X", "POST"] and cmd[4].endswith("/merge-upstream")
-        stderr = "gh: token ghp_SYNTHETIC1234567890 was rejected (HTTP 403)"
-        if long_stderr:
-            stderr = "x" * 700 + "\n" + stderr
-        return subprocess.CompletedProcess(cmd, 1, "", stderr)
+    import httpx
+    from ouroboros import skill_publish_client
 
-    monkeypatch.setattr(subprocess, "run", run)
+    def request(method, url, **_kwargs):
+        commands.append((method, url))
+        if url.endswith("/repos/alice/project"):
+            return httpx.Response(200, json={"name": "project"})
+        if "/git/ref/heads/" in url:
+            return httpx.Response(404, json={"message": "Not Found"})
+        if url.endswith("/git/refs"):
+            return httpx.Response(422, json={"message": "Object does not exist"})
+        assert method == "POST" and url.endswith("/merge-upstream")
+        message = "token ghp_SYNTHETIC1234567890 was rejected"
+        if long_message:
+            message = "x" * 700 + "\n" + message
+        return httpx.Response(403, json={"message": message})
+
+    monkeypatch.setattr(skill_publish_client.httpx, "request", request)
     result = _submit(ctx)
     assert result["ok"] is False
     assert result["reason_code"] == "fork_sync_failed"
     assert result["completed_stage"] == "fork_ready"
     assert result["github_status"] == 403
     assert result["github_operation"] == "merge-upstream"
-    assert result["error_detail"].startswith("⚠️ GH_ERROR: ")
-    # The status is read from the whole stderr BEFORE the head is bounded, so it
-    # survives even when the marker itself falls outside the 600-char head.
-    assert ("(HTTP 403)" in result["error_detail"]) == (not long_stderr)
+    assert result["error_detail"].startswith("GitHub HTTP 403: ")
+    # Status comes from the response, independently of the bounded message.
     assert "ghp_SYNTHETIC1234567890" not in json.dumps(result)
     assert "receipt" not in result
     assert not any(row[0] == "mutation" for row in events)
-    assert sum(1 for cmd in commands if cmd[-3:-2] == ["-X"] or "merge-upstream" in " ".join(cmd)) == 1
+    assert sum(url.endswith("/merge-upstream") for method, url in commands) == 1
     projected = extract_skill_publish_result_metadata(json.dumps(result))["skill_publish_attempt"]
     assert projected["github_status"] == 403
     assert projected["github_operation"] == "merge-upstream"
     # The projection is a single bounded line; the envelope keeps the transport's
     # own multi-line omission note when the head was cut. Pinned, not accidental.
     assert projected["error_detail"] == _bounded_text(result["error_detail"], 640)
-    if long_stderr:
+    if long_message:
         assert "OMISSION NOTE" in result["error_detail"] and "\n" in result["error_detail"]
         assert "\n" not in projected["error_detail"] and len(projected["error_detail"]) <= 640
     else:

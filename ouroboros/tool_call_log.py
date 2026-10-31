@@ -27,6 +27,8 @@ import pathlib
 import threading
 import time
 import uuid
+from contextvars import ContextVar
+from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional
 
 from ouroboros.utils import append_jsonl, truncate_for_log
@@ -35,6 +37,26 @@ CALL_STARTED = "tool_call_started"
 CALL_SETTLED = "tool_call"
 CALL_WAIT_ENDED = "tool_call_timeout"
 _FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status")
+_ACTIVE_CALL = ContextVar("active_tool_call", default=None)
+
+
+def current_tool_call_id() -> str:
+    return str((_ACTIVE_CALL.get() or {}).get("tool_call_id") or "")
+
+
+def current_args_source() -> Dict[str, Any]:
+    """This call's persisted dispatch-input ref and status; ``{}`` outside a loop call."""
+    active = _ACTIVE_CALL.get() or {}
+    return {key: active[key] for key in ("args_source_ref", "args_source_status") if key in active}
+
+
+@contextmanager
+def invocation_scope(invocation):
+    token = _ACTIVE_CALL.set(invocation)
+    try:
+        yield
+    finally:
+        _ACTIVE_CALL.reset(token)
 
 
 def new_invocation(tool_call_id: Any, correlation: Dict[str, Any], task_attempt: Any) -> Dict[str, Any]:
@@ -194,15 +216,16 @@ def logical_calls(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, iter_objects=None,
-                    list_archives=None) -> Dict[str, Any]:
+                    list_archives=None, memory=None, stat=None) -> Dict[str, Any]:
     """Bounded canonical invocation facts for history, independent of frozen wait metrics.
 
-    ``iter_objects`` and ``list_archives`` are the reader's parser and archive-listing seams."""
+    ``iter_objects``, ``list_archives`` and ``stat`` are the reader's parser, archive-listing and
+    metadata seams; ``memory`` a ``Memory`` of ``drive_root`` shared by one read's tasks."""
     from ouroboros.memory import Memory
     from ouroboros.tool_capabilities import routing_action_for_tool
 
-    rows, coverage = Memory(drive_root).read_task_recent("tools.jsonl", task_id, want, iter_objects=iter_objects,
-                                                         list_archives=list_archives)
+    rows, coverage = (memory or Memory(drive_root)).read_task_recent(
+        "tools.jsonl", task_id, want, iter_objects=iter_objects, list_archives=list_archives, stat=stat)
     observations = []
     legacy = {"calls": 0, "errors": 0, "wait_ended": False, "unknown": False}
     for call in logical_calls(rows):
@@ -250,12 +273,24 @@ def replay_evidence_for_tasks(drive_root: pathlib.Path, task_ids: Iterable[str])
 
     Only selected tasks are retained. Tail windows still double and archive
     backfill stays bounded by the existing reader; no cache survives this request.
+    Each window is read in one call and an (immutable) archive stat'ed once: a buffered
+    4 KiB line walk (hundreds of reads per window) and stats per task and window each handed
+    the server's interpreter lock away, which under load made this stage seconds of the page.
+    The live file is stat'ed once per task, so a source that grows mid-request is re-read.
     """
+    import io
+
     from ouroboros.jsonl_tail import archive_segments
-    from ouroboros.utils import iter_jsonl_objects
+    from ouroboros.utils import iter_jsonl_objects, jsonl_window
 
     selected = dict.fromkeys(task_ids)
-    windows, listings = {}, {}
+    windows, listings, stats = {}, {}, {}
+
+    def stat(path):
+        info = stats.get(path)
+        if info is None:
+            info = stats[path] = path.stat()
+        return info
 
     def list_archives(archive_dir, archive_prefix, gaps=None):
         # One enumeration per request; its unreadable_source gap is replayed to every task.
@@ -269,14 +304,19 @@ def replay_evidence_for_tasks(drive_root: pathlib.Path, task_ids: Iterable[str])
         return list(paths)
 
     def parse(path, *, tail_bytes=None, gap_reasons=None):
-        info = path.stat()
+        info = stat(path)
         stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         if windows.get(path, (None,))[0] != stamp:
             windows[path] = stamp, {}
         parsed = windows[path][1]
         if tail_bytes not in parsed:
             gaps: set = set()
-            rows = [row for row in iter_jsonl_objects(path, tail_bytes=tail_bytes, gap_reasons=gaps)
+            try:
+                with path.open("rb") as handle:
+                    data = jsonl_window(handle, info.st_size, tail_bytes)
+            except FileNotFoundError:
+                data = b""  # rotated away after its stat: the line reader's own absence answer
+            rows = [row for row in iter_jsonl_objects(path, gap_reasons=gaps, _handle=io.BytesIO(data))
                     if str(row.get("task_id") or "").strip() in selected]
             parsed[tail_bytes] = rows, gaps
         rows, gaps = parsed[tail_bytes]
@@ -284,5 +324,12 @@ def replay_evidence_for_tasks(drive_root: pathlib.Path, task_ids: Iterable[str])
             gap_reasons.update(gaps)
         return iter(rows)
 
-    return {task_id: replay_evidence(drive_root, task_id, iter_objects=parse, list_archives=list_archives)
-            for task_id in selected}
+    from ouroboros.memory import Memory
+
+    memory, evidence = Memory(drive_root), {}  # one log path resolution for every task of the read
+    for task_id in selected:
+        for path in [path for path in stats if path.parent.name != "archive"]:
+            del stats[path]  # archives never change; the live file is stat'ed again for each task
+        evidence[task_id] = replay_evidence(drive_root, task_id, iter_objects=parse, list_archives=list_archives,
+                                            memory=memory, stat=stat)
+    return evidence

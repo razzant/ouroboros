@@ -31,8 +31,8 @@ containment facts of its attempt (``attempts/a01/attempt.yaml``).
   disposed, the live file keeps the OWNER's content — not the run's — and the
   snapshot, its registry row and the captured patch all survive as the resolution
   material the nanny owns — and the TASK's own terminal is honest about it: a task
-  that ends holding an undisposed captured patch reads ``failed`` with
-  ``reason_code=delegated_custody_unreconciled``, not ``completed``.
+  that ends holding an undisposed captured patch reads Done with warnings, its own
+  reason kept and the run named in ``delegated_runs_unreconciled`` (#1583).
 
 The default-lane test pins the fake's new mutating half against the REAL readers:
 the edits land in the workspace root the body named (never in ``scope.root``), and
@@ -184,15 +184,18 @@ def _capture_dir(data_root: pathlib.Path, task_id: str, snapshot_id: str) -> pat
 
 
 def _registry_rows(data_root: pathlib.Path, snapshot_id: str) -> list:
-    """The durable snapshot-registry rows for one snapshot id (empty = released)."""
-    path = pathlib.Path(data_root) / "state" / "subagent_worktrees.json"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    rows = raw.get("worktrees") if isinstance(raw, dict) else raw
-    return [row for row in (rows or []) if isinstance(row, dict)
-            and str(row.get("snapshot_id") or "") == str(snapshot_id)]
+    """The durable copy records for one snapshot id (empty = disposed): one file per copy
+    under ``state/private_copies``."""
+    rows = []
+    for path in sorted((pathlib.Path(data_root) / "state" / "private_copies").glob("*.json")):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not path.name.startswith(".") and isinstance(row, dict) \
+                and str(row.get("snapshot_id") or "") == str(snapshot_id):
+            rows.append(row)
+    return rows
 
 
 # ===========================================================================
@@ -369,19 +372,19 @@ def test_s25_mutating_delegated_patch_conflict_is_refused_and_keeps_its_material
                 workspace_root=str(workspace))
             result = server.wait_task(task_id, timeout=600)
             # A task that ENDS holding an undisposed captured patch completes with a
-            # DISCLOSED custody debt (upstream 09ac51b2, absorbed by F2): the model's
-            # answer is kept verbatim, the execution axis stays the model's own work,
-            # the one Reason line names the unreconciled custody, and the debt rides
-            # objective.warning(s) plus the row's debt list — never a fabricated failure.
+            # DISCLOSED custody debt beside its own cause (#1583): the model's answer is
+            # kept verbatim, the reason and the execution axis stay the model's own work,
+            # and the debt is the row's own list and envelope — never a fabricated failure.
             assert result.get("status") == "completed", result
             oracle = ArtifactOracle(server.data_root)
             stored = wait_durable_result(oracle, task_id)
             assert S25_MARKER in str(stored.get("result") or ""), stored
             assert stub.script_consumed(), "S25 script was not fully consumed"
-            assert stored.get("reason_code") == "delegated_custody_unreconciled", stored
+            assert stored.get("reason_code") != "delegated_custody_unreconciled", stored
             axes = stored.get("outcome_axes") or {}
             assert (axes.get("execution") or {}).get("status") == "ok", axes
-            assert "delegated_custody_unreconciled" in ((axes.get("objective") or {}).get("warnings") or []), axes
+            assert "delegated_custody_unreconciled" not in ((axes.get("objective") or {}).get("warnings") or []), axes
+            assert stored.get("delegated_runs_unreconciled"), stored
             envelope = stored.get("delegate_terminal_reconciliation") or {}
             assert envelope.get("audit_status") == "ok", envelope
 
@@ -407,10 +410,12 @@ def test_s25_mutating_delegated_patch_conflict_is_refused_and_keeps_its_material
             resolved = _custody_rows(oracle, "delegate_run_patch_apply_resolved", run_id)
             assert resolved and resolved[-1].get("reason") == "baseline_drift", resolved
 
-            # -- the resolution material SURVIVES: snapshot, registry, patch ---
-            assert _registry_rows(server.data_root, snapshot_id), (
-                "the conflicted run's snapshot row was released")
-            assert pathlib.Path(execution_root).is_dir()
+            # -- the resolution material SURVIVES: record, pinned result, patch ---
+            [record] = _registry_rows(server.data_root, snapshot_id) or [{}]
+            assert record.get("result_sha"), "the conflicted run's copy record was released"
+            # Its saved result is the patch plus the pinned commit C; the checkout itself went.
+            assert record.get("checkout_released") and not pathlib.Path(execution_root).exists(), record
+            assert _git(["rev-parse", "--verify", record["result_ref"]], workspace) == record["result_sha"]
             cap_dir = _capture_dir(server.data_root, task_id, snapshot_id)
             assert (cap_dir / "workspace.patch").is_file()
             manifest = json.loads((cap_dir / "workspace_patch.json").read_text(encoding="utf-8"))

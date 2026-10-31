@@ -9,7 +9,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ouroboros import agent_task_pipeline as pipeline, model_wait
+from ouroboros import agent_task_pipeline as pipeline, dialogue_store, model_wait
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.gateway.state import _chat_activities_snapshot_safe
 from ouroboros.gateway.tasks import api_task_cancel
@@ -17,7 +17,6 @@ from ouroboros.post_task_checkpoint import post_task_model_wait
 from ouroboros.task_results import load_task_result
 from supervisor import active_activity, workers
 from tests.test_post_task_model_wait import phase as post_phase_fixture, until
-from tests.test_project_chat_continuity import _write_history_rows
 from tests.test_subscription_setup_browser import capture, subscription_ui as ui_fixture
 
 phase = post_phase_fixture
@@ -50,12 +49,14 @@ def test_browser_stops_native_post_task_wait_without_losing_answer(subscription_
         finally:
             registry.unregister(task_id)
 
-    _write_history_rows(f.root, task_id)
-    # The earlier running progress frame already carried the ordinary host's
-    # cancel authority. Retain it through history, then use the real endpoint.
-    path = f.root / "logs/progress.jsonl"
-    progress = json.loads(path.read_text())
-    path.write_text(json.dumps({**progress, "cancelable": True}) + "\n")
+    # The earlier running progress frame already carried the ordinary host's cancel
+    # authority; it and the delivered answer are stored rows. Then the real endpoint.
+    dialogue_store.append(f.root, "progress", {
+        "ts": "2026-08-17T10:00:00+00:00", "type": "send_message", "task_id": task_id, "is_progress": True,
+        "direction": "out", "chat_id": 1, "user_id": 1, "text": "step one", "content": "step one", "cancelable": True})
+    dialogue_store.append(f.root, "chat", {
+        "ts": "2026-08-17T10:00:05+00:00", "direction": "out", "chat_id": 1, "user_id": 1, "text": "final answer",
+        "task_id": task_id, "format": "markdown"})
     thread = threading.Thread(target=run)
     thread.start()
     responses = []
@@ -93,6 +94,7 @@ def test_browser_stops_native_post_task_wait_without_losing_answer(subscription_
             thread.join(5)
             assert not thread.is_alive() and len(f.engine.creates) == 1
             assert load_task_result(f.root, task_id)["root_phase_checkpoint"]["post_task_synthesis"] == "degraded"
+            ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
             page.reload()
             page.get_by_text("final answer", exact=True).wait_for()
             page.wait_for_function("() => !document.querySelector('[data-wait-id]')")

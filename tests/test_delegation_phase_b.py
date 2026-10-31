@@ -66,9 +66,8 @@ def test_dispatch_note_override_rides_only_the_harness_branch():
 
 
 def test_configured_nanny_note_states_the_charter_and_defers_truth_to_receipt():
-    # Charter (owner 2026-08-28): the host pre-starts the exact leaf before the
-    # first metered round; the note tells the nanny its rounds are judgment on
-    # wakes, points at the receipt as run truth, and keeps children explicit.
+    # Fresh work pre-starts the leaf; restored work follows its receipt. Both
+    # reserve the nanny's rounds for judgment and keep children explicit.
     from ouroboros.subagent_dispatch_notes import dispatch_executor_note
 
     lane = SubagentLaneResolution(
@@ -76,9 +75,10 @@ def test_configured_nanny_note_states_the_charter_and_defers_truth_to_receipt():
         resolved_from="main", provenance="configured_subagent",
     )
     note = dispatch_executor_note(_resolution(), lane)
-    assert "BEFORE your first metered round" in note
-    assert "startup/wake receipt in this context is the truth" in note
-    assert "metered duplicate" in note
+    assert "For fresh work the host starts the exact leaf before your first round" in note
+    assert "Restored supervision follows its continuation receipt" in note
+    assert "the receipt states custody" in note
+    assert "duplicate of already-paid work" in note
     assert "cancellation and terminal settlement are verified" in note
     assert "explicit separate child" in note
     assert "zero_run_decision=incomplete|unknown" in note

@@ -179,7 +179,9 @@ def test_the_gateway_action_and_the_agent_tool_mean_the_same_thing(tmp_path, mon
 
     assert by_owner["status"] == by_agent["status"] == "updated"
     assert by_owner["ok"] is by_agent["ok"] is True
-    ignore = {"updated_at"}
+    assert owner_row["writer_kind"] == owner_row["writer_origin"]["work_kind"] == "owner"
+    assert agent_row["writer_kind"] == agent_row["writer_origin"]["work_kind"] == "consciousness"
+    ignore = {"updated_at", "writer_kind", "writer_origin"}
     assert {k: v for k, v in owner_row.items() if k not in ignore} == \
            {k: v for k, v in agent_row.items() if k not in ignore}
     # Both wrote the same audit shape; only the actor and the reason differ.
@@ -205,19 +207,19 @@ def test_the_gateway_action_requires_a_named_action_and_a_reason(tmp_path, monke
     assert "activity_toggle" not in source and "activity_restore" not in source
 
 
-def test_the_delete_endpoint_reports_the_suppression_it_applied(tmp_path, monkeypatch):
+def test_the_delete_endpoint_reports_the_withdrawal_it_applied(tmp_path, monkeypatch):
     _bind(monkeypatch, tmp_path)
     _write(tmp_path, [_skill_row()])
     body = _gateway(tmp_path).delete("/api/schedules/skill-demo-daily").json()
-    assert body["ok"] is True and body["status"] == "suppressed"
-    assert _rows(tmp_path)[0]["manual_override"] == "deleted"
+    assert body["ok"] is True and body["status"] == "withdrawn"
+    assert _rows(tmp_path)[0]["delete_requested_at"]
 
 
 def test_the_gateway_list_carries_the_lifecycle_words_the_ui_renders(tmp_path, monkeypatch):
     _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row("c", enabled=False, manual_override="deleted"), _once_row()])
+    _write(tmp_path, [_skill_row("c", enabled=False, delete_requested_at="2026-10-21T00:00:00+00:00"), _once_row()])
     rows = _gateway(tmp_path).get("/api/schedules").json()["tasks"]
-    assert {r["status"] for r in rows} == {"suppressed", "consumed"}
+    assert {r["status"] for r in rows} == {"delete_pending", "consumed"}
     assert all(r["retained"] for r in rows)
 
 

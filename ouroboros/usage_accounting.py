@@ -23,9 +23,10 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_args
 
+from ouroboros.physical_attempt_context import PhysicalAttemptContext
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
-    _normalized_input_token_usage, _reported_token_count, processing_receipt, observed_processing_mode, usage_from_response,
+    _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
     _plain, _provider_exception_facts, physical_failure_evidence, provider_failure_payload, provider_cost_value,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
@@ -35,6 +36,7 @@ from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
     UsageLedgerCorrupt, UsageLockUnavailable, _drive_root, _named_lock, _number, _TERMINAL,
 )
 from ouroboros import usage_store
+from ouroboros.usage_origin import UsageScope
 from ouroboros.usage_store import hold as _locked  # noqa: F401 — the money acquisition primitive
 from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso  # noqa: F401 -- the accounting module keeps its historical import surface for the L-C2 leaf
 from ouroboros._usage_rows import (  # noqa: F401  (re-exported substrate vocabulary)
@@ -46,7 +48,6 @@ from ouroboros._usage_rows import (  # noqa: F401  (re-exported substrate vocabu
     _with_integrity,
     _with_limit,
 )
-from ouroboros.skill_review_usage import skill_review_usage
 log = logging.getLogger(__name__)
 __all__ = (
     "AttemptRequest", "AttemptReservation", "BillingAuthorityUnavailable", "BudgetExceeded", "ControlAuthorityUnavailable", "PhysicalAttemptCapture",
@@ -63,7 +64,7 @@ __all__ = (
     "record_unmetered_external_dispatch", "refresh_root_accounting",
     "release_attempt", "reserve_attempt", "settle_attempt",
     "apply_provider_price_receipt", "bind_provider_generation",
-    "skill_review_usage", "usage_breakdown", "usage_from_response", "usage_projection", "usage_scope",
+    "usage_breakdown", "usage_from_response", "usage_projection", "usage_scope",
     "usage_writer_snapshot", "read_usage_records",
     "review_wave_admission",
 )
@@ -240,50 +241,6 @@ class _AttemptLimit:
     claimed_ids: set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
 @dataclass(frozen=True)
-class UsageScope:
-    drive_root: pathlib.Path | str | None = None
-    task_id: str = ""
-    root_task_id: str = ""
-    parent_task_id: str = ""
-    category: str = "task"
-    source: str = "llm"
-    # Explicitly attributed system probes/one-shots have no task control owner.
-    non_task_operation: bool = False
-    review_skill: str = ""
-    review_wave_id: str = ""
-    review_slot_id: str = ""
-    global_limit_usd: Optional[float] = None
-    root_limit_usd: Optional[float] = None
-    root_cost_ceiling_usd: Optional[float] = None
-    global_limit_source: str = ""
-    global_limit_revision: Optional[str] = None
-    # Whole-work billing group (owner Batch4, ``usage_admission``): empty = this
-    # root is its own group under its own cap; a Continue's successor carries the
-    # ORIGINAL root's group and that root's original cap.
-    billing_group_id: str = ""
-    billing_group_limit_usd: Optional[float] = None
-    billing_group_limit_source: str = ""
-    billing_group_limit_revision: Optional[str] = None
-    root_limit_source: str = ""  # Original None + provenance is unlimited, not a new default.
-    root_limit_revision: Optional[str] = None
-    # The wave a caller named to own its prompt-cache split (skill, plan review). A round the review
-    # derives (#1544: retry_key or a fresh id) is attribution only; the split stays per task.
-    cache_wave: str = ""
-@dataclass(frozen=True)
-class PhysicalAttemptContext:
-    profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
-    rendered_mode: Literal["max", "low", "nano"]
-    measurement_basis: Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
-    route_fp: str
-    round_id: str
-    target_total_tokens: Optional[int]
-    capacity_total_tokens: Optional[int]
-    context_target_miss: bool
-    automatic_pass_used: bool
-    # Main's calibration (real tokens per estimated token) of the measurement above;
-    # the send finalizer sizes the reply with it. None on rows written before it existed.
-    measurement_density: Optional[float] = None
-@dataclass(frozen=True)
 class AttemptRequest:
     model: str
     provider: str
@@ -324,6 +281,11 @@ class AttemptRequest:
     effort: Optional[Dict[str, Any]] = None
     allow_live_fetch: bool = True  # False only for a price display: cached tariffs, never a fetch
     provider_receipt_binding: Optional[Dict[str, str]] = None
+    # The local serving tokenizer's observation of this candidate, never a density forecast.
+    prompt_tokens_exact: Optional[int] = None
+    context_window_tokens_exact: Optional[int] = None
+    working_reserve_tokens: Optional[int] = None
+    cost_evidence: Optional[Dict[str, Any]] = None
 @dataclass(frozen=True)
 class AttemptReservation:
     attempt_id: str
@@ -442,7 +404,7 @@ def capture_attempt_ids() -> Iterator[list[str]]:
         _ATTEMPT_COLLECTOR.reset(token)
 @contextlib.contextmanager
 def physical_attempt_limit(maximum: int) -> Iterator[None]:
-    """Bound physical provider sends in this actor context (acceptance uses 2)."""
+    """Bound physical provider sends in this actor context (a P3 packet reviewer's rail uses 2)."""
     state = _AttemptLimit(maximum=max(0, int(maximum)))
     token = _PHYSICAL_LIMIT.set(state)
     try:
@@ -478,6 +440,7 @@ def _merge_scope(request: AttemptRequest) -> Tuple[AttemptRequest, UsageScope]:
         category=str(request.category or bound.category or "task"),
         source=str(request.source or bound.source or "llm"),
         non_task_operation=bound.non_task_operation and same_root,
+        consciousness_cause=bound.consciousness_cause if same_root else "",
         **{key: str(getattr(bound, key, "") or "") for key in REVIEW_ATTRIBUTION_KEYS},
         global_limit_usd=(
             request.global_limit_usd if request.global_limit_usd is not None else bound.global_limit_usd
@@ -504,12 +467,6 @@ def _merge_scope(request: AttemptRequest) -> Tuple[AttemptRequest, UsageScope]:
 
         scope = replace(scope, **task_billing_fields({"id": scope.task_id}, scope.root_task_id,
                                                     scope.root_limit_usd, scope.drive_root))
-    if scope.billing_group_id and scope.drive_root:
-        from ouroboros.usage_admission import effective_billing_fields
-        scope = replace(scope, **effective_billing_fields(scope.drive_root, scope.root_task_id, {
-            key: getattr(scope, key) for key in ("root_limit_usd", "root_limit_source", "root_limit_revision", "billing_group_id",
-                "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")},
-            non_task_operation=scope.non_task_operation))
     if request.root_limit_usd is not None and (scope.root_limit_usd is None or request.root_limit_usd < scope.root_limit_usd):
         scope = replace(scope, root_limit_usd=request.root_limit_usd, root_limit_source="attempt_request", root_limit_revision=None)
     if request.global_limit_usd is None and scope.global_limit_usd is not None:
@@ -540,6 +497,7 @@ def usage_breakdown(
     *,
     root_task_id: str = "",
     task_id: str = "", allow_stale: bool = False, include_owners: bool = False,
+    include_custody: bool = False, custody_root=None,
 ) -> Dict[str, Any]:
     """Physical-call/token/cost buckets of the global scope, one root or one
     task, read from the store's summaries in one transaction (an addressed
@@ -547,12 +505,27 @@ def usage_breakdown(
     the ``[epoch, seq]`` publication marker of the SAME read. The global
     per-task/per-root maps enumerate every owner and are rendered only with
     ``include_owners``. ``allow_stale`` is a display read: after the short
-    display wait it raises ``UsageLockUnavailable`` (unavailable, never zero)."""
+    display wait it raises ``UsageLockUnavailable`` (unavailable, never zero).
+    ``include_custody`` is for finality/display consumers only: observe execution
+    coverage first, then join receipts and amounts in this same money read.
+    Amount-only admission and pacing never read custody."""
     root = _drive_root(drive_root)
-    with usage_store.read(root, allow_stale=allow_stale) as txn:
-        result = breakdown_view(txn, root_task_id=root_task_id, task_id=task_id, include_owners=include_owners,
-                                degraded=usage_store.integrity_degraded(root))
-        result["_ledger_high_water_seq"] = txn.marker()
+    from ouroboros._usage_rows import breakdown_read
+    from ouroboros.delegate_custody_usage import cost_coverage, cost_snapshot, with_cost_coverage
+    custody = (cost_snapshot(root, task_id=task_id, root_task_id=root_task_id,
+                             custody_root=custody_root, allow_stale=allow_stale)
+               if include_custody and (task_id or root_task_id) else None)
+    with usage_store.read(root, allow_stale=allow_stale) as txn:  # rows captured here, rendered after it closed
+        render = breakdown_read(txn, root_task_id=root_task_id, task_id=task_id, include_owners=include_owners)
+        marker, joined = txn.marker(), (cost_coverage(custody, txn, root) if custody is not None else None)
+    result = render(usage_store.integrity_degraded(root))
+    result["_ledger_high_water_seq"] = marker
+    if joined is not None:
+        result = with_cost_coverage(result, joined)
+        result["by_task"] = {tid: with_cost_coverage(bucket, joined, task_id=tid)
+                             for tid, bucket in result["by_task"].items()}
+        result["by_root"] = {rid: with_cost_coverage(bucket, joined, root_task_id=rid)
+                             for rid, bucket in result["by_root"].items()}
     return result
 
 
@@ -768,6 +741,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                         "billing_group_limit_source": scope.billing_group_limit_source,
                         "billing_group_limit_revision": scope.billing_group_limit_revision,
                         "category": scope.category,
+                        **({"consciousness_cause": scope.consciousness_cause} if scope.consciousness_cause else {}),
                         **({"non_task_operation": True} if scope.non_task_operation else {}),
                         "source": scope.source,
                         **{key: str(getattr(scope, key, "") or "") for key in REVIEW_ATTRIBUTION_KEYS},
@@ -787,6 +761,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                         "physical_context": asdict(request.physical_context) if request.physical_context else None,
                         **({"provider_receipt_binding": copy.deepcopy(request.provider_receipt_binding)}
                            if request.provider_receipt_binding else {}),
+                        **({"cost_evidence": copy.deepcopy(request.cost_evidence)} if request.cost_evidence is not None else {}),
                         **({"effort": copy.deepcopy(request.effort)} if request.effort is not None else {}),
                         **({"processing_preference": request.processing_preference,
                             "submitted_processing_mode": request.submitted_processing_mode,
@@ -805,7 +780,8 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                     root_limit,
                     reservation={
                         "attempt_id": attempt_id, "task_id": scope.task_id,
-                        "category": scope.category, "review_slot_id": scope.review_slot_id,
+                        "category": scope.category,
+                        **({"consciousness_cause": scope.consciousness_cause} if scope.consciousness_cause else {}), "review_slot_id": scope.review_slot_id,
                     },
                 )
 
@@ -858,6 +834,8 @@ def record_unmetered_external_dispatch(
         "completion_tokens": max(0, int(completion_tokens or 0)),
         "task_id": real_task,
         "root_task_id": real_root,
+        **({"consciousness_cause": bound.consciousness_cause}
+           if bound.consciousness_cause and real_root == (bound.root_task_id or bound.task_id) else {}),
         "parent_task_id": str(parent_task_id or bound.parent_task_id or ""),
         **{key: value for key, value in billing.items() if key.startswith("billing_group_")},
         "category": str(category or bound.category or "external"),
@@ -910,8 +888,8 @@ def record_subscription_session(
     (total, cache read, cache write). It is validated here, the one place that
     persists it, and it is deliberately outside the idempotent identity: an
     engine that starts reporting it must not rewrite or duplicate a row already
-    settled without it. Unreported or unusable stays absent — the legacy
-    ``prompt_tokens``/``cached_tokens`` axes keep their own meanings.
+    settled without it. The input axes are that split, a direct call's meaning (unknown where it
+    is); the harness's own counters, of differing meanings, stay in ``harness_tokens``.
     """
     stable_id, route_id = str(session_id or "").strip(), str(route or "").strip()
     if not stable_id or not route_id:
@@ -919,7 +897,8 @@ def record_subscription_session(
     bound = _CURRENT_SCOPE.get() or UsageScope()
     root = _drive_root(drive_root or bound.drive_root)
     identity = hashlib.sha256(stable_id.encode("utf-8")).hexdigest()
-    attempt_id = f"session-{identity[:24]}"
+    from ouroboros.delegate_custody_usage import disclosed_cost, session_attempt_id
+    attempt_id = session_attempt_id(stable_id)
     from ouroboros.usage_admission import settlement_billing_fields
 
     # Explicit custody identities never inherit an unrelated caller's context.
@@ -927,6 +906,10 @@ def record_subscription_session(
     real_root = str(root_task_id or (bound.root_task_id if not task_id else "") or real_task)
     billing = settlement_billing_fields(root, real_task, real_root)
     input_counters = _normalized_input_token_usage(input_token_usage)
+    split = input_counters or {}
+    cost = provider_cost_value(spend_usd)
+    cash = disclosed_cost({"spendUsd": cost, "spendEstimated": spend_estimated}, attempt_execution=attempt_execution)
+    cost, spend_estimated = cash["cost_usd"], cash["cost_estimated"]
     attribution = {"review_skill": review_skill, "review_wave_id": review_wave_id, "review_slot_id": review_slot_id}
     row = {
         "kind": "subscription_session",
@@ -935,16 +918,22 @@ def record_subscription_session(
         "model": str(model or ""),
         "provider": route_id,
         # None is undisclosed; zero is genuinely free; estimated amounts are non-final.
-        "cost_usd": None if spend_usd is None else round(float(spend_usd), 6),
-        "cost_final": spend_usd is not None and not spend_estimated,
-        "reservation_upper_bound_usd": None if spend_usd is None else round(float(spend_usd), 6),
-        "pricing_known": spend_usd is not None,
-        "prompt_tokens": None if prompt_tokens is None else max(0, int(prompt_tokens)),
+        "cost_usd": None if cost is None else round(cost, 6),
+        "cost_final": cash["cost_final"],
+        "reservation_upper_bound_usd": None if cost is None or cash["cost_partial"] else round(cost, 6),
+        **({"cost_partial": True, "cost_estimated": spend_estimated} if cash["cost_partial"] else {}),
+        "pricing_known": cost is not None,
+        **({"cost_invalid": True} if spend_usd is not None and cost is None else {}),
+        "prompt_tokens": split.get("total_tokens"),
         "completion_tokens": None if completion_tokens is None else max(0, int(completion_tokens)),
-        # Cached tokens are a separate axis because harness semantics differ.
-        "cached_tokens": None if cached_tokens is None else max(0, int(cached_tokens)),
+        "cached_tokens": split.get("cache_read_tokens"),
+        "cache_write_tokens": split.get("cache_write_tokens"),
+        "harness_tokens": {name: None if value is None else max(0, int(value))
+                           for name, value in (("prompt_tokens", prompt_tokens), ("cached_tokens", cached_tokens))},
         "task_id": real_task,
         "root_task_id": real_root,
+        **({"consciousness_cause": bound.consciousness_cause}
+           if bound.consciousness_cause and real_root == (bound.root_task_id or bound.task_id) else {}),
         "parent_task_id": str(parent_task_id or bound.parent_task_id or ""),
         **{key: value for key, value in billing.items() if key.startswith("billing_group_")},
         "category": str(category or bound.category or "subagent"),
@@ -1030,11 +1019,8 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
             if fence := member_fence(scope):
                 from ouroboros.llm_attempt import _PhysicalSendNotStarted
                 raise _PhysicalSendNotStarted(str(fence.get("reason") or "owner_pause"))
-            from ouroboros.usage_admission import effective_billing_fields
-            effective = effective_billing_fields(reservation.drive_root, scope.root_task_id, {
-                key: getattr(scope, key) for key in ("root_limit_usd", "root_limit_source", "root_limit_revision",
-                    "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")},
-                non_task_operation=scope.non_task_operation)
+            effective = {key: getattr(scope, key) for key in ("root_limit_usd", "root_limit_source", "root_limit_revision",
+                "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")}
             if scope.root_limit_source == "attempt_request":
                 effective.update(root_limit_usd=scope.root_limit_usd, root_limit_source=scope.root_limit_source,
                                  root_limit_revision=scope.root_limit_revision)
@@ -1237,7 +1223,8 @@ def bind_provider_generation(generation_id: str, *, reservation: Optional[Attemp
 
 
 def _retain_physical_failure(reservation, *, exc=None, response=None):
-    """Failure source is durable before a caller can retry or replace its capture."""
+    """Failure source is durable before a caller can retry or replace its capture.
+    With ``exc`` only once the answer path ended: ``ended_unbound_model_request`` reads that."""
     payload = None
     try:
         payload = provider_failure_payload(exc) if exc is not None else _plain(response)
@@ -1267,47 +1254,36 @@ def _retain_physical_failure(reservation, *, exc=None, response=None):
 
 
 def _settlement_fields(reservation, usage, cost_usd, cost_final) -> Dict[str, Any]:
-    """Normalize reported usage before the monetary transaction; no live pricing I/O."""
-    normalized = dict(usage or {})
-    receipt = processing_receipt(reservation.provider, normalized,
-                                 requested=reservation.processing_preference,
-                                 submitted_native=reservation.submitted_processing_mode)
-    if receipt is not None:
-        normalized["processing"] = receipt
-    prompt_tokens = _reported_token_count(normalized, "prompt_tokens", "input_tokens")
-    completion_tokens = _reported_token_count(normalized, "completion_tokens", "output_tokens")
-    cached_tokens = _reported_token_count(normalized, "cached_tokens")
-    cache_write_tokens = _reported_token_count(normalized, "cache_write_tokens")
-    cost = _number(cost_usd)
-    pricing_mode = observed_processing_mode(reservation.provider, normalized)
-    has_usage = bool((prompt_tokens or 0) or (completion_tokens or 0))
-    if cost is None and str(reservation.provider or "").lower() == "local":
-        cost, cost_final = 0.0, True
-    elif cost is None and cost_usd is None and not normalized.get("cost_invalid") and has_usage:
-        cost = estimate_cost_optional(
-            reservation.model,
-            int(prompt_tokens or 0),
-            int(completion_tokens or 0),
-            cache_usage={"cached_tokens": int(cached_tokens or 0),
-                         "cache_write_tokens": int(cache_write_tokens or 0),
-                         "cache_write_tokens_by_ttl": normalized.get("cache_write_tokens_by_ttl"),
-                         "prompt_cache_ttl": str(normalized.get("prompt_cache_ttl") or "")},
-            allow_live_fetch=False,
-            provider=reservation.provider,
-            **({"processing_mode": pricing_mode} if pricing_mode else {}),
-        )
-        cost_final = False
-    return dict(
-        cost_usd=cost,
-        cost_final=bool(cost_final and cost is not None),
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cached_tokens=cached_tokens,
-        cache_write_tokens=cache_write_tokens,
-        prompt_cache_ttl=str(normalized.get("prompt_cache_ttl") or ""),
-        **{key: copy.deepcopy(normalized[key]) for key in ("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_evidence")
-           if key in normalized},
-    )
+    from ouroboros._usage_settlement import settlement_fields
+
+    return settlement_fields(reservation, usage, cost_usd, cost_final,
+                             estimate_cost_optional=estimate_cost_optional)
+
+
+def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, cost_usd=None, pending=False) -> AttemptReservation:
+    """Record an already billed receipt; admission cannot veto past provider spend.
+
+    Already-started work can remain dispatched until its final usage arrives.
+    Receipts traverse the ordinary reducer without authorizing another send.
+    """
+    request, scope = _merge_scope(request)
+    root = _drive_root(scope.drive_root)
+    reservation = AttemptReservation(uuid.uuid4().hex, root, request.model, request.provider, None, scope=scope)
+    fields = _settlement_fields(reservation, usage, cost_usd, False)
+    row = {key: value for key, value in asdict(scope).items() if key != "drive_root"}
+    row.update(kind="attempt", attempt_id=reservation.attempt_id, model=request.model, provider=request.provider,
+               reservation_upper_bound_usd=None, pricing_known=False, reservation_basis="receipt_already_received",
+               candidate_measurement_kind="opaque", cost_evidence=copy.deepcopy(request.cost_evidence or {}),
+               physical_context=asdict(request.physical_context) if request.physical_context else None)
+    with _locked(root) as view:
+        current = None
+        for state in (("reserved", "dispatched") if pending else ("reserved", "dispatched", "settled")):
+            row = {**row, "state": state, **(fields if state == "settled" else {})}
+            current = view.write(row, current)
+    collector = _ATTEMPT_COLLECTOR.get()
+    if collector is not None:
+        collector.append(reservation.attempt_id)
+    return reservation
 
 
 def _observe_token_density(request: AttemptRequest, usage: Optional[Dict[str, Any]]) -> None:

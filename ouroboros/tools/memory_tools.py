@@ -6,6 +6,7 @@ import re
 import logging
 from pathlib import Path
 from typing import List
+from hashlib import sha256
 
 from ouroboros.tools.registry import ToolEntry, ToolContext
 
@@ -15,7 +16,9 @@ REGISTRY_PATH = "memory/registry.md"
 
 
 def _registry_file(ctx: ToolContext) -> Path:
-    return ctx.drive_path(REGISTRY_PATH)
+    from ouroboros.tool_access import canonical_data_root
+
+    return canonical_data_root(ctx) / REGISTRY_PATH
 
 
 @completed_local_read
@@ -25,13 +28,14 @@ def _memory_map(ctx: ToolContext) -> str:
     if not path.exists():
         return (
             "Memory registry not found at memory/registry.md.\n"
-            "Use memory_update_registry to create entries."
+            "revision=\"\" (create-only). Use memory_update_registry to create entries."
         )
-    return path.read_text(encoding="utf-8")
+    raw = path.read_bytes()
+    return f"revision={sha256(raw).hexdigest()}\n\n" + raw.decode("utf-8")
 
 
 def _memory_update_registry(
-    ctx: ToolContext, source_id: str, updates: str
+    ctx: ToolContext, source_id: str, updates: str, expected_revision: str | None = None
 ) -> str:
     """Update or create an entry in the memory registry."""
     if not source_id or not isinstance(source_id, str):
@@ -40,14 +44,21 @@ def _memory_update_registry(
     if "/" in source_id or "\\" in source_id or ".." in source_id:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ Invalid characters in source_id.")))
 
+    from ouroboros.knowledge import focus_signature
+    from ouroboros.memory_publication import publish_memory_file, publication_refusal
+
     path = _registry_file(ctx)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    result = publish_memory_file(path, expected_revision, lambda old: _registry_entry(old, source_id, updates),
+                                 journal=path.with_name("registry_history.jsonl"),
+                                 author=focus_signature(ctx), source_type="memory_update_registry")
+    if not result.ok:
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
+            text=publication_refusal(result, REGISTRY_PATH)))
+    return f"✅ Registry entry '{source_id}' updated. revision={result.revision}"
 
-    if path.exists():
-        content = path.read_text(encoding="utf-8")
-    else:
-        content = "# Memory Registry\n\nMetacognitive map: what I know, what I don't, and where to look.\n\n"
 
+def _registry_entry(content: str, source_id: str, updates: str) -> str:
+    content = content or "# Memory Registry\n\nMetacognitive map: what I know, what I don't, and where to look.\n\n"
     pattern = rf'^### {re.escape(source_id)}\s*$'
     lines = content.split("\n")
     start_idx = None
@@ -74,18 +85,18 @@ def _memory_update_registry(
             content += "\n"
         content += "\n" + new_section
 
-    path.write_text(content, encoding="utf-8")
-    return f"✅ Registry entry '{source_id}' updated."
+    return content
 
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("memory_map", {
             "name": "memory_map",
             "description": (
-                "Show the memory registry — a map of all data sources "
-                "the agent has access to, with coverage, gaps, and trust levels. "
-                "Use BEFORE generating content to verify you have actual source data, "
-                "not just cached impressions."
+                (
+                'Read memory/registry.md, the optional hand-written source registry: recorded coverage, gaps and trust. '
+                'This is not a discovered integration or file inventory; absence means nothing was recorded. Check '
+                'source availability before relying on cached impressions.'
+            )
             ),
             "parameters": {
                 "type": "object",
@@ -96,12 +107,18 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("memory_update_registry", {
             "name": "memory_update_registry",
             "description": (
-                "Update or create an entry in the memory registry. "
-                "Use after acquiring new data sources or discovering gaps."
+                (
+                "Replace one '### <source_id>' entry in the hand-written memory/registry.md source registry with "
+                'updates, its full new text.'
+            )
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "expected_revision": {
+                        "type": "string",
+                        "description": "Revision returned by memory_map; required when the registry exists. Empty means create-only."
+                    },
                     "source_id": {
                         "type": "string",
                         "description": "Source identifier (e.g. 'user-context', 'project-notes')"

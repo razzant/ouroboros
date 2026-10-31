@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 from hashlib import sha256
 from pathlib import Path
@@ -212,17 +213,55 @@ def test_a_crash_between_publication_and_the_row_write_converges_without_duplica
     assert not (data / "task_results" / "artifact_versions").exists()
 
 
-def test_a_crash_after_the_drive_left_its_place_leaves_only_unserved_trash(tmp_path, monkeypatch):
+def test_a_settled_drive_leaves_only_unserved_trash_for_the_maintenance_child(tmp_path):
     data, drive, _record = _cancelled_with_capture(tmp_path)
-    monkeypatch.setattr(task_custody.shutil, "rmtree", lambda *args, **kwargs: None)
     assert _settle(data, drive)["status"] == "removed"
-    monkeypatch.undo()
     trash = data / "state" / "custody_trash"
-    assert not drive.exists() and len(list(trash.iterdir())) == 1
-    task_custody.sweep_custody_leftovers(data, min_age_sec=3600)
-    assert len(list(trash.iterdir())) == 1  # a young entry may belong to a running settlement
+    assert not drive.exists() and len(list(trash.iterdir())) == 1  # moved, not deleted, by the server
     task_custody.sweep_custody_leftovers(data, min_age_sec=0)
+    assert len(list(trash.iterdir())) == 1, "the staging sweep never touches the moved drives"
+    staging = data / "state" / "custody_staging" / "crashed-settlement"
+    staging.mkdir(parents=True)
+    task_custody.sweep_custody_leftovers(data, min_age_sec=3600)
+    assert staging.exists()  # a young entry may belong to a running settlement
+    task_custody.sweep_custody_leftovers(data, min_age_sec=0)
+    assert not staging.exists()
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}}
     assert list(trash.iterdir()) == []
+
+
+def test_read_only_folders_in_custody_leftovers_never_strand_them(tmp_path):
+    """A moved drive or a crashed settlement's staging carrying read-only folders and files (a Git
+    object store, a tool's own modes) is removed whole by the permission-granting removal, so no
+    trash entry waits forever for its identity to change; a staging entry younger than an hour (a
+    settlement may still be running) is still left alone."""
+    import stat
+
+    data = tmp_path / "data"
+    sealed = []
+
+    def read_only_tree(entry: Path) -> Path:
+        objects = entry / "data" / ".git" / "objects" / "ab"
+        objects.mkdir(parents=True)
+        (objects / "cdef").write_bytes(b"object")
+        os.chmod(objects / "cdef", stat.S_IREAD)
+        os.chmod(objects, stat.S_IREAD | stat.S_IEXEC)
+        sealed.append(objects)
+        return entry
+
+    moved = read_only_tree(data / "state" / "custody_trash" / f"{TASK}-0123456789ab")
+    staging = read_only_tree(data / "state" / "custody_staging" / f"{TASK}-fedcba987654")
+    try:
+        task_custody.sweep_custody_leftovers(data, min_age_sec=3600)
+        assert staging.exists(), "a young staging entry may belong to a running settlement"
+        task_custody.sweep_custody_leftovers(data, min_age_sec=0)
+        assert not staging.exists()
+        assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}}
+        assert not moved.exists()
+    finally:
+        for objects in sealed:
+            if objects.exists():
+                os.chmod(objects, stat.S_IRWXU)
 
 
 @pytest.mark.parametrize("probe", [None, lambda _task: True, lambda _task: None])
@@ -343,6 +382,27 @@ def test_unrecorded_files_are_carried_at_their_relpaths_without_invented_rows_an
     assert listed["reports/a/summary.txt"]["path"] == str(_canonical(data, "reports/a/summary.txt").resolve())
     kept = [row for name, row in listed.items() if name.startswith("notes.") and name != "notes.txt"]
     assert len(kept) == 1 and Path(kept[0]["path"]).read_text(encoding="utf-8") == "child notes"
+
+
+def test_a_file_named_like_the_index_of_a_link_to_a_database_is_stored(tmp_path):
+    """The child's folder holds actual.sqlite, a link report -> actual.sqlite and the user's own
+    report-shm. SQLite's index of actual.sqlite would be actual.sqlite-shm, beside the real file, so
+    report-shm is an ordinary artifact the settlement stores before the drive goes (taken for an index
+    through the link, it was left out and removed with the drive, never stored)."""
+    data, drive, _record = _cancelled_with_capture(tmp_path)
+    store = artifacts.task_artifact_dir_path(drive, TASK)
+    conn = sqlite3.connect(store / "actual.sqlite")
+    conn.execute("CREATE TABLE t(v)")
+    conn.close()
+    try:
+        (store / "report").symlink_to("actual.sqlite")
+    except OSError:
+        pytest.skip("symbolic links need a privilege here")
+    (store / "report-shm").write_text("the user's report\n", encoding="utf-8")
+
+    assert _settle(data, drive)["status"] == "removed"
+    assert _canonical(data, "report-shm").read_text(encoding="utf-8") == "the user's report\n"
+    assert _canonical(data, "actual.sqlite").is_file()
 
 
 def test_admission_rollback_removes_only_a_never_started_drive(tmp_path):
@@ -588,6 +648,84 @@ def test_the_move_happens_only_under_the_interlock_with_a_fresh_census_and_probe
         write_task_result(data, "settle1r", "cancelled", result="never ran")
     assert _settle(data, drive)["status"] == "removed"
 
+
+@pytest.mark.parametrize("kind", ["headless", "task_drives"])
+def test_the_move_releases_the_store_handles_the_pass_itself_opened_inside_the_drive(tmp_path, monkeypatch, kind):
+    """Windows moves no folder while a file below it is open, and the pass itself reads the
+    drive's store through the per-thread connection cache: the move releases those handles
+    first. A lease still active inside the drive keeps it, as a transient retention the
+    next pass attempts again."""
+    from ouroboros import store
+
+    data, drive, _record = _cancelled_with_capture(tmp_path, kind)
+    real_replace = os.replace
+
+    def windows_replace(source, target):  # the Windows rule, applied to the store cache
+        prefix = os.path.join(os.path.realpath(source), "")
+        held = [name for pool in list(store._CONNECTION_POOLS) for name in pool.entries
+                if os.path.realpath(name).startswith(prefix)]
+        if held:
+            raise PermissionError(5, "Access is denied", str(source))
+        return real_replace(source, target)
+
+    monkeypatch.setattr(task_custody.os, "replace", windows_replace)
+    leased, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.open_store(drive, write=False):
+            leased.set()
+            release.wait()  # the finally below releases it; join bounds the test
+
+    worker = threading.Thread(target=hold)
+    worker.start()
+    try:
+        assert leased.wait(5)
+        outcome = _settle(data, drive)
+        assert outcome["status"] == "retained" and outcome["reason"] == "store_busy" and drive.is_dir()
+        rested = {}
+        task_custody.record_rest(rested, kind, data, TASK, tmp_path, drive, outcome)
+        assert rested == {}, "a busy store is attempted again on the next pass"
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    assert _settle(data, drive)["status"] == "removed" and not drive.exists()
+
+
+
+def test_the_worker_that_ran_the_task_releases_its_own_handles_on_the_drive(tmp_path):
+    """The settlement can close only the server's cached handles: the pool worker that ran the
+    task read the drive's store in its own process and releases those once the task ends. A
+    late thread still leasing one keeps it, and that thread's end closes it; every idle
+    handle goes at once, so the drive never waits on a cache nothing will use again."""
+    from ouroboros import store
+    from supervisor.worker_process import _release_drive_stores
+
+    data, drive, _record = _cancelled_with_capture(tmp_path)
+    with store.open_store(drive, write=False) as txn:
+        idle = txn.conn
+    leased, release, late = threading.Event(), threading.Event(), []
+
+    def late_thread():
+        with store.open_store(drive, write=False) as txn:
+            late.append(txn.conn)
+            leased.set()
+            release.wait()  # the finally below releases it; join bounds the test
+
+    worker = threading.Thread(target=late_thread)
+    worker.start()
+    try:
+        assert leased.wait(5)
+        _release_drive_stores(drive)
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            idle.execute("SELECT 1")
+        assert late[0].execute("SELECT 1").fetchone()[0] == 1, "a late lease is never closed under it"
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        late[0].execute("SELECT 1")  # the late thread's end disposed of its own handle
 
 def test_a_copy_back_between_preparation_and_publication_is_seen_by_the_revision(tmp_path, monkeypatch):
     """F3: a publisher that changed the row's custody fields after the plan was prepared
@@ -1058,12 +1196,28 @@ def test_every_canonical_store_publisher_takes_the_one_custody_lock(tmp_path):
     settlement, so it takes the same custody lock and answers ``CustodyBusy`` while it is held."""
     data, drive, _store = _nested_child(tmp_path)
     task = {"id": TASK, "drive_root": str(drive)}
+    lock_budget = 0.01  # Exercise real contention without waiting out the production budget.
     with task_custody.task_custody_lock(data, TASK) as locked:
         assert locked
         with pytest.raises(task_custody.CustodyBusy):
-            headless.finalize_task_artifacts(data, task)
+            headless.finalize_task_artifacts(data, task, lock_timeout_sec=lock_budget)
     assert not (artifacts.task_artifact_dir_path(data, TASK) / "memory_export.json").exists()
-    assert headless.finalize_task_artifacts(data, task)  # released: the same work completes
+    assert headless.finalize_task_artifacts(data, task, lock_timeout_sec=lock_budget)  # released: the same work completes
+
+
+def test_artifact_publication_keeps_the_production_lock_budget(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    budgets = []
+
+    def unavailable(_root, _task_id, *, timeout_sec):
+        budgets.append(timeout_sec)
+        return nullcontext(False)
+
+    monkeypatch.setattr(task_custody, "task_custody_lock", unavailable)
+    with pytest.raises(task_custody.CustodyBusy):
+        headless.finalize_task_artifacts(tmp_path, {"id": TASK})
+    assert budgets == [30.0]  # Production publication may wait for a competing writer.
 
 
 @pytest.mark.parametrize("when", ["before_the_custody_lock", "before_the_row_lock"])

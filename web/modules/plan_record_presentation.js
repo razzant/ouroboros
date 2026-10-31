@@ -7,6 +7,9 @@
 // their read-only branches in review_presentation.js.
 
 const text = (value) => String(value ?? '').trim();
+// What an ask was about, as the host names it (plan_record.ask_subject): an ask before any plan
+// carries no revision (null) and is a reading of the request.
+const askSubject = (revision) => (revision == null ? 'the reading of the request' : `revision ${revision}`);
 
 export const planRecordEngaged = (record) => record && typeof record === 'object'
     && ((Array.isArray(record.revisions) && record.revisions.length) || (Array.isArray(record.asks) && record.asks.length));
@@ -80,9 +83,10 @@ export function planRecordGroup(owner, record, detail) {
         const raised = objections.filter((o) => o.askId === text(ask.ask_id));
         const running = pending.length > 0 && live;
         const lines = [
-            `ask ${text(ask.ask_id)} on revision ${ask.revision}${text(ask.message) ? ` — «${text(ask.message)}»` : ''}`,
+            `ask ${text(ask.ask_id)} on ${askSubject(ask.revision)}${text(ask.message) ? ` — «${text(ask.message)}»` : ''}`,
             ...(Array.isArray(ask.host_added) && ask.host_added.length
-                ? [`first ask on a body plan: the host added ${ask.host_added.join(', ')}`] : []),
+                ? [`${ask.revision == null ? 'a reading about Ouroboros\'s own body' : 'first ask on a body plan'}: the host added ${
+                    ask.host_added.join(', ')}`] : []),
             ...participants.map((p) => {
                 const who = `${text(p.seat_id)} (${text(p.model) || '?'}${p.owner_marked ? '' : ', added — never holds'})`;
                 if (p.status === 'answered') {
@@ -90,6 +94,11 @@ export function planRecordGroup(owner, record, detail) {
                     const n = (Array.isArray(reply.objections) ? reply.objections : []).length;
                     const w = (Array.isArray(reply.withdrawn) ? reply.withdrawn : []).length;
                     const prose = text(reply.prose);
+                    if (ask.revision == null) {  // a reading's points stay out of the fold: shown here as advice, with their text
+                        const points = (Array.isArray(reply.objections) ? reply.objections : [])
+                            .map((o) => text(o && typeof o === 'object' ? (o.text || o.claim || o.id) : o)).filter(Boolean);
+                        return `${who}: answered${prose ? `: ${prose}` : ''}${points.length ? ` — advice, never holds: ${points.join('; ')}` : ''}`;
+                    }
                     return `${who}: answered — ${n} objection${n === 1 ? '' : 's'}${w ? `, ${w} withdrawn` : ''}${prose ? `: ${prose}` : ''}`;
                 }
                 if (p.status === 'not_dispatched') return `${who}: not sent — ${text(p.not_dispatched_reason) || 'not sendable'}`;
@@ -104,9 +113,11 @@ export function planRecordGroup(owner, record, detail) {
             progress: pending.length ? `${answered.length} of ${participants.length} answered` : '',
             tone: running ? 'working' : (raised.length ? 'warn' : 'done'),
             verdict: raised.length ? `${raised.length} objection${raised.length === 1 ? '' : 's'}` : (pending.length ? 'awaiting' : 'no objection'),
-            timestamp: text(ask.ts), ordinal: index + 1, label: `ask ${text(ask.ask_id)} · revision ${ask.revision}`,
+            timestamp: text(ask.ts), ordinal: index + 1, label: `ask ${text(ask.ask_id)} · ${askSubject(ask.revision)}`,
             summary: text(ask.message), superseded: false, compact: false, replayed: false, revised: false,
-            initiatorTaskId: '', executions: [], execution: null, detailRef: null, detailText: lines.join('\n'),
+            // The host's fold for this ask (which objections stand), or null when the detail did not project it.
+            initiatorTaskId: '', executions: [], execution: null, detailRef: null, participants, objections: known ? raised : null,
+            detailText: lines.join('\n'),
         });
     });
     const awaiting = asks.some((ask) => (Array.isArray(ask.participants) ? ask.participants : []).some((p) => p?.status === 'pending'));

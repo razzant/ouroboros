@@ -1,17 +1,7 @@
-"""Tests for review.py error-path truncation (v4.33.0).
+"""Review failures retain their complete safe cause before any display bound.
 
-Prior to v4.33.0 the triad review's error handlers used raw `[:200]` slices
-(`str(e)[:200]`, `json.dumps(result)[:200]`) to shorten exception messages
-and unparseable response bodies before returning them as review evidence.
-That violated DEVELOPMENT.md item 2(f) — review outputs must NEVER use
-silent `[:N]` truncation — and in practice it chopped off actionable error
-details (e.g. the full OpenRouter 404 "No endpoints found that can handle
-the requested parameters" body was clipped at 207 chars, hiding which
-parameter was incompatible).
-
-v4.33.0 replaces those sites with `truncate_review_artifact(…, limit=4000)`
-which preserves the full body when it fits and appends an explicit
-`OMISSION NOTE` naming the original length only when it doesn't.
+Short unparseable bodies also stay readable; a marker is not a substitute for
+the only retained copy of an engine's actionable refusal.
 """
 
 from __future__ import annotations
@@ -55,17 +45,15 @@ def test_query_model_preserves_full_error_body_under_4000_chars():
     assert "OMISSION NOTE" not in result["error"]
 
 
-def test_query_model_over_limit_appends_omission_note():
-    # 5000-char body — over the 4K limit
-    body = "A" * 5000
+def test_query_model_over_limit_keeps_the_whole_safe_cause():
+    secret = "sk-ant-api03-" + "A1b2C3d4E5f6G7h8" * 4
+    body = "A" * 5000 + secret + "\nTAIL: measured 940000 characters; limit 900000 characters"
     client = _ExplodingClient(body)
     _, result, _ = _run_query_model(client, "anthropic/claude-opus-4.6", [])
 
     assert isinstance(result, dict)
-    # Omission note is explicit (no silent clipping)
-    assert "OMISSION NOTE" in result["error"]
-    # Original length reported so forensic readers know what was lost
-    assert "5000" in result["error"] or "5_000" in result["error"] or "5,000" in result["error"]
+    assert result["error"] == "Error: " + body.replace(secret, "***REDACTED***")
+    assert secret not in result["error"] and "OMISSION NOTE" not in result["error"]
 
 
 def test_parse_model_response_unparseable_preserves_full_body():

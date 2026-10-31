@@ -1,4 +1,10 @@
-"""Recover tool evidence through its verified redacted observability source."""
+"""Recover tool evidence through its verified redacted observability source.
+
+``artifacts.materialize_tool_result_source`` is the one reader: a partial result reads
+its verified actor source, then a matching redacted projection (re-persisted as a new
+exact source), else it keeps the primary-source gap. Commit-review evidence and the
+result review read tool results through it.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +19,6 @@ import pytest
 
 from ouroboros import artifacts, observability
 from ouroboros.loop_tool_execution import process_tool_results
-from ouroboros.review_evidence import build_task_acceptance_evidence
-from ouroboros.review_evidence_sections import _accept_enforce_budget
-from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 from ouroboros.tools.core import _read_file
 from ouroboros.tools.registry import ToolContext
 from tests._tool_result_delivery_shared import measured_fit
@@ -54,11 +57,8 @@ def _record(tmp_path, *, full=FULL, remove_primary=True, keep_raw=False):
     return ctx, row
 
 
-def _evidence(ctx, row, *, budget=100_000):
-    return build_task_acceptance_evidence(
-        ctx, llm_trace={"tool_calls": [row]}, drive_root=ctx.drive_root,
-        task_id=ctx.task_id, budget_chars=budget,
-    )
+def _materialize(ctx, row):
+    return artifacts.materialize_tool_result_source(ctx.drive_root, ctx.task_id, row)
 
 
 def _read(ctx, ref, *, start_char=0):
@@ -67,61 +67,18 @@ def _read(ctx, ref, *, start_char=0):
     return _read_file(ctx, **args)
 
 
-class _Reviewer:
-    def __init__(self):
-        self.calls = 0
-
-    def chat(self, **_kwargs):
-        self.calls += 1
-        return {"content": json.dumps({
-            "verdict": "DEGRADED", "findings": [], "summary": "evidence inspected",
-        })}, {}
-
-
-def _dispatch(ctx, packet):
-    llm = _Reviewer()
-    result = run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="inspect the tool evidence",
-                      subject="candidate", evidence=packet, task_id=ctx.task_id,
-                      policy={"min_successful_slots": 1}),
-        slots=[ReviewSlot(slot_id="reviewer", model="review-model")],
-        drive_root=ctx.drive_root, llm=llm,
-    )
-    return llm.calls, result
-
-
-def test_missing_primary_recovers_full_result_and_dispatches_packet_reviewer(tmp_path):
+def test_missing_primary_recovers_full_result_from_the_redacted_projection(tmp_path):
     ctx, row = _record(tmp_path)
     original = copy.deepcopy(row)
-    packet = _evidence(ctx, row)
-    projected = packet["tool_trajectory"][0]
-    assert projected["result"] == FULL
-    assert projected["result_complete"] is True
-    assert projected["status"] == "error" and projected["is_error"] is True
-    assert TAIL in _read(ctx, projected["result_source_ref"], start_char=19_000)
-    assert "__unresolved_partial_artifacts__" not in packet
-    calls, _ = _dispatch(ctx, packet)
-    assert calls == 1
+    result, complete, meta = _materialize(ctx, row)
+    assert result == FULL and complete is True
+    assert TAIL in _read(ctx, meta["source_ref"], start_char=19_000)
     assert row == original
     assert artifacts.collect_task_artifact_records(tmp_path, ctx.task_id) == []
 
 
-def test_recovered_result_remains_readable_after_packet_recap(tmp_path):
-    ctx, row = _record(tmp_path)
-    packet = _evidence(ctx, row, budget=6_000)
-    assert "__immutable_core_overflow__" not in packet
-    projected = packet["tool_trajectory"][0]
-    assert projected["result_complete"] is False
-    assert TAIL not in projected["result"]
-    assert TAIL in _read(ctx, projected["result_source_ref"], start_char=19_000)
-    assert {x["status"] for x in packet["__unresolved_partial_artifacts__"]} == {
-        "not_materialized_for_reviewer",
-    }
-    assert _dispatch(ctx, packet)[0] == 1
-
-
 @pytest.mark.parametrize("stage", ["write", "readback"])
-def test_publication_failure_keeps_full_inline_but_refuses_after_recap(tmp_path, monkeypatch, stage):
+def test_publication_failure_keeps_the_full_result_without_a_source(tmp_path, monkeypatch, stage):
     ctx, row = _record(tmp_path)
     store = artifacts.store_actor_source_bytes
     read = artifacts.read_actor_source_bytes
@@ -137,36 +94,9 @@ def test_publication_failure_keeps_full_inline_but_refuses_after_recap(tmp_path,
                 raise OSError("source readback unavailable")
             return read(drive, task, ref)
         monkeypatch.setattr(artifacts, "read_actor_source_bytes", fail_readback)
-    full_packet = _evidence(ctx, row)
-    projected = full_packet["tool_trajectory"][0]
-    assert projected["result"] == FULL and projected["result_complete"] is True
-    assert projected["result_source_ref"] == {}
-    assert "__unresolved_partial_artifacts__" not in full_packet
-    assert _dispatch(ctx, full_packet)[0] == 1
-    # Include the historical-input availability exhibit added to the packet's
-    # fixed core, while keeping this budget far below the 20 KB tool result.
-    # The assertions below still require a recap and a source-unavailable refusal.
-    packet = _evidence(ctx, row, budget=6_000)
-    assert "__immutable_core_overflow__" not in packet
-    assert packet["tool_trajectory_source_ref"]
-    assert packet["tool_trajectory"][0]["result_source_ref"] == {}
-    assert all(x["status"] == "source_unavailable" and x["source_ref"] == {}
-               for x in packet["__unresolved_partial_artifacts__"])
-    calls, result = _dispatch(ctx, packet)
-    assert calls == 0 and result.actors[0]["status"] == "not_dispatched"
-
-
-def test_explicit_missing_source_cannot_borrow_original_partial_corpus(tmp_path):
-    ctx, row = _record(tmp_path)
-    corpus = artifacts.persist_tool_trajectory_source(tmp_path, ctx.task_id, [row])
-    packet = _accept_enforce_budget({
-        "tool_trajectory": [{"tool": TOOL, "result": FULL,
-                             "result_complete": True, "result_source_ref": {}}],
-        "tool_trajectory_source_ref": corpus,
-    }, budget=4_000)
-    assert packet["tool_trajectory"][0]["result_complete"] is False
-    assert packet["__unresolved_partial_artifacts__"][0]["status"] == "source_unavailable"
-    assert _dispatch(ctx, packet)[0] == 0
+    result, complete, meta = _materialize(ctx, row)
+    assert result == FULL and complete is True
+    assert meta["source_ref"] == {}
 
 
 def test_primary_source_wins_without_projection_reads_or_republication(tmp_path, monkeypatch):
@@ -175,9 +105,9 @@ def test_primary_source_wins_without_projection_reads_or_republication(tmp_path,
     reads, writes = [], []
     monkeypatch.setattr(observability, "read_blob_ref", lambda *a, **k: reads.append(True))
     monkeypatch.setattr(artifacts, "persist_exact_text_source", lambda *a, **k: writes.append(True))
-    packet = _evidence(ctx, row)
-    assert packet["tool_trajectory"][0]["result"] == FULL
-    assert packet["tool_trajectory"][0]["result_source_ref"] == row["result_source_ref"]
+    result, complete, meta = _materialize(ctx, row)
+    assert result == FULL and complete is True
+    assert meta == {}, "the row keeps its own primary source ref"
     assert reads == writes == []
 
 
@@ -269,12 +199,11 @@ def test_recovery_reads_redacted_projection_even_when_raw_payload_is_retained(tm
         calls.append(ref)
         return reader(drive, ref, **kwargs)
     monkeypatch.setattr(observability, "read_blob_ref", track_read)
-    packet = _evidence(ctx, row)
+    result, complete, meta = _materialize(ctx, row)
     assert calls == [row["trace_ref"]["redacted_projection_ref"]]
-    assert secret not in json.dumps(packet)
-    projected = packet["tool_trajectory"][0]
-    assert TAIL in projected["result"] and "***REDACTED***" in projected["result"]
-    assert secret not in _read(ctx, projected["result_source_ref"], start_char=19_000)
+    assert complete is True and secret not in result
+    assert TAIL in result and "***REDACTED***" in result
+    assert secret not in _read(ctx, meta["source_ref"], start_char=19_000)
 
 
 def test_empty_string_projection_is_a_complete_tool_result(tmp_path):
@@ -282,10 +211,8 @@ def test_empty_string_projection_is_a_complete_tool_result(tmp_path):
     row["trace_ref"]["redacted_projection_ref"] = observability.write_blob(
         tmp_path, {"tool": TOOL, "tool_call_id": CALL_ID, "result": ""},
     )
-    packet = _evidence(ctx, row)
-    assert packet["tool_trajectory"][0]["result"] == ""
-    assert packet["tool_trajectory"][0]["result_complete"] is True
-    assert "__unresolved_partial_artifacts__" not in packet
+    result, complete, _meta = _materialize(ctx, row)
+    assert result == "" and complete is True
 
 
 def test_legacy_envelope_recovers_with_matching_projection(tmp_path):
@@ -294,11 +221,9 @@ def test_legacy_envelope_recovers_with_matching_projection(tmp_path):
     row["result"] = FULL[:15_000] + f"\n... (truncated from {len(FULL)} chars, limit=15000)"
     row.pop("result_partial")
     row.pop("result_source_ref")
-    packet = _evidence(ctx, row)
-    projected = packet["tool_trajectory"][0]
-    assert projected["result"] == FULL and projected["result_complete"] is True
-    assert TAIL in _read(ctx, projected["result_source_ref"], start_char=19_000)
-    assert "__unresolved_partial_artifacts__" not in packet
+    result, complete, meta = _materialize(ctx, row)
+    assert result == FULL and complete is True
+    assert TAIL in _read(ctx, meta["source_ref"], start_char=19_000)
 
 
 def test_explicit_complete_row_does_not_read_trace_or_republish(tmp_path, monkeypatch):
@@ -308,62 +233,7 @@ def test_explicit_complete_row_does_not_read_trace_or_republish(tmp_path, monkey
     calls = []
     monkeypatch.setattr(observability, "read_blob_ref", lambda *a, **k: calls.append(True))
     monkeypatch.setattr(artifacts, "persist_exact_text_source", lambda *a, **k: calls.append(True))
-    packet = _evidence(ctx, row)
-    assert packet["tool_trajectory"][0]["result"] == row["result"]
-    assert packet["tool_trajectory"][0]["result_complete"] is True
-    assert "result_source_ref" not in packet["tool_trajectory"][0]
+    result, complete, meta = _materialize(ctx, row)
+    assert result == row["result"] and complete is True
+    assert meta == {}, "no source ref is minted for a complete row"
     assert calls == []
-
-
-@pytest.mark.parametrize("publication_fails", [False, True])
-def test_whole_row_shedding_retains_effective_source_or_unavailability(
-    tmp_path, monkeypatch, publication_fails,
-):
-    secret = "sk-" + "secret" * 8
-    ctx, row = _record(tmp_path, full=FULL + "\n" + json.dumps({"api_key": secret}))
-    if publication_fails:
-        store = artifacts.store_actor_source_bytes
-        def fail_individual(*args, **kwargs):
-            if kwargs.get("source_id") == CALL_ID:
-                raise OSError("individual source write unavailable")
-            return store(*args, **kwargs)
-        monkeypatch.setattr(artifacts, "store_actor_source_bytes", fail_individual)
-    calls = [row] + [{"tool": "later_tool", "result": "later evidence"} for _ in range(20)]
-    packet = build_task_acceptance_evidence(
-        ctx, llm_trace={"tool_calls": calls}, drive_root=ctx.drive_root,
-        # Leave room for the historical-input availability exhibit in the
-        # fixed core; the first 20 KB row must still be shed (asserted below).
-        task_id=ctx.task_id, budget_chars=12_000,
-    )
-    assert "__immutable_core_overflow__" not in packet
-    assert len(packet["tool_trajectory"]) == 20
-    assert all(item["tool"] == "later_tool" for item in packet["tool_trajectory"])
-    omitted = [item for item in packet["__unresolved_partial_artifacts__"] if item["tool"] == TOOL]
-    assert len(omitted) == 1
-    if publication_fails:
-        assert omitted[0]["status"] == "source_unavailable" and omitted[0]["source_ref"] == {}
-        assert _dispatch(ctx, packet)[0] == 0
-    else:
-        ref = omitted[0]["source_ref"]
-        assert omitted[0]["status"] == "not_materialized_for_reviewer"
-        assert ref["path"] != row["result_source_ref"]["path"]
-        text = _read(ctx, ref, start_char=19_000)
-        assert TAIL in text and secret not in text
-        assert _dispatch(ctx, packet)[0] == 1
-
-
-def test_shed_source_failure_retains_one_original_gap(tmp_path):
-    ctx, row = _record(tmp_path)
-    row["trace_ref"] = {}
-    calls = [row] + [{"tool": "later_tool", "result": "later evidence"} for _ in range(20)]
-    packet = build_task_acceptance_evidence(
-        ctx, llm_trace={"tool_calls": calls}, drive_root=ctx.drive_root,
-        task_id=ctx.task_id, budget_chars=8_000,
-    )
-    assert len(packet["tool_trajectory"]) == 20
-    assert all(item["tool"] == "later_tool" for item in packet["tool_trajectory"])
-    gaps = [item for item in packet["__unresolved_partial_artifacts__"] if item["tool"] == TOOL]
-    assert len(gaps) == 1
-    assert gaps[0]["status"] == "source_unavailable"
-    assert gaps[0]["source_ref"] == row["result_source_ref"]
-    assert "FileNotFoundError" in gaps[0]["reason"]

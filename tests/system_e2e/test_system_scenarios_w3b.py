@@ -62,6 +62,7 @@ import pytest
 
 from tests._usage_store_testing import ledger_rows
 from tests.system_e2e.harness import (
+    KEYLESS_REVIEW_ROWS,
     LANE_MOCK,
     SKILL_REVIEW_MARKER,
     TRIAD_USER_MARKER,
@@ -192,10 +193,9 @@ def test_fake_daemon_run_replay_refusals_and_cancel(tmp_path):
 
 def test_skill_review_classification_and_canned_verdict():
     """The skill-review branch classifies BEFORE every other marker branch (its
-    pack can quote them), and the canned all-PASS verdict covers the tree's own
-    checklist and aggregates to ``clean`` under the tree's own policy."""
-    from ouroboros.skill_review_prompt import _SKILL_REVIEW_ITEMS
-    from ouroboros.skill_review_status import aggregate_skill_review_status
+    pack can quote them), and its findings-only clean answer is a responsive
+    PASS under the same parser the skill review wave uses."""
+    from ouroboros.triad_review import parse_seat_answers
 
     body = {"messages": [{"role": "user", "content":
                           SKILL_REVIEW_MARKER + "\npack quoting: " + TRIAD_USER_MARKER
@@ -203,10 +203,14 @@ def test_skill_review_classification_and_canned_verdict():
     assert classify_call(body) == "skill_review"
     kind, message = scripted_completion(body, 1, lambda _b: None, "x")
     assert kind == "skill_review"
-    items = json.loads(message["content"])
-    assert {row["item"] for row in items} == set(_SKILL_REVIEW_ITEMS)
-    assert all(row["verdict"] == "PASS" and row["reason"].strip() for row in items)
-    assert aggregate_skill_review_status(items, "extension") == "clean"
+    assert message["content"] == "[]\nNO_FINDINGS"
+    parsed = parse_seat_answers(
+        {"results": [{"slot_id": "review-t1", "model": "stub", "text": message["content"]}]},
+        {"review-t1": ("skill",)})
+    assert parsed.findings == [] and not parsed.errors
+    assert parsed.responsive_models == ["stub [review-t1]"]
+    answer = parsed.actor_records[0].answers["skill"]
+    assert answer["status"] == "responded" and answer["verdict"] == "PASS", answer
 
 
 # ===========================================================================
@@ -613,16 +617,31 @@ def test_s13_skills_lifecycle_review_grants_enable_dispatch_disable_delete(
             review = _api(server.base_url, "POST",
                           f"/api/skills/{S13_SKILL}/review", {}, timeout=600)
             assert review.get("status") == "clean", review
-            # Durable verdict semantics on this tree: a review WITH real
-            # PASS/FAIL verdicts persists NO status key (status re-derives from
-            # the findings on every load), so the durable pin is the findings
-            # plane itself: all-PASS from the triad panel.
+            # Findings are problems only (#2123). A clean projection keeps its
+            # explicit status; prove every seat answered PASS in the canonical
+            # ledger, so an empty or missing review cannot pass this guard.
             review_state = oracle._json(f"state/skills/{S13_SKILL}/review.json")
-            findings = review_state.get("findings") or []
-            assert findings and all(
-                str(f.get("verdict") or "") == "PASS" for f in findings), review_state
-            assert "status" not in review_state, review_state
-            assert stub_a.kinds().count("skill_review") >= 3, stub_a.kinds()
+            assert review_state.get("status") == "clean", review_state
+            assert review_state.get("findings") == [], review_state
+            content_hash = review_state.get("content_hash")
+            assert content_hash and content_hash == review.get("content_hash"), review_state
+            record_id = review_state.get("record_id")
+            assert record_id and record_id == review.get("record_id"), review_state
+            record = oracle._json(f"state/review_ledger/{record_id}.json")
+            assert record.get("state") == "settled", record
+            subject = record.get("subject") or {}
+            assert subject.get("skill") == S13_SKILL and subject.get("tree_sha") == content_hash, subject
+            verdict = record.get("verdict") or {}
+            assert verdict.get("aggregate") == "PASS", verdict
+            assert verdict.get("per_row") == dict.fromkeys(KEYLESS_REVIEW_ROWS, "PASS"), verdict
+            seats = record.get("rows") or []
+            assert len(seats) == len(KEYLESS_REVIEW_ROWS), seats
+            assert {seat.get("seat_id") for seat in seats} == set(KEYLESS_REVIEW_ROWS), seats
+            for seat in seats:
+                answer = (seat.get("answers") or {}).get("skill") or {}
+                assert seat.get("status") == answer.get("status") == "responded", seat
+                assert answer.get("verdict") == "PASS" and answer.get("findings") == [], seat
+            assert stub_a.kinds().count("skill_review") >= len(KEYLESS_REVIEW_ROWS), stub_a.kinds()
 
             # GRANTS: the manifest-requested privileged permission, owner-granted.
             grants = _api(server.base_url, "POST", f"/api/skills/{S13_SKILL}/grants",
@@ -656,6 +675,7 @@ def test_s13_skills_lifecycle_review_grants_enable_dispatch_disable_delete(
             payload_dir = data_root / "skills" / "external" / S13_SKILL
             entry = _skill_entry(server, S13_SKILL)
             assert entry.get("enabled") is True, entry
+            assert entry.get("review_status") == "clean", entry
             assert entry.get("live_loaded") is True, entry
 
             # DISPATCH through a live task: durable tools.jsonl row + ABI-9 digest.

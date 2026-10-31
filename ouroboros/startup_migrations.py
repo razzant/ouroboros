@@ -1,20 +1,24 @@
 """Visible lifecycle import of current boot state, never a reader fallback.
 
-Run before producers on every startup door: ``ensure_current_store`` creates or
-reconciles ``state/current.sqlite`` (the one importer; details in
+Run before producers on every startup door: ``ensure_current_store`` opens or creates
+``state/current.sqlite`` (the one importer; legacy reconcile is a named job in
 ``store_import``), the admissible legacy cancel latches become intents, and the
 boot admissions no document derives (drives present on disk, the one-time upgrade
 receipts) join the owner-held rows, and legacy questions bind their publication
 address once. ``state/migrations.json`` keeps the watermarks: the store, the
-cancel-latch and the question-publication generations.
+cancel-latch, the question-publication and the retired-set generations.
 ``python -m ouroboros.startup_migrations`` is the explicit rebuild job, including
-its historical seal audit (no audit watermark).
+its historical seal audit (no audit watermark). An owner-held obligation set whose producer
+this body retired (``RETIRED_SETS``) has no reader or remover left, so the first boot of its
+generation deletes the rows an older body kept there. Its unsent outbox lines become exhausted
+with ``producer_retired`` through the shared storage owner; payloads remain, no delivery is invented.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import subprocess
 import time
 from pathlib import Path
 
@@ -23,6 +27,8 @@ from ouroboros.utils import append_jsonl, read_json_dict, update_json_locked, ut
 log = logging.getLogger(__name__)
 SCHEMA_GENERATION = 7
 QUESTION_PUBLICATIONS_GENERATION = 1
+RETIRED_SETS = ("memory_max",)  # the lost-Max episode's one row, retired 29.10 with its producer
+RETIRED_SETS_GENERATION = 2  # also retire the old episode's unsent outbox lines; generation 1 removed only its set
 
 
 def watermarks(root) -> dict:
@@ -93,13 +99,13 @@ def _legacy_question_publications(root, needed):
     return publications, unknowns, bool(unknowns and (unstable or unreadable))
 
 
-def migrate_question_publications(root, *, rebuild=False):
+def migrate_question_publications(root, *, rebuild=False, legacy=False):
     """Questions asked without publication addressing bind it once, from the store's
     ``owner_questions`` members and exact chat evidence (a GET never migrates): those asked
     before it existed, and those an older body asked after a rollback (no delivery record and
-    no ``question:`` row yet). The rest stay addressed ``question:`` unknowns, never a guessed
-    Main; a moving or unreadable history earns one next-boot retry, and the explicit rebuild
-    starts a fresh repair."""
+    no ``question:`` row yet, discovered by the legacy reconcile job). The rest stay addressed ``question:`` unknowns, never a guessed
+    Main; a moving or unreadable history earns one maintenance retry, and the explicit rebuild
+    starts a fresh repair. Current generations never read history during boot."""
     from ouroboros import obligations
     from ouroboros.owner_quiz import quiz_needs_retention, record_publication
     from ouroboros.task_store import read_document
@@ -107,8 +113,15 @@ def migrate_question_publications(root, *, rebuild=False):
     marks = watermarks(root)
     current = marks.get("question_publications_generation") == QUESTION_PUBLICATIONS_GENERATION
     retry = marks.get("question_publication_retry") or {}
-    needed, unseen = set(), False
-    classified = set(obligations.members(root, "unknowns")) if current else set()
+    if current and not (rebuild or legacy):
+        if retry.get("state") == "pending":
+            from ouroboros import maintenance_jobs
+            job = maintenance_jobs.job(root, "legacy_reconcile") or {}
+            if not job or job.get("state") == "done":
+                maintenance_jobs.record(root, "legacy_reconcile", state="pending", reason="question_publication_retry",
+                                        cursor=None, done=0, total=None, error=None)
+        return {}
+    needed = set()
     for tid in obligations.members(root, "owner_questions"):
         try:
             quizzes = (read_document(root, tid) or {}).get("owner_quiz")
@@ -123,9 +136,6 @@ def migrate_question_publications(root, *, rebuild=False):
                     and not (isinstance(owed, dict)
                              and (owed.get("kind") == "publication" or owed.get("publication_pending")))):
                 needed.add((tid, str(qid)))
-                unseen = unseen or ("delivery" not in block and f"question:{tid}:{qid}" not in classified)
-    if current and not rebuild and retry.get("state") != "pending" and not unseen:
-        return {}
     publications, unknowns, unsettled = _legacy_question_publications(root, needed)
     for (tid, qid), chat_id in publications.items():
         record_publication(root, tid, qid, chat_id, evidence="history")
@@ -138,6 +148,25 @@ def migrate_question_publications(root, *, rebuild=False):
     stamp(root, question_publications_generation=QUESTION_PUBLICATIONS_GENERATION, question_publication_retry=(
         {"attempts": attempts, "state": "pending" if attempts < 2 else "rebuild_required"} if unsettled else None))
     return {"bound": len(publications), "unknown": len(unknowns)}
+
+
+def retire_sets(root, *, rebuild=False) -> int:
+    """Delete the rows an older body kept in ``RETIRED_SETS``: the remover their gone producer was.
+    Once per generation, stamped after success; a current stamp reads no row (the explicit rebuild
+    repeats it, as after a return from an older body that kept such a row again). Returns the rows removed."""
+    from ouroboros import obligations
+    from ouroboros.terminal_outbox import retire_producer
+
+    if not rebuild and watermarks(root).get("retired_sets_generation") == RETIRED_SETS_GENERATION:
+        return 0
+    retire_producer(root, delivery_prefix="memory_max:", system_type="memory_max_notice")
+    removed = 0
+    for name in RETIRED_SETS:
+        for identity in obligations.members(root, name):
+            obligations.remove(root, name, identity)
+            removed += 1
+    stamp(root, retired_sets_generation=RETIRED_SETS_GENERATION)
+    return removed
 
 
 def boot_admissions(root) -> dict:
@@ -158,11 +187,12 @@ def boot_admissions(root) -> dict:
     return {"pending_drives": pending, "upgrade_notices": import_upgrade_receipts(root)}
 
 
-def prepare_startup_state(root, *, rebuild=False, repo_dir=None, strict=True):
+def prepare_startup_state(root, *, rebuild=False, repo_dir=None, strict=True, initialize_journal=False):
     """Boot may continue with an unavailable store (every door then answers typed); the explicit
     repair reports its failure."""
     try:
-        return _prepare_startup_state(root, rebuild=rebuild)
+        return _prepare_startup_state(root, rebuild=rebuild, repo_dir=repo_dir,
+                                      initialize_journal=initialize_journal)
     except Exception as exc:
         log.error("Startup import failed; the current-facts store is unavailable", exc_info=True)
         try:
@@ -175,8 +205,7 @@ def prepare_startup_state(root, *, rebuild=False, repo_dir=None, strict=True):
         return {"imported": False, "status": "unavailable"}
 
 
-def _prepare_startup_state(root, *, rebuild):
-    from ouroboros.store import published
+def _prepare_startup_state(root, *, rebuild, repo_dir=None, initialize_journal=False):
     from ouroboros.store_import import ensure_current_store
 
     root = Path(root)
@@ -188,17 +217,29 @@ def _prepare_startup_state(root, *, rebuild):
         from ouroboros.utils import atomic_write_json
         atomic_write_json(root / "state" / "migrations.json", {}, trailing_newline=True)
     started = time.monotonic()
-    report = ensure_current_store(root, rederive=rebuild)
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir or Path(__file__).resolve().parents[1],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        head = ""  # unknown current body is recorded; never substitute the previous body's SHA
+    report = ensure_current_store(root, rederive=rebuild, body_sha=head, initialize_journal=initialize_journal)
     if rebuild:
         from ouroboros.delegate_custody_current import rebuild as rebuild_custody
         report["custody_open"] = rebuild_custody(root, replace=True)
         report["cancel_latches"] = len(migrate_cancel_latches(root, records=None, rebuild=True))
-    if published(root):
+    if report["status"] in {"unchanged", "completed", "reconciled"}:
+        if not rebuild:
+            migrate_cancel_latches(root, records=None)  # the generation gate precedes every history read
         try:  # unstamped on failure: the next boot repeats it
             report["question_publications"] = migrate_question_publications(root, rebuild=rebuild)
         except Exception as exc:
             log.warning("Legacy question publication import failed; it reruns at the next start", exc_info=True)
             report["question_publications"] = {"error": type(exc).__name__}
+        try:  # unstamped on failure: the next boot repeats it
+            if removed := retire_sets(root, rebuild=rebuild):
+                report["retired_rows"] = removed
+        except Exception:
+            log.warning("Retired obligation rows not removed; the next start repeats it", exc_info=True)
     append_jsonl(root / "logs/supervisor.jsonl", {"ts": utc_now_iso(), "type": "startup_migration",
         "phase": "completed", "job": "current_store", "counts": {key: value for key, value in report.items()
                                                                   if key != "drives"},

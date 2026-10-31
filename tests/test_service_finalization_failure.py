@@ -1,4 +1,4 @@
-"""Unconfirmed stop stays an error in teardown, acceptance evidence and UI events."""
+"""Unconfirmed stop stays an error in teardown, the author's disclosure, the delivery evidence and UI events."""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,7 @@ from ouroboros.tools.registry import ToolContext
 
 @pytest.mark.parametrize("live", [False, True])
 def test_pending_stop_reaches_evidence_and_checkpoint_then_success_is_fresh(tmp_path, monkeypatch, live):
-    from ouroboros import acceptance_preparation
+    from ouroboros.loop_delivery import delivery_evidence_fingerprint
     from ouroboros.tools import services
 
     tool_ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path, task_id="task")
@@ -37,11 +37,11 @@ def test_pending_stop_reaches_evidence_and_checkpoint_then_success_is_fresh(tmp_
     assert len(row["stop_error"]) == 2000
     assert "OMISSION NOTE" in row["stop_error"]
     assert f"original length {len(pending['stop_error'])}" in row["stop_error"]
-    before = acceptance_preparation.preparation_material(tool_ctx, ctx.llm_trace)
+    before = delivery_evidence_fingerprint(tool_ctx, ctx.llm_trace)
     assert loop_budget._finalize_task_services(ctx) is False
-    assert acceptance_preparation.preparation_material(tool_ctx, ctx.llm_trace) == before
+    assert delivery_evidence_fingerprint(tool_ctx, ctx.llm_trace) == before
     assert loop_budget._finalize_task_services(ctx) is True
-    assert acceptance_preparation.preparation_material(tool_ctx, ctx.llm_trace) != before
+    assert delivery_evidence_fingerprint(tool_ctx, ctx.llm_trace) != before
     evidence = loop_budget._service_finalization_evidence(ctx.llm_trace)
     assert [event["kind"] for event in evidence] == ["service_finalization_error", "services_kept", "services_stopped"]
     assert evidence[-1]["services"][0]["cleanup_dispatched"] is True
@@ -68,87 +68,62 @@ def test_wrapper_corrects_legacy_stopped_label_on_failed_executor_stop(tmp_path,
 
 
 def _ordinary_completion(tmp_path, monkeypatch, rows, answer):
-    """Run the real ordinary rail: teardown holds the first answer, the author
-    selects again and the host panel receives its packet. Returns both views
-    and the author's own registry."""
+    """Run the real ordinary rail: teardown holds the first answer before its result review
+    and shows the author its evidence; the author selects again and that answer is reviewed at
+    delivery and delivered. Returns the author's view and its own registry."""
     import ouroboros.loop as loop
-    import ouroboros.review_substrate as review_substrate
     from ouroboros.tools import services
     from tests.test_delivery_forced_finalization import _forced_test_context, _select_completion
 
     _loop, registry, ctx, trace = _forced_test_context(tmp_path)
     registry._ctx.is_direct_chat = False
-    registry._ctx._task_acceptance_reviewed = False
     results = iter([rows])
     monkeypatch.setattr(services, "stop_task_services", lambda _ctx: next(results, []))
-    clean = review_substrate.ReviewRunResult(
-        request={"surface": "task_acceptance", "policy": {"require_criterion_evidence": True}},
-        actors=[{"signal": "PASS", "slot_id": "host-1", "parsed": {
-            "outcome_tier": "solved", "completion_coach": "ship", "criteria_used": [{
-                "criterion": "owner request", "status": "supported", "evidence_refs": ["artifact:1"]}]}}],
-        parsed_findings=[], aggregate_signal="PASS")
-    packets = []
-    monkeypatch.setattr(loop, "get_task_review_mode", lambda: "auto")
-    monkeypatch.setattr(loop, "_execute_task_acceptance_panel", lambda review_ctx: packets.append(review_ctx.evidence) or clean)
+    reviewed = []
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery",
+                        lambda _ctx, content, _trace, _hold: reviewed.append(content) or False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    # Auto reviews the author's typed nomination, never the declared expected_output (#1731).
-    from tests.test_loop_acceptance_gate import _nominate_acceptance
-
-    _nominate_acceptance(trace, task_id="parent1", subject="The service is stopped.")
 
     held = loop._no_tool_final_answer("The service is stopped.", ctx, trace, registry,
                                       queue.Queue(), set(), lambda _text: None)
-    assert held is None and not packets and registry._ctx._delivery_control_required is True
+    assert held is None and not reviewed and registry._ctx._delivery_control_required is True
     shown = [dict(message) for message in ctx.messages]
-    _select_completion(registry, ctx, trace, answer=answer)
-    # Even a clean PASS reaches the author before its decision (G1 #1737/D12); the
-    # informed re-selection then delivers on the same paid panel.
-    assert loop._no_tool_final_answer(answer, ctx, trace, registry, queue.Queue(), set(),
-                                      lambda _text: None, explicit_candidate=True) is None
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-
-    expose_acceptance_feedback(trace, ctx.messages, "parent1")  # the next Main request carried it
     _select_completion(registry, ctx, trace, answer=answer)
     text, _usage, _trace = loop._no_tool_final_answer(answer, ctx, trace, registry, queue.Queue(), set(),
                                                       lambda _text: None, explicit_candidate=True)
-    assert text == answer  # Evidence for the author and panel, not a finality veto.
-    [packet] = packets
-    return shown, packet, registry
+    assert text == answer  # Evidence for the author, not a finality veto.
+    assert reviewed == [answer]
+    return shown, registry
 
 
-def test_ordinary_completion_shows_pending_cleanup_to_author_and_panel_without_veto(tmp_path, monkeypatch):
+def test_ordinary_completion_shows_pending_cleanup_to_the_author_without_veto(tmp_path, monkeypatch):
     pending = {"service_id": "parent1:svc", "name": "svc", "task_id": "parent1", "lifecycle": "cleanup_pending",
                "state": "exited", "stop_failed": True, "cleanup_dispatched": False,
                "stop_error": "surviving process group members: 43"}
-    messages, packet, _registry = _ordinary_completion(
+    messages, _registry = _ordinary_completion(
         tmp_path, monkeypatch, [pending], "Service cleanup is unconfirmed: process 43 survived the stop.")
     shown = str(messages)
     assert "[SERVICE_FINALIZATION_EVIDENCE]" in shown
     assert "cleanup_pending" in shown and "surviving process group members: 43" in shown
-    [row] = packet["service_finalization"]
-    assert row["kind"] == "service_finalization_error" and packet["__provenance__"]["service_finalization"] == "host_attested"
+    [row], _size = _author_evidence(messages)
+    assert row["kind"] == "service_finalization_error"
     assert row["services"][0]["lifecycle"] == "cleanup_pending"
     assert row["services"][0]["stop_error"] == "surviving process group members: 43"
 
 
-def test_acceptance_packet_carries_service_section_only_when_teardown_recorded(tmp_path):
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    tool_ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path, task_id="task")
-    quiet = build_task_acceptance_evidence(tool_ctx, llm_trace={"tool_calls": []}, drive_root=tmp_path, task_id="task")
-    assert "service_finalization" not in quiet
+def test_the_service_projection_appears_only_when_teardown_recorded_and_keeps_private_paths_out(tmp_path):
+    projection = loop_forced_finalization._service_finalization_projection
+    assert projection({"tool_calls": []}, drive_root=tmp_path, task_id="task") == []
     trace = {"tool_calls": [], "verification_events": [{"kind": "services_stopped", "services": [
         {"service_id": "task:svc", "lifecycle": "stopped", "state": "stopped", "pid": 7, "log_path": "/private",
          "artifact_outputs": "report.html is missing: " + "x" * 9000}]}]}
-    packet = build_task_acceptance_evidence(tool_ctx, llm_trace=trace, drive_root=tmp_path, task_id="task")
-    # Source-complete task facts use the existing packet/context fitting layer.
-    assert packet["service_finalization"] == loop_forced_finalization._service_finalization_projection(
-        trace, drive_root=tmp_path, task_id="task")
-    [row] = packet["service_finalization"]
+    shown = projection(trace, drive_root=tmp_path, task_id="task")
+    # Source-complete task facts; the existing context fitting layer owns the bound.
+    [row] = shown
     assert row["services"][0]["artifact_outputs"] == trace["verification_events"][0]["services"][0]["artifact_outputs"]
-    rendered = json.dumps(packet["service_finalization"])
+    rendered = json.dumps(shown)
     assert "report.html is missing" in rendered and "log_path" not in rendered
 
 
@@ -175,9 +150,7 @@ def test_service_disclosure_carries_and_fingerprints_full_projection():
     assert str(ctx.messages).count("[SERVICE_FINALIZATION_EVIDENCE]") == 2
 
 
-def test_cleanup_failure_after_long_successes_reaches_author_and_acceptance(tmp_path):
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
+def test_cleanup_failure_after_long_successes_reaches_the_author_with_every_row(tmp_path):
     stopped = {"kind": "services_stopped", "services": [
         {"service_id": f"task:success-{i}", "lifecycle": "stopped", "artifact_outputs": "x" * 1000}
         for i in range(12)]}
@@ -188,13 +161,10 @@ def test_cleanup_failure_after_long_successes_reaches_author_and_acceptance(tmp_
     ctx = SimpleNamespace(messages=[], forced_service_evidence_fingerprint="", drive_root=tmp_path, task_id="task")
     loop_forced_finalization._disclose_service_finalization(ctx, trace)
     assert "task:late-failure" in str(ctx.messages) and "surviving members: 43" in str(ctx.messages)
-    packet = build_task_acceptance_evidence(ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path,
-                                                      task_id="task"), llm_trace=trace, drive_root=tmp_path, task_id="task")
-    rows = packet["service_finalization"]
+    rows = loop_forced_finalization._service_finalization_projection(trace, drive_root=tmp_path, task_id="task")
     assert len(rows[0]["services"]) == 12
     assert rows[-1]["kind"] == pending["kind"]
     assert rows[-1]["services"] == pending["services"]
-    assert packet["__provenance__"]["service_finalization"] == "host_attested"
 
 
 def _finalized_log(drive_root, name, text):
@@ -274,19 +244,15 @@ def _tool_reader(registry):
     return lambda arguments: registry.execute("read_file", arguments)
 
 
-def test_many_chatty_services_reach_ordinary_author_and_panel_by_readable_ref(tmp_path, monkeypatch):
+def test_many_chatty_services_reach_the_ordinary_author_by_readable_ref(tmp_path, monkeypatch):
     rows = _chatty_rows(tmp_path, monkeypatch)
     assert sum(len(row.get("log_finalization", {}).get("tail", "")) for row in rows) > 12 * 80_000
-    messages, packet, registry = _ordinary_completion(tmp_path, monkeypatch, rows,
-                                                      "Twelve previews stopped; two logs have gaps.")
+    messages, registry = _ordinary_completion(tmp_path, monkeypatch, rows,
+                                              "Twelve previews stopped; two logs have gaps.")
     _assert_retained_tails_by_ref(_tool_reader(registry), *_author_evidence(messages))
-    _assert_retained_tails_by_ref(_tool_reader(registry), packet["service_finalization"],
-                                  len(json.dumps(packet["service_finalization"])))
-    assert packet["__provenance__"]["service_finalization"] == "host_attested"
 
 
 def test_many_chatty_services_reach_the_forced_author_by_readable_ref(tmp_path, monkeypatch):
-    from ouroboros.review_evidence import build_task_acceptance_evidence
     from ouroboros.tools import services
     from tests.test_delivery_forced_finalization import _forced_test_context
 
@@ -304,9 +270,9 @@ def test_many_chatty_services_reach_the_forced_author_by_readable_ref(tmp_path, 
     # Raw teardown evidence keeps every tail; only the shown projection is compact.
     raw = returned["verification_events"][0]["services"]
     assert all(len(row["log_finalization"]["tail"]) == 80_000 for row in raw[:12])
-    packet = build_task_acceptance_evidence(registry._ctx, llm_trace=returned, drive_root=tmp_path, task_id="parent1")
-    _assert_retained_tails_by_ref(_tool_reader(registry), packet["service_finalization"],
-                                  len(json.dumps(packet["service_finalization"])))
+    # The returned trace projects the same compact, readable rows to any later reader.
+    shown = loop_forced_finalization._service_finalization_projection(returned, drive_root=tmp_path, task_id="parent1")
+    _assert_retained_tails_by_ref(_tool_reader(registry), shown, len(json.dumps(shown)))
 
 
 def test_display_drops_a_tail_only_for_a_readable_source_and_identity_sees_hidden_changes(tmp_path):
@@ -337,60 +303,3 @@ def test_display_drops_a_tail_only_for_a_readable_source_and_identity_sees_hidde
     assert shown["full_log_ref"] == {"kind": "txt", "sha256": log["full_log_ref"]["sha256"], "encoding": "gzip",
                                      "size": log["full_log_ref"]["size"], "availability": "unavailable",
                                      "reason": "FileNotFoundError"}
-
-
-@pytest.mark.parametrize("many", [False, True], ids=["one-small-row", "many-chatty-rows"])
-def test_retrieving_reviewer_reads_complete_logs_after_the_author_drive_is_gone(tmp_path, monkeypatch, many):
-    """The packet's host-attested rows are typed closure edges: the review closure
-    retains each log source, and the native reviewer's read_file reads it after
-    the author's execution drive is deleted. Gaps stay tails and refuse nothing."""
-    import pathlib
-    import shutil
-
-    from ouroboros import artifacts, observability
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-    from ouroboros.review_native_episode import inspection_registry
-    from ouroboros.review_records import ReviewRequest
-    from ouroboros.review_source_closure import retain_review_request_sources
-    from ouroboros.task_results import write_task_result
-
-    author, canonical, repo = tmp_path / "author", tmp_path / "canonical", tmp_path / "repo"
-    repo.mkdir()
-    write_task_result(author, "parent1", "running", description="author record")
-    if many:
-        rows = _chatty_rows(author, monkeypatch)
-        rows.append({"service_id": "parent1:lost", "name": "lost", "task_id": "parent1", "lifecycle": "stopped",
-                     "log_finalization": _finalized_log(author, "lost", "LOST-HEAD\nLOST-LAST\n")})
-        pathlib.Path(rows[-1]["log_finalization"]["full_log_ref"]["path"]).unlink()
-    else:
-        rows = [{"service_id": "parent1:small", "name": "small", "task_id": "parent1", "lifecycle": "stopped",
-                 "log_finalization": _finalized_log(author, "small", "HEAD-small\nLAST-small\n")}]
-    trace = {"tool_calls": [], "verification_events": [{"kind": "services_stopped", "services": rows}]}
-    packet = build_task_acceptance_evidence(ToolContext(repo_dir=repo, drive_root=author, task_id="parent1"),
-                                            llm_trace=trace, drive_root=author, task_id="parent1")
-    request = ReviewRequest(surface="task_acceptance", task_id="parent1", goal="review", subject="answer",
-                            evidence=packet, policy={})
-    retain_review_request_sources(request, source_root=author, custody_root=canonical)
-    shutil.rmtree(author)
-
-    read_root = pathlib.Path(request.policy["native_data_root"])
-    registry, _ctx, _schemas = inspection_registry(str(repo), str(read_root), "parent1")
-    refmap = request.policy["review_source_closure"]["refmap"]
-    services = {service["service_id"]: service for row in request.evidence["service_finalization"]
-                for service in row["services"]}
-    readable = [sid for sid, service in services.items() if "source_ref" in service.get("log_finalization", {})]
-    assert readable == ([f"parent1:svc{i}" for i in range(12)] if many else ["parent1:small"])
-    for sid in readable:
-        log = services[sid]["log_finalization"]
-        name = sid.split(":")[1].replace("svc", "")
-        [binding] = [row for row in refmap if row["sha256"] == log["source_ref"]["sha256"]]
-        for arguments in (binding["read"]["arguments"], log["source_ref"]["read"]["arguments"]):
-            text = registry.execute_result("read_file", arguments).text
-            assert f"HEAD-{name}" in text and f"LAST-{name}" in text
-        # The gzip blob is retained beside it for host readers; neither is the author's copy.
-        assert observability.read_blob_ref(read_root, log["full_log_ref"], expected_kind="txt").startswith(f"HEAD-{name}")
-        assert artifacts.read_actor_source_bytes(read_root, "parent1", log["source_ref"])
-    if many:
-        lost = services["parent1:lost"]["log_finalization"]
-        assert lost["full_log_ref"]["availability"] == "unavailable" and "LOST-LAST" in lost["tail"]
-        assert "FAILED-LAST" in services["parent1:failed"]["log_finalization"]["tail"]

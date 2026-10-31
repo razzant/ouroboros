@@ -90,11 +90,11 @@ def test_durable_triad_rows_and_the_frozen_roster_keep_the_reported_cause():
 
     from ouroboros.review_custody import _frozen_actor
     from ouroboros.tools.review import _parse_model_response
-    from ouroboros.triad_review import parse_model_review_results
+    from ouroboros.triad_review import parse_seat_answers
 
     def _durable_row(result):
         envelope = _parse_model_response("codex=gpt-6-astra", result, None)
-        parsed = parse_model_review_results({"results": [envelope]}, required_items=("manifest_schema",))
+        parsed = parse_seat_answers({"results": [envelope]}, {})
         return parsed.actor_records[0].to_dict()
 
     failed = _durable_row({"error": "Error: delegated review session run-1 ended failed",
@@ -172,7 +172,7 @@ def test_the_mind_reads_typed_facts_and_never_the_engines_retry_coach():
             "failure_code": "run_failed", "error": prose, "reported_cause": WORDS, "operation_state": "late_settled"}
     record = _record(dead)
     before = copy.deepcopy(record)
-    decision = plan_record.gate_projection(record, enforcement="advisory", cyber_pro=False, hurry=False, force_plan=False)
+    decision = plan_record.gate_projection(record, enforcement="advisory", cyber_pro=False, hurry=False)
     text = render_record(record, decision)
     assert record == before and "nextActions" in record["asks"][0]["participants"][0]["error"], "a display substitution never rewrites the stored row"
     assert f'- ask a1 on revision 1: s1 (codex=gpt-6-astra): failed[run_failed] — reported cause: "{WORDS}"; s2 (m): answered' in text

@@ -20,14 +20,15 @@ from ouroboros.settings_integrity import runtime_setting
 # vendor tier above `max`; above-ceiling tiers adapt per route (API wire recovery / delegated).
 EFFORT_SCALE: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
-# The owner's effort range: three flat keys read as one ordered triple (``effort_range``).
+# The primary effort and independently ordered helper bounds (``effort_range``).
 EFFORT_RANGE_KEYS: tuple[str, ...] = ("OUROBOROS_EFFORT_MIN", "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_MAX")
+EFFORT_FORMAT_KEY = "_effort_range_format"  # disk format, never an environment setting or owner knob
 # The tiers the owner's range control offers; `minimal` stays a runtime tier a stored value may name.
 OWNER_EFFORT_TIERS: tuple[str, ...] = tuple(tier for tier in EFFORT_SCALE if tier != "minimal")
 # Who decided one actor's effort (``choose_effort``); task records and chat frames carry it verbatim.
 EFFORT_SOURCES: tuple[str, ...] = ("auto", "pin", "model_name", "cyber")
 # The lane-era global review effort, kept ONLY as the frozen legacy skill-review fingerprint
-# literal (``skill_review_cycles``): an empty reviewer row reviews at the range's top, never here.
+# literal: an empty reviewer row reviews at the range's top, never here.
 REVIEW_POOL_DEFAULT_EFFORT = "high"
 
 
@@ -69,25 +70,42 @@ def _tier(value: Any) -> str:
     return text if text in EFFORT_SCALE else ""
 
 
-def effort_range(settings: Optional[Mapping[str, Any]] = None) -> dict[str, str]:
-    """The owner's effort range ``{min, recommended, max}`` — THE tolerant read.
+def normalize_legacy_effort_settings(settings: Mapping[str, Any], *, legacy_order: bool = False) -> dict[str, Any]:
+    """Materialize the old effective bounds BEFORE defaults erase their absence.
 
-    ``recommended`` is ``OUROBOROS_EFFORT_TASK``, the level Main works at. An unknown or
-    blank value takes its key's shipped default; ``min`` is never above and ``max`` never
-    below ``recommended`` (a document that carries only TASK=high reads low/high/high).
-    Snapshot-aware through ``runtime_setting`` (a running task keeps the range it started
-    with) unless a settings document is given (``settings_integrity.live_effort_range``
-    reads the owner's current one for a participant starting inside a running task). A
-    read never rewrites the document.
+    Partial choices widened their bounds around Main. Canonical complete triples
+    are independent; the document reader alone opts into the old ordering.
     """
-    def read(key: str) -> str:
-        default = str(SETTINGS_DEFAULTS[key])
-        raw = settings.get(key, default) if settings is not None else runtime_setting(key, default)
-        return _tier(raw) or default
+    result = dict(settings)
+    if legacy_order or (any(key in settings for key in EFFORT_RANGE_KEYS) and not all(
+            _tier(settings.get(key)) for key in (EFFORT_RANGE_KEYS[0], EFFORT_RANGE_KEYS[2]))):
+        low, primary, high = (_tier(settings.get(key)) or str(SETTINGS_DEFAULTS[key]) for key in EFFORT_RANGE_KEYS)
+        result.update(zip(EFFORT_RANGE_KEYS, (min(low, primary, key=effort_rank), primary,
+                                             max(high, primary, key=effort_rank))))
+    return result
 
-    low, recommended, high = (read(key) for key in EFFORT_RANGE_KEYS)
-    return {"min": min(low, recommended, key=effort_rank), "recommended": recommended,
-            "max": max(high, recommended, key=effort_rank)}
+
+def normalize_effort_document(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep pre-independent effective bounds, even after old writers filled defaults.
+
+    Call after selecting authored sources, before defaults hide absence. The returned
+    format marker survives ordinary saves; canonical actor/project triples need none.
+    """
+    return {**normalize_legacy_effort_settings(settings, legacy_order=settings.get(EFFORT_FORMAT_KEY) != 1),
+            EFFORT_FORMAT_KEY: 1}
+
+
+def effort_range(settings: Optional[Mapping[str, Any]] = None) -> dict[str, str]:
+    """Snapshot-aware primary level and helper bounds; only the bounds are ordered.
+
+    Missing legacy bounds retain their former effective values. Unknown tiers
+    take their defaults. Reversed helper bounds sort without moving the primary.
+    """
+    raw = settings if settings is not None else {key: runtime_setting(key) for key in EFFORT_RANGE_KEYS
+                                                if runtime_setting(key) is not None}
+    values = normalize_legacy_effort_settings(raw)
+    low, primary, high = (_tier(values.get(key)) or str(SETTINGS_DEFAULTS[key]) for key in EFFORT_RANGE_KEYS)
+    return {"min": min(low, high, key=effort_rank), "recommended": primary, "max": max(low, high, key=effort_rank)}
 
 
 def clamp_effort_into(value: str, rng: Mapping[str, str]) -> str:
@@ -113,8 +131,8 @@ def choose_effort(
     an explicit root effort — wins over ``requested`` while the range binds; in Cyber Pro an
     explicit request beats the pin and silence still sits on it. Otherwise the request is
     clamped into the range while it binds (``auto``) and applied as asked in Cyber Pro
-    (``cyber``); with no request the role default applies: the range's ``recommended``, or
-    its ``max`` for ``default_top`` roles (reviewers, evolution, consciousness). Blank or
+    (``cyber``); with no request the helper starts nearest the primary within its bounds,
+    or at ``max`` for ``default_top`` roles (reviewers, evolution, consciousness). Blank or
     unknown tiers read as absent; callers refuse an unknown request on their own surface.
     ``binds`` defaults to the runtime mode (``runtime_mode_policy.effort_range_binds``);
     ``rng`` to the task's snapshot read.
@@ -132,7 +150,7 @@ def choose_effort(
     rng = dict(rng) if rng is not None else effort_range()
     if requested:
         return (clamp_effort_into(requested, rng), "auto") if binding else (requested, "cyber")
-    return (rng["max"] if default_top else rng["recommended"]), "auto"
+    return (rng["max"] if default_top else clamp_effort_into(rng["recommended"], rng)), "auto"
 
 
 def effort_fact(requested: Any, level: str, source: str) -> dict[str, str]:
@@ -181,6 +199,7 @@ def resolve_prompt_cache_ttl() -> str:
     Validated like ``resolve_effort``: an unknown value falls back to the shipped default.
     Consumed ONLY by the finalizer (``llm.LLMClient._normalize_payload_cache_ttl``), by
     ``review_helpers.cached_prompt_blocks`` (its marker gets stamped to the same value anyway),
+    by ``effort_evidence.session_prompt_cache_ttl_request`` for native session starts,
     and by ``usage_accounting._reservation_cost`` as the payload-free admission fallback
     (payload-carrying sites use the finalizer's applied TTL) — never by per-builder marking
     sites (docs/DEVELOPMENT.md cache-friendliness invariant)."""
@@ -205,6 +224,14 @@ def normalize_runtime_mode(value: Any) -> str:
     return text if text in VALID_RUNTIME_MODES else default_val
 
 
+VALID_SUBAGENTS_MODES = ("off", "auto", "swarm")
+
+
+def normalize_subagents_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in VALID_SUBAGENTS_MODES else str(SETTINGS_DEFAULTS["OUROBOROS_SUBAGENTS_MODE"])
+
+
 VALID_SAFETY_MODES = ("full", "light", "off")
 
 
@@ -221,6 +248,7 @@ _SAFETY_MODE_RANK = {"full": 2, "light": 1, "off": 0}
 # Effect vocabulary shared by the owner gateway and task-local runtime readers.
 IMMEDIATE_SETTINGS = frozenset({
     "TOTAL_BUDGET",
+    "OUROBOROS_SUBAGENTS_MODE",  # live room rounds/admissions; never a task snapshot authority
     # The interface language is read live by the gateway (every /api/ui/i18n read) and by
     # the Telegram skill; a running task's runtime block keeps the tag it started with.
     "OUROBOROS_UI_LANGUAGE",
@@ -248,9 +276,8 @@ RESTART_REQUIRED_SETTINGS = frozenset({
     "OUROBOROS_HOST_SERVICE_PORT",
     # The main interface is selected once per server generation (server_web.ServedUI.apply).
     "OUROBOROS_UI_DIR",
-    # Pooled workers load the extension registry once at spawn and never
-    # reload it per task; the save-time server reload keeps the skills UI
-    # fresh, but agent tasks see the new repo only after a restart.
+    # Workers adopt the server's extension generation before task-start settings
+    # refresh; a changed repository path still requires a restart of the pool.
     "OUROBOROS_SKILLS_REPO_PATH",
     "LOCAL_MODEL_SOURCE",
     "LOCAL_MODEL_FILENAME",

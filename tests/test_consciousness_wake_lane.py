@@ -26,6 +26,7 @@ TS = "2026-09-16T12:00:00Z"
 WAKE_META = {
     "initiator": "consciousness", "usage_category": "consciousness", "wake_reason": "heartbeat",
     "consciousness_autonomy": "act", "model_role": "consciousness",
+    "wake_cause": "own_clock", "consciousness_cause": "own", "work_kind": "consciousness",
 }
 
 
@@ -386,20 +387,27 @@ def test_model_role_resolves_the_consciousness_slots_and_falls_back_to_main():
     assert _initial_effort_for({"reasoning_effort": "xhigh", "metadata": meta}, "task") == "xhigh"
 
 
-def test_prepare_task_context_applies_the_role_slot_through_the_tool_context_seam():
-    """The agent pins ``ctx.task_model_override``/``task_use_local_override`` — the
-    seam the loop already reads for a subagent's model — from the role slot."""
+def test_prepare_task_context_binds_the_route_through_route_choice_and_pins_no_wake_slot():
+    """The agent binds a task's route at the one ``route_choice`` seam; a wake carries no frozen model
+    (``task_model_override`` stays empty) and follows its slot per call instead (owner 1A, route_choice)."""
     import inspect
+    from types import SimpleNamespace
 
     from ouroboros import agent as agent_module
+    from ouroboros.route_choice import bind_task_route, open_route
 
     source = inspect.getsource(agent_module.OuroborosAgent._prepare_task_context)
-    assert "role_slot = model_role_slot_override(task_metadata)" in source
-    assert "ctx.task_model_override, ctx.task_use_local_override = role_slot" in source
+    assert "route_choice.bind_task_route(ctx, task_metadata" in source
+    assert "model_role_slot_override(task_metadata)" not in source
+    ctx = SimpleNamespace(task_metadata={"model_role": "consciousness"})
+    bind_task_route(ctx, ctx.task_metadata, presence=False)
+    assert ctx.task_model_override is None and ctx.task_use_local_override is None
+    with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "openai::consc", "USE_LOCAL_CONSCIOUSNESS": ""}):
+        assert open_route(ctx, SimpleNamespace(default_model=lambda: "main/model")) == (
+            "openai::consc", False, {"kind": "following", "role": "consciousness"})
 
 
 def test_handle_task_ledger_category_comes_from_usage_category(monkeypatch, tmp_path):
-    from ouroboros import agent as agent_module
     from ouroboros import config, model_wait, subagent_runtime, usage_accounting
 
     captured: list = []
@@ -411,13 +419,14 @@ def test_handle_task_ledger_category_comes_from_usage_category(monkeypatch, tmp_
 
     monkeypatch.setattr(usage_accounting, "usage_scope", fake_scope)
     monkeypatch.setattr(model_wait, "task_model_wait_scope", lambda **kw: contextlib.nullcontext())
-    monkeypatch.setattr(subagent_runtime, "apply_task_start_settings_or_disclose", lambda *a, **k: None)
+    from ouroboros.settings_integrity import task_settings_snapshot
+
+    monkeypatch.setattr(subagent_runtime, "apply_task_start_settings_or_disclose",
+                        lambda *a, **k: task_settings_snapshot({}, os.environ))
     monkeypatch.setattr(config, "task_settings_scope", lambda snapshot: contextlib.nullcontext())
-    monkeypatch.setattr(agent_module.OuroborosAgent, "_handle_task_scoped", lambda self, task: [])
-    agent = object.__new__(agent_module.OuroborosAgent)
-    agent.env = SimpleNamespace(drive_root=tmp_path)
-    agent._emit_live_log = lambda *a, **k: None
-    agent._event_queue = None
+    from tests._agent_entry_helpers import task_entry_agent
+
+    agent = task_entry_agent(tmp_path, lambda task: [])
     agent.handle_task({"id": "w1", "type": "task", "chat_id": 1, "text": "wake", "metadata": dict(WAKE_META)})
     agent.handle_task({"id": "o1", "type": "task", "chat_id": 1, "text": "hello"})
     agent.handle_task({"id": "e1", "type": "evolution", "chat_id": 1, "text": "evolve", "metadata": {"initiator": "consciousness"}})

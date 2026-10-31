@@ -82,7 +82,7 @@ def test_window_resolution_reads_the_evidence_cache_only(isolated_roots, monkeyp
 
     # Every network seam under `probe`, the persisting writer, and the FETCHING
     # resolver the runtime uses all raise: the measurer must not reach any of them.
-    for seam in ("_provider_metadata_window", "_local_health_window", "_generative_probe_window", "_store_evidence"):
+    for seam in ("_provider_metadata_window", "_local_health_window", "_store_evidence"):
         monkeypatch.setattr(ce, seam, boom)
     monkeypatch.setattr(rw, "resolve_reviewer_window", boom)
     monkeypatch.setattr(rw, "reviewer_context_window", boom)

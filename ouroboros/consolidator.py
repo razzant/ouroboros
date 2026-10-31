@@ -1,22 +1,22 @@
-"""Light memory operations: the shared Light transport and scratchpad compression.
+"""Light memory operations: the shared Light transport.
 
 The old dialogue writer (summary blocks of a hundred chat rows, eras, its cursor
 and nominations) is gone: the chronicle imports what it wrote once
-(``chronicle_import``) and the mind writes its own pages. What remains is the
-common Light transport (``_call_consolidation_llm`` with its route, fit and typed
-failures), the read context that records what an operation actually read, and
-scratchpad compression. No Light operation writes knowledge: lessons, the Pattern
+(``chronicle_import``) and the mind writes its own pages. So is the post-task
+scratchpad compression (#918): only a fold the integrating mind accepts replaces
+scratchpad blocks (``Memory.fold_scratchpad_blocks``). What remains is the common
+Light transport (``_call_consolidation_llm`` with its route, fit and typed
+failures) and the read context that records what an operation actually read; that
+knowledge-reading branch (``KnowledgeReadContext``) has no production caller since
+the compression left. No Light operation writes knowledge: lessons, the Pattern
 Register and the backlog are the acting mind's (``knowledge_write``).
 """
-import hashlib
 import json
 import logging
-import pathlib
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import chat_chain
 from ouroboros._usage_response import OUTPUT_LIMIT_FINISH_REASONS, response_finish_reason
-from ouroboros.utils import append_jsonl, utc_now_iso, extract_trailing_json_object
 
 log = logging.getLogger(__name__)
 
@@ -60,15 +60,7 @@ def _light_dispatch_binding() -> Dict[str, Any]:
     return binding
 
 
-def _emit_event(logs_dir: pathlib.Path, kind: str, **fields: Any) -> None:
-    """A memory-maintenance outcome is a typed fact beside the chat it concerns, never silence (I4)."""
-    try:
-        append_jsonl(logs_dir / "events.jsonl", {"ts": utc_now_iso(), "type": kind, **fields})
-    except Exception:
-        log.debug("Failed to emit %s event", kind, exc_info=True)
-
-
-def _merge_consolidation_usage(*usages: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_consolidation_usage(*usages: Dict[str, Any], reasoning_usage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Combine helper usage without turning absent spend/counters into zero."""
     from ouroboros.knowledge import observed_route_stamp
 
@@ -78,6 +70,10 @@ def _merge_consolidation_usage(*usages: Dict[str, Any]) -> Dict[str, Any]:
         merged[key] = None if None in values else sum(values)
     for key in ("ledger_attempt_ids", "_consolidation_errors", "_coverage"):
         merged[key] = [value for usage in usages for value in usage.get(key, [])]
+    retirement_rows = [*usages, reasoning_usage or {}]
+    for key in ("reasoning_retired", "reasoning_retired_turns", "reasoning_retired_blocks", "prompt_prefix_breaks"):
+        if any(key in usage for usage in retirement_rows):
+            merged[key] = sum(usage.get(key, 0) for usage in retirement_rows)
     # The route that answered the LAST send of this unit, and only that one: a
     # physical usage carries provider/resolved_model, a merged one its forwarded
     # stamp, and a final call without a physical fact reads unknown — an earlier
@@ -244,7 +240,7 @@ class KnowledgeReadContext:
                     measurement_basis="cold_estimate", measurement_density=facts.get("measurement_density", 1.0),
                     reclaim_goal_tokens=0,
                     **{key: pending[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names")})
-                candidate, applied, _usage = compact_tool_history_llm(
+                candidate, applied = compact_tool_history_llm(
                     complete, request=request, observed_messages=observed["messages"],
                     observed_tool_schemas=observed["tool_schemas"], tool_schemas=values["tools"],
                     fit_candidate=fit_candidate, drive_root=self.context.drive_root,
@@ -259,6 +255,9 @@ class KnowledgeReadContext:
                     json.dumps(facts_receipt, ensure_ascii=False).encode("utf-8"), "json")
                 if applied.status in {"applied", "no_op"}:
                     before = candidate[:-len(rows)]  # the new completed batch is preserved verbatim
+                if applied.status == "applied":
+                    from ouroboros.transcript_prefix import sanction_rewrite
+                    sanction_rewrite(self.context, "compaction")  # the actor's own fold names its change
             for row in rows:
                 if row["fn_name"] == "compact_context":
                     row["result"] = json.dumps({"context_view": receipt}, ensure_ascii=False)
@@ -281,7 +280,7 @@ def _call_consolidation_llm(
 ) -> Tuple[str, Dict[str, Any]]:
     from contextlib import nullcontext
     from math import ceil
-    from ouroboros.capability_evidence import is_known
+    from ouroboros.context_window import resolve_window
     from ouroboros.context_budget import SummarizerContextOverflow
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, resolve_context_fit_route)
@@ -292,6 +291,7 @@ def _call_consolidation_llm(
 
     facts: Dict[str, Any] = {}
     prepared_values: Dict[str, Any] = {}
+    retired_usage: Dict[str, Any] = {}
     model_route = model_route if model_route is not None else {}
     invoked = False
     usages: List[Dict[str, Any]] = []
@@ -306,6 +306,10 @@ def _call_consolidation_llm(
         observed = values.pop("_model_observed_route", None)
         if knowledge:
             from ouroboros.llm_claudexor import turn_state_for_route
+            from ouroboros.transcript_prefix import append_reasoning_retirement_fact, prepare_reasoning_for_send
+            if prepare_reasoning_for_send(knowledge.context, values["messages"], values["tools"],
+                                          round_idx=len(usages) + 1, usage=retired_usage):
+                append_reasoning_retirement_fact(retired_usage, len(usages) + 1, values["messages"])
             values["model_turn_state"] = turn_state_for_route(
                 turn_state, "local" if values["use_local"] else provider_for_model(values["model"]))
         prepared_values.clear()
@@ -348,15 +352,17 @@ def _call_consolidation_llm(
                 messages, values["tools"],
                 provider=route["provider"], reasoning_effort=values["reasoning_effort"],
             ) * density)
-        window = int(evidence.window_tokens) if is_known(evidence, require_fresh=True) else None
         from ouroboros.response_limits import ResponseLimit
         output_reserve = ResponseLimit(**(getattr(evidence, "response_limit", {}) or {})).ceiling(values["max_tokens"])
         if values["use_local"]:
             from ouroboros.llm_local import local_context_limits
             _local_window, output_reserve = local_context_limits(output_reserve)
         values["max_tokens"] = output_reserve
-        limit = window - output_reserve if window is not None else None
-        binding = dict(route_fp=evidence.route_fp, capacity_tokens=window, output_reserve_tokens=output_reserve)
+        scope = route.get("window_observation_fp") or evidence.route_fp
+        window = resolve_window(evidence, output_reserve, observation_fp=scope, bound=bool(scope))
+        limit = window.usable
+        binding = dict(route_fp=scope, capacity_tokens=window.total_equivalent if limit is not None else None,
+                       output_reserve_tokens=output_reserve)
         byte_limit = (input_limit["input_bytes"] if input_limit
                       and all(input_limit.get(key) == value for key, value in binding.items()) else None)
         request_text = (values["messages"][0]["content"] if len(values["messages"]) == 1 else
@@ -419,7 +425,6 @@ def _call_consolidation_llm(
                 invoked = True
                 if knowledge:
                     from ouroboros.llm_observability import chat_observed
-                    record_context_view(knowledge.context, values["messages"], values["tools"])
                     msg, usage = chat_observed(
                         llm_client, drive_root=knowledge.context.drive_root,
                         task_id=str(knowledge.context.task_id or "consolidation"),
@@ -430,6 +435,9 @@ def _call_consolidation_llm(
             if knowledge:
                 # A wait may have re-prepared this same call with another route;
                 # pin its final canonical view before executing the returned tools.
+                from ouroboros.transcript_prefix import count_accepted_send
+                count_accepted_send(knowledge.context, prepared_values["messages"], prepared_values["tools"],
+                                    round_idx=len(usages), usage=retired_usage)
                 record_context_view(knowledge.context, prepared_values["messages"], prepared_values["tools"])
                 knowledge.accept_delivery()
             if isinstance(usage.get("claudexor"), dict):
@@ -446,7 +454,7 @@ def _call_consolidation_llm(
             if content.strip():
                 if knowledge and not knowledge.source_complete():
                     response_ref = chat_chain.retain_memory_source(knowledge.context, "incomplete_memory_response", content.encode("utf-8"))
-                    return "", {**_merge_consolidation_usage(*usages), "_consolidation_errors": [{
+                    return "", {**_merge_consolidation_usage(*usages, reasoning_usage=retired_usage), "_consolidation_errors": [{
                         "kind": "source_incomplete", "label": label,
                         "message": "The complete retained source was not delivered; originals are preserved.",
                         "source_ref": knowledge.required_source, "response_ref": response_ref}]}
@@ -458,7 +466,7 @@ def _call_consolidation_llm(
                     usages.pop()
                     kind, message, preflight = "output_truncated", "Consolidation output was cut at the output ceiling", False
                     break
-                return content, _merge_consolidation_usage(*usages)
+                return content, _merge_consolidation_usage(*usages, reasoning_usage=retired_usage)
             usages.pop()  # the empty response is added once as the failed result below
             kind, message, preflight = "empty_summary", "Consolidation returned no summary", False
             break
@@ -491,138 +499,4 @@ def _call_consolidation_llm(
         kind = "knowledge_source_unfit"  # splitting the original episode cannot shrink a requested note
     fact = dict(facts, kind=kind, label=label, message=sanitize_tool_result_for_log(message), preflight_only=preflight)
     log.warning("%s failed (%s): %s", label, kind, fact["message"])
-    return "", {**_merge_consolidation_usage(*usages, usage), "_consolidation_errors": [fact]}
-
-
-from ouroboros.context_budget import (
-    SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS as SCRATCHPAD_CONSOLIDATION_THRESHOLD,
-)
-
-
-def should_consolidate_scratchpad(memory: Any) -> bool:
-    try:
-        blocks = memory.load_scratchpad_blocks()
-        return len(blocks) >= 3 and sum(len(b.get("content", "")) for b in blocks) > SCRATCHPAD_CONSOLIDATION_THRESHOLD
-    except Exception:
-        return False
-
-
-def consolidate_scratchpad(
-    memory: Any, llm_client: Any, identity_text: str = "",
-    *, pressure: bool = False, knowledge_context: Any = None,
-) -> Optional[Dict[str, Any]]:
-    blocks = memory.load_scratchpad_blocks()
-    total_chars = sum(len(b.get("content", "")) for b in blocks)
-    if not blocks or not pressure and (len(blocks) < 3 or total_chars <= SCRATCHPAD_CONSOLIDATION_THRESHOLD):
-        return None
-
-    compress_count = len(blocks) if pressure else max(2, len(blocks) // 2)
-    old_blocks = blocks[:compress_count]
-
-    old_content = "\n\n---\n\n".join(
-        f"[{b.get('ts', '?')[:16]} \u2014 {b.get('source', '?')}]\n{b.get('content', '')}"
-        for b in old_blocks
-    )
-
-    prompt = f"""You are a memory consolidator for Ouroboros, a self-modifying AI agent.
-
-The scratchpad working memory has {len(blocks)} blocks totaling {total_chars} chars.
-The oldest {compress_count} blocks need compression.
-
-Rules:
-1. Compress the old blocks into a SINGLE shorter summary block. Keep active
-   tasks, unresolved questions, admin instructions still in force. Remove
-   stale/completed items and routine status updates.
-2. Write as Ouroboros (first person). Don't lose signal — keep uncertain items
-   rather than dropping them.
-
-Identity context: {identity_text if identity_text else "(not available)"}
-
-## Old blocks to compress
-
-{old_content}
-
-Respond with JSON only (no fences):
-{{"compressed_block": "single compressed block text"}}
-"""
-
-    usage: Dict[str, Any] = {}
-    outcome, source_entry_id, new_blocks = "failed", "", blocks
-    try:
-        from ouroboros.tools.registry import ToolContext
-
-        context = knowledge_context or ToolContext(repo_dir=getattr(memory, "repo_dir", None) or memory.drive_root,
-                              drive_root=memory.drive_root)
-        knowledge = KnowledgeReadContext(context, "scratchpad_consolidation")
-        raw, usage = _call_consolidation_llm(llm_client, prompt, "Scratchpad consolidation", knowledge=knowledge)
-        raw = raw.strip()
-        if not raw:
-            outcome = "call_failed" if usage.get("_consolidation_errors") else "empty_response"
-            return usage
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        try:
-            result = json.loads(raw)
-        except json.JSONDecodeError:
-            _, result, _ = extract_trailing_json_object(raw)
-            if result is None:
-                raise
-
-        compressed_text = result.get("compressed_block", "")
-        if not compressed_text or not compressed_text.strip():
-            log.warning("Scratchpad block consolidation returned empty, skipping")
-            outcome = "empty_block"
-            return usage
-        if pressure and len(compressed_text) >= sum(len(b.get("content", "")) for b in old_blocks):
-            outcome = "not_shorter"
-            return usage  # an authored expansion is not pressure relief
-
-        # Only the compressed block is read from the answer: any other key (an older
-        # prompt's knowledge nominations included) causes no effect; the raw answer
-        # stays in the call's observability record.
-        compressed_block = {"ts": utc_now_iso(), "source": "consolidation", "content": compressed_text.strip()}
-        source_bytes = json.dumps(old_blocks, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        source_entry_id = "scratchpad-consolidation:" + hashlib.sha256(source_bytes).hexdigest()
-        source_ref = memory.scratchpad_journal_source_ref(source_entry_id)
-        if not append_jsonl(memory.journal_path(), {
-                "ts": utc_now_iso(), "type": "blocks_consolidated", "entry_id": source_entry_id,
-                "source_blocks": old_blocks, "source_ref": source_ref}):
-            log.error("Scratchpad consolidation source journal write failed; preserving blocks")
-            outcome = "journal_unavailable"
-            return usage
-        compressed_block["metadata"] = {"source_ref": source_ref}
-
-        # Merge-aware replace UNDER the write lock: blocks appended DURING the
-        # slow LLM call live only on disk — building the new list from the
-        # pre-call snapshot would silently drop them. Re-read inside the lock
-        # and keep every block outside the exact compressed source window.
-        def _merge_survivors(live_blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            if live_blocks[:len(old_blocks)] != old_blocks:
-                return live_blocks  # source changed; ts/source keys alone cannot authorize replacement
-            return [compressed_block] + live_blocks[len(old_blocks):]
-
-        new_blocks = memory.mutate_scratchpad_blocks(_merge_survivors)
-        outcome = "replaced" if new_blocks[:1] == [compressed_block] else "source_changed"
-
-        log.info("Scratchpad blocks consolidated: %d blocks (%d chars) -> %d blocks (%d chars)",
-                 len(blocks), total_chars,
-                 len(new_blocks), sum(len(b.get("content", "")) for b in new_blocks))
-        return usage
-
-    except Exception as e:
-        from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(e)
-        log.error("Scratchpad block consolidation failed: %s", e, exc_info=True)
-        usage = {**usage, "_consolidation_errors": [*usage.get("_consolidation_errors", []), {
-            "kind": "scratchpad_consolidation_failed", "message": f"{type(e).__name__}: {e}"}]}
-        return usage
-    finally:
-        # Every exit above names its outcome in one scratchpad_consolidation event.
-        errors = usage.get("_consolidation_errors") or []
-        _emit_event(pathlib.Path(memory.drive_root) / "logs", "scratchpad_consolidation", outcome=outcome,
-                    pressure=pressure, blocks_before=len(blocks), chars_before=total_chars,
-                    compressed_blocks=len(old_blocks), blocks_after=len(new_blocks),
-                    chars_after=sum(len(b.get("content", "")) for b in new_blocks), source_entry_id=source_entry_id,
-                    last_error_kind=(errors[-1] or {}).get("kind") if errors else None,
-                    accounted_upper_bound_usd=round(float(usage["cost"]), 6) if usage.get("cost") is not None else None)
+    return "", {**_merge_consolidation_usage(*usages, usage, reasoning_usage=retired_usage), "_consolidation_errors": [fact]}

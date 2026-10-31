@@ -1,6 +1,8 @@
 """Owner-approved room provenance; all history and registry data are synthetic."""
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import json
 
 import pytest
@@ -89,8 +91,12 @@ def test_unknown_address_never_defaults_to_main(entry, label):
 
 
 def test_actual_main_context_names_every_room_by_its_registry_label(tmp_path):
-    """Main keeps its own rows verbatim and names every other live room in one labelled line;
+    """Main keeps its own rows; quiet rooms share an aggregate with an exact labelled directory;
     the registry is only read, A2A never enters and the hidden partition is not Main's."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools.chronicle import _memory_read
+
     root = _drive(tmp_path)
     path = _registry(root, [{"id": "alpha", "chat_id": 1500, "name": "Alpha"}])
     ts = "2026-01-01T00:0{}:00+00:00"
@@ -110,9 +116,19 @@ def test_actual_main_context_names_every_room_by_its_registry_label(tmp_path):
     assert "] MAIN" in room and "] MISSING" in room and room.index("] MAIN") < room.index("] MISSING")
     assert "] UNKNOWN" in room  # a non-Project chat's unbound row is Main's too
     assert "PROJECT" not in changing and "HIDDEN" not in room and "A2A EXCLUDED" not in changing
-    for label in ("### Project Alpha [chat_id=1500] — open", "### Unknown room [chat_id=987654] — open"):
-        assert label in live, label
+    assert "3 open rooms;" in live and "memory_read(room_id='*', start=0)" in live
+    reader = SimpleNamespace(drive_root=root)
+    directory = _memory_read(reader, room_id="*", start=0)
+    for label, chat_id in (("Project Alpha [chat_id=1500]", "1500"),
+                          ("Unknown room [chat_id=987654]", "987654"), ("Hidden [chat_id=0]", "0")):
+        assert label not in live
+        assert f"- {label};" in directory
+        assert f"memory_read(room_id='{chat_id}', rows=true)" in directory
     assert "Main — open" not in live  # the current room is not one of the other rooms
+    project_rows = _memory_read(reader, room_id="1500", rows=True)
+    assert "] PROJECT" in project_rows and "] MAIN" not in project_rows
+    assert "] UNKNOWN" in _memory_read(reader, room_id="987654", rows=True)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])
@@ -180,13 +196,13 @@ def test_presence_rows_of_one_room_share_one_label_from_transport_facts():
     initiated = {"chat_id": chat_id, "direction": "in", "transport": dict(base)}
     summary = {"chat_id": chat_id, "direction": "system", "type": "task_summary",
                "presence_provenance": {**base, "binding_id": "1" * 32}}  # the turn's summary row carries no transport
-    expected = f"Presence telegram -100 [chat_id={chat_id}]"
+    expected = f"Place telegram -100 [chat_id={chat_id}]"
     # One room, four row types, one label: the correspondent-controlled title never enters it.
     assert {resolver.label(inbound), resolver.label(receipt), resolver.label(initiated), resolver.label(summary)} == {expected}
     assert resolver.label({**summary, "presence_provenance": {**base, "conversation_id": "-101"}}) == f"Unknown room [chat_id={chat_id}]"
     topic_chat = _stable_numeric_id("presence-conversation", conversation_key("telegram", "900", "-100", "42"))
     assert resolver.label({"chat_id": topic_chat, "transport": {**base, "thread_id": "42"}}) == (
-        f"Presence telegram -100 topic 42 [chat_id={topic_chat}]"
+        f"Place telegram -100 topic 42 [chat_id={topic_chat}]"
     )
     # Transport facts that do not re-derive this exact chat id never name the room.
     assert resolver.label({"chat_id": chat_id + 1, "transport": dict(base)}) == f"Unknown room [chat_id={chat_id + 1}]"
@@ -194,7 +210,7 @@ def test_presence_rows_of_one_room_share_one_label_from_transport_facts():
     # Brackets in a provider fact can never break the [room=...] marker.
     weird_chat = _stable_numeric_id("presence-conversation", conversation_key("telegram", "900", "x]y[z", ""))
     assert resolver.label({"chat_id": weird_chat, "transport": {**base, "conversation_id": "x]y[z"}}) == (
-        f"Presence telegram x y z [chat_id={weird_chat}]"
+        f"Place telegram x y z [chat_id={weird_chat}]"
     )
 
 
@@ -213,14 +229,14 @@ def test_terminal_projection_row_of_a_presence_turn_carries_the_room_facts(tmp_p
     stored = __import__("ouroboros.task_results", fromlist=["load_task_result"]).load_task_result(tmp_path, "presence-turn-1")
     assert append_terminal_task_projection(tmp_path, "presence-turn-1", {"id": "presence-turn-1", "chat_id": chat_id},
                                            stored, {"status": "completed", "chat_id": chat_id})
-    row = next(json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+    row = next(json.loads(line) for line in dialogue_test.log_text(tmp_path / "logs" / "chat.jsonl").splitlines()
                if json.loads(line).get("type") == "task_summary")
     assert row["presence_provenance"]["conversation_id"] == "-100"
-    assert RoomLabelResolver(projects=[]).label(row) == f"Presence telegram -100 [chat_id={chat_id}]"
+    assert RoomLabelResolver(projects=[]).label(row) == f"Place telegram -100 [chat_id={chat_id}]"
     # A non-presence terminal row carries no presence facts at all.
     write_task_result(tmp_path, "plain-task", "completed", result="Done")
     plain = __import__("ouroboros.task_results", fromlist=["load_task_result"]).load_task_result(tmp_path, "plain-task")
     assert append_terminal_task_projection(tmp_path, "plain-task", {"id": "plain-task", "chat_id": 5}, plain,
                                            {"status": "completed", "chat_id": 5})
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert "presence_provenance" not in next(r for r in rows if r.get("task_id") == "plain-task")

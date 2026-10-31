@@ -102,6 +102,17 @@ class UsageLockUnavailable(UsageAccountingError):
         self.error_number = error_number
 
 
+class BillingAuthorityBusy(BillingAuthorityUnavailable, UsageLockUnavailable):
+    """An ``unreadable`` billing authority whose money-store read met positive contention and
+    rolled back: every ``BillingAuthorityUnavailable`` reader keeps its answer, while a caller's
+    own unsent preparation (``_usage_wait.retry_presend``) waits it out as the lock it is."""
+
+    def __init__(self, root_task_id: str, *, rollback_confirmed: bool = False) -> None:
+        super().__init__(f"billing group authority unavailable for root {root_task_id} (money store busy)",
+                         kind="unreadable", cause="read_failed:UsageLockUnavailable", root_task_id=root_task_id)
+        self.reason, self.error_number, self.rollback_confirmed = "contention", None, rollback_confirmed
+
+
 def is_abandoned_settlement(row: Dict[str, Any]) -> bool:
     """An administratively closed attempt whose actual price is still unknown."""
     return (

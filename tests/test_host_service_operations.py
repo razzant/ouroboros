@@ -22,7 +22,8 @@ from ouroboros.gateway.host_service import (
     create_host_service_app,
     operation_ref,
 )
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros import dialogue_store
+from ouroboros.utils import utc_now_iso
 from tests.test_host_service_api import FakeBridge, _seed_token
 
 SKILL = "a2a"
@@ -49,7 +50,7 @@ def _chat_row(tmp_path: pathlib.Path, direction: str, text: str, *, chat_id: int
     }
     if record_type:
         row["type"] = record_type
-    append_jsonl(tmp_path / "logs" / "chat.jsonl", row)
+    dialogue_store.append(tmp_path, "chat", row)
 
 
 def _inbound(tmp_path: pathlib.Path, text: str = "hello", **kwargs) -> None:

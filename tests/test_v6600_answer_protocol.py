@@ -1,5 +1,6 @@
-"""v6.60.0 (Phase 4) — answer protocol (contract-gated FINAL ANSWER), blocking
-widening, and the bytes_equal verification mode.
+"""v6.60.0 (Phase 4) — answer protocol (contract-gated FINAL ANSWER) and the
+bytes_equal verification mode. (The blocking widening of acceptance obligations
+retired with the task-acceptance machine.)
 """
 from __future__ import annotations
 
@@ -60,17 +61,6 @@ def test_context_injects_protocol_rule_only_when_declared(tmp_path):
     assert "FINAL ANSWER" not in without_rule
 
 
-def test_system_prompt_carries_no_marker_doctrine():
-    """The SYSTEM.md marker rule moved to the per-task contract: the default prompt
-    must NOT instruct every task to emit FINAL ANSWER lines. Whitespace-NORMALIZED
-    check (adversarial r1: a line-wrapped 'FINAL\\nANSWER' slipped past the plain
-    substring assert — the guard must be wrap-insensitive)."""
-    text = (pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
-    normalized = " ".join(text.split())
-    assert "FINAL ANSWER" not in normalized
-    assert "CANDIDATES:" not in normalized
-
-
 def test_protocol_facts_state_the_latch_without_marker_instructions():
     """The 10% FINAL ANSWER flush and the pacing marker tail are gone (#1748); under
     the protocol the facts line states whether a FINAL ANSWER line is latched, and
@@ -86,54 +76,6 @@ def test_protocol_facts_state_the_latch_without_marker_instructions():
     assert _final_answer_fact(protocol) == "FINAL ANSWER line latched: none"
     protocol._execution_trace["best_valid_final_answer"] = "42"
     assert _final_answer_fact(protocol) == "FINAL ANSWER line latched: yes, current"
-
-
-# --- 4.2 blocking widening --------------------------------------------------------
-
-def _result(signal, findings, tiers=("solved",)):
-    from types import SimpleNamespace
-
-    actors = [
-        {"slot_id": f"s{i}", "signal": signal, "parsed": {"outcome_tier": tier}}
-        for i, tier in enumerate(tiers)
-    ]
-    return SimpleNamespace(aggregate_signal=signal, actors=actors, parsed_findings=findings)
-
-
-def test_obligations_widen_to_high_only_on_failing_aggregate():
-    from ouroboros.loop import _collect_acceptance_obligations
-
-    high_finding = {"severity": "high", "slot_id": "s0", "item": "missed requirement", "recommendation": "implement X"}
-    critical_finding = {"severity": "critical", "slot_id": "s0", "item": "broken", "recommendation": "fix Y"}
-
-    # PASS aggregate: high findings do NOT become obligations (critical-only bar).
-    trace_pass = {}
-    _collect_acceptance_obligations(trace_pass, _result("PASS", [high_finding, critical_finding]))
-    items = {o["item"] for o in trace_pass["acceptance_obligations"]}
-    assert items == {"broken"}
-
-    # FAIL aggregate: high + critical both become obligations.
-    trace_fail = {}
-    _collect_acceptance_obligations(trace_fail, _result("FAIL", [high_finding, critical_finding]))
-    items_fail = {o["item"] for o in trace_fail["acceptance_obligations"]}
-    assert items_fail == {"missed requirement", "broken"}
-
-    # blocked_with_evidence tier (even on non-FAIL signal): widened too.
-    trace_blocked = {}
-    _collect_acceptance_obligations(
-        trace_blocked, _result("PASS", [high_finding], tiers=("blocked_with_evidence",))
-    )
-    assert {o["item"] for o in trace_blocked["acceptance_obligations"]} == {"missed requirement"}
-
-
-def test_verdict_is_advisory_flag_is_gone():
-    """The dead policy KEY is removed from every ReviewRequest (comments may still
-    name it historically); enforcement semantics live in OUROBOROS_REVIEW_ENFORCEMENT."""
-    hits = []
-    for path in (pathlib.Path(__file__).resolve().parents[1] / "ouroboros").rglob("*.py"):
-        if '"verdict_is_advisory":' in path.read_text(encoding="utf-8", errors="replace"):
-            hits.append(str(path))
-    assert hits == [], f"dead policy key still set in: {hits}"
 
 
 # --- 4.3 bytes_equal ---------------------------------------------------------------

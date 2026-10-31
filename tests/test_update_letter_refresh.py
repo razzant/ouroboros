@@ -1,4 +1,4 @@
-"""Running-generation ranges, successful reuse, and failed-attempt provenance."""
+"""Running-generation ranges, same-range reuse, and the origin of a shown text versus a failed read."""
 import json
 
 import pytest
@@ -34,17 +34,28 @@ def test_runtime_status_preserves_checkout_and_only_reads_captured_baseline(monk
     assert ul._key_from_status(bound)["target_sha"] == "c" * 40
 
 
-def test_same_successful_range_reuses_without_material_or_model_work(tmp_path, monkeypatch):
-    record = _record()
+def _stored_material(drive, key):
+    (drive / "state").mkdir(parents=True, exist_ok=True)
+    ul.atomic_write_json(ul.material_path(drive), {"schema": 1, "key": key, "text": "commits", "text_bytes": 7})
+
+
+def test_same_range_reuses_its_material_and_never_touches_the_text(tmp_path, monkeypatch):
+    from ouroboros.update_qualification import range_qualification
+    record = _record(revision=2)
+    record["qualification"] = range_qualification({"base_sha": "a" * 40, "target_sha": "b" * 40,
+        "commits": [{"sha": "b" * 40, "subject": "change", "body": ""}]}, "")
     ul.atomic_write_json(ul.record_path(tmp_path), record)
+    _stored_material(tmp_path, record["key"])
     monkeypatch.setattr(ul, "_default_git", lambda: lambda cmd: (1, "", ""))
     calls = []
-    monkeypatch.setattr(ul, "collect_range_material", lambda *a: calls.append(a))
+    monkeypatch.setattr(ul, "collect_range_material", lambda *a, **k: calls.append(a))
     for _ in range(2):
-        assert ul.refresh_after_check(_status(), drive_root=tmp_path)["text"] == record["text"]
+        checked = ul.refresh_after_check(_status(), drive_root=tmp_path)
+        assert (checked["text"], checked["revision"]) == (record["text"], 2)
     assert calls == []
-    # Failed new-target attempt does not invalidate a last-good exact-range answer.
-    failed = _record(key={**record["key"], "target_sha": "c" * 40}, state="failed", text="", last_good=record)
+    # An old record whose last attempt failed keeps its shown text through every check.
+    failed = _record(key={**record["key"], "target_sha": "c" * 40}, state="failed", text="", last_good=record,
+                     qualification=record["qualification"])
     ul.atomic_write_json(ul.record_path(tmp_path), failed)
     assert ul.refresh_after_check(_status(), drive_root=tmp_path)["last_good"]["text"] == record["text"]
     assert calls == []
@@ -54,18 +65,17 @@ def test_running_baseline_collects_cumulative_commits_despite_disk_advance(histo
     repo, base = history_repo["repo"], history_repo["base"]
     middle, target = history_repo["c1"], history_repo["c4"]
     monkeypatch.setattr(ul, "_default_git", lambda: _capture_for(repo))
+    collect = ul.collect_range_material
     calls = []
-
-    def write(status, material, **kwargs):
-        calls.append(material)
-        return _record(key=ul._key_from_status(status), text="Cumulative description", author_version="same", target_version="same")
-
-    monkeypatch.setattr(ul, "write_letter", write)
+    monkeypatch.setattr(ul, "collect_range_material", lambda b, t, **k: calls.append(collect(b, t, **k)) or calls[-1])
     drive = tmp_path / "drive"
     status = _status(current_sha=middle, running_sha=base, latest_sha=target)
     first = ul.refresh_after_check(status, drive_root=drive)
-    assert first["key"]["base_sha"] == base
+    assert first["checked_key"]["base_sha"] == base and first["state"] == "none"
     assert {r["sha"] for r in calls[0]["commits"]} == set(_git(repo, "rev-list", f"{base}..{target}").splitlines())
+    saved = ul.save_description("Cumulative description", base, target, 0, author={"task_id": "t", "model": "m"},
+                                drive_root=drive, git=_capture_for(repo))
+    assert saved["outcome"] == "saved"
     # Disk consumed the target; the running generation did not. Reuse A→C.
     landed = dict(status, current_sha=target, latest_sha="", checked_target_sha=target, available=False)
     ul.refresh_after_check(landed, drive_root=drive)
@@ -84,35 +94,38 @@ def test_running_baseline_collects_cumulative_commits_despite_disk_advance(histo
     ul.refresh_after_check(dict(status, latest_sha=newest), drive_root=drive)
     assert calls[-1]["base_sha"] == base and calls[-1]["target_sha"] == newest
     assert middle in {r["sha"] for r in calls[-1]["commits"]}
-    prompt = ul._request_text(landed, calls[0], "same")
-    assert f'"sha": "{base}"' in prompt and f'"sha": "{target}"' in prompt
+    material = json.loads(ul.material_path(drive).read_text(encoding="utf-8"))
+    assert material["key"]["target_sha"] == newest and f"- {middle} " in material["text"]
+    request = ul.author_request_text(ul.read_record(drive), {
+        "mode": "write", "key": ul.read_record(drive)["checked_key"], "revision_at_request": 1})
+    assert f"{base}..{newest}" in request and "expected_revision=1" in request
+    # The saved text keeps its own range while the newer target waits for its own description.
+    assert ul.read_record(drive)["key"]["target_sha"] == target
 
 
-def test_failure_keeps_shown_origin_and_failed_attempt_origin_independent(tmp_path, monkeypatch):
+def test_an_unreadable_new_range_keeps_shown_origin_and_names_its_own(tmp_path, monkeypatch):
     good = _record()
     ul.atomic_write_json(ul.record_path(tmp_path), good)
     status = _status(current_sha="b" * 40, running_sha="b" * 40, latest_sha="c" * 40)
-    monkeypatch.setattr(ul, "collect_range_material", lambda *a: {"commits": ["new"]})
+    monkeypatch.setattr(ul, "collect_range_material",
+                        lambda *a, **k: (_ for _ in ()).throw(ul.MaterialUnavailable("git log failed (rc=128)")))
     monkeypatch.setattr(ul, "_default_git", lambda: lambda cmd: (1, "", ""))
-    monkeypatch.setattr(ul, "write_letter", lambda status, *a, **k: _record(
-        key=ul._key_from_status(status), state="failed", text="", error_kind="budget_exhausted",
-        error_text="Capacity unavailable", written_at="failed-at"))
     ul.refresh_after_check(status, drive_root=tmp_path)
     view = ul.project_letter_for_panel(status, drive_root=tmp_path)
-    assert view["relation"] == "applied" and view["state"] == "failed"
+    assert view["relation"] == "applied" and view["state"] == "ready"
     assert view["key"] == good["key"] and view["text"] == good["text"]
-    assert view["written_at"] == good["written_at"] and view["failed_at"] == "failed-at"
-    assert view["latest_failed_key"] == ul._key_from_status(status)
+    assert view["written_at"] == good["written_at"] and view["failed_at"]
+    assert view["latest_failed_key"] == ul._key_from_status(status) and view["error_kind"] == "material_unavailable"
     assert view["description_current"] is False
 
 
-def test_unknown_baseline_never_uses_disk_head_or_calls_model(tmp_path, monkeypatch):
+def test_unknown_baseline_never_uses_disk_head_or_reads_a_range(tmp_path, monkeypatch):
     good = _record()
     ul.atomic_write_json(ul.record_path(tmp_path), good)
     calls = []
-    monkeypatch.setattr(ul, "collect_range_material", lambda *a: calls.append(a))
+    monkeypatch.setattr(ul, "collect_range_material", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(ul, "_default_git", lambda: lambda cmd: (1, "", ""))
     record = ul.refresh_after_check(_status(running_sha=""), drive_root=tmp_path)
-    assert record["error_kind"] == "runtime_source_unavailable" and calls == []
-    assert record["last_good"] == good
-    assert json.loads(ul.record_path(tmp_path).read_text(encoding="utf-8"))["key"]["base_sha"] == ""
+    assert record["material_error"]["kind"] == "runtime_source_unavailable" and calls == []
+    assert record["text"] == good["text"] and record["key"] == good["key"]
+    assert json.loads(ul.record_path(tmp_path).read_text(encoding="utf-8"))["checked_key"]["base_sha"] == ""

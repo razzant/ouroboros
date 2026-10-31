@@ -175,7 +175,9 @@ def _save(page, posts):
         page.locator("#btn-save-settings").click()
     assert saved.value.ok and saved.value.json()["status"] == "saved", saved.value.text()
     page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    catalog = posts[-1]["OUROBOROS_SUBAGENTS"]
+    # An edited roster travels first, in the owner checker transaction, then the generic body.
+    written = [body.get("settings", body) for body in posts]
+    catalog = next(body["OUROBOROS_SUBAGENTS"] for body in reversed(written) if "OUROBOROS_SUBAGENTS" in body)
     catalog = json.loads(catalog) if isinstance(catalog, str) else catalog
     return {row["subagent_id"]: [row.get("review_eligible") is True, row.get("access")] for row in catalog["items"]}
 
@@ -258,7 +260,7 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
             errors, posts, engine_calls = [], [], []
             context.on("weberror", lambda error: errors.append(str(error.error)))
             context.on("request", lambda r: posts.append(r.post_data_json)
-                       if r.method == "POST" and r.url.endswith("/api/settings") else None)
+                       if r.method == "POST" and r.url.endswith(("/api/settings", "/api/owner/safety-model")) else None)
             # Configuration only: nothing here may wake, log in or refresh an agent engine.
             context.route(re.compile(r".*/api/claudexor/(wake|login|quota|credential-profiles).*"),
                           lambda route: (engine_calls.append(route.request.url), route.abort()))

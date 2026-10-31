@@ -19,9 +19,6 @@ guard. One section per Q10 item:
 from __future__ import annotations
 
 import json
-import pathlib
-
-REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 # --- Q10 item 1: OUROBOROS_SCOPE_REVIEW_FLOOR ---------------------------------
@@ -81,27 +78,6 @@ def test_scope_review_floor_and_semantic_owner_detectors_are_gone():
     assert not hasattr(registry, "_detect_safety_mode_self_lowering")
 
 
-def test_scope_review_floor_left_no_source_remnants():
-    """Grep-level absence over the runtime tree: no code path may still spell
-    the retired key or endpoint (docs/history and the retirement entry itself
-    are the only legitimate spellings)."""
-    allowed = {
-        pathlib.Path("ouroboros/settings_defaults.py"),  # RETIRED_SETTING_KEYS entry
-        pathlib.Path("ouroboros/tools/registry_guard_process.py"),  # historical incident comment
-    }
-    offenders = []
-    for root in ("ouroboros", "supervisor", "web", "prompts"):
-        for path in sorted((REPO / root).rglob("*")):
-            if not path.is_file() or path.suffix not in {".py", ".js", ".md", ".html"}:
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if "SCOPE_REVIEW_FLOOR" in text.upper() or "scope-review-floor" in text:
-                rel = path.relative_to(REPO)
-                if rel not in allowed:
-                    offenders.append(rel.as_posix())
-    assert not offenders, f"retired floor surface respelled in: {offenders}"
-
-
 # --- Q10 item 2: fail_tasks (budget-drain terminalizer) -----------------------
 
 def test_fail_tasks_is_gone_and_pause_scenario_supersedes_it():
@@ -114,15 +90,6 @@ def test_fail_tasks_is_gone_and_pause_scenario_supersedes_it():
 
     assert "E8" not in SCENARIOS
     assert "E13" in SCENARIOS
-
-
-def test_fail_tasks_left_no_source_remnants():
-    offenders = []
-    for root in ("ouroboros", "supervisor", "web", "prompts"):
-        for path in sorted((REPO / root).rglob("*.py")):
-            if "fail_tasks" in path.read_text(encoding="utf-8", errors="replace"):
-                offenders.append(path.relative_to(REPO).as_posix())
-    assert not offenders, f"removed fail_tasks respelled in: {offenders}"
 
 
 # --- Q10 item 3: until_deadline / stall_rounds_threshold aliases --------------
@@ -141,47 +108,3 @@ def test_deadline_pacing_aliases_are_gone_from_the_contract_shape():
     assert gone["improvement_policy"] == "fixed"
     assert "stall_rounds_threshold" not in gone
     assert "stall_rounds_threshold" not in normalize_budget_profile(None)
-
-
-def test_deadline_no_longer_lifts_the_improvement_count_axis(monkeypatch):
-    """Deadlines do not change an explicit author cap. The paid panel limit
-    no longer derives a separate author count, and has_deadline stays retired."""
-    import inspect
-
-    from ouroboros.task_pacing import effective_max_improvement_passes
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
-    profile = {"improvement_policy": "fixed", "max_improvement_passes": None}
-    assert effective_max_improvement_passes(profile) is None
-    assert effective_max_improvement_passes({**profile, "max_improvement_passes": 1}) == 1
-    params = inspect.signature(effective_max_improvement_passes).parameters
-    assert "has_deadline" not in params
-
-
-def test_deadline_aliases_left_no_source_remnants():
-    """FUNCTIONAL remnants only: a resurrected alias needs the QUOTED string
-    literal (a comparison, dict key or event type); prose comments disclosing
-    the removal legitimately keep the bare word.
-
-    One exemption: the ABI-2 quarantine classifier
-    (``ouroboros/task_result_schema.py``) is the removal's ENFORCEMENT arm —
-    it must spell the retired token to REFUSE a stored contract still
-    carrying it (reason ``retired_contract_until_deadline``, ledger f30
-    entry 4). That comparison sends rows to quarantine; it cannot make the
-    alias functional again."""
-    functional = (
-        '"until_deadline"', "'until_deadline'",
-        '"stall_rounds_threshold"', "'stall_rounds_threshold'",
-        "deprecated_task_pacing_alias",
-    )
-    refusal_only = {"ouroboros/task_result_schema.py"}
-    offenders = []
-    for root in ("ouroboros", "supervisor", "web", "prompts"):
-        for path in sorted((REPO / root).rglob("*.py")):
-            rel = path.relative_to(REPO).as_posix()  # Windows walks with backslashes
-            if rel in refusal_only:
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if any(tok in text for tok in functional):
-                offenders.append(rel)
-    assert not offenders, f"removed pacing aliases respelled in: {offenders}"

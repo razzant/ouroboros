@@ -485,8 +485,8 @@ def companion_spawn_env(
 
     Built only inside ``PluginAPIImpl._publish_registrations``'s post-swap attach, after
     the generation fence admitted the publication: the settings-derived
-    values (``_scrub_env`` -> ``load_settings`` takes the settings lock and
-    may persist a settings migration), the manifest env overlay, the Host
+    values (``_scrub_env`` -> ``load_settings``, a lock-free read that
+    persists nothing), the manifest env overlay, the Host
     Service bridge URL/token and the isolated-dep PYTHONPATH are all
     resolved HERE, so the pre-fence descriptor build stays purely
     computational.

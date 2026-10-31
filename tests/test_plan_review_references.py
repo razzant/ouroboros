@@ -9,8 +9,9 @@ import queue
 from hashlib import sha256
 from types import SimpleNamespace
 
-from ouroboros import plan_record, task_results
+from ouroboros import dialogue_store, plan_record, store, task_results
 from ouroboros.tools import plan_ask, plan_review_references
+from tests._dialogue import progress_rows
 
 
 def _revision(state: dict) -> str:
@@ -111,11 +112,7 @@ def test_review_reference_addresses_the_bound_project_chat(tmp_path):
 
     plan_ask._reference(ctx, "task-bound", record, tmp_path)
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows = progress_rows(tmp_path)
     assert binding["project_chat_id"] == 7373
     assert rows[0]["chat_id"] == 7373
     assert _reference_rows(events)[0]["chat_id"] == 7373
@@ -156,11 +153,7 @@ def test_plan_reference_is_durable_on_progress_rail_and_state_stays_authority(tm
 
     plan_ask._reference(ctx, "task-1", record, tmp_path)
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows = progress_rows(tmp_path)
     assert len(rows) == 1
     assert rows[0] == {
         "type": "review_reference",
@@ -184,12 +177,12 @@ def test_plan_reference_is_durable_on_progress_rail_and_state_stays_authority(tm
 def test_plan_reference_append_failure_is_not_misreported_as_durable(tmp_path, monkeypatch):
     record = _record(tmp_path, "task-1")
     ctx = SimpleNamespace(event_queue=queue.Queue(), drive_root=tmp_path)
-    monkeypatch.setattr(plan_review_references, "append_jsonl", lambda *_a, **_k: False)
+    monkeypatch.setattr(dialogue_store, "append", lambda *_a, **_k: (_ for _ in ()).throw(store.StoreBusy("busy budget spent")))
 
     plan_ask._reference(ctx, "task-1", record, tmp_path)
 
     assert plan_record.load_plan_record(tmp_path, "task-1") == record
-    assert not (tmp_path / "logs" / "progress.jsonl").exists()
+    assert not progress_rows(tmp_path)
     assert _reference_rows(ctx.event_queue)[0]["state_revision"] == _revision(record)
 
 
@@ -201,7 +194,7 @@ def test_plan_reference_append_exception_keeps_live_invalidation(monkeypatch, tm
     def fail_append(*_args, **_kwargs):
         raise OSError("progress rail unavailable")
 
-    monkeypatch.setattr(plan_review_references, "append_jsonl", fail_append)
+    monkeypatch.setattr(dialogue_store, "append", fail_append)
     plan_ask._reference(ctx, "task-1", record, tmp_path)
 
     assert plan_record.load_plan_record(tmp_path, "task-1") == record

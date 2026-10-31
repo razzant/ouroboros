@@ -131,3 +131,10 @@ def copy_apply_refusal(ctx: Any, target: Path, touched: list[str]) -> str:
     except (OSError, ValueError, TypeError, RuntimeError) as exc:
         return f"INTEGRATE_TARGET_FORBIDDEN: {exc}"
     return ""
+
+
+def target_write_refusal(target: Path, refusal: str) -> str:
+    """One marked integration refusal at either current-authority recheck."""
+    detail = refusal.removeprefix("⚠️ ").removeprefix("INTEGRATE_TARGET_FORBIDDEN: ")
+    return (f"⚠️ INTEGRATE_TARGET_FORBIDDEN: current write authority at the recorded target "
+            f"{target} does not admit this apply: {detail}")

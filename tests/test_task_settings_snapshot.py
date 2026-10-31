@@ -1,8 +1,8 @@
-"""Task admission freezes next-task reads, not owner writes or live controls."""
+"""Task admission freezes next-task reads (effort, context, review, catalog, custom keys), not owner writes,
+live controls or the route keys (models, accounts, provider keys: ``route_choice``, read as the document is now)."""
 
 import contextvars
 import json
-import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -11,6 +11,7 @@ import pytest
 
 from ouroboros import config, model_wait, subagent_runtime
 from ouroboros.settings_integrity import task_settings_snapshot
+from tests._socket_seal import block_network_except_socketpair
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +44,7 @@ def isolated_runtime(tmp_path, monkeypatch):
     def no_network(*args, **kwargs):
         raise AssertionError("Snapshot regressions must never contact a provider")
 
-    monkeypatch.setattr(socket.socket, "connect", no_network)
+    block_network_except_socketpair(monkeypatch, no_network)
     yield data
 
 
@@ -113,15 +114,16 @@ def observe():
     }
 
 
-def admitted_agent(body, events):
-    from ouroboros.agent import OuroborosAgent
+# What ``observe`` reads through the route keys: live in every task, unlike the rest of the snapshot.
+ROUTE_OBSERVATIONS = frozenset({"model", "light", "key", "router_key", "account", "auto_account", "window",
+                                "fit_model", "fit_key", "fallbacks", "processing"})
 
-    agent = object.__new__(OuroborosAgent)
-    agent.env = SimpleNamespace(drive_root=config.DATA_DIR)
-    agent._event_queue = None
-    agent._emit_live_log = lambda event, **facts: events.append((event, facts))
-    agent._handle_task_scoped = body
-    return agent
+
+def admitted_agent(body, events):
+    from tests._agent_entry_helpers import task_entry_agent
+
+    return task_entry_agent(config.DATA_DIR, body,
+                            emit_log=lambda event, **facts: events.append((event, facts)))
 
 
 def test_two_overlapping_real_task_entries_keep_readers_and_behavior(monkeypatch):
@@ -141,7 +143,8 @@ def test_two_overlapping_real_task_entries_keep_readers_and_behavior(monkeypatch
         old_ready.set()
         assert new_ready.wait(10)
         later = observe()
-        decision = (safety.check_safety("run_command", {"cmd": ["touch", "example"]})[0],
+        decision = (safety.check_safety("run_command", {"cmd": ["touch", "example"]},
+                    ctx=SimpleNamespace(task_metadata={"work_kind": "owner"}))[0],
                     skill_review_gate("blockers")["executable_review"])
         # The owner writer executes even inside an old task; its source stays LIVE.
         from ouroboros.gateway.owner_settings import _owner_update_settings
@@ -153,14 +156,17 @@ def test_two_overlapping_real_task_entries_keep_readers_and_behavior(monkeypatch
         value = observe()
         new_ready.set()
         assert finish.wait(10)
-        decision = (safety.check_safety("run_command", {"cmd": ["touch", "example"]})[0],
+        decision = (safety.check_safety("run_command", {"cmd": ["touch", "example"]},
+                    ctx=SimpleNamespace(task_metadata={"work_kind": "owner"}))[0],
                     skill_review_gate("blockers")["executable_review"])
         return value, decision
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         old = pool.submit(admitted_agent(old_body, events).handle_task, {"id": "old-task"})
         try:
-            assert old_ready.wait(10)
+            if not old_ready.wait(10):
+                old.result(timeout=1)  # disclose an entry failure instead of masking it as a readiness timeout
+                pytest.fail("old task never reached its body")
             save_owner(document("new", safety="off", enforcement="advisory"))
             config.apply_settings_to_env(config.load_settings())  # Save-time publication.
             new = pool.submit(admitted_agent(new_body, events).handle_task, {"id": "new-task"})
@@ -169,7 +175,11 @@ def test_two_overlapping_real_task_entries_keep_readers_and_behavior(monkeypatch
         finally:
             new_ready.set()
             finish.set()
-    assert initial == later
+    # The route keys moved with the save (owner 1A, route_choice); everything else kept the entry snapshot.
+    assert {k: v for k, v in later.items() if k not in ROUTE_OBSERVATIONS} == {k: v for k, v in initial.items() if k not in ROUTE_OBSERVATIONS}
+    assert later["model"] == later["fit_model"] == "openai::new" and later["key"] == later["fit_key"] == "test-key-new"
+    assert later["account"] == "account-new" and later["window"] == 400000 and later["light"] == "openai::new-light"
+    assert later["processing"] == "economy"  # the pool row's processing resolves the live global preference
     assert initial["model"] == initial["fit_model"] == "openai::old"
     assert initial["key"] == initial["fit_key"] == "test-key-old"
     assert initial["account"] == "account-old" and initial["effort"] == "high"
@@ -202,7 +212,7 @@ def test_copy_context_and_review_context_keep_settings_but_not_main_capture():
         def chat(self, model, model_role, use_local=False, model_account_override=None,
                  model_poll_control=None):
             return {"model": model, "key": config.runtime_setting("OPENAI_API_KEY"),
-                    "account": model_account_override}, {}
+                    "account": model_account_override, "effort": config.runtime_setting("OUROBOROS_EFFORT_TASK")}, {}
 
     with config.task_settings_scope(snapshot), model_wait.task_model_wait_scope(
             task={"id": "old"}, drive_root=config.DATA_DIR, event_queue=None,
@@ -224,9 +234,10 @@ def test_copy_context_and_review_context_keep_settings_but_not_main_capture():
             for copied in (ordinary, review):
                 result, facts = pool.submit(copied.run, Transport().chat,
                                             "openai::old", "main").result()
-                assert result == {"model": "claudexor::codex=override", "key": "test-key-old", "account": ""}
+                # The copies keep the task's snapshot (effort) and share its live route keys (the saved key, pin).
+                assert result == {"model": "claudexor::codex=override", "key": "test-key-new", "account": "", "effort": "high"}
                 assert facts["model_role_route"]["credential_profile_id"] == ""
-                assert copied.run(model_role_option, MODEL_ACCOUNTS_KEY, "main") == "account-old"
+                assert copied.run(model_role_option, MODEL_ACCOUNTS_KEY, "main") == "account-new"
         assert ordinary.get(usage._LAST_PHYSICAL_ATTEMPT) is capture
         assert ordinary.run(usage.current_physical_attempt_predicate) is predicate
         assert review.get(usage._LAST_PHYSICAL_ATTEMPT) is None
@@ -243,15 +254,15 @@ def test_snapshot_preserves_document_empty_absence_and_live_effects(monkeypatch)
     snapshot = task_settings_snapshot(saved, env)
     saved["CUSTOM"]["rows"].append(2)
     env["OPENAI_API_KEY"] = "modified"
-    save_owner({"OPENAI_API_KEY": "new", "NEW_CUSTOM": "new"})
+    save_owner({"OPENAI_API_KEY": "new", "NEW_CUSTOM": "new", "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""})
     monkeypatch.setenv("OPENAI_API_KEY", "new")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "new-legacy")
     config.initialize_runtime_mode_baseline("advanced")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     with config.task_settings_scope(snapshot):
-        assert config.runtime_setting("OPENAI_API_KEY") == "old"
+        assert config.runtime_setting("OPENAI_API_KEY") == "new"  # a route key reads the saved document
         assert config.runtime_setting("OUROBOROS_RETURN_REASONING", "default") == ""
-        assert config.runtime_setting("OUROBOROS_MODEL_LIGHT", "absent") == "absent"
+        assert config.runtime_setting("OUROBOROS_MODEL_LIGHT", "absent") == "absent"  # a saved blank stays absent
         assert config.get_fallback_models() == []
         assert config.get_runtime_mode() == "advanced"
         current = config.runtime_settings()
@@ -264,7 +275,7 @@ def test_snapshot_preserves_document_empty_absence_and_live_effects(monkeypatch)
             assert config.runtime_setting(key) == "live"
             assert config.runtime_environ()[key] == "live"
         child = config.runtime_environ()
-        assert child["OPENAI_API_KEY"] == "old" and child["OUROBOROS_RETURN_REASONING"] == ""
+        assert child["OPENAI_API_KEY"] == "new" and child["OUROBOROS_RETURN_REASONING"] == ""
         assert "OUROBOROS_MODEL_FALLBACK" not in child
         assert "OUROBOROS_MODEL_LIGHT" not in child
 
@@ -277,18 +288,22 @@ def test_shell_env_keeps_captured_settings_while_scrubbing_external_repo(tmp_pat
     (repo / "sub").mkdir(parents=True)
     ext.mkdir()
     ctx = SimpleNamespace(repo_dir=str(repo))
+    from ouroboros.route_choice import ROUTE_SETTING_KEYS
+
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(repo), str(ext)]))
-    monkeypatch.setenv("OUROBOROS_MODEL", "new-task-model")
+    monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "new-task-effort")
     snapshot = task_settings_snapshot(
-        {"OUROBOROS_MODEL": "admitted-model"}, {"OUROBOROS_MODEL": "admitted-model"})
+        {"OUROBOROS_EFFORT_TASK": "admitted-effort"}, {"OUROBOROS_EFFORT_TASK": "admitted-effort"})
     with config.task_settings_scope(snapshot):
         inside = _shell_env_for_cwd(ctx, repo / "sub")
         outside = _shell_env_for_cwd(ctx, ext)
     assert inside["PYTHONPATH"] == os.environ["PYTHONPATH"]
     assert outside["PYTHONPATH"] == str(ext)
-    assert inside["OUROBOROS_MODEL"] == outside["OUROBOROS_MODEL"] == "admitted-model"
-    assert os.environ["OUROBOROS_MODEL"] == "new-task-model"
-    assert _shell_env_for_cwd(ctx, repo / "sub") == dict(os.environ)
+    assert inside["OUROBOROS_EFFORT_TASK"] == outside["OUROBOROS_EFFORT_TASK"] == "admitted-effort"
+    assert os.environ["OUROBOROS_EFFORT_TASK"] == "new-task-effort"
+    # Outside a task the shell sees the process environment, its route keys as the document reads now.
+    plain = {k: v for k, v in _shell_env_for_cwd(ctx, repo / "sub").items() if k not in ROUTE_SETTING_KEYS}
+    assert plain == {k: v for k, v in os.environ.items() if k not in ROUTE_SETTING_KEYS}
 
 
 def test_task_snapshot_does_not_become_explicit_probe_settings(monkeypatch):
@@ -322,16 +337,18 @@ def test_failed_reload_discloses_then_binds_previous_env_and_resets():
     events = []
 
     def body(task):
-        assert config.runtime_setting("OPENAI_API_KEY") == "test-key-old"
+        # An unreadable document makes a credential unavailable, never the mirrored old key (route_choice).
+        assert config.runtime_setting("OPENAI_API_KEY") is None and config.runtime_setting("OUROBOROS_EFFORT_TASK") == "high"
         save_owner(document("new"))
         subagent_runtime.apply_task_start_settings()
-        assert config.runtime_setting("OPENAI_API_KEY") == "test-key-old"
+        assert config.runtime_setting("OPENAI_API_KEY") == "test-key-new"  # repaired: read at once
+        assert config.runtime_setting("OUROBOROS_EFFORT_TASK") == "high"  # the task's own non-route view stays
         raise ValueError("task failed")
 
     with config.task_settings_scope(old_snapshot):
         with pytest.raises(ValueError, match="task failed"):
             admitted_agent(body, events).handle_task({"id": "failed-reload"})
-        assert config.runtime_setting("OPENAI_API_KEY") == "test-key-old"
+        assert config.runtime_setting("OPENAI_API_KEY") == "test-key-new"
     assert config.runtime_setting("OPENAI_API_KEY") == "test-key-new"
     assert model_wait.current_model_wait() is None
     assert len(events) == 1 and events[0][0] == "task_start_settings_reload_failed"
@@ -383,11 +400,12 @@ def test_simultaneous_admission_cannot_capture_half_projected_credentials(monkey
             release.set()
         write.result(timeout=10)
         snapshot = capture.result(timeout=10)
+    # The capture waited for the complete projection: both credentials, never one half of it.
+    assert snapshot.environ["OPENAI_API_KEY"] == "test-key-old" and snapshot.environ["OPENROUTER_API_KEY"] == "test-router-old"
     with config.task_settings_scope(snapshot):
-        assert config.runtime_setting("OPENAI_API_KEY") == "test-key-old"
-        assert config.runtime_setting("OPENROUTER_API_KEY") == "test-router-old"
-        # Main is absent on disk: the publisher's projected Main is its own echo, not a choice (owner 2A),
-        # so the task captures the proposal for the access it captured — the credentials above say which.
+        # The document on disk authors no key: the projection's mirror is this tree's own and never answers a
+        # route read (route_choice); Main is absent on disk too, so the task reads the proposal for its access.
+        assert config.runtime_setting("OPENAI_API_KEY") is None and config.runtime_setting("OPENROUTER_API_KEY") is None
         assert config.runtime_setting("OUROBOROS_MODEL") == config.SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
 
 
@@ -416,7 +434,8 @@ def test_real_immediate_consumers_remain_live():
         assert get_update_channel() == "development"
         assert config.get_mcp_servers() == values["MCP_SERVERS"]
         assert config.get_mcp_tool_timeout_sec() == 73
-        assert config.runtime_setting("OUROBOROS_MODEL") == "openai::old"
+        assert config.runtime_setting("OUROBOROS_MODEL") == "openai::new"  # route keys are live too (route_choice)
+        assert config.runtime_setting("OUROBOROS_EFFORT_TASK") == "high"  # the snapshot's own keys are not
 
 
 def test_private_projection_uses_incoming_roster_and_keeps_empty_env(monkeypatch):
@@ -464,7 +483,7 @@ def test_plugin_settings_reader_keeps_grants_and_reads_current_values(tmp_path):
         assert allowed.get_settings(keys) == {"OPENAI_API_KEY": "test-key-new", "CUSTOM_SERVICE_KEY": "test-custom-new"}
         assert denied.get_settings(keys) == {}
         assert config.runtime_settings()["CUSTOM_SERVICE_KEY"] == "test-custom-old"
-        assert observe()["key"] == "test-key-old"
+        assert observe()["key"] == "test-key-new" and observe()["effort"] == "high"
 
 
 def test_script_and_companion_env_read_current_permitted_values(tmp_path):
@@ -503,7 +522,7 @@ def test_script_and_companion_env_read_current_permitted_values(tmp_path):
         assert config.runtime_settings()["CUSTOM_SERVICE_KEY"] == "test-custom-old"
 
 
-def test_vision_child_gets_snapshot_env_without_snapshot_in_ipc(monkeypatch):
+def test_vision_child_gets_the_current_key_without_snapshot_in_ipc(monkeypatch):
     import pathlib
     from ouroboros.tools import shell, vision_process
 
@@ -514,7 +533,8 @@ def test_vision_child_gets_snapshot_env_without_snapshot_in_ipc(monkeypatch):
     class ReachedSpawn(Exception):
         pass
     def spawn(argv, **kwargs):
-        assert kwargs["env"]["OPENAI_API_KEY"] == "test-key-old"
+        assert kwargs["env"]["OPENAI_API_KEY"] == "test-key-new"  # a model call in a child uses the current key
+        assert kwargs["env"]["OUROBOROS_EFFORT_TASK"] == "high"  # and the task's own snapshot otherwise
         payload = pathlib.Path(argv[-1]).read_text()
         assert "test-key" not in payload and "test-custom" not in payload
         raise ReachedSpawn
@@ -527,7 +547,8 @@ def test_bundled_node_child_reads_projected_task_env():
     import subprocess
     import pathlib
 
-    snapshot = task_settings_snapshot({"OPENAI_API_KEY": "old"}, {"OPENAI_API_KEY": "old"})
+    save_owner({"OPENAI_API_KEY": "old"})
+    snapshot = subagent_runtime.apply_task_start_settings()
     with config.task_settings_scope(snapshot):
         node = str(pathlib.Path.home() / ".claudexor" / "node" / "bin" / "node") if (pathlib.Path.home() / ".claudexor" / "node" / "bin" / "node").exists() else "node"
         result = subprocess.run([node, "-e", "process.stdout.write(process.env.OPENAI_API_KEY)"],

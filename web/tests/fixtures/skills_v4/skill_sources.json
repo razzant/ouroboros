@@ -1,0 +1,58 @@
+{
+  "sources": [
+    {
+      "id": "builtin",
+      "name": "Built in",
+      "kind": "builtin",
+      "trust": "trusted",
+      "confirmed": true,
+      "state": "ready"
+    },
+    {
+      "id": "ouroboros",
+      "name": "Ouroboros",
+      "kind": "hub",
+      "url": "https://github.com/razzant/OuroborosHub",
+      "ref": "main",
+      "part": "official",
+      "trust": "trusted",
+      "confirmed": false,
+      "state": "ready",
+      "last_read_at": "2026-10-17T14:58:00Z"
+    },
+    {
+      "id": "ouroboros-community",
+      "name": "Ouroboros Community",
+      "kind": "hub",
+      "url": "https://github.com/razzant/OuroborosHub",
+      "ref": "main",
+      "part": "community",
+      "trust": "review",
+      "confirmed": false,
+      "state": "ready",
+      "last_read_at": "2026-10-17T13:00:00Z",
+      "error": "GitHub didn't answer (timed out after 60 s)"
+    },
+    {
+      "id": "clawhub",
+      "name": "ClawHub",
+      "kind": "registry",
+      "url": "https://clawhub.ai",
+      "trust": "review",
+      "confirmed": true,
+      "state": "search"
+    },
+    {
+      "id": "my-folder",
+      "name": "My skills",
+      "kind": "local",
+      "path": "~/ouroboros-skills",
+      "trust": "review",
+      "confirmed": true,
+      "state": "ready",
+      "last_read_at": "2026-10-17T15:00:00Z"
+    }
+  ],
+  "materialized": true,
+  "problem": ""
+}

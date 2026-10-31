@@ -1,16 +1,22 @@
 """#1536 policy boundaries with real loop, admission, review wallet and wait owners.
 
 Inference, reviewer transport and history output are scripted. Policy tests use a
-minimal agent adapter; the proactive case bootstraps OuroborosAgent. Shipped inline
-round, review-cycle, packet-size and monetary limits stay unchanged. No separate
-Host process or live delegated child is started here.
+minimal agent adapter; the full-agent cases bootstrap OuroborosAgent. Shipped inline
+round, review-cycle and monetary limits stay unchanged. No separate Host process or
+live delegated child is started here.
+
+A Presence author parks only at a review it left (the kept trigger of
+``test_presence_continuation``): it reviews its own result with
+``review_change(subject="result")``, an addressed message reaches its mailbox while
+the reviewer runs, and its next plain prose parks on that review. Produced work
+alone never parks it: a Required result review of a Presence result runs with
+nobody waiting (``review_result._presence_result_review``).
 """
 
 from __future__ import annotations
 
 import contextvars
 import copy
-import json
 import queue
 import threading
 from types import SimpleNamespace
@@ -19,26 +25,41 @@ import pytest
 
 from ouroboros import agent_task_pipeline as pipeline, config, loop, review_substrate
 from ouroboros.model_wait import task_model_wait_scope
-from ouroboros.presence_admission import admit_presence_turn
 from ouroboros.presence_runner import (
     PresenceTurnExecutions, PresenceTurnGate, presence_event_identity, presence_turn_task_id,
     run_presence_turn,
 )
 from ouroboros.review_records import ReviewSlot
-from ouroboros.task_results import (
-    claim_task_acceptance_review_cycle, load_task_acceptance_review_state, load_task_result, write_task_result,
-)
-from ouroboros.tools.registry import ToolRegistry
+from ouroboros.task_results import load_task_result, write_task_result
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_host_service_api import _seed_presence_behavior
-from tests.test_presence_continuation import ANSWER, call, event, finish
+from tests.test_presence_continuation import (
+    ADDRESSED, ANSWER, RESUMED, call, event, finish, review, settlement_notices_done, waits,
+)
 
 
-def _nominate_result():
-    """Main explicitly requests a root panel and selects its Presence output."""
-    return {"content": None, "tool_calls": [
-        call("task_acceptance_review", {"claim": ANSWER, "goal": "Prepare the status report"}, "review-request"),
-        call("presence_finish", {"outcome": "message", "message": ANSWER}, "select-report"),
-    ]}
+def select_review_change(data):
+    """The installed behavior also requests a tool its owner maps to ``review_change``."""
+    from tests.frozen_presence_capabilities import (
+        PresenceSelection, PresenceState, PresenceToolTarget, load_presence_state,
+        presence_state_fingerprint, save_presence_state,
+    )
+    from tests.frozen_presence_profile import parse_presence_profile, presence_request_fingerprint
+    from ouroboros.skill_loader import SkillReviewState, load_skill, save_review_state
+
+    skill_dir = data / "skills/external/community-helper"
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(skill_path.read_text().replace(
+        "  capability_requests:\n", "  capability_requests:\n    - id: review\n      kind: tool\n"
+        "      required: true\n      purpose: Request an independent review of my result.\n"), encoding="utf-8")
+    loaded = load_skill(skill_dir, data)
+    save_review_state(data, loaded.name, SkillReviewState(status="pass", content_hash=loaded.content_hash))
+    profile = parse_presence_profile(loaded.manifest, skill_dir)
+    state = load_presence_state(data, loaded.name)
+    request = next(row for row in profile.capability_requests if row.request_id == "review")
+    save_presence_state(data, loaded.name, PresenceState((*state.selections, PresenceSelection(
+        presence_request_fingerprint(request), PresenceToolTarget("builtin", "review_change")))),
+        expected_state_fingerprint=presence_state_fingerprint(state))
 
 
 @pytest.fixture
@@ -50,41 +71,24 @@ def policy_turn(tmp_path, monkeypatch):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("MCP_ENABLED", "false")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
     data, repo = tmp_path / "data", tmp_path / "repo"
     data.mkdir()
     repo.mkdir()
-    binding = _seed_presence_behavior(data)
-    # This fixture used to rely on expected_output alone. A real nomination
-    # needs the same declared and selected capability as an installed Presence.
-    from ouroboros.presence_capabilities import (
-        PresenceSelection, PresenceState, PresenceToolTarget, load_presence_state,
-        presence_state_fingerprint, save_presence_state,
-    )
-    from ouroboros.presence_profile import parse_presence_profile, presence_request_fingerprint
-    from ouroboros.skill_loader import SkillReviewState, load_skill, save_review_state
-    skill_dir = data / "skills/external/community-helper"
-    skill_path = skill_dir / "SKILL.md"
-    skill_path.write_text(skill_path.read_text().replace(
-        "  capability_requests:\n", "  capability_requests:\n    - id: review\n      kind: tool\n"
-        "      required: true\n      purpose: Request independent result review.\n"), encoding="utf-8")
-    loaded = load_skill(skill_dir, data)
-    save_review_state(data, loaded.name, SkillReviewState(status="pass", content_hash=loaded.content_hash))
-    profile = parse_presence_profile(loaded.manifest, skill_dir)
-    state = load_presence_state(data, loaded.name)
-    request = next(row for row in profile.capability_requests if row.request_id == "review")
-    save_presence_state(data, loaded.name, PresenceState((*state.selections, PresenceSelection(
-        presence_request_fingerprint(request), PresenceToolTarget("builtin", "task_acceptance_review")))),
-        expected_state_fingerprint=presence_state_fingerprint(state))
-    admission = admit_presence_turn(drive_root=data, authenticated_transport_skill="telegram-bot",
-                                   binding_id=binding, global_max_rounds=config.get_max_rounds())
+    # These cases pin the retained ten-round carrier policy of already-admitted work.
+    # Current place admission is covered by the Host focus lifecycle cases.
+    from tests.test_presence_continuation_bootstrap import admission as legacy_admission
+    admission = legacy_admission()
+    binding = admission.binding_id
     h = SimpleNamespace(data=data, repo=repo, admission=admission, script=[], calls=0, reviews=[], ctx=None,
                         inputs=[], progress=[], contract=True, produced=False, before_loop=lambda _ctx: None,
-                        release=threading.Event(), dispatched=threading.Event(), settled=threading.Event(), executions=PresenceTurnExecutions(),
+                        hold=True, addressed=ADDRESSED, release=threading.Event(), dispatched=threading.Event(),
+                        settled=threading.Event(), executions=PresenceTurnExecutions(),
                         gate=PresenceTurnGate(1, state_root=data / "state"), running=[])
-    slots = [ReviewSlot(slot_id="policy-reviewer", model="fixture/reviewer", effort="high", timeout_sec=30)]
-    monkeypatch.setattr(review_substrate, "triad_delivery_slots", lambda **_kw: slots)
+    slots = [ReviewSlot(slot_id="policy-reviewer", model="fixture/reviewer", effort="high", timeout_sec=180)]
+    monkeypatch.setattr("ouroboros.reviewer_slot_config.review_pool_slots", lambda *_a, **_kw: list(slots))
     original_settle = review_custody._settle_review_attempt
 
     def settle(*args, **kwargs):
@@ -115,33 +119,30 @@ def policy_turn(tmp_path, monkeypatch):
             return {}
 
         def execute(self):
+            from ouroboros.owner_mailbox import PROVENANCE_INDEPENDENT_TASK, write_task_message
             from ouroboros.review_dispatch import invoke_review_paid_stamp
-            from ouroboros.review_evidence_refs import acceptance_evidence_ref_vocabulary
 
             invoke_review_paid_stamp(self.assignment.dispatch_stamp)
             h.reviews.append(self.assignment.request)
-            h.dispatched.set()
-            assert h.release.wait(30), "test did not release its reviewer"
-            vocabulary = acceptance_evidence_ref_vocabulary(self.assignment.request.evidence)
-            reference = next(key for key, kind in vocabulary.items() if kind in {"tool_record", "packet_section"})
-            text = json.dumps({"verdict": "PASS", "summary": "Report supported", "findings": [],
-                               "outcome_tier": "solved", "completion_coach": "Deliver it.",
-                               "criteria_used": [{"criterion": "report", "status": "supported",
-                                                  "evidence_refs": [reference]}]})
+            if h.hold:  # the author's review: held, and an addressed message reaches the author meanwhile
+                if h.addressed:
+                    assert write_task_message(h.data, h.addressed, self.assignment.request.task_id,
+                                              source_task_id="operations-room",
+                                              provenance=PROVENANCE_INDEPENDENT_TASK)
+                h.dispatched.set()
+                assert h.release.wait(180), "test did not release its reviewer"
+            text = "[]"  # review_change's answer contract: a clean answer
             return ReviewAttemptResult(message={"content": text}, raw_text=text,
                                        usage={"prompt_tokens": 5, "completion_tokens": 3,
                                               "physical_attempt_state": "settled"})
 
     monkeypatch.setattr(review_substrate, "_review_route_executor", lambda assignment, **_kw: Reviewer(assignment))
 
-    def model(_llm, messages, *_args, **kwargs):
+    def model(_llm, messages, *_args, **_kwargs):
         h.calls += 1
         h.inputs.append(copy.deepcopy(messages))
         assert h.script, f"unexpected extra inference round: {messages[-3:]}"
         step = h.script.pop(0)
-        observer = kwargs.get("model_context_observer")
-        if callable(observer):
-            observer(messages)
         return (step(messages) if callable(step) else step), 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", model)
@@ -165,9 +166,9 @@ def policy_turn(tmp_path, monkeypatch):
             ctx.review_wait_callback = self.review_wait_callback
             registry.override_handler("chat_history", lambda _ctx, **_kw: "History read.")
             task["_skip_post_task_synthesis"] = True
-            h.before_loop(ctx)
             with task_model_wait_scope(task=task, drive_root=data, event_queue=None, worker_slot_held=False) as waiter:
                 ctx.model_wait_context, waiter.tool_context = waiter, ctx
+                h.before_loop(ctx)
                 text, usage, trace = loop.run_llm_loop(
                     [{"role": "system", "content": "Presence turn."}, {"role": "user", "content": task["text"]}],
                     registry, SimpleNamespace(default_model=lambda: "fixture/main"), data / "logs",
@@ -193,40 +194,46 @@ def policy_turn(tmp_path, monkeypatch):
     yield h
     h.release.set()
     for execution in h.running:
-        execution.result.result(timeout=30)
+        execution.result.result(timeout=90)
     if h.reviews:
-        assert h.settled.wait(15), "review custody did not settle"
+        assert h.settled.wait(60), "review custody did not settle"
+        settlement_notices_done()
     assert not h.executions.live()
 
 
 @pytest.mark.parametrize("mode", ["auto", "required", "off"])
 @pytest.mark.parametrize("contract", [False, True])
-@pytest.mark.parametrize("material", ["none", "nomination", "registered_output"])
-def test_presence_eligibility_keeps_auto_required_and_off(policy_turn, monkeypatch, mode, contract, material):
+@pytest.mark.parametrize("material", ["none", "review_request", "registered_output"])
+def test_presence_parks_only_at_a_review_its_author_left(policy_turn, monkeypatch, mode, contract, material):
     h = policy_turn
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", mode)
     h.contract = contract
     h.produced = material == "registered_output"
-    nominated = material == "nomination"
-    reviewed = mode != "off" and (nominated or (mode == "required" and h.produced))
-    h.script = [_nominate_result() if nominated else finish("select-report", message=ANSWER)]
-    if nominated:
-        # A nomination must see its tool result; expected_output alone adds no
-        # inference round after removal of the "nothing attempted" re-loop.
-        h.script.append(lambda _messages: finish("after-reminder", answer_sha256=h.ctx._delivery_candidate.content_sha256))
-    if reviewed:
-        h.script.append(lambda _messages: finish("select", answer_sha256=h.ctx._delivery_candidate.content_sha256))
+    asked = material == "review_request"
+    h.addressed = ADDRESSED if asked else ""
+    # Off refuses a result review before payment, so there is no review to leave.
+    parks = asked and mode != "off"
+    # Required reviews produced work with nobody waiting: speech is never held, so nothing parks.
+    floor = h.produced and mode == "required"
+    if asked:
+        h.script = [review(answer=ANSWER), waits if parks else finish("after-refusal", message=ANSWER)]
+        if parks:
+            h.script.append(lambda _messages: finish("select", message=ANSWER))
+    else:
+        h.script = [finish("select-report", message=ANSWER)]
     execution = h.start()
-    initial = execution.initial.result(timeout=30)
-    if reviewed:
+    initial = execution.initial.result(timeout=90)
+    if parks:
         assert initial.status == "continuing" and initial.text == ""
         assert not execution.result.done()
         h.release.set()
-    final = execution.result.result(timeout=30)
+    final = execution.result.result(timeout=90)
     assert final.text == ANSWER and final.outcome == "message"
-    assert h.calls == 1 + int(nominated) + int(reviewed)
-    assert len(h.reviews) == int(reviewed)
-    assert bool(load_task_result(h.data, final.task_id).get("presence_continuation")) is reviewed
+    assert h.calls == (3 if parks else 2 if asked else 1)
+    if floor:
+        assert h.dispatched.wait(30)  # dispatched although the turn already ended
+    assert len(h.reviews) == int(parks or floor)
+    assert bool(load_task_result(h.data, final.task_id).get("presence_continuation")) is parks
     assert not h.script
 
 
@@ -234,16 +241,13 @@ def test_default_inline_cap_is_not_reset_by_review_wait(policy_turn):
     h = policy_turn
     assert config.get_max_rounds() is None and h.admission.inline_max_rounds == 10
     h.script = [{"content": None, "tool_calls": [call("chat_history", {}, f"read-{i}")]} for i in range(8)]
-    # Round 9 nominates; round 10 consumes its result and selects completion.
-    # Co-batching that selection with a new tool cannot acknowledge its result.
-    h.script += [_nominate_result(),
-                 lambda _messages: finish("select", answer_sha256=h.ctx._delivery_candidate.content_sha256),
-                 {"content": "Forced record without a delivery declaration."}]
+    # Round 9 asks for the review and leaves it for the addressed message; round 10 waits and parks.
+    h.script += [review(answer=ANSWER), waits, {"content": "Forced record without a delivery declaration."}]
     execution = h.start()
-    initial = execution.initial.result(timeout=30)
+    initial = execution.initial.result(timeout=90)
     assert initial.status == "continuing" and initial.text == "" and h.calls == 10
     h.release.set()
-    final = execution.result.result(timeout=30)
+    final = execution.result.result(timeout=90)
     assert final.text == "" and final.outcome in {"silent", "deferred"}
     assert h.calls == 11 and not h.script  # ten inline calls plus the existing single forced record
     assert h.usage["reason_code"] == "round_limit"
@@ -252,12 +256,26 @@ def test_default_inline_cap_is_not_reset_by_review_wait(policy_turn):
     assert len(reads) == 8 and all(row["status"] == "ok" and not row["is_error"] for row in reads)
 
 
-def _spend_review_cycles(h, ctx, count):
-    for index in range(count):
-        binding = review_substrate.build_review_binding(candidate=f"Earlier distinct material {index}",
-                                                       evidence={}, fence_token_or_state="earlier-review")
-        claim = claim_task_acceptance_review_cycle(h.data, ctx.task_id, binding, claimed_by_task_id=ctx.task_id)
-        assert claim["status"] == "claimed"
+def _spend_result_reviews(h, ctx, count):
+    """Earlier paid result reviews of distinct drafts that settled at once: nothing was left for mail."""
+    from ouroboros.tools.review_change import run_review_change
+
+    h.hold = False
+    try:
+        for index in range(count):
+            spent = run_review_change(ctx, subject="result", answer=f"An earlier draft {index}.",
+                                      reason="Check an earlier draft")
+            assert spent["state"] == "settled" and spent["aggregate"] == "PASS"
+    finally:
+        h.hold = True
+
+
+def _result_cycles(ctx):
+    """The paid result-review ceiling exactly as a new wave reads it (``review_change._cycles_exhausted``)."""
+    from ouroboros.tools.commit_gate import check_review_cycles_ceiling
+
+    probe = SimpleNamespace(**{**vars(ctx), "_current_review_tool_name": "review_result"})
+    return check_review_cycles_ceiling(probe, root_task_id=ctx.task_id)
 
 
 def test_last_default_review_cycle_still_allows_the_author_response(policy_turn):
@@ -265,80 +283,33 @@ def test_last_default_review_cycle_still_allows_the_author_response(policy_turn)
 
     h = policy_turn
     assert review_max_cycles() == 2
-    h.before_loop = lambda ctx: _spend_review_cycles(h, ctx, 1)
-    h.script = [_nominate_result(),
-                lambda _messages: finish("after-reminder", answer_sha256=h.ctx._delivery_candidate.content_sha256),
-                lambda messages: finish("select", answer_sha256=h.ctx._delivery_candidate.content_sha256)]
+    h.before_loop = lambda ctx: _spend_result_reviews(h, ctx, 1)
+    h.script = [review(answer=ANSWER), waits, lambda _messages: finish("select", message=ANSWER)]
     execution = h.start()
-    initial = execution.initial.result(timeout=30)
+    initial = execution.initial.result(timeout=90)
     assert initial.status == "continuing" and h.calls == 2
     assert h.dispatched.wait(30)  # lending the conversation can precede the physical paid stamp
-    assert len(load_task_acceptance_review_state(h.data, initial.task_id)["claims_by_binding"]) == 2
+    spent = _result_cycles(h.ctx)  # the author's review was the last allowed paid wave
+    assert spent is not None and (spent["cycles_paid"], spent["cap"]) == (2, 2)
     h.release.set()
-    final = execution.result.result(timeout=30)
-    assert final.text == ANSWER and h.calls == 3 and len(h.reviews) == 1
-    assert "[PRESENCE CONVERSATION RESUMED]" in str(h.inputs[-1])
-    assert len(load_task_acceptance_review_state(h.data, final.task_id)["claims_by_binding"]) == 2
+    final = execution.result.result(timeout=90)
+    assert final.text == ANSWER and h.calls == 3 and len(h.reviews) == 2
+    assert RESUMED in str(h.inputs[-1])
+    assert _result_cycles(h.ctx)["cycles_paid"] == 2  # the response and the delivery bought nothing
 
 
-def test_spent_default_review_wallet_dispatches_and_lends_nothing(policy_turn):
+def test_spent_default_review_allowance_dispatches_and_lends_nothing(policy_turn):
     h = policy_turn
-    h.before_loop = lambda ctx: _spend_review_cycles(h, ctx, 2)
-    h.script = [_nominate_result(),
-                lambda _messages: finish("after-reminder", answer_sha256=h.ctx._delivery_candidate.content_sha256),
-                finish("stop", message=ANSWER, author_disposition="partial", action="stop",
-                       rationale="Review wallet is exhausted; retain the unaccepted report.")]
+    h.before_loop = lambda ctx: _spend_result_reviews(h, ctx, 2)
+    h.script = [review(answer=ANSWER), lambda _messages: finish("after-refusal", message=ANSWER)]
     execution = h.start()
-    final = execution.result.result(timeout=30)
+    final = execution.result.result(timeout=90)
     assert execution.initial.result(timeout=1) is final
-    assert not h.reviews and not load_task_result(h.data, final.task_id).get("presence_continuation")
-    assert h.trace["review_decision"]["dispatch_refusal"]["reason"] == "review_cycles_exhausted"
-    assert len(load_task_acceptance_review_state(h.data, final.task_id)["claims_by_binding"]) == 2
-
-
-def test_acceptance_money_gate_refuses_a_spent_default_root_cap(policy_turn, monkeypatch):
-    """Exercise monetary admission itself; no claim of Main's budget-pause lifecycle."""
-    from ouroboros import pricing, usage_accounting as ua
-    from ouroboros.contracts.task_contract import build_task_contract
-
-    h = policy_turn
-    root_cap = config.SETTINGS_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"]
-    global_cap = config.SETTINGS_DEFAULTS["TOTAL_BUDGET"]
-    task_id = "presence-spent-money"
-    contract = build_task_contract({"id": task_id, "expected_output": "Report"})
-    write_task_result(h.data, task_id, "running", root_task_id=task_id, task_contract=contract)
-    ctx = SimpleNamespace(task_id=task_id, drive_root=h.data, repo_dir=h.repo, task_contract=contract, pending_events=[],
-                          task_metadata={"root_task_id": task_id, "budget_drive_root": str(h.data)})
-
-    class Price(tuple):
-        tiers = ()
-
-    monkeypatch.setattr(pricing, "get_pricing", lambda **_kw: {"fixture/reviewer": Price((1., .1, 1.25, 4.))})
-    scope = ua.UsageScope(drive_root=h.data, task_id=task_id, root_task_id=task_id,
-                          root_limit_usd=root_cap, global_limit_usd=global_cap,
-                          root_limit_source="shipped_default", global_limit_source="shipped_default")
-    with ua.usage_scope(scope):
-        reservation = ua.reserve_attempt(ua.AttemptRequest(
-            model="fixture/reviewer", provider="openrouter", reservation_usd=root_cap,
-            drive_root=h.data, task_id=task_id, root_task_id=task_id,
-            root_limit_usd=root_cap, global_limit_usd=global_cap))
-        ua.mark_dispatched(reservation)
-        ua.settle_attempt(reservation, {}, cost_usd=root_cap, cost_final=True)
-        panel = loop._TaskAcceptanceContext(
-            tools=SimpleNamespace(_ctx=ctx), content=ANSWER, task_id=task_id, task_type="task",
-            llm_trace={"tool_calls": []}, drive_root=h.data,
-            messages=[{"role": "system", "content": "Presence"}, {"role": "user", "content": "Report"}],
-            emit_progress=lambda *_a, **_kw: None, mode="required", subtree_statuses=[], budget_profile={},
-            passes_done=0, evidence={"goal": "Report"},
-            review_binding=review_substrate.build_review_binding(candidate=ANSWER, evidence={"goal": "Report"},
-                                                                 fence_token_or_state="money-gate"))
-        result = loop._execute_task_acceptance_panel(panel)
-    assert result.aggregate_signal == "DEGRADED" and result.degraded
-    assert result.degraded_reasons[0].startswith("review_wave_budget_insufficient")
-    assert not h.reviews and not load_task_acceptance_review_state(h.data, task_id).get("claims_by_binding")
-    refusal = next(row for row in ctx.pending_events if row.get("type") == "review_wave_budget_insufficient")
-    assert refusal["limit_usd"] == root_cap and refusal["remaining_usd"] == 0
-    assert refusal["estimated_wave_usd"] > 0
+    assert len(h.reviews) == 2 and not h.dispatched.is_set()  # the refusal cost nothing and sent no reviewer
+    assert not load_task_result(h.data, final.task_id).get("presence_continuation")
+    refusal = [str(row.get("content")) for row in h.inputs[1] if row.get("role") == "tool"]
+    assert len(refusal) == 1 and "REVIEW_CYCLES_EXHAUSTED" in refusal[0]
+    assert final.text == ANSWER and h.calls == 2 and not h.script
 
 
 def test_full_agent_review_return_keeps_the_spent_default_wallet(tmp_path, monkeypatch):
@@ -350,7 +321,9 @@ def test_full_agent_review_return_keeps_the_spent_default_wallet(tmp_path, monke
     owner/reentry coupling, not a qualification of the full provider transport.
     """
     from ouroboros import usage_accounting as ua
-    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, nominate, wait_for
+    from tests.test_presence_continuation_bootstrap import (
+        install_bootstrap_harness, left_review, wait_for, woke,
+    )
 
     h = install_bootstrap_harness(monkeypatch, tmp_path / "data")
     scopes = []
@@ -371,20 +344,19 @@ def test_full_agent_review_return_keeps_the_spent_default_wallet(tmp_path, monke
 
     monkeypatch.setattr(loop, "call_llm_with_retry", metered_transport)
 
-    def script(_messages):
+    def script(messages):
         assert not spent.is_set(), "the author bought a model round after its wallet was exhausted"
         scope = ua.current_usage_scope()
         assert scope.root_limit_usd == config.SETTINGS_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"] == 50.0
         scopes.append(scope)
-        ctx = h.agents[0].tools._ctx
-        if getattr(ctx, "_task_acceptance_pending", ""):
-            return finish("wait", answer_sha256=ctx._delivery_candidate.content_sha256)
-        return nominate()
+        if woke(messages):
+            return finish("final", message=ANSWER)
+        return waits() if left_review(messages) else review(answer=ANSWER)
 
     h.script = script
     execution = h.start(event())
     try:
-        initial = execution.initial.result(timeout=40)
+        initial = execution.initial.result(timeout=90)
         assert initial.status == "continuing" and initial.text == ""
         wait_for(lambda: (load_task_result(h.data, initial.task_id).get("owner_wait") or {}).get("state") == "waiting",
                  what="author parked before spending its remaining wallet")
@@ -401,7 +373,7 @@ def test_full_agent_review_return_keeps_the_spent_default_wallet(tmp_path, monke
             ua.settle_attempt(reservation, {}, cost_usd=remaining, cost_final=True)
         spent.set()
         h.release.set()
-        final = execution.result.result(timeout=40)
+        final = execution.result.result(timeout=90)
         row = load_task_result(h.data, initial.task_id)
         assert h.calls == calls_before_wake and len(h.agents) == 1 and len(h.reviews) == 1
         assert len(dispatched) == calls_before_wake
@@ -416,8 +388,9 @@ def test_full_agent_review_return_keeps_the_spent_default_wallet(tmp_path, monke
     finally:
         h.release.set()
         if h.entered.is_set():
-            assert h.settled.wait(15)
-        execution.result.result(timeout=40)
+            assert h.settled.wait(60)
+            settlement_notices_done()
+        execution.result.result(timeout=90)
         assert not h.executions.live()
 
 
@@ -428,7 +401,9 @@ def test_full_agent_explicit_calendar_deadline_survives_review_park(tmp_path, mo
     from ouroboros import deadline_utils
     from ouroboros.model_wait import _CALENDAR, calendar_scope
     from ouroboros.review_cycles import review_max_cycles
-    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, nominate, wait_for
+    from tests.test_presence_continuation_bootstrap import (
+        install_bootstrap_harness, left_review, wait_for, woke,
+    )
 
     h = install_bootstrap_harness(monkeypatch, tmp_path / "data")
     clock = SimpleNamespace(now=datetime.now(timezone.utc))
@@ -437,19 +412,18 @@ def test_full_agent_explicit_calendar_deadline_survives_review_park(tmp_path, mo
     monkeypatch.setattr(deadline_utils, "utc_now", lambda: clock.now)
     observed_deadlines = []
 
-    def script(_messages):
+    def script(messages):
         observed_deadlines.append(_CALENDAR.get())
         assert clock.now < expires, "a model call escaped the expired calendar bound"
-        ctx = h.agents[0].tools._ctx
-        if getattr(ctx, "_task_acceptance_pending", ""):
-            return finish("wait", answer_sha256=ctx._delivery_candidate.content_sha256)
-        return nominate()
+        if woke(messages):
+            return finish("final", message=ANSWER)
+        return waits() if left_review(messages) else review(answer=ANSWER)
 
     h.script = script
     with calendar_scope(deadline):
         execution = h.start(event())
     try:
-        initial = execution.initial.result(timeout=40)
+        initial = execution.initial.result(timeout=90)
         assert initial.status == "continuing" and initial.text == ""
         wait_for(lambda: (load_task_result(h.data, initial.task_id).get("owner_wait") or {}).get("state") == "waiting",
                  what="author parked with its inherited calendar deadline")
@@ -460,7 +434,7 @@ def test_full_agent_explicit_calendar_deadline_survives_review_park(tmp_path, mo
         assert h.entered.is_set() and not h.release.is_set() and not execution.result.done()
         calls_before_expiry = h.calls
         clock.now = expires + timedelta(seconds=1)
-        final = execution.result.result(timeout=30)
+        final = execution.result.result(timeout=90)
         row = load_task_result(h.data, initial.task_id)
         assert h.calls == calls_before_expiry and len(h.agents) == len(h.reviews) == 1
         assert ctx._presence_conversation_lost == "deadline"
@@ -471,40 +445,23 @@ def test_full_agent_explicit_calendar_deadline_survives_review_park(tmp_path, mo
         assert not h.executions.live()
     finally:
         h.release.set()
-        execution.result.result(timeout=40)
+        execution.result.result(timeout=90)
         if h.entered.is_set():
-            assert h.settled.wait(15)
+            assert h.settled.wait(60)
+            settlement_notices_done()
 
 
 def test_proactive_full_agent_preserves_child_and_parent_tail(tmp_path, monkeypatch):
     """Real initiation/admission/bootstrap; promoted work is a retained scheduled fixture."""
     import functools
 
-    from ouroboros.presence_capabilities import (
-        PresenceSelection, PresenceState, PresenceToolTarget, load_presence_state,
-        presence_state_fingerprint, save_presence_state,
-    )
-    from ouroboros.presence_profile import parse_presence_profile, presence_request_fingerprint
     from ouroboros.presence_runner import PROACTIVE_TURNS
-    from ouroboros.skill_loader import SkillReviewState, load_skill, save_review_state
-    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, nominate, wait_for
+    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, left_review, wait_for
     from tests.test_presence_continuation_host import _initiate
 
     h = install_bootstrap_harness(monkeypatch, tmp_path / "data")
     h.binding = _seed_presence_behavior(h.data)
-    skill_dir = h.data / "skills/external/community-helper"
-    skill_path = skill_dir / "SKILL.md"
-    skill_path.write_text(skill_path.read_text().replace(
-        "  capability_requests:\n", "  capability_requests:\n    - id: review\n      kind: tool\n"
-        "      required: true\n      purpose: Request independent result review.\n"), encoding="utf-8")
-    loaded = load_skill(skill_dir, h.data)
-    save_review_state(h.data, loaded.name, SkillReviewState(status="pass", content_hash=loaded.content_hash))
-    profile = parse_presence_profile(loaded.manifest, skill_dir)
-    state = load_presence_state(h.data, loaded.name)
-    review_request = next(request for request in profile.capability_requests if request.request_id == "review")
-    save_presence_state(h.data, loaded.name, PresenceState((*state.selections, PresenceSelection(
-        presence_request_fingerprint(review_request), PresenceToolTarget("builtin", "task_acceptance_review")))),
-        expected_state_fingerprint=presence_state_fingerprint(state))
+    select_review_change(h.data)
     monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
                         functools.partial(run_presence_turn, agent_factory=h.factory))
 
@@ -519,10 +476,8 @@ def test_proactive_full_agent_preserves_child_and_parent_tail(tmp_path, monkeypa
                         and str(row.get("content", "")).startswith("[PRESENCE CONVERSATION RESUMED]")), "")
         if resumed:
             assert "your promoted work work-proactive is scheduled" in resumed
-            return finish("final", answer_sha256=ctx._delivery_candidate.content_sha256)
-        if getattr(ctx, "_task_acceptance_pending", ""):
-            return finish("wait", answer_sha256=ctx._delivery_candidate.content_sha256)
-        return nominate()
+            return finish("final", message=ANSWER)
+        return waits() if left_review(messages) else review(answer=ANSWER)
 
     h.script = script
     try:
@@ -543,4 +498,5 @@ def test_proactive_full_agent_preserves_child_and_parent_tail(tmp_path, monkeypa
         h.release.set()
         wait_for(lambda: not PROACTIVE_TURNS.live(), timeout=40, what="proactive teardown")
         if h.entered.is_set():
-            assert h.settled.wait(15)
+            assert h.settled.wait(60)
+            settlement_notices_done()

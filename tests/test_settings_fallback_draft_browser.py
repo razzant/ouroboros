@@ -52,7 +52,7 @@ def test_saved_fallback_context_keeps_incomplete_number_through_stay_and_auto(ro
     field.fill('32768')
     with page.expect_response('**/api/settings'):
         page.locator('#btn-save-settings').click()
-    saved = [body for path, body in ui['posts'] if path == '/api/settings']
+    saved = roles.settings_saves(ui)
     assert len(saved) == 1
     expected = [0, 0, 0]
     expected[ordinal] = 32768

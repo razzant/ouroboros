@@ -12,6 +12,7 @@ from ouroboros.utils import truncate_review_artifact
 def review_operation_fields(actor: dict) -> dict:
     usage = actor.get("usage") if isinstance(actor.get("usage"), dict) else {}
     return {
+        "outcome": dict(actor.get("outcome") or {}),
         "operation_id": actor.get("operation_id") or "",
         "operation_state": actor.get("operation_state") or "settled",
         "late_result_pending": bool(actor.get("late_result_pending")),
@@ -50,7 +51,8 @@ def parse_model_response(model: str, result: Any, headers_dict: Any) -> dict:
     if isinstance(result, str) or (isinstance(result, dict) and result.get("error")):
         return {
             "model": resolved_model, "request_model": model,
-            "provider": provider, "verdict": "ERROR",
+            "provider": provider, "verdict": "PENDING" if operation_fields["late_result_pending"]
+            and operation_fields["operation_state"] != "custody_lost" else "ERROR",
             "text": result if isinstance(result, str) else str(result.get("error") or ""),
             "tokens_in": 0, "tokens_out": 0, "cost_estimate": cost,
             "slot_id": slot_id,
@@ -74,7 +76,7 @@ def parse_model_response(model: str, result: Any, headers_dict: Any) -> dict:
         else:
             text = choices[0]["message"]["content"]
             verdict = "UNKNOWN"
-            for line in text.split("\n")[:3]:
+            for line in (() if operation_fields["outcome"] else text.split("\n")[:3]):
                 line_upper = line.upper()
                 if "PASS" in line_upper:
                     verdict = "PASS"
@@ -91,6 +93,10 @@ def parse_model_response(model: str, result: Any, headers_dict: Any) -> dict:
             f"{truncate_review_artifact(json.dumps(result), limit=4000)})"
         )
         verdict = "ERROR"
+
+    if isinstance(result.get("outcome"), dict) and result["outcome"]:
+        outcome = result["outcome"]
+        verdict = "PENDING" if outcome.get("status") == "pending" else outcome.get("verdict") or "UNKNOWN"
 
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)

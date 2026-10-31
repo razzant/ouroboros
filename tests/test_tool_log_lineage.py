@@ -1,10 +1,12 @@
 """M2: every ``tools.jsonl`` row of a task carries ``root_task_id`` and
 ``delegation_role`` through the ONE lineage resolver
 (``task_results.resolve_task_lineage``; a direct root is its own root), and the
-``proactive_message`` / ``schedule_task_from_direct_chat`` event rows carry the
-``task_id`` that makes them visible in the task's own log stream
-(``gateway/logs.py`` filters rows by task/parent/root id). Rows that belong to
-no task stay exactly as they were.
+``proactive_message`` event row carries the ``task_id`` that makes it visible in
+the task's own log stream (``gateway/logs.py`` filters rows by task/parent/root
+id). A child scheduled from a direct turn is linked by its own recorded
+parent/root ids; the retired ``schedule_task_from_direct_chat`` duplicate-work
+warning is not written (one-bubble D16). Rows that belong to no task stay
+exactly as they were.
 """
 from __future__ import annotations
 
@@ -92,7 +94,10 @@ def test_proactive_message_row_carries_the_task_id(tmp_path):
     assert row["reason"] == "progress" and row["text_preview"] == "a word while I work"
 
 
-def test_schedule_from_direct_chat_row_carries_the_task_id(tmp_path, monkeypatch):
+def test_schedule_from_direct_chat_links_the_child_without_the_retired_warning(tmp_path, monkeypatch):
+    import re
+
+    from ouroboros.task_results import load_task_result
     from ouroboros.tools.control import _schedule_task
     from ouroboros.tools.registry import ToolContext
     from tests._shared import configure_test_subagent
@@ -104,7 +109,9 @@ def test_schedule_from_direct_chat_row_carries_the_task_id(tmp_path, monkeypatch
     ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="direct-1", is_direct_chat=True,
                       current_chat_id=5, event_queue=queue.Queue())
     out = _schedule_task(ctx, subagent_id=subagent_id, objective="scout X", expected_output="Y")
-    assert "queued" in out, out
-    [row] = [r for r in _rows(drive / "logs" / "events.jsonl") if r["type"] == "schedule_task_from_direct_chat"]
-    assert row["task_id"] == "direct-1", row
-    assert row["description"] == "scout X" and "duplicate" in row["warning"]
+    [child_id] = re.findall(r"Subagent request queued (\w+):", out)
+    child = load_task_result(drive, child_id)
+    # The direct turn's own log stream reaches the child through its recorded lineage.
+    assert (child["parent_task_id"], child["root_task_id"]) == ("direct-1", "direct-1"), child
+    events = drive / "logs" / "events.jsonl"
+    assert not [r for r in (_rows(events) if events.exists() else []) if r["type"] == "schedule_task_from_direct_chat"]

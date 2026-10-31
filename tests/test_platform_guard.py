@@ -8,11 +8,12 @@ for direct use of the following forbidden patterns:
   - Direct attribute access: os.kill, os.killpg, os.setsid, os.getpgid
   - Direct attribute access: signal.SIGKILL, signal.SIGTERM
 
-Note: subprocess flags (creationflags, start_new_session) and launcher.py
-are NOT covered by this guard — platform_layer.py provides
-subprocess_new_group_kwargs() and subprocess_hidden_kwargs() helpers,
-and caller code uses them (checked by code review, not by this AST guard).
-launcher.py is the immutable outer shell and is intentionally excluded.
+Console windows on Windows have their own two scans below: no process the
+launcher-process modules (launcher.py, ouroboros/launcher_*.py) start opens a
+console window, and no product code detaches a process from its console.
+Other subprocess flags (creationflags, start_new_session) are checked by code
+review: platform_layer.py provides subprocess_new_group_kwargs() and
+subprocess_hidden_kwargs(). launcher.py is excluded from the API scan above.
 
 Runs on every `make test` on all platforms.
 """
@@ -170,6 +171,70 @@ def test_no_platform_specific_apis_outside_platform_layer():
             f"All platform-specific code must go through platform_layer.py. "
             f"See docs/DEVELOPMENT.md 'Platform Abstraction Rule'."
         )
+
+
+# ── Console windows (Windows) ───────────────────────────────────────────
+
+# The packaged desktop launcher is the one Ouroboros process without a console. Windows gives each console
+# program it starts a window of its own unless the start asks for none; the server itself starts without one.
+# So a launcher-process module never lets a spawn open a console window: hidden flags, or the handoff's own
+# console choice (a terminal run keeps its terminal); only the handoff's POSIX branch replaces the process image.
+LAUNCHER_PROCESS_FILES = sorted([REPO_ROOT / "launcher.py", *(REPO_ROOT / "ouroboros").glob("launcher_*.py")])
+_SPAWNS = {"subprocess": {"run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput"},
+           "asyncio": {"create_subprocess_exec", "create_subprocess_shell"}}
+_HIDDEN_HELPERS = {"merge_hidden_kwargs", "subprocess_hidden_kwargs", "inherited_console_kwargs"}
+_IMAGE_REPLACEMENT = {("ouroboros/launcher_bootstrap.py", "exec_source_launcher")}
+# A process started without a console to pass on (or given its own) gives every console grandchild a window;
+# no product spawn needs that. A deliberate exception names its file and reason here.
+CONSOLE_DETACHING_ALLOWLIST: dict = {}
+_CONSOLE_DETACHING = {"DETACHED_PROCESS", "CREATE_NEW_CONSOLE", "AllocConsole", "FreeConsole"}
+
+
+def _asks_for_hidden_window(call: ast.Call) -> bool:
+    for keyword in call.keywords:
+        value = keyword.value
+        if keyword.arg is None and isinstance(value, ast.Call) \
+                and (getattr(value.func, "id", None) or getattr(value.func, "attr", None)) in _HIDDEN_HELPERS:
+            return True
+        if keyword.arg == "creationflags" and "CREATE_NO_WINDOW" in ast.unparse(value):
+            return True
+    return False
+
+
+def test_launcher_process_spawns_open_no_console_window():
+    offenders = []
+    for path in LAUNCHER_PROCESS_FILES:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        replacing = {id(node) for function in ast.walk(tree) if isinstance(function, ast.FunctionDef)
+                     and (rel, function.name) in _IMAGE_REPLACEMENT for node in ast.walk(function)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)):
+                continue
+            module, name = node.func.value.id, node.func.attr
+            if name in _SPAWNS.get(module, ()) and not _asks_for_hidden_window(node):
+                offenders.append(f"{rel}:{node.lineno}: {module}.{name} without hidden-window flags")
+            if module == "os" and id(node) not in replacing and (
+                    name.startswith(("exec", "spawn", "posix_spawn")) or name in {"system", "popen", "startfile"}):
+                offenders.append(f"{rel}:{node.lineno}: os.{name}; the launcher replaces itself only through "
+                                 "launcher_bootstrap.exec_source_launcher")
+    assert not offenders, "\n".join(offenders)
+
+
+def test_no_product_code_detaches_a_process_from_its_console():
+    offenders = []
+    files = [*SCAN_FILES, REPO_ROOT / "launcher.py", *(path for base in SCAN_DIRS for path in base.rglob("*.py"))]
+    for path in sorted(set(files)):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in CONSOLE_DETACHING_ALLOWLIST:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            name = (node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute)
+                    else node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None)
+            if name in _CONSOLE_DETACHING:
+                offenders.append(f"{rel}:{node.lineno}: {name}")
+    assert not offenders, "\n".join(offenders)
 
 
 def test_platform_layer_exports_core_symbols():

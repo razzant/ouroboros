@@ -8,7 +8,6 @@ subagent → parent mailbox frame; forged owner provenance impossible).
 
 from __future__ import annotations
 
-import json
 import types
 
 import pytest
@@ -83,6 +82,24 @@ def test_projection_admits_the_late_answer_only_under_the_explicit_flag(tmp_path
                              request_id="r2", allow_expired=True)
     assert second["ok"] is False and second["state"] == STATE_ANSWERED
     assert quiz_states(tmp_path, "t1")["q1"]["answered_index"] == 1
+
+
+@pytest.mark.parametrize("wait_mode", ["optional", "waiting", "resumed"])
+def test_late_frame_does_not_invent_continuation_after_terminal(tmp_path, monkeypatch, wait_mode):
+    from ouroboros import owner_quiz
+
+    record_asked(tmp_path, "t1", quiz_id="q1", question="Which?", options=["A"],
+                 assumption="assume A", wait_for_answer=wait_mode != "optional")
+    if wait_mode == "resumed":
+        monkeypatch.setattr(owner_quiz, "utc_now_iso", lambda: "2026-01-01T00:00:01Z")
+        assert owner_quiz.mark_wait_ended(tmp_path, "t1", "q1")
+    monkeypatch.setattr(owner_quiz, "utc_now_iso", lambda: "2026-01-01T00:00:02Z")
+    reconcile_terminal(tmp_path, "t1")
+    answer = record_answered(tmp_path, "t1", quiz_id="q1", option_index=0,
+                             request_id="late", allow_expired=True)
+    frame = owner_quiz.recorded_answer_frame(answer["block"])
+    assert ("You continued under the assumption" in frame) == (wait_mode != "waiting")
+    assert "The owner chose option 1: A" in frame
 
 
 def test_projection_refuses_out_of_range_and_unknown(tmp_path):
@@ -164,18 +181,19 @@ def test_task_done_seam_reconciles_and_broadcasts(tmp_path, monkeypatch):
     quiz_state frame for each — replacing the per-domain events.py blocks."""
     import supervisor.queue_transitions as qt
 
-    record_asked(tmp_path, "t1", quiz_id="q1", question="?", options=["A", "B"])
+    record_asked(tmp_path, "t1", quiz_id="q1", question="?", options=["A", "B"], chat_id=73)
     frames = []
 
     class _Bridge:
-        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0, comment=None, question_delivery=None):
-            frames.append((quiz_id, task_id, state))
+        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0, comment=None,
+                            question_delivery=None, wait_for_answer=None):
+            frames.append((quiz_id, task_id, state, chat_id, wait_for_answer))
 
     import supervisor.message_bus as mb
 
     monkeypatch.setattr(mb, "get_bridge", lambda: _Bridge())
     qt.reconcile_terminal_task_projections(tmp_path, "t1")
-    assert frames == [("q1", "t1", "expired_terminal")]
+    assert frames == [("q1", "t1", "expired_terminal", 73, False)]
     assert quiz_states(tmp_path, "t1")["q1"]["state"] == STATE_EXPIRED_TERMINAL
 
 
@@ -190,7 +208,7 @@ def _decision_app(tmp_path, monkeypatch, live_task=None):
     monkeypatch.setattr(td, "request_drive_root", lambda request: tmp_path)
     monkeypatch.setattr(
         td, "_live_root_task",
-        lambda task_id: (live_task, "" if live_task else "task_not_live"),
+        lambda task_id, **_: (live_task, "" if live_task else "task_not_live"),
     )
     if live_task is not None:
         # Tests of live answer effects start from an explicitly published card.
@@ -462,12 +480,13 @@ def test_history_replay_merges_projection_state(tmp_path, monkeypatch):
     logs = tmp_path / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     chat_path = logs / "chat.jsonl"
-    chat_path.write_text(json.dumps({
+    from ouroboros import dialogue_store as ds
+    ds.append(tmp_path, "chat", {
         "ts": "2026-08-31T00:00:00Z", "direction": "out", "chat_id": 1,
         "user_id": 7, "text": "Which?", "type": "quiz", "task_id": "task-1",
         "quiz": {"quiz_id": "q1", "options": [{"label": "A"}, {"label": "B"}],
                  "stake": "", "assumption": "x", "state": "open"},
-    }) + "\n")
+    })
     from ouroboros.gateway.history import _collect_chat_rows
 
     rows, _ = _collect_chat_rows(chat_path, tmp_path / "archive", 50,
@@ -740,12 +759,13 @@ def test_history_replay_carries_the_owner_comment(tmp_path, monkeypatch):
     logs = tmp_path / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     chat_path = logs / "chat.jsonl"
-    chat_path.write_text(json.dumps({
+    from ouroboros import dialogue_store as ds
+    ds.append(tmp_path, "chat", {
         "ts": "2026-09-01T00:00:00Z", "direction": "out", "chat_id": 1,
         "user_id": 7, "text": "Which?", "type": "quiz", "task_id": "task-1",
         "quiz": {"quiz_id": "q1", "options": [{"label": "A"}, {"label": "B"}],
                  "stake": "", "assumption": "x", "state": "open"},
-    }) + "\n")
+    })
     from ouroboros.gateway.history import _collect_chat_rows
 
     rows, _ = _collect_chat_rows(chat_path, tmp_path / "archive", 50,

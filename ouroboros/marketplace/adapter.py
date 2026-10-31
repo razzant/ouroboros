@@ -98,6 +98,8 @@ def _manifest_frontmatter_dict(manifest: SkillManifest) -> Dict[str, Any]:
         # CPL-7: preserve the author's Model Experience prose across adaptation.
         "model_experience": dict(manifest.model_experience) if manifest.model_experience else None,
     }
+    if manifest.always_in_context:
+        front["always_in_context"] = True
     front.update(manifest.raw_extra or {})
     return front
 
@@ -299,7 +301,7 @@ def _translate_env_from_settings(
 def _render_frontmatter(front: Dict[str, Any]) -> str:
     import yaml  # type: ignore
 
-    order = ("name", "description", "version", "type", "runtime", "timeout_sec", "when_to_use", "model_experience", "permissions", "env_from_settings", "os", "requires", "entry", "scripts")
+    order = ("name", "description", "version", "type", "runtime", "timeout_sec", "when_to_use", "model_experience", "always_in_context", "permissions", "env_from_settings", "os", "requires", "entry", "scripts")
     ordered = {
         key: front[key]
         for key in order
@@ -506,6 +508,13 @@ def adapt_openclaw_skill(
     source_model_experience = original_front.get("model_experience")
     if isinstance(source_model_experience, dict) and source_model_experience:
         translated_front["model_experience"] = source_model_experience
+    # So does an instruction source's always-in-context declaration (same fail-closed re-parse).
+    if original_front.get("always_in_context") is True:
+        if skill_type == "instruction":
+            translated_front["always_in_context"] = True
+        else:
+            warnings.append("always_in_context is dropped: the package adapts as a script skill, and only "
+                            "instruction skills place their body in every context.")
 
     rendered_body = _append_manual_install_guidance(body, manual_install_specs)
     rendered_skill_md = _render_skill_md(translated_front, rendered_body)

@@ -105,6 +105,23 @@ def review_output_allowance(model: str, window: int = 0, **binding) -> int:
     return response_allowance(str(model or ""), _review_output_budget(), **observed_binding(window, binding))
 
 
+def triad_stable_head(layer: str, bible_text: str) -> str:
+    """The head of an api row's system text: the constitutional preamble and BIBLE (or its absence) on the body
+    layer, the bare instructions heading elsewhere."""
+    if layer != "body":
+        return "## REVIEW INSTRUCTIONS\n\n"
+    if bible_text:
+        return (_CONSTITUTIONAL_PREAMBLE + "### BIBLE.md (Full Text)\n\n" + bible_text
+                + "\n\n---\n\n## REVIEW INSTRUCTIONS\n\n")
+    return _CONSTITUTIONAL_PREAMBLE + "(BIBLE.md could not be loaded)\n\n## REVIEW INSTRUCTIONS\n\n"
+
+
+def packet_head_material(layer: str) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): an api row's head on ``layer``,
+    BIBLE present (a placeholder: guide text) or missing, and its one user turn."""
+    return [triad_stable_head(layer, "⟨BIBLE.md⟩"), triad_stable_head(layer, ""), TRIAD_USER_TURN]
+
+
 def triad_api_messages(prompt: str, stable_prefix_len: int, content: str,
                        *, layer: str = "body") -> tuple:
     """The exact api-row message pair of a triad panel, and the BIBLE text it
@@ -118,22 +135,11 @@ def triad_api_messages(prompt: str, stable_prefix_len: int, content: str,
     anything else would admit a wave the ledger then refuses seat by seat.
     """
     bible_text = ""
-    if layer != "body":
-        stable_head = "## REVIEW INSTRUCTIONS\n\n"
-    else:
+    if layer == "body":
         bible_text = _rev().load_governance_doc(_rev()._REPO_ROOT, "BIBLE.md", on_missing="explicit")
-        if bible_text:
-            stable_head = (
-                _CONSTITUTIONAL_PREAMBLE
-                + "### BIBLE.md (Full Text)\n\n" + bible_text
-                + "\n\n---\n\n## REVIEW INSTRUCTIONS\n\n"
-            )
-        else:
+        if not bible_text:
             log.warning("Proceeding without BIBLE.md — constitutional compliance cannot be guaranteed")
-            stable_head = (
-                _CONSTITUTIONAL_PREAMBLE
-                + "(BIBLE.md could not be loaded)\n\n## REVIEW INSTRUCTIONS\n\n"
-            )
+    stable_head = triad_stable_head(layer, bible_text)
     # System content is split at the caller-declared stable/dynamic boundary so
     # the byte-stable prefix (constitutional preamble + BIBLE + the prompt's own
     # stable governance head) carries a provider cache marker; per-round evidence
@@ -219,98 +225,102 @@ async def _query_model(
     retry_key: str = "", subagent_id: str = "", use_local: bool | None = None, task_evidence: dict = None,
     native_retrieval: bool = False, resolved_wave_id: str = "",
     session_access: str = "", checking_source: dict = None, preflight_execution: dict = None,
+    processing_preference: str | None = None, parts: Any = None,
+    additional: bool = False, severity_policy: dict = None,
 ):
-    async with semaphore:
-        slot = None
-        try:
-            if bool(getattr(ctx, "_review_reconcile_only", False)):
-                from ouroboros.tools.review_change_custody import collect_recorded_commit_actor
-                actor = await asyncio.get_running_loop().run_in_executor(
-                    None, contextvars.copy_context().run,
-                    lambda: collect_recorded_commit_actor(ctx, surface, slot_id, retry_key),
-                )
-                return _actor_query_result(model, actor, slot_id)
-            from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
-            from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-            slot_route = route if route is not None else ReviewRouteKind.API_CHAT
-            delegated = slot_route is ReviewRouteKind.AGENT_SESSION
-            # RETRIEVES class (session row, or an api row saved as ``native``):
-            # the compact session task replaces the assembled pack. The row's
-            # catalog id is identity, never a delivery signal (F8).
-            native_retrieval = bool(native_retrieval) and not delegated
-            retrieves = delivery_retrieves(slot_route, native_retrieval)
-            from ouroboros.review_evidence import commit_review_evidence_refs, commit_review_evidence_section
-            evidence = task_evidence or {}
-            policy = dict(session_policy or {"output_contract": _rev().REVIEW_JSON_ARRAY_CONTRACT}) if retrieves else {}
-            if retrieves and evidence:
-                session_task += "\n\n" + commit_review_evidence_section(evidence, delivery="session" if delegated else "native")
-                if not delegated:
-                    policy["native_data_root"] = evidence["data_root"]
-            _out_budget = _review_output_budget()
-            request = ReviewRequest(
-                surface=surface,
-                goal="Run independent multi-model review over the supplied evidence.",
-                # 5.2: a retrieving slot never receives the assembled api pack.
-                messages=[] if retrieves else messages,
-                task_id=review_request_task_id(ctx),
-                call_type="multi_model_review",
-                max_tokens=_out_budget,
-                default_temperature=0.2,
-                no_proxy=True,
-                session_task=session_task if retrieves else "",
-                session_root=session_root if retrieves else "",
-                policy=policy,
-                # The wave's frozen exhibits, persisted with the request for an exact rejoin.
-                evidence={**({"task_execution": evidence} if evidence else {}),
-                          **({"preflight_execution": preflight_execution} if preflight_execution else {})},
-                evidence_refs=commit_review_evidence_refs(evidence),
-                usage_attribution=usage_attribution or {},
-                resolved_wave_id=resolved_wave_id,
-                task_attempt=getattr(ctx, "task_attempt", None) if ctx is not None else None,
-                retry_key=str(retry_key or ""),
-                reconcile_only=bool(getattr(ctx, "_review_reconcile_only", False)),
-                checking_source=dict(checking_source or {}) if delegated else {},
-                # The owner deadline is a bound of every retrieving episode; it
-                # reaches the row here exactly as the advisory passes it.
-                deadline_at=_rev()._owner_deadline_at(ctx),
+    slot = None
+    try:
+        if bool(getattr(ctx, "_review_reconcile_only", False)):
+            from ouroboros.tools.review_change_custody import collect_recorded_commit_actor
+            actor = await asyncio.get_running_loop().run_in_executor(
+                None, contextvars.copy_context().run,
+                lambda: collect_recorded_commit_actor(ctx, surface, slot_id, retry_key),
             )
-            slot = ReviewSlot(
-                slot_id=slot_id,
-                model=model,
-                effort=effort or live_effort_range()["max"],  # an absent vector tail: an Auto reviewer's level
-                max_tokens=_out_budget,
-                default_temperature=0.2,
-                role_hint=TRIAD_ROLE_HINT,
-                use_local=_rev()._cfg.review_model_uses_local(model) if use_local is None else use_local,
-                route=slot_route,
-                session_target=session_target if delegated else "",
-                session_profile=session_profile,
-                subagent_id=str(subagent_id or ""),
-                # Explicit both ways for an api row: the slot's own delivery fact.
-                native_retrieval_override=None if delegated else bool(native_retrieval),
-                session_access=str(session_access or "") if delegated else "",
-            )
-            loop = asyncio.get_running_loop()
-            # run_in_executor copies no context: carry the usage scope (and its
-            # bound fence) into the executor thread the substrate reserves on.
-            run_result = await loop.run_in_executor(
-                None,
-                contextvars.copy_context().run,
-                lambda: run_review_request(
-                    request,
-                    slots=[slot],
-                    drive_root=_rev().review_drive_root(ctx),
-                    llm=llm_client,
-                    usage_ctx=ctx,
-                ),
-            )
-            actor = (run_result.actors or [{}])[0]
             return _actor_query_result(model, actor, slot_id)
-        except Exception as e:
-            # Preserve full review errors; helper adds an omission note if needed.
-            error_msg = _rev().truncate_review_artifact(str(e), limit=4000)
-            error = f"Error: {error_msg}"
-            return model, _rev()._review_query_error_payload(ctx=ctx, model=model, messages=messages, slot_id=slot_id, error=error, slot=slot), None
+        from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
+        from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
+        slot_route = route if route is not None else ReviewRouteKind.API_CHAT
+        delegated = slot_route is ReviewRouteKind.AGENT_SESSION
+        # RETRIEVES class (session row, or an api row saved as ``native``):
+        # the compact session task replaces the assembled pack. The row's
+        # catalog id is identity, never a delivery signal (F8).
+        native_retrieval = bool(native_retrieval) and not delegated
+        retrieves = delivery_retrieves(slot_route, native_retrieval)
+        from ouroboros.review_evidence import commit_review_evidence_refs, commit_review_evidence_section
+        evidence = task_evidence or {}
+        policy = dict(session_policy or {"output_contract": _rev().REVIEW_JSON_ARRAY_CONTRACT}) if retrieves else {}
+        policy.update(parts=list(parts or ()), additional=additional, severity_policy=severity_policy or {})
+        if retrieves and evidence:
+            session_task += "\n\n" + commit_review_evidence_section(evidence, delivery="session" if delegated else "native")
+            if not delegated:
+                policy["native_data_root"] = evidence["data_root"]
+        _out_budget = _review_output_budget()
+        request = ReviewRequest(
+            surface=surface,
+            goal="Run independent multi-model review over the supplied evidence.",
+            # 5.2: a retrieving slot never receives the assembled api pack.
+            messages=[] if retrieves else messages,
+            task_id=review_request_task_id(ctx),
+            call_type="multi_model_review",
+            max_tokens=_out_budget,
+            default_temperature=0.2,
+            no_proxy=True,
+            session_task=session_task if retrieves else "",
+            session_root=session_root if retrieves else "",
+            policy=policy,
+            # The wave's frozen exhibits, persisted with the request for an exact rejoin.
+            evidence={**({"task_execution": evidence} if evidence else {}),
+                      **({"preflight_execution": preflight_execution} if preflight_execution else {})},
+            evidence_refs=commit_review_evidence_refs(evidence),
+            usage_attribution=usage_attribution or {},
+            resolved_wave_id=resolved_wave_id,
+            task_attempt=getattr(ctx, "task_attempt", None) if ctx is not None else None,
+            retry_key=str(retry_key or ""),
+            reconcile_only=bool(getattr(ctx, "_review_reconcile_only", False)),
+            checking_source=dict(checking_source or {}) if delegated else {},
+            # The owner deadline is a bound of every retrieving episode; it
+            # reaches the row here exactly as the advisory passes it.
+            deadline_at=_rev()._owner_deadline_at(ctx),
+        )
+        slot = ReviewSlot(
+            slot_id=slot_id,
+            model=model,
+            effort=effort or live_effort_range()["max"],  # an absent vector tail: an Auto reviewer's level
+            max_tokens=_out_budget,
+            default_temperature=0.2,
+            role_hint=TRIAD_ROLE_HINT,
+            use_local=_rev()._cfg.review_model_uses_local(model) if use_local is None else use_local,
+            route=slot_route,
+            session_target=session_target if delegated else "",
+            session_profile=session_profile,
+            processing_preference=processing_preference,
+            subagent_id=str(subagent_id or ""),
+            # Explicit both ways for an api row: the slot's own delivery fact.
+            native_retrieval_override=None if delegated else bool(native_retrieval),
+            session_access=str(session_access or "") if delegated else "",
+        )
+        loop = asyncio.get_running_loop()
+        # run_in_executor copies no context: carry the usage scope (and its
+        # bound fence) into the executor thread the substrate reserves on.
+        run_result = await loop.run_in_executor(
+            None,
+            contextvars.copy_context().run,
+            lambda: run_review_request(
+                request,
+                slots=[slot],
+                drive_root=_rev().review_drive_root(ctx),
+                llm=llm_client,
+                usage_ctx=ctx,
+            ),
+        )
+        actor = (run_result.actors or [{}])[0]
+        return _actor_query_result(model, actor, slot_id)
+    except Exception as e:
+        # Preserve full review errors; helper adds an omission note if needed.
+        from ouroboros.utils import sanitize_tool_result_for_log
+        error_msg = sanitize_tool_result_for_log(str(e))
+        error = f"Error: {error_msg}"
+        return model, _rev()._review_query_error_payload(ctx=ctx, model=model, messages=messages, slot_id=slot_id, error=error, slot=slot), None
 
 
 def _actor_query_result(model, actor, slot_id):
@@ -358,6 +368,8 @@ async def _multi_model_review_async(content: str, prompt: str,
     row_ids = _row_vector("slot_ids", lambda idx: _rev().slot_id_for_row(idx + 1))
     row_actors = _row_vector("subagent_ids", lambda idx: "")
     row_local = _row_vector("use_local", lambda idx: None)
+    # None is an unbound historical row; a captured empty preference stays empty.
+    row_processing = _row_vector("processing_preferences", lambda idx: None)
     row_access = _row_vector("session_accesses", lambda idx: "")
     # One brief per seat (PR-3 B): a retrieving row carries ITS OWN two-part
     # brief, answer policy and reading root; an absent entry keeps the shared one.
@@ -410,7 +422,9 @@ async def _multi_model_review_async(content: str, prompt: str,
         checking_source = wave_checking_source(session_root,
             [SimpleNamespace(route=route, session_access=access) for route, access in zip(row_routes, row_access)],
             data_root=_rev().review_drive_root(ctx), subject=SUBJECT_INDEX)
-    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+    from ouroboros.review_wave import review_wave_scope
+
+    semaphore = None  # Compatibility argument; physical workers own wave capacity.
     llm_client = _rev().LLMClient()
     tasks = [
         _query_model(llm_client, m, messages, semaphore, ctx, slot_id=row_ids[idx],
@@ -418,14 +432,19 @@ async def _multi_model_review_async(content: str, prompt: str,
                      session_root=row_roots[idx] or session_root,
                      effort=row_efforts[idx], session_target=row_targets[idx],
                      session_profile=row_profiles[idx], surface=surface,
+                     processing_preference=row_processing[idx],
                      session_policy=row_policies[idx] or session_policy, usage_attribution=usage_attribution,
+                     parts=_row_vector("parts", lambda idx: ())[idx],
+                     additional=_row_vector("additional", lambda idx: False)[idx],
+                     severity_policy=(row_plan or {}).get("severity_policy"),
                      retry_key=retry_key, subagent_id=row_actors[idx], use_local=row_local[idx], task_evidence=task_evidence,
                      preflight_execution=preflight_execution,
                      resolved_wave_id=fan_out_wave, session_access=row_access[idx], checking_source=checking_source,
                      native_retrieval=row_retrieves[idx] and row_routes[idx] is ReviewRouteKind.API_CHAT)
         for idx, m in enumerate(models)
     ]
-    results = await asyncio.gather(*tasks)
+    with review_wave_scope(CONCURRENCY_LIMIT):
+        results = await asyncio.gather(*tasks)
 
     review_results = []
     for model, result, headers_dict in results:

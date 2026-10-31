@@ -279,7 +279,7 @@ def test_unreadable_pause_authority_refuses_repeated_real_tool_launches(tmp_path
 
 def test_worker_claim_is_durable_before_handoff_and_restore_is_not_unrun(tmp_path, monkeypatch):
     from supervisor.worker_assignment import _claim_worker_launch
-    from supervisor.events_budget import budget_hold_fact
+    from ouroboros.work_stop import continuation_refusal
     from ouroboros.task_results import write_task_result
 
     q, _, workers = _install_queue(tmp_path, monkeypatch)
@@ -295,5 +295,5 @@ def test_worker_claim_is_durable_before_handoff_and_restore_is_not_unrun(tmp_pat
     assert handed_off == [task] and task["admitted_dispatch"] == "possible"
     workers.PENDING.clear()  # crash before transport outcome became observable
     assert q.restore_pending_from_snapshot() == 1
-    assert budget_hold_fact(workers.PENDING[0])["reason"] == "dispatch_outcome_unknown"
+    assert continuation_refusal(workers.PENDING[0])["reason"] == "dispatch_outcome_unknown"
     assert not q.resume_budget_paused_task("root")["ok"]

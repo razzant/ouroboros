@@ -1,12 +1,46 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshModelCatalog, summarizeReadErrors } from '../modules/settings_catalog.js';
+import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
 
 const first = {
     items: [{ value: 'claudexor::opaque=owner-model', source_id: 'opaque', credential_profile_id: 'personal', observed_at: 'earlier' }],
     model_sources: [{ id: 'opaque', label: 'Model service', credentialHarness: 'codex' }],
     observed_at: 'earlier', errors: [],
 };
+
+test('connection discovery replaces only the exact source and preserves general refresh provenance', () => {
+    const general = mergeModelCatalog({}, { ...first, coverage: { complete: true },
+        account_catalogs: [{ source: 'opaque', accounts: [] }], items: [...first.items,
+            { value: 'openai::same-model' }, { value: 'openai-compatible::same-model' },
+            { value: 'openai-compatible@alpha::old' }, { value: 'openai-compatible@beta::same-model' }] });
+    const connections = { 'openai-compatible@alpha': [{ value: 'openai-compatible@alpha::same-model' }] };
+    const composed = withConnectionCatalogs(general, connections);
+    assert.deepEqual(composed.items.map((item) => item.value), [first.items[0].value,
+        'openai::same-model', 'openai-compatible::same-model', 'openai-compatible@beta::same-model',
+        'openai-compatible@alpha::same-model']);
+    const { items: _items, ...provenance } = composed;
+    const { items: _generalItems, ...originalProvenance } = general;
+    assert.deepEqual(provenance, originalProvenance);
+    for (const incoming of [
+        { read_state: 'transport', errors: [{ error: 'offline' }] },
+        { items: [], model_sources: [], errors: [{ error: 'source failed' }] },
+        { items: [{ value: 'openai::new' }], model_sources: [], partial: true },
+        { items: [{ value: 'openai::new' }], model_sources: [], errors: [] },
+        { items: [], model_sources: [], errors: [] },
+    ]) {
+        const refreshed = mergeModelCatalog(general, incoming);
+        const after = withConnectionCatalogs(refreshed, connections);
+        assert.deepEqual(after, { ...refreshed, items: [...refreshed.items.filter((item) =>
+            item.value !== 'openai-compatible@alpha::old'), ...connections['openai-compatible@alpha']] });
+        assert.deepEqual(withConnectionCatalogs(refreshed, { 'openai-compatible@alpha': [] }).items,
+            refreshed.items.filter((item) => item.value !== 'openai-compatible@alpha::old'));
+    }
+    assert.ok(general.items.some((item) => item.value === 'openai-compatible@alpha::old'), 'composition does not mutate the general store');
+    assert.deepEqual(withConnectionCatalogs({ items: [
+        { value: 'openai-compatible@default::old' }, { value: 'openai-compatible@beta::old' },
+    ] }, { 'openai-compatible': [] }).items, [{ value: 'openai-compatible@beta::old' }],
+    'source identity uses the existing parser, including the built-in default alias');
+});
 
 test('unread, failed, and stale discovery preserve last-known entries with their provenance', () => {
     const before = mergeModelCatalog({}, first);

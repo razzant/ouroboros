@@ -27,7 +27,7 @@ from ouroboros.post_task_checkpoint import set_root_post_task_checkpoint
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_cybergym_executor import _config, dataclasses_replace
 from tests.test_cybergym_cost_grace import _completed_abandoned_residue_frame
-from tests._store_shared import read_result
+from tests._store_shared import as_install, read_result
 
 
 def _frame():
@@ -100,13 +100,14 @@ def test_real_ledger_checkpoint_gateway_and_disk_reach_grace(canonical_terminal,
     assert stored["root_phase_checkpoint"]["accounting"]["attempt_counts"]["unresolved"] == 1
     app = Starlette(routes=[Route("/api/tasks/{task_id}", api_task_get)])
     app.state.drive_root = data
-    with TestClient(app) as client:
+    with as_install(data), TestClient(app) as client:  # the producer's own server answers for its root
         response = client.get("/api/tasks/cybergym-root")
     assert response.status_code == 200
     live = response.json()
     assert live["root_phase_checkpoint"]["accounting"] == stored["root_phase_checkpoint"]["accounting"]
     assert _abandoned_cost_residue_usd(live) == pytest.approx(0.05)
-    raw = read_result(data, "cybergym-root")
+    with as_install(data):
+        raw = read_result(data, "cybergym-root")
     assert _abandoned_cost_residue_usd(raw) == pytest.approx(0.05)
     root = tmp_path / "executor"
     root.mkdir()
@@ -129,7 +130,8 @@ def test_real_ledger_checkpoint_gateway_and_disk_reach_grace(canonical_terminal,
     assert _valid_cost_grace(delivered)["accounting_schema"] == "ouroboros.root_cost_snapshot.v1"
     disk = executor._terminal_result_from_isolate_disk("cybergym-root")
     assert _valid_cost_grace(disk) is not None
-    assert load_task_result(data, "cybergym-root")["root_phase_checkpoint"] == stored["root_phase_checkpoint"]
+    with as_install(data):
+        assert load_task_result(data, "cybergym-root")["root_phase_checkpoint"] == stored["root_phase_checkpoint"]
     responses = iter(({"status_code": 404, "body": {}}, live))
     custody = CyberGymExecutor(dataclasses_replace(config, http_runner=lambda *_args, **_kwargs: next(responses)))
     custody._gateway_attempts["cybergym-root"] = {"status": "submitted"}

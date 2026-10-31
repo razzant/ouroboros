@@ -17,6 +17,8 @@ import queue as stdqueue
 
 import pytest
 
+from ouroboros.delegate_reply import addressed_questions
+
 
 @pytest.fixture(autouse=True)
 def _fresh_custody_memo():
@@ -47,6 +49,23 @@ def _own_run(run_id="run-1", *, task_id="t-nanny", route_id="some-route", settle
         run_id=run_id, task_id=task_id, route_id=route_id, model="m",
         project_id="prj", project_owned=False, settled=settled,
     )
+
+
+def _retained_message(ctx, mid, text="steer", rid="run-1"):
+    """A prior host-prepared invocation; arbitrary IDs alone grant no replay."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from ouroboros import delegate_custody as custody, delegate_message_store, store
+
+    if not mid:
+        return mid
+    with store.open_store(custody.custody_root(ctx), write=False) as txn:
+        if txn.get_row(delegate_message_store._set(rid), mid) is not None:
+            return mid
+    entry = custody.lookup(custody.custody_root(ctx), ctx.task_id, rid)[1]
+    with patch.object(delegate_message_store.uuid, "uuid4", return_value=SimpleNamespace(hex=mid)):
+        delegate_message_store.prepare(ctx, entry, "starter", text, "", None)
+    return mid
 
 
 def _row(route_id="some-route", live_input="mid_turn"):
@@ -384,7 +403,7 @@ def test_engine_rejected_classifies_by_reason(tmp_path, monkeypatch):
 
     _install(monkeypatch, _Stub(error=cx.ClaudexorUnavailable(
         "idempotency_conflict", "different digest", status_code=409)))
-    out = _delegate_message(ctx, "run-1", "steer", message_id="m-old")
+    out = _delegate_message(ctx, "run-1", "steer", message_id=_retained_message(ctx, "m-old"))
     payload = json.loads(out.text)
     assert payload["status"] == "rejected" and payload["reason"] == "idempotency_conflict"
     assert out.code == AGENT_FAULT_CODE
@@ -536,11 +555,11 @@ def test_a_returned_message_id_replays_under_the_same_key_skipping_the_short_cir
     _own_run(settled=True)
     stub = _install(monkeypatch, _Stub(operations=[], result={
         "accepted": True, "outcome": "accepted", "attemptId": "a01"}))
-    payload = json.loads(_delegate_message(ctx, "run-1", "steer", message_id="m-earlier").text)
+    payload = json.loads(_delegate_message(ctx, "run-1", "steer", message_id=_retained_message(ctx, "m-earlier")).text)
     assert payload["status"] == "accepted" and payload["message_id"] == "m-earlier"
     assert stub.reads == []
-    assert stub.posts == [{"run_id": "run-1", "text": "steer", "key": "m-earlier",
-                           "timeout_sec": stub.posts[0]["timeout_sec"]}]
+    assert len(stub.posts) == 1 and stub.posts[0]["key"] == "m-earlier"
+    assert json.loads(stub.posts[0]["text"])["text"] == "steer"
 
 
 def test_a_fresh_call_mints_a_new_id_each_time(tmp_path, monkeypatch):
@@ -574,7 +593,7 @@ def test_the_message_verb_is_registered_on_every_contract_surface():
     assert entry.timeout_sec == 120 and entry.timeout_sec > interactions._MESSAGE_DEADLINE_SEC
     schema = entry.schema["parameters"]
     assert schema["required"] == ["run_id", "text"]
-    assert set(schema["properties"]) == {"run_id", "text", "message_id"}
+    assert set(schema["properties"]) == {"run_id", "text", "message_id", "reply_to"}
     assert "delegate_message" in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
     assert "delegate_message" in ACTING_SUBAGENT_TOOL_NAMES
     # Supervision activity, never a burn-baseline reset (only start/schedule are).
@@ -778,14 +797,14 @@ def test_pending_refusal_includes_current_answerable_questions_without_consuming
     stub = _install(monkeypatch, _QuestionStub())
     memo = {"other-run": frozenset({"other-question"})}
     monkeypatch.setattr(interactions, "_REPORTED_INTERACTIONS", memo)
-    out = interactions._delegate_message(ctx, "run-1", "steer", message_id=message_id)
+    out = interactions._delegate_message(ctx, "run-1", "steer", message_id=_retained_message(ctx, message_id))
     payload = json.loads(out.text)
     assert (payload["status"], payload["reason"], payload["accepted"]) == (
         "not_active", "interaction_pending", False)
     assert out.code == SUBSTRATE_REFUSAL_CODE and payload["ok"] is False
     assert payload["attempt_id"] == "a01" and payload["detail"] == "Answer the pending question"
     assert payload["message_id"] == (message_id or stub.posts[0]["key"])
-    assert payload["pending_interactions"] == pending_interactions(stub.detail)
+    assert payload["pending_interactions"] == addressed_questions(ctx.task_id, "run-1", pending_interactions(stub.detail))
     assert payload["interaction_observation"]["status"] == "observed"
     assert "continuation" not in payload and "continuation_note" not in payload
     assert "state" not in payload and "waiting_on_user" not in payload
@@ -842,7 +861,7 @@ def test_failed_question_observation_preserves_the_refusal_as_unknown(
     ctx = _ctx(tmp_path)
     _own_run()
     stub = _install(monkeypatch, _QuestionStub(detail=detail, detail_error=error))
-    out = _delegate_message(ctx, "run-1", "steer", message_id="m-refused")
+    out = _delegate_message(ctx, "run-1", "steer", message_id=_retained_message(ctx, "m-refused"))
     payload = json.loads(out.text)
     assert (payload["status"], payload["reason"], payload["message_id"]) == (
         "not_active", "interaction_pending", "m-refused")
@@ -865,7 +884,7 @@ def test_question_resolved_between_refusal_and_read_is_an_empty_current_observat
     ctx = _ctx(tmp_path)
     _own_run()
     stub = _install(monkeypatch, _QuestionStub(detail={"pendingInteractions": []}))
-    payload = json.loads(_delegate_message(ctx, "run-1", "steer", message_id=message_id).text)
+    payload = json.loads(_delegate_message(ctx, "run-1", "steer", message_id=_retained_message(ctx, message_id)).text)
     assert (payload["status"], payload["reason"]) == ("not_active", "interaction_pending")
     assert payload["pending_interactions"] == []
     assert payload["interaction_observation"]["status"] == "empty"
@@ -927,7 +946,7 @@ def test_large_pending_questions_fit_and_are_retrievable_with_complete_refusal(
     ctx = _ctx(tmp_path)
     _own_run()
     stub = _install(monkeypatch, _QuestionStub(detail={"pendingInteractions": rows}))
-    out = _delegate_message(ctx, "run-1", "steer", message_id="m-large")
+    out = _delegate_message(ctx, "run-1", "steer", message_id=_retained_message(ctx, "m-large"))
     assert len(out.text) <= tool_result_limit("delegate_message")
     assert _truncate_tool_result(out.text, "delegate_message", {}) == out.text
     payload = json.loads(out.text)
@@ -943,7 +962,7 @@ def test_large_pending_questions_fit_and_are_retrievable_with_complete_refusal(
     raw = Path(artifact["abs_path"]).read_bytes()
     assert artifact["bytes"] == len(raw) and artifact["sha256"] == hashlib.sha256(raw).hexdigest()
     complete = json.loads(raw)
-    assert complete["pending_interactions"] == pending_interactions(stub.detail)
+    assert complete["pending_interactions"] == addressed_questions(ctx.task_id, "run-1", pending_interactions(stub.detail))
     for key in ("status", "reason", "message_id", "accepted", "ok", "host_code", "detail"):
         assert complete[key] == payload[key]
     read_args = {key: value for key, value in delivery["read_next"].items() if key != "tool"}
@@ -977,7 +996,7 @@ def test_question_delivery_failure_never_replaces_the_message_receipt(
     stub = _install(monkeypatch, _QuestionStub(detail={
         "pendingInteractions": [_message_question(question="Q" * 30_000)],
     }))
-    out = interactions._delegate_message(ctx, "run-1", "steer", message_id="m-original")
+    out = interactions._delegate_message(ctx, "run-1", "steer", message_id=_retained_message(ctx, "m-original"))
     payload = json.loads(out.text)
     assert (payload["status"], payload["reason"], payload["message_id"]) == (
         "not_active", "interaction_pending", "m-original")
@@ -1029,7 +1048,7 @@ def test_replayed_refusal_observes_changed_then_vanished_questions_without_borro
             **_message_question(iid), "runId": "run-1", "attemptId": "a-current", "harnessId": "h-current",
         }] if iid else []}
         payload = json.loads(interactions._delegate_message(
-            ctx, "run-1", "original steer", message_id="old-refusal").text)
+            ctx, "run-1", "original steer", message_id=_retained_message(ctx, "old-refusal", text="original steer")).text)
         assert payload["attempt_id"] == refusal_attempt
         assert payload["status"] == "not_active" and payload["accepted"] is False
         assert payload["message_id"] == "old-refusal" and payload["ok"] is False
@@ -1092,7 +1111,7 @@ def test_complete_published_refusal_envelope_fits_with_huge_receipt_and_observat
     sentinel = object()
     token = _install_tool_result_sidecar(ctx, sentinel)
     try:
-        text = entry.handler(ctx, rid, "steer", message_id=mid)
+        text = entry.handler(ctx, rid, "steer", message_id=_retained_message(ctx, mid, rid=rid))
         published = _published_tool_result(ctx, sentinel)
     finally:
         _restore_tool_result_sidecar(token)
@@ -1168,7 +1187,7 @@ def test_registered_message_handler_observes_current_questions_over_real_gateway
         monkeypatch.setattr(cx.ClaudexorGateway, "send_run_message", send_then_change_question)
         for iid in ("int-after-refusal", "int-new-current", None):
             next_question[0] = iid
-            payload = json.loads(entry.handler(ctx, rid, "steer", message_id="stored-refusal"))
+            payload = json.loads(entry.handler(ctx, rid, "steer", message_id=_retained_message(ctx, "stored-refusal", rid=rid)))
             assert (payload["status"], payload["reason"], payload["attempt_id"]) == (
                 "not_active", "interaction_pending", "a01")
             assert payload["accepted"] is False and payload["ok"] is False

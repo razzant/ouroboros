@@ -5,12 +5,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    computeDerivedChatStatus,
     computeHydratedDirectActivities,
     partitionLocalEchoJournal,
     positiveTaskTerminalFact,
     reconcileHydratedDirectActivities,
 } from '../modules/chat_activity.js';
+import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
+import { room } from './work_fixture.js';
 import {
     isTerminalTaskDetail,
     summarizeChatLiveEvent,
@@ -192,34 +193,22 @@ test('durable detail terminality is narrow and outcome labels stay unchanged', (
 });
 
 // ---------------------------------------------------------------------------
-// Header status: managed activities surface as Working... / Queued...
+// Header status: the server's room surfaces managed work as Working... / Queued...
 // ---------------------------------------------------------------------------
 
-test('admitted managed work shows Working... without a live card', () => {
-    const status = computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeManagedCount: 1,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 0,
-    });
-    assert.deepEqual(status, { kind: 'thinking', text: 'Working...', showDots: true });
+const inRoom = (activity, extra = {}) => ({ ...emptyWorkState(), room: room(activity, extra) });
+
+test('admitted managed work shows Working... without a live card (the room says it)', () => {
+    assert.deepEqual(roomStatusView(inRoom('working')),
+        { kind: 'thinking', text: 'Working', tone: 'live', mark: 'moving', owner: false, amber: '' });
 });
 
-test('managed status priority: working > thinking > sending > queued > online', () => {
-    assert.equal(computeDerivedChatStatus({
-        activeManagedCount: 1, activeDirectCount: 1, pendingSubmissionsCount: 1, queuedManagedCount: 1,
-    }).text, 'Working...');
-    assert.equal(computeDerivedChatStatus({
-        activeDirectCount: 1, pendingSubmissionsCount: 1, queuedManagedCount: 1,
-    }).text, 'Working');
-    assert.equal(computeDerivedChatStatus({
-        pendingSubmissionsCount: 1, queuedManagedCount: 1,
-    }).text, 'Sending...');
-    assert.equal(computeDerivedChatStatus({
-        queuedManagedCount: 1,
-    }).text, 'Queued...');
-    assert.equal(computeDerivedChatStatus({}).text, 'Online');
+test('room status order: the room\'s work > the owner\'s send > Online; queued work yields to a send', () => {
+    assert.equal(roomStatusView(inRoom('working'), { sending: true }).text, 'Working');
+    assert.equal(roomStatusView(inRoom('working', { call: 'thinking' }), { sending: true }).text, 'Thinking');
+    assert.equal(roomStatusView(inRoom('queued'), { sending: true }).text, 'Sending');
+    assert.equal(roomStatusView(inRoom('queued')).text, 'Queued');
+    assert.equal(roomStatusView(emptyWorkState()).text, 'Online');
 });
 
 // ---------------------------------------------------------------------------

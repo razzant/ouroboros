@@ -17,7 +17,7 @@ from tests._store_shared import delete_result, unreadable_result
 
 @pytest.fixture
 def q(tmp_path, monkeypatch):
-    from supervisor import queue, queue_schedules, state, workers
+    from supervisor import queue, state, workers
 
     root = tmp_path / "data"  # project folders live beside, never inside, the data root
     root.mkdir()
@@ -28,12 +28,12 @@ def q(tmp_path, monkeypatch):
     queue.init_queue_refs(pending, {}, {"value": 0})
     monkeypatch.setattr(workers, "REPO_DIR", tmp_path / "repo")
     (tmp_path / "repo").mkdir()
-    monkeypatch.setattr(queue_schedules, "resync_skill_schedules", lambda *_a: {})
     monkeypatch.setattr("ouroboros.config.get_bg_wakeup_min_sec", lambda: 0)  # waits end at once here
     return SimpleNamespace(queue=queue, pending=pending, root=root)
 
 
 def _row(q, schedule_id="s1", *, intent=None, cron=False, project_id="", chat_id=42, metadata=None, **extra):
+    from ouroboros.consciousness_authority import work_kind
     meta = dict(metadata or {})
     if intent is not None:
         meta["resource_intent"] = intent
@@ -45,6 +45,7 @@ def _row(q, schedule_id="s1", *, intent=None, cron=False, project_id="", chat_id
               **({"next_run_at": "2000-01-01T00:00:00+00:00"} if cron else {})}
     q.queue.upsert_scheduled_task({**record, **{k: v for k, v in extra.items() if k != "continuation_of"}},
                                   continuation_of=extra.get("continuation_of"),
+                                  writer_kind=work_kind(meta), writer_metadata=meta,
                                   host_followup={"followup_relation": {"kind": "independent"},
                                       "followup_origin": {"task_id": meta.get("origin_task_id", ""),
                                                           "root_task_id": meta.get("origin_root_task_id")
@@ -61,7 +62,9 @@ def _project(q, pid="proj", folder=None):
     return create_project(q.root, pid, name="Room", working_dir=str(folder or ""))
 
 
-def test_one_occurrence_one_receipt_with_the_room_address(q):
+def test_one_occurrence_one_receipt_with_the_room_address(q, monkeypatch):
+    frames = []
+    monkeypatch.setattr("supervisor.worker_chat_lane._broadcast_task_named", frames.append)
     _row(q, intent={"kind": "system_repo"})
     q.queue.check_scheduled_tasks()
     q.queue.check_scheduled_tasks()
@@ -69,6 +72,9 @@ def test_one_occurrence_one_receipt_with_the_room_address(q):
     receipt = load_task_result(q.root, task["id"])
     admission = receipt["schedule_admission"]
     assert receipt["status"] == "scheduled" and receipt["chat_id"] == 42  # never the hidden chat 0
+    # The schedule's name is the run's authored name from admission on: history and the task API read it here.
+    assert receipt["title"] == receipt["suggested_name"] == task["title"] == "Follow-up"
+    assert frames == [{"type": "task_named", "task_id": task["id"], "suggested_name": "Follow-up"}]  # the live card is born named
     assert (admission["status"], admission["dispatch"]) == ("accepted", "none")
     assert task["metadata"]["schedule_occurrence"]["token"] == admission["token"]
     row = _rows(q)["s1"]
@@ -113,7 +119,8 @@ def test_a_named_continuation_is_outside_the_cap_but_not_outside_money(q, monkey
     _row(q, "cont", intent={"kind": "system_repo"}, metadata=wake, continuation_of={"task_id": "t0"})
     _row(q, "spont", intent={"kind": "system_repo"}, metadata=wake)
     # A payload cannot author the host fact.
-    q.queue.upsert_scheduled_task({**_rows(q)["spont"], "continuation_of": {"task_id": "forged"}})
+    q.queue.upsert_scheduled_task({**_rows(q)["spont"], "continuation_of": {"task_id": "forged"}},
+                                  writer_kind="consciousness", writer_metadata=wake)
     assert "continuation_of" not in _rows(q)["spont"]
     q.queue.check_scheduled_tasks()
     rows = _rows(q)
@@ -155,19 +162,20 @@ def test_resource_intent_is_resolved_at_admission(q, tmp_path, case):
         (q.root / "state" / "projects.json").write_text("{not json", encoding="utf-8")
     q.queue.check_scheduled_tasks()
     row = _rows(q)["s1"]
-    if case in {"explicit_gone", "registry_unreadable"}:
-        assert q.pending == [] and row["hold"]["reason"] == (
-            "workspace_unusable" if case == "explicit_gone" else "registry_unreadable")
+    if case == "registry_unreadable":
+        assert q.pending == [] and row["hold"]["reason"] == "registry_unreadable"
         assert not list((q.root / "task_results").glob("*.json"))
         return
     [task] = q.pending
-    expected = {"room_current": new, "explicit_kept": old}.get(case)
+    expected = {"room_current": new, "explicit_kept": old, "explicit_gone": old}.get(case)
     assert task.get("workspace_root", "") == (str(expected.resolve()) if expected else "")
     if expected:
         assert task["workspace_mode"] == "external" and task["memory_mode"] == "forked"
         assert pathlib.Path(task["drive_root"]).is_dir()
+    # A known folder that is merely gone starts as the same address and says so (#1799).
+    assert ("workspace_availability" in task["metadata"]) == (case == "explicit_gone")
     assert task["metadata"]["resource_intent"]["kind"] == {
-        "room_current": "room_default", "room_folderless": "room_default",
+        "room_current": "room_default", "room_folderless": "room_default", "explicit_gone": "explicit_resource",
         "explicit_kept": "explicit_resource", "explicit_none": "explicit_none"}[case]
 
 
@@ -234,7 +242,8 @@ def test_a_change_during_prepare_never_launches_the_old_choice(q, tmp_path, monk
     q.queue.check_scheduled_tasks()
     assert q.pending == [] and not list((q.root / "task_results").glob("*.json"))
     if change == "delete":
-        assert "s1" not in _rows(q)
+        assert _rows(q)["s1"]["delete_requested_at"]
+        assert "occurrence" not in _rows(q)["s1"]
         return
     if change == "rebind":
         assert _rows(q)["s1"]["hold"]["reason"] == "project_routing_fence_changed"
@@ -367,8 +376,8 @@ def test_running_cron_task_blocks_a_second_due_occurrence(q):
         q.queue.RUNNING.pop(task["id"], None)
 
 
-def test_recreated_cron_row_without_last_task_id_still_waits_for_live_root(q):
-    """A skill can recreate a due row while its earlier task is still live.
+def test_recreated_cron_row_without_last_task_id_still_waits_for_live_root(q, monkeypatch):
+    """An owner can recreate a due row while its earlier task is still live.
 
     The new row has no history fields, but the running root retains schedule_id.
     It must not admit a second root merely because last_task_id disappeared.
@@ -388,6 +397,8 @@ def test_recreated_cron_row_without_last_task_id_still_waits_for_live_root(q):
             "delete", "s1", reason="owner removed reminder", actor="owner:gateway", drive_root=q.root,
         )
         assert removed["changed"] is True
+        monkeypatch.setattr("ouroboros.retention.get_gc_retention_days", lambda: 0)
+        q.queue.check_scheduled_tasks()
         assert "s1" not in _rows(q)
         _row(q, intent={"kind": "system_repo"}, cron=True)
         assert not _rows(q)["s1"].get("last_task_id")
@@ -462,7 +473,7 @@ def test_a_folderless_delegated_run_reads_but_never_writes_through_scratch(tmp_p
     assert refused is not None and "workspace_not_active" in refused.text
 
 
-def test_receipt_and_dispatch_mark_are_monotonic_and_read_back_from_disk(q, monkeypatch):
+def test_receipt_and_dispatch_mark_are_monotonic_and_require_committed_identity(q, monkeypatch):
     import ouroboros.task_results as task_results
     from supervisor import schedule_occurrence as occurrences
 
@@ -479,7 +490,7 @@ def test_receipt_and_dispatch_mark_are_monotonic_and_read_back_from_disk(q, monk
     # A terminal occurrence is never dispatched again through the barrier.
     task_results.write_task_result(q.root, task["id"], "completed", result="done")
     assert occurrences.record_dispatch_possible(task) is False
-    # The verdict is what the FILE says, not what a writer returned.
+    # An incomplete writer acknowledgement cannot prove this task's admission.
     _row(q, "s2", intent={"kind": "system_repo"}, cron=True)
     monkeypatch.setattr(task_results, "write_task_result", lambda *_a, **k: {
         "status": "scheduled", "schedule_admission": dict(k.get("schedule_admission") or {})})
@@ -517,7 +528,7 @@ def test_deleting_a_row_never_takes_back_an_accepted_occurrence(q, monkeypatch):
     task_id = _rows(q)["s1"]["occurrence"]["task_id"]
     outcome = q.queue.mutate_scheduled_task("delete", "s1", reason="owner", actor="owner")
     row = _rows(q)["s1"]
-    assert outcome["status"] == "delete_deferred" and "owed" in outcome["detail"]
+    assert outcome["status"] == "withdrawn" and _rows(q)["s1"]["delete_requested_at"]
     assert row["enabled"] is False and row["delete_requested_at"]
     monkeypatch.setattr(q.queue, "persist_queue_snapshot", lambda reason="": True)
     q.queue.check_scheduled_tasks()
@@ -526,11 +537,14 @@ def test_deleting_a_row_never_takes_back_an_accepted_occurrence(q, monkeypatch):
     assert occurrences.record_dispatch_possible(task) is True
     q.pending.clear()
     q.queue.check_scheduled_tasks()
-    assert "s1" not in _rows(q)  # removed once its run was dispatched
-    # A row whose occurrence was never accepted is deleted at once (future-only).
+    assert _rows(q)["s1"]["delete_requested_at"]  # retained through the withdrawal window
+    monkeypatch.setattr("ouroboros.retention.get_gc_retention_days", lambda: 0)
+    q.queue.check_scheduled_tasks()
+    assert "s1" not in _rows(q)
+    # Even a row that never fired remains a restorable withdrawal.
     _row(q, "s3", intent={"kind": "system_repo"}, cron=True)
-    assert q.queue.mutate_scheduled_task("delete", "s3", reason="owner", actor="owner")["status"] == "deleted"
-    assert "s3" not in _rows(q)
+    assert q.queue.mutate_scheduled_task("delete", "s3", reason="owner", actor="owner")["status"] == "withdrawn"
+    assert _rows(q)["s3"]["delete_requested_at"]
 
 
 def test_a_folderless_direct_parent_dispatches_a_readonly_child_with_its_own_scratch(tmp_path, monkeypatch):

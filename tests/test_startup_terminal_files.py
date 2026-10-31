@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import headless, observability, server_maintenance as maintenance
+from ouroboros import maintenance as background
 from ouroboros.task_results import load_task_result, write_task_result
 
 from tests._cancel_intents_shared import _LiveProc
@@ -90,6 +91,9 @@ def test_saved_body_and_sources_precede_orphan_reader_and_actual_prune(roots, mo
     monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _task: False)
     maintenance._startup_prune_sweeps()
     assert child.exists(), "startup copies and hashes no child store: settlement is the off-loop pass's"
+    maintenance._run_drive_custody_pass()
+    assert child.exists(), "settlement waits for the pending child-ref promotion"
+    background.run_job(root, "child_ref_promotion")  # the maintenance child's job, never a server thread
     maintenance._run_drive_custody_pass()
     assert not child.exists()
     manifest = observability.read_call_manifest_ref(root, row["trace_refs"]["response"], task_id="saved")
@@ -392,11 +396,11 @@ def test_late_split_root_start_cannot_replace_canonical_terminal(roots):
 
 @pytest.mark.parametrize("failure", [False, True])
 def test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep(roots, monkeypatch, failure):
-    """The child-ref promotion walk is history-sized (every child drive, a result load
-    each). It rides the 300 s reconcile block, never the 20 s cancel sweep: while the
-    walk is held the tick returns, the cancel sweep keeps its OWN cadence (a second one
-    starts and finishes 25 s later), and no second walk starts. Whether the walk ends or
-    raises, its latch opens and its marker is stamped at the END (issue #1230)."""
+    """Drive settlement may copy and hash a child store per settlement. It rides the 300 s
+    reconcile block, never the 20 s cancel sweep: while the walk is held the tick returns,
+    the cancel sweep keeps its OWN cadence (a second one starts and finishes 25 s later),
+    and no second walk starts. Whether the walk ends or raises, its latch opens and its
+    marker is stamped at the END (issue #1230)."""
     root, _ = roots
     entered, release, done = threading.Event(), threading.Event(), threading.Event()
     cancel_lock, reconcile_lock = threading.Lock(), threading.Lock()
@@ -421,15 +425,16 @@ def test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep(roots, monke
     monkeypatch.setattr(maintenance, "_reconcile_abandoned_usage", lambda root: calls.append("usage"))
     monkeypatch.setattr(maintenance, "_periodic_zombie_reconcile", lambda **kw: calls.append("heal"))
 
-    def bulk(root, **_kwargs):
-        calls.append("refs")
+    def bulk(*_args, **_kwargs):
+        calls.append("drives")
         entered.set()
         assert release.wait(3)
         done.set()
         if failure:
             raise OSError("copy failed")
 
-    monkeypatch.setattr(observability, "retry_pending_child_ref_promotions", bulk)
+    monkeypatch.setattr(maintenance, "_run_drive_custody_pass", bulk)
+    monkeypatch.setattr(maintenance, "_tick_maintenance_child", lambda: calls.append("dispatch"))
     marker = [0.0]
 
     def cancel_sweeps():
@@ -441,14 +446,14 @@ def test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep(roots, monke
         for thread in cancel_sweeps():
             thread.join(3)
         assert calls.count("cancel") == calls.count("delivery") == calls.count("usage") == 1
-        assert calls.index("heal") < calls.index("refs"), "heal first, then promote"
+        assert calls.index("heal") < calls.index("drives"), "heal first, then settle"
         assert not cancel_lock.locked(), "the cancel sweep finished while the walk is still held"
         clock[0] = 1025.0
         maintenance._periodic_supervisor_maintenance([clock[0]], marker)
         for thread in cancel_sweeps():
             thread.join(3)
         assert [t.name for t in threads if t.name != "cold-custody"] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery"] + ["reconcile-maintenance"] + ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery"]
-        assert calls.count("cancel") == 2 and calls.count("refs") == 1, "cancel cadence held; no duplicate walk"
+        assert calls.count("cancel") == 2 and calls.count("drives") == 1, "cancel cadence held; no duplicate walk"
         assert marker[0] == 0.0 and reconcile_lock.locked(), "stamped only when the walk ENDS"
     finally:
         release.set()
@@ -460,7 +465,7 @@ def test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep(roots, monke
     maintenance._periodic_supervisor_maintenance([clock[0]], marker)  # 25 s after the END
     for thread in threads:
         thread.join(3)
-    assert calls.count("cancel") == 3 and calls.count("refs") == 1, "the walk waits its 300 s, the cancel sweep does not"
+    assert calls.count("cancel") == 3 and calls.count("drives") == 1, "the walk waits its 300 s, the cancel sweep does not"
 
 
 def test_thread_start_failure_releases_maintenance_latch(roots, monkeypatch):
@@ -469,6 +474,8 @@ def test_thread_start_failure_releases_maintenance_latch(roots, monkeypatch):
     monkeypatch.setattr(maintenance, "_LAST_CANCEL_INTENT_SWEEP", [0.0])
     monkeypatch.setattr(maintenance, "time", SimpleNamespace(time=lambda: 100.0))
     monkeypatch.setattr(maintenance, "threading", SimpleNamespace(Thread=lambda **k: (_ for _ in ()).throw(RuntimeError("thread unavailable"))))
+    # The child dispatcher starts its thread through ouroboros.maintenance, past the patch above: not this latch.
+    monkeypatch.setattr(maintenance, "_tick_maintenance_child", lambda: None)
     maintenance._periodic_supervisor_maintenance([100.0], [100.0])
     assert lock.acquire(blocking=False)
     lock.release()
@@ -481,6 +488,8 @@ def test_real_supervisor_orders_custody_recovery_before_prune(roots, monkeypatch
 
     _supervisor_harness(monkeypatch, tmp_path, ["stop"])
     order = []
+    open_dialogue = server._open_dialogue
+    monkeypatch.setattr(server, "_open_dialogue", lambda settings, **kw: order.append("dialogue") or open_dialogue(settings, **kw))
     monkeypatch.setattr(server, "_migrate_startup_cancel_latches", lambda root: order.append("migrate"))
     monkeypatch.setattr(server, "_startup_worker_pids", lambda root: order.append("capture-pids") or {777})
     monkeypatch.setattr(queue, "restore_pending_from_snapshot",
@@ -497,7 +506,8 @@ def test_real_supervisor_orders_custody_recovery_before_prune(roots, monkeypatch
     monkeypatch.setattr(server, "_startup_prune_sweeps", lambda **kw: order.append(("prune", kw["preserve_task_sources"])))
     server._run_supervisor({})
     assert server._supervisor_error is None
-    assert order == ["capture-pids", "restore", "kill", "spawn", "custody", "recover", ("prune", True)]
+    assert order == ["dialogue", "capture-pids", "restore", "kill", "spawn", "custody", "recover", ("prune", True)], \
+        "the dialogue is attached before any repair; recovery precedes the prune"
 
 
 def test_supervisor_init_failure_keeps_boot_recovery_owner():
@@ -639,6 +649,7 @@ def test_the_healer_tells_rendered_cards_their_question_expired(roots, monkeypat
     write_task_result(root, "ghost-asked", "running", chat_id=1)
     owner_quiz.record_asked(root, "ghost-asked", quiz_id="q9", question="Which folder?",
                             options=["A", "B"], wait_for_answer=True)
+    queue_module.persist_queue_snapshot(reason="startup")  # this generation already holds the queue
     _interrupted_running_row(root, "ghost-asked")
     queue_module.persist_queue_snapshot(reason="startup")
     frames: list = []
@@ -750,6 +761,7 @@ def test_the_boot_healer_still_settles_a_running_row_nothing_owns(roots):
     from supervisor import queue as queue_module
     root, _ = roots
 
+    queue_module.persist_queue_snapshot(reason="startup")  # this generation already holds the queue
     _interrupted_running_row(root, "ghost-unowned")
     queue_module.persist_queue_snapshot(reason="startup")
 
@@ -978,7 +990,6 @@ def test_unknown_startup_recovery_keeps_coarse_tree_and_temp_preservation(roots,
         delete_result(root, "unresolved")
     else:
         unreadable_result(monkeypatch, "unresolved")
-    monkeypatch.setattr(maintenance, "_STARTUP_TEMP_SWEEP_OWED", [False])
     monkeypatch.setattr("ouroboros.retention.age_cutoff", lambda *a, **kw: 4_000_000_000)
     maintenance._startup_prune_sweeps(preserve_task_sources=True, recovery_report=report)
-    assert tree.exists() and maintenance._STARTUP_TEMP_SWEEP_OWED == [False]
+    assert tree.exists()

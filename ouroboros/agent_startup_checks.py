@@ -26,7 +26,7 @@ from ouroboros.utils import (
     utc_now_iso,
 )
 from ouroboros.config import runtime_setting
-from ouroboros.store import StoreError
+from ouroboros.store import StoreError, StoreMigrating
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +131,9 @@ def task_result_authority_projection(
             promotion=row.get("child_ref_promotion"))
         # Beside the recorded state, never inside it: every projection keeps this small field whole.
         authority.update({"plan_review_source_gap": gap} if gap else {})
-    return authority
+    from ouroboros.delegate_output import project_task_output_readers
+
+    return project_task_output_readers(authority)
 
 
 def valid_task_result_authority_source(source: Any, task_id: Any) -> bool:
@@ -148,28 +150,25 @@ def valid_task_result_authority_source(source: Any, task_id: Any) -> bool:
         and isinstance(arguments, dict)
         and str(arguments.get("task_id") or "") == selected_id
         and arguments.get("include_authority") is True
+        and arguments.get("authority_fields") is None
+        and arguments.get("source_only") is not True
     )
 
 
 def _automatic_predecessor_authority_projection(
     row: Dict[str, Any], source: Dict[str, Any], *, drive_root: Any,
 ) -> Dict[str, Any]:
-    """Bounded continuation envelope: every terminal fact, no body recursion.
+    """Bounded continuation envelope of the predecessor's record, digest included.
 
-    The recursion that compiled 300K+ work orders and 800K-token parent
-    prompts lived in exactly two carriers: the nested ``task_contract``
-    (which embedded the hop before, recursively) and unbounded string bodies
-    (``result``/``final_answer`` and friends). Every OTHER top-level terminal
-    fact - artifact/custody/verification/capability facts, fields this reader
-    predates - keeps inheriting whole, so authority cannot silently vanish.
-    The carriers are bounded structurally by the shared envelope producer
-    (contracts SSOT): the contract inherits its OPERATIVE core minus the
-    nested predecessor, and any field whose body outgrows the tool-result
-    budget - measured on its serialized form, so lists and dicts count -
-    rides as a typed preview beside the named pull source (the same
-    whole-or-pointer rule main_context_authority already applies to Main).
-    Digest facts are observed at binding; the complete canonical authority
-    stays in the current task store, pullable whole via the named source.
+    The shared envelope producer (contracts SSOT) bounds the two growth carriers
+    structurally: the nested ``task_contract`` inherits its OPERATIVE core minus
+    the nested predecessor, and any field whose body outgrows the tool-result
+    budget - measured on its serialized form - rides as a typed preview beside
+    the named pull source. The digest is observed at binding over the complete
+    projection. The successor's start materializes only the compact brief of
+    this envelope (``main_context_authority.project_helper_predecessor_authority``);
+    the complete canonical authority stays in the task store, pullable whole
+    via the named source.
     """
 
     from ouroboros.contracts.task_contract import bounded_continuation_envelope
@@ -233,7 +232,13 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
             if _text_sha256(origin_text) != str(origin_ref.get("text_sha256") or ""):
                 return _unavailable(owner_source, "retained origin text does not match its ingress checksum")
         else:
-            matching = resolve_owner_message_source(root, origin_ref)
+            try:
+                matching = resolve_owner_message_source(root, origin_ref)
+            except StoreMigrating:  # unknown yet, never absent: the start waits for the upgrade, not a crash
+                return _unavailable(owner_source, "the named owner message is in saved history that is still "
+                                                  "being upgraded; retry when the upgrade finishes")
+            except StoreError as exc:
+                return _unavailable(owner_source, f"the dialogue store could not answer: {exc}")
             if matching is None:
                 return _unavailable(
                     owner_source, "named canonical owner row is not readable and no retention-proof text is stored")
@@ -258,15 +263,20 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
         # A missing file reads back as ``{}``: an empty row is no predecessor either.
         if not isinstance(predecessor_row, dict) or not predecessor_row:
             return _unavailable(predecessor, "named predecessor task result is missing or unreadable")
+        from ouroboros.contracts.task_contract import task_input_sources
+        from ouroboros.main_context_authority import project_helper_predecessor_authority
+
         # The pull pointer is written LAST: a projected row field named
         # ``source`` must not clobber the authority route the pull flow and
-        # identity checks depend on.
-        task["predecessor_authority"] = {
+        # identity checks depend on. Every consumer of a predecessor gets the
+        # same compact brief; the predecessor mind's own notes follow the
+        # assignment as a foldable row, and the pointer reads the whole record.
+        task["predecessor_authority"] = project_helper_predecessor_authority({
             **_automatic_predecessor_authority_projection(
                 predecessor_row, predecessor, drive_root=root,
             ),
             "source": dict(predecessor),
-        }
+        }, declared=task_input_sources(task) == "declared")
     else:
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
         previous = metadata.get("project_last_task_result")
@@ -345,11 +355,13 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
     A read only: it takes no optional index lock and removes none, since a lock's
     age says nothing about whether its writer is still running.
     """
+    from ouroboros.git_observation import host_git_env
+
     try:
         result = subprocess.run(
             ["git", "--no-optional-locks", "status", "--porcelain"],
             cwd=str(env.repo_dir),
-            capture_output=True, text=True, timeout=10, check=True
+            capture_output=True, text=True, timeout=10, check=True, env=host_git_env()
         )
         dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
         if dirty_files:
@@ -581,6 +593,33 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
         return {"status": "error", "error": str(e)}, 1
 
 
+# The stray scan reads command lines with one ``ps`` per batch of pids (BSD and procps both take a comma
+# list for ``-p``); a technical bound on argv length, not a judgment about which process counts.
+_PS_BATCH = 256
+
+
+def _commands_of(pids: list[int]) -> dict[int, str]:
+    """Each pid's command line, as ``process_command`` reads it: one ``ps`` per batch, and a pid the batch
+    did not answer (it exited, or the batch failed) read on its own as before, so no answer differs."""
+    import subprocess as _subprocess
+
+    from ouroboros.platform_layer import process_command
+
+    commands: dict[int, str] = {}
+    for start in range(0, len(pids), _PS_BATCH):
+        batch = set(pids[start:start + _PS_BATCH])
+        try:
+            out = _subprocess.run(["ps", "-ww", "-o", "pid=,command=", "-p", ",".join(map(str, sorted(batch)))],
+                                  capture_output=True, text=True, timeout=5)
+        except Exception:
+            continue
+        for line in (out.stdout or "").splitlines():
+            head, _sep, command = line.strip().partition(" ")
+            if head.isdigit() and int(head) in batch:
+                commands[int(head)] = command.strip()
+    return {pid: commands[pid] if pid in commands else process_command(pid) for pid in pids}
+
+
 def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
     """Report ouroboros-server processes that belong to NO current install (v6.70.0).
 
@@ -605,7 +644,7 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
     import subprocess as _subprocess
 
     try:
-        from ouroboros.platform_layer import IS_WINDOWS, process_command
+        from ouroboros.platform_layer import IS_WINDOWS
 
         if IS_WINDOWS:
             return {"status": "skipped", "reason": "non-posix"}, 0
@@ -660,29 +699,35 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
             same_install_paths = set()
             _names_our_server = None
         stray: list[dict[str, Any]] = []
+        candidates: list[int] = []
         for line in (out.stdout or "").splitlines():
             try:
                 pid = int(line.strip())
             except ValueError:
                 continue
-            if pid in known:
-                continue
-            command = process_command(pid)
+            if pid not in known:
+                candidates.append(pid)
+        commands = _commands_of(candidates)
+        known_groups: set[int] | None = None
+        for pid in candidates:
+            command = commands[pid]
             if not server_shape.search(command or ""):
                 continue
-            # Same process group as a known pid => part of a known tree.
+            # Same process group as a known pid => part of a known tree, the known groups read once.
             # (Per-pid defensiveness: most ledger pids are dead, and one
             # ProcessLookupError must not disable the exclusion entirely.)
             try:
                 from ouroboros.platform_layer import process_group_id
 
-                known_groups = set()
-                for k in known:
-                    if k > 0:
-                        try:
-                            known_groups.add(process_group_id(k))
-                        except Exception:
-                            continue
+                if known_groups is None:
+                    groups = set()
+                    for k in known:
+                        if k > 0:
+                            try:
+                                groups.add(process_group_id(k))
+                            except Exception:
+                                continue
+                    known_groups = groups
                 if process_group_id(pid) in known_groups:
                     continue
             except Exception:
@@ -700,156 +745,6 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
         return {"status": "ok"}, 0
     except Exception:
         return {"status": "skipped"}, 0
-
-
-# Hot-store growth tripwires (perf/lifecycle sprint; BIBLE P2 "autonomy in
-# class detection"): the append-only stores whose interactive readers degrade
-# with file size get a deterministic size WARNING. Thresholds are the justified
-# constants in ouroboros/context_budget.py. Each row: drive-relative path,
-# threshold in bytes, remediation pointer appended to the WARNING.
-def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
-    from ouroboros.context_budget import (
-        CHRONICLE_JOURNAL_WARN_BYTES,
-        EVENTS_LOG_WARN_BYTES,
-        PROGRESS_LOG_WARN_BYTES,
-        SCHEDULED_TASKS_WARN_BYTES,
-        SKILL_REVIEW_ROOT_TASKS_WARN_BYTES,
-        SUPERVISOR_LOG_WARN_BYTES,
-        TASK_REFLECTIONS_LOG_WARN_BYTES,
-        TOOLS_LOG_WARN_BYTES,
-    )
-
-    rotation_expected = (
-        "This log is expected to be rotation-bounded far below this "
-        "threshold; rotation is broken or missing — investigate the "
-        "supervisor rotation tick (rotate_chat_log_if_needed pattern)."
-    )
-    return (
-        ("logs/events.jsonl", EVENTS_LOG_WARN_BYTES, rotation_expected),
-        ("logs/tools.jsonl", TOOLS_LOG_WARN_BYTES, rotation_expected),
-        ("logs/supervisor.jsonl", SUPERVISOR_LOG_WARN_BYTES, rotation_expected),
-        ("logs/task_reflections.jsonl", TASK_REFLECTIONS_LOG_WARN_BYTES, rotation_expected),
-        (
-            "logs/progress.jsonl",
-            PROGRESS_LOG_WARN_BYTES,
-            "progress.jsonl is expected to be rotation-bounded far below this "
-            "threshold; rotation is broken or missing — investigate the "
-            "supervisor rotation tick (rotate_chat_log_if_needed pattern).",
-        ),
-        (
-            "state/scheduled_tasks.json",
-            SCHEDULED_TASKS_WARN_BYTES,
-            "The scheduler parses and rewrites this whole document on every tick "
-            "under the queue lock; consumed one-shot receipts age out past GC "
-            "retention on the same tick — growth past this size means the prune "
-            "is broken or the live schedule set itself is this large.",
-        ),
-        (
-            "state/skill_review_root_tasks.jsonl",
-            SKILL_REVIEW_ROOT_TASKS_WARN_BYTES,
-            "Acceptance packet assembly reads this compact skill-review index; "
-            "archive old root-task rows with their review histories.",
-        ),
-        (
-            "memory/chronicle/records.jsonl",
-            CHRONICLE_JOURNAL_WARN_BYTES,
-            "Every task context decodes each acting page and part of this journal; it is "
-            "never rotated or cut. Select acting records through the index before loading "
-            "bodies (or fold more of the story) — never delete records.",
-        ),
-    )
-
-
-def hot_store_growth_notes(env: Any) -> list:
-    """Health-invariant WARNING lines for hot stores past their thresholds.
-
-    Reused live by context.py::build_health_invariants (the
-    check_stray_server_processes pattern). Deliberately NOT TTL-cached
-    (contrast context._STRAY_PROBE_CACHE): nine os.stat calls plus two shallow
-    iterdir passes per task turn are orders of magnitude cheaper than the pgrep
-    probe that cache exists for, and a stale reading would delay the signal."""
-    from supervisor.state import ISOLATED_BENCHMARK_SENTINEL
-
-    drive_root = pathlib.Path(getattr(env, "drive_root", None) or env.drive_path("state").parent)
-    # Isolated benchmark data roots are throwaway by construction and may
-    # legitimately accumulate unbounded logs for the run's duration; a
-    # perpetual WARNING in every bench task context is noise that steers the
-    # agent, not a signal (the sentinel is the same marker
-    # reset_per_task_budget keys on — a live root never carries it).
-    if (drive_root / ISOLATED_BENCHMARK_SENTINEL).exists():
-        return []
-    notes: list = []
-    for rel, threshold, remediation in _hot_store_thresholds():
-        try:
-            size = env.drive_path(rel).stat().st_size
-        except OSError:
-            continue
-        if size > threshold:
-            notes.append(
-                f"WARNING: HOT STORE GROWTH — {rel} is {size / 1_000_000:.1f} MB "
-                f"(threshold {threshold // 1_000_000} MB). {remediation}"
-            )
-    # Append-only chains whose total size reaches a replaying reader: one row per chain.
-    from ouroboros.context_budget import CHAT_ARCHIVE_SCAN_WARN_BYTES, REVIEW_LEDGER_INDEX_WARN_BYTES
-    for folder, pattern, threshold, remediation in (
-        ("archive", "chat_*.jsonl", CHAT_ARCHIVE_SCAN_WARN_BYTES,
-         "Ordinary context reads only rows after the legacy frontier; explicit chat_history, memory_read(rows=true) "
-         "and page covers replay this chain. Investigate archive indexing/compaction without shortening the memory horizon."),
-        ("state/review_ledger", "index*.jsonl", REVIEW_LEDGER_INDEX_WARN_BYTES,
-         "Task context reads only the rotating hot index; readers that walk the rotated segments replay this chain — "
-         "move old segments and the records they name to cold storage, never delete the newest."),
-    ):
-        try:
-            total = sum(path.stat().st_size for path in (drive_root / folder).glob(pattern) if path.is_file())
-        except OSError:
-            total = 0
-        if total > threshold:
-            notes.append(f"WARNING: HOT STORE GROWTH — {folder}/{pattern} totals {total / 1_000_000:.1f} MB "
-                         f"(threshold {threshold // 1_000_000} MB). {remediation}")
-    # Custody replay walks the whole events chain (live + rotated segments), so
-    # the pre-rotation 100MB replay-degradation signal now watches the chain.
-    try:
-        events_chain_size = sum(
-            path.stat().st_size for path in (drive_root / "archive").glob("events_*.jsonl")
-            if path.is_file()
-        )
-    except OSError:
-        events_chain_size = 0
-    try:
-        events_chain_size += (drive_root / "logs" / "events.jsonl").stat().st_size
-    except OSError:
-        pass
-    from ouroboros.context_budget import EVENTS_ARCHIVE_SCAN_WARN_BYTES
-    if events_chain_size > EVENTS_ARCHIVE_SCAN_WARN_BYTES:
-        notes.append(
-            "WARNING: HOT STORE GROWTH — the events chain (logs/events.jsonl + "
-            f"archive/events_*.jsonl) totals {events_chain_size / 1_000_000:.1f} MB "
-            f"(threshold {EVENTS_ARCHIVE_SCAN_WARN_BYTES // 1_000_000} MB). Each process's "
-            "first custody read folds this whole chain into its row memo (later reads fold "
-            "only appended bytes); forensic and retirement scans still walk it. Legacy "
-            "segments retain inline delegated request bodies; new start rows reference the "
-            "observability store, without shrinking existing history. Investigate a durable "
-            "compact custody projection; archives are durable history and are never deleted."
-        )
-    from ouroboros.context_budget import RETAINED_EXECUTION_DRIVES_WARN_COUNT
-    from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
-    retained_drive_count = 0
-    for retained_root in (
-        drive_root / HEADLESS_TASKS_DIR,
-        drive_root / TASK_DRIVES_DIR,
-    ):
-        try:
-            retained_drive_count += sum(path.is_dir() for path in retained_root.iterdir())
-        except OSError:
-            pass
-    if retained_drive_count > RETAINED_EXECUTION_DRIVES_WARN_COUNT:
-        notes.append(
-            "WARNING: HOT STORE GROWTH — retained execution drives under "
-            f"state/headless_tasks and task_drives total {retained_drive_count} "
-            f"(threshold {RETAINED_EXECUTION_DRIVES_WARN_COUNT}). Terminal-task retention "
-            "or pruning is lagging; inspect lifecycle GC without recursively sizing drives."
-        )
-    return notes
 
 
 def check_extension_health(env: Any) -> Tuple[Dict[str, Any], int]:
@@ -891,11 +786,21 @@ def verify_system_state(env: Any, git_sha: str) -> None:
 
     identity_ok = identity_path.exists() and identity_path.stat().st_size > 0
     scratchpad_ok = scratchpad_path.exists()
+    # The map's measured block is the host's: refresh it in place at every start, keeping
+    # the text the mind wrote around it (a missing file is generated).
+    try:
+        from ouroboros.world_profiler import refresh_world_profile
+
+        world_refreshed = refresh_world_profile(
+            str(world_path), str(getattr(env, "repo_dir", "") or ""), str(memory_dir.parent))
+    except Exception:
+        log.debug("WORLD.md measured block refresh failed", exc_info=True)
+        world_refreshed = False
     world_ok = world_path.exists()
 
     checks["identity"] = {"exists": identity_path.exists(), "non_empty": identity_ok}
     checks["scratchpad"] = {"exists": scratchpad_ok}
-    checks["world_profile"] = {"exists": world_ok}
+    checks["world_profile"] = {"exists": world_ok, "measured_refreshed": world_refreshed}
 
     if not identity_ok:
         issues += 1
@@ -917,14 +822,6 @@ def verify_system_state(env: Any, git_sha: str) -> None:
 
     checks["stray_server_processes"], issue_count = check_stray_server_processes(env)
     issues += issue_count
-
-    # Boot-time surfacing of the same probe context.py::build_health_invariants
-    # reuses per task turn (benchmark-sentinel suppression lives in the probe).
-    growth_notes = hot_store_growth_notes(env)
-    checks["hot_store_growth"] = (
-        {"status": "warning", "notes": growth_notes} if growth_notes else {"status": "ok"}
-    )
-    issues += 1 if growth_notes else 0
 
     # The startup boundary proves that process-local reviewer threads from the
     # prior worker are gone. Delegated rows with a durable invocation token keep

@@ -167,12 +167,12 @@ def test_vcs_argument_refusal_and_corrected_retry_settle_only_their_claims(tmp_p
     registry, queue, workers = _registry(tmp_path, monkeypatch)
     dispatched = []
     monkeypatch.setattr(git, "run_cmd", lambda cmd, **_kw: dispatched.append(cmd) or "")
-    refused = registry.execute_result("vcs_diff", {"root": "active_workspace", **args})
+    refused = registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace", **args})
     assert refused.code == "TOOL_ARG_ERROR"
     assert dispatched == []
     assert refused.meta.get("operation_outcome") == "completed_no_effect"
     assert not load_task_result(tmp_path, "root").get("launch_handoffs")
-    retry = registry.execute_result("vcs_diff", {"root": "active_workspace"})
+    retry = registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"})
     assert retry.code == "OK" and dispatched == [["git", "diff"]]
     _consumers(tmp_path, registry, queue, workers, False)
 
@@ -185,13 +185,13 @@ def test_joined_git_error_does_not_survive_corrected_retry(tmp_path, monkeypatch
     def unknown(*_a, **_kw):
         raise subprocess.TimeoutExpired("git diff", 1)
     monkeypatch.setattr(git, "run_cmd", unknown)
-    result = registry.execute_result("vcs_diff", {"root": "active_workspace"})
+    result = registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"})
     assert result.code == "GIT_ERROR" and not result.meta.get("operation_outcome")
     claim = load_task_result(tmp_path, "root").get("launch_handoffs", {})
     assert claim == {}
     monkeypatch.setattr(git, "run_cmd", lambda *_a, **_kw: "")
-    registry.execute_result("vcs_diff", {"root": "active_workspace", "head": "HEAD"})
-    registry.execute_result("vcs_diff", {"root": "active_workspace"})
+    registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace", "head": "HEAD"})
+    registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"})
     assert load_task_result(tmp_path, "root").get("launch_handoffs", {}) == claim
     _consumers(tmp_path, registry, queue, workers, False)
 
@@ -215,7 +215,7 @@ def test_vcs_validation_family_never_dispatches_git(tmp_path, monkeypatch, name,
     assert refused.meta.get("operation_outcome") == "completed_no_effect", refused
     assert dispatched == []
     assert not load_task_result(tmp_path, "root").get("launch_handoffs")
-    assert registry.execute_result("vcs_diff", {"root": "active_workspace"}).code == "OK"
+    assert registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"}).code == "OK"
     _consumers(tmp_path, registry, queue, workers, False)
 
 

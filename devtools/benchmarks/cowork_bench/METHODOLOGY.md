@@ -53,7 +53,7 @@ That inherited two-hour lifetime can end a long task regardless of a larger
 `--task-timeout`; retain it in the deferred full-run timeout decision. Qualification
 uses 3600 seconds.
 
-The acceptance panel is part of the measured agent, not the official scorer.
+The result review panel is part of the measured agent, not the official scorer.
 Safety-off is a benchmark-specific departure from the usual light-mode template;
 it avoids adding a separate safety-model request to the mock office operations.
 These settings do not alter the user's live installation. The committed model

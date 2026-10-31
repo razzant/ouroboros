@@ -31,6 +31,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS as _SEND_OBSERVER_KEYS  # a resumed task keeps the send observer's state
 from ouroboros.observability import without_finalization_timing
 from ouroboros.owner_mailbox import OwnerMailboxPeek
 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
@@ -52,7 +53,8 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     Precedence: control, this card's answer, owner words, hurry, mail.
     """
     from ouroboros.owner_mailbox import (
-        KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE,
+        KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, place_arrival_wake,
     )
 
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
@@ -60,18 +62,20 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
         return "control:finalize_now"
     if KIND_OWNER_PAUSE in kinds:
         return "control:owner_pause"
-    if any(kind == KIND_QUIZ_ANSWER and row.get("msg_id") == f"quiz_answer:{quiz_id}"
-           for kind, row in zip(kinds, entries)):
+    # This card's answer: ``quiz_answer:{asker}:{quiz}``, or saved ``quiz_answer:{quiz}`` mail.
+    answers = [str(row.get("msg_id") or "") for kind, row in zip(kinds, entries) if kind == KIND_QUIZ_ANSWER]
+    if quiz_id and any(msg_id.startswith("quiz_answer:") and msg_id.rsplit(":", 1)[-1] == quiz_id
+                       for msg_id in answers):
         return "answer"
     if any(kind == KIND_QUIZ_CLOSED and row.get("msg_id") == f"quiz_closed:{quiz_id}"
            for kind, row in zip(kinds, entries)):
         return "question_closed"
-    if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER} for kind in kinds):
+    if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_CARD_INPUT} for kind in kinds):
         return "owner_text"
     if KIND_HURRY in kinds:
         return "hurry"
     for kind, row in zip(kinds, entries):
-        if kind == KIND_TASK_MESSAGE:  # the first mail is the one that woke the task
+        if kind == KIND_TASK_MESSAGE and place_arrival_wake(row) is not False:  # the first waking mail
             source = str(row.get("source_task_id") or "").strip()
             return f"mail:{source}" if source else "mail:unknown"
     return "mail:unknown" if entries else "unknown"
@@ -112,13 +116,18 @@ class OwnerWaitSuperseded(ValueError):
     """A compare-and-set lost: the wait row changed identity or state since its read."""
 
 
-def set_owner_wait(root: Any, task_id: str, wait: dict,
+def set_owner_wait(root: Any, task_id: str, wait: Any,
                    expected_wait_id: str | None = None, *, expected_state: str | None = None) -> dict:
-    """Update only the existing continuation projection, preserving siblings."""
+    """Update only the existing continuation projection, preserving siblings.
+
+    A callable ``wait`` derives the new row from the CURRENT one inside this same write: a
+    transition (``resumed``) never drops what another writer recorded on that wait meanwhile."""
     from ouroboros.task_results import (
         require_writable_task_result_schema,
         stamp_task_result_schema,
     )
+
+    written: dict = {}
 
     def update(current: dict) -> dict:
         require_writable_task_result_schema(current)
@@ -131,10 +140,12 @@ def set_owner_wait(root: Any, task_id: str, wait: dict,
             raise OwnerWaitSuperseded("owner wait identity changed")
         if expected_state is not None and old.get("state") != expected_state:
             raise OwnerWaitSuperseded("owner wait state changed")
-        return stamp_task_result_schema({**current, "owner_wait": dict(wait)})
+        written.clear()
+        written.update(wait(dict(old)) if callable(wait) else wait)
+        return stamp_task_result_schema({**current, "owner_wait": dict(written)})
 
     patch_document(root, task_id, update)
-    return dict(wait)
+    return dict(written)
 
 
 def _wait_bound_fields(ctx: Any) -> dict:
@@ -151,19 +162,22 @@ def _wait_bound_fields(ctx: Any) -> dict:
             "wait_max_minutes": int(getattr(ctx, "_owner_wait_max_minutes", 0) or 0)}
 
 
+
 def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
                        round_idx: int, tool_schemas: list, seen: set) -> dict:
     """The loop's exact continuation values, never Python handles.
 
-    ONE serializer for every same-ID continuation (owner wait, acceptance park,
+    ONE serializer for every same-ID continuation (owner wait, review park,
     budget pause): the carried fields are the loop's cognition — transcript,
-    trace, usage, route, delivery candidate, acceptance identities, owner
-    directives — so a second serializer could only drift from this one.
+    trace, usage, route, delivery candidate, admission-seal and owner-source
+    identities, owner directives — so a second serializer could only drift from this one.
     """
     candidate = getattr(ctx, "_delivery_candidate", None)
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
+    from ouroboros.settings_integrity import captured_cognition
+
     return {
         "task_id": ctx.task_id, "task_attempt": int(getattr(ctx, "task_attempt", None) or 1),
         "started_at": getattr(ctx, "task_started_at", None),
@@ -175,6 +189,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "usage": without_finalization_timing(usage),
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,
         "model_wait": model_state,
+        "cognition": captured_cognition(),
         "nanny_activity": {key: getattr(ctx, key, None) for key in (
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
@@ -182,17 +197,30 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         # Exposure facts gate automatic compaction; a resumed task keeps them.
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
-            "_historical_author_inputs", "_pending_owner_dialogue",
+            "_historical_author_inputs", "_pending_owner_dialogue", *_SEND_OBSERVER_KEYS,
         ) if getattr(ctx, key, None) is not None},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
+        **({"actor_loaded_tool_names": sorted(ctx._actor_loaded_tool_names)}
+           if hasattr(ctx, "_actor_loaded_tool_names") else {}),
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
         "sleep_interaction_seen": dict(getattr(ctx, "_sleep_interaction_seen", None) or {}),
+        "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
+        "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
+        "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
+        "held_owner_messages": dict(getattr(ctx, "_held_owner_messages", None) or {}),
+        "open_relays": dict(getattr(ctx, "_open_relays", None) or {}),
         # Own routing acts still unconfirmed: a resumed turn reports their outcomes too.
         "unconfirmed_routing_acts": list(getattr(ctx, "unconfirmed_routing_acts", None) or []),
+        "restart": {
+            "request": dict(getattr(ctx, "pending_restart_request", None) or {}),
+            "reason": getattr(ctx, "pending_restart_reason", None),
+            "evolution": bool(getattr(ctx, "pending_restart_is_evolution", False)),
+        },
         "route": {key: getattr(ctx, key, None) for key in (
             "active_model", "active_effort", "active_use_local", "active_context_mode",
             "active_model_override", "active_effort_override", "active_use_local_override",
             "active_role_override", "route_wait_on_primary", "primary_route", "_route_facts_pending",
+            "route_choice",  # following its role, or the task's own (route_choice)
         )},
         "delivery_candidate": asdict(candidate) if candidate is not None else None,
         "delivery": {key: getattr(ctx, key, None) for key in (
@@ -203,17 +231,15 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_completion_observation", "_completion_held_sha256", "_presence_completion",
             "_presence_completion_owner_revision", "_acceptance_observation",
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
-            "_presence_selection_seq", "_presence_released", "_presence_release",
-            "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
-
+            "_presence_selection_seq", "_presence_released",
+            "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation", "_owner_reply_revision",
+            "_owner_message_sent",
         ) if getattr(ctx, key, None) is not None},
+        # The block keeps its stored name; the task-acceptance flags it once carried are gone
+        # (a pre-fold continuation still has them: ``restore_continuation_state`` ignores them).
         "acceptance": {
-            "_task_acceptance_improvement_passes": int(getattr(ctx, "_task_acceptance_improvement_passes", 0)),
-            "_task_acceptance_reviewed": bool(getattr(ctx, "_task_acceptance_reviewed", False)),
-            "_task_acceptance_pending": str(getattr(ctx, "_task_acceptance_pending", "")),
-            "_task_acceptance_reviewed_subject": str(getattr(ctx, "_task_acceptance_reviewed_subject", "")),
             # The validated wait/finish choice outlives its consumed selection; turn
-            # start and a new nomination reset it, so only the current choice rides.
+            # start resets it, so only the current choice rides.
             "_acceptance_pending_review_choice": str(getattr(ctx, "_acceptance_pending_review_choice", "") or ""),
             # A left commit/change review wait, by value; its owner token says whether a
             # restored copy still has live custody in the resuming process.
@@ -268,10 +294,8 @@ def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
                                if sleep else {}),
         **({"owner_pause": dict(pause)} if pause else {}),
         "review_binding": review_binding,
-        # When THIS owner wait began: readers date the wait by it, never by the
-        # task's ``started_at`` below (which the lifetime clocks own). The whole
-        # row rides every later write, so a planned restart keeps the stamp. A
-        # review-bound park is dated by its review operation, not here.
+        # Date this wait independently of task lifetime; the stamp survives restart.
+        # A review-bound park is dated by its review operation instead.
         **({} if review_binding else {"parked_at": utc_now_iso()}),
         "source_ref": source, "task_attempt": int(ctx.task_attempt or 1),
         "execution_drive_root": str(ctx.drive_root),
@@ -280,7 +304,8 @@ def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
         # The SAME two carriers every finite-lifetime reader subtracts: the quota
         # union above and the budget-paused interval (#1196, F5). Without it the
         # row's own lifetime check would count a pause as execution.
-        "budget_paused_sec": float(model_state.get("budget_paused_sec") or 0.0),
+        **({"budget_paused_sec": model_state["budget_paused_sec"]}
+           if "budget_paused_sec" in model_state else {}),
     }
 
 
@@ -302,6 +327,28 @@ def saved_sleep_checkpoint(root: Any, task_id: str, attempt: int | None = None) 
             or attempt is not None and int(wait["task_attempt"]) != int(attempt)):
         return {}, {}
     return wait, state
+
+
+def governing_continuation(task: dict) -> str:
+    """Name the ONE carrier the loop resumes: owner wait, then exact pause, then saved work.
+
+    The loop loads the first present carrier and never falls back when it fails,
+    so admission validates that carrier alone. A later carrier legitimately
+    retains the earlier saved-work locator; a valid newer one never reads it, and
+    an invalid one never falls back to it. Falsy wait/pause fields are absent;
+    working recovery is selected by presence, even with an unusable locator.
+    """
+    if task.get("_owner_wait_resume"):
+        return "owner_wait"
+    if task.get("_budget_pause_resume"):
+        return "exact_pause"
+    return "working" if "_working_recovery" in task else ""
+
+
+def fresh_input(task: dict) -> bool:
+    """The task's own first attempt: no governing continuation, retry or reissue of another task."""
+    return not (governing_continuation(task) or int(task.get("_attempt") or 1) != 1
+                or task.get("original_task_id") or task.get("timeout_retry_from"))
 
 
 def load_owner_wait(ctx: Any, handoff: dict | None = None) -> dict:
@@ -345,12 +392,8 @@ def restore_owner_wait_allowed(root: Any, task: dict, *, strict: bool = False, e
     if not isinstance(handoff, dict):
         return False
     root = pathlib.Path(root)
-    try:  # Panic never returns work; the owner's Restart returns only what its acknowledged transaction names
-        if (root / "state" / "panic_stop.flag").read_text(encoding="utf-8").strip() == "panic":
-            return False
-    except FileNotFoundError:
-        pass
-    except OSError:
+    from ouroboros.delegate_recovery import owner_restart_in_progress
+    if owner_restart_in_progress(root):
         return False
     _ack_direct_exec_successor(root)
     task_id = str(task.get("id") or "")
@@ -400,18 +443,14 @@ def restore_owner_wait_allowed(root: Any, task: dict, *, strict: bool = False, e
 
 def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
                       checkpoint: dict) -> str:
-    """Keep the original task process asleep until the pool grants capacity.
-
-    A bound is a second reason to ask for the SAME resume the mailbox already
-    triggers — no new scheduler: the request must sit inside the ``parked``
-    gate, because the supervisor ignores a resume for a wait that is not
-    durably waiting. Disclosed: a resume is a REQUEST, not a guarantee (the
-    grant can be refused under a cancel intent or the repo-writer gate); the
-    hard axes still end the task in that case.
+    """Keep this stack until the pool grants capacity. Mail and the wait's own
+    bound request Resume only after park; hard controls also end a pre-ACK wait.
+    A request grants nothing: current cancellation and writer gates still bind.
     """
     import os
 
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+    from ouroboros.budget_pause import _hold_control_reason
 
     identity = {"type": "owner_wait", "worker_id": wid, "pid": os.getpid(),
                 "task_id": ctx.task_id, "task_attempt": int(ctx.task_attempt or 1),
@@ -427,6 +466,8 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
     deadline = parse_deadline_ts((checkpoint or {}).get("wait_deadline_at"))
     parked = resume_requested = False
     outcome = "unknown"
+    from ouroboros import custody_owed
+
     while True:
         try:
             command = in_q.get(timeout=1.0)
@@ -447,6 +488,12 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
                     return outcome
                 elif phase == "refused":
                     raise RuntimeError(str(command.get("reason") or "owner wait refused"))
+        if custody_owed.pending():  # this park's own poll services what the worker owes (its wake lands here too)
+            custody_owed.drain()
+        if not parked and (reason := _hold_control_reason(ctx)):
+            from ouroboros.model_wait import ModelWaitInterrupted
+
+            raise ModelWaitInterrupted(reason)
         if parked and not resume_requested:
             woke = _sleep_wake(ctx, checkpoint)
             if woke is not None:
@@ -518,17 +565,28 @@ def _sleep_wake(ctx: Any, checkpoint: dict) -> str | None:
         # A left review's park also ends at its wave's settlement, notice written or not.
         left = getattr(ctx, "_left_review_wait", None)
         binding = (checkpoint or {}).get("review_binding")
-        if binding and isinstance(left, dict) and left.get("binding") == binding and left.get("done"):
-            return str(left.get("wake_reason") or "review_settled")
+        if binding and isinstance(left, dict) and left.get("binding") == binding:
+            from ouroboros.review_waiting import wake_reason
+            reason = wake_reason(ctx, left)
+            if reason:
+                return "helper_result" if reason.startswith(("task:", "run:")) else reason
+            return str(left.get("wake_reason") or "review_settled") if left.get("done") else ""
         return "question_closed" if _question_closed(ctx, checkpoint) else None
     from ouroboros.model_sleep import wake_reason
     from ouroboros.store import acquisition_budget
 
+    wait_id = checkpoint.get("wait_id") or id(chosen)
     try:
         with acquisition_budget(0):  # store contention is retried by the next poll, never waited on
-            return wake_reason(ctx, chosen)
+            reason = wake_reason(ctx, chosen)
+        ctx._sleep_read_failures = None
+        return reason
     except Exception:
-        log.warning("Sleep readiness unreadable for %s; still sleeping", ctx.task_id, exc_info=True)
+        previous = getattr(ctx, "_sleep_read_failures", None)
+        count = previous[1] + 1 if previous and previous[0] == wait_id else 1
+        ctx._sleep_read_failures = (wait_id, count)
+        log.warning("Sleep readiness unreadable for %s; still sleeping (consecutive failures: %d)",
+                    ctx.task_id, count, exc_info=count == 1)
         return ""
 
 
@@ -569,7 +627,7 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
     usage_for_state = {key: value for key, value in limit_ctx.accumulated_usage.items()
                        if key not in ("execution_status", "reason_code", "_best_effort_extracted",
                                       "budget_pause_hold", "_llm_round_started")}
-    from ouroboros.external_runs import STOP_POLICY_TASK_OWNED, observe_task_runs
+    from ouroboros.external_runs import STOP_POLICY_TASK_OWNED, episode_fields, observe_task_runs
 
     try:  # the member's OWN runs stop exactly as at a cold Pause; its reviewers' runs are spared
         from ouroboros import delegate_custody as custody
@@ -580,7 +638,7 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
         external = {"runs": [], "custody_read": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     pause = {"fence_id": str(fence.get("fence_id") or ""), "generation": int(fence.get("generation") or 0),
              "root_task_id": str(fence.get("root_task_id") or ""), "detached_reviews": list(detached),
-             "external_runs": external, "parked_at": utc_now_iso()}
+             "external_runs": external, **episode_fields({}, external, starts=True), "parked_at": utc_now_iso()}
     from ouroboros import model_sleep
 
     # Reuse the live paused interval and fold it into the same cumulative carrier
@@ -590,11 +648,13 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
         checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage_for_state, int(limit_ctx.round_idx),
                                            list(limit_ctx.tool_schemas or []),
                                            set(limit_ctx.owner_msg_seen or ()), pause=pause)
+        checkpoint["sleep_started_at"] = ctx._model_sleep_started
         outcome = str(callback(ctx, checkpoint) or "")
     finally:
         model_sleep.end(ctx)
     if outcome == "control:owner_resume":
         messages.append(owner_pause_resume_notice(ctx, checkpoint, outcome))
+    model_sleep.announce_resumed(ctx, outcome)
     return outcome
 
 
@@ -615,7 +675,7 @@ def consume_warm_resume(ctx: Any) -> bool:
         fence = read_fence(root_drive, root_task_id)
         stamp = {"consumed_at": utc_now_iso(), "consumed_by": task_id,
                  "task_attempt": int(getattr(ctx, "task_attempt", 1) or 1)}
-        if fence_closed(fence):
+        if fence_closed(fence) or ((fence.get("resume_grant") or {}).get("tree_only") and task_id != root_task_id):
             selected = dict(fence.get("selected_members") or {})
             mine = selected.get(task_id)
             if not isinstance(mine, dict):
@@ -635,7 +695,7 @@ def consume_warm_resume(ctx: Any) -> bool:
         return True
 
 
-def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str) -> dict:
+def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str, *, cold: bool = False) -> dict:
     """The host frame a warm-parked member reads when the owner's Pause ends.
 
     States only what this process knows about each review it detached from:
@@ -646,6 +706,14 @@ def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str) -> dict:
     from ouroboros.review_pause import review_operation_state
 
     pause = checkpoint.get("owner_pause") if isinstance(checkpoint.get("owner_pause"), dict) else {}
+    if cold:
+        return {"role": "user", "content": (
+            "[SYSTEM NOTICE]\nThe application stopped while this owner Pause was warm. "
+            "Detached review operations recorded at the pause: "
+            + json.dumps(pause.get("detached_reviews") or [], ensure_ascii=False)
+            + ". Their former process-local state is not current liveness or a verdict. "
+            "Collect the original review records before deciding what remains; "
+            "an unknown paid outcome is not permission to dispatch it again.")}
     lines = []
     for item in pause.get("detached_reviews") or []:
         if not isinstance(item, dict):
@@ -653,6 +721,9 @@ def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str) -> dict:
         state = review_operation_state(str(item.get("owner_id") or ""))
         lines.append(f"- {item.get('surface') or 'review'} operation {item.get('owner_id')}: {state}")
     reviews = ("\n".join(lines) if lines else "- none")
+    from ouroboros.external_runs import paused_runs_notice
+
+    runs = paused_runs_notice(ctx, _parked_owner_pause(ctx, checkpoint, pause))
     abandoned = list(getattr(ctx, "_abandoned_model_attempts", None) or [])
     ctx._abandoned_model_attempts = []
     late = (f"The Pause interrupted {len(abandoned)} model request(s) already sent ({', '.join(abandoned)}): "
@@ -660,12 +731,43 @@ def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str) -> dict:
             "and its tools were not run. " if abandoned else "")
     return {"role": "user", "content": (
         "[SYSTEM NOTICE]\nThe owner paused this task and has now resumed it. Reviewers you had already "
-        f"launched kept running while you were paused:\n{reviews}\nYour review tool returned a pending "
+        f"launched kept running while you were paused:\n{reviews}\nWhat became of the delegated runs this Pause "
+        f"stopped or observed (current custody; engine facts are evidence, never a grant):\n{runs}\n"
+        "Your review tool returned a pending "
         "result for them; nothing was committed, applied or published after the Pause. Calling the same "
         "review again with an unchanged subject rejoins or replays that attempt in this process without a "
         "new dispatch; a changed subject is a new review. A reviewer whose state is unknown was not resent. "
         f"{late}Nothing you asked for after the Pause ran. Cumulative spend, rounds and elapsed time were "
         "not reset; prior tool results remain recorded; do not repeat completed effects.")}
+
+
+def _parked_owner_pause(ctx: Any, checkpoint: dict, pause: dict) -> dict:
+    """This park's ``owner_pause`` with the participants its settle tick recorded since (same wait
+    only); a park without a whole list stays partial (``external_runs.episode_fields``)."""
+    from ouroboros.external_runs import PARTIAL_KEY, episode_fields
+
+    try:
+        wait = (load_task_result(pathlib.Path(ctx.budget_drive_root or ctx.drive_root), ctx.task_id, strict=True)
+                or {}).get("owner_wait") or {}
+    except Exception:
+        return pause  # the park's own list stands; the notice still reads current custody
+    later = (wait.get("owner_pause") or {}) if wait.get("wait_id") == checkpoint.get("wait_id") else {}
+    merged = {**pause, **episode_fields(pause, {"runs": later.get("episode_runs")})}
+    return {**merged, PARTIAL_KEY: True} if later.get(PARTIAL_KEY) is True else merged
+
+
+def _admit_direct_continuation_wake(task_id: str, wait: dict, root: pathlib.Path) -> bool:
+    """Clear park mark under the repo-writer gate lock; re-park if admission is closed."""
+    from supervisor import workers
+    from supervisor.active_activity import get_direct_activity_registry
+
+    registry = get_direct_activity_registry()
+    with workers._repo_writer_gate_lock:
+        registry.clear_parked(task_id)
+        if workers.repo_writer_admission_closed():
+            registry.mark_parked(task_id, wait, drive_root=root)
+            return False
+        return True
 
 
 def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
@@ -678,41 +780,80 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
     so Stop, the task deadline and the absolute ceiling keep precedence.
     """
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+    from supervisor.active_activity import get_direct_activity_registry
 
     control = ctx.model_wait_context
     root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
+    if getattr(ctx, "event_queue", None) is None:
+        from ouroboros.presence_owner_contact import flush_owner_events
+        flush_owner_events(root, ctx.pending_events)
     # Without a queue (a Presence turn may have none) the buffer keeps its events for the final flush.
     while ctx.pending_events and getattr(ctx, "event_queue", None) is not None:
         ctx.event_queue.put(dict(ctx.pending_events[0]))
         del ctx.pending_events[0]
-    wait = set_owner_wait(root, ctx.task_id, {**checkpoint, "state": "waiting"})
-    peek = OwnerMailboxPeek()
+    wait = set_owner_wait(root, ctx.task_id, {**checkpoint, "state": "waiting", "is_direct_chat": True})
+    get_direct_activity_registry().mark_parked(ctx.task_id, wait, drive_root=root)
+    peek = OwnerMailboxPeek(waking_only=True)  # an inline author still hears place arrivals here
     deadline = parse_deadline_ts((checkpoint or {}).get("wait_deadline_at"))  # None = unbounded
     outcome = "unknown"
     warm_pause = checkpoint.get("reason") == REASON_OWNER_PAUSE_WARM
-    while not control.control_reason():
-        woke = _sleep_wake(ctx, checkpoint)
-        if woke:
-            outcome = woke
-            break
-        if warm_pause:
-            woke = _owner_pause_wake(ctx, checkpoint)
+    control_reason = ""
+    try:
+        while True:
+            control_reason = str(control.control_reason() or "")
+            if control_reason:
+                if control_reason not in {"finalize_requested", "finalize_now"}:
+                    break
+                if _admit_direct_continuation_wake(ctx.task_id, wait, root):
+                    break
+                time.sleep(0.05)
+                continue
+            woke = _sleep_wake(ctx, checkpoint)
             if woke:
-                outcome = woke
-                break
-        elif woke is None and peek.pending(
-                pathlib.Path(ctx.drive_root), ctx.task_id,
-                set(getattr(ctx, "_loop_mailbox_seen_ids", set())), ctx.task_attempt or 1):
-            break
-        if deadline is not None and utc_now() >= deadline:
-            outcome = "timeout"
-            break
-        time.sleep(1.0)
-    control_reason = control.control_reason()
+                if _admit_direct_continuation_wake(ctx.task_id, wait, root):
+                    outcome = woke
+                    break
+                time.sleep(0.05)
+                continue
+            if warm_pause:
+                woke = _owner_pause_wake(ctx, checkpoint)
+                if woke:
+                    if (woke.startswith("control:")
+                            and woke not in {"control:owner_resume", "control:owner_pause",
+                                             "control:finalize_requested", "control:finalize_now"}):
+                        outcome = woke
+                        break
+                    if _admit_direct_continuation_wake(ctx.task_id, wait, root):
+                        outcome = woke
+                        break
+                    time.sleep(0.05)
+                    continue
+            elif woke is None and peek.pending(
+                    pathlib.Path(ctx.drive_root), ctx.task_id,
+                    set(getattr(ctx, "_loop_mailbox_seen_ids", set())), ctx.task_attempt or 1):
+                if _admit_direct_continuation_wake(ctx.task_id, wait, root):
+                    break
+                time.sleep(0.05)
+                continue
+            if deadline is not None and utc_now() >= deadline:
+                if _admit_direct_continuation_wake(ctx.task_id, wait, root):
+                    outcome = "timeout"
+                    break
+                time.sleep(0.05)
+                continue
+            time.sleep(1.0)
+    finally:
+        get_direct_activity_registry().clear_parked(ctx.task_id)
+    if not control_reason:
+        # Every continuation exit above was already admitted (or is terminal); a late
+        # control only joins it. Re-checking admission here could re-park a stack that
+        # is already resuming and hide it from the update drain (#2191).
+        control_reason = str(control.control_reason() or "")
     outcome = (f"control:{control_reason}" if control_reason else outcome if warm_pause else
                _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome))
-    set_owner_wait(root, ctx.task_id,
-                   {**wait, "state": "resumed", "resume_reason": outcome}, wait["wait_id"])
+    # The current same wait, in one write: a settle tick's facts recorded meanwhile stay (#1562).
+    set_owner_wait(root, ctx.task_id, lambda current: {**current, "state": "resumed", "resume_reason": outcome},
+                   wait["wait_id"])
     if not outcome.startswith("control:"):
         announce_wait_ended(root, ctx.task_id, str(checkpoint.get("quiz_id") or ""),
                             int(getattr(ctx, "current_chat_id", 0) or 0))
@@ -726,9 +867,12 @@ def announce_wait_ended(root: Any, task_id: str, quiz_id: str, chat_id: int) -> 
     if not quiz_id:
         return
     try:
-        from ouroboros.owner_quiz import mark_wait_ended
+        from ouroboros.owner_quiz import mark_wait_ended, quiz_states
+        from ouroboros.presence_owner_contact import private_main_contact
 
         changed = mark_wait_ended(root, task_id, quiz_id)
+        block = quiz_states(root, task_id).get(quiz_id) or {}
+        chat_id = int(block.get("publication_chat_id", 1 if private_main_contact(block, task_id) else chat_id))
     except Exception:
         log.debug("owner-wait end not recorded on quiz %s", quiz_id, exc_info=True)
         return
@@ -810,12 +954,15 @@ def append_wake_notice(ctx: Any, checkpoint: dict, outcome: Any, messages: list)
     Only a wake that answered nothing gets a notice: this card's answer or the
     owner's words reach the transcript through the ordinary drain, and a
     control reason is acted on by the loop. An answer may have landed after
-    the wake but before this round — never claim silence then. The acceptance
-    park is not an owner question and gets no notice.
+    the wake but before this round — never claim silence then. A review park
+    is not an owner question and gets no notice.
     """
     outcome = str(outcome or "")
     if checkpoint.get("reason") == REASON_OWNER_PAUSE_WARM:
         return  # ``park_owner_pause_warm`` writes the Resume notice itself
+    if checkpoint.get("review_binding") and (outcome in {"helper_result", "review_result", "timeout"} or outcome.startswith("run_question:")):
+        from ouroboros.review_waiting import append_helper_notice
+        append_helper_notice(ctx, messages)
     if checkpoint.get("review_binding") or not (
             outcome in {"timeout", "hurry", "unknown", "question_closed"} or outcome.startswith("mail")):
         return
@@ -851,6 +998,8 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
     """Yield only after complete tool results; no model polling or terminal path."""
     if not getattr(ctx, "_owner_wait_requested", "") and not review_binding:
         return
+    from ouroboros.model_detach import preserve_owner_question
+    preserve_owner_question(ctx, messages)
     sleep = getattr(ctx, "_model_sleep", None)
     if isinstance(sleep, dict) and sleep.get("mode") == "cold" and not review_binding:
         # A cold sleep ends this process at the next round boundary
@@ -859,20 +1008,23 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
         ctx._owner_wait_deadline_at = ""
         return
     callback = getattr(ctx, "owner_wait_callback", None)
-    # A Presence author has only the narrow review-wait owner (``presence_continuation``): it
-    # parks for its panel and never gains owner quizzes, sleeps or budget pauses through it.
-    review_callback = getattr(ctx, "review_wait_callback", None) if review_binding else None
+    # Presence validates its own review/private question at this narrow seam;
+    # the callback grants no sleep, detach, owner Pause or budget-pause capability.
+    review_callback = getattr(ctx, "review_wait_callback", None)
     if not callable(callback) and not callable(review_callback):
         raise RuntimeError("required owner wait has no worker continuation owner")
+    from ouroboros import model_sleep
+
+    if not review_binding and model_sleep.withdraw_for_new_holds(ctx, messages) and not ctx._owner_wait_requested:
+        return  # a stop begun since arming reaches the mind before the park; the same request then sleeps
     checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage, round_idx, tool_schemas, seen,
                                        review_binding=review_binding)
-    sleep = checkpoint.get("sleep")
     if not callable(callback):
-        review_callback(ctx, checkpoint, messages)
-    elif sleep:
-        from ouroboros import model_sleep
-
+        outcome = review_callback(ctx, checkpoint, messages)
+        append_wake_notice(ctx, checkpoint, outcome, messages)
+    elif sleep := checkpoint.get("sleep"):
         model_sleep.begin(ctx)
+        checkpoint["sleep_started_at"] = ctx._model_sleep_started
         try:
             outcome = callback(ctx, checkpoint)
         finally:
@@ -883,12 +1035,13 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
     else:
         outcome = callback(ctx, checkpoint)
         append_wake_notice(ctx, checkpoint, outcome, messages)
-    ctx._owner_wait_requested = ""
-    ctx._owner_wait_deadline_at = ""
-    ctx._owner_wait_max_minutes = 0
+    ctx._owner_wait_requested, ctx._owner_wait_deadline_at, ctx._owner_wait_max_minutes = "", "", 0
+    if callable(callback):
+        model_sleep.announce_resumed(ctx, outcome)  # the same attempt prepares again, with no new start
 
 
-def park_for_left_review(tools: Any, limit_ctx: Any, content: Any, emit_progress: Any) -> bool:
+def park_for_left_review(tools: Any, limit_ctx: Any, content: Any, emit_progress: Any,
+                         origin: str = "prose") -> bool:
     """Plain prose with no completion choice while a commit/change review the author left
     for an addressed message is still its intention: the prose stays in the transcript as
     narration and the same wait resumes on the review park, with no model call until the
@@ -896,15 +1049,24 @@ def park_for_left_review(tools: Any, limit_ctx: Any, content: Any, emit_progress
     gets one round, and one that could not be written is said inline; a wait restored from
     another process holds no live custody here, so the author gets one round with that fact
     instead of a park nothing would end. A new commit or review_change act, an explicit
-    completion, a new turn or a read notice ends it."""
+    completion, a new turn or a read notice ends it. Each case that holds the prose records
+    its ``left_review_wait`` hold itself (``origin`` from the caller); a park before it waits."""
     from ouroboros.review_pause import PROCESS_TOKEN
+
+    def held(case: str) -> bool:
+        from ouroboros.loop_delivery import observe_completion_hold
+
+        observe_completion_hold(tools, limit_ctx, origin, "left_review_wait", case)
+        return True
 
     ctx = tools._ctx
     wait = getattr(ctx, "_left_review_wait", None)
-    if not isinstance(wait, dict) or getattr(ctx, "_task_acceptance_pending", ""):
+    if not isinstance(wait, dict):
         return False
     restored = wait.get("owner") != PROCESS_TOKEN
     if str(wait.get("msg_id") or "") in limit_ctx.owner_msg_seen:
+        ctx._review_wait_selection = dict(wait)
+        ctx._left_review_wait = None
         return False  # its notice was read: that wave is over
     from ouroboros.loop_messages import _emit_round_progress
 
@@ -916,8 +1078,15 @@ def park_for_left_review(tools: Any, limit_ctx: Any, content: Any, emit_progress
 
         ctx._left_review_wait = None
         limit_ctx.messages.append({"role": "user", "content": left_review_custody_note(wait)})
-        return True
-    if not wait.get("done"):
+        return held("custody_restored")
+    parked = not wait.get("done")
+    if parked:
+        from ouroboros.review_waiting import wake_reason
+        if reason := wake_reason(ctx, wait):
+            append_wake_notice(ctx, {"review_binding": wait.get("binding")},
+                               "helper_result" if reason.startswith(("task:", "run:")) else reason, limit_ctx.messages)
+            return held("wake_notice")
+        held("parked")  # before the wait: the hold is readable while it lasts and after a wait that ended it
         wait_after_tools(ctx, limit_ctx.messages, limit_ctx.llm_trace, limit_ctx.accumulated_usage,
                          limit_ctx.round_idx, limit_ctx.tool_schemas, limit_ctx.owner_msg_seen,
                          review_binding=str(wait.get("binding") or ""))
@@ -925,7 +1094,7 @@ def park_for_left_review(tools: Any, limit_ctx: Any, content: Any, emit_progress
         ctx._left_review_wait = None
         if wait.get("notice"):
             limit_ctx.messages.append({"role": "user", "content": str(wait["notice"])})
-    return True
+    return True if parked else held("settled")
 
 
 def restore_continuation_state(tools: Any, state: dict, messages: list, trace: dict,
@@ -935,31 +1104,60 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     NOT restored: they died with the previous process and stay invalidated."""
     from ouroboros.loop_delivery import DeliveryCandidate
 
-    from ouroboros.model_wait import budget_paused_seconds
+    from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
+    from ouroboros.settings_integrity import restore_cognition
 
     ctx = tools._ctx
+    restore_cognition(state.get("cognition"))
     # Missing old observations are unknown, not this new process's startup seed.
     # None is the known fresh state; an empty mark has no historical anchor.
     for key in ("_nanny_metered_progress", "_nanny_delegate_baseline"):
         setattr(ctx, key, (state.get("nanny_activity") or {}).get(key, {}))
     for key, value in (state.get("context_observations") or {}).items():
-        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs", "_pending_owner_dialogue"}:
+        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs", "_pending_owner_dialogue", *_SEND_OBSERVER_KEYS}:
             setattr(ctx, key, value)
     messages[:] = state["messages"]
+    # This set is also bound into enable_tools; never replace the closure's object.
+    loaded = getattr(ctx, "_actor_loaded_tool_names", None)
+    if loaded is not None:
+        loaded.update(state.get("actor_loaded_tool_names") or ())
     trace.update(state["trace"])
     usage.update(state["usage"])
     seen.update(state["seen"])
     ctx._loop_mailbox_seen_ids = seen
     ctx._sleep_interaction_seen = dict(state.get("sleep_interaction_seen") or {})
+    # A legacy state without this map shows each current hold once more before its wait arms.
+    ctx._held_dependencies_seen = dict(state.get("held_dependencies_seen") or {})
+    # Each record's place: an older source read whole later never replaces a newer one (``model_sleep._record_holds``).
+    ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
+    # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
+    ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
     ctx._owner_directives = state["owner_directives"]
+    ctx._held_owner_messages = dict(state.get("held_owner_messages") or {})
+    ctx._open_relays = dict(state.get("open_relays") or {})
     ctx.unconfirmed_routing_acts = [dict(act) for act in state.get("unconfirmed_routing_acts") or [] if isinstance(act, dict)]
-    # The cumulative budget-paused carrier rides EVERY same-ID continuation
-    # (#1196, F5): a cold owner-wait restore of a task that had been budget
-    # paused keeps it, so a later pause row and the delegate clock start from
-    # the same cumulative value; a budget grant overrides it with its own.
-    ctx._budget_paused_sec = budget_paused_seconds(state.get("model_wait") or {})
-    for key, value in {**state["route"], **state["delivery"], **state["acceptance"]}.items():
+    restart = state.get("restart") or {}
+    request = restart.get("request") or {}
+    # Cold Pause/Resume keeps the requester's obligation without sending again.
+    # A new task or attempt inherits no authority to finish this Restart.
+    if (request.get("task_id"), request.get("task_attempt")) == (
+            ctx.task_id, int(getattr(ctx, "task_attempt", None) or 1)):
+        ctx.pending_restart_request = dict(request)
+        ctx.pending_restart_reason = restart.get("reason")
+        ctx.pending_restart_is_evolution = bool(restart.get("evolution"))
+    # Match the agent's native handoff clock; a budget grant overrides it separately.
+    ctx._budget_paused_sec = budget_paused_seconds(adopt_handoff_clock(
+        state.get("model_wait") or {}, getattr(ctx, "owner_wait_resume", None)))
+    # A pre-fold continuation's ``acceptance`` block also carries the deleted task-acceptance
+    # flags (``_task_acceptance_pending`` and friends); they are not restored.
+    review = {key: value for key, value in state["acceptance"].items()
+              if key in {"_acceptance_pending_review_choice", "_left_review_wait"}}
+    for key, value in {**state["route"], **state["delivery"], **review}.items():
         setattr(ctx, key, value)
+    from ouroboros.route_choice import restored_choice
+
+    ctx.route_choice = restored_choice(ctx, state)  # a saved choice, else the legacy classification (D5)
+    ctx._route_binding = None  # the first round compares to the restored acting route (route_choice.round_route)
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
@@ -973,11 +1171,12 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
 def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     """Rebind the restored route's context-fit plan; returns ``(plan, mode)``.
 
-    The new capture starts in the mode the task ran in (restored onto ``ctx``), never above the
-    owner's current one: a restore, like any route, never raises a mode."""
+    The actor's captured owner choice survives restart, separately from the physically
+    achieved mode. Legacy sources without that choice keep the previous fallback."""
     from ouroboros.loop import _rebind_context_fit_plan, get_context_mode
     from ouroboros.memory_floor import MODES
     from ouroboros.model_slots import task_model_binding
+    from ouroboros.continuation_tools import reconcile_restored_tools
 
     ctx = tools._ctx
     model_wait = getattr(ctx, "model_wait_context", None)
@@ -987,25 +1186,38 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         overrides=model_wait.overrides if model_wait is not None else None,
     )
     owner, ran = get_context_mode(), getattr(ctx, "active_context_mode", None)
-    return _rebind_context_fit_plan(
-        ctx.context_fit_plan, tools, messages, model=ctx.active_model,
+    route = dict(model=ctx.active_model,
         use_local=ctx.active_use_local, preferred_mode=owner,
         tool_schemas=state["tool_schemas"],
         model_role=role, model_route={}, credential_profile_id=account,
-        start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None,
     )
+    plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, **route,
+        start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)
+    if reconcile_restored_tools(tools, state, messages, mode):
+        plan, mode = _rebind_context_fit_plan(plan, tools, messages, **route, start_mode=mode)
+    return plan, mode
 
 
 def resume_native_loop(tools: Any, state: dict, messages: list, trace: dict,
                        usage: dict, seen: set) -> tuple:
     """Restore the selected cold continuation and await its ordinary input grant."""
     from ouroboros.review_pause import wake_restored_left_review
+    from ouroboros.model_wait import native_sleep_started_at
+    from ouroboros import model_sleep
 
     ctx = tools._ctx
     restore_continuation_state(tools, state, messages, trace, usage, seen)
     cold_checkpoint = ctx.owner_wait_resume
-    wake_restored_left_review(ctx)  # a left review's custody ended with its process: say so, which also wakes
-    outcome = ctx.owner_wait_callback(ctx, cold_checkpoint)
+    wake_restored_left_review(ctx)  # departed review custody is disclosed and wakes its author
+    started = native_sleep_started_at(cold_checkpoint)
+    if started is not None:
+        model_sleep.begin(ctx, started_at=started)
+    try:
+        outcome = ctx.owner_wait_callback(ctx, cold_checkpoint)
+    finally:
+        if started is not None:
+            model_sleep.end(ctx)
+    model_sleep.announce_resumed(ctx, outcome)
     ctx.owner_wait_resume = None
     plan, mode = rebind_restored_route(tools, state, messages)
     messages.append({"role": "user", "content": (
@@ -1017,15 +1229,10 @@ def resume_native_loop(tools: Any, state: dict, messages: list, trace: dict,
     if isinstance(left, dict) and left.get("done") and not left.get("noticed") and left.get("notice"):
         messages.append({"role": "user", "content": str(left["notice"])})
         ctx._left_review_wait = None
-    # The bound survived the restart as an absolute stamp, so the cold
-    # continuation can ALSO end on it — and a peer wake or a hurry is no more
-    # an answer cold than warm: the same notice seam says so.
+    # The same absolute bound and wake semantics survive a cold return.
     if (cold_checkpoint or {}).get("reason") == "sleep":
-        from ouroboros import model_sleep
-
-        started = cold_checkpoint.get("sleep_started_at")  # absent on legacy rows: no invented duration
         messages.append(model_sleep.wake_notice(cold_checkpoint.get("sleep") or {}, str(outcome or ""),
-                                                max(0.0, time.time() - float(started)) if started else None))
+                                                max(0.0, time.time() - started) if started is not None else None))
         model_sleep.append_question_notice(ctx, str(outcome or ""), messages)
     else:
         append_wake_notice(ctx, cold_checkpoint or {}, outcome, messages)
@@ -1033,14 +1240,37 @@ def resume_native_loop(tools: Any, state: dict, messages: list, trace: dict,
             mode, state["round_idx"], plan)
 
 
-def prepare_owner_wait_handoffs(root: Any, running: dict, transaction_id: str) -> set[str]:
-    """Select only parked native continuations for the planned restart owner."""
+def prepare_owner_wait_handoffs(root: Any, running: dict, transaction_id: str, *,
+                                include_sleep: bool = True, direct: Any = None) -> set[str]:
+    """Prepare returning waits; owner-Pause keeps its own retention.
+
+    Planned restarts and updates may return a sleeper to its existing wait.
+    Manual Restart excludes sleep: it stays held until explicit Resume.
+    """
     selected = set()
-    for task_id, meta in running.items():
-        task = meta.get("task") or {}
-        row = load_task_result(root, task_id, strict=True) or {}
+    reasons = {"owner", "review", "sleep"} if include_sleep else {"owner", "review"}
+    if direct is None:
+        try:
+            from supervisor.workers import direct_chat_turns
+
+            direct = direct_chat_turns()
+        except Exception:
+            direct = ()
+    candidates = [
+        *((str(task_id or ""), (meta or {}).get("task") or {}) for task_id, meta in (running or {}).items()),
+        *((str((task or {}).get("id") or ""), task if isinstance(task, dict) else {}) for task in (direct or ())),
+    ]
+    for task_id, task in candidates:
+        if not task_id or task_id in selected:
+            continue
+        try:
+            row = load_task_result(root, task_id, strict=True) or {}
+        except (OSError, ValueError, TypeError, RuntimeError):
+            log.warning("Restart handoff could not read task %s; its retention stays unresolved", task_id, exc_info=True)
+            continue
         wait = row.get("owner_wait") or {}
-        if wait.get("state") != "waiting" or not wait.get("source_ref"):
+        if (wait.get("state") != "waiting" or wait.get("reason") not in reasons
+                or not wait.get("source_ref")):
             continue
         read_actor_source_bytes(root, task_id, wait["source_ref"])
         task["_owner_wait_resume"] = {**wait, "restart_transaction_id": transaction_id}

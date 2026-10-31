@@ -180,7 +180,7 @@ def _publish_unresolved(root, observations, *, subject=ATTEMPTS, faults=None, ke
                      _ID_FIELDS[subject]: list(shown), "reasons": {key: current[key] for key in shown}}
             path.parent.mkdir(parents=True, exist_ok=True)
             data = (json.dumps(event, ensure_ascii=False) + '\n').encode('utf-8')
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_BINARY', 0), 0o644)
             try:
                 _write_fd_fully(fd, data, path)
             finally:
@@ -243,8 +243,9 @@ def _contended(exc) -> bool:
     return False
 
 
-def _absent_task_ids(root, task_ids) -> set:
-    """Task ids whose result row is proven absent, in one statement; an unanswered query proves nothing."""
+def _present_facts(root, task_ids) -> tuple:
+    """``(ids, facts)``: the valid task ids among TASK_IDS and the typed facts of those with a row, in
+    one statement; ``facts`` is ``None`` when the query went unanswered, which proves nothing."""
     from ouroboros.task_results import validate_task_id
     from ouroboros.task_store import task_facts
 
@@ -255,16 +256,16 @@ def _absent_task_ids(root, task_ids) -> set:
         except ValueError:
             pass  # System accounting scopes own no task result.
     if not ids:
-        return set()
+        return ids, {}
     try:
-        return ids - set(task_facts(root, where="task_id IN (SELECT value FROM json_each(?))",
-                                    params=(json.dumps(sorted(ids)),)))
+        return ids, task_facts(root, where="task_id IN (SELECT value FROM json_each(?))", params=(json.dumps(sorted(ids)),))
     except Exception:
-        return set()  # Only proven absence skips a read; the ownership read reports the rest.
+        return ids, None  # Only proven absence skips a read; the ownership read reports the rest.
 
 
 def _refresh_costs(root: pathlib.Path, reads) -> None:
-    from ouroboros import usage_store
+    from ouroboros import store, usage_store
+    from ouroboros.obligations import COST_ARRIVALS, DutyRest
     from ouroboros.task_results import validate_task_id
     from ouroboros.task_status import SETTLED_STATUSES
     from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
@@ -284,29 +285,55 @@ def _refresh_costs(root: pathlib.Path, reads) -> None:
             if leaf != task_id and settled:
                 yield leaf, reads.load(leaf)
 
+    with store.open_store(root, write=False) as txn:
+        arrivals = int(txn.meta(COST_ARRIVALS) or 0)
     with usage_store.read(root) as txn:
-        owners = txn.dirty_owners()
+        money_marker = txn.marker()
+        with _UNRESOLVED_LOCK:
+            state = _subject_state(root, COST_PROJECTIONS)
+            inputs = state.get("absence_inputs")
+            resting = bool(inputs and inputs[0] == arrivals and inputs[1][0] == money_marker[0]
+                           and inputs[1][1] <= money_marker[1])
+            owners = dict(state.get("present_owners", ())) if resting else {}
+        if not resting:
+            owners.update(txn.dirty_owners())
+        elif inputs[1] != money_marker:
+            owners.update(txn.dirty_owners(since=inputs[1][1]))
+        owners = list(owners.items())
+    if resting and not owners:
+        state["absence_inputs"] = [arrivals, money_marker]
+        # Retry a failed diagnostic publication, not the proven-absent owners.
+        if state["fault"] is not None or state["published"] is None:
+            _publish_unresolved(root, {}, subject=COST_PROJECTIONS, keep=state["observed"])
+        return
     ids = {}
     for owner, _revision in owners:
         try:
             ids[owner] = validate_task_id(owner)
         except ValueError:
             pass  # System accounting scopes own no task result.
-    # Presence precedes the ownership read, for every owner in one statement: an
-    # absent row keeps this exact revision without the fence's authority read, and
-    # the next pass projects a row copied back after the last ledger write.
-    absent = _absent_task_ids(root, ids.values())
+    # A money-only pass selects newer dirty rows plus still-present owners. Successful
+    # absence keeps debt; arrival, a changed ledger epoch or restart reselects it.
+    _ids, facts = _present_facts(root, ids.values())
+    settled = set() if facts is None else {tid for tid, row in facts.items() if row["status"] in SETTLED_STATUSES}
+    rest = DutyRest(root, "cost_projection", {ids[owner]: {"usage_revision": revision}
+                                              for owner, revision in owners if owner in ids}, partial=resting)
     acknowledged, pending, failures, faults = [], set(), {}, {}
     for owner, revision in owners:
         task_id = ids.get(owner)
         if task_id is None:
             continue
         pending.add(task_id)
-        if task_id in absent:
+        if facts is not None and task_id not in facts:
             failures[task_id] = "result_absent"
+            rest.wait(task_id, "result_absent", absent=True, report={"reason": "result_absent"})
+            continue
+        if facts is not None and task_id not in settled or task_id in rest.resting:
             continue
         try:
             current = reads.load(task_id)
+            if post_task_synthesis_is_open((current.get("root_phase_checkpoint") or {}).get("post_task_synthesis")):
+                rest.wait(task_id, "post_task_synthesis_open")  # only its own phase write closes it
             if (not current or current.get("status") not in SETTLED_STATUSES
                     or post_task_synthesis_is_open((current.get("root_phase_checkpoint") or {}).get("post_task_synthesis"))
                     or task_has_live_ownership(task_id, ownership=reads)):
@@ -327,7 +354,29 @@ def _refresh_costs(root: pathlib.Path, reads) -> None:
         with usage_store.hold(root) as txn:
             for owner, revision in acknowledged:
                 txn.ack_dirty_owner(owner, revision)
-    _publish_unresolved(root, failures, subject=COST_PROJECTIONS, faults=faults, keep=pending)
+    for owner, _revision in acknowledged:
+        rest.candidates.pop(owner, None)
+    absent = {tid for tid, reason in failures.items() if reason == "result_absent"}
+    unchanged_absence = bool(absent) and rest.readable and all(
+        rest.signatures.get(tid) is None for tid in absent)
+    confirmed = rest.commit(confirm=absent if unchanged_absence else ())
+    with _UNRESOLVED_LOCK:
+        if resting:
+            # Never swallow another absent owner's arrival during this partial pass.
+            state["absence_inputs"] = ([arrivals, money_marker] if not absent or
+                unchanged_absence and confirmed == arrivals else None)
+            state["absent_owners"].difference_update(ids.values())
+            state["absent_owners"].update(absent)
+        else:
+            state["absence_inputs"] = [confirmed, money_marker] if unchanged_absence and confirmed is not None else None
+            state["absent_owners"] = absent
+        state["present_owners"] = [(owner, rev) for owner, rev in owners if owner in pending and owner not in absent]
+        if (resting and all(state["observed"].get(tid) == reason for tid, reason in failures.items())
+                and not any(tid in state["observed"] and tid not in failures for tid in ids.values())
+                and state["fault"] is None and state["published"] is not None):
+            return
+        kept = pending | state.get("absent_owners", set()) if resting else pending
+    _publish_unresolved(root, failures, subject=COST_PROJECTIONS, faults=faults, keep=kept)
 
 
 def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
@@ -346,11 +395,14 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
     from ouroboros import usage_store
 
     root = pathlib.Path(drive_root).resolve()
-    with usage_store.read(root) as txn:
-        rows = txn.attempts(f"{usage_store._OPEN_PREDICATE} AND {_RECOVERABLE}")
+    with usage_store.read(root) as txn:  # captured in one step, decoded after the read closed
+        captured = txn.attempt_rows(f"{usage_store._OPEN_PREDICATE} AND {_RECOVERABLE}")
+    rows = usage_store.decode_attempts(captured)
     reads, eligible, observations, faults = TaskOwnershipRead(root), {}, {}, {}
-    # A task whose row is proven absent cannot be eligible: one statement, not 3-4 reads per task per pass.
-    eligible.update(dict.fromkeys(_absent_task_ids(root, {str(row.get("task_id") or "") for row in rows}), False))
+    # A task proven absent or not settled yet cannot be eligible: one statement, not 3-4 reads per task per pass.
+    ids, facts = _present_facts(root, {str(row.get("task_id") or "") for row in rows})
+    if facts is not None:
+        eligible.update({tid: False for tid in ids if (facts.get(tid) or {}).get("status") not in SETTLED_STATUSES})
     # An open attempt keeps its last reason unless this pass observes a new one or
     # proves an outcome: a recovered receipt, a release, a terminal settlement or
     # terminal remote custody. Skipped, live or lost-race outcomes prove nothing.

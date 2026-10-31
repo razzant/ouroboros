@@ -6,6 +6,7 @@ The restart/commit are wiring inputs here, not a claimed paid self-modification 
 from __future__ import annotations
 
 import json
+import re
 import types
 
 import pytest
@@ -18,14 +19,35 @@ subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
+def _swap(css: str, old: str, new: str) -> str:
+    # A literal the palette no longer has would leave the fixture's colour change silently undone.
+    assert old in css, f"the shared palette no longer has {old}"
+    return css.replace(old, new)
+
+
+def _with_dark_roles(css: str, roles: dict[str, str]) -> str:
+    """The shared sheet with these roles of its dark seed (its first block) set by name, whatever their values are."""
+    seed, end, rest = css.partition("\n}")
+    for name, value in roles.items():
+        seed, found = re.subn(rf"(?m)^(\s*{re.escape(name)}\s*:\s*)[^;]+;", rf"\g<1>{value};", seed, count=1)
+        assert found, f"the dark seed has no {name}"
+    return seed + end + rest
+
+
 @pytest.mark.parametrize("fault", ["none", "wizard-missing-link", "wizard-stale-focus"])
 def test_shared_palette_reaches_both_documents_and_rejects_divergence(subscription_ui, tmp_path, fault):
     ui = subscription_ui
     page = ui["page"]
     shared = scenarios.css_with_accent((setup_browser.WEB / "ui.css").read_text(), scenarios.SM1_NEW_ACCENT)
     # A visible fixture-only palette change. The paid model/review still chooses its own
-    # coherent derivation; this tests that real consumers follow the shared roles.
-    shared = shared.replace("201, 53, 69", "47, 125, 225").replace("#f07a86", "#8fc0ff")
+    # coherent derivation; this tests that real consumers follow the shared roles. A primary
+    # action and the chosen place wear the accent's solid tone and its ink, the current step its
+    # soft tone (#1924). The dark seed's own crimson words move with the ladder, set by name.
+    shared = _with_dark_roles(shared, {"--accent-light": "#8fc0ff", "--focus-accent-border": "#8fc0ff",
+                                       "--assistant-sender": "#8fc0ff"})
+    for old, new in (("201, 53, 69", "47, 125, 225"), ("#d32d43", "#2f7de1"), ("211, 45, 67", "47, 125, 225"),
+                     ("#c32a3f", "#2a6fc9"), ("#872236", "#1d4f8f"), ("#ffdfe1", "#dbe9ff"), ("#b52b3b", "#2f7de1")):
+        shared = _swap(shared, old, new)
     page.route("**/static/ui.css", lambda route: route.fulfill(content_type="text/css", body=shared))
     if fault == "wizard-missing-link":
         html = (setup_browser.WEB / "onboarding_template.html").read_text()
@@ -52,8 +74,13 @@ def test_shared_palette_reaches_both_documents_and_rejects_divergence(subscripti
     assert not ctx.ui_reason and len(ctx.screenshots) == 2
     setup_browser.capture(page, f"sm1-palette-{fault}")
     if fault == "none":
-        assert probe.computed_property("#next-btn", "color") == "rgb(143, 192, 255)"
-        assert probe.computed_property(".wizard-step.active", "background-color") == "rgba(47, 125, 225, 0.08)"
+        assert probe.computed_property("#next-btn", "background-color") == "rgb(47, 125, 225)"
+        assert probe.computed_property("#next-btn", "color") == "rgb(255, 255, 255)"
+        assert probe.computed_property(".wizard-step.active", "background-color") == "rgb(29, 79, 143)"
+        assert probe.computed_property(".wizard-step.active .wizard-step-index", "color") == "rgb(219, 233, 255)"
         probe.goto("/")
-        assert probe.computed_property(".nav-row-main.active", "color") == "rgb(47, 125, 225)"
+        # The chosen row takes its tone through a transition: read the color it settles on.
+        page.wait_for_function("() => document.querySelector('.nav-row-main.active')?.getAnimations().length === 0")
+        assert probe.computed_property(".nav-row-main.active", "background-color") == "rgb(47, 125, 225)"
+        assert probe.computed_property(".nav-row-main.active", "color") == "rgb(255, 255, 255)"
     ctx.close_ui()

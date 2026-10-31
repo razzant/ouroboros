@@ -76,6 +76,7 @@ def geo(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     from ouroboros.tools import delegate
 
     delegate._READ_COVERAGE.clear()
@@ -271,12 +272,16 @@ def test_a_root_continue_reads_its_old_nanny_childs_answer_after_drive_cleanup(g
 
     stored = load_task_result(geo.canonical, NANNY)["delegate_terminal_reconciliation"]["terminal_runs"]
     stored_receipt = next(row for row in stored if row["run_id"] == "run-1")
-    assert public_receipt["staged_output"] == stored_receipt["staged_output"]
+    stored_source = stored_receipt["staged_output"]
+    assert public_receipt["staged_output"] == {
+        **stored_source, "read": stored_source["source_read"], "direct_read": stored_source["read"]}
     assert public_receipt["staged_output"]["sha256"] == source["sha256"]
     assert public_receipt["staged_output"]["task_id"] == NANNY
     assert '"run_dir": "/engine/runs/run-1"' in listed, "the read tool shows the engine's own locator"
-    sized = json.loads(_execute(continuation, "get_task_result", task_id=NANNY,
-                                delegated_output_sha256=source["sha256"]).text)["delegated_output_source"]
+    first_reader = public_receipt["staged_output"]["read"]
+    assert first_reader == public_receipt["staged_output"]["source_read"]
+    sized = json.loads(_execute(continuation, first_reader["tool"],
+                                **first_reader["arguments"]).text)["delegated_output_source"]
     full = canonical_file.read_bytes().decode("utf-8")
     assert sized["reason"] == "source_range_required" and sized["status"] == "available"
     assert sized["complete_chars"] == len(full)
@@ -387,8 +392,10 @@ def test_a_retry_reader_stages_into_its_own_store_and_the_starter_receipt_names_
     monkeypatch.setattr(delegate, "_CUSTODY", memo)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
 
-    ctx = retry_context(tmp_path, monkeypatch, split=True)  # retry-b on a forked drive
+    ctx = retry_context(tmp_path, monkeypatch, split=True,
+                        fixed_ownership_clock=True)  # retry-b on a forked drive
     held = durable_run(ctx, owner="retry-a")
     bind_gateway(monkeypatch, TerminalGateway(output="V" * 120_000))
     wait = call(ctx, "delegate_wait", run_id=held.run_id)
@@ -403,6 +410,14 @@ def test_a_retry_reader_stages_into_its_own_store_and_the_starter_receipt_names_
     assert staged["read"]["arguments"]["root"] == "artifact_store"
     assert pathlib.Path(staged["read"]["arguments"]["path"]) == pathlib.Path(artifact["path"])
     assert record_terminal_reconciliation(data, "retry-a", audit)
+
+    summary = json.loads(call(ctx, "get_task_result", task_id="retry-a", view="summary").text)
+    facts = summary["delegated_custody"]
+    runs = [*facts.get("terminal_runs", []), *facts.get("predecessor_terminal_runs", [])]
+    public = next(row["staged_output"] for row in runs if row["run_id"] == held.run_id)
+    assert public["read"] == public["source_read"]
+    assert public["read"]["arguments"]["task_id"] == "retry-a"
+    assert public["direct_read"] == staged["read"]
 
     page = json.loads(call(ctx, "get_task_result", task_id="retry-a", delegated_output_sha256=artifact["sha256"],
                            source_start_char=0, source_end_char=40).text)["delegated_output_source"]
@@ -659,23 +674,57 @@ def test_receipts_carry_locators_and_old_receipts_stay_byte_identical(geo, monke
         "receipts never touch the primary status or reason (owner Q5=A)"
 
     # A task whose runs settled before these facts existed: the same five keys, no rewrite.
+    from ouroboros import obligations, startup_migrations, usage_store
+    from ouroboros.task_store import signature
+    from supervisor.events_task_done import _terminal_cost_probe
+
     legacy_task = "legacy0aa111111"
+    old_receipt = {"run_id": "run-legacy", "state": "failed", "model": "m", "profile_id": "",
+                   "selected_subagent_id": ""}
+
+    def legacy_result(root):
+        write_task_result(root, legacy_task, "failed", reason_code="tool_failure",
+                          delegate_terminal_reconciliation={
+                              "task_id": legacy_task, "trigger": "terminal_boundary", "outcomes": [],
+                              "unreconciled": [], "audit_status": "ok", "open_run_ids": [],
+                              "pending_invocation_ids": [], "undisposed_patch_run_ids": [],
+                              "terminal_runs": [old_receipt], "deferred_project_retirements": []},
+                          delegated_runs_unreconciled=[])
+
+    def frozen(root):
+        return (signature(root, legacy_task), load_task_result(root, legacy_task),
+                (root / "logs" / "events.jsonl").read_bytes())
+
     assert custody.record_started(geo.canonical, custody.RunCustody(
         run_id="run-legacy", task_id=legacy_task, route_id="r", model="m", ledger_root=str(geo.canonical)))
     assert custody.emit(geo.canonical, custody.SETTLED, {"run_id": "run-legacy", "task_id": legacy_task,
                                                          "state": "failed", "model": "m"})
     custody._CUSTODY.clear()
-    old_receipt = {"run_id": "run-legacy", "state": "failed", "model": "m", "profile_id": "",
-                   "selected_subagent_id": ""}
-    write_task_result(geo.canonical, legacy_task, "failed", reason_code="tool_failure",
-                      delegate_terminal_reconciliation={
-                          "task_id": legacy_task, "trigger": "terminal_boundary", "outcomes": [],
-                          "unreconciled": [], "audit_status": "ok", "open_run_ids": [],
-                          "pending_invocation_ids": [], "undisposed_patch_run_ids": [],
-                          "terminal_runs": [old_receipt], "deferred_project_retirements": []},
-                      delegated_runs_unreconciled=[])
-    from ouroboros.task_store import signature
-
-    before = signature(geo.canonical, legacy_task), load_task_result(geo.canonical, legacy_task)
+    # Imported as closed history (an install whose chain predates its store) the run owes nothing:
+    # the refresh reads no money and changes no byte.
+    history = geo.tmp / "history"
+    (history / "logs").mkdir(parents=True)
+    shutil.copyfile(geo.canonical / "logs" / "events.jsonl", history / "logs" / "events.jsonl")
+    startup_migrations.prepare_startup_state(history)
+    assert legacy_task not in obligations.members(history, "delegated_runs")
+    legacy_result(history)
+    before = frozen(history)
+    with monkeypatch.context() as patch:
+        for name in ("read", "hold"):
+            patch.setattr(usage_store, name, lambda *_a, **_k: pytest.fail("money work without a debt"))
+        assert refresh_terminal_reconciliation(history, legacy_task) is False
+    assert frozen(history) == before
+    # Settled live, the same run owes the task's cost projection once: paying it updates money
+    # fields only, never the receipt, and the repeat is a byte-level no-op.
+    legacy_result(geo.canonical)
+    unpaid = load_task_result(geo.canonical, legacy_task)
     assert refresh_terminal_reconciliation(geo.canonical, legacy_task) is False
-    assert (signature(geo.canonical, legacy_task), load_task_result(geo.canonical, legacy_task)) == before
+    paid = load_task_result(geo.canonical, legacy_task)
+    assert paid["delegate_terminal_reconciliation"] == unpaid["delegate_terminal_reconciliation"]
+    assert paid["delegate_terminal_reconciliation"]["terminal_runs"] == [old_receipt]
+    outcome, money, _ = _terminal_cost_probe(geo.canonical, legacy_task, paid)
+    assert outcome == "equal" and legacy_task not in obligations.members(geo.canonical, "delegated_runs")
+    assert {key for key in {*unpaid, *paid} if unpaid.get(key) != paid.get(key)} <= {*money, "updated_at"}
+    before = frozen(geo.canonical)
+    assert refresh_terminal_reconciliation(geo.canonical, legacy_task) is False
+    assert frozen(geo.canonical) == before

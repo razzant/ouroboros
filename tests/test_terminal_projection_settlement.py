@@ -16,7 +16,6 @@ at-least-once — this is not exactly-once.
 """
 from __future__ import annotations
 
-import json
 import pathlib
 from types import SimpleNamespace
 
@@ -36,10 +35,9 @@ DONE = {"chat_id": 1, "status": "completed", "outcome_axes": {"execution": {"sta
 
 
 def _chat_rows(root: pathlib.Path):
-    path = root / "logs" / "chat.jsonl"
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    from tests._dialogue import chat_rows
+
+    return chat_rows(root)
 
 
 def _project_rows(root: pathlib.Path, task_id: str):
@@ -336,22 +334,19 @@ class TestPartialWritesAndRetry:
 
 
 class TestRestartRecovery:
-    def test_startup_keeps_paused_synthesis_on_its_existing_resume_path(self, tmp_path, monkeypatch):
+    def test_startup_leaves_a_pause_an_earlier_version_saved_for_the_maintenance_pass(self, tmp_path, monkeypatch):
         from ouroboros import agent_task_pipeline as pipeline, post_task_synthesis
-        from supervisor import owner_pause_control
 
         _store(tmp_path, phase="paused")
-        calls = []
-        monkeypatch.setattr(post_task_synthesis, "revoke_late_phase_grant",
-                            lambda root, tid, **kw: calls.append(("revoke", tid, kw["reason"])))
-        monkeypatch.setattr(owner_pause_control, "retain_late_phase_latch",
-                            lambda root, tid: calls.append(("retain", tid)))
         monkeypatch.setattr(pipeline, "_settle_terminal_projection",
                             lambda *_a, **_kw: pytest.fail("paused synthesis has not settled"))
         monkeypatch.setattr(pipeline, "_run_post_task_processing_async",
-                            lambda *_a, **_kw: pytest.fail("Pause needs an explicit Resume"))
+                            lambda *_a, **_kw: pytest.fail("a saved Pause never runs"))
+        monkeypatch.setattr(post_task_synthesis, "end_saved_late_phase_pause",
+                            lambda *_a, **_kw: pytest.fail("boot never converts; the maintenance pass does"))
         assert pipeline.recover_pending_root_post_task_synthesis(tmp_path) == 0
-        assert calls == [("revoke", "root-1", "restart_no_resume"), ("retain", "root-1")]
+        checkpoint = pipeline.load_task_result(tmp_path, "root-1")["root_phase_checkpoint"]
+        assert checkpoint["post_task_synthesis"] == "paused"
 
     @pytest.mark.parametrize("ready", [False, True])
     def test_startup_selects_publication_debt_before_mail_capture(self, project_root, monkeypatch, ready):
@@ -546,27 +541,22 @@ def test_main_address_and_retry_claim_are_durable_before_live_queue(project_root
     assert settle_terminal_projection(project_root.root, 'root-1', task=project_root.task) == SETTLEMENT_SETTLED
 
 
-def test_append_receipt_crash_dedupes_across_chat_rotation(project_root, monkeypatch):
+def test_append_receipt_crash_dedupes_by_the_stored_publication(project_root, monkeypatch):
     from ouroboros import project_dialogue as dialogue
     from ouroboros.terminal_projection import reconcile_terminal_projections
 
     _store(project_root.root)
     original = dialogue.append_canonical_task_summary
 
-    def append_then_rotate(root, row):
+    def append_then_fail(root, row):
         assert original(root, row)
-        archive = root / 'archive'
-        archive.mkdir(exist_ok=True)
-        (root / 'logs/chat.jsonl').rename(archive / 'chat_20260923.jsonl')
         raise OSError('append succeeded; result receipt was not written')
 
-    monkeypatch.setattr(dialogue, 'append_canonical_task_summary', append_then_rotate)
+    monkeypatch.setattr(dialogue, 'append_canonical_task_summary', append_then_fail)
     assert settle_terminal_projection(project_root.root, 'root-1', task=project_root.task) == SETTLEMENT_DEFERRED
     monkeypatch.setattr(dialogue, 'append_canonical_task_summary', original)
     assert reconcile_terminal_projections(project_root.root) == 1
-    assert _project_rows(project_root.root, 'root-1') == []
-    archived = [json.loads(line) for line in (project_root.root / 'archive/chat_20260923.jsonl').read_text(encoding="utf-8").splitlines()]
-    assert len([row for row in archived if row.get('summary_id') == 'task-terminal:root-1']) == 1
+    assert len(_project_rows(project_root.root, 'root-1')) == 1, "the earlier publication is found in the store, not appended again"
     assert len(project_root.queued) == 1
 
 
@@ -602,7 +592,7 @@ def test_canonical_cancel_keeps_existing_artifact_readiness_exception(project_ro
         project_id='launch', workspace_root=str(project_root.root/'workspace'),
         artifact_status='pending', result='Cancelled by custody')
     assert settle_terminal_projection(project_root.root, 'root-1') == SETTLEMENT_SETTLED
-    assert _project_rows(project_root.root, 'root-1')[0]['outcome'] == 'Cancelled'
+    assert _project_rows(project_root.root, 'root-1')[0]['outcome'] == 'Stopped'
 
 
 def test_split_root_uses_stored_adoption_facts_without_task_argument(project_root):

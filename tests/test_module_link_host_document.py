@@ -10,7 +10,7 @@ from ouroboros.server_web import UI_OWNER_MARKER, make_index_page
 
 def test_telegram_marker_only_changes_the_host_document():
     web = pathlib.Path(__file__).resolve().parents[1] / "web"
-    source = (web / "index.html").read_text(encoding="utf-8")
+    source = (web / "index.html").read_bytes().decode("utf-8")  # as served: checkout line endings kept
     with TestClient(Starlette(routes=[Route("/", make_index_page(web))])) as client:
         plain = client.get("/")
         # The only response-time change of the builtin page is its core-ownership marker.

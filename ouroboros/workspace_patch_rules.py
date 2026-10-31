@@ -59,6 +59,9 @@ _LOCKFILE_MANIFESTS = {
     "composer.lock": "composer.json",
     "Gemfile.lock": "Gemfile",
 }
+# A delegated copy's NEW files under its named evidence folder: retained beside the
+# capture by their owner (``subagent_integration_delegated.run_named_evidence``).
+NAMED_EVIDENCE_EXCLUSION = "named evidence, retained separately by its host"
 _SENSITIVE_EXAMPLE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 _SENSITIVE_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 _SENSITIVE_FILENAMES = {
@@ -128,6 +131,7 @@ def _sensitive_untracked_reason(rel: str) -> str:
 
 
 __all__ = [
+    "NAMED_EVIDENCE_EXCLUSION",
     "_ANY_SEGMENT_EXCLUDE_DIRS",
     "_LOCKFILE_MANIFESTS",
     "_PATCH_EXCLUDE_RULES_VERSION",
@@ -153,17 +157,21 @@ def format_patch_exclusions(manifest: Any) -> str:
     manifest rows the rules above produce, so it belongs beside them rather
     than in either of the two integration tools that display it.
     """
-    entries = []
+    entries, evidence = [], 0
     for key in ("sensitive_blocked", "untracked_excluded", "tracked_excluded"):
         for item in (manifest or {}).get(key) or []:
             if isinstance(item, dict):
                 path, reason = str(item.get("path") or ""), str(item.get("reason") or "")
             else:
                 path, reason = str(item or ""), ""
-            if path:
+            if path and reason == NAMED_EVIDENCE_EXCLUSION:
+                evidence += 1  # not a lost deliverable: its owner keeps the bytes
+            elif path:
                 entries.append(f"{path} ({reason})" if reason else path)
+    kept = (f"\n{evidence} new file(s) under the copy's named evidence folder are evidence, not part of "
+            "this patch: named_evidence reports their retention.") if evidence else ""
     if not entries:
-        return ""
+        return kept
     shown = "; ".join(entries[:8])
     more = (
         f" and {len(entries) - 8} more (full list with reasons: the child's "
@@ -173,6 +181,6 @@ def format_patch_exclusions(manifest: Any) -> str:
     return (
         f"\n⚠️ {len(entries)} file(s) EXCLUDED from this patch by capture policy: "
         f"{shown}{more}. Excluded content is NOT in this patch: if one is a real "
-        "deliverable, recover it from the child workspace/snapshot while that "
+        "deliverable, recover it from the child workspace/snapshot if that "
         "still exists, or have it re-produced."
-    )
+    ) + kept

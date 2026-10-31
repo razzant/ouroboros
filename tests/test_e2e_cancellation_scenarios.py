@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import signal
 import time
 import uuid
 
@@ -95,6 +96,15 @@ from tests.fixtures_e2e_cancellation import (
     wait_until,
     write_settings_file,
 )
+
+# One per-test ceiling for every MOCK-lane server scenario of this file: a hung scenario
+# fails BY NAME and the lane runs on, instead of starving the job until the runner
+# cancels it (tests/system_e2e/conftest.py carries the same rule for the system
+# scenarios). On POSIX the SIGALRM method fails only the running test, so its fixtures
+# still stop the server. The operator-run paid scenarios (E1-E3, E13) keep their own pace.
+SCENARIO_TIMEOUT_SEC = 900
+_SCENARIO_CEILING = pytest.mark.timeout(
+    SCENARIO_TIMEOUT_SEC, method="signal" if hasattr(signal, "SIGALRM") else "thread")
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -452,6 +462,7 @@ def test_stall_forensics_separates_the_three_stall_hypotheses(tmp_path):
 # ===========================================================================
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e4_cancel_single_settles_the_intent_and_writes_the_terminal(mock_stack):
     """E4 — the single cancel: intent requested -> claimed -> settled, the projection is
     empty again, and the task has a durable ``cancelled`` result."""
@@ -478,6 +489,7 @@ def test_e4_cancel_single_settles_the_intent_and_writes_the_terminal(mock_stack)
 
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e5_cancel_cascade_settles_descendants_then_the_root(e2e_clone, tmp_path_factory):
     """E5 — the cascade: the root intent is minted with ``scope=cascade`` AT THE INGRESS,
     each captured descendant gets its own intent, and the ROOT settles only on the cascade
@@ -518,6 +530,7 @@ def test_e5_cancel_cascade_settles_descendants_then_the_root(e2e_clone, tmp_path
 
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e6_cancel_after_settlement_is_a_404_and_preserves_the_result(mock_stack):
     """E6 — the cancel x completion race, on its deterministic side: once a task settles on
     its own, a cancel must neither resurrect it nor rewrite its stored result.
@@ -573,6 +586,7 @@ def test_e6_cancel_after_settlement_is_a_404_and_preserves_the_result(mock_stack
 
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e7_terminal_delivery_is_owed_then_recorded_exactly_once(mock_stack):
     """E7 — the owed outbox, on the side a stub can drive: a terminal answer registers a
     delivery id in ``state/terminal_deliveries.json`` and lands in ``delivered`` exactly
@@ -617,6 +631,7 @@ def test_e7_terminal_delivery_is_owed_then_recorded_exactly_once(mock_stack):
 
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e9_boot_migration_adopts_a_legacy_cancel_requested_latch(e2e_clone, tmp_path_factory):
     """E9 — a pre-redesign ``cancel_requested`` result file becomes an ordinary intent at
     boot (``source=boot_migration``), and a SECOND boot migrates it zero more times."""
@@ -659,6 +674,7 @@ def test_e9_boot_migration_adopts_a_legacy_cancel_requested_latch(e2e_clone, tmp
 
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e10_graceful_stop_keeps_the_intent_open_and_finalizes(e2e_clone, tmp_path_factory):
     """E10 — ``finalize_then_cancel``: a 202 pending acknowledgement, an intent that stays
     OPEN carrying the policy, and a terminal reason of ``owner_requested_finalization``
@@ -703,6 +719,7 @@ def test_e10_graceful_stop_keeps_the_intent_open_and_finalizes(e2e_clone, tmp_pa
 
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e11_stop_now_hardens_the_same_intent_without_minting_a_second(e2e_clone, tmp_path_factory):
     """E11 — Stop-now during the graceful wait HARDENS the pending intent: same
     ``request_id``, policy flips to immediate, exactly one ``stop_policy_hardened``
@@ -736,6 +753,7 @@ def test_e11_stop_now_hardens_the_same_intent_without_minting_a_second(e2e_clone
 
 
 @pytest.mark.serial
+@_SCENARIO_CEILING
 def test_e12_owner_hurry_is_idempotent_text_free_and_loses_to_a_pending_stop(
     e2e_clone, tmp_path_factory,
 ):
@@ -840,8 +858,8 @@ def test_e2_delegated_patch_integration_disposes_the_snapshot(e2e_clone, tmp_pat
 
 @pytest.mark.serial
 def test_e3_conflicting_delegated_patch_preserves_the_snapshot(e2e_clone, tmp_path_factory):
-    """E3 — a conflicting integrate: the patch is NOT disposed and the snapshot survives,
-    so the owner can retry instead of losing the delegated work."""
+    """E3 — a conflicting integrate: the patch is NOT disposed and the snapshot's record and
+    its pinned result survive, so the owner can retry instead of losing the delegated work."""
     require_lane(LANE_PAID)
     root_dir = tmp_path_factory.mktemp("e2e_conflict")
     server = start_server(e2e_clone, root_dir, isolated_settings(stub=None, paid=True))
@@ -857,9 +875,10 @@ def test_e3_conflicting_delegated_patch_preserves_the_snapshot(e2e_clone, tmp_pa
         applied = [row for row in events(data_root, "delegate_run_patch_disposed")
                    if str(row.get("disposition") or row.get("outcome") or "") == "applied"]
         assert not applied, "a conflicting patch was disposed as applied"
-        registry = pathlib.Path(data_root) / "state" / "subagent_worktrees.json"
-        assert registry.exists() and registry.read_text(encoding="utf-8").strip(), \
-            "the snapshot registry was discarded on a conflict"
+        records = sorted((pathlib.Path(data_root) / "state" / "private_copies").glob("*.json"))
+        rows = [json.loads(path.read_text(encoding="utf-8")) for path in records if not path.name.startswith(".")]
+        assert any(row.get("kind") == "delegated_exec" and row.get("result_sha") for row in rows), \
+            "the snapshot's record and its result were discarded on a conflict"
     finally:
         server.stop()
 

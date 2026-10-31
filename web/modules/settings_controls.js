@@ -116,6 +116,14 @@ export function paintSettingsFieldErrors(root, errors) {
     });
 }
 
+/** A Settings action in flight: disabled and announced busy, the same for Save and a key's Test. */
+export function setButtonBusy(button, busy) {
+    if (!button) return;
+    button.disabled = busy;
+    if (busy) button.setAttribute('aria-busy', 'true');
+    else button.removeAttribute('aria-busy');
+}
+
 /** Saved/unsaved/unknown are server receipts, never inferred from HTTP success. */
 export function settingsWriteFailure(error, label = 'Settings') {
     const receipt = error?.body || error?.payload;

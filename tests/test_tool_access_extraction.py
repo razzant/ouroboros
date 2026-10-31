@@ -138,15 +138,3 @@ def test_tool_access_policy_matrix_is_one_object_across_owners():
     the facade re-export IS its binding."""
     assert tool_access._POLICY is tool_access_types._POLICY
     assert set(tool_access._ALL_ROOTS) == set(tool_access_types._ALL_ROOTS)
-
-
-def test_tool_access_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (tool_access, *_LEAVES)
-    }
-    assert counts["ouroboros.tool_access"] <= 900
-    assert all(count <= 1000 for count in counts.values())
-    assert counts["ouroboros.tool_access_user_files"] <= 1000

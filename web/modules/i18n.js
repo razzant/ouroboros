@@ -61,7 +61,7 @@ export const EXCLUDE_SELECTOR = [
 export const SKIP_ROOTS = [
     '#chat-messages', '.chat-messages', '.chat-live-card', '#log-entries', '.log-entries',
     '.files-preview-content', '.files-editor', '.chat-empty-welcome', '.chat-photo-menu',
-    '.task-control-menu', '#reconnect-overlay', '[data-i18n-authored]',
+    '.task-control-menu', '[data-i18n-authored]',
 ].join(',');
 
 /** Roots where a BARE owner-supplied name lands (a project title, a path segment). Gated

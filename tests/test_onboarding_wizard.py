@@ -336,10 +336,11 @@ def test_prepare_onboarding_settings_rejects_openai_compatible_key_without_base_
 
 
 def test_onboarding_frontend_uses_base_url_first_compatible_validation():
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    assert "!['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey)" in source
-    assert "const hasRemote = keyValues.some(([, value]) => value);" not in source
+    payload = {**_base_payload(), "OPENAI_COMPATIBLE_BASE_URL": "http://localhost:41001/v1",
+               "OPENAI_COMPATIBLE_API_KEY": "x", "OUROBOROS_MODEL": "openai-compatible::private-model"}
+    prepared, error = prepare_onboarding_settings(payload, {})
+    assert error is None
+    assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "x"
 
 
 def test_build_onboarding_html_serves_a_real_page_with_linked_modules():
@@ -358,7 +359,7 @@ def test_build_onboarding_html_serves_a_real_page_with_linked_modules():
     assert "openai::gpt-5.6-luna" in html
     assert "anthropic::claude-sonnet-5" in html
     assert "minimax::MiniMax-M3" in html
-    assert "minimax::MiniMax-M2.7" in html
+    assert "minimax::MiniMax-M3.1-Flash" in html
     # The wizard's own source is no longer copied into the page body.
     assert "const STEP_ORDER = bootstrap.stepOrder" not in html
 
@@ -469,23 +470,6 @@ def test_agents_step_is_skippable_and_cannot_block_completion():
     # Nothing on the step is a form control the shared validator would see.
     step_source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
     assert "<input" not in step_source
-
-
-def test_agents_step_ladder_states_the_startup_gate_honestly():
-    """Codex can start Models; other subscriptions remain agent connections."""
-    source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-
-    assert "Run models and agents without an API key" in source
-    assert "Claude Code, Cursor, and Antigravity remain agent connections" in source
-    assert "a plan cannot run it" not in source
-    assert "not free" in source
-    assert "Task acceptance stays on the API" not in source
-    assert "commit, plan, skill review and task acceptance all run on the review pool" in source
-    assert "acceptance panel on the subscription" in source
-    assert "about 12 s" in source and "$0.07 per model row per task" in source  # R12 numbers, not adjectives
-    assert "all reviewers" not in source.lower()
-    # D-10 vocabulary in the new owner-facing surface.
-    assert "coding agent" not in source.lower()
 
 
 def test_agents_step_rotation_diagram_is_inert_static_artwork():
@@ -604,9 +588,11 @@ def test_wizard_keeps_a_typed_completion_refusal_visible_with_its_real_reason():
     source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
 
     # The typed fields are read by ONE pure reader (node-tested branch by
-    # branch in web/tests/onboarding_agents_step.test.js); the wizard only has
-    # to carry them onto the Error it renders from.
-    assert "readCompletionAnswer({" in source
+    # branch in web/tests/onboarding_agents_step.test.js; the POST around it in
+    # onboarding_completion_attempt.test.js); the wizard only has to carry them
+    # onto the Error it renders from.
+    assert "await postCompletion(ONBOARDING_COMPLETE_ENDPOINT, payload)" in source
+    assert "return readCompletionAnswer({" in (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
     assert "Object.assign(error, answer.failure);" in source
     assert "completionFailureNotice(error)" in source
     assert "state.presetFailure = notice.canSkip" in source
@@ -679,7 +665,7 @@ def test_setup_contract_has_no_secret_values():
     assert "anthropic/claude-sonnet-5" in suggestions
     assert "anthropic::claude-sonnet-5" in suggestions
     assert "minimax::MiniMax-M3" in suggestions
-    assert "minimax::MiniMax-M2.7" in suggestions
+    assert "minimax::MiniMax-M3.1-Flash" in suggestions
     assert "deepseek::deepseek-v4-pro" in suggestions
     assert "deepseek::deepseek-v4-flash" in suggestions
     assert empty_bootstrap["initialState"]["totalBudget"] == 200.0
@@ -692,7 +678,7 @@ def test_setup_contract_has_no_secret_values():
     initial = bootstrap["initialState"]
     assert initial["providerProfile"] == "minimax"
     assert initial["mainModel"] == "minimax::MiniMax-M3"
-    assert initial["lightModel"] == "minimax::MiniMax-M2.7"
+    assert initial["lightModel"] == "minimax::MiniMax-M3.1-Flash"
 
     deepseek_bootstrap = build_setup_bootstrap({"DEEPSEEK_API_KEY": "ds-hidden-value"}, "web")
     deepseek_initial = deepseek_bootstrap["initialState"]
@@ -1104,13 +1090,12 @@ def test_the_launcher_onboarding_module_authors_no_onboarding_settings():
 def test_wizard_rejects_a_newly_typed_short_key():
     """The length check still guards a credential the owner actually authored."""
     payload = _base_payload()
-    payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
-    payload["OPENAI_COMPATIBLE_API_KEY"] = "ollama"
+    payload["OPENAI_API_KEY"] = "short"
 
     prepared, error = prepare_onboarding_settings(payload, {})
 
     assert prepared == {}
-    assert error == "OpenAI-compatible API key looks too short."
+    assert error == "OpenAI API key looks too short."
 
 
 def test_wizard_is_not_deadlocked_by_a_short_key_already_on_disk():
@@ -1264,3 +1249,46 @@ def test_browser_render_smoke_fixture_is_the_live_bootstrap():
     assert fixture_path.read_text(encoding="utf-8") == live, (
         "web/tests/fixtures/onboarding_bootstrap.json drifted from build_setup_bootstrap({}, 'desktop')"
     )
+
+
+def test_named_only_setup_masks_and_rehydrates_credentials_by_identity():
+    rows = [
+        {"kind": "openai-compatible", "name": "alpha", "label": "Long local reasoning server", "base_url": "http://localhost:41001/v1"},
+        {"kind": "openai-compatible", "name": "beta", "base_url": "http://localhost:41002/v1", "api_key": "beta-SECRETCANARY"},
+    ]
+    settings = {"OUROBOROS_CONNECTIONS": rows, "OUROBOROS_MODEL": "openai-compatible@alpha::same-model",
+                "OUROBOROS_MODEL_LIGHT": "openai-compatible@beta::same-model", "OUROBOROS_MODEL_FALLBACKS": ""}
+    bootstrap = build_setup_bootstrap(settings, "web")
+    assert "beta-SECRETCANARY" not in build_onboarding_html(settings, "web")
+    assert bootstrap["initialState"]["connections"][0] == rows[0]
+    masked = bootstrap["initialState"]["connections"]
+    assert masked[1]["api_key"] != rows[1]["api_key"]
+    payload = {**_base_payload(), **settings, "OUROBOROS_CONNECTIONS": masked}
+    prepared, error = prepare_onboarding_settings(payload, settings)
+    assert error is None
+    assert prepared["OUROBOROS_CONNECTIONS"] == rows
+    assert prepared["OUROBOROS_MODEL_LIGHT"] == settings["OUROBOROS_MODEL_LIGHT"]
+    assert prepared["OUROBOROS_MODEL_FALLBACKS"] == ""
+    # Omitting the field from an older wizard retains the rows; an explicit empty list clears them.
+    payload.pop("OUROBOROS_CONNECTIONS")
+    assert prepare_onboarding_settings(payload, settings)[0]["OUROBOROS_CONNECTIONS"] == rows
+    payload.update(OPENAI_API_KEY="sk-openai-1234567890", OUROBOROS_CONNECTIONS=[])
+    assert prepare_onboarding_settings(payload, settings)[0]["OUROBOROS_CONNECTIONS"] == []
+
+
+@pytest.mark.parametrize("rows", [None, {}, [{"kind": "openai-compatible", "name": "Bad name"}],
+    [{"kind": "openai-compatible", "name": "one", "api_key": 42}],
+    [{"kind": "openai-compatible", "name": "one"}] * 2])
+def test_onboarding_rejects_malformed_connection_draft_without_partial_settings(rows):
+    prepared, error = prepare_onboarding_settings({**_base_payload(), "OPENAI_API_KEY": "sk-valid-1234567890",
+                                                   "OUROBOROS_CONNECTIONS": rows}, {})
+    assert prepared == {} and error
+
+
+@pytest.mark.parametrize("row", [
+    {"kind": "openai-compatible", "name": "one", "api_key": "x"},
+    {"kind": "openai-compatible", "name": "one", "base_url": "http://localhost:41001/v1", "enabled": False},
+])
+def test_named_connection_needs_an_enabled_endpoint_for_remote_access(row):
+    prepared, error = prepare_onboarding_settings({**_base_payload(), "OUROBOROS_CONNECTIONS": [row]}, {})
+    assert prepared == {} and error == "Connect Codex, an API provider, or a local model before continuing."

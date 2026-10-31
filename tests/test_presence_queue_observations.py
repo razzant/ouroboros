@@ -1,7 +1,8 @@
 """Transport facts through authenticated Host and the same live review-wait author.
 
 Real ASGI routes/admission/task sources/loop/gate; model and reviewer are scripted
-by the shared harness. This is not a separate Host/Slack process qualification.
+by the shared harness, whose author parks on a review it left for an addressed
+message. This is not a separate Host/Slack process qualification.
 """
 
 import copy
@@ -14,7 +15,9 @@ import pytest
 from ouroboros.presence_continuation import ReviewWaitBinding, reentry_note
 from ouroboros.presence_observations import transport_queue_observation
 from ouroboros.task_results import load_task_result
-from tests.test_presence_continuation import ANSWER, NEW_WORDS, finish, harness as harness, wait_for
+from tests.test_presence_continuation import (
+    ANSWER, NEW_WORDS, author, deliver, harness as harness, parked, resumed, wait_for,
+)
 from tests.test_presence_continuation_host import _HEADERS, host as host, poll, turn
 from tests.test_presence_reentry import _read_all
 
@@ -46,29 +49,24 @@ def refresh(h, ref, value, **extra):
                          json={"binding_id": h.binding, "transport_queue": value, **extra})
 
 
-@pytest.mark.parametrize("early", [False, True])
 @pytest.mark.parametrize("reporting", [0, 1])
-def test_refreshed_queue_reaches_same_author_without_holding_room(host, monkeypatch, early, reporting):
+def test_refreshed_queue_reaches_same_author_without_holding_room(host, reporting):
     h = host
-    if early:
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     seen = []
 
-    def scripted(messages):
-        notes = [str(row.get("content")) for row in messages if "[PRESENCE CONVERSATION RESUMED]" in str(row.get("content"))]
-        if notes:
-            seen.append(notes[-1])
-            assert "fresh queued words" in notes[-1] and NEW_WORDS in notes[-1]
-            assert '"observed_at": "2026-10-06T10:00:01+00:00"' in notes[-1]
-            assert "old queued words" not in notes[-1]
-            assert "not canonical chat or owner directives" in notes[-1]
-            return finish("final", answer_sha256=h.ctxs[0]._delivery_candidate.content_sha256)
-        return finish("nominate", message=ANSWER, **({"pending_review": "finish"} if early else {}))
+    def after_wake(messages):
+        note = resumed(messages)
+        seen.append(note)
+        assert "fresh queued words" in note and NEW_WORDS in note
+        assert '"observed_at": "2026-10-06T10:00:01+00:00"' in note
+        assert "old queued words" not in note
+        assert "not canonical chat or owner directives" in note
+        return deliver()
 
-    h.script = scripted
+    h.script = author(after_wake)
     first = turn(h, 42, reporting=reporting, transport_queue=snapshot(("old queued words",))).json()
     ref = first["continuation_ref"]
-    assert first["status"] == "continuing" and first["text"] == (ANSWER if early else "")
+    assert first["status"] == "continuing" and first["text"] == ""
     updated = snapshot(("fresh queued words",), second=1)
     assert refresh(h, ref, updated).json()["status"] == "recorded"
     h.quick.add("telegram:bot-1:43")
@@ -78,47 +76,30 @@ def test_refreshed_queue_reaches_same_author_without_holding_room(host, monkeypa
     assert refresh(h, ref, snapshot(("old queued words",))).json()["status"] == "stale"
     h.release.set()
     wait_for(lambda: poll(h, ref).status_code == 200, what="same author terminal")
-    assert seen and h.calls == 2 and len(h.reviews) == 1
-    assert poll(h, ref).json()["text"] == ("" if early else ANSWER)
+    assert seen and h.calls == 3 and len(h.reviews) == 1
+    assert poll(h, ref).json()["text"] == ANSWER
     assert load_task_result(h.data, ref)["presence_transport_queue"]["observed_at"] == updated["observed_at"]
 
 
 def _park(h):
-    h.script = lambda messages: (finish("final", message=ANSWER)
-                                 if any("[PRESENCE CONVERSATION RESUMED]" in str(row.get("content")) for row in messages)
-                                 else finish("nominate", message=ANSWER))
+    h.script = author(deliver)
     ref = turn(h, 42).json()["continuation_ref"]
     h.parked_for_test.append(ref)
+    # The envelope is published before the direct wait records itself: read the row once the park is written.
+    wait_for(lambda: parked(h, ref), what="the review park")
     return ref
-
-
-# The fixture runs a real host: its background acceptance-review claim may stamp the same
-# task row (its accounting block and updated_at) while a test watches the queue endpoints.
-_BACKGROUND_CLAIM_KEYS = ("task_acceptance_review_accounting", "updated_at")
-
-
-def _unchanged_apart_from_background_claim(after, before):
-    """The whole row is unchanged; only when the background claim itself landed may it and its
-    updated_at differ, so an endpoint that wrote either field on its own is still caught."""
-    if after.get("task_acceptance_review_accounting") == before.get("task_acceptance_review_accounting"):
-        return after == before
-    keep = lambda row: {key: value for key, value in row.items() if key not in _BACKGROUND_CLAIM_KEYS}  # noqa: E731
-    return keep(after) == keep(before)
 
 
 def test_complete_empty_snapshot_replaces_old_queue_and_get_is_passive(host):
     h = host
     ref = _park(h)
-    # The independent reviewer may still be publishing its paid-attempt claim
-    # after the author parks. Wait for that writer before testing GET passivity.
-    wait_for(h.entered.is_set, what="review accounting before the passive snapshot")
     first, empty = snapshot(), snapshot((), second=1)
     assert refresh(h, ref, first).json()["status"] == "recorded"
     assert refresh(h, ref, first).json()["status"] == "duplicate"
     assert refresh(h, ref, empty).json()["status"] == "recorded"
     before = load_task_result(h.data, ref)
     assert poll(h, ref).status_code == 202
-    assert _unchanged_apart_from_background_claim(load_task_result(h.data, ref), before)
+    assert load_task_result(h.data, ref) == before
     event = SimpleNamespace(**before["metadata"]["presence"]["event"])
     observation = transport_queue_observation(h.data, ref, event)
     assert observation["status"] == "available" and observation["snapshot"]["events"] == []
@@ -126,7 +107,7 @@ def test_complete_empty_snapshot_replaces_old_queue_and_get_is_passive(host):
     conflicting = snapshot(("different",), second=1)
     response = refresh(h, ref, conflicting)
     assert response.status_code == 400 and response.json()["code"] == "presence_observation_invalid"
-    assert _unchanged_apart_from_background_claim(load_task_result(h.data, ref), before)
+    assert load_task_result(h.data, ref) == before
 
 
 @pytest.mark.parametrize("change", [
@@ -177,4 +158,4 @@ def test_failed_retention_and_foreign_binding_do_not_replace_queue(host, monkeyp
     monkeypatch.setattr("ouroboros.artifacts.store_actor_source_bytes", fail)
     response = refresh(h, ref, snapshot(second=1))
     assert response.status_code == 500 and response.json()["disposition"] == "retry"
-    assert _unchanged_apart_from_background_claim(load_task_result(h.data, ref), before)
+    assert load_task_result(h.data, ref) == before

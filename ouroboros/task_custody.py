@@ -66,6 +66,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -78,7 +79,7 @@ from typing import Any, Callable, ContextManager, Dict, Iterator, List, Optional
 from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
 from ouroboros.utils import utc_now_iso
 from ouroboros.owner_mailbox import _mailbox_path, _MAILBOX_DIR as _OWNER_MAILBOX_DIR
-from ouroboros.store import StoreError
+from ouroboros.store import StoreBusy, StoreError, WalIndexRefused, close_connections_under
 
 log = logging.getLogger(__name__)
 
@@ -87,10 +88,11 @@ TASK_DRIVES_DIR = pathlib.Path("task_drives")
 _ARTIFACTS_DIR = pathlib.Path("task_results") / "artifacts"
 _MAILBOX_DIR = pathlib.Path(_OWNER_MAILBOX_DIR)
 _STAGING_DIR = pathlib.Path("state") / "custody_staging"
+DRIVE_ARRIVALS = "drive_arrivals"  # meta: published drive arrivals (a count); set: the arrivals no lap has looked at yet
 _TRASH_DIR = pathlib.Path("state") / "custody_trash"
 # The addressed words a sender is owed; controls (hurry, finalize_now, ...) are not mail.
-UNREAD_MAIL_KINDS = frozenset({"owner_text", "task_message", "quiz_answer", "quiz_closed"})
-OWNER_MAIL_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed"})  # what the owner authored
+UNREAD_MAIL_KINDS = frozenset({"owner_text", "task_message", "quiz_answer", "quiz_closed", "card_input", "relay_entry"})
+OWNER_MAIL_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "card_input"})  # what the owner authored
 # A store's own bookkeeping and non-deliverable subtrees (inputs, media, sources).
 _STORE_BOOKKEEPING = frozenset({".artifact_manifest.json", ".artifact_manifest.json.lock",
                                 ".scratch_manifest.json", "verification_receipts.jsonl"})
@@ -168,7 +170,9 @@ def canonical_owner_root(drive_root: Any) -> pathlib.Path:
 @contextlib.contextmanager
 def _task_lock(drive_root: Any, task_id: str, suffix: str, timeout_sec: float) -> Iterator[bool]:
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+    from ouroboros.install_identity import require_owned_root
 
+    require_owned_root(drive_root)
     tid = validate_task_id(task_id)
     path = custody_anchor(drive_root, tid) / "task_results" / f"{tid}.{suffix}.lock"
     fd = acquire_exclusive_file_lock(path, timeout_sec=timeout_sec, stale_sec=120.0, poll_sec=0.01,
@@ -196,15 +200,58 @@ def task_mail_lock(drive_root: Any, task_id: str, *, timeout_sec: float = 5.0) -
     return _task_lock(drive_root, task_id, "mail", timeout_sec)
 
 
-def own_child_drives(canonical_root: Any, task_id: str) -> List[pathlib.Path]:
-    """TASK's own execution drives from the host layout alone, never created.
+def child_drive_candidates(result: Dict[str, Any]) -> List[pathlib.Path]:
+    """The child drive roots a task row names (row, then its metadata), in order, once each."""
+    paths: List[pathlib.Path] = []
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    for source in (result, metadata):
+        for key in ("child_drive_root", "headless_child_drive_root", "drive_root"):
+            text = str(source.get(key) or "").strip()
+            if not text:
+                continue
+            path = pathlib.Path(text)
+            if path not in paths:
+                paths.append(path)
+    return paths
 
-    No result field names them, so a forged row cannot widen what a read or a
-    settlement touches; a drive reached through a symlink is not own.
+
+def recorded_execution_drive(row: Dict[str, Any], drive: pathlib.Path, spellings: Any = ()) -> bool:
+    """Canonical admission/copy-back facts, compared lexically before child IO;
+    ``spellings`` (``confined_files.root_spellings``) unify the configured root's spelling.
+
+    A writable task scratch directory is not evidence that it hosts a task store.
+    Callers must supply the canonical row, never a row read from that directory.
     """
-    canonical, tid = pathlib.Path(canonical_root).resolve(strict=False), validate_task_id(task_id)
+    from ouroboros.confined_files import physical_path
+
+    target = physical_path(spellings, drive)
+    return any(physical_path(spellings, recorded) == target for recorded in child_drive_candidates(row))
+
+
+def own_child_drives(canonical_root: Any, task_id: str, *,
+                     store_row: Optional[Dict[str, Any]] = None) -> List[pathlib.Path]:
+    """TASK's physical child layouts, never created; no row widens the layouts.
+
+    ``store_row`` (the HTTP artifact view) keeps only layouts its canonical row
+    records, before any directory IO: there, scratch existence does not authorize
+    a SQLite read. Other callers keep discovering the layouts that exist.
+    """
+    from ouroboros.confined_files import confined_directory, root_spellings
+
+    spellings = root_spellings(canonical_root)
+    canonical, tid = spellings[0], validate_task_id(task_id)
     drives = (canonical / HEADLESS_TASKS_DIR / tid / "data", canonical / TASK_DRIVES_DIR / tid)
-    return [drive for drive in drives if drive.is_dir() and drive.resolve(strict=False) == drive]
+
+    found = []
+    for drive in drives:
+        if store_row is not None and not recorded_execution_drive(store_row, drive, spellings):
+            continue
+        try:
+            with confined_directory(canonical, drive.relative_to(canonical).parts):
+                found.append(drive)
+        except OSError:
+            continue
+    return found
 
 
 def task_artifact_stores(canonical_root: Any, task_id: str) -> List[pathlib.Path]:
@@ -214,8 +261,7 @@ def task_artifact_stores(canonical_root: Any, task_id: str) -> List[pathlib.Path
     stores = [canonical / _ARTIFACTS_DIR / tid]
     for drive in own_child_drives(canonical, tid):
         store = drive / _ARTIFACTS_DIR / tid
-        if store.resolve(strict=False) == store:
-            stores.append(store)
+        stores.append(store)  # location only; every read descends from canonical_root
     return stores
 
 
@@ -330,7 +376,7 @@ def owner_mail_rows(drive_root: Any, task_id: str) -> Tuple[List[str], bool]:
             continue
         if not isinstance(entry, dict):
             complete = False
-        elif str(entry.get("kind") or "owner_text") in OWNER_MAIL_KINDS:
+        elif str(entry.get("kind") or "owner_text") in OWNER_MAIL_KINDS | {"relay_entry"}:
             rows.append(line)
     return rows, complete
 
@@ -579,20 +625,29 @@ def store_artifact_view(canonical_root: Any, task_id: str, recorded: List[Dict[s
     weaker one. Its LOCATION is the canonical store's copy when one is listed there, else
     the child's. Pure: nothing is hashed, copied or registered."""
     from ouroboros.artifacts import collect_task_artifact_records, merge_artifact_records
+    from ouroboros.confined_files import confined_directory, lexical_relative, read_confined_json, root_spellings
 
     stores = task_artifact_stores(canonical_root, task_id)
+    spellings = root_spellings(canonical_root)  # rows record the configured spelling
+    anchor = spellings[0]
     claims: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}  # rel -> [(store index, row)]
     order: List[str] = []
     free: List[Dict[str, Any]] = []
 
     def claim(row: Dict[str, Any], *, free_ok: bool) -> None:
         located = next(((index, rel) for index, store in enumerate(stores)
-                        if (rel := store_relpath(store, row.get("path")))), None)
+                        if (rel := lexical_relative(store, row.get("path"), spellings))), None)
         if located is None:
             if free_ok:
                 free.append(row)
             return
         index, rel = located
+        try:  # read as the walk reads: no SQLite lock drops, and a WAL index is refused unread
+            with confined_directory(anchor, (*stores[index].relative_to(anchor).parts, *rel.split("/")[:-1])) as held:
+                held.open_for_read(rel.rsplit("/", 1)[-1])[0].close()
+        except OSError as exc:  # a recorded index, immutable or not, is shared memory no read may serve or verify
+            if isinstance(exc, WalIndexRefused) or exc.errno in {errno.ELOOP, errno.EMLINK, errno.ENOTDIR}:
+                return  # A linked placement is not an own-store row; a missing identity stays visible.
         if rel not in claims:
             order.append(rel)
         claims.setdefault(rel, []).append((index, row))
@@ -602,16 +657,16 @@ def store_artifact_view(canonical_root: Any, task_id: str, recorded: List[Dict[s
             claim(dict(row), free_ok=True)
     for store, rows in (child_rows or {}).items():
         for row in rows:
-            if isinstance(row, dict) and store_relpath(store, row.get("path")):
+            if isinstance(row, dict) and lexical_relative(store, row.get("path"), spellings):
                 claim(dict(row), free_ok=False)
     for index, store in enumerate(stores):
-        try:
-            registered = _registrations(store)
-        except _Retained:
-            registered = {}
+        document = read_confined_json(anchor, (*store.relative_to(anchor).parts, ".artifact_manifest.json"))
+        registered = (document or {}).get("artifacts")
+        registered = registered if isinstance(registered, dict) else {}
         for name, row in registered.items():
-            claim({**row, "path": str(store / name)}, free_ok=False)
-        for row in collect_task_artifact_records(store.parents[2], task_id, measure=False):
+            if isinstance(row, dict):
+                claim({**row, "path": str(store / name)}, free_ok=False)
+        for row in collect_task_artifact_records(store.parents[2], task_id, measure=False, anchor=anchor):
             claim(row, free_ok=False)
 
     rows: List[Dict[str, Any]] = []
@@ -741,6 +796,7 @@ def _obligations(source: pathlib.Path, current: Dict[str, Any], child: Dict[str,
 def _listed(source: pathlib.Path) -> Dict[str, pathlib.Path]:
     """The regular files SOURCE holds outside its bookkeeping and input subtrees."""
     from ouroboros.artifacts import iter_artifact_tree
+    from ouroboros.store import is_wal_index  # a leftover WAL index: shared memory, never read nor copied
 
     if not (source.exists() or source.is_symlink()):
         return {}
@@ -751,7 +807,7 @@ def _listed(source: pathlib.Path) -> Dict[str, pathlib.Path]:
         for path in iter_artifact_tree(source):
             rel = path.relative_to(source).as_posix()
             if path.is_symlink() or not path.is_file() or path.name in _STORE_BOOKKEEPING \
-                    or rel.split("/", 1)[0] in _STORE_INPUT_SUBTREES:
+                    or rel.split("/", 1)[0] in _STORE_INPUT_SUBTREES or is_wal_index(path):
                 continue
             listed[rel] = path
     except OSError as exc:
@@ -995,6 +1051,8 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     except (OSError, ValueError, StoreError) as exc:
         raise _Retained("task_result_unreadable") from exc
     status = str(current.get("status") or "")
+    if isinstance(current.get("owner_keep"), dict):
+        raise _Retained("owner_keep")
     if admission_rollback and not child and not current.get("started_at") \
             and status not in {"running", "interrupted"}:
         return {"task_id": task_id, "current": current, "plan": [], "rollback": True, "live": live,
@@ -1009,14 +1067,23 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     if _pending_refs_under(current, drive):
         raise _Retained("child_refs_pending")  # retry_pending_child_ref_promotions owns the retry
     from ouroboros.history_retention import call_inventory_custodied
+    calls = _calls_revision(drive, task_id)  # read BEFORE the check judges it: any later change keeps the drive
     if not call_inventory_custodied(canonical, drive, task_id, current, stop=stop):
         raise _Retained("call_inventory_pending")
     if not unread_mail_rows(drive, task_id)[1]:
         raise _Retained("unread_mailbox_unreadable")  # a torn mailbox stages nothing (the closure is Phase A's)
     plan = _child_store_plan(canonical, drive, task_id, current, child, staging / task_id)
     return {"task_id": task_id, "current": current, "plan": plan, "basis": attempt_basis(current), "live": live,
-            "revision": custody_revision(current),
-            "call_inventory_mtime_ns": (current.get("child_ref_promotion") or {}).get("call_inventory_mtime_ns")}
+            "revision": custody_revision(current), "call_inventory_mtime_ns": calls}
+
+
+def _calls_revision(drive: pathlib.Path, task_id: str) -> Optional[int]:
+    """THIS drive's call inventory revision (its calls folder's mtime), None when it has none. The
+    row's recorded revision may be another drive's: a task can own a helper and a direct drive."""
+    try:
+        return (drive / "observability" / "calls" / task_id).stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
 
 
 def _receipts_identity(drive: pathlib.Path, task_id: str) -> Optional[tuple]:
@@ -1084,6 +1151,8 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
     and the receipts are exactly what Phase A left (bounded reads, no copy or hash)."""
     task_id = prepared["task_id"]
     current = load_task_result(canonical, task_id, strict=True) or {}
+    if isinstance(current.get("owner_keep"), dict):
+        raise _Retained("owner_keep")  # the writer saves it under this very lock: no keep can follow this move
     if attempt_basis(current) != prepared["basis"] or custody_revision(current) != prepared["revision_after"]:
         raise _Retained("canonical_changed")
     rows, complete = unread_mail_rows(drive, task_id)
@@ -1100,12 +1169,133 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
         raise _Retained("verification_receipts_uncustodied")
     if _pending_refs_under(current, drive):
         raise _Retained("child_refs_pending")
-    try:
-        call_revision = (drive / "observability" / "calls" / task_id).stat().st_mtime_ns
-    except FileNotFoundError:
-        call_revision = None
-    if call_revision != prepared["call_inventory_mtime_ns"]:
+    if _calls_revision(drive, task_id) != prepared["call_inventory_mtime_ns"]:
         raise _Retained("call_inventory_changed")  # The next pass re-arms retention outside the queue lock.
+
+
+# Retentions a later pass would meet again until an input of the settlement changes; the rest
+# (a live or unknown owner, a busy lock, a closed generation, a race, an unreadable row, an
+# I/O error) is attempted again on the next pass.
+TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
+                                   "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
+                                   "call_inventory_changed", "task_result_unreadable"})
+
+
+def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
+    """What a retained settlement's verdict was read from, cheaply: the canonical row's signature,
+    the drive's, its store's (the database and its WAL log, where a commit lives until a
+    checkpoint), its call inventory's and both mailboxes' identities, and the release that judged
+    it. Any change makes the next pass attempt the drive again."""
+    from ouroboros import __version__
+    from ouroboros.store import log_identity
+    from ouroboros.task_store import signature
+
+    def identity(path: pathlib.Path) -> Any:
+        try:
+            stat = path.lstat()
+        except OSError as exc:
+            return type(exc).__name__
+        return [stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+    return json.loads(json.dumps([
+        signature(parent, task_id), identity(task_dir), identity(drive / "state" / "current.sqlite"),
+        log_identity(drive / "state" / "current.sqlite"),
+        identity(drive / "observability" / "calls" / task_id), identity(_mailbox_path(parent, task_id)),
+        identity(_mailbox_path(drive, task_id)), str(__version__)], default=str))
+
+
+def layout_basis(parent: pathlib.Path, base: pathlib.Path, days: int) -> Dict[str, Any]:
+    """What can give a layout's lap work again, cheaply: the layout directory's identity (a drive
+    added or removed moves its mtime), the published drive arrivals (``DRIVE_ARRIVALS``: when the
+    directory moved together with them, the pass looks only at the drives published,
+    ``arrived_drives``; a directory moved without one is a change nobody published, walked whole),
+    the store's terminal-write counter (a task closing, or a closed task written again: the receipts
+    a retained verdict waits on ride row writes; when it moved, the pass looks only at the rows
+    written since, ``task_store.terminal_writes_since``), the server generation (one full lap per
+    boot), the retention setting and the release that judged the last lap. A drive younger than
+    retention is not here: its instant is kept beside the basis."""
+    from ouroboros import __version__
+    from ouroboros.maintenance_retirement import STARTUP
+    from ouroboros.store import TERMINAL_WRITES, open_store
+
+    try:
+        info = base.lstat()
+        directory: Any = [info.st_ino, info.st_mtime_ns]
+    except OSError as exc:
+        directory = type(exc).__name__
+    with open_store(parent, write=False) as txn:
+        terminal, startup, arrivals = txn.meta(TERMINAL_WRITES), txn.meta(STARTUP), txn.meta(DRIVE_ARRIVALS)
+    return json.loads(json.dumps({"directory": directory, "terminal": terminal, "startup": startup,
+                                  "arrivals": arrivals, "days": int(days), "release": str(__version__)}, default=str))
+
+
+def record_drive_arrival(canonical: pathlib.Path, base: pathlib.Path, task_id: str) -> bool:
+    """A drive creator's publication once its drive exists under the layout directory BASE: the
+    layout's next lap looks at this drive alone instead of walking the layout (``layout_basis``,
+    ``headless._prune_drives``). Best-effort, never the creator's failure and never its wait: a store
+    that is absent (a root nothing imported yet), busy, migrating, retired or foreign takes no row,
+    and the layout directory's moved mtime makes the next lap walk whole, as every lap did before the
+    publication existed. The write spends no acquisition budget: a missed publication costs one whole
+    walk, a wait would cost every task creation up to the store's. Returns whether it landed."""
+    from ouroboros.store import acquisition_budget, open_store, probe
+
+    tid = validate_task_id(task_id)
+    try:
+        if probe(canonical)[0] != "present":
+            return False
+        with acquisition_budget(0), open_store(canonical, write=True) as txn:
+            txn.set_meta(DRIVE_ARRIVALS, int(txn.meta(DRIVE_ARRIVALS) or 0) + 1)
+            txn.put_row(DRIVE_ARRIVALS, f"{base.name}/{tid}", {"layout": base.name, "task_id": tid})
+        return True
+    except (StoreError, OSError):  # StoreForeign (install_identity) is a StoreError
+        log.debug("the arrival of drive %s under %s was not published", tid, base.name, exc_info=True)
+        return False
+
+
+def arrived_drives(parent: pathlib.Path, base: pathlib.Path) -> List[str]:
+    """The drives published as arrived under BASE that no lap has looked at yet (``DRIVE_ARRIVALS`` rows,
+    O(drives created since the last lap); the lap that looks at them forgets them, ``forget_arrivals``).
+    Read after ``layout_basis``: a publication landing between the two reads is looked at now, and the
+    next lap, seeing its count alone moved, finds nothing left to look at."""
+    from ouroboros.store import open_store
+
+    with open_store(parent, write=False) as txn:
+        rows = txn.set_rows(DRIVE_ARRIVALS)
+    return sorted({str(facts["task_id"]) for facts in rows.values()
+                   if facts.get("layout") == base.name and facts.get("task_id")})
+
+
+def forget_arrivals(txn: Any, base_name: str, task_ids: List[str]) -> None:
+    """The lap looked at these published arrivals of the layout named BASE_NAME: their rows go, in the
+    transaction that records the lap's facts."""
+    for task_id in task_ids:
+        txn.delete_row(DRIVE_ARRIVALS, f"{base_name}/{task_id}")
+
+
+def rested_verdict(rested: Optional[Dict[str, Any]], parent: pathlib.Path, task_id: str, task_dir: pathlib.Path,
+                   drive: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """A retained drive's durable verdict while nothing it was read from changed (``settlement_basis``):
+    the pass skips it instead of copying and hashing an unproven custody again."""
+    verdict = (rested or {}).get(task_id)
+    return verdict if verdict is not None and verdict.get("basis") == settlement_basis(parent, task_id, task_dir, drive) else None
+
+
+def forget_departed(rested: Optional[Dict[str, Any]], layout: str, names: List[str]) -> None:
+    """Verdicts of drives that left a layout go with them."""
+    for name in [key for key, verdict in (rested or {}).items() if verdict.get("layout") == layout and key not in names]:
+        del rested[name]
+
+
+def record_rest(rested: Optional[Dict[str, Any]], layout: str, parent: pathlib.Path, task_id: str,
+                task_dir: pathlib.Path, drive: pathlib.Path, outcome: Dict[str, Any]) -> None:
+    """Keep a retained drive's verdict; a removed, transiently retained or failed one owes another look."""
+    if rested is None:
+        return
+    reason = str(outcome.get("reason") or "")
+    if outcome["status"] == "removed" or reason in TRANSIENT_RETENTIONS or reason.startswith("custody_error"):
+        rested.pop(task_id, None)
+    else:
+        rested[task_id] = {"layout": layout, "reason": reason, "basis": settlement_basis(parent, task_id, task_dir, drive)}
 
 
 def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: Optional[LiveProbe],
@@ -1171,9 +1361,12 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     _recheck_occupant(canonical, drive, item)
                 trash = canonical / _TRASH_DIR / f"{tid}-{uuid.uuid4().hex[:12]}"
                 trash.parent.mkdir(parents=True, exist_ok=True)
+                try:  # this pass itself read the drive's store; Windows moves no folder with an open file
+                    close_connections_under(base)
+                except StoreBusy as exc:
+                    raise _Retained("store_busy") from exc
                 os.replace(base, trash)
-        outcome.update(status="removed")
-        shutil.rmtree(trash, ignore_errors=True)
+        outcome.update(status="removed")  # the moved drive is deleted by the maintenance child (remove_custody_trash)
     except _Retained as retained:
         # A fenced write surfaces as its caller's own failure reason: a closed generation names the close.
         outcome["reason"] = "generation_closed" if closed() else str(retained)
@@ -1193,23 +1386,81 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     return outcome
 
 
+def _remove_entry(entry: pathlib.Path) -> None:
+    """A moved drive or a crashed settlement's staging goes whole: the removal grants owner write and
+    list bits inside the tree (never through a link), so read-only folders do not strand it."""
+    if entry.is_dir() and not entry.is_symlink():
+        from ouroboros.force_remove import force_rmtree as _force_rmtree
+
+        _force_rmtree(entry)
+    else:
+        entry.unlink(missing_ok=True)
+
+
 def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0) -> None:
-    """Remove trash and staging a crashed settlement left behind (older than ``min_age_sec``,
-    so a running settlement keeps its own); both are unserved and unreferenced by
-    construction: trash is a fully custodied drive, staging a private copy."""
+    """Remove the staging a crashed settlement left behind (older than ``min_age_sec``, so a
+    running settlement keeps its own); staging is a private copy, unserved and unreferenced."""
     import time
 
-    for directory in (_TRASH_DIR, _STAGING_DIR):
-        root = pathlib.Path(canonical_root) / directory
-        if not root.is_dir() or root.is_symlink():
+    root = pathlib.Path(canonical_root) / _STAGING_DIR
+    if not root.is_dir() or root.is_symlink():
+        return
+    for entry in root.iterdir():
+        try:
+            if time.time() - entry.lstat().st_mtime >= min_age_sec:
+                _remove_entry(entry)
+        except OSError:
             continue
-        for entry in root.iterdir():
-            try:
-                if time.time() - entry.lstat().st_mtime < min_age_sec:
-                    continue
-                if entry.is_dir() and not entry.is_symlink():
-                    shutil.rmtree(entry, ignore_errors=True)
-                else:
-                    entry.unlink(missing_ok=True)
-            except OSError:
-                continue
+
+
+def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
+    """``(name, identity)`` of each drive a settlement moved aside (one directory read, an ``lstat`` each)."""
+    root = pathlib.Path(canonical_root) / _TRASH_DIR
+    entries: List[Tuple[str, List[int]]] = []
+    try:
+        if root.is_symlink():
+            return entries
+        with os.scandir(root) as listing:
+            for entry in listing:
+                with contextlib.suppress(OSError):
+                    stat = os.lstat(entry.path)  # remove_custody_trash's identity, not a Windows listing's copy
+                    entries.append((entry.name, [stat.st_ino, stat.st_mtime_ns]))
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    return entries
+
+
+def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+    """Delete the drives settlements moved aside: each was fully custodied before its move, and
+    nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
+    off the serving process. Returns the count removed and each entry that survived its removal
+    (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)."""
+    report: Dict[str, Any] = {"removed": 0, "stuck": {}}
+    root = pathlib.Path(canonical_root) / _TRASH_DIR
+    try:
+        entries = [] if root.is_symlink() else list(root.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        entries = []
+    for entry in entries:
+        if stop is not None and stop():
+            break
+        with contextlib.suppress(OSError):
+            if entry.is_dir() and not entry.is_symlink():
+                from ouroboros.workspace_preflight import release_session_scratch
+
+                release_session_scratch(entry)
+                if (entry / "data").is_dir() and not (entry / "data").is_symlink():
+                    release_session_scratch(entry / "data")
+            _remove_entry(entry)
+        try:
+            stat = entry.lstat()
+            report["stuck"][entry.name] = [stat.st_ino, stat.st_mtime_ns]
+        except FileNotFoundError:
+            report["removed"] += 1
+        except OSError as exc:
+            report["stuck"][entry.name] = [type(exc).__name__]
+    if report["removed"]:  # the bytecode the removed sources left is owed to retirement now
+        from ouroboros.maintenance_retirement import artifact_changed
+
+        artifact_changed(canonical_root, immediate=True)
+    return report

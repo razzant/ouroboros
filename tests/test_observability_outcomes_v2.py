@@ -481,7 +481,7 @@ def test_forced_finalization_with_answer_is_best_effort():
     """Deadline/budget/round-limit forced finalization with a REAL extracted
     model answer is the typed best_effort shelf, not a failure. Structural
     gate: forced reason code + the loop's typed _best_effort_extracted fact +
-    non-empty non-error text."""
+    non-empty text; punctuation does not establish provenance."""
     from ouroboros.outcomes import EXECUTION_BEST_EFFORT, derive_loop_outcome
 
     for reason in ("budget_exhausted", "round_limit", "finalization_grace", "deadline_local"):
@@ -517,18 +517,27 @@ def test_forced_finalization_with_answer_is_best_effort():
     )
     assert empty["outcome_axes"]["execution"]["status"] == "failed"
 
-    # Error-marker text stays a failure even with the fact set — BOTH marker
-    # families (⚠️ and ❌, e.g. deep-self-review error strings) are rejected.
+    # Genuine extracted answers can start with either former error marker.
     for marker_text in (
-        "⚠️ Task exceeded MAX_ROUNDS (200).",
-        "❌ Deep self-review unavailable: configure OUROBOROS_MODEL_DEEP_SELF_REVIEW.",
+        "⚠️ Three modules fixed; integration tests remain unverified.",
+        "❌ The login test still fails. The saved patch fixes the other two cases.",
     ):
         marker = derive_loop_outcome(
             marker_text,
             {"execution_status": "failed", "reason_code": "round_limit", "_best_effort_extracted": True},
             {"tool_calls": [], "reasoning_notes": []},
         )
-        assert marker["outcome_axes"]["execution"]["status"] == "failed", marker_text
+        execution = marker["outcome_axes"]["execution"]
+        assert execution["status"] == EXECUTION_BEST_EFFORT, marker_text
+        assert execution["reason_code"] == "round_limit" and execution["failure"] is None
+
+    for notice in ("⚠️ Task exceeded MAX_ROUNDS (200).",
+                   "❌ Deep self-review unavailable: configure OUROBOROS_MODEL_DEEP_SELF_REVIEW."):
+        unextracted = derive_loop_outcome(
+            notice, {"execution_status": "failed", "reason_code": "round_limit"},
+            {"tool_calls": [], "reasoning_notes": []},
+        )
+        assert unextracted["outcome_axes"]["execution"]["status"] == "failed", notice
 
     # Non-forced failure reasons keep failing regardless of text/fact.
     other = derive_loop_outcome(

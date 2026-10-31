@@ -7,6 +7,7 @@ from ouroboros.gateway.main_decisions import main_decisions_snapshot
 from ouroboros.owner_quiz import quiz_states, record_asked, record_publication, reconcile_terminal
 from ouroboros.projects_registry import create_project
 from ouroboros.startup_migrations import prepare_startup_state
+from ouroboros.store_import import run_legacy_reconcile
 from ouroboros.task_results import write_task_result
 
 
@@ -78,6 +79,7 @@ def test_store_published_before_the_question_flag_gains_it_once_at_boot(tmp_path
     record_publication(tmp_path, "task", "q", project["chat_id"])
     with store.open_store(tmp_path, write=True) as txn:  # the column set before ``owner_questions``
         txn.conn.execute("DROP INDEX tasks_has_owner_questions")
+        txn.conn.execute("DROP INDEX tasks_underived_flags")
         txn.conn.execute("ALTER TABLE tasks DROP COLUMN has_owner_questions")
         txn.set_meta("schema_version", 1)
     assert ensure_current_store(tmp_path, with_children=False)["flag_columns_added"] == ["owner_questions"]
@@ -90,11 +92,11 @@ def test_store_published_before_the_question_flag_gains_it_once_at_boot(tmp_path
 
 def schema_one_write(root, document):
     """A schema-1 body's ``Txn.store_task`` on an upgraded store (a rollback's write): its own
-    column list, which predates both nullable additions; it never touches ``schema_version``."""
+    column list, which predates the nullable additions; it never touches ``schema_version``."""
     task_id = str(document["task_id"])
     with store.open_store(root, write=True) as txn:
         columns = {key: value for key, value in store.typed_columns(document).items()
-                   if key not in {"has_owner_questions", "review_collection_pending"}}
+                   if key not in {"has_owner_questions", "review_collection_pending", "plan_collection_pending"}}
         columns["write_seq"] = (txn.row(task_id, "write_seq") or 0) + 1
         txn.conn.execute("INSERT OR REPLACE INTO task_bodies (task_id, body) VALUES (?, ?)",
                          (task_id, store.encode_document(document)))
@@ -103,7 +105,7 @@ def schema_one_write(root, document):
                          (task_id, *columns.values()))
 
 
-def test_questions_an_older_body_rewrote_or_asked_return_to_main_at_the_next_boot(tmp_path, monkeypatch):
+def test_questions_an_older_body_rewrote_or_asked_return_to_main_after_legacy_job(tmp_path, monkeypatch):
     from ouroboros import startup_migrations
     from ouroboros.owner_quiz import mark_discharged, quiz_delivery_due, record_answered
     from ouroboros.task_store import read_document
@@ -129,7 +131,8 @@ def test_questions_an_older_body_rewrote_or_asked_return_to_main_at_the_next_boo
         assert txn.meta("schema_version") == store.SCHEMA_VERSION
         assert [txn.row(tid, "has_owner_questions") for tid in ("task", "later")] == [None, None]
     report = prepare_startup_state(tmp_path)  # the return to this body
-    assert report["flag_rows_derived"] == 2 and report["question_publications"] == {"bound": 1, "unknown": 0}
+    assert report["flag_rows_derived"] == 2 and report["question_publications"] == {}
+    assert run_legacy_reconcile(tmp_path)["question_publications"] == {"bound": 1, "unknown": 0}
     assert set(obligations.members(tmp_path, "owner_questions")) == {"task", "later"}
     snapshot = main_decisions_snapshot(tmp_path, [], {})
     assert snapshot["current_questions_complete"] is True and snapshot["current_questions_gaps"] == []
@@ -161,6 +164,7 @@ def test_flag_upgrade_keeps_an_undecodable_body_owed_and_disclosed(tmp_path):
     project_task(tmp_path)
     with store.open_store(tmp_path, write=True) as txn:
         txn.conn.execute("DROP INDEX tasks_has_owner_questions")
+        txn.conn.execute("DROP INDEX tasks_underived_flags")
         txn.conn.execute("ALTER TABLE tasks DROP COLUMN has_owner_questions")
     corrupt_body(tmp_path)
     assert ensure_current_store(tmp_path, with_children=False)["flag_columns_added"] == ["owner_questions"]
@@ -200,6 +204,49 @@ def test_question_read_is_readonly(tmp_path):
     assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
     with store.open_store(tmp_path, write=False) as txn:
         assert txn.revision() == revision
+
+
+@pytest.mark.parametrize("room,chat_id", [("main", 1), ("agent-to-agent", -1001)])
+@pytest.mark.parametrize("second,order", [(1, ("waited", "calm")), (0, ("calm", "waited"))],
+                         ids=["distinct-times", "tied-times"])
+def test_mains_own_unanswered_questions_are_named_by_identity_and_other_rooms_stay_out(
+        tmp_path, monkeypatch, room, chat_id, second, order):
+    """Main's waiting count reaches Main's own unanswered questions, whose cards are already its native
+    history: the census names each by identity and never builds a copy. Another known room that is
+    neither Main nor a Project stays out of Main, without a gap."""
+    from ouroboros.owner_quiz import mark_discharged, record_answered
+    from ouroboros.owner_wait import set_owner_wait
+
+    write_task_result(tmp_path, "author", "running", chat_id=chat_id)
+    asked = []
+    # Coarse clocks can give both questions the same timestamp; identity breaks that tie.
+    for quiz_id, tick in (("waited", 0), ("calm", second)):
+        monkeypatch.setattr("ouroboros.owner_quiz.utc_now_iso", lambda tick=tick: f"2026-01-01T00:00:0{tick}+00:00")
+        asked.append(record_asked(tmp_path, "author", quiz_id=quiz_id, question=f"{quiz_id}?", options=["Yes", "No"],
+                                  wait_for_answer=quiz_id == "waited", chat_id=chat_id))
+    for block in asked:
+        record_publication(tmp_path, "author", block["quiz_id"], chat_id)
+    set_owner_wait(tmp_path, "author", {"quiz_id": "waited", "wait_id": "w", "state": "waiting"})
+    snapshot = main_decisions_snapshot(tmp_path, [], {})
+    assert snapshot["current_questions_complete"] is True and snapshot["current_questions_gaps"] == []
+    if room != "main":
+        assert snapshot["current_questions"] == []
+        return
+    waited, calm = asked
+    expected = {
+        "waited": {"task_id": "author", "quiz_id": "waited", "chat_id": 1, "native": True, "quiz_state": "open",
+         "ts": waited["asked_at"], "owner_wait_state": "waiting"},
+        "calm": {"task_id": "author", "quiz_id": "calm", "chat_id": 1, "native": True, "quiz_state": "open",
+         "ts": calm["asked_at"]}}
+    assert snapshot["current_questions"] == [expected[quiz_id] for quiz_id in order]
+    # Unanswered stays current after its author finishes; an answered one leaves once delivered.
+    reconcile_terminal(tmp_path, "author")
+    rows = main_decisions_snapshot(tmp_path, [], {})["current_questions"]
+    assert [(row["quiz_id"], row["quiz_state"], row["native"]) for row in rows] == [
+        (quiz_id, "expired_terminal", True) for quiz_id in order]
+    record_answered(tmp_path, "author", quiz_id="calm", option_index=0, request_id="owner", allow_expired=True)
+    mark_discharged(tmp_path, "author", "calm")
+    assert [row["quiz_id"] for row in main_decisions_snapshot(tmp_path, [], {})["current_questions"]] == ["waited"]
 
 
 def test_unavailable_index_or_member_is_not_complete_empty(tmp_path, monkeypatch):
@@ -267,7 +314,8 @@ def test_an_older_bodys_ask_imports_without_turning_a_current_owed_publication_u
     older_body_ask(tmp_path, "later", "older", chat_id=project["chat_id"])
     append_jsonl(tmp_path / "logs/chat.jsonl", {"direction": "out", "type": "quiz", "task_id": "later",
                  "chat_id": project["chat_id"], "quiz": {"quiz_id": "older"}})
-    assert prepare_startup_state(tmp_path)["question_publications"] == {"bound": 1, "unknown": 0}
+    assert prepare_startup_state(tmp_path)["question_publications"] == {}
+    assert run_legacy_reconcile(tmp_path)["question_publications"] == {"bound": 1, "unknown": 0}
     assert not [key for key in obligations.members(tmp_path, "unknowns") if key.startswith("question:")]
     record_publication(tmp_path, "task", "current", project["chat_id"])  # the body publishes its own ask
     mark_published(tmp_path, "task", "current")
@@ -376,8 +424,10 @@ def test_resume_attention_follows_the_parked_rows_release_rule(tmp_path, cause, 
         assert rows[0]["can_resume"] is True and rows[0]["cancelable"] is True
         assert rows[0]["attention_reason"] == reason
     # Pausing is not yet parked: no Resume is offered before the boundary.
-    activity.update(phase="budget_pausing")
+    activity.update(phase="budget_pausing", live=True)
     assert main_decisions_snapshot(tmp_path, [activity], {})["main_attention"] == []
+    activity["live"] = False
+    assert bool(main_decisions_snapshot(tmp_path, [activity], {})["main_attention"]) is can_resume
 
 
 def test_required_quiz_wait_is_one_identity_and_does_not_hide_other_task_actions(tmp_path):
@@ -401,7 +451,7 @@ def test_required_quiz_wait_is_one_identity_and_does_not_hide_other_task_actions
     # A parked row runs no wait loop, so its recorded wait is no separate
     # action beside Resume.
     assert row["can_resume"] is True and row["model_waits"] == {}
-    activity.update(phase="budget_pausing")
+    activity.update(phase="budget_pausing", live=True)
     assert main_decisions_snapshot(tmp_path, [activity], {})["main_attention"] == []
 
 
@@ -457,7 +507,6 @@ def test_retained_descendant_question_converges_after_ancestor_conversion(tmp_pa
     keeps the publication address. This does not grant live subagents new quiz authority."""
     from ouroboros.gateway.history import _assemble_history_response
     from ouroboros.projects_registry import bind_task_to_project
-    from ouroboros.utils import append_jsonl
     from tests.test_quiz_answer import _decision_app, _post
     from tests.test_quiz_late_answer import _late_bridge, _inbox
 
@@ -470,7 +519,8 @@ def test_retained_descendant_question_converges_after_ancestor_conversion(tmp_pa
     tid = chain[-1]
     record_asked(tmp_path, tid, quiz_id="retained", question="Choose the output", options=["PDF", "HTML"], chat_id=1)
     record_publication(tmp_path, tid, "retained", 1)
-    append_jsonl(tmp_path / "logs/chat.jsonl", {"type": "quiz", "direction": "out", "chat_id": 1,
+    from ouroboros import dialogue_store as ds
+    ds.append(tmp_path, "chat", {"type": "quiz", "direction": "out", "chat_id": 1,
         "task_id": tid, "ts": "2026-10-15T00:00:00Z", "text": "Choose the output",
         "quiz": {"quiz_id": "retained", "options": ["PDF", "HTML"]}})
     bind_task_to_project(tmp_path, converted, project["id"], origin={"absent": "system"})
@@ -505,7 +555,7 @@ def test_unreadable_ancestor_never_hides_a_retained_main_ask_as_unbound(tmp_path
     write_task_result(tmp_path, "child", "completed", chat_id=1, parent_task_id="unreadable", root_task_id="root")
     record_asked(tmp_path, "child", quiz_id="q", question="Still pending?", options=["Yes"], chat_id=1)
     record_publication(tmp_path, "child", "q", 1)
-    monkeypatch.setattr(projects_registry, "_read_lineage", lambda *a: None)
+    monkeypatch.setattr(projects_registry, "_read_lineage", lambda *a, **_kw: None)
     snapshot = main_decisions_snapshot(tmp_path, [], {})
     assert snapshot["current_questions_complete"] is False
     assert snapshot["current_questions_gaps"] == [{"reason": "question_source_unavailable", "task_id": "child"}]

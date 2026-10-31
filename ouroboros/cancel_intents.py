@@ -1353,9 +1353,14 @@ def migrate_legacy_cancel_latches(drive_root: Any, *, records=None) -> List[str]
     return migrated
 
 
-def cancel_state_fields(drive_root: Any, task_id: str) -> Dict[str, Any]:
-    """Typed public projection: ``{"cancel_state": "pending", ...}`` or ``{}``."""
-    intent = active_intent(drive_root, task_id)
+def cancel_state_fields(drive_root: Any, task_id: str, *, intents: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Typed public projection: ``{"cancel_state": "pending", ...}`` or ``{}``; ``intents`` is a
+    batch reader's one ``active_intents`` read (``task_reads``) instead of a read per task."""
+    if intents is None:
+        intent = active_intent(drive_root, task_id)
+    else:
+        row = intents.get(str(task_id))
+        intent = dict(row) if isinstance(row, dict) else None
     if intent is None:
         return {}
     fields: Dict[str, Any] = {"cancel_state": "pending"}

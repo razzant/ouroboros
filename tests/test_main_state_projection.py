@@ -137,7 +137,9 @@ def test_state_carries_current_model_access_and_budget_resume_controls(gateway):
     assert payload["active_chat_activities_complete"] is True
     assert payload["main_attention_complete"] is True
     attention = {row["task_id"]: row for row in payload["main_attention"]}
-    assert set(attention) == {"access-task", "budget-task"}
+    assert set(attention) == {"access-task", "budget-task", "owner-paused-task"}
+    # An owner marker with no current tree fence awaits explicit selection (R3).
+    assert attention["owner-paused-task"]["can_resume"] is True
     model = attention["access-task"]
     assert model["model_waits"] == {"sign-in": wait}
     assert model["task_attempt"] == 3 and model["attention_reason"] == "model_access"
@@ -218,7 +220,7 @@ def _hold(reason):
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, False, True),
     ({"_budget_pause": {"status": "paused_before_dispatch", "reason": "budget", "replay_safe": True}}, False, True),
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, True, False),
-    ({"_budget_pause": {**_EXACT, "reason": "owner"}}, False, False),
+    ({"_budget_pause": {**_EXACT, "reason": "owner"}}, False, True),
     ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}}}, False, False),
     ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}},
       "_budget_pause_hold": _hold("saved_sleep_recovery")}, False, True),
@@ -227,39 +229,39 @@ def _hold(reason):
     ({"_budget_pause_hold": _hold("owner_restart_hold")}, False, True),
     ({"_budget_pause_hold": _hold("saved_work_hold")}, False, True),
     ({"_budget_pause_hold": _hold("continuation_writer_unsettled")}, False, False),
-    ({"_budget_pause_hold": _hold("restore_refused:invalid_budget_fence_snapshot")}, False, False),
-    ({"_continuation_prepared": "sha"}, False, False),
-    ({"_budget_pause_hold": {**_hold("owner_restart_hold"), "selected": True}}, False, False),
+    ({"_budget_pause_hold": _hold("restore_refused:invalid_budget_fence_snapshot")}, False, True),
+    ({"_continuation_prepared": "sha"}, False, True),
+    ({"_resume_selection": {"selected_by": "owner"}}, False, False),
     ({}, False, False),
 ], ids=["exact-budget", "zero-dispatch-budget", "under-owner-fence", "owner-saved", "unheld-sleep",
         "held-saved-sleep", "panic-held-sleep", "restart-hold", "saved-work-hold", "writer-hold",
         "restore-refused", "continue-unconfirmed", "already-selected", "not-parked"])
 def test_explicit_resume_follows_each_rows_release_rule(tmp_path, row, owner_paused, expected):
     """Only rows that nothing but an explicit Resume continues need the owner."""
-    from supervisor.events_budget import explicit_resume_required
+    from ouroboros.gateway.state import _pending_resume_available
 
     task = {"id": "root", "root_task_id": "root", **row}
-    assert explicit_resume_required(_registries(tmp_path, [task]), task, owner_paused=owner_paused) is expected
+    assert _pending_resume_available(_registries(tmp_path, [task]), task, owner_paused=owner_paused) is expected
 
 
 def test_member_resume_belongs_to_its_root_unless_only_the_owner_can_select_it(tmp_path, monkeypatch):
     from supervisor import events_budget
-    from supervisor.events_budget import explicit_resume_required
+    from ouroboros.gateway.state import _pending_resume_available
 
     member = {"id": "child", "root_task_id": "root", "parent_task_id": "root",
               "_budget_pause_hold": _hold("owner_restart_hold")}
     root = {"id": "root", "root_task_id": "root"}
     # A running root with no live Resume grant: the model cannot select it; the owner must.
-    assert explicit_resume_required(_registries(tmp_path, [member], running={"root": {"task": root}}),
+    assert _pending_resume_available(_registries(tmp_path, [member], running={"root": {"task": root}}),
                                     member, owner_paused=False) is True
     # A root that is itself parked: its own Resume is the one action.
     parked_root = {**root, "_budget_pause": {**_EXACT, "reason": "budget"}}
-    assert explicit_resume_required(_registries(tmp_path, [parked_root, member]), member, owner_paused=False) is False
-    assert explicit_resume_required(_registries(tmp_path, [member], fences={"root": {"status": "active"}}),
+    assert _pending_resume_available(_registries(tmp_path, [parked_root, member]), member, owner_paused=False) is False
+    assert _pending_resume_available(_registries(tmp_path, [member], fences={"root": {"status": "active"}}),
                                     member, owner_paused=False) is False
     # A live root grant lets the root's model select the member (owner Q9).
     monkeypatch.setattr(events_budget, "live_root_resume_grant", lambda *_a, **_k: {"grant_id": "g", "generation": 1})
-    assert explicit_resume_required(_registries(tmp_path, [member], running={"root": {"task": root}}),
+    assert _pending_resume_available(_registries(tmp_path, [member], running={"root": {"task": root}}),
                                     member, owner_paused=False) is False
 
 
@@ -284,7 +286,7 @@ def test_census_resume_and_stop_follow_owner_facts_and_children_stay_out_of_the_
     assert not any(key in row for row in census.values() for key in ("parent_task_id", "delegation_role"))
     attention = {row["task_id"]: row for row in payload["main_attention"]}
     assert set(attention) == {"held-sleep", "held-child"}
-    assert attention["held-sleep"]["attention_reason"] == "resume"
+    assert attention["held-sleep"]["attention_reason"] == "restart"  # saved sleep is app_stop in the shared table
     # The child's own Resume is real (no root grant exists); Stop addresses roots only.
     assert attention["held-child"]["can_resume"] is True and attention["held-child"]["cancelable"] is False
     assert attention["held-child"]["root_task_id"] == "running-root"
@@ -402,31 +404,41 @@ def _attention_rows(payload, task_id):
 
 
 def _main_consumer(payloads, task_id):
-    """Main's real consumer reads these exact /api/state payloads in order, as ``chat.js`` hands them over."""
+    """Main's real consumer reads these exact /api/state payloads in order, as ``chat.js`` hands them over:
+    a task that needs the owner is one System message in Main's feed with the task's own controls."""
     script = """
         import fs from 'node:fs';
         import { installDom, restoreDom } from './web/tests/chat_dom_fixture.js';
-        import { createMainAttention } from './web/modules/main_attention.js';
+        import { createMainWaiting } from './web/modules/main_waiting.js';
+        import { stampNodeTimestamp } from './web/modules/chat_activity.js';
         const { payloads, taskId } = JSON.parse(fs.readFileSync(0, 'utf8'));
         const posted = [];
         const env = installDom(async (url, init) => {
             posted.push([url, init?.method || 'GET']);
             return { ok: true, json: async () => ({ ok: true }) };
         });
+        globalThis.CSS = { escape: value => value };
         const find = (node, predicate) => predicate(node) ? node
             : node.children.reduce((found, child) => found || find(child, predicate), null);
-        const attention = createMainAttention({ mount: env.mount });
+        const page = document.createElement('div');
+        const messagesDiv = document.createElement('div');
+        const toolbar = document.createElement('div');
+        page.append(messagesDiv, toolbar);
+        env.mount.append(page);
         document.body = env.mount;
-        for (const payload of payloads) attention.snapshot(payload);
-        const card = find(env.mount, node => node.dataset.taskId === taskId);
+        const waiting = createMainWaiting({ page, messagesDiv, toolbar, stampNodeTimestamp,
+            insertMessageNode: node => messagesDiv.append(node) });
+        for (const payload of payloads) waiting.snapshot(payload);
+        const card = find(messagesDiv, node => node.dataset.ownerAction === taskId);
+        const sender = card && find(card, node => node.classList.contains('sender'));
         const resume = card && find(card, node => node.dataset.resumeRun === '1');
-        const reason = card && find(card, node => node.classList.contains('main-attention-reason'));
+        const reason = card && find(card, node => node.classList.contains('owner-action-reason'));
         const stop = card && find(card, node => node.textContent === 'Stop\\u2026');
         const enabled = Boolean(resume && !resume.disabled);
         if (enabled) await resume.listeners.get('click')[0]({ stopPropagation() {} });
-        console.log(JSON.stringify({ card: Boolean(card), resume: Boolean(resume), enabled, stop: Boolean(stop),
-            reason: reason ? reason.textContent : '', posted }));
-        attention.destroy(); restoreDom(env.prior);
+        console.log(JSON.stringify({ card: Boolean(card), sender: sender ? sender.textContent : '',
+            resume: Boolean(resume), enabled, stop: Boolean(stop), reason: reason ? reason.textContent : '', posted }));
+        waiting.destroy(); restoreDom(env.prior);
     """
     result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=Path(__file__).parents[1],
                             input=json.dumps({"payloads": payloads, "taskId": task_id}),
@@ -469,11 +481,12 @@ def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_res
     # The answered fence no longer explains it: the row's own facts do, never "owner".
     assert (row["pause_cause"], row["attention_reason"]) == (("unknown", "resume") if returning
                                                              else ("restart", "restart"))
-    # Main's real consumer of this exact payload shows that Resume and posts it to the same route.
+    # Main's real consumer of this exact payload shows that Resume in its feed message and posts it
+    # to the same route.
     assert _main_consumer([payload], CHILD) == {
-        "card": True, "resume": True, "enabled": True, "stop": False,
+        "card": True, "sender": "System", "resume": True, "enabled": True, "stop": False,
         "posted": [[f"/api/tasks/{CHILD}/resume", "POST"]],
-        "reason": "This task needs an explicit Resume." if returning else "This task needs Resume after the restart."}
+        "reason": "Needs an explicit Resume." if returning else "Needs Resume after the restart."}
     before = read_fence(host.root, ROOT)
     response = client.post(f"/api/tasks/{CHILD}/resume")
     assert response.status_code == 200 and response.json()["ok"], response.text
@@ -481,7 +494,7 @@ def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_res
     assert after["fence_id"] == before["fence_id"] and after["state"] == before["state"], "the tree stays fenced"
     assert after["selected_members"][CHILD]["grant_id"] == grant_id, "completed on its own consumed grant"
     [held] = workers.PENDING
-    assert held[BUDGET_HOLD_KEY]["selected"] is True and held[BUDGET_HOLD_KEY]["selected_by"] == "owner"
+    assert BUDGET_HOLD_KEY not in held and held["_resume_selection"]["selected_by"] == "owner"
     assert not _attention_rows(_member_state(client), CHILD), "a completed Resume leaves Main"
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
@@ -528,15 +541,16 @@ def test_main_offers_no_member_resume_beyond_its_own_interrupted_grant(host, tmp
 
 @pytest.mark.serial
 @pytest.mark.parametrize("settled", [False, True])
-def test_an_unreadable_root_keeps_the_member_unknown_and_its_main_action_unavailable(
+def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
     host, tmp_path, monkeypatch, settled,  # noqa: F811
 ):
-    """The root's own document stops decoding after a census read (bytes no UTF-8 decoder accepts):
-    the member's state is unknown — an incomplete census, never quiet completeness or an invented Resume.
-    While the tree's Pause settles, its census reads that root anyway; once settled, the member's own
-    interrupted-Resume check is the only reader the failure reaches (fence and facts are signature-cached)."""
+    """The root's own document stops decoding after a census read (bytes no UTF-8 decoder accepts,
+    written outside the store). The census answers from typed hot facts and never decodes bodies
+    (task cards, PERSISTENCE), so that corruption reaches only the action's strict authority read:
+    Resume refuses, writes no fence and sends nothing; it never invents a resumable member."""
     import sqlite3
 
+    from ouroboros.owner_pause import read_fence
     from supervisor import workers
     from tests.test_project_hold_recovery import worker
     from tests.test_resume_handover import _stop_boot
@@ -546,20 +560,15 @@ def test_an_unreadable_root_keeps_the_member_unknown_and_its_main_action_unavail
     if settled:
         _settle_owner_fence(host.root, ROOT)
     client = _member_http(host.root)
-    shown = _member_state(client)
-    assert _attention_rows(shown, CHILD), "offered while its facts read"
+    assert _attention_rows(_member_state(client), CHILD), "offered while its facts read"
     with sqlite3.connect(host.root / "state" / "current.sqlite") as conn:
         conn.execute("UPDATE task_bodies SET body = CAST(X'7B22FF' AS TEXT) WHERE task_id = ?", (ROOT,))
     with pytest.raises(Exception):
         load_task_result(host.root, ROOT, strict=True)
-    unknown = _member_state(client, complete=False)
-    assert not _attention_rows(unknown, CHILD), "no Resume from unreadable authority"
-    # Main's real consumer keeps the shown action visible but unavailable: not runnable, not silently gone.
-    assert _main_consumer([shown, unknown], CHILD) == {
-        "card": True, "resume": True, "enabled": False, "stop": False, "posted": [],
-        "reason": "This task needs Resume after the restart."}
+    before = read_fence(host.root, ROOT)
     sent = worker(host, monkeypatch)
     assert client.post(f"/api/tasks/{CHILD}/resume").status_code != 200, "the API refuses unreadable authority"
+    assert read_fence(host.root, ROOT) == before
     workers.assign_tasks()
     assert not sent
 
@@ -601,6 +610,7 @@ def test_a_budget_parked_direct_project_turn_is_a_queue_row_whose_resume_main_of
     assert (row["attention_reason"], row["project_id"], row["can_resume"]) == ("budget", project["id"], True)
     shown = _main_consumer([payload], "direct-park")
     assert shown["card"] and shown["enabled"] and shown["posted"] == [["/api/tasks/direct-park/resume", "POST"]]
+    assert shown["reason"] == "Paused at the spending limit. Change the limit if needed, then Resume."
 
 
 def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, monkeypatch):

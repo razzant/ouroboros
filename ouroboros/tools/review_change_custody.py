@@ -29,6 +29,81 @@ log = logging.getLogger(__name__)
 TOOL_NAME = "review_change"
 
 
+def _tool_name(wave: Any) -> str:
+    """The wave's own attempt-row tool name (``review_change.wave_tool_name``)."""
+    from ouroboros.tools.review_change import wave_tool_name
+
+    return wave_tool_name(getattr(wave, "request", None))
+
+
+def paid_repo_key(ctx: Any, root: Any) -> str:
+    """The host-bound source owns a copy's paid pool, never its review identity.
+
+    Follow actual copy provenance only: neither a directory name nor a shared
+    remote proves ownership. Pin this address on the paid row before copy GC.
+    """
+    from ouroboros.review_ledger import ledger_root
+    from ouroboros.subagent_worktrees import list_worktrees
+    from ouroboros.workspace_copies import copy_binding, same_directory
+
+    bindings = [copy_binding(ctx), *(
+        {"execution_root": row.get("path"), "source_root": row.get("repo_dir")}
+        for row in list_worktrees(ledger_root(ctx)) if row.get("kind") != "delegated_exec")]
+    current, seen = pathlib.Path(root).resolve(), set()
+    while str(current) not in seen:
+        seen.add(str(current))
+        bound = next((item for item in bindings if same_directory(current, item.get("execution_root"))), {})
+        source = str(bound.get("source_root") or "")
+        if not source:
+            return str(current)
+        if not pathlib.Path(source).is_absolute():
+            raise ValueError("review copy source binding must be absolute")
+        current = pathlib.Path(source).resolve()
+    raise ValueError("review copy source bindings contain a cycle")
+
+
+def review_state_root(ctx: Any) -> pathlib.Path:
+    """Canonical attempt custody; move this task's legacy rows off its child drive.
+
+    A crash after the canonical save can leave the old row: the next move only
+    removes that duplicate, never overwrites a newer canonical settlement. Both
+    locks cover the move; new dispatch/checkpoint/settlement writes only canonical.
+    """
+    from ouroboros.review_ledger import ledger_root
+    from ouroboros.review_state import _STATE_RELPATH, ReviewStateMutation, update_state
+    from ouroboros.review_state_records import _attempt_identity_tuple
+
+    canonical, old = ledger_root(ctx), pathlib.Path(ctx.drive_root).resolve()
+    if old == canonical or not (old / _STATE_RELPATH).exists():
+        return canonical
+    task_id = str(getattr(ctx, "task_id", "") or "")
+
+    def move(state: Any) -> ReviewStateMutation:
+        rows = [row for row in state.attempts if row.tool_name == TOOL_NAME and row.task_id == task_id]
+        if not rows:
+            return ReviewStateMutation(None, changed=False)
+
+        def accept(target: Any) -> None:
+            existing = {_attempt_identity_tuple(row): row for row in target.attempts}
+            for row in rows:
+                prior = existing.get(_attempt_identity_tuple(row))
+                if prior is not None:
+                    if any(getattr(prior, key) != getattr(row, key) for key in (
+                            "review_retry_key", "review_record_id", "root_task_id")):
+                        raise ValueError("conflicting legacy review attempt; custody was not moved")
+                    continue
+                moved = copy.deepcopy(row)
+                moved.review_budget_repo_key = row.review_budget_repo_key or paid_repo_key(ctx, row.repo_key)
+                target.record_attempt(moved)
+
+        update_state(canonical, accept)
+        state.attempts = [row for row in state.attempts if row not in rows]
+        return ReviewStateMutation(None, changed=True)
+
+    update_state(old, move)
+    return canonical
+
+
 def attempt_record(wave: Any, ctx: Any, **fields: Any) -> Any:
     """One attempt row of this wave (the gate's ``CommitAttemptRecord``): a review only.
     A paid row is bound to the process that pays it (``stamp_paid_review_owner``, as the
@@ -41,7 +116,9 @@ def attempt_record(wave: Any, ctx: Any, **fields: Any) -> Any:
 
     attempt = CommitAttemptRecord(
         ts=utc_now_iso(), commit_message=wave.label, task_id=str(getattr(ctx, "task_id", "") or ""),
-        root_task_id=wave.root_task_id, repo_key=make_repo_key(wave.root), tool_name=TOOL_NAME,
+        root_task_id=wave.root_task_id, repo_key=make_repo_key(wave.root), tool_name=_tool_name(wave),
+        review_budget_repo_key=(getattr(getattr(wave, "rejoin", None), "review_budget_repo_key", "")
+                                or paid_repo_key(ctx, wave.root)),
         pre_review_fingerprint=str(wave.frozen.diff_sha), review_retry_key=wave.retry_key,
         rebuttal_sha256=wave.rebuttal_sha, review_contract_fingerprint=wave.contract_fp,
         review_record_id=wave.record_id, **fields)
@@ -49,7 +126,7 @@ def attempt_record(wave: Any, ctx: Any, **fields: Any) -> Any:
     return attempt
 
 
-def pending_round_attempt(ctx: Any, *, root: pathlib.Path, retry_key: str) -> Optional[Any]:
+def pending_round_attempt(ctx: Any, *, root: pathlib.Path, retry_key: str, tool_name: str = TOOL_NAME) -> Optional[Any]:
     """The open operation of THIS round on THIS task, or ``None``: the newest attempt
     row of (root, ``review_change``, task) under the wave's retry key whose custody is
     still active — a seat late, in flight or lost (``review_state_custody``). Found,
@@ -58,7 +135,7 @@ def pending_round_attempt(ctx: Any, *, root: pathlib.Path, retry_key: str) -> Op
     raises: it is not evidence that nothing is owed."""
     from ouroboros.review_state import _STATE_RELPATH, ReviewStateMutation, _utc_now, make_repo_key, update_state
 
-    drive = pathlib.Path(ctx.drive_root)
+    drive = review_state_root(ctx)
     if not (drive / _STATE_RELPATH).exists():
         return None  # no review state holds no open round; a refused call writes none
     repo_key, task_id = make_repo_key(root), str(getattr(ctx, "task_id", "") or "")
@@ -66,7 +143,7 @@ def pending_round_attempt(ctx: Any, *, root: pathlib.Path, retry_key: str) -> Op
     def _active(state: Any) -> ReviewStateMutation:
         expired = state.expire_stale_attempts(now_ts=_utc_now())
         rows = [item for item in state.get_active_attempts(repo_key=repo_key)
-                if item.tool_name == TOOL_NAME and item.task_id == task_id and item.review_retry_key == retry_key]
+                if item.tool_name == tool_name and item.task_id == task_id and item.review_retry_key == retry_key]
         return ReviewStateMutation(rows, changed=bool(expired))
 
     rows = update_state(drive, _active)
@@ -121,7 +198,7 @@ def install_paid_stamp(ctx: Any, wave: Any) -> Dict[str, int]:
     from ouroboros.review_state import checkpoint_pending_review_invocation, make_repo_key, update_state
 
     holder = {"attempt": int(getattr(getattr(wave, "rejoin", None), "attempt", 0) or 0)}
-    drive, repo_key = pathlib.Path(ctx.drive_root), make_repo_key(wave.root)
+    drive, repo_key = review_state_root(ctx), make_repo_key(wave.root)
     task_id = str(getattr(ctx, "task_id", "") or "")
 
     def _write() -> None:
@@ -130,7 +207,7 @@ def install_paid_stamp(ctx: Any, wave: Any) -> Dict[str, int]:
         triad = copy.deepcopy(list(reserved.get("multi_model_review") or []))
 
         def _mutate(state: Any) -> None:
-            number = holder["attempt"] or state.next_attempt_number(repo_key, TOOL_NAME, task_id)
+            number = holder["attempt"] or state.next_attempt_number(repo_key, _tool_name(wave), task_id)
             state.record_attempt(attempt_record(
                 wave, ctx, status="reviewing", phase="review", paid=True, attempt=number,
                 triad_raw_results=triad))
@@ -140,7 +217,7 @@ def install_paid_stamp(ctx: Any, wave: Any) -> Dict[str, int]:
 
     def _checkpoint(*, surface: str, slot_id: str, operation_id: str, invocation_id: str) -> None:
         checkpoint_pending_review_invocation(
-            drive, repo_key=repo_key, tool_name=TOOL_NAME, task_id=task_id, attempt=holder["attempt"],
+            drive, repo_key=repo_key, tool_name=_tool_name(wave), task_id=task_id, attempt=holder["attempt"],
             review_retry_key=wave.retry_key, surface=surface, slot_id=slot_id, operation_id=operation_id,
             invocation_id=invocation_id)
 
@@ -150,7 +227,7 @@ def install_paid_stamp(ctx: Any, wave: Any) -> Dict[str, int]:
 
 
 def settle_attempt(ctx: Any, wave: Any, outcome: Dict[str, Any], payload: Dict[str, Any],
-                   forensic: Dict[str, Any]) -> None:
+                   forensic: Dict[str, Any]) -> bool:
     """Close the attempt row this wave opened or rejoined (a review only; never a
     commit) with the wave's final roster: a seat still owed stays
     ``late_result_pending`` with its exact operation and start token, so a later
@@ -158,20 +235,22 @@ def settle_attempt(ctx: Any, wave: Any, outcome: Dict[str, Any], payload: Dict[s
     number = (int((outcome.get("attempt") or {}).get("attempt") or 0)
               or int(getattr(getattr(wave, "rejoin", None), "attempt", 0) or 0))
     if number <= 0:
-        return
+        return True
     from ouroboros.review_state import update_state
 
     verdict = dict(payload.get("verdict") or {})
     try:
-        update_state(pathlib.Path(ctx.drive_root), lambda state: state.record_attempt(attempt_record(
+        update_state(review_state_root(ctx), lambda state: state.record_attempt(attempt_record(
             wave, ctx, status="reviewed", phase="review", paid=True, attempt=number,
             late_result_pending=payload.get("state") == "pending",
             block_reason=str(outcome.get("block_reason") or ""),
             triad_raw_results=copy.deepcopy([row for row in forensic.get("triad_raw") or [] if isinstance(row, dict)]),
             degraded_reasons=[str(item) for item in verdict.get("degraded_reasons") or []])))
+        return True
     except Exception:
         log.warning("review_change attempt row was not settled", exc_info=True)
 
+        return False
 
 def _recorded_commit_identity(ctx, surface: str, row: dict, retry_key: str) -> dict:
     attempt = getattr(ctx, "_pending_review_attempt", None)
@@ -223,6 +302,11 @@ def recorded_commit_plan(ctx) -> dict:
                 parts=[tuple(row.get("parts") or seat_parts(slot)) for slot, row in zip(slots, composition)],
                 additional=[bool(row.get("additional")) for row in composition],
                 brief_shas=[str(row.get("brief_sha") or "") for row in composition])
+    # The record's declared per-item severity policy (a skill wave's checklist rule) rides the rejoin plan as
+    # it rode the dispatching one: fresh, explicit-rejoin and background settlement read the same policy.
+    policy = ((recorded.get("brief") or {}).get("checklist") or {}).get("severity_policy")
+    if isinstance(policy, dict) and policy:
+        plan["severity_policy"] = dict(policy)
     return plan
 
 
@@ -275,6 +359,9 @@ def collect_recorded_commit_actor(ctx, surface: str, slot_id: str, retry_key: st
         return collect_recorded_review_actor(root, **identity, usage_ctx=ctx)
     recovered = recover_review_producer(root, request, slot, row)
     if recovered is not None and recovered.operation_state != "in_flight":
+        from ouroboros.review_seat_outcome import publish_seat_execution
+
+        publish_seat_execution(request, slot, recovered, ctx)
         return asdict(recovered)
     token = str(row.get("pending_invocation_id") or (row.get("usage") or {}).get("pending_invocation_id")
                 or (row.get("recovery_binding") or {}).get("pending_invocation_id") or "")
@@ -324,3 +411,31 @@ def prepare_recorded_commit_review(ctx, *, target_repo, blocking_review: bool, l
             "routes": plan["routes"], "row_plan": plan, "session_task": "",
             "target_repo": target_repo, "blocking_review": blocking_review,
             "layer": layer}, None, False
+
+
+def settle_collected_attempt(root, attempt, seats, record):
+    """Merge each collected seat against the current attempt under its state lock."""
+    from dataclasses import replace
+    from ouroboros.review_custody import _row_is_pending
+    from ouroboros.review_state import update_state
+
+    def mutate(state):
+        for index, current in enumerate(state.attempts):
+            if (current.repo_key, current.tool_name, current.task_id, current.attempt) != (
+                    attempt.repo_key, attempt.tool_name, attempt.task_id, attempt.attempt):
+                continue
+            rows = {str(row.get("slot_id") or ""): copy.deepcopy(row) for row in current.triad_raw_results}
+            for incoming in seats:
+                key = str(incoming.get("slot_id") or "")
+                old = rows.get(key) or {}
+                if old and not _row_is_pending(old) and _row_is_pending(incoming):
+                    continue
+                if old.get("operation_id") and incoming.get("operation_id") not in (None, "", old["operation_id"]):
+                    continue
+                rows[key] = {**old, **incoming}
+            state.attempts[index] = replace(current, triad_raw_results=list(rows.values()),
+                late_result_pending=any(_row_is_pending(row) for row in rows.values()),
+                review_record_id=record["record_id"])
+            return
+        raise LookupError("the paid attempt disappeared before collection was saved")
+    update_state(root, mutate)

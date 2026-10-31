@@ -160,6 +160,34 @@ test('a richer terminal updates its existing line while older terminal content c
     assert.equal(item.body, 'Retained result details');
 });
 
+test('a finalizing projection is the outcome line Working, and a finished card takes nothing from it', () => {
+    const row = (offset, second) => ({ history_id: `chat:${offset}`,
+        history_position: { source: 'chat', offset }, ts: `2026-09-12T12:00:0${second}Z` });
+    const working = { visible: true, terminal: false, phase: 'working', headline: 'Working', dedupeKey: 'task_done|t' };
+    const done = { visible: true, terminal: true, phase: 'done', headline: 'Done', dedupeKey: 'task_done|t' };
+    const live = (record, second) => updateLiveTimelineItem(record, done, { ts: `12:00:0${second}`,
+        rawTs: `2026-09-12T12:00:0${second}Z`, syntheticKey: done.dedupeKey, headline: done.headline, inPlaceByKey: true });
+    // Still running: both finalizing rows are the one outcome line, keyed as live, so the
+    // live terminal settles that line in place instead of standing beside a line of work.
+    const open = { items: [] };
+    assert.equal(mergeHistoricalTimelineItem(open, working, row(924, 1), '12:00:01'), true);
+    mergeHistoricalTimelineItem(open, working, row(1904, 2), '12:00:02');
+    assert.deepEqual(open.items.map(item => [item.dedupeKey, item.phase, item.historyId]), [['task_done|t', 'working', undefined]]);
+    live(open, 3);
+    assert.deepEqual(open.items.map(item => [item.phase, item.headline]), [['done', 'Done']]);
+    // Finished: a newer read still finalizing neither adds a line nor reopens Done, while a
+    // settled row and the card's ordinary history rows still land.
+    const finished = { items: [], finished: true };
+    live(finished, 3);
+    const outcome = finished.items[0];
+    assert.equal(mergeHistoricalTimelineItem(finished, working, row(1904, 4), '12:00:04'), false);
+    assert.deepEqual([finished.items.length, outcome.phase, outcome.headline], [1, 'done', 'Done']);
+    assert.equal(mergeHistoricalTimelineItem(finished, { ...done, body: 'Settled' }, row(3830, 5), '12:00:05'), true);
+    assert.equal(outcome.body, 'Settled');
+    assert.equal(mergeHistoricalTimelineItem(finished, { visible: true, headline: 'Narration' }, row(500, 1), '12:00:01'), true);
+    assert.equal(finished.items.length, 2);
+});
+
 test('narration and current terminal projection of one source have distinct DOM keys', () => {
     const record = { items: [] };
     const row = { history_id: 'progress:100', ts: '2026-09-12T12:00:00Z' };

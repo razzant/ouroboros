@@ -94,10 +94,7 @@ class BranchTransport(rw.Transport):
             self.state_failures += 1
             route.abort("connectionreset")
             return
-        route.fulfill(json={"sha": "room-work-fixture", "supervisor_ready": self.ready,
-                            "active_chat_activities": json.loads(json.dumps(self.activities)),
-                            "active_chat_activities_complete": self.complete, "projects": self.projects,
-                            "project_chat_ids": [p["chat_id"] for p in self.projects]})
+        route.fulfill(json=self.body(ready=self.ready))
 
     def _i18n(self, route):
         if self.i18n is None:
@@ -128,7 +125,7 @@ ROWS_RECORDER = """([scope, ms]) => {
     const root = scope === 'main' ? '#page-chat' : '#project-panel';
     let last = '';
     const tick = () => {
-        const surface = document.querySelector(`${root} .rw-surface`);
+        const surface = document.querySelector(`${root} .rw-surface:not(.cx-shade)`);  // the work Shade, not the chip's
         const note = surface?.querySelector('.rw-note');
         const menu = document.querySelector('body > .task-control-menu');
         const state = { hidden: surface ? surface.hidden : null, note: note && !note.hidden ? note.textContent : '',
@@ -174,7 +171,7 @@ def open_menu(page, task_id, scope="main"):
 # Translated chrome, long names, a coarse pointer at 320 and 390 px, light and dark.
 
 MARK = "‹{}›"
-OVERLAY_KEYS = ["Back to reading", "Some work is waiting", "Earlier place is no longer loaded",
+OVERLAY_KEYS = ["Back to reading", "A question waits for your answer", "Earlier place is no longer loaded",
                 "The earlier reading place is no longer loaded.", "Returned to where you were reading.",
                 "Returned to the nearest loaded place."]
 _TR = re.compile(r"""\btr\(\s*(['"])([A-Za-z0-9_.\-]+)\1\s*,\s*(['"])((?:\\.|(?!\3).)*?)\3\s*\)""", re.S)
@@ -187,9 +184,14 @@ def _unescape(text):
 
 def pseudo_memory():
     """An install language whose memory knows every literal ``tr`` code and ``fmt`` template in
-    web/modules and the chrome strings room_work.js writes as plain text. Each translation is the
+    web/modules, the chrome strings room_work.js writes as plain text, and the server's reason
+    sentences the web reads by their code (gateway/work_status.py REASON_TEXT; a reason whose text
+    is the host's own words, a Project hold's label, stays host text). Each translation is the
     English wrapped in ‹…›, so any chrome still in plain English is a string no seam translated."""
-    entries = {}
+    from ouroboros.gateway.work_status import REASON_TEXT
+
+    entries = {f"code:work.because.{code}": {"text": MARK.format(phrase)} for code, phrase in REASON_TEXT.items()
+               if isinstance(phrase, str) and code not in {"project_admission", "held"}}
     for path in sorted((REPO / "web" / "modules").glob("*.js")):
         source = path.read_text(encoding="utf-8")
         for match in _TR.finditer(source):
@@ -216,14 +218,14 @@ LEAKS = r"""(scope) => {
     };
     const shown = (el) => Boolean(el) && !el.hidden && el.getClientRects().length > 0;
     const trigger = root?.querySelector('.rw-trigger');
-    const surface = root?.querySelector('.rw-surface');
+    const surface = trigger ? document.getElementById(trigger.getAttribute('aria-controls')) : null;  // the room's work Shade, never the chip's
     const waitNote = trigger?.querySelector('.rw-sr');
     if (waitNote && !waitNote.hidden) note('trigger .rw-sr (wait note)', waitNote.textContent);
     note('surface[aria-label]', surface?.getAttribute('aria-label'));
     for (const el of surface?.querySelectorAll('.rw-group, .rw-note') || []) if (shown(el)) note(el.className, el.textContent);
     for (const rowEl of surface?.querySelectorAll('.rw-row') || []) {
         const id = rowEl.dataset.id;
-        for (const sel of ['.rw-word', '.rw-secondary', '.rw-place', '.rw-pill', '.rw-detail-label',
+        for (const sel of ['.rw-word', '.rw-secondary', '.rw-pill', '.rw-detail-label',
                            '.rw-detail-line > span:not(.rw-detail-label)']) {
             for (const el of rowEl.querySelectorAll(sel)) if (shown(el)) note(`${id} ${sel}`, el.textContent);
         }
@@ -274,11 +276,12 @@ NAMES = """(scope) => {
 
 SHADE_GEOMETRY = """() => { const box = s => { const r = document.querySelector(s).getBoundingClientRect();
         return {x: r.x, y: r.y, right: r.right, bottom: r.bottom}; };
-    const shade = document.querySelector('#project-panel .rw-shade');
+    const shade = document.querySelector('#project-panel .rw-shade:not(.cx-shade)');
     const reachable = [...shade.querySelectorAll('.rw-more, .rw-main[tabindex="0"], .rw-pill')].filter((el) => el.getClientRects().length)
         .every((el) => { const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
             return Boolean(hit) && (hit === el || el.contains(hit)); });
-    return {bar: box('#project-panel .project-panel-bar'), shade: box('#project-panel .rw-shade'),
+    return {bar: box('#project-panel .project-panel-bar'), shade: box('#project-panel .rw-shade:not(.cx-shade)'),
+            capsule: box('#project-panel .app-page-title-row'),
             panel: box('#project-panel'), vw: innerWidth, vh: innerHeight, reachable,
             overflow: document.documentElement.scrollWidth - innerWidth}; }"""
 
@@ -325,11 +328,11 @@ def test_translated_chrome_long_names_coarse_pointer(branch_ui, width, theme):
     tag = f"{width}-{theme}"
     problems, observations, out = [], [], {}
 
-    # Closed: the floating group at this width.
+    # Closed: Main's bar at this width.
     rw.wait_facts(page, "main", lambda f: not f["disabled"], "an enabled control")
     page.locator("#chat-messages").evaluate("el => { el.scrollTop = Math.round(el.scrollHeight * 0.5); }")
     page.wait_for_timeout(250)
-    out["closed_geometry"] = page.evaluate(rw._GROUP_GEOMETRY)
+    out["closed_geometry"] = page.evaluate(rw._BAR_GEOMETRY, "main")
     out["closed_targets"] = page.evaluate(TARGETS, "main")
     rw.capture(page, f"coarse-{tag}-main-closed")
     if not out["closed_targets"]["coarse"]:
@@ -339,24 +342,26 @@ def test_translated_chrome_long_names_coarse_pointer(branch_ui, width, theme):
     rw.trigger(page).tap()
     opened = rw.wait_facts(page, "main", lambda f: len(f["rows"]) == 4 and (rw.row(f, "rw-far") or {}).get("name", "")
                            .startswith("Индексировать"), "four named rows")
-    page.wait_for_timeout(300)
+    rw.settle_unfold(page, "main")
     out["open_facts"] = opened
-    out["open_geometry"] = page.evaluate(rw._GROUP_GEOMETRY)
+    out["open_geometry"] = page.evaluate(rw._BAR_GEOMETRY, "main")
     out["open_targets"] = page.evaluate(TARGETS, "main")
     out["open_names"] = page.evaluate(NAMES, "main")
     out["open_leaks"] = leaks(page, "main")
     rw.capture(page, f"coarse-{tag}-main-open")
     geometry = out["open_geometry"]
-    sheet, group = geometry["sheet"], geometry["group"]
-    if not (sheet and sheet["x"] >= -0.5 and sheet["right"] <= geometry["vw"] + 0.5 and sheet["bottom"] <= geometry["vh"] + 0.5):
-        problems.append(f"the sheet leaves the viewport: {sheet} vw={geometry['vw']} vh={geometry['vh']}")
-    if sheet and abs(sheet["y"] - group["bottom"]) > 1.5:
-        problems.append(f"the sheet does not continue its group: {sheet} {group}")
-    if geometry["pageOverflow"] > 0:
-        problems.append(f"page overflows horizontally by {geometry['pageOverflow']}px")
+    shade, bar = geometry["shade"], geometry["bar"]
+    if not (shade and shade["x"] >= -0.5 and shade["x"] + shade["w"] <= geometry["vw"] + 0.5
+            and shade["bottom"] <= geometry["vh"] + 0.5):
+        problems.append(f"the Shade leaves the viewport: {shade} vw={geometry['vw']} vh={geometry['vh']}")
+    capsule = geometry["capsule"]
+    if shade and (abs((shade["y"] - capsule["bottom"]) - 8) > 1.5 or abs(shade["x"] - capsule["x"]) > 1.5):
+        problems.append(f"the work list does not hang under its status capsule: {shade} {capsule} (bar {bar})")
+    if geometry["overflow"] > 0:
+        problems.append(f"page overflows horizontally by {geometry['overflow']}px")
     if not geometry["reachable"]:
         problems.append("a row target is not the element hit at its centre")
-    moved = [(a, b) for a, b in zip(out["closed_geometry"]["controls"], geometry["controls"])
+    moved = [(a, b) for a, b in zip(out["closed_geometry"]["neighbours"], geometry["neighbours"])
              if any(abs(a[k] - b[k]) > 0.5 for k in ("x", "y", "w", "h"))]
     if moved:
         problems.append(f"opening moved a neighbouring target: {moved}")
@@ -412,15 +417,16 @@ def test_translated_chrome_long_names_coarse_pointer(branch_ui, width, theme):
     rw.capture(page, f"coarse-{tag}-project-closed")
     rw.trigger(page, "project").tap()
     rw.wait_facts(page, "project", lambda f: len(f["rows"]) == 2, "two Project rows")
-    page.wait_for_timeout(300)
+    rw.settle_unfold(page, "project")
     out["shade"] = page.evaluate(SHADE_GEOMETRY)
     out["shade_targets"] = page.evaluate(TARGETS, "project")
     out["shade_names"] = page.evaluate(NAMES, "project")
     out["shade_leaks"] = leaks(page, "project")
     rw.capture(page, f"coarse-{tag}-project-open")
     shade = out["shade"]
-    if abs(shade["shade"]["y"] - shade["bar"]["bottom"]) > 1.5:
-        problems.append(f"the Shade is not under its bar: {shade}")
+    if (abs((shade["shade"]["y"] - shade["capsule"]["bottom"]) - 8) > 1.5
+            or abs(shade["shade"]["x"] - shade["capsule"]["x"]) > 1.5):
+        problems.append(f"the work list does not hang under its status capsule: {shade}")
     if shade["shade"]["x"] < -0.5 or shade["shade"]["right"] > shade["vw"] + 0.5 or shade["overflow"] > 0:
         problems.append(f"the Shade leaves the viewport: {shade}")
     if not shade["reachable"]:
@@ -468,7 +474,7 @@ def test_open_sheet_repaints_translated_chrome_without_replacing_focus(branch_ui
         page.wait_for_function('(label) => document.querySelector("#page-chat .rw-pill-question").textContent === label', arg=question)
         assert page.evaluate('() => document.activeElement === window.__languageFocusNode'), 'language repaint replaced focus'
         expected = '‹Work in this chat›' if language == 'ru' else 'Work in this chat'
-        assert page.locator('#page-chat .rw-surface').get_attribute('aria-label') == expected
+        assert page.locator('#page-chat .rw-surface:not(.cx-shade)').get_attribute('aria-label') == expected
         assert page.locator('#page-chat .rw-pill-resume').inner_text() == ('‹Resume›' if language == 'ru' else 'Resume')
     record('language-switch', {'focus': page.evaluate(ACTIVE), 'posts': transport.posts})
     assert transport.posts == [] and transport.decision_posts() == []
@@ -749,7 +755,8 @@ def test_subagent_and_reusable_ids_get_no_row_or_no_controls(branch_ui):
     transport = BranchTransport(page, history=history, projects=[rw.PROJECT], details={
         "p-root": {"task_id": "p-root", "status": "completed", "suggested_name": "Archive pass"},
         "p-sub": {"task_id": "p-sub", "status": "completed", "delegation_role": "subagent", "parent_task_id": "p-root"}},
-        activities=[rw.activity("rw-root"), rw.activity("rw-sub"),
+        # The census names a child with its lineage, as the server's census does: it is a member of its root's work.
+        activities=[rw.activity("rw-root"), rw.activity("rw-sub", parent_task_id="rw-root", root_task_id="rw-root"),
                     rw.activity("active", kind="direct_chat", client_message_id="cm-active")])
     rw.open_app(branch_ui, transport)
     cards = page.evaluate("""() => [...document.querySelectorAll('#chat-messages .chat-live-card')].map((c) => ({
@@ -965,6 +972,108 @@ def test_offline_http_across_a_socket_reopen_keeps_stale_actions_withdrawn(branc
 
 
 # ------------------------------------------------------------------------------------------------
+# A root asleep on the helper it chose, which still awaits its own Resume: Waiting, and the line says so.
+
+_SLEEP_ON_HELD = {"state": "waiting", "reason": "sleep", "task_attempt": 1,
+                  "sleep": {"mode": "warm", "tasks": ["rw-child"], "senders": ["rw-child"]}}
+_HELD_LINE = "Sleeping until it is woken · 1 helper it waits for is paused until Ouroboros resumes it"
+# A Continue episode holds no request door for its predecessor's helper: no releaser is named.
+_COLD_LINE = "Sleeping until it is woken · 1 helper it waits for is paused"
+# Whether a status line shows whole where it is drawn: inside the viewport, nothing cut, nothing covering it.
+_LINE_FIT = """(el) => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + Math.min(4, r.width / 2), r.top + r.height / 2);
+    return { x: r.left, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight,
+             cut: el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1,
+             covered: !(hit === el || el.contains(hit)), lines: Math.round(r.height / parseFloat(getComputedStyle(el).lineHeight)) };
+}"""
+
+
+def _held_line(branch_ui, transport, task_id, tag, *, width, height, theme, work_id=None, line=_HELD_LINE):
+    """Open the room, wait for the sleeper's card and its work's list row to say the held line; measure and
+    capture both. A work is listed under its id: its first episode's, for a Continue."""
+    work_id = work_id or task_id
+    page = branch_ui["page"]
+    rw.open_app(branch_ui, transport, theme=theme, viewport={"width": width, "height": height})
+    bar = rw.wait_facts(page, "main", lambda f: f["badge"] == "Waiting", "the room says Waiting")
+    card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{task_id}"]')
+    card.scroll_into_view_if_needed()
+    page.wait_for_function("""([task, line]) => document.querySelector(
+        `#chat-messages .chat-live-card[data-task-id="${task}"] [data-live-phase-secondary]`)?.textContent === line""",
+                           arg=[task_id, line], timeout=20000)
+    rw.settle_frames(page)
+    chip = {"word": card.locator("[data-live-phase]").inner_text().strip(),
+            "line": card.locator("[data-live-phase-secondary]").inner_text().strip(),
+            "fit": card.locator("[data-live-phase-secondary]").evaluate(_LINE_FIT)}
+    rw.capture(page, f"{tag}-card")
+    rw.trigger(page).click()
+    listed = rw.wait_facts(page, "main", lambda f: (rw.row(f, work_id) or {}).get("secondary"), "the sleeping row")
+    rw.settle_frames(page)
+    fit = page.locator(f'#page-chat .rw-row[data-id="{work_id}"] .rw-secondary').evaluate(_LINE_FIT)
+    rw.capture(page, f"{tag}-list")
+    record(tag, {"bar": bar, "chip": chip, "listed": listed, "row_line_fit": fit, "console": transport.console})
+    for where, measured in (("card", chip["fit"]), ("list", fit)):
+        assert not measured["cut"] and not measured["covered"], (where, measured)
+        assert 0 <= measured["x"] and measured["right"] <= measured["vw"] + 0.5, (where, measured)
+    assert (chip["word"], chip["line"]) == ("Waiting", line), chip
+    return bar, listed
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("width,height", [(1100, 722), (390, 844)])
+def test_a_sleep_on_a_helper_awaiting_resume_says_so_on_card_and_list_without_a_door(branch_ui, width, height, theme):
+    history = {1: [*rw.reading(8), rw.progress("rw-sleep", "Waiting for the builder it chose.", 30,
+                                               suggested_name=rw.LONG_NAME)]}
+    transport = BranchTransport(branch_ui["page"], history=history, activities=[
+        rw.activity("rw-sleep"),
+        rw.activity("rw-child", "budget_paused", pause_cause="unknown", can_resume=False,
+                    parent_task_id="rw-sleep", root_task_id="rw-sleep")])
+    transport.raw = {"rw-sleep": {"running": True, "owner_wait": _SLEEP_ON_HELD},
+                     "rw-child": {"_budget_pause": {"reason": "owner", "exact_continuation": True}}}
+    bar, listed = _held_line(branch_ui, transport, "rw-sleep", f"held-helper-{width}x{height}-{theme}",
+                             width=width, height=height, theme=theme)
+    row = rw.row(listed, "rw-sleep")
+    assert (row["word"], row["secondary"], row["resume"]) == ("Waiting", _HELD_LINE, False), row
+    assert rw.row(listed, "rw-child") is None, "a helper is a member of its root's work, never a row of its own"
+    assert bar["mark"].startswith("still") and not bar["waitNote"], ("still dots, no owner's move", bar)
+    assert transport.posts == [] and transport.decision_posts() == []
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("width,height", [(1100, 722), (390, 844)])
+def test_a_cold_sleep_of_a_continue_says_which_held_helper_of_the_earlier_episode_it_waits_for(
+        branch_ui, width, height, theme):
+    """The rows the real census gives a Continue episode cold-asleep on its predecessor's held helper
+    (``test_current_stop_readers``): the saved selection rides on the exact pause; the ended predecessor's
+    helpers are the owner's to select, the one the sleep chose is named on the line, the other is not."""
+    history = {1: [*rw.reading(8), rw.progress("rw-cold", "Waiting for the builder of the first attempt.", 30,
+                                               suggested_name=rw.LONG_NAME)]}
+    transport = BranchTransport(branch_ui["page"], history=history, activities=[
+        rw.activity("rw-cold", "budget_paused", pause_cause="sleep", can_resume=False),
+        *(rw.activity(helper, "budget_paused", pause_cause="unknown", can_resume=True,
+                      parent_task_id="rw-first", root_task_id="rw-first") for helper in ("rw-run", "rw-new"))])
+    transport.raw = {
+        "rw-cold": {"root_task_id": "rw-cold", "continuation": {"predecessor_task_id": "rw-first"}, "_budget_pause": {
+            "reason": "sleep", "scope": "task", "rail": "model_sleep", "exact_continuation": True, "root_task_id": "rw-cold",
+            "sleep": {"mode": "cold", "tasks": ["rw-run"], "senders": [], "runs": [], "wake_at": "", "any_mail": False}}},
+        "rw-run": {"root_task_id": "rw-first", "parent_task_id": "rw-first", "_budget_pause": {
+            "reason": "owner", "scope": "root", "rail": "owner_pause", "exact_continuation": True,
+            "root_task_id": "rw-first"}},
+        "rw-new": {"root_task_id": "rw-first", "parent_task_id": "rw-first", "_budget_pause_hold": {
+            "reason": "root_fence_lifted_pending_selection", "release": "resume", "root_task_id": "rw-first"}}}
+    transport.results = {"rw-first": {"task_id": "rw-first", "status": "interrupted", "chat_id": 1,
+                                      "root_task_id": "rw-first"}}
+    bar, listed = _held_line(branch_ui, transport, "rw-cold", f"cold-held-helper-{width}x{height}-{theme}",
+                             width=width, height=height, theme=theme, work_id="rw-first", line=_COLD_LINE)
+    row = rw.row(listed, "rw-first")
+    assert (row["word"], row["secondary"], row["resume"]) == ("Waiting", _COLD_LINE, False), row
+    assert all(rw.row(listed, task) is None for task in ("rw-cold", "rw-run", "rw-new")), "one work, one row"
+    # The earlier episode's helpers are the owner's to select: the owner's mark, as the projection's turn says.
+    assert bar["mark"].startswith("dot owner") and bar["waitNote"], bar
+    assert transport.posts == [] and transport.decision_posts() == []
+
+
+# ------------------------------------------------------------------------------------------------
 # Real server: the Project Shade in WebKit.
 
 def test_real_project_shade_in_webkit(direct_server_with_data, monkeypatch, tmp_path):
@@ -999,6 +1108,13 @@ def _press(page, task_id, action, url_suffix):
     menu = page.locator("body > .task-control-menu")
     with page.expect_response(lambda r: r.url.endswith(url_suffix) and r.request.method == "POST", timeout=30_000) as answer:
         menu.locator(f'[data-task-control="{action}"]').click()
+    if action in {"hurry", "finalize"}:
+        # Let the acknowledgement expire away from the pointer, keeping the Work list open (#2193).
+        notice = page.locator('#toast-stack .toast').filter(has_text=("Hurry up: accepted" if action == "hurry"
+            else f"The owner asked task {task_id} to summarize and stop"))
+        notice.wait_for(state="visible")
+        page.mouse.move(0, 0)
+        notice.wait_for(state="detached")
     return {"status": answer.value.status, "body": answer.value.json(), "request": answer.value.request.post_data_json}
 
 
@@ -1107,6 +1223,20 @@ def test_real_row_hurry_wrap_up_stop_and_restart_with_page_open(direct_server_wi
                     observations.append("a queued root's row offered no ⋯ (its card has no Stop predicate yet)")
                 evidence.shot(page, "03-after-stops")
 
+                # Working is admission, not a saved continuation. Stop only after
+                # this exact attempt has real recovery bytes, never a seeded source.
+                assert model.entered[marks[bravo]].wait(90), "BRAVO never reached its first model call"
+                from ouroboros.working_checkpoint import read_working
+
+                def saved_bravo():
+                    detail = backend._http(url, "GET", f"/api/tasks/{bravo}")
+                    attempt = int(detail.get("task_attempt") or 0)
+                    raw, state = read_working(data_dir, bravo, attempt)
+                    return ({"task_id": state["task_id"], "attempt": attempt,
+                             "bytes": len(raw), "working": state["working"]} if raw else None)
+
+                evidence.record("bravo_checkpoint_before_restart", backend._wait(
+                    saved_bravo, 90, "BRAVO's current attempt checkpoint"))
                 # A server restart with the page and the list open.
                 page.evaluate(ROWS_RECORDER, ["main", 120_000])
                 sockets = page.evaluate("() => window.__testSockets.length")
@@ -1155,8 +1285,19 @@ def test_real_row_hurry_wrap_up_stop_and_restart_with_page_open(direct_server_wi
                 closed = backend._wait_facts(page, "main", lambda f: f["surfaceHidden"], "closed")
                 evidence.record("closed", closed)
                 assert backend._decision_posts(log) == []
-                assert log["pageerrors"] == [], log["pageerrors"]
+                assert log["pageerrors"].unexpected() == [], log["pageerrors"]
             except Exception:
+                for label, path in (("census_on_failure", "/api/state"),
+                                    ("bravo_detail_on_failure", f"/api/tasks/{bravo}")):
+                    try:
+                        evidence.record(label, backend._http(url, "GET", path))
+                    except Exception as exc:
+                        evidence.record(label, {"read_error": str(exc)})
+                for relative in ("logs/supervisor.jsonl", "logs/server.log", "state/queue_snapshot.json"):
+                    try:
+                        evidence.record(relative, (data_dir / relative).read_text(encoding="utf-8"))
+                    except (OSError, UnicodeError) as exc:
+                        evidence.record(relative, {"read_error": str(exc)})
                 evidence.shot(page, "failure")
                 raise
             finally:

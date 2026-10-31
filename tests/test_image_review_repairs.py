@@ -1,4 +1,6 @@
 """Consumer regressions for image-only ingress and host-owned VLM disclosures."""
+
+from tests import _dialogue as dialogue_test
 import base64
 import io
 import json
@@ -17,7 +19,6 @@ from tests.test_vision_model_wait import child_fixture as child_fixture
 @pytest.mark.parametrize("delivery", ["named", "unnamed", "write_then_retry"])
 def test_host_attachment_only_accept_rejoin_and_real_server_dequeue(tmp_path, monkeypatch, kind, delivery):
     import server
-    from ouroboros.utils import iter_jsonl_objects
     from supervisor import message_bus
     from tests.test_chat_inject_attachments import _client, _skill_file
 
@@ -41,14 +42,14 @@ def test_host_attachment_only_accept_rejoin_and_real_server_dequeue(tmp_path, mo
         body["client_message_id"] = "skill-file-image"
     headers = {"X-Skill-Token": "token"}
     if delivery == "write_then_retry":
-        original = message_bus.log_chat
+        original = message_bus.accept_chat
 
         def fail_after_write(*args, **kwargs):
             original(*args, **kwargs)
             raise OSError("controlled failure after canonical acceptance")
 
         with monkeypatch.context() as scoped:
-            scoped.setattr(message_bus, "log_chat", fail_after_write)
+            scoped.setattr(message_bus, "accept_chat", fail_after_write)
             assert client.post("/chat/inject", headers=headers, json=body).status_code == 500
         assert bridge._inbox.empty()
     response = client.post("/chat/inject", headers=headers, json=body)
@@ -61,7 +62,7 @@ def test_host_attachment_only_accept_rejoin_and_real_server_dequeue(tmp_path, mo
     server._process_bridge_updates(bridge, 0, ctx)
     assert bridge._inbox.empty() and len(routed) == 1
     expected = "(file attached)" if kind == "file" else "(image attached)"
-    rows = list(iter_jsonl_objects(tmp_path / "logs/chat.jsonl"))
+    rows = list(dialogue_test.log_rows(tmp_path / "logs/chat.jsonl"))
     assert len(rows) == 1 and rows[0]["text"] == expected and rows[0]["text_placeholder"] is True
     assert routed[0]["log_text"] == expected
     assert routed[0]["origin_message_ref"]["text_sha256"] == __import__("hashlib").sha256(expected.encode()).hexdigest()
@@ -71,7 +72,7 @@ def test_host_attachment_only_accept_rejoin_and_real_server_dequeue(tmp_path, mo
         assert client.post("/chat/inject", headers=headers, json=body).json()["rejoined"] is True
         sources[-1].write_bytes(b"changed content")
         assert client.post("/chat/inject", headers=headers, json=body).status_code == 409
-        assert bridge._inbox.empty() and len(list(iter_jsonl_objects(tmp_path / "logs/chat.jsonl"))) == 1
+        assert bridge._inbox.empty() and len(list(dialogue_test.log_rows(tmp_path / "logs/chat.jsonl"))) == 1
 
 
 def _registered_query(tmp_path, monkeypatch, client, tool, raw, model, *, real_child=False):

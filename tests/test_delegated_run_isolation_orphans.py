@@ -101,15 +101,15 @@ class TestNestedOrphanApply:
         custody._CUSTODY.clear()
 
     def test_nested_target_outside_the_projects_root_stays_a_mismatch(self, tmp_path, monkeypatch):
-        """Containment alone is not authority: an owner-attached folder is never
-        a host-minted tree, so the same geometry keeps refusing there."""
+        """Nesting alone is not authority: outside the configured projects/worktrees
+        roots the same geometry keeps refusing, whoever created the folder."""
         parent_root, target, _ctx, entry = _captured_orphan(
             tmp_path, monkeypatch, under_projects_root=False)
         disposer = _disposer(tmp_path, monkeypatch, parent_root, target)
 
         out = _integrate_delegated_patch(disposer, "run-1", "apply", "")
         assert "INTEGRATE_DELEGATED_TARGET_MISMATCH" in out, out
-        assert "subagent-projects" in out
+        assert "inside the configured projects/worktrees roots" in out, out
         assert not (target / "newfile.py").exists()
         assert entry.patch_disposed == ""
         custody._CUSTODY.clear()

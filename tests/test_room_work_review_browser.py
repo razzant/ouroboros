@@ -10,12 +10,10 @@ from tests.test_room_work_browser import (
     activity,
     capture,
     evidence,
-    facts,
     open_app,
     open_project,
     room_ui,
     row_main,
-    settle_frames,
     subscription_ui,
     trigger,
     wait_facts,
@@ -37,8 +35,9 @@ def test_last_cardless_project_turn_returns_focus_to_its_own_composer(room_ui):
     transport.refresh()
     wait_facts(page, "project", lambda f: f["rows"][0]["settled"], "retained ended row")
     page.keyboard.press("Escape")
-    settle_frames(page)
-    current = facts(page, "project")
+    # Closing returns focus immediately; only the inert picture waits for its fold.
+    assert page.locator("#project-panel .chat-input").evaluate("el => el === document.activeElement")
+    current = wait_facts(page, "project", lambda f: f["surfaceHidden"] and f["disabled"], "the ended list folded away")
     evidence("project-ended-focus", current)
     capture(page, "project-ended-focus")
     assert current["surfaceHidden"] and current["disabled"], current

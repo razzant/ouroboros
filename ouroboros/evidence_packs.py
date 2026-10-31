@@ -83,10 +83,10 @@ def dict_size_for(raw_total: int) -> int:
     return min(size, MAX_DICT_SIZE)
 
 
-def read_sidecar(path: pathlib.Path) -> Dict[str, Any]:
+def read_sidecar(path: pathlib.Path, *, raw: Optional[bytes] = None) -> Dict[str, Any]:
     """Read the publication authority; a torn or invalid sidecar is never absence."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8") if raw is None else raw)
         if (not isinstance(data, dict) or data.get("format_version") != FORMAT_VERSION or data.get("codec") != CODEC
                 or not isinstance(data.get("members"), list) or not data.get("task_id")
                 or any(type(data[key]) is not int for key in ("generation", "raw_total", "packed_total", "dict_size", "preset"))
@@ -116,17 +116,44 @@ def read_sidecar(path: pathlib.Path) -> Dict[str, Any]:
         raise SidecarCorrupt(f"evidence_corrupt: unreadable sidecar {path.name}") from exc
 
 
-def list_sidecars(root: Any, *, errors: Optional[list] = None) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
-    """One listing of pack authority; only cache builders may collect faults beside healthy rows."""
+def _sidecar_names(root: Any) -> set[str]:
+    try:
+        return {name for name in os.listdir(packs_dir(root))
+                if not name.startswith(".") and name.endswith(".members.json")}
+    except FileNotFoundError:
+        return set()
+
+
+def _own_sidecar(name: str, task_id: str) -> bool:
+    """A name one of this task's generations may carry: the exact spelling, including task IDs
+    containing dots/digits (``a.2`` is ``a`` generation 2 or ``a.2`` generation 1; the sidecar's
+    own ``task_id`` decides). A sidecar is valid only under its own name, so no other name holds
+    this task's members."""
+    prefix = name.removesuffix(".members.json")
+    return prefix == task_id or (prefix.startswith(task_id + ".") and prefix[len(task_id) + 1:].isdigit())
+
+
+def _task_sidecar_names(root: Any, task_id: str) -> set[str]:
+    """This task's sidecar names, found by their spelling instead of listing the directory. The
+    packer gives a task the first free generation after its newest and no published name is ever
+    removed, so the task's occupied generations run from 1 (a torn pack, or a homonym's sidecar
+    such as ``a.2`` generation 1 for ``a``, occupies one too) and the first free one ends them."""
+    directory, names, generation = packs_dir(root), set(), 1
+    while True:
+        name = sidecar_name(task_id, generation)
+        if (directory / name).exists():
+            names.add(name)
+        elif not (directory / pack_name(task_id, generation)).exists():
+            return names
+        generation += 1
+
+
+def list_sidecars(root: Any, *, errors: Optional[list] = None,
+                  names: Optional[set[str]] = None) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+    """Read pack authority, or a rebuild's filename delta; cache builders may collect faults."""
     out = []
     directory = packs_dir(root)
-    try:
-        names = sorted(os.listdir(directory))
-    except FileNotFoundError:
-        return out
-    for name in names:
-        if name.startswith(".") or not name.endswith(".members.json"):
-            continue
+    for name in sorted(_sidecar_names(root) if names is None else names):
         try:
             out.append((directory / name, read_sidecar(directory / name)))
         except SidecarCorrupt as exc:
@@ -182,10 +209,20 @@ def _reader(path: pathlib.Path) -> _PackReader:
         return reader
 
 
-def member_bytes(pack_path: pathlib.Path, member: Dict[str, Any]) -> bytes:
+def member_bytes(pack_path: pathlib.Path, member: Dict[str, Any], *, anchor: Any = None) -> bytes:
     """One member's exact bytes, verified against the sidecar's size and sha256."""
     parts: List[bytes] = []
-    _reader(pack_path).read_at(int(member["offset"]), int(member["size"]), parts.append)
+    if anchor is None:
+        _reader(pack_path).read_at(int(member["offset"]), int(member["size"]), parts.append)
+    else:
+        from ouroboros.confined_files import open_confined_file
+        handle, _ = open_confined_file(anchor, pack_path.relative_to(anchor).parts)
+        try:
+            with handle, lzma.LZMAFile(handle, "rb") as stream:
+                stream.seek(int(member["offset"]))
+                parts.append(stream.read(int(member["size"])))
+        except (lzma.LZMAError, EOFError) as exc:
+            raise EvidenceCorrupt(f"evidence_corrupt: pack stream unreadable: {pack_path.name}") from exc
     raw = b"".join(parts)
     if len(raw) != int(member["size"]) or hashlib.sha256(raw).hexdigest() != member["sha256"]:
         raise EvidenceCorrupt(f"evidence_corrupt: member {member['sha256'][:12]} of {pack_path.name} failed verification")
@@ -220,23 +257,39 @@ def index_tier(root: pathlib.Path) -> str:
     return store.TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / store.LOCK_NAME) else store.TIER_NAME
 
 
-def _index_valid(path: pathlib.Path, tier: str) -> bool:
+def _index_stamp(path: pathlib.Path) -> Optional[tuple]:
     identity = store.file_identity(path)
     if identity is None:
-        return False
+        return None
     try:
         info = os.stat(path)
-        stamp = (*identity, info.st_size, info.st_mtime_ns)
     except OSError:
+        return None
+    return (*identity, info.st_size, info.st_mtime_ns)
+
+
+def _index_validated(path: pathlib.Path) -> bool:
+    """This process already validated these exact index bytes; nothing is checked here."""
+    stamp = _index_stamp(path)
+    return stamp is not None and _VALIDATED.get(str(path)) == stamp
+
+
+def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC) -> bool:
+    stamp = _index_stamp(path)
+    if stamp is None:
         return False
     if _VALIDATED.get(str(path)) == stamp:
         return True
     if store.header_tier(path, _APPLICATION_ID) != tier:
         return False
     try:
-        with contextlib.closing(store.connect(path, tier, wait_sec=INDEX_WAIT_SEC)) as conn:
+        with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
             ok = conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    except sqlite3.OperationalError as exc:
+        if store.busy(exc):
+            raise store.StoreBusy("evidence index validation busy", reason="contention") from exc
+        return False
     except sqlite3.Error:
         return False
     valid = ok and version is not None and version[0] == str(INDEX_SCHEMA_VERSION)
@@ -260,67 +313,104 @@ def _index_rows(conn: sqlite3.Connection, pack_path: pathlib.Path, sidecar: Dict
                          (task_id, str(member["path"]), member["sha256"], generation))
 
 
-def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
-    """Rebuild the cache from the sidecars (one listing) into a temp file published by rename."""
+def _index_wait(wait_sec: float = INDEX_WAIT_SEC) -> float:
+    return store.bounded_wait(min(wait_sec, INDEX_WAIT_SEC))
+
+
+def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC) -> None:
+    """Build privately, refresh changed sidecars unlocked, then publish a still-current snapshot."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    def build(tmp):
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
+    indexed: set[str] = set()
+    names, faults = _sidecar_names(root), {}
+    try:
         with contextlib.closing(store.connect(tmp, tier, create=True)) as conn:
             conn.execute(f"PRAGMA application_id = {_APPLICATION_ID[tier]}")
             conn.executescript(_INDEX_SCHEMA)
             with store.transaction(conn, write=True):
                 conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(INDEX_SCHEMA_VERSION),))
                 conn.execute("INSERT INTO meta VALUES ('built_at', ?)", (utc_now_iso(),))
-                errors: list = []
-                for sidecar_path, sidecar in list_sidecars(root, errors=errors):
-                    _index_rows(conn, sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), sidecar)
-                conn.execute("INSERT INTO meta VALUES ('sidecar_errors', ?)", (json.dumps([str(e) for e in errors]),))
-    _atomic_overwrite(path, build)
-    store.fsync_directory(path.parent)
+        while True:
+            added, removed = names - indexed, indexed - names
+            errors: list = []
+            sidecars = list_sidecars(root, errors=errors, names=added)
+            for name in removed:
+                faults.pop(name, None)
+            failed = sorted(added - {sidecar_path.name for sidecar_path, _ in sidecars})
+            faults.update(zip(failed, map(str, errors)))
+            with contextlib.closing(store.connect(tmp, tier)) as conn:
+                with store.transaction(conn, write=True):
+                    for name in removed:
+                        row = conn.execute("SELECT task_id, generation FROM packs WHERE path=?",
+                                           (name.removesuffix(".members.json") + ".xz",)).fetchone()
+                        if row is not None:
+                            for table in ("packs", "members", "handles"):
+                                conn.execute(f"DELETE FROM {table} WHERE task_id=? AND generation=?", tuple(row))
+                    for sidecar_path, sidecar in sidecars:
+                        _index_rows(conn, sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), sidecar)
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('sidecar_errors', ?)",
+                                 (json.dumps(list(faults.values())),))
+            indexed = names
+            with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait(wait_sec)):
+                if _index_valid(path, tier, wait_sec=_index_wait(wait_sec)):
+                    return  # another builder published; keep its subsequent writes too
+                names = _sidecar_names(root)
+                if names == indexed:
+                    with contextlib.suppress(FileNotFoundError):
+                        tmp.chmod(path.stat().st_mode)
+                    replace_atomic(tmp, path)
+                    store.fsync_directory(path.parent)
+                    return
+    finally:
+        for leftover in (tmp, *(tmp.with_name(tmp.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
+            with contextlib.suppress(FileNotFoundError):
+                leftover.unlink()
+
 
 @contextlib.contextmanager
-def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC) -> Iterator[sqlite3.Connection]:
-    """One transaction on the index cache under the name lock; a missing, damaged or
-    other-version cache is rebuilt from the sidecars first. ``store.StoreBusy`` on contention."""
+def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC,
+               rebuild: bool = True) -> Iterator[sqlite3.Connection]:
+    """One transaction under the name lock, narrowed by the caller's acquisition budget.
+
+    Missing, damaged or other-version caches rebuild outside the lock. ``rebuild=False``
+    is advisory discovery: unavailable cache raises instead of walking all sidecars.
+    ``store.StoreBusy`` on contention.
+    """
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
-    with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=wait_sec):
-        if not _index_valid(path, tier):
-            _rebuild_index(root, path, tier)
-        with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
-            with store.transaction(conn, write=write):
-                yield conn
+    wait_sec = _index_wait(wait_sec)
+    while True:
+        with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=wait_sec):
+            if _index_valid(path, tier, wait_sec=wait_sec):
+                with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
+                    with store.transaction(conn, write=write):
+                        yield conn
+                return
+            if not rebuild:
+                raise sqlite3.DatabaseError("evidence index requires reconstruction")
+        _rebuild_index(root, path, tier, wait_sec=wait_sec)
 
 
 def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:
-    """Record one published, verified pack; a cache that cannot take the row is dropped so the
-    next access rebuilds it from the sidecars."""
-    try:
-        with open_index(root, write=True) as conn:
-            _index_rows(conn, pack_path, sidecar)
-    except (store.StoreError, sqlite3.Error):
-        with contextlib.suppress(OSError):
-            (packs_dir(root) / INDEX_NAME).unlink()
-        _VALIDATED.pop(str(packs_dir(root) / INDEX_NAME), None)
+    """Record one verified pack, or defer its caller without destroying a contended cache."""
+    with open_index(root, write=True) as conn:
+        _index_rows(conn, pack_path, sidecar)
 
 
 def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id: str = "", rel_path: str = "",
                 ) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
-    """All indexed placements, or healthy sidecar rows when the cache is unavailable."""
+    """All indexed placements, or healthy sidecar rows when the cache is unavailable; a task's
+    checkpoint handle is addressed by its task (``_task_handles``)."""
     if not packs_dir(root).is_dir():
         return []  # a root without packs is left untouched (no cache, no lock file)
+    if rel_path:
+        return _task_handles(root, task_id, rel_path)
     try:
         with open_index(root) as conn:
-            if rel_path:
-                rows = conn.execute(
-                    "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM handles h "
-                    "JOIN members m ON m.sha256=h.sha256 AND m.task_id=h.task_id AND m.generation=h.generation "
-                    "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation "
-                    "WHERE h.task_id=? AND h.rel_path=? AND m.kind=?", (task_id, rel_path, CHECKPOINT)).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM members m "
-                    "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation "
-                    "WHERE m.sha256=? AND m.kind=? ORDER BY p.task_id, p.generation", (sha256, kind)).fetchall()
+            rows = conn.execute(
+                "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM members m "
+                "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation "
+                "WHERE m.sha256=? AND m.kind=? ORDER BY p.task_id, p.generation", (sha256, kind)).fetchall()
             if not rows:
                 error_row = conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
                 if error_row and json.loads(error_row[0]):
@@ -331,12 +421,70 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
     errors, found = [], []
     for sidecar_path, sidecar in list_sidecars(root, errors=errors):
         for member in sidecar["members"]:
-            if (rel_path and sidecar["task_id"] == task_id and member["kind"] == CHECKPOINT and member.get("path") == rel_path) or (
-                    not rel_path and member["sha256"] == sha256 and member["kind"] == kind):
+            if member["sha256"] == sha256 and member["kind"] == kind:
                 found.append((sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), member))
     if errors and not found:
         raise errors[0]
     return found
+
+
+def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "") -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+    """This task's packed checkpoint handles (``rel_path``: that one), read as an addressed fact.
+
+    A handle is named by its task and the task's own sidecars are its authority, so no other
+    task's pack is read: the index answers while this process has validated its current bytes and
+    its lock is free now; otherwise, and for an absence it cannot prove (it recorded unreadable
+    sidecars), the task's own sidecars answer, found by name (``_task_sidecar_names``). Only when
+    one of them is unreadable does a valid index that still holds the placement keep it (checked,
+    never rebuilt). The ordinary read never lists the directory or waits for, re-validates or
+    rebuilds the shared cache: those whole-pack passes stay with the readers that need every pack
+    (``blob_bytes``) and with the packer."""
+    rows = _indexed_handles(root, task_id, rel_path, validated=True)
+    if rows is not None:
+        return rows
+    errors, found = [], []
+    for sidecar_path, sidecar in list_sidecars(root, errors=errors, names=_task_sidecar_names(root, task_id)):
+        for member in sidecar["members"]:
+            if sidecar["task_id"] == task_id and member["kind"] == CHECKPOINT and member.get("path") and (
+                    not rel_path or member["path"] == rel_path):
+                found.append((sidecar_path.with_name(pack_name(task_id, sidecar["generation"])), member))
+    if errors and not found:
+        kept = _indexed_handles(root, task_id, rel_path, validated=False)
+        if kept:
+            return kept
+        raise errors[0]
+    return found
+
+
+_HANDLES_SQL = ("SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind, h.rel_path AS path FROM handles h "
+                "JOIN members m ON m.sha256=h.sha256 AND m.task_id=h.task_id AND m.generation=h.generation "
+                "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation WHERE h.task_id=? AND m.kind=?")
+
+
+def _indexed_handles(root: pathlib.Path, task_id: str, rel_path: str, *,
+                     validated: bool) -> Optional[List[Tuple[pathlib.Path, Dict[str, Any]]]]:
+    """The index's rows for this task's handles, or ``None`` when it cannot answer. ``validated``
+    reads only bytes this process already validated and never waits for the lock; otherwise
+    ``open_index`` checks the existing index under the caller's budget, never rebuilding it."""
+    path = packs_dir(root) / INDEX_NAME
+    try:
+        with contextlib.ExitStack() as held:
+            if not validated:
+                conn = held.enter_context(open_index(root, rebuild=False))
+            else:
+                held.enter_context(store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=0))
+                if not _index_validated(path):
+                    return None
+                conn = held.enter_context(contextlib.closing(store.connect(path, index_tier(root), wait_sec=0)))
+                held.enter_context(store.transaction(conn, write=False))
+            rows = conn.execute(_HANDLES_SQL + (" AND h.rel_path=?" if rel_path else ""),
+                                (task_id, CHECKPOINT, *((rel_path,) if rel_path else ()))).fetchall()
+            recorded = conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
+            if not rows and recorded and json.loads(recorded[0]):
+                return None  # an unreadable sidecar may be this task's: the index proves no absence
+    except (store.StoreError, sqlite3.Error, OSError, ValueError):
+        return None
+    return [(packs_dir(root) / row["pack"], dict(row)) for row in rows]
 
 
 def _locate(root: pathlib.Path, **identity: str) -> Optional[Tuple[pathlib.Path, Dict[str, Any]]]:
@@ -393,43 +541,48 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     if max_bytes is not None and size > max_bytes:
         raise ValueError("blob exceeds byte limit")
     failure: Optional[Exception] = None
-    for candidate in _blob_roots(root, ref, sha256, kind):
-        loose = candidate / "observability" / "blobs" / f"{sha256}.{kind}.gz"
-        if admit is not None:
-            admit(loose)
-        try:
-            raw = read_loose_gzip(loose, max_bytes)
-            if size in (-1, len(raw)) and hashlib.sha256(raw).hexdigest() == sha256:
-                return raw
-            failure = EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
-        except FileNotFoundError as exc:
-            failure = failure or exc
-        except ValueError as exc:
-            failure = exc
-        except (OSError, EOFError, zlib.error) as exc:
-            failure = exc  # retention repair distinguishes transient IO from damaged gzip
-        try:
-            placements = _placements(candidate, sha256=sha256, kind=kind)
-        except (OSError, EvidenceCorrupt) as exc:
-            failure = exc
-            continue
-        for located in placements:
+    try:
+        for candidate in _blob_roots(root, ref, sha256, kind):
+            loose = candidate / "observability" / "blobs" / f"{sha256}.{kind}.gz"
             if admit is not None:
-                admit(located[0])
+                admit(loose)
             try:
-                if max_bytes is not None and int(located[1]["size"]) > max_bytes:
-                    raise ValueError("blob exceeds byte limit")
-                raw = member_bytes(*located)
-                if size not in (-1, len(raw)):
-                    raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
-                return raw
+                raw = read_loose_gzip(loose, max_bytes)
+                if size in (-1, len(raw)) and hashlib.sha256(raw).hexdigest() == sha256:
+                    return raw
+                failure = EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
             except FileNotFoundError as exc:
                 failure = failure or exc
             except ValueError as exc:
                 failure = exc
-            except OSError:
-                failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
-    raise failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
+            except (OSError, EOFError, zlib.error) as exc:
+                failure = exc  # retention repair distinguishes transient IO from damaged gzip
+            try:
+                placements = _placements(candidate, sha256=sha256, kind=kind)
+            except (OSError, EvidenceCorrupt) as exc:
+                failure = exc
+                continue
+            for located in placements:
+                if admit is not None:
+                    admit(located[0])
+                try:
+                    if max_bytes is not None and int(located[1]["size"]) > max_bytes:
+                        raise ValueError("blob exceeds byte limit")
+                    raw = member_bytes(*located)
+                    if size not in (-1, len(raw)):
+                        raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
+                    return raw
+                except FileNotFoundError as exc:
+                    failure = failure or exc
+                except ValueError as exc:
+                    failure = exc
+                except OSError:
+                    failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
+        raise failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
+    finally:
+        # The kept error's traceback holds this frame: kept past an exit, it is a cycle retaining the callers'
+        # frames and payloads until a GC pass. Every exit drops it; a raised error keeps its object and traceback.
+        failure = None
 
 
 def _handle_path(root: Any, task_id: str, rel_path: str) -> pathlib.Path:
@@ -438,8 +591,103 @@ def _handle_path(root: Any, task_id: str, rel_path: str) -> pathlib.Path:
     return task_artifact_dir_path(root, task_id, create=False).joinpath(*pathlib.PurePosixPath(rel_path).parts)
 
 
-def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
+def _confined_handle(root: Any, task_id: str, rel_path: str, anchor: Any, *, info_only: bool = False) -> Any:
+    """Preserve admitted roots' placement authority; confine their payload opens.
+
+    Physical scratch custody alone never admits a pathname-opened SQLite index.
+    Such retained sources use confined sidecars without granting store authority.
+    """
+    from ouroboros.confined_files import (
+        confined_directory,
+        open_confined_file,
+        physical_path,
+        relative_parts,
+        root_spellings,
+    )
+    from ouroboros.task_results import validate_task_id
+
+    task_id = validate_task_id(task_id)
+    if not relative_parts(rel_path):
+        raise ValueError("invalid checkpoint path")
+    spellings = root_spellings(anchor)  # ANCHOR as configured; its rows record that spelling
+    anchor, root = spellings[0], physical_path(spellings, pathlib.Path(root).absolute())
+    loose = _handle_path(root, task_id, rel_path)
+    digest, failure = pathlib.PurePosixPath(rel_path).stem.rsplit("-", 1)[-1], None
+    try:
+        handle, _ = open_confined_file(anchor, loose.relative_to(anchor).parts)
+        with handle:
+            raw = handle.read()
+        if hashlib.sha256(raw).hexdigest() == digest:
+            return {"size": len(raw), "sha256": digest, "loose": True} if info_only else raw
+        failure = EvidenceCorrupt("evidence_corrupt: loose handle failed sha256 verification")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if not info_only:
+            raise
+        failure = exc
+    if info_only and pathlib.PurePosixPath(rel_path).parts[:2] != CHECKPOINTS_REL.parts:
+        if failure is not None:
+            raise failure
+        return None
+    from ouroboros.task_custody import recorded_execution_drive
+    from ouroboros.task_store import read_document
+
+    if root == anchor or recorded_execution_drive(read_document(anchor, task_id) or {}, root, spellings):
+        located = _locate(root, task_id=task_id, rel_path=rel_path)
+        if located is not None:
+            return ({"size": int(located[1]["size"]), "sha256": located[1]["sha256"], "loose": False}
+                    if info_only else member_bytes(*located, anchor=anchor))
+        if failure is not None:
+            raise failure
+        if info_only:
+            return None
+        raise FileNotFoundError(str(loose))
+    try:
+        held = confined_directory(anchor, packs_dir(root).relative_to(anchor).parts)
+        directory = held.__enter__()
+    except FileNotFoundError:
+        directory = None
+    if directory is not None:
+        try:
+            names = sorted(name for name, _ in directory.entries(include_links=True)
+                           if not name.startswith(".") and name.endswith(".members.json"))
+            errors = []
+            for name in [*(name for name in names if _own_sidecar(name, task_id)),
+                         *(name for name in names if not _own_sidecar(name, task_id))]:
+                try:
+                    try:
+                        handle, _ = directory.open(name)
+                        with handle:
+                            sidecar = read_sidecar(packs_dir(root) / name, raw=handle.read())
+                    except OSError as exc:
+                        raise SidecarCorrupt(f"evidence_corrupt: unreadable sidecar {name}") from exc
+                    if sidecar["task_id"] != task_id:
+                        continue
+                    for member in sidecar["members"]:
+                        if member["kind"] != CHECKPOINT or member.get("path") != rel_path:
+                            continue
+                        if info_only:
+                            return {"size": int(member["size"]), "sha256": member["sha256"], "loose": False}
+                        return member_bytes(packs_dir(root) / pack_name(task_id, sidecar["generation"]),
+                                            member, anchor=anchor)
+                except SidecarCorrupt as exc:
+                    errors.append((name, exc))
+            if errors:
+                raise min(errors, key=lambda item: item[0])[1]
+        finally:
+            held.__exit__(None, None, None)
+    if failure is not None:
+        raise failure
+    if info_only:
+        return None
+    raise FileNotFoundError(str(loose))
+
+
+def handle_bytes(root: Any, task_id: str, rel_path: str, *, anchor: Any = None) -> bytes:
     """Verified loose handle bytes, falling back to the pack if the loose digest is wrong."""
+    if anchor is not None:
+        return _confined_handle(root, task_id, rel_path, anchor)
     rel = pathlib.PurePosixPath(str(rel_path))
     loose, failure = _handle_path(root, task_id, rel.as_posix()), None
     try:
@@ -457,8 +705,10 @@ def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
     return member_bytes(*located)
 
 
-def handle_info(root: Any, task_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
+def handle_info(root: Any, task_id: str, rel_path: str, *, anchor: Any = None) -> Optional[Dict[str, Any]]:
     """Verified placement metadata; ``None`` only for absence, corruption stays explicit."""
+    if anchor is not None:
+        return _confined_handle(root, task_id, rel_path, anchor, info_only=True)
     rel = pathlib.PurePosixPath(str(rel_path))
     loose = _handle_path(root, task_id, rel.as_posix())
     failure = None
@@ -483,14 +733,8 @@ def packed_handle_names(root: Any, task_id: str) -> List[str]:
     """Names of this task's packed checkpoint handles (for directory listings)."""
     if not packs_dir(root).is_dir():
         return []
-    try:
-        with open_index(root) as conn:
-            rows = conn.execute("SELECT rel_path FROM handles WHERE task_id=?", (str(task_id),)).fetchall()
-        return sorted(pathlib.PurePosixPath(row["rel_path"]).name for row in rows)
-    except (store.StoreError, sqlite3.Error, OSError):
-        return sorted(pathlib.PurePosixPath(member["path"]).name for _, sidecar in list_sidecars(root)
-                      if sidecar["task_id"] == str(task_id) for member in sidecar["members"]
-                      if member["kind"] == CHECKPOINT and member.get("path"))
+    return sorted({pathlib.PurePosixPath(member["path"]).name
+                   for _, member in _task_handles(pathlib.Path(root), str(task_id))})
 
 
 def _checkpoint_path(path: pathlib.Path) -> Optional[tuple]:
@@ -597,110 +841,24 @@ def pending_restore_bytes(root: Any) -> int:
 
 
 
-def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None, cache: Optional[dict] = None) -> dict:
-    """Read every set once but the declared ``obligations.RECORD_SETS`` (an undeclared stored set owes too), indexed
-    by all recorded task owners. Reuse for a candidate pass or fresh unlink census; task-local rows form its revision key."""
-    from ouroboros import obligations
-
-    if txn is None:
-        with store.open_store(root, write=False) as txn:
-            return settlement_obligations(root, txn=txn, cache=cache)
-    revision = (str(txn.root), txn.revision())
-    if cache is not None and cache.get("revision") == revision:
-        return cache["rows"]
-    by_task: dict = {}
-    for name in sorted((set(obligations.DUTY_SETS) | set(txn.set_names())) - set(obligations.RECORD_SETS)):
-        for identity, entry in obligations.members_in(txn, name).items():
-            owners = {str(identity)} | {str(f.get("task_id") or "") for f in
-                                      (entry, entry.get("custody") or {}, entry.get("request") or {})}
-            for owner in owners - {""}:
-                by_task.setdefault(owner, {}).setdefault(name, {})[identity] = entry
-    if cache is not None:
-        cache.update(revision=revision, rows=by_task)
-    return by_task
-
-
-def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
-                          external: Optional[dict] = None, txn: Optional[store.Txn] = None) -> Dict[str, Any]:
-    """The facts the settle predicate reads, through the current store: terminal status,
-    every obligation flag, open review operations / undischarged acceptance debt, and unresolved
-    money attempts (``None`` = unknown, which never settles). No timer anywhere."""
-    from ouroboros.review_operation import _OPEN_STATES
-    from ouroboros.review_projection import _actor_pending
-    from ouroboros.task_store import read_document
+def row_packable(status: Any, review_pending: Any) -> bool:
+    """The packing rule over a row's two indexed facts: the status is terminal, and no review of the
+    task may still read its loose files (``review_collection_pending`` 1 names an open review
+    operation, whose agent-session reader holds a retained handle's absolute path, or a row an older
+    body flagged for its acceptance collection until the maintenance pass writes it back
+    (``task_store.reclassify_review_collection``); NULL is a row no body with the selector ever wrote, so no such
+    reader exists, and the selector stays a derived fact, never a retention duty). No duty, money or
+    delivery fact is consulted (packing moves verified bytes, never content: a later write becomes
+    the next generation)."""
     from ouroboros.task_status import SETTLED_STATUSES
 
-    root = pathlib.Path(root)
-    row, owed = {}, set()
-    try:
-        with (store.open_store(root, write=False) if txn is None else contextlib.nullcontext(txn)) as txn:
-            row = read_document(root, task_id, txn=txn) or {}
-            if obligation_rows is None:
-                obligation_rows = settlement_obligations(root, txn=txn)
-            owed.update(obligation_rows.get(str(task_id), {}))
-    except (store.StoreError, OSError, ValueError, TypeError, AttributeError):
-        owed.add("unknowns")
-    operations = row.get("review_operations") if isinstance(row.get("review_operations"), dict) else {}
-    debt = row.get("acceptance_debt") if isinstance(row.get("acceptance_debt"), dict) else {}
-    projection = row.get("review_projection") or {}
-    panels = [p for p in projection.get("panels") or [] if isinstance(p, dict)]
-    open_debt = False
-    if debt.get("debt_id"):
-        wanted = "task_acceptance:" + hashlib.sha256(str(debt["debt_id"]).encode()).hexdigest()
-        open_debt = not any(((p.get("late_settlement") or {}).get("reviewed_subject") or {}).get("retry_key") == wanted
-                            for p in panels)
-    late_open = any(_actor_pending(actor) for p in panels for actor in p.get("actors") or [] if isinstance(actor, dict))
-    for receipt in (projection.get("late_notice_receipts") or {}).values():
-        panel = next((p for p in panels if p.get("panel_id") == receipt.get("panel_id")), {})
-        late_open |= (receipt.get("custody") != "terminal_outbox"
-                      or receipt.get("settled_at") != (panel.get("late_settlement") or {}).get("settled_at"))
-    external = settlement_external(root) if external is None else external
-    if external["delivery"] is None:
-        owed.add("unknowns")
-    else:
-        late_open |= str(task_id) in external["delivery"]
-    return {
-        "status": str(row.get("status") or ""),
-        "terminal": bool(row) and str(row.get("status") or "") in SETTLED_STATUSES,
-        "obligations": sorted(owed),
-        "open_operations": any(isinstance(e, dict) and e.get("state") in _OPEN_STATES for e in operations.values()),
-        "open_acceptance": open_debt,
-        "open_late_receipts": late_open,
-        "money_open": None if external["money"] is None else str(task_id) in external["money"],
-    }
+    return status is not None and str(status) in SETTLED_STATUSES and review_pending != 1
 
 
-def settlement_external(root: Any) -> dict:
-    """One money query and one outbox read for every task in a pass; None stays unknown."""
-    from ouroboros import usage_store
-    from ouroboros.usage_ledger import LEDGER_REL
-    from supervisor.terminal_delivery import pending_deliveries
-
-    root = pathlib.Path(root)
-    money = set()
-    if (root / usage_store.STORE_REL).exists() or (root / LEDGER_REL).exists():
-        try:
-            with usage_store.hold(root, write=False, migrate=False) as txn:
-                money = {row[0] for row in txn.conn.execute(
-                    "SELECT DISTINCT task_id FROM attempts WHERE kind='attempt' "
-                    "AND state IN ('reserved','dispatched','unresolved')")}
-        except Exception:
-            money = None
-    try:
-        delivery = {str(event.get("task_id") or "") for event in pending_deliveries(root, strict=True)}
-    except Exception:
-        delivery = None
-    return {"money": money, "delivery": delivery}
-
-
-def facts_settled(facts: Dict[str, Any]) -> bool:
-    return bool(facts["terminal"] and not facts["obligations"] and not facts["open_operations"]
-                and not facts["open_acceptance"] and not facts["open_late_receipts"] and facts["money_open"] is False)
-
-
-def task_settled(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
-                 external: Optional[dict] = None, txn: Optional[store.Txn] = None) -> bool:
-    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows, external=external, txn=txn))
+def task_packable(txn: store.Txn, task_id: str) -> bool:
+    """``row_packable`` over the task's row (``False`` without one)."""
+    row = txn.row(str(task_id), "status", "review_collection_pending")
+    return row is not None and row_packable(*row)
 
 
 
@@ -724,7 +882,7 @@ def note_manifest_publication(root: Any, manifest: dict) -> None:
     """Called under the publication lock BEFORE the manifest write. Track new refs only
     while a sweep owns the scratch file; a stale file is reset at the next sweep."""
     try:
-        fd = os.open(packs_dir(root) / PUBLICATIONS_NAME, os.O_WRONLY | os.O_APPEND)
+        fd = os.open(packs_dir(root) / PUBLICATIONS_NAME, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
     except FileNotFoundError:
         return
     with os.fdopen(fd, "ab") as journal:
@@ -758,9 +916,10 @@ def manifest_blob_refs(root: Any, task_id: str) -> List[Tuple[str, str, int]]:
     return out
 
 
-def loose_members(root: Any, task_id: str) -> List[Dict[str, Any]]:
+def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) -> List[Dict[str, Any]]:
     """The task's members whose bytes are at hand (loose checkpoint handles first, then the manifest
-    blobs that are loose or already held by some pack on this root), each with its loose source path."""
+    blobs that are loose or already held by some pack on this root), each with its loose source path;
+    a referenced blob that is neither is appended to ``missing`` as ``(kind, sha256, size)``."""
     from ouroboros.artifacts import task_artifact_dir_path
 
     root = pathlib.Path(root)
@@ -776,12 +935,16 @@ def loose_members(root: Any, task_id: str) -> List[Dict[str, Any]]:
         loose = root / "observability" / "blobs" / f"{sha256}.{kind}.gz"
         if loose.is_file() or _locate(root, sha256=sha256, kind=kind) is not None:  # a shared sha is duplicated per pack
             members.append({"sha256": sha256, "kind": kind, "size": size, "source": loose})
+        elif missing is not None:
+            missing.append((kind, sha256, size))
     return members
 
 
 def published_generations(root: Any, task_id: str, listing: Optional[list] = None) -> List[Dict[str, Any]]:
-    """This task's published sidecars, oldest generation first (``listing``: one shared ``list_sidecars``)."""
-    found = [sidecar for _, sidecar in (list_sidecars(root) if listing is None else listing) if sidecar["task_id"] == str(task_id)]
+    """This task's published sidecars, oldest generation first: those its names spell (``_task_sidecar_names``),
+    or of one shared ``listing``; a homonym's (``a.2`` generation 1 beside ``a``) is told by its own ``task_id``."""
+    found = [sidecar for _, sidecar in (list_sidecars(root, names=_task_sidecar_names(root, task_id))
+                                        if listing is None else listing) if sidecar["task_id"] == str(task_id)]
     return sorted(found, key=lambda sidecar: int(sidecar["generation"]))
 
 
@@ -839,8 +1002,9 @@ def write_pack(root: Any, task_id: str, generation: int, members: List[Dict[str,
             os.fsync(handle.fileno())
         replace_atomic(tmp_pack, pack_path)
         store.fsync_directory(directory)
-        replace_atomic(tmp_sidecar, sidecar_path)  # publication
-        store.fsync_directory(directory)
+        with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait()):
+            replace_atomic(tmp_sidecar, sidecar_path)  # serialize publication with index revalidation
+            store.fsync_directory(directory)
     finally:
         for tmp in (tmp_pack, tmp_sidecar):
             with contextlib.suppress(FileNotFoundError):
@@ -874,8 +1038,9 @@ def _unlink_phase(root: Any) -> Iterator[tuple]:
 
 def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str,
                  sweep, members: list) -> Dict[str, int]:
-    """Remove loose files whose bytes a VERIFIED pack holds; a blob some non-settled task's
-    manifests still reference (``keep_shas``) stays loose. A busy file is retried next pass."""
+    """Remove loose files whose bytes a VERIFIED pack (``sidecars``) holds; a blob a live task's
+    manifests still reference (``keep_shas`` and the sweep's keep-set) stays loose. A busy file is
+    retried next pass."""
     from ouroboros.evidence_packer import task_stamps
     from ouroboros.task_custody import task_custody_lock
 
@@ -884,22 +1049,17 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
 
     def remove(txn, todo: list, until: float) -> Optional[list]:
-        """One section under both locks: the O(1) staleness recheck and the journal suffix, then
-        unlinks until ``until``; the members left, or ``None`` when the candidate went stale."""
+        """One section under both locks: this task's own recheck (its row is still terminal and its
+        evidence directories are as the census saw them: the stamp carries both) and the journal
+        suffix, then unlinks until ``until``; the members left, or ``None`` when the candidate went stale."""
         nonlocal revision
-        if not sweep.current(txn):
-            return None
-        duties, external = sweep.duties, sweep.external
-        if (task_stamps(root, task_id, obligation_rows=duties, external=external, txn=txn) != revision
-                or not task_settled(root, task_id, obligation_rows=duties, external=external, txn=txn)):
+        if task_stamps(root, task_id, txn=txn) != revision:
             return None
         keep = sweep.refresh_keep()
-        if not sweep.current(txn):
-            return None
         for index, member in enumerate(todo):
             if index and time.monotonic() >= until:
                 # Still under the locks: this section's own unlinks are the only change to the stamps.
-                revision = task_stamps(root, task_id, obligation_rows=duties, external=external, txn=txn)
+                revision = task_stamps(root, task_id, txn=txn)
                 return todo[index:]
             if not member["source"].is_file():
                 continue
@@ -917,12 +1077,11 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
 
     # Compression precedes custody -> store write -> manifest publication locks. A section holds
     # the store write lock (a rollback barrier) and the publication lock for one UNLINK_SECTION_SEC
-    # budget; model calls and every store writer wait on them. Between sections the census refreshes
-    # outside both, and a waiting writer gets a poll-length gap. A stale check defers the candidate.
+    # budget; model calls and every store writer wait on them. Inside, only this task's recheck;
+    # between sections a waiting writer gets a poll-length gap. A stale check defers the candidate.
     todo: Optional[list] = [m for m in members if _member_key(m) in packed]
     with task_custody_lock(root, task_id) as acquired:
         while acquired and todo:
-            sweep.refresh()  # outside the locks; inside, only this task and an O(1) staleness check
             left: Optional[list] = None
             with _unlink_phase(root) as (allowed, txn):
                 until = time.monotonic() + UNLINK_SECTION_SEC
@@ -945,24 +1104,33 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
 def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list] = None, revision: Optional[str] = None,
               sweep=None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
-    re-read + verify every member, index), then unlink loose files held by verified packs."""
+    re-read + verify every member, index), then unlink loose files held by verified packs. Only the
+    generations an unlink relies on are re-read: the new one, and an older one while it still holds a
+    member whose loose file exists now (a busy retry); the rest stay closed. Referenced records that
+    are neither loose nor packed are counted (``missing``), never invented."""
     root = pathlib.Path(root)
-    from ouroboros.evidence_packer import pack_sweep, task_stamps
+    from ouroboros.evidence_packer import keep_rows, pack_sweep, task_stamps
 
     if sweep is None:
         with pack_sweep(root) as sweep:
-            sweep.collect_keep({})
+            sweep.collect_keep(keep_rows(root))
             return pack_task(root, task_id, keep_shas=keep_shas, listing=listing, revision=revision, sweep=sweep)
     if revision is None:
-        revision = task_stamps(root, task_id, obligation_rows=sweep.duties, external=sweep.external)
+        revision = task_stamps(root, task_id)
     generations = published_generations(root, task_id, listing)
     already = {_member_key(m) for s in generations for m in s["members"]}
-    members = loose_members(root, task_id)
+    missing: list = []
+    members = loose_members(root, task_id, missing=missing)
     fresh = [m for m in members if _member_key(m) not in already]
     report: Dict[str, Any] = {"task_id": str(task_id), "generation": None, "members": 0, "raw": 0, "packed": 0,
-                              "verified_bytes": 0}
-    if not fresh and not any(m["source"].is_file() for m in members):
+                              "verified_bytes": 0, "missing": len(missing),
+                              "missing_bytes": sum(size for _, _, size in missing)}
+    loose = {_member_key(m) for m in members if m["source"].is_file()}
+    if not fresh and not loose:
+        if missing:  # nothing to pack, but the gap is a fact of this task: recorded, never silent
+            record_storage_pack(root, phase="packed", **report)
         return report  # nothing can be unlinked: do not decompress historical generations
+    relied = [s for s in generations if any(_member_key(m) in loose for m in s["members"])]
     if fresh:
         generation = 1 + max((int(s["generation"]) for s in generations), default=0)
         while any((packs_dir(root) / name).exists() for name in
@@ -970,18 +1138,18 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
             generation += 1
         pack_path, sidecar = write_pack(root, task_id, generation, fresh)
         report.update(generation=generation, members=len(fresh), raw=sidecar["raw_total"], packed=sidecar["packed_total"])
-        generations.append(sidecar)
+        relied.append(sidecar)
         if listing is not None:
             listing.append((pack_path.with_name(sidecar_name(task_id, generation)), sidecar))
-    for sidecar in generations:
+    for sidecar in relied:
         pack_path = packs_dir(root) / pack_name(task_id, sidecar["generation"])
-        verify_pack(pack_path, sidecar)  # from disk, EVERY member, before any unlink
+        verify_pack(pack_path, sidecar)  # from disk, EVERY member of a relied-on generation, before any unlink
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
         report["verified_bytes"] += int(sidecar["raw_total"])
     write_unpacker(root)
-    report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas, revision=revision,
+    report.update(unlink_loose(root, task_id, relied, keep_shas=keep_shas, revision=revision,
                                sweep=sweep, members=members))
-    if report["members"] or report["unlinked"]:  # a row records production, never a re-visit
+    if report["members"] or report["unlinked"] or missing:  # a row records production or a gap, never a re-visit
         record_storage_pack(root, phase="packed", **report)
     return report
 

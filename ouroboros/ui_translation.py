@@ -113,7 +113,7 @@ def _core_catalogs() -> Dict[str, Tuple[Dict[str, str], str]]:
     from ouroboros import project_dialogue as pd
 
     return {
-        "task.headline": (pd.OUTCOME_PHASE_HEADLINE,
+        "task.headline": ({**pd.OUTCOME_PHASE_HEADLINE, "quiet": pd.QUIET_RUN_HEADLINE},
                           "the one-word status headline of a task card (Working, Done, Failed…)"),
         "task.cause": (pd.TASK_CAUSE_PHRASES,
                        "one sentence under a finished task explaining why its answer was or was not signed off"),
@@ -201,7 +201,10 @@ def _usage_scope(drive_root: pathlib.Path):
 
 def _call_light(drive_root: pathlib.Path, messages: List[Dict[str, Any]], *, client: Any = None,
                 cache_affinity: str = "") -> Tuple[str, str]:
-    """One accounted light call. Returns ``(content, stop)``; raises on transport failure."""
+    """One accounted call; one deadline covers preparation, slot waiting and recovery.
+
+    Returns ``(content, stop)``; raises on transport failure so the batch can requeue.
+    """
     from ouroboros import model_concurrency
     from ouroboros.llm import LLMClient
     from ouroboros.llm_observability import chat_observed
@@ -211,7 +214,7 @@ def _call_light(drive_root: pathlib.Path, messages: List[Dict[str, Any]], *, cli
     if not available:
         raise LanguageResolveError("language_needs_model", "no credentialed model is configured for the light slot", 400)
     deadline_ts = time.time() + _timeout_sec()
-    with model_concurrency.model_call_slot(model, use_local, deadline_ts=deadline_ts):
+    with model_concurrency.model_call_scope(model, use_local, deadline_ts=deadline_ts):
         remaining = deadline_ts - time.time()
         if remaining <= 0:
             raise TimeoutError("the translation ceiling was spent waiting for a model slot")
@@ -220,6 +223,7 @@ def _call_light(drive_root: pathlib.Path, messages: List[Dict[str, Any]], *, cli
                 client or LLMClient(), drive_root=drive_root, task_id=SYSTEM_TASK_ID, call_type=USAGE_CATEGORY,
                 messages=messages, model=model, tools=None, reasoning_effort="low", model_role="light",
                 max_tokens=UI_TRANSLATION_MAX_TOKENS, use_local=use_local, timeout=remaining,
+                caller_deadline_ts=deadline_ts,
                 response_format={"type": "json_object"}, cache_affinity=cache_affinity)
     body_error = (usage or {}).get("provider_error")
     if isinstance(body_error, dict) and body_error:

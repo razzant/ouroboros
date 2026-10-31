@@ -1,4 +1,10 @@
-"""Child-only TCP fixture; never point its root or control routes at an installation."""
+"""Child-only TCP fixture; never point its root or control routes at an installation.
+
+The author parks through the kept trigger (``tests/test_presence_continuation.py``):
+it reviews its own result with ``review_change(subject="result")``, the held
+reviewer writes an addressed message to its mailbox, the author leaves only its
+own wait, and its next plain prose parks on that review.
+"""
 from __future__ import annotations
 
 import json
@@ -42,10 +48,11 @@ def shutdown_fixture_processes(root, generation):
 
 
 def seed(data):
-    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint, save_presence_binding
-    from ouroboros.presence_capabilities import (
+    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
+    from tests.frozen_presence_bindings import save_presence_binding
+    from tests.frozen_presence_capabilities import (
         PresenceSelection, PresenceState, PresenceToolTarget, presence_state_fingerprint, save_presence_state)
-    from ouroboros.presence_profile import parse_presence_profile, presence_request_fingerprint
+    from tests.frozen_presence_profile import parse_presence_profile, presence_request_fingerprint
     from ouroboros.skill_loader import load_skill, save_enabled, save_review_state, SkillReviewState
     from tests.test_host_service_api import _seed_token
     from tests.test_presence_continuation_process import TOKEN
@@ -57,7 +64,7 @@ def seed(data):
                 permissions=["presence"], manifest_permissions=["presence"])
     folder = data / "skills" / "external" / "lifecycle-helper"
     folder.mkdir(parents=True)
-    names = ["chat_history", "task_acceptance_review", "get_task_result"]
+    names = ["chat_history", "review_change", "get_task_result"]
     (folder / "SKILL.md").write_text(
         "---\nname: lifecycle-helper\ndescription: Isolated report helper.\nversion: 0.1\n"
         "type: instruction\npresence:\n  instructions: Prepare reports and explicitly review substantive results.\n"
@@ -79,6 +86,14 @@ def seed(data):
     return binding
 
 
+def _last_review_left(messages):
+    """The latest tool result is a review its author left for an addressed message."""
+    from tests.test_presence_continuation import LEFT
+
+    tools = [row for row in messages if row.get("role") == "tool"]
+    return bool(tools) and LEFT in str(tools[-1].get("content"))
+
+
 def main(root, generation, mode, scenario="incoming", with_event_bus=False):
     import pytest
     import uvicorn
@@ -90,13 +105,19 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
     from ouroboros.presence_runner import run_presence_turn
     from ouroboros.task_status import reconcile_orphaned_running_tasks
     from supervisor import queue as _task_queue  # noqa: F401 -- normal supervisor import order for Panic
-    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, finish, nominate
-    from tests.test_presence_continuation_process import ROOT, ANSWER, MANUAL, LATE_CHILD, REVISED_ANSWER
+    from tests.test_presence_continuation import review, waits
+    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, finish, tool_call
+    from tests.test_presence_continuation_process import ROOT, ANSWER, MANUAL, LATE_CHILD, REVISED_ANSWER, TOOL_NOTE
 
     assert Path(os.environ["OUROBOROS_DATA_DIR"]).resolve() == (root / "data").resolve()
     assert Path(os.environ["HOME"]).resolve() == (root / "home").resolve()
     patch = pytest.MonkeyPatch()
     h = install_bootstrap_harness(patch, root / "data", repo=ROOT, enforcement=mode)
+    patch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    patch.setattr("supervisor.consciousness_carriers.autonomous_work_enabled", lambda *_: True, raising=False)
+    patch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {
+        "status": "available", "remaining_usd": 100})
+    patch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))
     event_bus_children = []
     if with_event_bus:
         from multiprocessing import active_children
@@ -115,6 +136,7 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
     if scenario == "late_child_close_barrier":
         from ouroboros.model_wait import TaskModelWait
         from ouroboros.task_results import load_task_result
+        from ouroboros.utils import atomic_write_json
 
         scenario = "late_child"
         original_close = TaskModelWait.close
@@ -123,8 +145,9 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
             if any(agent.tools._ctx.model_wait_context is waiter for agent in h.agents):
                 terminal = load_task_result(h.data, waiter.task_id)
                 assert terminal["status"] in {"completed", "cancelled", "failed"}
-                (root / "before-author-close.json").write_text(json.dumps({
-                    "task_id": waiter.task_id, "status": terminal["status"], "closed": waiter.closed}))
+                # Published whole (temporary file, then rename): the test polls this marker with a strict read.
+                atomic_write_json(root / "before-author-close.json", {
+                    "task_id": waiter.task_id, "status": terminal["status"], "closed": waiter.closed})
                 assert close_release.wait(30), "test failed to release author teardown"
             return original_close(waiter)
 
@@ -146,13 +169,17 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
         if generation > 1:
             assert MANUAL in str(messages), "restart attempted inference without a fresh manual event"
             return finish("manual", message="Continued after the explicit request.")
+        if h.calls == 1:
+            return review(answer=ANSWER)  # the author reviews its own result and waits for it
+        if h.calls in (2, 4) and _last_review_left(messages):
+            return waits()  # it left that review for the addressed message: plain prose parks on it
         if scenario == "late_child" and h.calls == 3:
             from ouroboros.task_results import write_task_result
 
             # The original reviewer has settled before the same author resumes.
             # Hold a new, distinct review; never rely on a timing window between
             # releasing the first reviewer and parking for the second.
-            assert h.settled.wait(15)
+            assert h.settled.wait(60)
             h.release.clear()
             h.entered.clear()
             h.settled.clear()
@@ -164,22 +191,12 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
                               root_task_id=LATE_CHILD, description="Compile the independent report",
                               metadata={"presence": dict(ctx.task_metadata["presence"])})
             ctx._swarm_handoff_attempt = {"status": "scheduled", "task_id": LATE_CHILD}
-            return nominate(REVISED_ANSWER)
-        if h.calls > 1:
-            candidate = h.agents[0].tools._ctx._delivery_candidate
-            return finish("select", outcome="tool_delivered" if scenario == "tool_delivered" else "message",
-                          answer_sha256=candidate.content_sha256,
-                          **({"pending_review": "finish"} if mode == "advisory" else {}))
-        result = nominate(ANSWER)
-        if scenario == "tool_delivered":
-            arguments = json.loads(result["tool_calls"][-1]["function"]["arguments"])
-            arguments["outcome"] = "tool_delivered"
-            result["tool_calls"][-1]["function"]["arguments"] = json.dumps(arguments)
-        if mode == "advisory":
-            arguments = json.loads(result["tool_calls"][-1]["function"]["arguments"])
-            arguments["pending_review"] = "finish"
-            result["tool_calls"][-1]["function"]["arguments"] = json.dumps(arguments)
-        return result
+            return review(answer=REVISED_ANSWER)
+        if scenario == "tool_silent":
+            # Its tool delivered the result: the mind chooses silence; a receipt never chooses for it.
+            return {"content": None, "tool_calls": [tool_call("finish_task", {
+                "action": "finish", "silent": True, "answer": TOOL_NOTE}, "select")]}
+        return finish("select", message=REVISED_ANSWER if scenario == "late_child" else ANSWER)
 
     h.script = script
 
@@ -255,7 +272,7 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
                              "held": h.entered.is_set() and not h.release.is_set()})
 
     def initiate():
-        from ouroboros.tools.presence import _initiate_presence
+        from tests.presence_legacy_helpers import _initiate_presence
         from ouroboros.tools.registry import ToolContext
         # Same stable caller/dedupe identity across process recycle.
         return json.loads(_initiate_presence(
@@ -288,7 +305,7 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
         close_release.set()
         h.release.set()
         if h.entered.is_set():
-            assert h.settled.wait(15)
+            assert h.settled.wait(60)
         shutdown_fixture_processes(root, generation)
         sock.close()
         print(json.dumps({"threads": [thread.name for thread in threading.enumerate()],

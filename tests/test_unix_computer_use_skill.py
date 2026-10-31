@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -11,10 +14,21 @@ PLUGIN_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "plugin.py"
 SKILL_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "SKILL.md"
 
 
+_PROBE_HEADS = (("lsappinfo",), ("xdotool", "getactivewindow"), ("wmctrl", "-lpxG"))
+
+
+def _inputs(captured):
+    """The input argvs a test pins; the skill's own place reads (who is in front, the native helper) sit beside them."""
+    return [argv for argv in captured
+            if not any(tuple(argv[:len(head)]) == head for head in _PROBE_HEADS)
+            and not any(str(part).endswith("macos_native.py") for part in argv)]
+
+
 def _load_plugin():
-    spec = importlib.util.spec_from_file_location("unix_computer_use_plugin", PLUGIN_PATH)
+    spec = importlib.util.spec_from_file_location("unix_computer_use_plugin", PLUGIN_PATH, submodule_search_locations=[str(PLUGIN_PATH.parent)])
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -91,7 +105,7 @@ def test_unix_computer_use_reports_missing_backends(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_platform", lambda: "linux")
     monkeypatch.setattr(module, "_which", lambda _name: "")
 
-    result = json.loads(api.tools["click"]["handler"](x=1, y=2))
+    result = json.loads(api.tools["click"]["handler"](x=1, y=2, raw=True))
 
     assert result["ok"] is False
     assert "no supported click backend" in result["error"]
@@ -106,14 +120,17 @@ def test_unix_computer_use_window_list_uses_linux_backend(tmp_path, monkeypatch)
     monkeypatch.setattr(module, "_which", lambda name: "/usr/bin/wmctrl" if name == "wmctrl" else "")
 
     def fake_run(cmd, **_kwargs):
-        assert cmd == ["wmctrl", "-l"]
-        return SimpleNamespace(returncode=0, stdout="0x001 host Browser\n", stderr="")
+        assert cmd == ["wmctrl", "-lpxG"], cmd
+        return SimpleNamespace(returncode=0, stdout="0x001  0 4242 10 20 800 600 navigator.Firefox host Browser - Docs\n", stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     result = json.loads(api.tools["window_list"]["handler"]())
 
-    assert result == {"ok": True, "platform": "linux", "windows": ["0x001 host Browser"]}
+    assert result["ok"] is True and result["platform"] == "linux"
+    assert result["windows"] == [{"window_id": "0x001", "desktop": 0, "pid": 4242, "bounds": [10, 20, 800, 600],
+                                  "app": "navigator.Firefox", "title": "Browser - Docs"}]
+    assert result["frontmost"] is None and "xdotool" in result["front_unread"], "no xdotool here: who is in front is unknown, not invented"
 
 
 # --- NW-5: macOS-branch coverage (previously only the linux path was tested) ---
@@ -143,23 +160,25 @@ def test_macos_scroll_is_honest_unsupported_not_fake_wait(tmp_path, monkeypatch)
 def test_macos_right_click_uses_rc(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    json.loads(impl.click(x=10, y=20, button="right"))
+    json.loads(impl.click(x=10, y=20, button="right", raw=True))
     assert captured and captured[-1] == ["cliclick", "rc:10,20"]
 
 
 def test_macos_middle_click_honest_unsupported(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    result = json.loads(impl.click(x=10, y=20, button="middle"))
+    result = json.loads(impl.click(x=10, y=20, button="middle", raw=True))
     assert result["ok"] is False and "middle" in result["error"]
 
 
-def test_negative_coordinates_rejected(tmp_path, monkeypatch):
+def test_negative_coordinates_are_absolute_points_on_macos(tmp_path, monkeypatch):
+    """A display left of or above the main one has negative logical coordinates: cliclick takes them with the `=`
+    prefix (a bare `-` would be a move relative to the pointer), so they are valid input here, not an error."""
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    assert json.loads(impl.click(x=-5, y=20))["ok"] is False
-    assert json.loads(impl.move(x=10, y=-1))["ok"] is False
-    assert captured == []  # no cliclick issued for invalid coords
+    assert json.loads(impl.click(x=-5, y=20, raw=True))["ok"] is True
+    assert json.loads(impl.move(x=10, y=-1, raw=True))["ok"] is True
+    assert _inputs(captured) == [["cliclick", "c:=-5,20"], ["cliclick", "m:10,=-1"]]
 
 
 def test_macos_key_combo_uses_modifier_down_up(tmp_path, monkeypatch):
@@ -167,7 +186,7 @@ def test_macos_key_combo_uses_modifier_down_up(tmp_path, monkeypatch):
     impl = _macos_impl(tmp_path, monkeypatch, captured)
     json.loads(impl.key(keys="command+s"))
     # kd:cmd t:s ku:cmd (modifier held, key tapped, modifier released).
-    assert captured[-1] == ["cliclick", "kd:cmd", "t:s", "ku:cmd"]
+    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd", "t:s", "ku:cmd"]
 
 
 def test_capabilities_reports_permission_state_unverified(tmp_path, monkeypatch):
@@ -189,49 +208,52 @@ def test_new_actions_registered(tmp_path):
     } <= set(api.tools)
 
 
-def test_screenshot_transform_remaps_click_coordinates(tmp_path, monkeypatch):
-    """Coordinate contract: input tools consume the LAST screenshot's image
-    space and remap through the stored transform; raw=true bypasses."""
+def test_observation_transform_remaps_click_coordinates(tmp_path, monkeypatch):
+    """Input tools remap through the named screenshot's stored transform; raw=true bypasses."""
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
     # Simulate a stored transform: image 1280x800 -> input 2560x1600 (sx=sy=2).
+    geometry = {"x": 0, "y": 0, "w": 2560, "h": 1600}
+    monkeypatch.setattr(impl, "_display_geometry", lambda _tf, **_kw: geometry)
     impl._save_transform({
         "sx": 2.0, "sy": 2.0, "image_w": 1280, "image_h": 800,
         "input_w": 2560, "input_h": 1600, "platform": "macos",
         "session": "native", "approx": False, "ts": 1.0,
+        "observation_id": "shot-1", "display_geometry": geometry,
+        "connection_identity": impl._connection_identity(), "backend": impl._active_backend_name(),
     })
-    result = json.loads(impl.click(x=100, y=50))
+    result = json.loads(impl.click(x=100, y=50, observation_id="shot-1"))
     assert result["ok"] is True
-    assert captured[-1] == ["cliclick", "c:200,100"]
+    assert _inputs(captured)[-1] == ["cliclick", "c:200,100"]
     assert result["coordinate_space"] == "screenshot"
 
     result_raw = json.loads(impl.click(x=100, y=50, raw=True))
     assert result_raw["ok"] is True
-    assert captured[-1] == ["cliclick", "c:100,50"]
+    assert _inputs(captured)[-1] == ["cliclick", "c:100,50"]
     assert result_raw["coordinate_space"] == "raw"
 
 
 def test_macos_drag_uses_dd_dm_du(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    result = json.loads(impl.left_click_drag(start_x=10, start_y=20, end_x=30, end_y=40))
+    result = json.loads(impl.left_click_drag(start_x=10, start_y=20, end_x=30, end_y=40, raw=True))
     assert result["ok"] is True
-    assert captured[-1] == ["cliclick", "dd:10,20", "dm:30,40", "du:30,40"]
+    assert _inputs(captured)[-1] == ["cliclick", "dd:10,20", "dm:30,40", "du:30,40"]
 
 
 def test_macos_triple_click_uses_tc(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    json.loads(impl.click(x=10, y=20, triple=True))
-    assert captured[-1] == ["cliclick", "tc:10,20"]
+    json.loads(impl.click(x=10, y=20, triple=True, raw=True))
+    assert _inputs(captured)[-1] == ["cliclick", "tc:10,20"]
 
 
 def test_macos_mouse_down_left_only(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    assert json.loads(impl.mouse_down(x=5, y=6))["ok"] is True
-    assert captured[-1] == ["cliclick", "dd:5,6"]
-    result = json.loads(impl.mouse_down(x=5, y=6, button="right"))
+    assert json.loads(impl.mouse_down(x=5, y=6, raw=True))["ok"] is True
+    assert _inputs(captured)[-1] == ["cliclick", "dd:5,6"]
+    result = json.loads(impl.mouse_down(x=5, y=6, button="right", raw=True))
     assert result["ok"] is False and "left button" in result["error"]
 
 
@@ -253,8 +275,8 @@ def test_wayland_click_routes_through_ydotool(tmp_path, monkeypatch):
 
     result = json.loads(impl.click(x=10, y=20, raw=True))
     assert result["ok"] is True
-    assert captured[0][:2] == ["ydotool", "mousemove"]
-    assert captured[-1][:2] == ["ydotool", "click"]
+    assert _inputs(captured)[0][:2] == ["ydotool", "mousemove"]
+    assert _inputs(captured)[-1][:2] == ["ydotool", "click"]
     # xdotool must never be invoked on a Wayland session.
     assert not any(cmd[0] == "xdotool" for cmd in captured)
 
@@ -278,9 +300,9 @@ def test_wayland_capabilities_report_session_and_missing_ydotool(tmp_path, monke
     assert json.loads(impl.hold_key(keys="ctrl"))["ok"] is False
 
 
-def test_macos_multi_display_clean_ratio_still_flags_approx(tmp_path, monkeypatch):
+def test_macos_multi_display_clean_ratio_is_capture_only(tmp_path, monkeypatch):
     """Two identical Retina displays produce a deceptively clean 0.5 ratio
-    (logical union vs main-display capture) — must still flag approx."""
+    (logical union vs main-display capture) and no sound mapped observation."""
     module = _load_plugin()
     monkeypatch.setattr(module, "_platform", lambda: "macos")
     monkeypatch.setattr(
@@ -292,14 +314,18 @@ def test_macos_multi_display_clean_ratio_still_flags_approx(tmp_path, monkeypatc
     monkeypatch.setattr(module, "_png_dimensions", lambda _p: (2560, 1440))
 
     def fake_run(cmd, **_kwargs):
-        Path(cmd[-1]).write_bytes(b"png")
+        if cmd[0] == "screencapture":  # only the capture writes a file; the native helper answers nothing here
+            Path(cmd[-1]).write_bytes(b"png")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     impl = module._ComputerUse(_API(tmp_path))
     result = json.loads(impl.screenshot(job_id="multi"))
     assert result["ok"] is True
-    assert result["coord_transform"]["approx"] is True
+    assert result["mapped_input_available"] is False
+    assert "observation_id" not in result and "coord_transform" not in result
+    assert result["input_geometry_evidence"] == "finder_desktop_union"
+    assert "Finder bounds may span multiple displays" in result["coordinate_note"]
 
 
 def test_linux_type_text_terminates_option_parsing(tmp_path, monkeypatch):
@@ -320,13 +346,11 @@ def test_linux_type_text_terminates_option_parsing(tmp_path, monkeypatch):
     impl = module._ComputerUse(_API(tmp_path))
 
     json.loads(impl.type_text(text="--help"))
-    assert captured[-1] == ["xdotool", "type", "--delay", "0", "--", "--help"]
+    assert _inputs(captured)[-1] == ["xdotool", "type", "--delay", "0", "--", "--help"]
 
 
-def test_macos_screenshot_without_logical_size_flags_approx(tmp_path, monkeypatch):
-    """When the logical desktop size is unavailable (Automation TCC denied),
-    the transform must be flagged approximate with an honest warning, not a
-    silent 2x-wrong pixel mapping."""
+def test_macos_screenshot_without_logical_size_is_capture_only(tmp_path, monkeypatch):
+    """Unknown logical size cannot create a usable pixel-to-point observation."""
     module = _load_plugin()
     monkeypatch.setattr(module, "_platform", lambda: "macos")
     monkeypatch.setattr(
@@ -337,19 +361,64 @@ def test_macos_screenshot_without_logical_size_flags_approx(tmp_path, monkeypatc
     monkeypatch.setattr(module, "_png_dimensions", lambda _p: (800, 600))
 
     def fake_run(cmd, **_kwargs):
-        Path(cmd[-1]).write_bytes(b"png")
+        if cmd[0] == "screencapture":  # only the capture writes a file; the native helper answers nothing here
+            Path(cmd[-1]).write_bytes(b"png")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     impl = module._ComputerUse(_API(tmp_path))
     result = json.loads(impl.screenshot(job_id="tcc"))
     assert result["ok"] is True
-    assert result["coord_transform"]["approx"] is True
-    assert "WARNING" in result["coordinate_note"]
+    assert result["mapped_input_available"] is False
+    assert "observation_id" not in result and "coord_transform" not in result
+    assert result["input_geometry_evidence"] == "unavailable" and result["input_width"] is None
+    assert "Capture only" in result["coordinate_note"]
+
+
+@pytest.mark.parametrize("backend", ["local", "remote"])
+@pytest.mark.parametrize("failure", ["write", "lock"])
+def test_screenshot_save_failure_keeps_image_without_claiming_observation(tmp_path, monkeypatch, backend, failure):
+    from PIL import Image
+    from ouroboros import utils
+
+    module = _load_plugin()
+    impl = module._ComputerUse(_API(tmp_path))
+    if failure == "write":
+        def deny_write(*_args):
+            raise OSError("disk full")
+        monkeypatch.setattr(impl, "_atomic_write", deny_write)
+    else:
+        def deny_lock(*_args):
+            raise TimeoutError("lock busy")
+        monkeypatch.setattr(utils, "json_update_lock", deny_lock)
+    if backend == "local":
+        monkeypatch.setattr(module, "_platform", lambda: "linux")
+        monkeypatch.setattr(module, "_session_type", lambda: "x11")
+        monkeypatch.setattr(module, "_which", lambda name: "/fake/gnome-screenshot" if name == "gnome-screenshot" else "")
+
+        def capture(cmd, **_kwargs):
+            Image.new("RGB", (100, 80)).save(cmd[-1])
+            return 0, "", ""
+
+        monkeypatch.setattr(module, "_run", capture)
+        result = json.loads(impl.screenshot(job_id="save-failure"))
+    else:
+        raw = tmp_path / "remote.png"
+        Image.new("RGB", (100, 80)).save(raw)
+        result = json.loads(impl._remote_screenshot_result(
+            backend="osworld_http", raw_path=raw, max_width=1280, max_height=800,
+            input_w=100, input_h=80))
+    assert result["ok"] is True and Path(result["path"]).is_file()
+    assert result["auto_attach_image"] == result["path"]
+    assert result["mapped_input_available"] is False
+    assert "observation_id" not in result and "coord_transform" not in result
+    assert ("disk full" if failure == "write" else "lock busy") in result["coordinate_note"]
+    assert impl._load_transform() == {}
 
 
 def test_key_alias_maps_to_x11_names(tmp_path, monkeypatch):
     module = _load_plugin()
+    monkeypatch.setattr(module._ComputerUse, "_x11_keysym", staticmethod(lambda _name: None))
     monkeypatch.setattr(module, "_platform", lambda: "linux")
     monkeypatch.setattr(module, "_session_type", lambda: "x11")
     monkeypatch.setattr(
@@ -365,9 +434,9 @@ def test_key_alias_maps_to_x11_names(tmp_path, monkeypatch):
     impl = module._ComputerUse(_API(tmp_path))
 
     json.loads(impl.key(keys="ctrl+pagedown"))
-    assert captured[-1] == ["xdotool", "key", "ctrl+Page_Down"]
+    assert _inputs(captured)[-1] == ["xdotool", "key", "ctrl+Page_Down"]
     json.loads(impl.key(keys="cmd+enter"))
-    assert captured[-1] == ["xdotool", "key", "super+Return"]
+    assert _inputs(captured)[-1] == ["xdotool", "key", "super+Return"]
 
 
 def test_wait_bounded(tmp_path, monkeypatch):
@@ -392,11 +461,11 @@ def test_macos_hold_key_modifier_combo_and_honest_unsupported(tmp_path, monkeypa
 
     result = json.loads(impl.hold_key(keys="cmd", duration_ms=500))
     assert result["ok"] is True
-    assert captured[-1] == ["cliclick", "kd:cmd", "w:500", "ku:cmd"]
+    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd", "w:500", "ku:cmd"]
 
     result = json.loads(impl.hold_key(keys="cmd+shift", duration_ms=200))
     assert result["ok"] is True
-    assert captured[-1] == ["cliclick", "kd:cmd,shift", "w:200", "ku:cmd,shift"]
+    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd,shift", "w:200", "ku:cmd,shift"]
 
     before = list(captured)
     result = json.loads(impl.hold_key(keys="a"))
@@ -457,15 +526,16 @@ def test_wayland_drag_and_press_use_mask_codes(tmp_path, monkeypatch):
 
     captured.clear()
     json.loads(impl.mouse_down(x=5, y=6, button="right", raw=True))
-    assert captured[-1] == ["ydotool", "click", "0x41"]
+    assert _inputs(captured)[-1] == ["ydotool", "click", "0x41"]
     json.loads(impl.mouse_up(button="middle"))
-    assert captured[-1] == ["ydotool", "click", "0x82"]
+    assert _inputs(captured)[-1] == ["ydotool", "click", "0x82"]
 
 
 def test_x11_function_keys_and_case_preserved(tmp_path, monkeypatch):
     """B-fix: f5 maps to F5 (X11 keysyms are case-sensitive); unknown
     multi-char tokens keep their original case (XF86AudioPlay)."""
     module = _load_plugin()
+    monkeypatch.setattr(module._ComputerUse, "_x11_keysym", staticmethod(lambda _name: None))
     monkeypatch.setattr(module, "_platform", lambda: "linux")
     monkeypatch.setattr(module, "_session_type", lambda: "x11")
     monkeypatch.setattr(
@@ -481,13 +551,13 @@ def test_x11_function_keys_and_case_preserved(tmp_path, monkeypatch):
     impl = module._ComputerUse(_API(tmp_path))
 
     json.loads(impl.key(keys="F5"))
-    assert captured[-1] == ["xdotool", "key", "F5"]
+    assert _inputs(captured)[-1] == ["xdotool", "key", "F5"]
     json.loads(impl.key(keys="ctrl+f11"))
-    assert captured[-1] == ["xdotool", "key", "ctrl+F11"]
+    assert _inputs(captured)[-1] == ["xdotool", "key", "ctrl+F11"]
     json.loads(impl.key(keys="XF86AudioPlay"))
-    assert captured[-1] == ["xdotool", "key", "XF86AudioPlay"]
+    assert _inputs(captured)[-1] == ["xdotool", "key", "XF86AudioPlay"]
     json.loads(impl.key(keys="super+l"))
-    assert captured[-1] == ["xdotool", "key", "super+l"]
+    assert _inputs(captured)[-1] == ["xdotool", "key", "super+l"]
     # hold_key shares the same case preservation (keydown path).
     import time as _time
     monkeypatch.setattr(_time, "sleep", lambda _s: None)
@@ -497,32 +567,52 @@ def test_x11_function_keys_and_case_preserved(tmp_path, monkeypatch):
 
 
 def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
+    """macOS: the frontmost pid comes from lsappinfo, the bounded walk from the native helper; marks keep
+    input-space centres and the receipt names every cut."""
     module = _load_plugin()
     monkeypatch.setattr(module, "_platform", lambda: "macos")
-    monkeypatch.setattr(
-        module, "_which",
-        lambda name: "/usr/bin/osascript" if name == "osascript" else "",
-    )
-    ax_output = (
-        "PROC\tSafari\nWIN\tStart Page\n"
-        "EL\tAXButton\tReload\t100\t50\t30\t20\n"
-        "EL\tAXTextField\tAddress\t200\t50\t400\t24\n"
-    )
+    monkeypatch.setattr(module, "_which", lambda name: f"/usr/bin/{name}" if name in ("lsappinfo",) else "")
+    helper = json.dumps({"ok": True, "pid": 77, "root": "AXFocusedWindow", "window": "Start Page", "visited": 3,
+                         "truncated": True, "truncated_by": ["max_nodes"], "errors": {}, "elapsed_ms": 40,
+                         "nodes": [{"id": 1, "depth": 0, "role": "Window", "label": "Start Page", "x": 0, "y": 0, "w": 800, "h": 600},
+                                   {"id": 2, "depth": 1, "role": "Button", "label": "Reload", "x": 100, "y": 50, "w": 30, "h": 20},
+                                   {"id": 3, "depth": 1, "role": "TextField", "label": "Address", "x": 200, "y": 50, "w": 400, "h": 24}],
+                         "marks": [{"id": 1, "role": "Button", "title": "Reload", "center_x": 115, "center_y": 60, "x": 100, "y": 50, "w": 30, "h": 20},
+                                   {"id": 2, "role": "TextField", "title": "Address", "center_x": 400, "center_y": 62, "x": 200, "y": 50, "w": 400, "h": 24}],
+                         "limits": {"max_nodes": 3, "timeout_ms": 3000}})
+    calls = []
 
     def fake_run(cmd, *a, **k):
-        return module.subprocess.CompletedProcess(cmd, 0, ax_output, "")
+        calls.append(list(cmd))
+        if cmd[:2] == ["lsappinfo", "front"]:
+            return module.subprocess.CompletedProcess(cmd, 0, "ASN:0x0-0x1:\n", "")
+        if cmd[:2] == ["lsappinfo", "info"]:
+            return module.subprocess.CompletedProcess(cmd, 0, '"pid"=77\n"CFBundleIdentifier"="com.apple.Safari"\n"LSDisplayName"="Safari"\n', "")
+        if any(str(part).endswith("macos_native.py") for part in cmd):
+            assert cmd[cmd.index("tree") + 1:] == ["77", "3", "3000", "window", "false"], cmd
+            return module.subprocess.CompletedProcess(cmd, 0, helper + "\n", "")
+        raise AssertionError(cmd)
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
-    result = json.loads(impl.ax_tree())
+    result = json.loads(impl.ax_tree(max_nodes=3))
     assert result["ok"] is True
-    assert result["frontmost"] == "Safari"
-    assert result["window"] == "Start Page"
-    assert len(result["marks"]) == 2
+    assert result["app"] == {"pid": 77, "app_id": "com.apple.Safari", "app": "Safari"}
+    assert result["window"] == "Start Page" and result["truncated_by"] == ["max_nodes"]
+    assert len(result["marks"]) == 2 and len(result["nodes"]) == 3
     first = result["marks"][0]
     assert first["id"] == 1 and first["role"] == "Button" and first["title"] == "Reload"
     assert first["center_x"] == 115 and first["center_y"] == 60
     assert "raw=true" in result["coordinate_note"]
+
+    # A failed read is a failure with its reason, never a process list wearing the tool's name.
+    def failing(cmd, *a, **k):
+        if any(str(part).endswith("macos_native.py") for part in cmd):
+            return module.subprocess.CompletedProcess(cmd, 1, json.dumps({"ok": False, "reason": "accessibility_untrusted", "pid": 77}), "")
+        return fake_run(cmd, *a, **k)
+    monkeypatch.setattr(module.subprocess, "run", failing)
+    degraded = json.loads(impl.ax_tree())
+    assert degraded["ok"] is False and degraded["reason"] == "accessibility_untrusted" and "marks" not in degraded
 
 
 def test_coerce_point_normalizes_the_shapes_models_actually_emit():
@@ -627,9 +717,9 @@ def test_pair_in_x_recovery_works_at_the_handler_boundary(tmp_path, monkeypatch)
         return d["error"]
 
     # Pair-in-x with the y omitted: must reach backend selection on every tool.
-    assert "backend" in outcome(impl.mouse_down(x="663, 500"))
-    assert "backend" in outcome(impl.mouse_up(x="663, 500"))
-    assert "backend" in outcome(impl.left_click_drag(start_x="10, 20", end_x="30, 40"))
+    assert "backend" in outcome(impl.mouse_down(x="663, 500", raw=True))
+    assert "backend" in outcome(impl.mouse_up(x="663, 500", raw=True))
+    assert "backend" in outcome(impl.left_click_drag(start_x="10, 20", end_x="30, 40", raw=True))
     # No coordinates at all stays the legal "press where the pointer is" form.
     assert "backend" in outcome(impl.mouse_down())
     assert "backend" in outcome(impl.mouse_down(x=-1, y=-1))
@@ -713,7 +803,7 @@ def test_angle_brackets_route_through_the_clipboard_not_keystrokes(tmp_path, mon
                         lambda self: ("osw", {"backend": "osworld_http"}))
     sent = []
     monkeypatch.setattr(plugin._ComputerUse, "_remote_pyautogui",
-                        lambda self, conn, code, note=None, timeout=None:
+                        lambda self, conn, code, note=None, timeout=None, target="", **kw:
                             sent.append((code, note)) or json.dumps({"ok": True}))
 
     impl.type_text(text='<?xml version="1.0"?>')
@@ -743,10 +833,12 @@ def test_key_accepts_a_whitespace_separated_sequence_of_combos(tmp_path, monkeyp
     monkeypatch.setattr(plugin._ComputerUse, "_is_remote", lambda self: True)
     monkeypatch.setattr(plugin._ComputerUse, "_active_connection",
                         lambda self: ("osw", {"backend": "osworld_http"}))
+    from tests.test_unix_computer_use_safety_contract import guest_key_validation
+    impl._osworld_execute = lambda conn, command, **kw: guest_key_validation(command[-1])
     codes = []
-    monkeypatch.setattr(plugin._ComputerUse, "_remote_pyautogui",
-                        lambda self, conn, code, note=None, timeout=None:
-                            codes.append(code) or json.dumps({"ok": True}))
+    monkeypatch.setattr(plugin._ComputerUse, "_remote_input",
+                        lambda self, conn, code, note=None, timeout=None, target="", **kw:
+                            codes.append(code) or {"ok": True})
 
     out = json.loads(impl.key(keys="shift+Right shift+Right shift+Right"))
     assert out["ok"] is True and out["steps"] == 3, out
@@ -757,8 +849,8 @@ def test_key_accepts_a_whitespace_separated_sequence_of_combos(tmp_path, monkeyp
     assert all("press('left')" in c for c in codes), codes
     # A failing step stops the sequence and says which one.
     codes.clear()
-    monkeypatch.setattr(plugin._ComputerUse, "_remote_pyautogui",
-                        lambda self, conn, code, note=None, timeout=None: json.dumps({"ok": True}))
+    monkeypatch.setattr(plugin._ComputerUse, "_remote_input",
+                        lambda self, conn, code, note=None, timeout=None, target="", **kw: {"ok": True})
     bad = json.loads(impl.key(keys="ctrl+s bogusmod+x"))
     assert bad["ok"] is False and "bogusmod" in bad["error"], bad
 
@@ -781,7 +873,7 @@ def test_multiline_and_long_text_route_through_the_clipboard(tmp_path, monkeypat
                         lambda self: ("osw", {"backend": "osworld_http"}))
     sent = []
     monkeypatch.setattr(plugin._ComputerUse, "_remote_pyautogui",
-                        lambda self, conn, code, note=None, timeout=None:
+                        lambda self, conn, code, note=None, timeout=None, target="", **kw:
                             sent.append((code, note)) or json.dumps({"ok": True}))
 
     impl.type_text(text="para one\npara two")

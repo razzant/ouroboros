@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
-from datetime import datetime
 import json
 from pathlib import Path
 
@@ -20,15 +19,8 @@ WINDOW_FACTS = json.loads((
 
 
 @pytest.mark.parametrize("case", WINDOW_FACTS["cases"], ids=lambda case: case["name"])
-def test_partial_window_evidence_matches_ui_and_uses_only_one_get(monkeypatch, case):
-    from ouroboros import subagent_route_health as health
-
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime.fromisoformat(WINDOW_FACTS["now"].replace("Z", "+00:00"))
-
-    monkeypatch.setattr(health, "datetime", Clock)
+def test_legacy_partial_window_ratios_cannot_certify_scope(monkeypatch, case):
+    # A legacy raw-ratio response cannot establish exact engine availability.
     requests = []
 
     def handler(request):
@@ -42,17 +34,17 @@ def test_partial_window_evidence_matches_ui_and_uses_only_one_get(monkeypatch, c
         gateway._client.close()
         gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler))
         assert _exhausted_window(gateway, "claude", pinned_profile="chosen") == (
-            case["exhausted"], case["resetsAt"])
+            False, "")
     assert requests == [("GET", "/v2/quota")]
 
 
 def test_partial_sibling_preserves_rotation_but_never_rescues_a_spent_pin():
     class Gateway:
-        def quota_state(self):
+        def quota_state(self, **_scope):
             return {"snapshots": [
                 _spent("chosen"),
-                {**_spent("unknown"), "constraints": [{"used_ratio": 1}]},
-            ], "absences": []}
+                {**_spent("unknown"), "constraints": [{"used_ratio": 1}], "availability": {}},
+            ], "absences": [], "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"}}
 
     gateway = Gateway()
     assert _exhausted_window(gateway, "claude") == (False, "")
@@ -66,14 +58,17 @@ def _spent(subject_id: str) -> dict:
         "subject": {"harness": "claude", "subject_id": subject_id},
         "freshness": "fresh",
         "constraints": [{"used_ratio": 1.0, "resets_at": "2099-01-01T00:00:00Z"}],
+        "availability": {"state": "exhausted", "resets_at": "2099-01-01T00:00:00Z"},
     }
 
 
-def test_route_health_contradictory_same_subject_absence_fails_open():
+def test_route_health_same_subject_absence_cannot_mask_a_dated_block():
+    """OB1851: a refresh gap beside the subject's own dated, unexpired block is a
+    constraint on that subject, not an alternative; the block's reset is the recheck."""
     class Gateway:
         reads = 0
 
-        def quota_state(self):
+        def quota_state(self, **_scope):
             self.reads += 1
             return {
                 "snapshots": [_spent("proton4")],
@@ -82,6 +77,7 @@ def test_route_health_contradictory_same_subject_absence_fails_open():
                     "reason": "refresh_failed",
                 }],
                 "refreshed_at": "2026-08-30T00:00:00Z",
+                "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"},
             }
 
         def quota_snapshots(self):  # pragma: no cover - forbidden production path
@@ -91,19 +87,20 @@ def test_route_health_contradictory_same_subject_absence_fails_open():
             raise AssertionError("route health must not perform a second quota read")
 
     gateway = Gateway()
-    assert _exhausted_window(gateway, "claude", pinned_profile="proton4") == (False, "")
+    assert _exhausted_window(gateway, "claude", pinned_profile="proton4") == (True, "2099-01-01T00:00:00Z")
     assert gateway.reads == 1
 
 
 def test_route_health_gap_for_another_subject_keeps_unpinned_route_unknown():
     class Gateway:
-        def quota_state(self):
+        def quota_state(self, **_scope):
             return {
                 "snapshots": [_spent("proton4")],
                 "absences": [{
                     "subject": {"harness": "claude", "subject_id": "proton3"},
                     "reason": "refresh_failed",
                 }],
+                "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"},
             }
 
     assert _exhausted_window(Gateway(), "claude") == (False, "")
@@ -121,6 +118,7 @@ def test_real_gateway_route_health_performs_one_physical_quota_get():
                 "reason": "refresh_failed",
             }],
             "refreshed_at": "2026-08-30T00:00:00Z",
+            "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"},
         })
 
     with ClaudexorGateway(DaemonEndpoint("127.0.0.1", 1, "test-token")) as gateway:
@@ -130,7 +128,7 @@ def test_real_gateway_route_health_performs_one_physical_quota_get():
             transport=httpx.MockTransport(handler),
         )
         assert _exhausted_window(
-            gateway, "claude", pinned_profile="proton4") == (False, "")
+            gateway, "claude", pinned_profile="proton4") == (True, "2099-01-01T00:00:00Z")
 
     assert requests == ["GET /v2/quota"]
 
@@ -139,11 +137,12 @@ def test_same_envelope_sentinel_cannot_mix_with_a_later_quota_epoch():
     class Gateway:
         reads = 0
 
-        def quota_state(self):
+        def quota_state(self, **_scope):
             self.reads += 1
             if self.reads > 1:
                 raise AssertionError("a second epoch was read")
-            return {"snapshots": [_spent("proton4")], "absences": []}
+            return {"snapshots": [_spent("proton4")], "absences": [],
+                    "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"}}
 
     gateway = Gateway()
     assert _exhausted_window(gateway, "claude", pinned_profile="proton4") == (
@@ -156,21 +155,20 @@ def test_route_health_normalizes_malformed_quota_envelope_collections():
         def __init__(self, envelope):
             self.envelope = envelope
 
-        def quota_state(self):
-            return self.envelope
+        def quota_state(self, **_scope):
+            return {**self.envelope,
+                    "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"}}
 
     for absences in (None, 42, "bad", {}):
         assert _exhausted_window(
             Gateway({"snapshots": [_spent("proton4")], "absences": absences}),
             "claude",
             pinned_profile="proton4",
-        ) == (True, "2099-01-01T00:00:00Z")
+        ) == (False, "")
 
-    assert _exhausted_window(
-        Gateway({"snapshots": [_spent("proton4")]}),
-        "claude",
-        pinned_profile="proton4",
-    ) == (True, "2099-01-01T00:00:00Z")
+    # Absences may be omitted by old engines; this remains a positive scoped view.
+    assert _exhausted_window(Gateway({"snapshots": [_spent("proton4")]}),
+                             "claude", pinned_profile="proton4") == (True, "2099-01-01T00:00:00Z")
 
     for snapshots in (None, 42, "bad", {}):
         assert _exhausted_window(
@@ -221,7 +219,7 @@ def test_status_projects_snapshots_and_absences_from_its_single_read(monkeypatch
         def operations(self):
             return {"operations": []}
 
-        def quota_state(self):
+        def quota_state(self, **_scope):
             type(self).quota_reads += 1
             return {
                 "snapshots": [_spent("proton4")],
@@ -254,7 +252,7 @@ def test_status_projects_snapshots_and_absences_from_its_single_read(monkeypatch
     assert "quota_refresh_skipped" not in payload
 
 
-def test_status_treats_absent_or_malformed_additive_quota_fields_as_empty(monkeypatch, tmp_path):
+def test_status_marks_malformed_additive_quota_fields_failed(monkeypatch, tmp_path):
     from ouroboros import claudexor_daemon as owned
     from ouroboros.gateway.claudexor_accounts import _status_payload
     from ouroboros.gateways import claudexor as gateway_module
@@ -274,7 +272,7 @@ def test_status_treats_absent_or_malformed_additive_quota_fields_as_empty(monkey
         def harnesses(self): return []
         def credential_profiles(self): return {"profiles": [], "harnessAccounts": []}
         def operations(self): return {"operations": []}
-        def quota_state(self):
+        def quota_state(self, **_scope):
             return {"snapshots": [], "absences": 42}
 
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: Daemon())
@@ -282,7 +280,7 @@ def test_status_treats_absent_or_malformed_additive_quota_fields_as_empty(monkey
     monkeypatch.setattr(gateway_module, "discover_daemon_at", lambda _path: object())
     monkeypatch.setattr(gateway_module, "ClaudexorGateway", Gateway)
     payload = _status_payload(False)
-    assert payload["reads"]["quota"] == "ok"
+    assert payload["reads"]["quota"] == "failed"
     assert payload["quota_absences"] == []
 
 

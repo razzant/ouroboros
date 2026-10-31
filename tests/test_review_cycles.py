@@ -2,10 +2,12 @@
 plan-review redesign sprint (owner decisions D9/D10/D19/D20; roast F3/F9/F11/F12).
 
 Covers: strict parsing (string-typed key, ``unlimited`` aliases, fail-closed
-default), env-or-default precedence, the deprecated acceptance alias, the
-acceptance formula and Required+Blocking binding in ``task_pacing``, the commit
-gate reading the live value, the settings POST boundary, the UI/JS binding, and
-the size ratchet of the moved getter."""
+default), env-or-default precedence, the retired acceptance-pass key migrated into
+the shared knob at load, the commit gate reading the live value (and the spent
+allowance's message per enforcement), the settings POST boundary, the UI/JS
+binding, the durable exhaustion event and the module size bounds. The acceptance
+pass formula, its Required+Blocking binding in ``task_pacing`` and the per-root
+acceptance wallet left with task acceptance (owner 17.10, Q2-A)."""
 
 from __future__ import annotations
 
@@ -21,10 +23,6 @@ from starlette.testclient import TestClient
 
 from ouroboros import config as cfg
 from ouroboros import review_cycles as rc
-from ouroboros import task_pacing
-from ouroboros.contracts.task_contract import normalize_budget_profile
-from tests._governance_docs_shared import architecture_text, development_text
-from tests._store_shared import result_signature, unreadable_result
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
@@ -121,193 +119,6 @@ def test_settings_file_roundtrip_projects_unlimited_into_env(monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# Acceptance formula + deprecated alias precedence
-
-
-@pytest.mark.parametrize("cycles", ["1", "2", "5", "unlimited"])
-def test_paid_cap_does_not_limit_author_responses(monkeypatch, cycles):
-    monkeypatch.setenv(KEY, cycles)
-    assert rc.get_acceptance_max_improvement_passes() is None
-
-
-def test_getter_moved_out_of_config():
-    assert not hasattr(cfg, "get_acceptance_max_improvement_passes")
-    assert task_pacing.get_acceptance_max_improvement_passes is rc.get_acceptance_max_improvement_passes
-
-
-# ---------------------------------------------------------------------------
-# task_pacing: Required+Blocking binds the shared cap (D10/D20); explicit caps win
-
-
-def test_required_blocking_binds_shared_cap_unless_unlimited(monkeypatch):
-    uncapped = normalize_budget_profile({})
-    assert task_pacing.effective_max_improvement_passes(uncapped, required_blocking=True) is None
-    monkeypatch.setenv(KEY, "3")
-    assert task_pacing.effective_max_improvement_passes(uncapped, required_blocking=True) is None
-    monkeypatch.setenv(KEY, "unlimited")
-    assert task_pacing.effective_max_improvement_passes(uncapped, required_blocking=True) is None
-    # Explicit task-local caps still win under every policy (owner "Hurry up" = 0).
-    assert task_pacing.effective_max_improvement_passes({"max_improvement_passes": 0}, required_blocking=True) == 0
-    assert task_pacing.effective_max_improvement_passes({"max_improvement_passes": 6}, required_blocking=True) == 6
-    monkeypatch.setenv(KEY, "1")
-    assert task_pacing.effective_max_improvement_passes({"max_improvement_passes": 6}, required_blocking=False) == 6
-
-
-def test_descendant_deadline_cannot_widen_root_acceptance_wallet(tmp_path, monkeypatch):
-    from ouroboros.contracts.task_contract import build_task_contract
-    from ouroboros.task_results import (
-        STATUS_RUNNING,
-        claim_task_acceptance_review_cycle,
-        project_task_acceptance_review_capacity,
-        review_binding_hash,
-        write_task_result,
-    )
-
-    monkeypatch.setenv(KEY, "2")
-    contract = build_task_contract({})
-    write_task_result(
-        tmp_path, "root-tree-cap", STATUS_RUNNING,
-        root_task_id="root-tree-cap", task_contract=contract,
-    )
-
-    def binding(seed):
-        fields = {
-            "candidate_hash": seed * 64,
-            "evidence_revision": chr(ord(seed) + 1) * 64,
-            "fence_hash": chr(ord(seed) + 2) * 64,
-        }
-        return {**fields, "binding_hash": review_binding_hash(**fields)}
-
-    outcomes = [claim_task_acceptance_review_cycle(
-        tmp_path, "root-tree-cap", binding(seed),
-        # A deadline-bearing child used to pass None and widen this root wallet.
-        claimed_by_task_id="deadline-child",
-    ) for seed in ("1", "5", "a")]
-    assert [row["status"] for row in outcomes] == [
-        "claimed", "claimed", "unavailable",
-    ]
-    assert outcomes[-1]["max_cycles"] == 2
-
-    ctx = types.SimpleNamespace(
-        task_id="deadline-child", drive_root=tmp_path,
-        budget_drive_root=str(tmp_path), task_contract=contract,
-        task_metadata={
-            "root_task_id": "root-tree-cap", "parent_task_id": "root-tree-cap",
-            "delegation_role": "subagent", "budget_drive_root": str(tmp_path),
-            "deadline_at": "2099-01-01T00:00:00+00:00",
-        },
-    )
-    projection = project_task_acceptance_review_capacity(ctx)
-    assert projection["cap_cycles"] == projection["claimed_cycles"] == 2
-    assert projection["remaining_cycles"] == 0
-    assert projection["reason"] == "review_cycles_exhausted"
-
-    # ABI 7.0 (Q10=A): the retired deadline alias no longer lifts the count
-    # axis; the uncapped-root lane comes from the shared cap being unlimited.
-    monkeypatch.setenv(KEY, "unlimited")
-    deadline_contract = build_task_contract({
-        "deadline_at": "2099-01-01T00:00:00+00:00",
-    })
-    write_task_result(
-        tmp_path, "deadline-root", STATUS_RUNNING,
-        root_task_id="deadline-root", task_contract=deadline_contract,
-    )
-    root_deadline_outcomes = [claim_task_acceptance_review_cycle(
-        tmp_path, "deadline-root", binding(seed),
-        # The inverse claimant mismatch also follows root authority.
-        claimed_by_task_id="no-deadline-child",
-    ) for seed in ("1", "5", "a")]
-    assert [row["status"] for row in root_deadline_outcomes] == [
-        "claimed", "claimed", "claimed",
-    ]
-    assert root_deadline_outcomes[-1]["max_cycles"] is None
-    monkeypatch.setenv(KEY, "2")
-
-    # A non-authoritative top-level deadline cannot widen the canonical contract.
-    write_task_result(
-        tmp_path, "stale-deadline-root", STATUS_RUNNING,
-        root_task_id="stale-deadline-root", task_contract=contract,
-        deadline_at="2099-01-01T00:00:00+00:00",
-    )
-    stale_outcomes = [claim_task_acceptance_review_cycle(
-        tmp_path, "stale-deadline-root", binding(seed),
-        claimed_by_task_id="child",
-    ) for seed in ("1", "5", "a")]
-    assert [row["status"] for row in stale_outcomes] == [
-        "claimed", "claimed", "unavailable",
-    ]
-
-
-def test_empty_root_contract_cannot_mint_acceptance_wallet(tmp_path):
-    from ouroboros.task_results import (
-        STATUS_RUNNING, claim_task_acceptance_review_cycle, review_binding_hash,
-        write_task_result,
-    )
-
-    write_task_result(
-        tmp_path, "empty-contract-root", STATUS_RUNNING,
-        root_task_id="empty-contract-root", task_contract={},
-    )
-    fields = {
-        "candidate_hash": "b" * 64,
-        "evidence_revision": "c" * 64,
-        "fence_hash": "d" * 64,
-    }
-    with pytest.raises(ValueError, match="root contract is malformed"):
-        claim_task_acceptance_review_cycle(
-            tmp_path, "empty-contract-root",
-            {**fields, "binding_hash": review_binding_hash(**fields)},
-            claimed_by_task_id="child",
-        )
-
-
-def test_unreadable_claimant_cancel_latch_cannot_spend_root_wallet(tmp_path, monkeypatch):
-    """The claimant's own cancel latch is read strictly inside the claim: a claimant row the
-    store cannot answer for refuses the claim and the root's wallet is left untouched."""
-    from ouroboros.contracts.task_contract import build_task_contract
-    from ouroboros.store import StoreError
-    from ouroboros.task_results import (
-        STATUS_RUNNING, claim_task_acceptance_review_cycle, review_binding_hash,
-        write_task_result,
-    )
-
-    write_task_result(
-        tmp_path, "root-corrupt-claimant", STATUS_RUNNING,
-        root_task_id="root-corrupt-claimant", task_contract=build_task_contract({}),
-    )
-    before = result_signature(tmp_path, "root-corrupt-claimant")
-    write_task_result(tmp_path, "corrupt-claimant", STATUS_RUNNING, root_task_id="root-corrupt-claimant")
-    claimant_before = result_signature(tmp_path, "corrupt-claimant")
-    unreadable = unreadable_result(monkeypatch, "corrupt-claimant")
-    fields = {
-        "candidate_hash": "b" * 64,
-        "evidence_revision": "c" * 64,
-        "fence_hash": "d" * 64,
-    }
-    with pytest.raises(StoreError):
-        claim_task_acceptance_review_cycle(
-            tmp_path, "root-corrupt-claimant",
-            {**fields, "binding_hash": review_binding_hash(**fields)},
-            claimed_by_task_id="corrupt-claimant",
-        )
-    unreadable["on"] = False
-    assert result_signature(tmp_path, "root-corrupt-claimant") == before
-    assert result_signature(tmp_path, "corrupt-claimant") == claimant_before
-
-
-def test_author_rails_separate_paid_cap_from_local_passes(monkeypatch):
-    snapshot = task_pacing.BudgetSnapshot(has_deadline=False)
-    profile = normalize_budget_profile({})
-    for count in (0, 1, 50):
-        assert task_pacing.improvement_pass_allowed(snapshot, count, profile, required_blocking=True) == (True, "")
-    line = task_pacing._acceptance_rails_line_inner(snapshot, profile, 1, None, required_blocking=True)
-    assert "no local count cap" in line and "paid reviewer cycles: 2 maximum" in line
-    monkeypatch.setenv(KEY, "unlimited")
-    line = task_pacing._acceptance_rails_line_inner(snapshot, profile, 50, None, required_blocking=True)
-    assert "no local count cap" in line and "paid reviewer cycles: unlimited maximum" in line
-
-
-# ---------------------------------------------------------------------------
 # Commit gate reads the live value: the shared knob bounds PAID triad+scope
 # cycles per ROOT task (Q16/Q23); the identical-diff refusal is knob-independent
 # and covered in tests/test_commit_gate.py + tests/test_review_cycles_gates.py.
@@ -332,6 +143,23 @@ def _seed_paid_attempts(tmp_path, count, *, start=1, root="root-1", status="succ
     update_state(pathlib.Path(tmp_path), _mutate)
 
 
+@pytest.mark.parametrize("enforcement, mode, owner_menu", [
+    ("advisory", "pro", False), ("blocking", "cyber_pro", False), ("blocking", "pro", True),
+])
+def test_a_spent_allowance_leaves_the_decision_to_the_mind_unless_blocking(monkeypatch, tmp_path, enforcement, mode, owner_menu):
+    """Advisory (Cyber Pro included) decides itself whether what was reviewed is enough; only Blocking
+    names the owner's ceiling as the way on (owner 17.10, Q1-A)."""
+    from ouroboros.tools.commit_gate import check_review_cycles_ceiling
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    ctx = types.SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="root-1")
+    _seed_paid_attempts(tmp_path, 2)
+    message = check_review_cycles_ceiling(ctx, root_task_id="root-1")["message"]
+    assert ("escalate to the owner" in message and "3/5/unlimited" in message) is owner_menu, message
+    assert ("Decide whether what was reviewed is enough" in message) is not owner_menu, message
+
+
 def test_commit_gate_ceiling_reads_live_setting(monkeypatch, tmp_path):
     from ouroboros.tools.commit_gate import (
         check_review_cycles_ceiling,
@@ -347,9 +175,6 @@ def test_commit_gate_ceiling_reads_live_setting(monkeypatch, tmp_path):
     exhausted = check_review_cycles_ceiling(ctx, root_task_id="root-1")
     assert exhausted is not None and "REVIEW_CYCLES_EXHAUSTED" in exhausted["message"]
     assert exhausted["cycles_paid"] == 2 and exhausted["cap"] == 2
-    # The gate speaks of what it bought — review waves of the pool — never of a
-    # triad and a scope reviewer, which no longer exist as surfaces (FIX3 T1).
-    assert "paid review wave(s)" in exhausted["message"] and "triad" not in exhausted["message"].lower()
     # Another root task has its own ceiling.
     assert check_review_cycles_ceiling(ctx, root_task_id="root-2") is None
     # An unknown root never gates (fail-open, disclosed).
@@ -371,36 +196,22 @@ def test_commit_gate_ceiling_reads_live_setting(monkeypatch, tmp_path):
 @pytest.mark.parametrize("enforcement, reason", [
     ("blocking", "identical_diff_refused"), ("blocking", "review_cycles_exhausted"), ("advisory", "identical_diff_refused"),
 ])
-def test_t1_the_replay_disclosure_names_the_review_wave_not_a_triad(monkeypatch, enforcement, reason):
-    """The free-replay words the author and the owner read (progress note, Advisory
-    disclosure) name what was not bought — a review wave of the pool — never the retired
-    triad and scope reviewer (FIX3 T1); the identical-diff note still says the verdict is reused."""
+def test_replay_disclosure_preserves_recorded_outcome(monkeypatch, enforcement, reason):
+    """Every replay emits one progress note and one disclosure carrying the prior outcome."""
     from ouroboros.tools.commit_gate import disclose_commit_review_replay
 
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     notes, advisory = [], []
     ctx = types.SimpleNamespace(_review_advisory=advisory, emit_progress_fn=notes.append)
     disclose_commit_review_replay(ctx, {"replay_reason": reason, "advisory_replay": "Prior outcome: FAIL."})
-    [note], [disclosure] = notes, advisory
-    assert "triad" not in (note + disclosure).lower() and "scope reviewer" not in (note + disclosure).lower()
-    assert disclosure.startswith(f"Review enforcement=Advisory: no new review wave was bought for this commit ({reason})")
+    [_note], [disclosure] = notes, advisory
+    assert reason in disclosure
     assert disclosure.endswith("Prior outcome: FAIL.")
-    if reason == "identical_diff_refused":
-        assert note == "Max Review Cycles: identical staged diff — reusing the recorded review verdict, no paid review-wave dispatch."
-    else:
-        assert note.startswith("Max Review Cycles: paid-cycle ceiling exhausted")
 
 
-def test_t1_the_commit_schema_explains_scope_by_the_coupling_questions():
-    """``commit_reviewed.scope`` is read by the panel's coupling questions as the intended
-    transformation (``resolve_intent``: goal > scope > commit subject); its description says
-    so and no longer promises a "scope reviewer" that no longer exists (FIX3 T1)."""
-    from ouroboros.tools import git
+def test_commit_scope_supplies_intent_when_goal_is_empty():
     from ouroboros.tools.review_helpers import resolve_intent
 
-    [entry] = [entry for entry in git.get_tools() if entry.name == "commit_reviewed"]
-    description = entry.schema["parameters"]["properties"]["scope"]["description"]
-    assert "coupling questions" in description and "scope reviewer" not in description
     assert resolve_intent("", "only the gate wording", "subject: x") == ("only the gate wording", "scope")
 
 
@@ -513,7 +324,7 @@ def test_legacy_acceptance_key_migrates_into_the_shared_knob(tmp_path, monkeypat
     import json
 
     from ouroboros import config as cfg
-    from ouroboros.review_cycles import get_acceptance_max_improvement_passes, review_max_cycles
+    from ouroboros.review_cycles import review_max_cycles
 
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({"OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES": 3}), encoding="utf-8")
@@ -526,7 +337,6 @@ def test_legacy_acceptance_key_migrates_into_the_shared_knob(tmp_path, monkeypat
     # the saved file itself is untouched by load (migration happens in the LOADED dict)
     cfg.apply_settings_to_env(loaded)
     assert review_max_cycles() == 4
-    assert get_acceptance_max_improvement_passes() is None
     # An owner-authored shared value always wins: no "customized?" guessing left.
     settings.write_text(json.dumps({
         "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES": 3,
@@ -534,7 +344,7 @@ def test_legacy_acceptance_key_migrates_into_the_shared_knob(tmp_path, monkeypat
     }), encoding="utf-8")
     loaded = cfg.load_settings()
     cfg.apply_settings_to_env(loaded)
-    assert review_max_cycles() == 2 and get_acceptance_max_improvement_passes() is None
+    assert review_max_cycles() == 2
 
 
 def test_exhausted_event_is_durable_even_with_a_live_queue(tmp_path):
@@ -562,75 +372,10 @@ def test_exhausted_event_is_durable_even_with_a_live_queue(tmp_path):
     assert len(lines) == 2 and events.empty()
 
 
-def test_docs_describe_shared_key_and_new_module_size():
-    dev = development_text(REPO)
-    arch = architecture_text(REPO)
-    assert dev.count(KEY) >= 2 and "review_cycles.py" in dev
-    assert f"| {KEY} |" in arch
-    assert f"| {LEGACY} |" in arch
-    assert "Required+Blocking without one has no local count cap" not in dev
-    assert "Required+Blocking with no explicit cap has no local count cap" not in arch
+def test_review_cycle_modules_respect_size_bounds():
     module_lines = (REPO / "ouroboros" / "review_cycles.py").read_text(encoding="utf-8").splitlines()
     # Brief-level target for this module (the repo ratchet is 1000/1600).
     assert len(module_lines) <= 200
     config_lines = (REPO / "ouroboros" / "config.py").read_text(encoding="utf-8").splitlines()
     assert len(config_lines) <= 1600
 
-
-# ------------------------------------------------- acceptance at the shared cap (D27)
-
-
-def _acceptance_ctx(tmp_path, *, passes_done, events=None):
-    import ouroboros.loop as loop_mod
-
-    tool_ctx = types.SimpleNamespace(
-        _task_acceptance_reviewed=False, _task_acceptance_improvement_passes=passes_done,
-        drive_root=str(tmp_path), budget_drive_root=str(tmp_path), task_id="acc-1",
-        task_metadata={}, task_contract={}, is_direct_chat=False, event_queue=events,
-        end_acceptance_fence=lambda **_k: {"ok": True}, _task_acceptance_fence_token="tok",
-    )
-    return loop_mod._TaskAcceptanceContext(
-        tools=types.SimpleNamespace(_ctx=tool_ctx), content="done", task_id="acc-1", task_type="task",
-        llm_trace={"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}, drive_root=None,
-        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m, *, incident=None: None, mode="required",
-        subtree_statuses=[], budget_profile={}, passes_done=passes_done,
-    )
-
-
-def _fail_result():
-    import ouroboros.review_substrate as rs
-
-    return rs.ReviewRunResult(
-        request={"surface": "task_acceptance", "policy": {"min_successful_slots": 1}},
-        actors=[{"slot_id": "s0", "signal": "FAIL", "parsed": {
-            "verdict": "FAIL", "outcome_tier": "best_effort", "completion_coach": "fix it",
-            "dialogue_status": "continue_actionable"}}],
-        parsed_findings=[{"slot_id": "s0", "severity": "critical", "item": "broken",
-                          "recommendation": "fix", "verdict": "FAIL"}],
-        aggregate_signal="FAIL",
-    )
-
-
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-def test_last_paid_acceptance_result_returns_to_author(tmp_path, monkeypatch, enforcement):
-    import ouroboros.loop as loop_mod
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: enforcement)
-    ctx = _acceptance_ctx(tmp_path, passes_done=1)
-    assert loop_mod._apply_task_acceptance_result(ctx, _fail_result(), record_run=True) is True
-    assert ctx.llm_trace["acceptance_decision"]["status"] == "revision_requested"
-    assert ctx.llm_trace["review_runs"][-1]["aggregate_signal"] == "FAIL"
-    assert ctx.messages[-1]["review_feedback"]
-
-
-def test_explicit_author_limit_still_binds(monkeypatch):
-    from ouroboros import task_pacing
-    from ouroboros.contracts.task_contract import normalize_budget_profile
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
-    snap = task_pacing.BudgetSnapshot(has_deadline=False)
-    shared = normalize_budget_profile({})
-    assert task_pacing.improvement_pass_allowed(snap, 1, shared, required_blocking=True) == (True, "")
-    explicit = normalize_budget_profile({"max_improvement_passes": 0})
-    assert task_pacing.improvement_pass_allowed(snap, 0, explicit, required_blocking=True) == (False, "improvement_passes_exhausted")

@@ -25,17 +25,18 @@ body {
    `100vh - padding` floor overflowed every onboarding page by exactly the
    control's height. A body column lets the shell take the space that is really
    left: `flex: 1 0 auto` fills a short page and still grows past the viewport
-   when a step is genuinely taller — the only scroll onboarding should have. */
+   when a step is genuinely taller — the only scroll onboarding should have.
+   style.css, linked for the shared provider cards, makes the app shell's body
+   one fixed viewport that never scrolls; this page's body stays a document. */
 body {
+  height: auto;
+  overflow: visible;
   min-height: 100vh;
   padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background:
-    radial-gradient(circle at top left, rgba(201, 53, 69, 0.12), transparent 35%),
-    radial-gradient(circle at top right, rgba(232, 121, 249, 0.12), transparent 30%),
-    var(--bg);
+  background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -451,8 +452,8 @@ textarea::placeholder {
   background: var(--accent-08);
 }
 
-/* Choice-card chip. Only advisory/blocking declared a pair, so the three
-   runtime-mode chips rendered as bare white text; neutral is now the default. */
+/* Choice-card chip: neutral by default, so no chip renders as bare white text. A setting's value is never
+   amber, so Advisory keeps the neutral chip; only Blocking declares a pair. */
 .wizard-choice .tone {
   display: inline-flex;
   margin-bottom: 10px;
@@ -464,11 +465,6 @@ textarea::placeholder {
   line-height: var(--line-meta);
   font-weight: 700;
   letter-spacing: 0.02em;
-}
-
-.wizard-choice.advisory .tone {
-  background: var(--status-warn-bg);
-  color: var(--status-warn-fg);
 }
 
 .wizard-choice.blocking .tone {
@@ -499,20 +495,6 @@ textarea::placeholder {
 
 .wizard-runtime-status[data-tone="error"] {
   color: var(--status-error-fg);
-}
-
-/* Status = dot + text, matching the settings shell. */
-.wizard-runtime-status[data-tone]::before {
-  content: "";
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
-  border-radius: 999px;
-  background: currentColor;
-  vertical-align: middle;
-  position: relative;
-  top: -1px;
 }
 
 .wizard-test-result {
@@ -1203,19 +1185,6 @@ textarea::placeholder {
 .settings-inline-status[data-tone="warn"] { color: var(--status-warn-fg); }
 .settings-inline-status[data-tone="error"] { color: var(--status-error-fg); }
 
-.settings-inline-status[data-tone]::before {
-  content: "";
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
-  border-radius: 999px;
-  background: currentColor;
-  vertical-align: middle;
-  position: relative;
-  top: -1px;
-}
-
 @media (max-height: 820px), (max-width: 900px) {
   .wizard-shell {
     gap: 10px;
@@ -1233,7 +1202,7 @@ textarea::placeholder {
   .wizard-step-copy,
   .step-copy,
   .panel-card p,
-  .field-note,
+  .field-note:not(.compatible-load-status),
   .footer-copy {
     display: none;
   }
@@ -1396,3 +1365,150 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
   box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }
 /* track-migration:end */
+
+/* ---- Airy dopamine (DESIGN.md design bible) -------------------------------------------------------------------
+   The setup page maps onto the bible's roles in both themes: the shell is the plain room (no wash, no outline, no
+   heavy shadow); the step's body is the object on the rest shadow; cards, the collapse and the summary inside it are
+   trays, and a tray inside a tray drops its fill; the step rail is trays with the current step in the soft crimson (a
+   chosen card) and a done step's chip in green; choices and pills are neutral capsules standing on the rest shadow,
+   the chosen one in the soft crimson and still standing. Fields keep their hairline. States change colour, never
+   height. */
+:root[data-theme] .wizard-shell {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+:root[data-theme] .wizard-content {
+  border-color: transparent;
+  border-radius: var(--radius-object);
+  background: var(--surface-object);
+  box-shadow: var(--elev-rest);
+}
+:root[data-theme] :is(.panel-card, .summary-card, .wizard-collapse, .wizard-runtime-strip) {
+  border-color: transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-tray);
+}
+:root[data-theme] :is(.panel-card, .summary-card, .wizard-collapse) :is(.agent-family-row, .panel-card, .summary-card) {
+  border-color: transparent;
+  background: transparent;
+}
+:root[data-theme] .wizard-step {
+  border-color: transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-tray);
+  box-shadow: none;
+}
+:root[data-theme] .wizard-step.active { background: var(--tone-crimson-soft); }
+:root[data-theme] .wizard-step.done { border-color: transparent; }
+:root[data-theme] .wizard-step.active .wizard-step-index { background: transparent; color: var(--tone-crimson-soft-ink); }
+:root[data-theme] .wizard-step.done .wizard-step-index { background: var(--tone-green); color: var(--status-ok-fg); }
+:root[data-theme] .wizard-badge { border-color: transparent; }
+:root[data-theme] :is(.wizard-choice, .selection-pill) {
+  border-color: transparent;
+  background: var(--surface-capsule);
+  box-shadow: var(--elev-rest);
+  transition: var(--motion-tone);
+}
+:root[data-theme] .wizard-choice { border-radius: var(--radius-inner); }
+:root[data-theme] :is(.wizard-choice, .selection-pill):hover {
+  border-color: transparent;
+  background: var(--surface-capsule-hover);
+  box-shadow: var(--elev-rest);
+  transform: none;
+}
+:root[data-theme] :is(.wizard-choice, .selection-pill).active {
+  border-color: transparent;
+  background: var(--tone-crimson-soft);
+  color: var(--tone-crimson-soft-ink);
+  box-shadow: var(--elev-rest);
+}
+:root[data-theme] :is(.wizard-choice, .selection-pill):active { transform: none; filter: var(--press); }
+/* A mark inside a chosen card wears the card's ink (a chosen state's ink is its tone's, DESIGN.md principle 4). */
+:root[data-theme] .wizard-choice.active .skills-mark { color: inherit; }
+
+/* ---- Starter skills (board B13): one Summary row that opens in place into ONE vertical scroll of categorized
+   cards — two columns, one on a phone; a ticked card takes the wizard's chosen tone. Under the list stay the two
+   public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
+   depend on style.css. */
+.summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
+.skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
+.skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.skills-starter-change,
+.skills-starter-bulk button {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--type-meta);
+  font-weight: 600;
+}
+.skills-starter-change:focus-visible,
+.skills-starter-bulk button:focus-visible,
+.skills-starter-scroll:focus-visible {
+  outline: 2px solid var(--focus-accent-border);
+  outline-offset: 2px;
+}
+.skills-starter-panel { display: grid; gap: var(--space-2); padding-bottom: var(--space-2); min-width: 0; container: starterpanel / inline-size; }
+.skills-starter-bar { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
+.skills-starter-bar p { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.skills-starter-bulk { display: inline-flex; align-items: baseline; gap: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap; }
+.skills-starter-scroll {
+  max-height: 420px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2) var(--space-4);
+  --starter-fade-top: 0px;
+  --starter-fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, black var(--starter-fade-top), black calc(100% - var(--starter-fade-bottom)), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, black var(--starter-fade-top), black calc(100% - var(--starter-fade-bottom)), transparent 100%);
+}
+.skills-starter-scroll[data-scroll-above] { --starter-fade-top: 32px; }
+.skills-starter-scroll[data-scroll-below] { --starter-fade-bottom: 32px; }
+.skills-starter-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.skills-starter-scroll::-webkit-scrollbar-track { background: transparent; }
+.skills-starter-scroll::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--radius-xs); }
+.skills-starter-group + .skills-starter-group { margin-top: var(--space-4); }
+.skills-starter-group h4 { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
+.skills-starter-group h4 span { margin-left: var(--space-2); color: var(--text-meta); font-weight: 400; }
+.wizard-choice-grid.skills-starter-cards { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: var(--space-2) var(--space-3); }
+.wizard-choice.skills-starter-card { display: grid; align-content: start; gap: var(--space-1); padding: var(--space-3); }
+.skills-starter-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--space-2); }
+.skills-starter-head strong { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; overflow-wrap: anywhere; }
+.skills-starter-marks { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
+.skills-starter-desc,
+.skills-starter-needs {
+  padding-left: calc(14px + var(--space-2));
+  color: var(--text-meta);
+  font-size: var(--type-meta);
+  line-height: var(--line-meta);
+  overflow-wrap: anywhere;
+}
+.skills-starter-needs { font-weight: 500; }
+.skills-starter-trust { display: grid; gap: var(--space-2); padding-top: var(--space-1); }
+.skills-starter-trust-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.skills-starter-trust-row strong { flex: 1 1 30%; min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
+.skills-starter-trust .selection-pill { padding: 6px 12px; font-size: var(--type-meta); }
+.skills-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--tone-crimson-word);
+  font-size: var(--type-meta);
+  line-height: var(--line-meta);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.skills-mark-glyph { display: inline-flex; }
+.skills-mark svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.ui-chip.skills-chip { padding: 3px 10px; font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 500; }
+@container starterpanel (max-width: 44rem) {
+  .skills-starter-scroll { max-height: 60vh; }
+}

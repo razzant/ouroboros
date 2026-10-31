@@ -5,6 +5,8 @@ from __future__ import annotations
 import pathlib
 import types
 
+import pytest
+
 import ouroboros.config as cfg
 from ouroboros.project_facts import (
     project_knowledge_dir,
@@ -163,6 +165,124 @@ def test_generic_tools_deny_project_store_live(tmp_path, monkeypatch):
     assert "ACCESS_DENIED" in core._data_write(ctx, "projects/proj_x/k.md", "data")
 
 
+@pytest.mark.parametrize(("path", "hint", "wrong"), [
+    ("projects/proj_x/workpad.md", "workpad_read(project_id='proj_x') reads it and "
+     "workpad_write(project_id='proj_x', content=...) replaces it", "knowledge_read"),
+    ("projects/proj_x/journal.jsonl", "journal_read(project_id='proj_x') reads it and "
+     "journal_write(project_id='proj_x', kind=..., text=...) appends to it", "knowledge_read"),
+    ("projects/proj_x/logs/task_reflections.jsonl",
+     "journal_read(project_id='proj_x', source='reflections') reads it", "it writes it"),
+    ("projects/proj_x/knowledge/notes/arch.md",
+     "knowledge_read(topic='notes/arch', scope='project:proj_x') reads it and "
+     "knowledge_write(topic='notes/arch', scope='project:proj_x', content=..., expected_revision=...) writes it; "
+     "expected_revision is the revision knowledge_read returned", "root task"),
+    ("projects/proj_x/knowledge/patterns.md", "Topic 'patterns' is global-only", "topic='patterns', scope="),
+    ("projects/proj_x/knowledge/overview.md", "never this project copy; knowledge_list(scope='project:proj_x') may "
+     "still list it", "topic='overview', scope="),
+    ("projects/proj_x/knowledge/improvement-backlog.md", "Topic 'improvement-backlog' is global-only",
+     "topic='improvement-backlog', scope="),
+    ("projects/proj_x/knowledge/_index.md",
+     "not addressable as a knowledge topic; knowledge_list(scope='project:proj_x') lists the shelf", "topic="),
+    ("projects/proj_x/knowledge", "knowledge_list(scope='project:proj_x') lists it", "workpad_read"),
+    ("projects/proj_x/knowledge/index-full.md", "knowledge_list(scope='project:proj_x') lists it", "topic="),
+    ("projects/proj_x/.project.json", "No scoped reader or writer addresses this path", "reads it"),
+    ("projects/proj_x/notes/plan.md", "No scoped reader or writer addresses this path", "reads it"),
+    ("projects/Not An Id/workpad.md", "No scoped reader or writer addresses this path", "reads it"),
+])
+def test_project_store_refusal_names_only_tools_that_address_the_path(path, hint, wrong):
+    """#1612: the refusal stays, but its next step is the read/write pair whose address
+    space holds this path — never the knowledge shelf for a workpad, journal or other file."""
+    from ouroboros.project_facts import project_store_access_block
+
+    message = project_store_access_block(path)
+    assert message.startswith("⚠️ ACCESS_DENIED: the per-project facts store (projects/<id>/)")
+    assert hint in message and wrong not in message
+
+
+def test_project_store_refusal_hint_reaches_the_target_only_within_existing_authority(tmp_path, monkeypatch):
+    """#1612: following the named reader reaches the denied workpad for a root task, and
+    a restricted child gets the refusal the hint announces; no access is widened."""
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
+    from ouroboros.tools import core
+    from ouroboros.tools.project_journal import _workpad_read
+    from ouroboros.tools.registry import ToolContext
+
+    store = cfg.DATA_DIR / "projects" / "proj_x"
+    store.mkdir(parents=True)
+    (store / "workpad.md").write_text("WORKPADMARKER", encoding="utf-8")
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=cfg.DATA_DIR)
+
+    refusal = core._data_read(ctx, "projects/proj_x/workpad.md")
+    assert "WORKPADMARKER" not in refusal
+    assert "knowledge_read" not in refusal
+    assert "workpad_read(project_id='proj_x') reads it" in refusal
+    assert "Outside its own project a task reads it only as a root task" in refusal
+    root = types.SimpleNamespace(task_id="root", drive_root=cfg.DATA_DIR, project_id="mine",
+                                 task_metadata={"root_task_id": "root"})
+    assert "WORKPADMARKER" in _workpad_read(root, "proj_x")
+    child = types.SimpleNamespace(task_id="child", drive_root=cfg.DATA_DIR, project_id="",
+                                  task_metadata={"delegation_role": "subagent"})
+    assert _workpad_read(child, "proj_x").startswith("⚠️ TOOL_FORBIDDEN")
+
+
+def test_project_knowledge_hints_match_what_the_knowledge_tools_address(tmp_path, monkeypatch):
+    """#1612: replacing a named project note needs the revision a read returns, and a
+    reserved topic named with a project scope reaches the global note, not this copy."""
+    import json
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
+    from ouroboros.project_facts import project_store_access_block
+    from ouroboros.tools.knowledge import _knowledge_read, _knowledge_write
+    from ouroboros.tools.registry import ToolContext
+
+    shelf = cfg.DATA_DIR / "projects" / "proj_x" / "knowledge"
+    shelf.mkdir(parents=True)
+    (shelf / "arch.md").write_text("PROJECT NOTE\n", encoding="utf-8")
+    (shelf / "patterns.md").write_text("PROJECT COPY\n", encoding="utf-8")
+    (cfg.DATA_DIR / "memory" / "knowledge").mkdir(parents=True)
+    (cfg.DATA_DIR / "memory" / "knowledge" / "patterns.md").write_text("GLOBAL PATTERNS\n", encoding="utf-8")
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=cfg.DATA_DIR)
+
+    assert "expected_revision=" in project_store_access_block("projects/proj_x/knowledge/arch.md")
+    assert "revision_required" in _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x")
+    read = _knowledge_read(ctx, "arch", scope="project:proj_x")
+    revision = json.loads(read.split("\n", 1)[0].removeprefix("[Knowledge source] "))["revision"]
+    assert _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x", expected_revision=revision).startswith("✅")
+    assert (shelf / "arch.md").read_text(encoding="utf-8") == "NEW\n"
+
+    assert "global-only" in project_store_access_block("projects/proj_x/knowledge/patterns.md")
+    reserved = _knowledge_read(ctx, "patterns", scope="project:proj_x")
+    assert "GLOBAL PATTERNS" in reserved and "PROJECT COPY" not in reserved
+
+
+def test_project_store_write_refusal_names_the_writer_and_its_current_project_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
+    from ouroboros.tools import core
+    from ouroboros.tools.project_journal import _workpad_read, _workpad_write
+    from ouroboros.tools.registry import ToolContext
+
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=cfg.DATA_DIR)
+    refusal = core._data_write(ctx, "projects/proj_x/workpad.md", "OVERWRITE")
+    assert "ACCESS_DENIED" in refusal and "knowledge_write" not in refusal
+    assert "workpad_write(project_id='proj_x', content=...) replaces it" in refusal
+    assert "it writes it only as a root task placed in no project (such as Main)" in refusal
+    assert not (cfg.DATA_DIR / "projects" / "proj_x" / "workpad.md").exists()
+    # The named writer behaves as announced: its own project and an unplaced root write it;
+    # a root placed in another project and a restricted child never do.
+    own = types.SimpleNamespace(task_id="t", drive_root=cfg.DATA_DIR, project_id="proj_x", task_metadata={})
+    assert _workpad_write(own, "PLAN").startswith("OK:") and _workpad_read(own) == "PLAN"
+    main = types.SimpleNamespace(task_id="main", drive_root=cfg.DATA_DIR, project_id="",
+                                 task_metadata={"root_task_id": "main"})
+    assert _workpad_write(main, "MAIN PLAN", "proj_x").startswith("OK:") and _workpad_read(own) == "MAIN PLAN"
+    placed = types.SimpleNamespace(task_id="root", drive_root=cfg.DATA_DIR, project_id="mine",
+                                   task_metadata={"root_task_id": "root"})
+    child = types.SimpleNamespace(task_id="child", drive_root=cfg.DATA_DIR, project_id="",
+                                  task_metadata={"delegation_role": "subagent"})
+    assert _workpad_write(placed, "FOREIGN", "proj_x").startswith("⚠️ TOOL_FORBIDDEN")
+    assert _workpad_write(child, "FOREIGN", "proj_x").startswith("⚠️ TOOL_FORBIDDEN")
+    assert _workpad_read(own) == "MAIN PLAN"
+
+
 def test_explicit_project_id_strict_validation():
     from ouroboros.project_facts import explicit_project_id_ok
 
@@ -182,6 +302,7 @@ def test_knowledge_write_project_scoped_goes_to_project_store(tmp_path, monkeypa
     from ouroboros.tools import knowledge
 
     ctx = _Ctx(tmp_path / "child", project_id="proj_abc")
+    ctx.budget_drive_root = str(tmp_path / "data")  # a split child carries its canonical root (#915)
     knowledge._knowledge_write(ctx, "facts", "project fact X", "overwrite")
 
     proj = project_knowledge_dir("proj_abc") / "facts.md"
@@ -207,10 +328,10 @@ def test_context_project_scope_adds_to_global_knowledge_index(tmp_path, monkeypa
     drive = tmp_path / "drive"
     (drive / "memory" / "knowledge").mkdir(parents=True)
     (drive / "memory" / "knowledge" / "index-full.md").write_text("# idx\n- **g**: GLOBAL stuff", encoding="utf-8")
-    px = project_knowledge_dir("proj_x")
+    px = drive / "projects" / "proj_x" / "knowledge"  # the shelf on the context's own root, not DATA_DIR (#915)
     px.mkdir(parents=True)
     (px / "index-full.md").write_text("# idx\n- **facts**: project x stuff", encoding="utf-8")
-    py = project_knowledge_dir("proj_y")
+    py = drive / "projects" / "proj_y" / "knowledge"
     py.mkdir(parents=True)
     (py / "index-full.md").write_text("# idx\n- **facts**: project y secret", encoding="utf-8")
 
@@ -318,7 +439,8 @@ def test_scratchpad_and_identity_tools_write_canonical_memory_from_a_project_roo
     # scratchpad and identity files the main chat writes.
     ctx = types.SimpleNamespace(drive_root=tmp_path, project_id="proj_p")
     r1 = control._update_scratchpad(ctx, "a meaningful scratchpad note for the task at hand")
-    r2 = control._update_identity(ctx, "x" * 60)
+    from hashlib import sha256
+    r2 = control._update_identity(ctx, "x" * 60, sha256((tmp_path / "memory/identity.md").read_bytes()).hexdigest())
     assert r1.startswith("OK")
     assert r2.startswith("OK")
     assert (tmp_path / "memory" / "scratchpad_blocks.json").exists()

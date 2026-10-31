@@ -14,7 +14,7 @@ def test_server_subcommand_sanitizes_argv(monkeypatch):
 
     class FakeServer:
         @staticmethod
-        def main():
+        def executable_main():
             seen["argv"] = list(sys.argv)
             return 0
 
@@ -134,3 +134,62 @@ def test_chat_history_without_limit_sends_no_quota(monkeypatch, capsys):
     assert args.func(args) == 0
     assert seen["request"] == ("GET", "/api/chat/history")
     capsys.readouterr()
+
+
+@pytest.mark.parametrize("hub", ["sources", "ouroboroshub"])
+@pytest.mark.parametrize("command,method,path,body", [
+    (["installed"], "GET", "/api/extensions", None),
+    (["search", "weather"], "GET", "/api/skill-catalog/search?q=weather", None),
+    (["preview", "ouroboros/weather"], "GET", "/api/skill-catalog/item/ouroboros/weather", None),
+    (["install", "ouroboros/weather"], "POST", "/api/skill-catalog/install", {"id": "ouroboros/weather"}),
+    (["update", "weather"], "POST", "/api/skills/weather/update", {"mode": "replace"}),
+    (["uninstall", "weather"], "POST", "/api/skills/weather/uninstall", {}),
+])
+def test_marketplace_hub_alias_uses_source_routes(monkeypatch, hub, command, method, path, body):
+    from ouroboros import cli
+
+    calls = []
+    client = SimpleNamespace(request=lambda *args: calls.append(args) or {"ok": True})
+    monkeypatch.setattr(cli, "_client", lambda _args: client)
+    args = cli.build_parser().parse_args(["marketplace", hub, *command])
+    assert args.func(args) == 0
+    if command == ["installed"] and hub == "ouroboroshub":
+        path = "/api/marketplace/ouroboroshub/installed"
+    assert calls == [(method, path, body)]
+
+
+@pytest.mark.parametrize("hub", ["sources", "ouroboroshub"])
+@pytest.mark.parametrize("source", ["ouroboros", "ouroboros-community"])
+@pytest.mark.parametrize("command", ["install", "preview"])
+def test_marketplace_bare_name_resolves_the_public_hub_offer(monkeypatch, hub, source, command):
+    from ouroboros import cli
+
+    calls = []
+
+    def request(method, path, body=None):
+        calls.append((method, path, body))
+        return {"items": [{"id": "mine/weather", "name": "weather", "source_id": "mine"},
+                          {"id": f"{source}/weather", "name": "weather", "source_id": source}]}
+
+    monkeypatch.setattr(cli, "_client", lambda _args: SimpleNamespace(request=request))
+    args = cli.build_parser().parse_args(["marketplace", hub, command, "weather"])
+    assert args.func(args) == 0
+    action = (("POST", "/api/skill-catalog/install", {"id": f"{source}/weather"}) if command == "install"
+              else ("GET", f"/api/skill-catalog/item/{source}/weather", None))
+    assert calls == [("GET", "/api/skill-catalog/search?q=weather", None), action]
+
+
+@pytest.mark.parametrize("command", ["install", "preview"])
+def test_marketplace_bare_name_does_not_select_a_different_source(monkeypatch, command):
+    from ouroboros import cli
+
+    calls = []
+    def request(method, path, body=None):
+        calls.append(method)
+        return {"items": [{"id": "mine/weather", "name": "weather", "source_id": "mine"}]}
+
+    monkeypatch.setattr(cli, "_client", lambda _args: SimpleNamespace(request=request))
+    args = cli.build_parser().parse_args(["marketplace", "sources", command, "weather"])
+    with pytest.raises(cli.CLIError, match="catalog id"):
+        args.func(args)
+    assert calls == ["GET"]

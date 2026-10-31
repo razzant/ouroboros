@@ -243,7 +243,9 @@ def test_a_live_review_link_changed_elsewhere_is_checked_before_new_money(env, m
 
     task(env)
     attempt(env)
-    primary = {"state": review_operation.OPERATION_CLOSED, "controller": {"fixture": "alive"}, "source_ref": {"id": "s"}}
+    # Persisted control-only links come only from the retired historical acceptance reviews; their
+    # primary pointer starts in the "closed" state those operations left (nothing writes it now).
+    primary = {"state": "closed", "controller": {"fixture": "alive"}, "source_ref": {"id": "s"}}
     task(env, "subject", **{review_operation.OPERATIONS_FIELD: {"operation": primary}})
     link = {"control_only": True, "subject_task_id": "subject", "controller": primary["controller"], "source_ref": primary["source_ref"]}
     task(env, **{review_operation.OPERATIONS_FIELD: {"operation": link}})

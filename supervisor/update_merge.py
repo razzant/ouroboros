@@ -31,7 +31,7 @@ from supervisor import git_ops as _g
 # re-exported: every caller and test reaches them via this module (F401 intended).
 from supervisor.update_candidate import (  # noqa: F401
     _MERGE_NEUTRAL_FLAGS, _git_run, _merge_head_sha, _preserve_failed_update_attempt,
-    _rev_parse, existing_failed_update_ref, live_unmerged_paths,
+    _rev_parse, existing_failed_update_ref, live_unmerged_paths, capture_update_step,
     UpdateTxCorrupt, managed_assisted_marker_check, managed_tests_evidence_covers,
     record_managed_tests_evidence,
     record_managed_tests_proof, update_tx_phase, update_tx_phase_or_keep,
@@ -404,21 +404,16 @@ def apply_managed_merge_update(branch: str, merge_commit: str) -> Tuple[bool, st
     so the worktree is reset away here. Returns (ok, message)."""
     if not merge_commit:
         return False, "no merge_commit to apply"
-    rc0, _o0, e0 = _g.git_capture(["git", "reset", "--hard", "HEAD"])
-    if rc0 != 0:
-        return False, f"reset before apply failed: {e0}"
-    rc_clean0, _co0, ce0 = _g.git_capture(["git", "clean", "-fd"])
-    if rc_clean0 != 0:
-        return False, f"clean before apply failed: {ce0}"
-    rc1, _o1, e1 = _g.git_capture(["git", "checkout", "-B", branch, merge_commit])
-    if rc1 != 0:
-        return False, f"checkout -B {branch} {merge_commit[:12]} failed: {e1}"
-    rc2, _o2, e2 = _g.git_capture(["git", "reset", "--hard", merge_commit])
-    if rc2 != 0:
-        return False, f"reset --hard {merge_commit[:12]} failed: {e2}"
-    rc_clean, _co, clean_error = _g.git_capture(["git", "clean", "-fd"])
-    if rc_clean != 0:
-        return False, f"clean after apply failed: {clean_error}"
+    for step, (cmd, failure) in enumerate((
+        (["git", "reset", "--hard", "HEAD"], "reset before apply failed"),
+        (["git", "clean", "-fd"], "clean before apply failed"),
+        (["git", "checkout", "-B", branch, merge_commit], f"checkout -B {branch} {merge_commit[:12]} failed"),
+        (["git", "reset", "--hard", merge_commit], f"reset --hard {merge_commit[:12]} failed"),
+        (["git", "clean", "-fd"], "clean after apply failed"),
+    )):
+        rc, _out, error = capture_update_step(cmd, first=step == 0)
+        if rc:
+            return False, f"{failure}: {error}"
     return True, f"applied merge {merge_commit[:12]} to {branch}"
 
 
@@ -431,7 +426,7 @@ def rollback_managed_update(
     to pre_update_sha and cleans unless that verified target already holds, and logs. Boot
     recovery retains a clear-only transaction until the restored process starts, protecting
     returned work from bootstrap reset; other callers clear it immediately. Does NOT push
-    (unlike rollback_to_version, which can push origin — wrong for an internal recovery).
+    (manual Restore likewise stays local).
 
     Marker admission is STRICT (F14): a FUTURE-schema marker was recorded by a newer
     release — this code cannot interpret its semantics, so the rollback refuses typed
@@ -559,10 +554,14 @@ def _finish_rollback(
     except Exception:
         return False, "rollback restored the repository but could not close writer admission; " + stash_note
     rescue = tx.get("rollback_rescue") if isinstance(tx.get("rollback_rescue"), dict) else {}
+    tx["rollback_outcome"] = "not_applied" if in_place and (tx.get("git_failure") or {}).get("before_tree_effects") else "rolled_back"
     if not _log_supervisor(
         {"type": "managed_update_rolled_back", "reason": reason,
          "pre_update_sha": pre, "branch": branch, **({"checkout_already_restored": True} if in_place else {}),
          "stash_note": stash_note, "stash_restore_status": result.status,
+         "error": str(tx.get("rollback_error") or ""),
+         **(tx.get("git_failure") or {}),
+         "outcome": tx["rollback_outcome"],
          **({"failed_update_ref": tx["failed_update_ref"]} if tx.get("failed_update_ref") else {}),
          **{f"rescue_{key}": rescue[key] for key in ("path", "ref", "ts") if rescue.get(key)},
          **({"rescue_error": tx["rollback_rescue_error"]} if tx.get("rollback_rescue_error") else {})},
@@ -591,7 +590,8 @@ def _finish_rollback(
         except Exception:
             _g.log.warning("rollback restored the repository but could not reopen writer admission", exc_info=True)
             return False, "rollback restored the repository but could not reopen writer admission; " + stash_note
-    message = f"rolled back to {pre[:12]}" + (
+    message = (f"update not applied; checkout remains at {pre[:12]}" if in_place and
+               (tx.get("git_failure") or {}).get("before_tree_effects") else f"rolled back to {pre[:12]}") + (
         "; the checkout already matched it and needed no reset/checkout" if in_place else "")
     if tx.get("failed_update_ref"):
         message += f"; the attempt is preserved on branch {tx['failed_update_ref']}"
@@ -702,6 +702,9 @@ def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
             # honors this key first): the resolver's own id, or after a fresh-id re-enqueue the
             # ORIGINAL id, so the money ceiling never resets across resume chains of one update.
             "root_task_id": str(tx.get("original_root_task_id") or task_id),
+            # The staged merge sits in the system repository itself; a follow-up it schedules
+            # keeps that resource instead of waiting as intent-unknown (#1799).
+            "resource_intent": {"kind": "system_repo"},
             "managed_update": {
                 "target_sha": str(tx.get("target_sha") or ""),
                 "conflict_paths": list(tx.get("conflict_paths") or []),
@@ -771,18 +774,17 @@ def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
 
 def _run_update_smoke(cmd: List[str], timeout_sec: float = 120.0) -> Dict[str, Any]:
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-    from ouroboros.tools.shell import _active_subprocesses, _subprocess_lock
+    from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(_g.REPO_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        **subprocess_new_group_kwargs(),
-    )
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
+    with tracked_start() as publish:
+        proc = publish(subprocess.Popen(
+            cmd,
+            cwd=str(_g.REPO_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **subprocess_new_group_kwargs(),
+        ))
     try:
         try:
             stdout, stderr = proc.communicate(timeout=timeout_sec)
@@ -856,6 +858,35 @@ def _log_supervisor(payload: Dict[str, Any]) -> bool:
     except Exception:
         _g.log.warning("managed update event could not be saved", exc_info=True)
         return False
+
+
+def _observed(tx: Dict[str, Any], outcome: str) -> Dict[str, Any]:
+    """This boot branch's meaning for the attempt projection (gateway/update_progress.py): the transaction
+    it processed and the commit a server must serve for that meaning. Never read by recovery."""
+    commit = tx.get("merge_commit") if outcome == "applied" else tx.get("pre_update_sha")
+    return {"observed": {"outcome": outcome, "attempt_id": str(tx.get("attempt_id") or ""),
+                         "commit": str(commit or "")}}
+
+
+def _cleanup_observed(tx: Dict[str, Any]) -> Dict[str, Any]:
+    """Recover only meanings the completed branch already established before cleanup failed."""
+    restore = tx.get("stash_restore") or {}
+    context = restore.get("context")
+    if context == "boot_restore_resume":
+        # The restore owner preserves its one interrupted marker under this edge.
+        context = ((restore.get("evidence") or {}).get("interrupted") or {}).get("context")
+    if context == "boot_finalize":
+        return _observed(tx, "applied")
+    if context == "boot_stash_recovery":
+        return _observed(tx, "not_applied")
+    reason = tx.get("gate_blocked_reason")
+    if reason == "rollback_restart_pending":
+        return _observed(tx, tx.get("rollback_outcome") or "rolled_back")
+    if reason == "replace_abandon_tx_cleanup_failed":
+        return _observed(tx, "not_applied")
+    if reason == "stash_marker_cleanup_failed" and tx.get("gate_blocked_from_phase") == "pending_boot_smoke":
+        return _observed(tx, "applied")
+    return {}
 
 
 def _complete_stash_recovery(
@@ -934,7 +965,8 @@ def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> 
             mark_update_tx_gate_blocked("finalize_intent_cleanup_failed")
             return {"finalized": False, "reason": "could not clear update intent"}
         return _complete_stash_recovery(
-            tx, "boot_finalize", {"finalized": True}, {"type": "managed_update_finalized", "head": head},
+            tx, "boot_finalize", {"finalized": True, **_observed(tx, "applied")},
+            {"type": "managed_update_finalized", "head": head},
         )
     if (bool(supervisor_ready) and head_resolved and not merge_in_head) or attempts >= 2:
         ok, msg = _boot_smoke_rollback(tx, "post_boot_smoke_failed")
@@ -1305,7 +1337,8 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
         if head == pre:
             # No target checkout is visible. Disarm replay and leave the current tree alone;
             # the rescue already exists, but a crash before reset must not erase dirty work.
-            return abandon_unapplied_replace(head)
+            abandoned = abandon_unapplied_replace(head)
+            return {**abandoned, **_observed(tx, "not_applied")} if abandoned.get("abandoned") else abandoned
         reason = "replace_apply_interrupted"
     ok, msg = rollback_managed_update(reason, reopen_writer_admission=False)
     return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
@@ -1317,6 +1350,8 @@ def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, 
     Every completed boot rollback retains custody for one re-exec: HEAD may
     equal pre_update_sha while imported files came from an assisted merge.
     The restored generation clears the existing handoff without another reset.
+    Explicit ``observed`` facts name that branch's transaction and expected served commit;
+    they are presentation, never read by recovery.
     """
     lock_fh = None
     try:
@@ -1367,7 +1402,7 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
             tx, "boot_restore_resume",
             {"finalized": (tx.get("gate_blocked_from_phase") if phase == MARKER_CLEANUP_RETRY_PHASE
                            else phase) == "pending_boot_smoke",
-             "reason": "resumed local work recovery"},
+             "reason": "resumed local work recovery", **_cleanup_observed(tx)},
             {"type": "managed_update_stash_recovered_on_boot"},
         )
     if phase == "stashing_local_work":
@@ -1388,7 +1423,7 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
             tx["stash_sha"] = sha
         return _complete_stash_recovery(
             tx, "boot_stash_recovery",
-            {"finalized": False, "reason": "recovered pre-apply stash crash"},
+            {"finalized": False, "reason": "recovered pre-apply stash crash", **_observed(tx, "not_applied")},
             {"type": "managed_update_stash_recovered_on_boot"},
         )
     if phase == "pending_boot_smoke":
@@ -1411,8 +1446,10 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
         if clear_update_tx():
             _log_supervisor({"type": "managed_update_cleanup_retry_succeeded",
                              "reason": str(tx.get("gate_blocked_reason") or ""), "stash_note": stash_note})
+            # Only a completed rollback's handoff means this restored process is the previous version.
             return {"finalized": True, "reason": "marker cleanup retried",
-                    **({"stash_note": stash_note} if stash_note else {})}
+                    **({"stash_note": stash_note} if stash_note else {}),
+                    **_cleanup_observed(tx)}
         return {"finalized": False, "reason": "marker cleanup still failing",
                 **({"stash_note": stash_note} if stash_note else {})}
     if phase == GATE_BLOCKED_PHASE:

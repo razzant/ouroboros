@@ -24,6 +24,7 @@ from ouroboros.config import (
     load_settings,
 )
 from ouroboros.deadline_utils import deadline_remaining_sec
+from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
     CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement,
@@ -38,10 +39,12 @@ from ouroboros.tool_capabilities import (
 )
 from ouroboros.tool_result_delivery import (
     FitCandidate, prepare_producer_sources, project_tool_result_batch, reader_text, render_result_view,
-    split_allowance, typed_result_facts, with_producer_source,
+    split_allowance, typed_result_facts, with_delivery_note, with_producer_source,
 )
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.tools.shell_process import COMMAND_TIMEOUT_TOOLS, command_timeout_for_call
+from ouroboros.tools.tool_resolution import _normalize_tool_call_args
 from ouroboros.tools.tool_result import (
     TOOL_CODE_SPECS,
     LegacyTextResultAdapter,
@@ -56,7 +59,6 @@ from ouroboros.utils import (
     sanitize_tool_args_for_log,
     sanitize_tool_result_for_log,
     truncate_for_log,
-    truncate_review_artifact,
     utc_now_iso,
 )
 
@@ -102,7 +104,7 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
 
 
 def _publish_settlement(tools, drive_logs, row):
-    if completion_control_call(str(row.get("tool") or ""), row.get("args")):
+    if completion_control_call(str(row.get("tool") or "")):
         row["completion_control"] = True
     action = routing_action_for_tool(str(row.get("tool") or ""))
     if action:
@@ -129,7 +131,9 @@ def _settle_host_error(tools, drive_logs, live, invocation, outcome):
 def _settling_tool_worker(function, tools, drive_logs, live, invocation, *args):
     """All producer effects, including exceptional settlement, precede Future completion."""
     try:
-        return function(*args)
+        from ouroboros.tool_call_log import invocation_scope
+        with invocation_scope(invocation):
+            return function(*args)
     except BaseException as exc:
         _settle_host_error(tools, drive_logs, live, invocation, exc)
         raise
@@ -218,7 +222,9 @@ def _with_correlation(payload: Dict[str, Any], correlation: Dict[str, Any], *, t
     return out
 
 
-_PER_CALL_TIMEOUT_TOOLS = ("run_command", "run_script")
+# The tools whose handler bounds its own child through ``shell_process``'s one per-command
+# resolution; the outer wait follows that resolution (``_get_tool_timeout``).
+_PER_CALL_TIMEOUT_TOOLS = COMMAND_TIMEOUT_TOOLS
 # TYPED process facts (exit_code, POSIX signal name, duration_ms, timed_out,
 # killed_by_host, pre_exec_failure — plus resolved_runtime when the interpreter
 # resolver substituted the executable) reach this loop through the thread-local
@@ -230,9 +236,9 @@ _PER_CALL_TIMEOUT_TOOLS = ("run_command", "run_script")
 # published. Typed facts take PRECEDENCE over the producer-meta copy from the
 # ToolResult; a record with no typed publication carries no process facts at all
 # (D02: prose is never harvested into typed fields).
-# Structural ordering margin: the outer cap sits this far above the requested
-# per-call timeout so the handler's own (cleanly-messaged) subprocess timeout
-# fires first, before the outer thread-kill. Not a wait duration — a race margin.
+# Structural ordering margin: the outer cap sits this far above the handler's
+# resolved child timeout so its own (cleanly-messaged) timeout fires first and an
+# ordinary settlement lands inside the wait. Not a wait duration — a race margin.
 _PER_CALL_TIMEOUT_OUTER_MARGIN_SEC = NESTED_SETTLEMENT_MARGIN_SEC
 
 
@@ -255,12 +261,13 @@ def _get_tool_timeout(
 ) -> int:
     """Return max(settings/env timeout, per-tool minimum).
 
-    For ``run_command``/``run_script`` a per-call ``timeout_sec`` (or its
-    ``timeout`` alias) raises this OUTER tool-execution cap so the handler's own
-    deadline-clamped subprocess timeout fires first — otherwise a legitimately
-    long ``run_command(timeout_sec=900)`` would be cut off at the static 360s
-    entry cap before the inner timeout matters. A +30s margin lets the inner
-    (cleanly-messaged) timeout win over the outer thread-kill.
+    A handler that bounds its own child (``shell_process.COMMAND_TIMEOUT_TOOLS``) waits
+    at least that child's timeout plus the settlement margin, resolved by the handler's
+    own function from the arguments dispatch hands it (its alias folding, on a copy), so
+    the child's cleanly reported timeout fires first; a second rule once ran a 1800 s
+    check under a 1000 s wait (#1376). Near a task deadline the child keeps its 60 s
+    floor, so this wait can outlast that deadline as the registered window already
+    could; what settles after the wait ends is a late result (``late_tool_results``).
     """
     settings_val = 0
     try:
@@ -282,16 +289,12 @@ def _get_tool_timeout(
         from ouroboros.tools.vision import _vision_tool_timeout
 
         base = max(base, _vision_tool_timeout(tools._ctx, tool_args or {}))
-    if tool_name in _PER_CALL_TIMEOUT_TOOLS and isinstance(tool_args, dict):
-        raw = tool_args.get("timeout_sec", tool_args.get("timeout"))
-        try:
-            override = int(raw) if raw is not None else 0
-        except (TypeError, ValueError):
-            override = 0
-        if override > 0:
-            from ouroboros.config import get_per_call_timeout_ceiling_sec
-
-            return min(max(base, override), get_per_call_timeout_ceiling_sec()) + _PER_CALL_TIMEOUT_OUTER_MARGIN_SEC
+    if tool_name in _PER_CALL_TIMEOUT_TOOLS:
+        call_args, entry = dict(tool_args or {}), (getattr(tools, "_entries", None) or {}).get(tool_name)
+        if entry is not None:
+            _normalize_tool_call_args(entry, call_args)
+        inner = command_timeout_for_call(tool_name, call_args, getattr(tools, "_ctx", None))
+        return max(base, inner + _PER_CALL_TIMEOUT_OUTER_MARGIN_SEC)
     return _deadline_clamped_timeout(tools, tool_name, base)
 
 
@@ -303,7 +306,7 @@ def _get_tool_timeout(
 # per-call/run_command machinery and the deadline milestones own those.
 _DEADLINE_CLAMPED_TOOLS = frozenset({
     "web_search", "browse_page", "browser_action", "youtube_transcript",
-    "wait_task", "wait_tasks", "await_messages", "plan_task", "task_acceptance_review",
+    "wait_task", "wait_tasks", "await_messages", "plan_task",
     "analyze_screenshot", "vlm_query", "generate_image", "list_image_models", "recover_image",
 })
 
@@ -392,7 +395,8 @@ def _deliver_tool_results(
         # candidate, including the zero-body minimum. Never add them after fit.
         shaped = list(candidate)
         for index, row in enumerate(results, len(candidate) - len(results)):
-            shaped[index] = {**candidate[index], "content": with_producer_source(row, candidate[index]["content"])}
+            shaped[index] = {**candidate[index], "content": with_delivery_note(
+                row, with_producer_source(row, candidate[index]["content"]))}
         return fit_candidate([*shaped, *(pending_messages or [])], schemas)
 
     rows, receipt = project_tool_result_batch(
@@ -480,6 +484,8 @@ def _typed_result_metadata(
             meta["artifact_registered"] = True
         if isinstance(tool_result.meta.get("verification"), dict):  # the criterion verdict beside this status (#1585)
             meta["verification"] = dict(tool_result.meta["verification"])
+        if isinstance(tool_result.meta.get("image_attachment"), dict):
+            meta["image_attachment"] = dict(tool_result.meta["image_attachment"])
     # Legacy non-process deliverable fallback reads the FULL result before trace
     # truncation. Process producers must supply the typed fact below.
     if (
@@ -601,9 +607,12 @@ def _execute_single_tool(
         tool_call_id, _tool_correlation(tools), getattr(getattr(tools, "_ctx", None), "task_attempt", None))
     # The FROZEN correlation: a body that starts after an executor wait never adopts a later round's ids.
     correlation = {key: invocation[key] for key in ("execution_id", "round_id", "llm_call_id") if key in invocation}
+    # The invocation id and attempt make this call's own manifest (one address per invocation)
+    # bindable to its wait-end record when it settles after a timeout (``late_tool_results``).
     trace_identity = {"tool": fn_name, "tool_call_id": tool_call_id,
                       "parent_call_id": correlation.get("llm_call_id"),
-                      "execution_id": correlation.get("execution_id"), "round_id": correlation.get("round_id")}
+                      "execution_id": correlation.get("execution_id"), "round_id": correlation.get("round_id"),
+                      **{key: invocation[key] for key in ("invocation_id", "task_attempt") if key in invocation}}
     settlement = {"type": CALL_SETTLED, "tool": fn_name, "task_id": task_id, **invocation_fields(invocation),
                   **start_log_field(invocation)}
 
@@ -681,7 +690,6 @@ def _execute_single_tool(
             "ts": utc_now_iso(), "type": "tool_error", "task_id": task_id,
             "tool": fn_name, "args": args_for_log, "error": safe_error,
         }, correlation, tool_call_id=tool_call_id))
-
     # `status`/`is_error` are READ from the published code, never re-derived from
     # the text; process exit, signal and artifact-registration facts come from
     # typed meta, so producer-controlled stdout can forge none of them (ABI-6(b):
@@ -709,7 +717,7 @@ def _execute_single_tool(
         trace_ref = persist_call(
             pathlib.Path(drive_logs).parent,
             task_id=task_id,
-            call_id=new_call_id(f"tool_{fn_name}"),
+            call_id=record_call_id(f"tool_{fn_name}", str(invocation.get("invocation_id") or "")),
             call_type="tool_call",
             payload={
                 **trace_identity,
@@ -826,10 +834,10 @@ def abandoned_on_timeout(timeout_sec: float, *, bounded: bool = True) -> Iterato
     mechanics the loop uses: the worker inherits the caller's execution
     deadline through a copied context (its inner waits share the bound), the
     caller waits with ``future_result`` (a quota pause does not spend the
-    budget), and the executor is retired WITHOUT joining — a caller that timed
-    out walks away, and the value the worker settles on later is evidence of
-    nothing. ``bounded=False`` leaves the context unscoped for a terminal wait
-    that must not be cut at all.
+    budget), and the executor is retired WITHOUT joining: the caller walks away.
+    The reviewer episode never reads the worker's later value; the loop records
+    it for its next authorized turn (``late_tool_results``). ``bounded=False``
+    leaves the context unscoped for a terminal wait that must not be cut at all.
     """
     executor = ThreadPoolExecutor(max_workers=1)
     try:
@@ -878,11 +886,12 @@ def _make_timeout_result(
     result_meta = _typed_result_metadata(fn_name, result, True, tool_result)
     trace_ref = {}
     corr = dict(correlation or {})
+    frozen = {key: invocation[key] for key in ("invocation_id", "task_attempt") if invocation and key in invocation}
     try:
         trace_ref = persist_call(
             pathlib.Path(drive_logs).parent,
             task_id=task_id,
-            call_id=new_call_id(f"tool_timeout_{fn_name}"),
+            call_id=record_call_id(f"tool_timeout_{fn_name}", str(frozen.get("invocation_id") or "")),
             call_type="tool_timeout",
             payload={
                 "tool": fn_name,
@@ -895,6 +904,7 @@ def _make_timeout_result(
                 "args_redacted_preview": args_for_log,
                 "result": result,
                 "result_meta": result_meta,
+                **frozen,
             },
             manifest={
                 "execution_id": corr.get("execution_id"),
@@ -902,6 +912,7 @@ def _make_timeout_result(
                 "parent_call_id": corr.get("llm_call_id"),
                 "tool_call_id": tool_call_id,
                 "tool": fn_name,
+                **frozen,
                 "status": "timeout",
                 "timeout_sec": timeout_sec,
                 "tool_code": tool_result.code,
@@ -1001,7 +1012,7 @@ def _execute_with_timeout(
     # Host-stamped control calls are receipts, not substantive work.
     action = routing_action_for_tool(fn_name)
     receipt = {"routing_action": action} if action else {}
-    if completion_control_call(fn_name, _tc_args(tc)):
+    if completion_control_call(fn_name):
         receipt["completion_control"] = True
     # Durable/live start share identity for replay deduplication.
     live = _with_correlation({
@@ -1157,6 +1168,7 @@ def handle_tool_calls(
     *,
     fit_candidate: Optional[FitCandidate] = None,
     tool_schemas: Optional[list] = None,
+    project_results: Optional[Callable] = None,
 ) -> int:
     """Execute tool calls, append results, and return error count.
 
@@ -1273,7 +1285,7 @@ def handle_tool_calls(
             executor.shutdown(wait=batch_raised, cancel_futures=True)
 
     errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
-                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas)
+                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
     if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
         tools._ctx._skill_finalization_injected = False
     return errors
@@ -1340,9 +1352,16 @@ def _maybe_auto_attach_image(
         observation = {"status": "unavailable"}
         from ouroboros.tools.vision import attach_local_image_to_context
 
-        ok, note = attach_local_image_to_context(ctx, path)
+        # The producer's typed capture target, never the output filename or pixels.
+        target = parsed.get("auto_attach_source")
+        if target is None and isinstance(parsed.get("display"), dict):
+            target = parsed["display"].get("index")
+        source = json.dumps([exec_result["fn_name"], target], sort_keys=True) if target not in (None, "") else ""
+        ok, note = attach_local_image_to_context(ctx, path, stamp=getattr(tools, "_ctx", None),
+                                               observation=observation, **({"capture_source": source} if source else {}))
         observation["status"] = "attached" if ok else "unavailable"
         if not ok:
+            observation["reason"] = note
             log.debug("auto-attach skipped for %s: %s", path, note)
     except Exception:  # noqa: BLE001 - attachment is an enhancement, never a failure
         log.debug("auto-attach image failed", exc_info=True)
@@ -1353,15 +1372,6 @@ def reclaim_trace_refs(tool_ctx: Any) -> Dict[str, Any]:
     """Legacy diagnostic map; exact compaction custody belongs to each result row."""
     refs = getattr(tool_ctx, "_tool_trace_refs", None)
     return refs if isinstance(refs, dict) else {}
-
-
-def reclaim_negative_memo(tool_ctx: Any) -> set:
-    """Per-task set of non-shrinking reclaim unit keys (created on demand)."""
-    memo = getattr(tool_ctx, "_context_reclaim_negative_memo", None)
-    if not isinstance(memo, set):
-        memo = set()
-        tool_ctx._context_reclaim_negative_memo = memo
-    return memo
 
 
 def prune_reclaim_trace_refs(tool_ctx: Any, messages: List[Dict[str, Any]]) -> None:
@@ -1387,6 +1397,7 @@ def process_tool_results(
     *,
     fit_candidate: Optional[FitCandidate] = None,
     tool_schemas: Optional[list] = None,
+    project_results: Optional[Callable] = None,
 ) -> int:
     """Append tool results to messages/trace and return error count.
 
@@ -1401,9 +1412,15 @@ def process_tool_results(
     for exec_result in results:
         record_tool_activity(ctx, exec_result)
     from ouroboros.artifacts import task_id_for_artifacts
+    from ouroboros.mark_anchors import anchored_note
+    from ouroboros.delegation_knowledge_index import with_knowledge_index
 
-    results = prepare_producer_sources(results, getattr(ctx, "drive_root", None),
-                                       task_id_for_artifacts(ctx) if ctx is not None else "")
+    # A mark the mind tied to an action trails what the mind sees of that call, once per task: a
+    # delivery note measured with the batch and kept beside the retained producer payload, so the
+    # host readers below (acknowledgements, receipts, result review) parse the result without it.
+    notes = [anchored_note(ctx, row["fn_name"], row.get("tool_args") or {}) for row in results]
+    results = prepare_producer_sources(with_knowledge_index(ctx, results), getattr(ctx, "drive_root", None),
+                                       task_id_for_artifacts(ctx) if ctx is not None else "", notes)
     review_updates, review_pending = [], {}
     if ctx is not None and getattr(ctx, "_pending_review_context", None):
         from ouroboros.review_history_view import review_context_updates
@@ -1419,7 +1436,7 @@ def process_tool_results(
     history_count = len(messages)
     image_observations = [_maybe_auto_attach_image(row, tools, staged_messages=image_history) for row in results]
     image_messages = image_history[history_count:]
-    views = _deliver_tool_results(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
+    views = (project_results or _deliver_tool_results)(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
                                   [*review_updates, *dialogue_updates, *image_messages])
     messages[:] = image_history[:history_count]
 
@@ -1440,26 +1457,38 @@ def process_tool_results(
         typed = exec_result.get("tool_result")
         producer_ref = exec_result.get("producer_source_ref") or {}
         truncated_result = with_producer_source(exec_result, truncated_result)
+        shown_result = with_delivery_note(exec_result, truncated_result)
 
         messages.append({
             "role": "tool",
             "tool_call_id": exec_result["tool_call_id"],
-            "content": truncated_result,
+            "content": shown_result,
             TOOL_RESULT_RECORD_KEY: make_tool_result_record(
-                exec_result, truncated_result, facts=typed_result_facts(exec_result),
+                exec_result, shown_result, facts=typed_result_facts(exec_result),
                 source_ref=result_source_ref),
         })
         published = (exec_result.get("result_meta") or {}).get("tool_result_meta") or {}
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery
             acknowledge_question_delivery(ctx, truncated_result)  # exposure needs the complete ready view
+        if ctx is not None and published.get("held_dependency_notice") and not (is_error or result_partial):
+            from ouroboros.model_sleep import acknowledge_hold_delivery
+            acknowledge_hold_delivery(ctx, truncated_result)  # likewise for a held dependency
+        elif ctx is not None and not is_error and (published.get("held_dependency_notice") or published.get("read_view")):
+            from ouroboros.model_sleep import credit_hold_source
+            credit_hold_source(ctx, exec_result, view)  # a shortened one: shown once its exact source was, whole
+        if ctx is not None and published.get("review_delivery") and not result_partial:
+            from ouroboros.review_waiting import acknowledge_delivery
+            acknowledge_delivery(ctx, published["review_delivery"])
         # Keyed on the wake the RESULT published, not on a tool name: a call that published none has nothing to ack.
         # A delivered refusal wake too: ``acknowledge_pending_wake`` itself verifies what the text carried.
         if ctx is not None and published.get("supervision_wake_id"):
             try:
-                from ouroboros.delegate_supervision import acknowledge_pending_wake
+                from ouroboros.delegate_supervision import acknowledge_pending_wake, stage_pending_wake_exposure
+                from ouroboros.working_checkpoint import defer_content_ack
 
-                acknowledge_pending_wake(ctx, truncated_result)
+                stage_pending_wake_exposure(ctx, truncated_result)
+                defer_content_ack(ctx, lambda delivered=truncated_result: acknowledge_pending_wake(ctx, delivered))
             except Exception:
                 log.debug("Failed to acknowledge injected delegate wake", exc_info=True)
 
@@ -1481,11 +1510,11 @@ def process_tool_results(
             trace_args = {"_repr": repr(exec_result["args_for_log"])}
         llm_trace["tool_calls"].append({
             "tool": fn_name,
-            **({"completion_control": True} if completion_control_call(fn_name, trace_args) else {}),
+            **({"completion_control": True} if completion_control_call(fn_name) else {}),
             "tool_call_id": exec_result["tool_call_id"],
             "args": trace_args,
             # Review sees the same complete/bounded tool view that Main saw.
-            "result": truncated_result,
+            "result": shown_result,
             "is_error": is_error,
             "trace_ref": exec_result.get("trace_ref"), **({"round_id": exec_result["round_id"]} if exec_result.get("round_id") else {}),
             **({
@@ -1496,82 +1525,11 @@ def process_tool_results(
             } if result_partial else {}),
             **(exec_result.get("result_meta") or {}),
             **({"producer_source_ref": producer_ref,
-                "host_annotations": list(typed.host_annotations)}
-               if isinstance(typed, ToolResult) and typed.producer_text is not None else {}),
+                "host_annotations": [*(typed.host_annotations if isinstance(typed, ToolResult) else ()),
+                                     *([exec_result["delivery_note"]] if exec_result.get("delivery_note") else [])]}
+               if "producer_source_ref" in exec_result else {}),
+            **late_watch_fields(exec_result, ctx),
         })
-        if fn_name == "task_acceptance_review" and not is_error:
-            raw = str(exec_result.get("result") or "")
-            # The auto self-call leads with a compact improvement capsule and wraps
-            # the full ReviewRunResult JSON in <full_review>...</full_review> (M5).
-            # Extract that block so the FULL record still lands in review_runs even
-            # when the visible result is not pure JSON — otherwise an auto review
-            # that produced a capsule would record nothing and leave the objective
-            # unevaluated exactly when the feedback matters most.
-            payload = raw
-            if "<full_review>" in raw and "</full_review>" in raw:
-                payload = raw.split("<full_review>", 1)[1].rsplit("</full_review>", 1)[0].strip()
-            try:
-                parsed = json.loads(payload)
-                if isinstance(parsed, dict):
-                    deferred_to_host = (
-                        str(parsed.get("status") or "") == "deferred_to_host_acceptance"
-                        and parsed.get("authoritative") is False
-                    )
-                    if deferred_to_host:
-                        llm_trace.setdefault("acceptance_evidence_calls", []).append(parsed)
-                        if isinstance(parsed.get("acceptance_retry"), dict):
-                            # One explicit, source-bound retry of a disclosed local
-                            # preparation failure. Duplicate deliveries are idempotent.
-                            from ouroboros.acceptance_preparation import record_retry_intent
-
-                            record_retry_intent(llm_trace, parsed["acceptance_retry"], ctx)
-                        if ctx is not None:
-                            ctx._acceptance_request_pending = {
-                                **(parsed.get("request") or {}),
-                                "acceptance_subject": parsed.get("acceptance_subject"),
-                            }
-                    # A review run is the producer's own structure (an ``actors`` list, even empty/pending/
-                    # refused); completion, cap, historical and child acknowledgements carry none (#1602, #1318).
-                    elif isinstance(parsed.get("actors"), list):
-                        llm_trace.setdefault("review_runs", []).append(parsed)
-                    # v6.54.4 (review round 2): dissent is recorded on the agent-called
-                    # path too — merge into acceptance_decision without requiring an
-                    # agent_decision envelope.
-                    if not deferred_to_host and parsed.get("dissent_noted"):
-                        _dec = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
-                        _dec.setdefault("source", "agent_task_acceptance_review_tool")
-                        _dec["dissent_noted"] = True
-                        llm_trace["acceptance_decision"] = _dec
-                    agent_decision = parsed.get("agent_decision") if isinstance(parsed.get("agent_decision"), dict) else {}
-                    if agent_decision:
-                        from ouroboros.loop_acceptance import merge_agent_acceptance_stance
-
-                        merge_agent_acceptance_stance(llm_trace, agent_decision, ctx)
-                        if parsed.get("dissent_noted"):
-                            llm_trace["acceptance_decision"]["dissent_noted"] = True
-                        # v6.54.4 obligations layer: apply the agent's per-obligation
-                        # dispositions onto the host-collected per-task obligations.
-                        ob_dispositions = agent_decision.get("obligation_dispositions")
-                        if isinstance(ob_dispositions, list) and ob_dispositions:
-                            by_id = {
-                                str(e.get("id") or ""): e
-                                for e in ob_dispositions if isinstance(e, dict)
-                            }
-                            for ob in (llm_trace.get("acceptance_obligations") or []):
-                                if not isinstance(ob, dict):
-                                    continue
-                                entry = by_id.get(str(ob.get("id") or ""))
-                                if entry:
-                                    ob["disposition"] = str(entry.get("disposition") or "")
-                                    ob["disposition_reason"] = truncate_review_artifact(
-                                        str(entry.get("reason") or ""), limit=500,
-                                    )
-                                    # "agent_disposed", not "disposed": this status renders inside the
-                                    # host_attested catalog and must not read as host adjudication
-                                    # (host lifecycle values stay "open"/"disposed_by_re_review").
-                                    ob["status"] = "agent_disposed"
-            except Exception:
-                log.debug("Failed to parse task_acceptance_review tool result", exc_info=True)
 
     # These resident facts and exact bodies were included before allocation. Append
     # only after the complete assistant/tool block, before an owner-wait can park.
@@ -1584,6 +1542,8 @@ def process_tool_results(
             if pending.get(key) == value:
                 pending.pop(key)
         ctx._pending_review_context = pending
+        if getattr(ctx, "_held_dependencies_pending", None):
+            ctx._held_dependencies_pending = []  # the batch reached the transcript: undelivered holds re-read
     # Auto-attach AFTER the round's complete tool-message block, never between two
     # tool messages answering the same assistant turn: the user(image) injection
     # then preserves tool-result contiguity BY CONSTRUCTION instead of relying on

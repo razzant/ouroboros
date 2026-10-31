@@ -102,6 +102,7 @@ def test_mcp_start_between_timeout_result_and_handoff_close_keeps_custody(tmp_pa
     _running(tmp_path, workers)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = registry._ctx.root_task_id = "root"
+    registry._ctx.task_metadata = {"work_kind": "owner"}  # an owner task's minted kind
     monkeypatch.setattr(registry, "_mcp_name_miss", lambda _name: None)
     initialize, entered, finish = threading.Event(), threading.Event(), threading.Event()
     threads, sent = [], []

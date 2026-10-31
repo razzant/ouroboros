@@ -10,6 +10,7 @@ candidate, and a manifest waits up to ``PUBLICATION_WAIT_SEC``.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import sqlite3
@@ -21,6 +22,7 @@ import pytest
 from ouroboros import evidence_packer as packer
 from ouroboros import evidence_packs as packs
 from ouroboros import observability, store
+from tests._store_journal_shared import use_journal
 from tests.test_evidence_packs import _handle_path, _task
 from tests.test_evidence_packs import root as root  # noqa: F401  (the shared fixture)
 
@@ -42,16 +44,18 @@ class _SlowUnlinks:
 
 
 def _between_sections(monkeypatch, hook):
-    """Run ``hook(n)`` before the n-th census refresh of a deletion (n >= 2: after section n-1)."""
-    refresh, calls = packer.PackSweep.refresh, []
+    """Run ``hook(n)`` before the n-th section of a deletion enters its phase gate (n >= 2: after section n-1)."""
+    phase, calls = packs._unlink_phase, []
 
-    def observed(self):
+    @contextlib.contextmanager
+    def observed(root):
         calls.append(None)
         if len(calls) >= 2:
             hook(len(calls))
-        return refresh(self)
+        with phase(root) as value:
+            yield value
 
-    monkeypatch.setattr(packer.PackSweep, "refresh", observed)
+    monkeypatch.setattr(packs, "_unlink_phase", observed)
     return calls
 
 
@@ -112,14 +116,14 @@ def test_a_section_that_cannot_get_the_publication_lock_defers_the_rest(root, mo
             threading.Thread(target=holder, daemon=True).start()
             assert taken.wait(10)
 
-    calls = _between_sections(monkeypatch, hold)
-    swept = []
-    monkeypatch.setattr(packer, "record_swept", lambda *args: swept.append(args))
-    monkeypatch.setattr(packs, "os", _SlowUnlinks(0.1))
-    report = packer.run_pass(root)
-    assert report["faults"] == 0 and len(calls) == 2  # no section after the refused one
-    assert 0 < report["unlinked"] < 13 and _loose(refs) and not swept  # partial, deferred, retried later
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        calls = _between_sections(patch, hold)
+        swept = []
+        patch.setattr(packer, "record_swept", lambda *args: swept.append(args))
+        patch.setattr(packs, "os", _SlowUnlinks(0.1))
+        report = packer.run_pass(root)
+        assert report["faults"] == 0 and len(calls) == 2  # no section after the refused one
+        assert 0 < report["unlinked"] < 13 and _loose(refs) and not swept  # partial, deferred, retried later
     assert packer.run_pass(root)["faults"] == 0 and not _loose(refs)
 
 
@@ -131,12 +135,12 @@ def test_an_export_between_sections_stops_the_deletion_until_published_again(roo
             with store.open_store(root, write=True, service=True) as txn:
                 txn.set_meta("phase", store.EXPORTING)
 
-    _between_sections(monkeypatch, export)
-    monkeypatch.setattr(packs, "os", _SlowUnlinks(0.1))
-    report = packer.run_pass(root)
-    assert report["faults"] == 0 and 0 < report["unlinked"] < 13 and _loose(refs)
-    loose_after_export = len(_loose(refs))
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        _between_sections(patch, export)
+        patch.setattr(packs, "os", _SlowUnlinks(0.1))
+        report = packer.run_pass(root)
+        assert report["faults"] == 0 and 0 < report["unlinked"] < 13 and _loose(refs)
+        loose_after_export = len(_loose(refs))
     assert packer.run_pass(root)["unlinked"] == 0 and len(_loose(refs)) == loose_after_export
     with store.open_store(root, write=True, service=True) as txn:
         txn.set_meta("phase", store.PUBLISHED)
@@ -150,15 +154,21 @@ def _held_reader(root):
     return conn
 
 
-def test_the_phase_barrier_releases_without_waiting_for_readers(root):
+@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
+def test_the_phase_barrier_releases_without_waiting_for_readers(root, monkeypatch, journal):
+    use_journal(monkeypatch, journal)
     _task(root, "t1", blobs=1)  # a published store
     reader = _held_reader(root)
     try:
         with store.open_store(root, write=True, wait_sec=0, barrier=True):
             pass  # ROLLBACK: no reader drain, so no busy wait at all is needed
-        with pytest.raises(store.StoreBusy):
+        if journal == "PERSIST":
+            with pytest.raises(store.StoreBusy):
+                with store.open_store(root, write=True, wait_sec=0):
+                    pass  # a rowless COMMIT still has to wait for the reader
+        else:
             with store.open_store(root, write=True, wait_sec=0):
-                pass  # a rowless COMMIT still has to wait for the reader
+                pass  # a WAL COMMIT waits for no reader: the barrier is no exception there
     finally:
         reader.execute("ROLLBACK")
         reader.close()

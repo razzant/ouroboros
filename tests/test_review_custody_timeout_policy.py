@@ -75,7 +75,8 @@ def test_deadline_crossing_before_queue_wait_preserves_late_result(tmp_path, mon
 def test_spent_deadline_restart_reconciliation_gets_only_a_settlement_window(
     tmp_path, monkeypatch,
 ):
-    import time
+    import ouroboros.review_custody as custody
+    from time import monotonic
     from types import SimpleNamespace
 
     import ouroboros.config as config
@@ -87,6 +88,13 @@ def test_spent_deadline_restart_reconciliation_gets_only_a_settlement_window(
     from ouroboros.usage_accounting import UsageScope
 
     monkeypatch.setattr(config, "NESTED_SETTLEMENT_MARGIN_SEC", 0.2)
+    safety_deadline = monotonic() + 60  # Bound a lost worker; never measure product speed.
+
+    def clock(_slot):
+        assert monotonic() < safety_deadline, "review settlement stopped making progress"
+        return 100.0
+
+    monkeypatch.setattr(custody, "monotonic_now", clock)
     attempt = SimpleNamespace(triad_raw_results=[{
         "slot_id": "slot-1", "model_id": "cursor/test", "status": "error",
         "operation_id": "op-existing", "operation_state": "in_flight",
@@ -106,7 +114,7 @@ def test_spent_deadline_restart_reconciliation_gets_only_a_settlement_window(
     calls = []
 
     def recover(_slot, operation_id, retry_state, deadline, _checkpoint):
-        calls.append((operation_id, dict(retry_state), deadline - time.monotonic()))
+        calls.append((operation_id, dict(retry_state), deadline - custody.monotonic_now(_slot.slot_id)))
         return ReviewActorRecord(slot_id="slot-1", model="cursor/test", status="ok")
 
     [actor] = run_custodied_review_slots(
@@ -119,18 +127,17 @@ def test_spent_deadline_restart_reconciliation_gets_only_a_settlement_window(
             drive_root=tmp_path, task_id="task-spent-restart",
         ),
         run_slot=recover,
-        error_actor=lambda *_args, **_kwargs: None,
+        error_actor=lambda slot, error, operation_id="", operation_state="settled": ReviewActorRecord(
+            slot_id=slot.slot_id, model=slot.model, status="error", error=error,
+            operation_id=operation_id, operation_state=operation_state),
     )
 
     assert len(calls) == 1
     operation_id, retry_state, remaining = calls[0]
     assert operation_id == "op-existing"
     assert retry_state == {"pending_invocation_id": "inv-existing"}
-    # The deadline is monotonic_now + 0.2 and ``remaining`` re-reads the same
-    # clock, so it can only shrink — but on Windows the coarse monotonic clock
-    # returns the identical reading twice, leaving pure float rounding noise
-    # above 0.2 (observed +4.5e-13 on the CI shard). Tolerate one epsilon.
-    assert 0 < remaining <= 0.2 + 1e-9
+    assert remaining == pytest.approx(0.2, rel=0, abs=1e-9)
+    assert actor.status == "ok"
     assert paid == []
     assert actor.operation_id == "op-existing"
     assert actor.operation_state == "settled"
@@ -366,80 +373,71 @@ def test_restart_reconciliation_requires_complete_exact_identity(
     assert ctx._review_custody_lost is True
 
 
-def test_logical_timeout_actor_carries_live_delegated_restart_token(tmp_path):
+def test_logical_timeout_actor_carries_live_delegated_restart_token(tmp_path, monkeypatch):
     import threading
-    import time
     from types import SimpleNamespace
 
-    from ouroboros.review_custody import run_custodied_review_slots
+    import ouroboros.review_custody as custody
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_substrate import ReviewActorRecord, ReviewRequest, ReviewSlot
     from ouroboros.usage_accounting import UsageScope
 
-    release = threading.Event()
-    request = ReviewRequest(
-        surface="multi_model_review", goal="review", task_id="task-timeout-token",
-        retry_key="commit_review:token",
-    )
-    slot = ReviewSlot(
-        slot_id="slot-1", model="cursor/test", route=ReviewRouteKind.AGENT_SESSION,
-        timeout_sec=0.1,
-    )
-    calls = []
+    entered, release, settled = threading.Event(), threading.Event(), threading.Event()
+    ticks = iter((100.0,))
 
-    def still_running(_slot, _operation_id, retry_state, _deadline, _checkpoint):
-        calls.append(_operation_id)
-        retry_state["pending_invocation_id"] = "inv-live"
-        retry_state["delegated_run_id"] = "run-live"
-        release.wait(0.4)
-        return ReviewActorRecord(slot_id="slot-1", model="cursor/test", status="ok")
+    def clock(_slot):
+        first = next(ticks, None)
+        if first is not None:
+            return first
+        assert entered.wait(10), "review worker never entered before logical expiry"
+        return 101.0  # Cross the 100.1 deadline only after the invocation token exists.
+
+    monkeypatch.setattr(custody, "monotonic_now", clock)
+    request = ReviewRequest(surface="multi_model_review", goal="review",
+                            task_id="task-timeout-token", retry_key="commit_review:token")
+    slot = ReviewSlot(slot_id="slot-1", model="cursor/test",
+                      route=ReviewRouteKind.AGENT_SESSION, timeout_sec=0.1)
+    calls, workers = [], []
+
+    def still_running(_slot, operation_id, retry_state, _deadline, _checkpoint):
+        workers.append(threading.current_thread())
+        calls.append(operation_id)
+        retry_state.update(pending_invocation_id="inv-live", delegated_run_id="run-live")
+        entered.set()
+        try:
+            assert release.wait(10), "test did not release the review worker"
+            return ReviewActorRecord(slot_id="slot-1", model="cursor/test", status="ok")
+        finally:
+            settled.set()
 
     def error_actor(_slot, error, operation_id="", operation_state="settled"):
         return ReviewActorRecord(
             slot_id="slot-1", model="cursor/test", status="error", error=error,
             operation_id=operation_id, operation_state=operation_state,
-            late_result_pending=operation_state == "in_flight",
-        )
+            late_result_pending=operation_state == "in_flight")
 
-    started = time.monotonic()
-    ctx = SimpleNamespace()
-    [actor] = run_custodied_review_slots(
-        request=request,
-        slots=[slot],
-        usage_ctx=ctx,
-        task_id="task-timeout-token",
-        usage_meta={},
-        review_usage_scope=UsageScope(drive_root=tmp_path, task_id="task-timeout-token"),
-        run_slot=still_running,
-        error_actor=error_actor,
-    )
-    [joined] = run_custodied_review_slots(
-        request=ReviewRequest(
-            surface="multi_model_review", goal="review",
-            task_id="task-timeout-token", retry_key="commit_review:token",
-            reconcile_only=True, deadline_at="2000-01-01T00:00:00Z",
-        ),
-        slots=[slot],
-        usage_ctx=ctx,
-        task_id="task-timeout-token",
-        usage_meta={"deadline_at": "2000-01-01T00:00:00Z"},
-        review_usage_scope=UsageScope(
-            drive_root=tmp_path, task_id="task-timeout-token",
-        ),
-        run_slot=still_running,
-        error_actor=error_actor,
-    )
-    release.set()
-
-    assert time.monotonic() - started < 0.3
-    assert len(calls) == 1
-    assert actor.operation_state == "in_flight"
-    assert actor.usage["pending_invocation_id"] == "inv-live"
-    assert actor.usage["delegated_run_id"] == "run-live"
-    assert joined.operation_id == actor.operation_id
-    assert joined.operation_state == "in_flight"
-    assert joined.usage["pending_invocation_id"] == "inv-live"
-    assert joined.usage["delegated_run_id"] == "run-live"
+    kwargs = dict(slots=[slot], usage_ctx=SimpleNamespace(), task_id=request.task_id,
+                  review_usage_scope=UsageScope(drive_root=tmp_path, task_id=request.task_id),
+                  run_slot=still_running, error_actor=error_actor)
+    try:
+        [actor] = custody.run_custodied_review_slots(request=request, usage_meta={}, **kwargs)
+        [joined] = custody.run_custodied_review_slots(request=ReviewRequest(
+            surface=request.surface, goal="review", task_id=request.task_id, retry_key=request.retry_key,
+            reconcile_only=True, deadline_at="2000-01-01T00:00:00Z"),
+            usage_meta={"deadline_at": "2000-01-01T00:00:00Z"}, **kwargs)
+        assert not settled.is_set()  # Both answers returned while physical work is still held.
+        assert len(calls) == 1
+        assert joined.operation_id == actor.operation_id
+        for row in (actor, joined):
+            assert row.operation_state == "in_flight"
+            assert row.usage["pending_invocation_id"] == "inv-live"
+            assert row.usage["delegated_run_id"] == "run-live"
+    finally:
+        release.set()
+        assert settled.wait(10), "review worker did not settle"
+        for worker in workers:
+            worker.join(10)
+            assert not worker.is_alive()
 
 
 def test_coordinator_keeps_fresh_empty_session_custody_cell_shared(
@@ -866,8 +864,8 @@ def test_a_collection_while_a_released_slot_runs_keeps_the_settled_roster(tmp_pa
     slots are still running re-registers the released wave. The outcomes already recorded
     for that wave must survive the re-registration: otherwise the roster shrinks to the
     still-pending slots and the settled wave the last settlement hands the plan ask's hook
-    under-counts. One frame is still written for the ask, once every roster slot has an
-    outcome."""
+    under-counts. Each reply now carries its partial snapshot; one frame is still written
+    for the ask once every counted roster slot has an outcome."""
     import threading
     import time
     from types import SimpleNamespace
@@ -932,7 +930,10 @@ def test_a_collection_while_a_released_slot_runs_keeps_the_settled_roster(tmp_pa
     frames = _mailbox_entries(tmp_path, request.task_id)
     assert len(frames) == 1, [frame["text"] for frame in frames]
     assert frames[0]["text"].startswith("Plan ask a1: every participant settled — 3 answered")
-    assert settled_waves == [({"s1": "ok", "s2": "ok", "s3": "ok"}, 3)]
+    assert all(set(wave) == {"s1", "s2", "s3"} and size == 3 for wave, size in settled_waves)
+    assert sorted(sum(status == "ok" for status in wave.values()) for wave, _ in settled_waves) == [1, 2, 3]
+    assert [(wave, size) for wave, size in settled_waves if all(wave.values())] == [
+        ({"s1": "ok", "s2": "ok", "s3": "ok"}, 3)]
     assert not custody._RELEASED_WAVES
 
 

@@ -1,9 +1,10 @@
-"""Real Git range regressions for update-letter model input (issue #961)."""
+"""Real Git range regressions for the update description's material (issue #961)."""
 
 import pytest
 
 from ouroboros import update_letter as ul
-from tests.test_update_letter import _capture_for, _commit, _git, _status, _write_readme, letter_env  # noqa: F401
+from tests.test_update_description import _registry
+from tests.test_update_letter import _capture_for, _commit, _git, _status, _write_readme
 
 pytestmark = pytest.mark.serial
 
@@ -49,6 +50,7 @@ def test_full_graph_range_excludes_base_and_local_commits(merged_range, divergen
     assert len(shas) == len(set(shas))
     assert feature in shas and nested in shas
     assert base not in shas and local not in shas
+    assert [c['sha'] for c in material['local_commits']] == ([local] if divergent else [])
     bodies = {c["sha"]: c["body"] for c in material["commits"]}
     assert bodies[feature] == "Preserve the Project through retries."
     assert bodies[nested] == "Transfer the planning obligation."
@@ -71,33 +73,46 @@ def test_merge_range_preserves_body_and_row_bounds(merged_range, limit):
     assert f"bodies of the {len(expected) - limit} oldest commit(s)" in text
 
 
-def test_real_merge_material_reaches_write_letter_messages(merged_range, letter_env, monkeypatch):  # noqa: F811
+def test_real_merge_material_reaches_its_reader_beside_the_record(merged_range, tmp_path, monkeypatch):
+    """A fetching check writes the range's material where query_data(kind='update_material') reads it;
+    the author's request names that reader, never a paragraph template."""
+    import json
+
     repo, base, target, local, feature, nested = merged_range
     monkeypatch.setattr(ul, "_default_git", lambda: _capture_for(repo))
-    seen = []
-
-    def chat(client, **kwargs):
-        seen.extend(kwargs["messages"])
-        return {"content": "A short letter."}, {"ledger_attempt_ids": ["test-attempt"]}
-
-    monkeypatch.setattr(ul, "_chat", chat)
-    record = ul.refresh_after_check(_status(current_sha=local, latest_sha=target), drive_root=letter_env["drive"])
-    assert record["state"] == "ready"
-    text = seen[-1]["content"]
+    monkeypatch.setattr("ouroboros.update_qualification.post_merge_checks",
+                        lambda commits, url: {"status": "unavailable", "reason": "offline", "runs": [], "missing_shas": []})
+    drive = tmp_path / "drive"
+    record = ul.refresh_after_check(_status(current_sha=local, latest_sha=target), drive_root=drive)
+    assert record["state"] == "none" and record["text"] == ""
+    assert record["checked_key"]["base_sha"] == local and record["checked_key"]["target_sha"] == target
+    document = json.loads(ul.material_path(drive).read_text(encoding="utf-8"))
+    text = document["text"]
     for sha, subject in ((feature, "Project retry binding"), (nested, "Swarm planning transfer")):
         assert sha in text and subject in text
     assert "Preserve the Project through retries." in text
     assert "Transfer the planning obligation." in text
-    assert "shared base" not in text and "local-only customization" not in text
-    assert "ONE short paragraph" in text and "Summarize the whole range" in text
-    assert record["key"]["base_sha"] == local and record["key"]["target_sha"] == target
+    assert "shared base" not in text
+    assert text.index("Existing local history") < text.index("local-only customization")
+    assert local in text and "not incoming changes" in text
+    budget = document["text_bytes"]
+    assert budget == record["material"]["text_bytes"] > len(text.encode("utf-8")), "the reader counts canonical JSON"
+    request = ul.author_request_text(record, {"mode": "write", "key": record["checked_key"], "revision_at_request": 0})
+    assert f'kind="update_material", select="text", max_bytes={budget})' in request
+    assert "ONE short paragraph" not in request and "Summarize the whole range" not in request
+    reg = _registry(tmp_path / "repo", drive, task_id="main-turn")
+    reads = {size: reg.execute_result("query_data", {"op": "json", "kind": "update_material", "select": "text",
+                                                     "max_bytes": size}) for size in (budget, budget - 1)}
+    assert json.loads(reads[budget].text)["data"] == text and reads[budget - 1].status == "error"
 
 
-@pytest.mark.parametrize("failed_read", ["subjects", "bodies", "readme"])
+@pytest.mark.parametrize("failed_read", ["subjects", "bodies", "readme", "first_parent"])
 def test_each_material_read_failure_is_typed(merged_range, failed_read):
     repo, base, target, *_ = merged_range
 
     def capture(cmd):
+        if failed_read == "first_parent" and cmd[:2] == ["git", "rev-list"]:
+            return 128, "", "fixture read failure"
         kind = "readme" if "README.md" in cmd else "bodies" if "-n" in cmd else "subjects"
         if cmd[:2] == ["git", "log"] and kind == failed_read:
             return 128, "", "fixture read failure"
@@ -132,47 +147,3 @@ def test_long_branch_body_is_bounded_without_losing_its_identity(merged_range):
     assert len(entry["body"]) <= ul.COMMIT_BODY_MAX_CHARS
     assert "OMISSION" in entry["body"]
     assert large in ul.material_text(material) and entry["subject"] == "long branch detail"
-
-
-def test_nano_real_fit_keeps_material_for_toolless_author(merged_range, letter_env, monkeypatch):  # noqa: F811
-    import json
-    from types import SimpleNamespace
-
-    from ouroboros import context_fit
-    from ouroboros.context_budget import OWNER_NANO_TARGET_TOKENS
-
-    repo, base, target, *_ = merged_range
-    material = ul.collect_range_material(base, target, git=_capture_for(repo))
-    plans = []
-    monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: ([], ""))
-
-    def real_plan(env, memory, task):
-        # Production fitting, with deterministic context/evidence instead of owner memory
-        # or a network capability probe. Pressure exercises Nano input fitting.
-        core = context_fit.ContextCore(
-            base_prompt="p", bible_md="b", architecture_md="a", development_md="d",
-            semi_stable_text="s" * (OWNER_NANO_TARGET_TOKENS * 8), dynamic_text="y",
-            user_content_json=json.dumps(task["text"]), docs_need_development=False,
-        )
-        route = lambda task, **kw: (
-            {"provider": "test", "model": "test/light", "base_url": "", "use_local": False},
-            SimpleNamespace(route_fp="test", status="confirmed", stale=False, window_tokens=1_000_000),
-        )
-        plan = context_fit.build_context_fit_plan(env, core, task, preferred_mode="nano", route_resolver=route)
-        plans.append(plan)
-        return plan
-
-    sent = []
-    monkeypatch.setattr(ul, "_fit_plan", real_plan)
-    monkeypatch.setattr(ul, "_chat", lambda client, **kw: (
-        sent.append(kw) or {"content": "A paragraph."}, {"ledger_attempt_ids": ["test-nano"]}))
-    record = ul.write_letter(_status(current_sha=base, latest_sha=target), material, drive_root=letter_env["drive"])
-    assert record["state"] == "ready"
-    plan = plans[0]
-    assert plan.initial_mode == "nano"
-    assert "[Exact task input source]" not in plan.messages_for("nano")[-1]["content"]
-    assert sent[0]["messages"][0] == plan.projection("nano").system_message()
-    assert sent[0]["tools"] is None
-    text = sent[0]["messages"][-1]["content"]
-    assert text == json.loads(plan.user_content_json)
-    assert all(c["sha"] in text and c["subject"] in text for c in material["commits"])

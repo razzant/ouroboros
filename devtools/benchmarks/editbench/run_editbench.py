@@ -100,7 +100,7 @@ BASE_DISABLED = [
     "peek_task", "cancel_task", "discard_child_result",
     "web_search", "browse_page", "browser_action", "youtube_transcript",
     "analyze_screenshot", "vlm_query", "view_image", "ocr_pdf", "extract_video_frames",
-    "advisory_review", "task_acceptance_review", "request_deep_self_review",
+    "advisory_review", "request_deep_self_review",
     "plan_task",
 ]
 
@@ -643,7 +643,7 @@ def main() -> int:
                         rows.append(fut.result())
                         (out_dir / "runs.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
         finally:
-            server.stop()
+            teardown_unconfirmed = server.stop()
 
         rows.sort(key=lambda r: r["run"])
         summary = _summarize(rows)
@@ -661,7 +661,7 @@ def main() -> int:
         if not args.keep:
             _log("(pass --keep to retain workspaces/logs; keeping run root because results live there)"
                  if not args.out else "cleaning run root")
-            if args.out:
+            if args.out and not teardown_unconfirmed:  # an unconfirmed stop keeps its root for inspection
                 shutil.rmtree(run_root, ignore_errors=True)
     return 0
 

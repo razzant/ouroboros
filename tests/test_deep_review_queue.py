@@ -93,6 +93,7 @@ def test_the_tool_event_hands_the_reviewer_to_the_queue():
                                       "reviewer": "api-scout", "model": "openai/fake-reviewer"}, sup)
     _handle_deep_self_review_request({"type": "deep_self_review_request", "reason": "mine"}, sup)
     assert [(kw["reason"], kw["reviewer"]) for kw in handed] == [("look again", "api-scout"), ("mine", "")]
+    assert all(kw["origin"]["work_kind"] == "consciousness" for kw in handed)
 
 
 @pytest.mark.parametrize("source, chat, text, reviewer", [
@@ -116,7 +117,7 @@ def test_every_owner_entry_reaches_the_one_queue_door(monkeypatch, source, chat,
     server._handle_bridge_update_batch(types.SimpleNamespace(), [update], 0, ctx, [0])
     # The submission rides along so the door's rows settle only this message's Sending.
     assert handed == [{"reason": "owner:/review", "force": True, "chat_id": chat, "reviewer": reviewer,
-                       "client_message_id": "cm-review"}]
+                       "client_message_id": "cm-review", "origin": {"work_kind": "owner"}}]
 
 
 def test_the_worker_runs_the_named_row_and_links_its_record(tmp_path, monkeypatch):

@@ -75,8 +75,8 @@ def argument_refusal(
     """Publish one typed refusal naming every violated constraint (the W2 shape).
 
     ``identifier`` stays the first-line marker so each domain keeps its own code
-    in the text; the typed ``TOOL_ARG_ERROR`` is what status, reflection and the
-    Pattern Register read. ``effect`` states what the refused call did NOT do.
+    in the text; the typed ``TOOL_ARG_ERROR`` is what status and outcome readers
+    read. ``effect`` states what the refused call did NOT do.
     """
     text = f"⚠️ {identifier}: " + "; ".join(str(item).rstrip(". ") for item in problems) + "."
     if effect:

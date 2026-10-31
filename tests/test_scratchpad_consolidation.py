@@ -1,14 +1,18 @@
-"""Tests for scratchpad auto-consolidation.
+"""Scratchpad consolidation is the integrating mind's fold, never an automatic pass (#918).
 
 Verifies:
-- Threshold is 30000 chars
-- should_consolidate_scratchpad triggers only for block scratchpads
-- a pre-block flat scratchpad is never rewritten
-- the consolidation route keeps an explicit local light model or inherits a local main one
+- the automatic writer is gone: no 30 000-character threshold, no ``should_consolidate_scratchpad``
+  predicate, no ``consolidate_scratchpad`` Light pass and no post-task stage that runs one
+  (the root post-task census in ``test_authored_memory`` and ``test_root_post_task_synthesis``
+  shows the late phase buying no scratchpad call and leaving the blocks untouched)
+- a pre-block flat scratchpad is never rewritten, by a fold or by an append
+- the Light route the remaining Light operations use keeps an explicit local light model or
+  inherits a local main one
 """
 import importlib
 import os
 
+import pytest
 
 from ouroboros.memory import Memory
 
@@ -21,41 +25,15 @@ def _get_consolidator():
     return importlib.import_module("ouroboros.consolidator")
 
 
-def test_consolidation_threshold_is_30000():
-    """Scratchpad auto-consolidation must trigger at 30000."""
+def test_no_threshold_predicate_or_automatic_writer_remains():
+    """The former 30 000 threshold, its predicate and the Light pass it admitted."""
+    from ouroboros import context_budget, post_task_synthesis
+
     mod = _get_consolidator()
-    assert mod.SCRATCHPAD_CONSOLIDATION_THRESHOLD == 30000, (
-        f"Expected 30000, got {mod.SCRATCHPAD_CONSOLIDATION_THRESHOLD}"
-    )
-
-
-def test_should_not_consolidate_small_scratchpad(tmp_path):
-    mod = _get_consolidator()
-    drive = tmp_path / "data"
-    (drive / "memory").mkdir(parents=True)
-    (drive / "logs").mkdir(parents=True)
-    mem = Memory(drive_root=drive)
-    mem.scratchpad_path().write_text("x" * 10000, encoding="utf-8")
-    assert not mod.should_consolidate_scratchpad(mem)
-
-
-def test_should_not_consolidate_large_flat_scratchpad(tmp_path):
-    mod = _get_consolidator()
-    drive = tmp_path / "data"
-    (drive / "memory").mkdir(parents=True)
-    (drive / "logs").mkdir(parents=True)
-    mem = Memory(drive_root=drive)
-    mem.scratchpad_path().write_text("x" * 35000, encoding="utf-8")
-    assert not mod.should_consolidate_scratchpad(mem)
-
-
-def test_should_not_consolidate_missing_file(tmp_path):
-    mod = _get_consolidator()
-    drive = tmp_path / "data"
-    (drive / "memory").mkdir(parents=True)
-    (drive / "logs").mkdir(parents=True)
-    mem = Memory(drive_root=drive)
-    assert not mod.should_consolidate_scratchpad(mem)
+    for name in ("SCRATCHPAD_CONSOLIDATION_THRESHOLD", "should_consolidate_scratchpad", "consolidate_scratchpad"):
+        assert not hasattr(mod, name), name
+    assert not hasattr(context_budget, "SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS")
+    assert not hasattr(post_task_synthesis, "_run_scratchpad_consolidation")
 
 
 def test_flat_scratchpad_consolidation_is_retired():
@@ -64,8 +42,8 @@ def test_flat_scratchpad_consolidation_is_retired():
     assert not hasattr(mod, "_consolidate_scratchpad_flat")
 
 
-def test_consolidate_scratchpad_does_not_rewrite_flat_scratchpad(tmp_path):
-    mod = _get_consolidator()
+@pytest.mark.parametrize("operation", ["fold", "append"])
+def test_a_flat_scratchpad_is_never_rewritten(tmp_path, operation):
     drive = tmp_path / "data"
     (drive / "memory").mkdir(parents=True)
     (drive / "logs").mkdir(parents=True)
@@ -73,14 +51,14 @@ def test_consolidate_scratchpad_does_not_rewrite_flat_scratchpad(tmp_path):
     legacy = "legacy flat scratchpad\n" + ("x" * 35000)
     mem.scratchpad_path().write_text(legacy, encoding="utf-8")
 
-    class FailingLLM:
-        def chat(self, *args, **kwargs):
-            raise AssertionError("flat scratchpad consolidation should not call the LLM")
+    with pytest.raises(RuntimeError, match="LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE"):
+        if operation == "fold":
+            mem.fold_scratchpad_blocks("A fold over a flat file.", ["0" * 64])
+        else:
+            mem.append_scratchpad_block("An append over a flat file.")
 
-    result = mod.consolidate_scratchpad(mem, FailingLLM())
-
-    assert result is None
     assert mem.scratchpad_path().read_text(encoding="utf-8") == legacy
+    assert not mem.scratchpad_blocks_path().exists()
 
 
 def test_consolidation_route_preserves_explicit_local_light(monkeypatch):

@@ -1,10 +1,9 @@
 # Role and authority
 
 This chapter says what the handbook is for and names the domain manifest, the one owner
-a contributor must know before moving code. The handbook is how the body is changed:
-imperative rules, each naming its enforcing test, gate or CI lane or saying review-only.
-Their form and what belongs in which book are the "Documentation contract"; which
-document owns what is BIBLE P7 "Named canonical locations". This book keeps no
+a contributor must know before moving code. The handbook is how the body is changed;
+the form of its rules and what belongs in which book are the "Documentation contract"; which
+document owns what is BIBLE P7 "DRY / SSOT". This book keeps no
 inventory and no history.
 
 `ouroboros/domains.toml` is the SSOT of the module-to-domain assignment (1:1, complete

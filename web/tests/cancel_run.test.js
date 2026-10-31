@@ -36,7 +36,7 @@ test('taskCancelPending reads the typed projection, never the status', () => {
     assert.equal(taskCancelPending({ status: 'running' }), false);
 });
 
-test('the cancel click shows the honest interim, not an instant Cancelled', () => {
+test('the cancel click shows the honest interim, not an instant Stopped', () => {
     // Pinned at source: the click handler marks the card "Cancelling…" while the
     // durable intent settles, and the stored-record reconcile branches keep the
     // interim for a nonterminal record with cancel_state=pending instead of
@@ -81,10 +81,10 @@ test('taskTerminalPhase maps every severity to its card phase', () => {
 
 // --- both task_done summarizers ---
 
-test('chat live task_done summarizer renders an honest Cancelled state', () => {
+test('chat live task_done summarizer renders an honest Stopped state', () => {
     const view = summarizeChatLiveEvent({ type: 'task_done', status: 'cancelled' });
     assert.equal(view.phase, 'cancelled');
-    assert.equal(view.headline, 'Cancelled');
+    assert.equal(view.headline, 'Stopped');
     assert.equal(view.terminal, true);
 });
 
@@ -94,10 +94,10 @@ test('chat live task_done summarizer keeps the clean Done contract', () => {
     assert.equal(view.headline, 'Done');
 });
 
-test('logs task_done summarizer labels cancellation as Cancelled', () => {
+test('logs task_done summarizer labels cancellation as Stopped', () => {
     const view = summarizeLogEvent({ type: 'task_done', status: 'cancelled' });
     assert.equal(view.phase, 'cancelled');
-    assert.equal(view.headline, 'Cancelled');
+    assert.equal(view.headline, 'Stopped');
 });
 
 // --- terminal phase + history replay fallback ---
@@ -108,7 +108,7 @@ test('cancelled is a terminal card phase (card resolves, never re-inflates)', ()
     assert.equal(isTerminalTaskPhase('working'), false);
 });
 
-test('history replay of a cancelled root resolves to Cancelled, not Done', () => {
+test('history replay of a cancelled root resolves to Stopped, not Done', () => {
     // The reload fallback builds {...row, status: task_terminal_status} and asks
     // taskTerminalPhase for the finishLiveCard phase (chat.js terminal fallback).
     const terminalRecord = { task_id: 'root1', status: 'cancelled' };
@@ -209,7 +209,7 @@ test('a successful cancel also reconciles when task_done publication is lost', (
 test('task-detail reconciliation consults taskCancelPending BEFORE the legacy terminal fallback', () => {
     // GR2-8b: a live task wedged in the legacy `cancel_requested` STATUS latch is
     // INTENT, not outcome — it must show as cancel-pending, never resolve as a
-    // terminal "Cancelled" while the supervisor is still tearing it down. Pinned
+    // terminal "Stopped" while the supervisor is still tearing it down. Pinned
     // at source: the shared reconcile helper checks the typed projection first
     // and only falls through to the terminal list afterwards.
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');

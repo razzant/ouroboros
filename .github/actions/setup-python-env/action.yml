@@ -12,6 +12,17 @@ inputs:
     required: false
     default: 'true'
 
+  interpreter:
+    description: >-
+      The interpreter the environment is built on: setup-python, or shipped — the
+      python-build-standalone release the desktop packages bundle, fetched by the same
+      pinned and checksummed scripts/download_python_standalone.* the builds use. Test
+      jobs take shipped, so they run the SQLite (and with it the store's journal mode, WAL)
+      that fresh installs run; quick-test and journal-persist keep setup-python's, whose
+      PERSIST is what an install updated in place keeps running.
+    required: false
+    default: setup-python
+
 runs:
   using: composite
   steps:
@@ -24,17 +35,35 @@ runs:
         enable-cache: true
         cache-dependency-glob: uv.lock
         activate-environment: true
+    - name: Fetch the shipped interpreter
+      if: ${{ inputs.interpreter == 'shipped' && runner.os != 'Windows' }}
+      shell: bash
+      run: |
+        PYTHON_STANDALONE_DEST="$RUNNER_TEMP/shipped-python" PYTHON_STANDALONE_INTERPRETER_ONLY=1 bash scripts/download_python_standalone.sh
+        echo "OUROBOROS_CI_INTERPRETER=$RUNNER_TEMP/shipped-python/bin/python3" >> "$GITHUB_ENV"
+    - name: Fetch the shipped interpreter (Windows)
+      if: ${{ inputs.interpreter == 'shipped' && runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        & scripts/download_python_standalone.ps1 -Dest "$env:RUNNER_TEMP\shipped-python" -InterpreterOnly
+        "OUROBOROS_CI_INTERPRETER=$env:RUNNER_TEMP\shipped-python\python.exe" >> $env:GITHUB_ENV
     - name: Sync locked dependencies
       shell: bash
       run: |
         PROJECT_ARGS=()
         if [[ "${{ inputs.install-project }}" == false ]]; then PROJECT_ARGS+=(--no-install-project); fi
+        case "${{ inputs.interpreter }}" in
+          setup-python) ;;
+          shipped) PROJECT_ARGS+=(--python "$OUROBOROS_CI_INTERPRETER") ;;
+          *) echo "Unknown interpreter: ${{ inputs.interpreter }}" >&2; exit 2 ;;
+        esac
         case "${{ inputs.profile }}" in
           test) uv sync --locked --extra browser --group dev "${PROJECT_ARGS[@]}" ;;
           build) uv sync --locked --extra browser --extra desktop --extra build --group dev "${PROJECT_ARGS[@]}" ;;
           *) echo "Unknown Python dependency profile: ${{ inputs.profile }}" >&2; exit 2 ;;
         esac
         python -m pip --version
+        python -c "import sqlite3, sys; print(f'interpreter {sys.executable}: Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version}')"
     - name: Verify generated release dependency exports
       shell: bash
       run: |

@@ -433,6 +433,12 @@ def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
     quiz = plugin._make_quiz(_Api(tmp_path))
     asyncio.run(quiz({"question": "q?", "options": [{"label": "a"}, {"label": "b"}]}))
 
-    assert built == [{"trust_env": expected, "proxy": None,
-                      "api_base_url": "https://api.telegram.org",
-                      "files_dir": None}]
+    # A mirrored row also carries its message-id observer and native-reply anchor
+    # (test_telegram_proxy pins those); the transport facts stay exactly these.
+    assert len(built) == 1
+    options = dict(built[0])
+    assert callable(options.pop("on_message"))
+    assert options.pop("reply_to_message_id") == 0
+    assert options == {"trust_env": expected, "proxy": None,
+                       "api_base_url": "https://api.telegram.org",
+                       "files_dir": None}

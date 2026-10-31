@@ -47,13 +47,13 @@ class UsageReviewer(_ScriptedLLM):
         return (entry(kwargs) if callable(entry) else entry), next(self.usage)
 
 
-@pytest.mark.parametrize("surface", ["multi_model_review", "task_acceptance", "deep_self_review"])
+@pytest.mark.parametrize("surface", ["multi_model_review", "deep_self_review"])
 def test_large_initial_assignment_and_continuation_reach_transport(tmp_path, monkeypatch, surface):
     """Initial layout hints and every historical cap value leave dispatch intact."""
     monkeypatch.setenv("OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS", "50000")
     task = 'Review all of these exact premises: "quoted" \\ line\n' * 20_000
     assert len(task) > 900_000
-    answer = json.dumps({"verdict": "PASS", "findings": []}) if surface == "task_acceptance" else _VERDICT
+    answer = _VERDICT
     llm = _ScriptedLLM([
         {"tool_calls": [_tool_call("read_file", {"path": "source.txt"}, "read")]},
         {"content": answer},
@@ -242,9 +242,8 @@ def test_native_inspection_respects_reported_anthropic_input(tmp_path, monkeypat
 
 
 def test_authored_note_without_inspect_applies_even_when_view_still_exceeds_old_limit(tmp_path, monkeypatch):
-    from ouroboros import context_compaction
+    from ouroboros.tools.compact_context import get_tools
 
-    monkeypatch.setattr(context_compaction, "_call_summarizer", lambda *a, **k: pytest.fail("authored request called a helper"))
     note = "I read the exact source and retain its first and last facts."
     llm = _ScriptedLLM([
         {"tool_calls": [_tool_call("read_file", {"path": "source.txt"}, "read")]},
@@ -253,6 +252,12 @@ def test_authored_note_without_inspect_applies_even_when_view_still_exceeds_old_
     ])
     executor = _executor(tmp_path, llm, task="immutable assignment " * 48_000)
     result = executor.execute()
+    delivered = next(tool["function"] for tool in llm.calls[0]["tools"]
+                     if tool["function"]["name"] == "compact_context")
+    assert delivered == get_tools()[0].schema
+    guidance = delivered["parameters"]["properties"]["working_note"]["description"]
+    assert "future reader" in guidance and "within those sources" in guidance
+    assert "unaffected branches" in guidance and "invent no detail" in guidance
     receipt = executor._view_receipt
     assert receipt["status"] == "applied" and result.usage["native_view_changes"] == 1
     after = llm.calls[-1]
@@ -270,9 +275,6 @@ def test_authored_note_without_inspect_applies_even_when_view_still_exceeds_old_
 
 
 def test_authored_keep_last_n_keeps_the_exact_requested_tail_without_helper(tmp_path, monkeypatch):
-    from ouroboros import context_compaction
-
-    monkeypatch.setattr(context_compaction, "_call_summarizer", lambda *a, **k: pytest.fail("authored request called a helper"))
     llm = _ScriptedLLM([
         *({"tool_calls": [_tool_call("read_file", {"path": "source.txt"}, f"read-{i}")]} for i in range(4)),
         {"tool_calls": [_tool_call("compact_context", {"working_note": "All four reads agree.", "keep_last_n": 2}, "compact")]},
@@ -289,7 +291,9 @@ def test_restore_with_authored_note_retains_original_source_and_checkpoint_ident
 
     def compact(kwargs):
         inspected = json.loads(_tool_result(kwargs, "inspect"))
-        restored.update(next(unit["restore_ref"] for unit in inspected["units"] if unit["kind"] == "tool"))
+        unit = next(unit for unit in inspected["units"] if unit["kind"] == "tool")
+        restored.update({"checkpoint_ref": inspected["restore_checkpoint"], "unit_id": unit["unit_id"],
+                         "raw_sha256": unit["raw_sha256"]})
         return {"tool_calls": [_tool_call("compact_context", {
             "working_note": "Retain the verified source in its checkpoint.", "keep_unit_ids": [],
             "expected_view_revision": inspected["view_revision"],
@@ -359,9 +363,7 @@ def test_previous_input_observation_keeps_its_old_view_after_authored_compaction
 def test_provider_context_refusal_keeps_its_original_failure_without_new_recovery(tmp_path, monkeypatch):
     import httpx
     import openai
-    from ouroboros import context_compaction
 
-    monkeypatch.setattr(context_compaction, "_call_summarizer", lambda *a, **k: pytest.fail("unexpected recovery helper"))
     error = openai.BadRequestError(
         "maximum context length exceeded",
         response=httpx.Response(400, request=httpx.Request("POST", "https://provider.invalid/chat/completions")),

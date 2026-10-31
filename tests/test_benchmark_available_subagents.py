@@ -474,14 +474,12 @@ def test_legacy_heavy_read_vocabulary_does_not_leak_into_new_projection(
 
 def test_clb_operator_adapters_transport_canonical_actor_without_active_heavy():
     patch_root = REPO / "devtools/benchmarks/continual_learning/operator_patches"
-    host_patch = (patch_root / "_launcher.v6560.patch").read_text(encoding="utf-8")
     docker_patch = (patch_root / "clb_env_campaign_overrides.v6745.patch").read_text(
         encoding="utf-8"
     )
     official_patch = (patch_root / "adapter_official_submission.v681.patch").read_text(
         encoding="utf-8"
     )
-    assert "Canonical benchmark actor bytes are authored by run_clb.py" in host_patch
     assert '"OUROBOROS_SUBAGENTS"):' in docker_patch
     assert "OUROBOROS_SUBAGENTS=os.environ.get" in official_patch
     assert "OUROBOROS_MODEL_HEAVY" not in official_patch

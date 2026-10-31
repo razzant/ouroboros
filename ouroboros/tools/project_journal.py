@@ -6,7 +6,7 @@ live in the per-project store (``data/projects/<id>/``), which generic data
 tools cannot reach (``project_store_access_block``) — these scoped tools are
 the only write path, exactly like project knowledge.
 
-Tools resolve the project from the CURRENT task (``ctx.project_id``); an
+Tools resolve the project from the CURRENT task's durable placement; an
 explicit ``project_id`` argument lets the main-chat agent annotate a specific
 project (e.g. when curating from the штаб).
 """
@@ -21,6 +21,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.project_facts import (
+    placed_project_id,
     project_journal_path,
     project_reflections_path,
     project_workpad_path,
@@ -35,6 +36,7 @@ from ouroboros.utils import (
     append_jsonl,
     jsonl_generation_signature,
     utc_now_iso,
+    write_text_atomic,
 )
 
 log = logging.getLogger(__name__)
@@ -73,7 +75,7 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
 
 
 def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
-    own_value = getattr(ctx, "project_id", "")
+    own_value = placed_project_id(ctx)
     if own_value not in (None, "") and not isinstance(own_value, str):
         return "", "⚠️ TOOL_ARG_ERROR: current project scope is malformed"
     if explicit not in (None, "") and not isinstance(explicit, str):
@@ -509,7 +511,8 @@ def _workpad_write(ctx: ToolContext, content: str, project_id: str = "") -> str:
     path = project_workpad_path(pid)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(body, encoding="utf-8")
+        # Replace, never truncate in place: a failed write leaves the previous page whole.
+        write_text_atomic(path, body)
     except OSError as exc:
         return f"⚠️ TOOL_ERROR (workpad_write): {exc}"
     return f"OK: workpad[{pid}] written ({len(body)} chars)."
@@ -638,7 +641,7 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
     # what the provider was allowed to omit).
     if isinstance(source_ref, dict) and str(source_ref.get("reader") or "") in ("journal_read", "workpad_read") \
             and not str(source_ref.get("project_id") or "").strip():
-        own_project = str(getattr(ctx, "project_id", "") or "").strip()
+        own_project = str(placed_project_id(ctx) or "").strip()
         if own_project:
             source_ref = {**source_ref, "project_id": own_project}
     from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
@@ -788,7 +791,8 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     "Optionally publish one short line about this live root's work. Your context facts repeat "
                     "its dated text as working thought, never an owner directive; revise it when your focus changes. "
-                    "OTHER live roots see it while this task is unsettled (waits included), until replaced; "
+                    "OTHER live roots see it, and the owner reads it under the work's name, while this task is "
+                    "unsettled (waits included), until replaced; "
                     "after settlement it is history. It is task-scoped, not a project-level record; "
                     "journal/workpad writes do not publish it and nothing refreshes it. source_ref names a "
                     "reader whose current answer is retained as evidence."

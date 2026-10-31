@@ -45,7 +45,8 @@ def candidate(tmp_path, monkeypatch):
     subprocess.run(["git", "add", "change.py"], cwd=repo, check=True)
     ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="inline-task", emit_progress_fn=lambda *a: None)
     monkeypatch.setattr(review_helpers, "check_worktree_readiness", lambda *a, **kw: [])
-    monkeypatch.setattr(commit_admission, "release_metadata_preflight", lambda *a, **kw: "")
+    monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     return ctx
@@ -73,6 +74,7 @@ def _stub_preflight_lanes(repo, monkeypatch):
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the gate must really run two workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr(pr, "_verify_preflight_plugins", lambda *a: [])
@@ -527,13 +529,8 @@ class TestReleaseMetadataPreflight:
         assert result is not None and "PREFLIGHT_BLOCKED" in result
         assert 'web/package-lock.json (expected both root "version" entries = "5.99.0-rc.1")' in result
 
-    def test_doc_only_carve_is_the_commit_gate_classifier(self, tmp_path):
-        """One detector: the release-metadata carve is the one remaining reader of
-        ``_diff_is_doc_only`` (the tests rule runs the suite on a documentation diff too).
-        A code file, a mixed diff and a doc under ``tests/`` keep the block; the carve never
-        touches the carrier-coherence checks once VERSION is in scope."""
-        from ouroboros.tools.git_review_cycle import _diff_is_doc_only
-
+    def test_serving_release_requirement_covers_documentation_and_code(self, tmp_path):
+        """File extensions do not select release policy; contribution authority does."""
         repo = _make_agent_repo(tmp_path)
         _init_git_repo(repo)
         _write_release_files(repo, version="5.99.0-rc.1")
@@ -547,20 +544,18 @@ class TestReleaseMetadataPreflight:
         def _preflight(paths):
             return commit_admission.release_metadata_preflight(repo, "m", paths)
 
-        assert _preflight(["docs/NOTES.md"]) is None
-        assert _diff_is_doc_only(["docs/NOTES.md"]) is True
-        for scope in (["ouroboros/feature.py"], ["docs/NOTES.md", "ouroboros/feature.py"], ["tests/NOTES.md"]):
-            assert _diff_is_doc_only(scope) is False, scope
+        for scope in (["docs/NOTES.md"], ["ouroboros/feature.py"],
+                      ["docs/NOTES.md", "ouroboros/feature.py"], ["tests/NOTES.md"]):
             blocked = _preflight(scope)
             assert blocked is not None and "VERSION is not in scope" in blocked, scope
+            assert commit_admission.release_metadata_preflight(repo, "m", scope, neutral_allowed=True) is None
         (repo / "pyproject.toml").write_text('[project]\nname = "ouroboros"\nversion = "5.98.0"\n', encoding="utf-8")
         stale = _preflight(["VERSION", "docs/NOTES.md"])
         assert stale is not None and "pyproject.toml" in stale
 
     @pytest.mark.parametrize("case", ["p9_history", "readme_not_staged"])
     def test_the_commit_gate_blocks_on_the_staged_index_before_any_look(self, tmp_path, monkeypatch, case):
-        """``commit_gate.deterministic_preflight`` reads the STAGED index (the prepared lane of
-        the retired advisory, as is: the version-neutral form stays allowed there), so a P9
+        """``commit_gate.deterministic_preflight`` reads the STAGED index, so a P9
         overflow or a numbered release without its staged README blocks before the tests and
         before any paid look."""
         (tmp_path / "repo").mkdir()
@@ -655,20 +650,6 @@ def _look(monkeypatch, calls):
     monkeypatch.setattr(commit_gate, "run_commit_preflight", look)
 
 
-def test_the_system_prompt_says_which_look_the_commit_record_counts():
-    """The model's own prompt states the record rule the tests below pin: only the row
-    named in the ``commit_reviewed`` call itself is the commit's preflight; a separate
-    ``preflight_review`` is an early look of its own; no name records not performed."""
-    import pathlib
-
-    text = (pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
-    phrase = " ".join(text.split())
-    assert ("the commit's record counts an early look only when that call itself names the row "
-            "(`commit_reviewed(preflight_reviewer=…)`)") in phrase
-    assert "a separate `preflight_review` is an early look of its own" in phrase
-    assert "a commit that names no row records its preflight as not performed" in phrase
-
-
 @pytest.mark.parametrize("skip, status", [(False, "not_performed"), (True, "skipped")])
 def test_without_a_named_row_the_record_states_the_fact_and_nothing_looks(candidate, monkeypatch, skip, status):
     calls = []
@@ -706,35 +687,10 @@ def test_a_doc_only_diff_pays_the_suite_like_any_other_diff(candidate, monkeypat
 
 
 def test_every_site_states_the_one_tests_rule_for_a_documentation_diff():
-    """Owner answer A (2026-10-08): the suite runs before any commit to the body, a
-    documentation-only diff included; ``skip_tests`` is the one exemption. The gate's
-    condition, its comments, the checklist line and the test modules that once pinned the
-    retired carve say the same thing, so no site describes a doc-only diff as exempt."""
+    """The gate condition preserves the test exemption and managed proof requirement."""
     import inspect
-    import pathlib
 
-    import tests.test_git_review_tests_gate as tests_gate
-    import tests.test_skip_tests_doc_only as classifier_tests
-
-    repo = pathlib.Path(git.__file__).resolve().parents[2]
-    checklist = (repo / "docs" / "CHECKLISTS.md").read_text(encoding="utf-8")
-    sites = {
-        "git._preflight_and_tests_gate": inspect.getsource(git._preflight_and_tests_gate),
-        "git._managed_candidate_needs_proof": inspect.getsource(git._managed_candidate_needs_proof),
-        "docs/CHECKLISTS.md": checklist,
-        "tests/test_git_review_tests_gate.py": tests_gate.__doc__ or "",
-        "tests/test_skip_tests_doc_only.py": classifier_tests.__doc__ or "",
-        "this module": TestReleaseMetadataPreflight.test_doc_only_carve_is_the_commit_gate_classifier.__doc__ or "",
-    }
-    retired = ("exempt from the suite", "preflight bypass", "skip_tests/doc-only",
-               "the tests rule applies", "diff-aware")
-    for name, text in sites.items():
-        for phrase in retired:
-            assert phrase not in text, (name, phrase)
-    assert "if not message and (not skip_tests or _managed_needs_proof):" in sites["git._preflight_and_tests_gate"]
-    assert "documentation has tests too" in sites["git._preflight_and_tests_gate"]
-    assert "a documentation-only diff included" in checklist
-    assert "a documentation-only diff included" in sites["tests/test_git_review_tests_gate.py"]
+    assert "if not message and (not skip_tests or _managed_needs_proof):" in inspect.getsource(git._preflight_and_tests_gate)
 
 
 def test_a_syntax_error_blocks_before_the_tests_and_the_look(candidate, monkeypatch):

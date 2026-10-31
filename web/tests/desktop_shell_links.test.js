@@ -361,8 +361,13 @@ test('the parent pywebviewready listener is released when the framed document un
 function toastDocument() {
     const toasts = [];
     const node = () => ({
-        classList: { add() {} },
+        classList: { add() {}, contains: () => false },
+        style: { setProperty() {} },
+        children: [],
+        offsetTop: 0, offsetWidth: 0, offsetHeight: 0,
         setAttribute() {},
+        removeAttribute() {},
+        hasAttribute: () => false,
         appendChild() {},
         addEventListener() {},
         remove() {},

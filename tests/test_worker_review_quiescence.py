@@ -52,28 +52,6 @@ def test_paid_review_quiescence_includes_empty_active_completion_tail(env, monke
     until(review_operation.local_reviews_settled)
 
 
-def test_historical_preparation_owns_quiescence_through_actual_drain_return(env):
-    entered, release = threading.Event(), threading.Event()
-
-    def work(operation):
-        assert operation.preparing and review_operation._LIVE[operation.owner_id] is operation
-        entered.set()
-        assert release.wait(10)
-        return {"status": "refused", "reason": "keyless_source", "dispatched": False}
-
-    purpose = {"task_id": env.ctx.task_id, "task_attempt": 1, "debt_id": "preparation",
-               "accounting_root_task_id": env.ctx.task_id, "automatic": False,
-               "confirmed_delivery": {"chat_id": 7}}
-    result = review_operation.prepare_historical_operation(root=env.root, purpose=purpose,
-        event_queue=env.events, work=work, background=True)
-    try:
-        assert entered.wait(10) and result["status"] == "preparing"
-        assert not review_operation.local_reviews_settled()
-    finally:
-        release.set()
-    until(review_operation.local_reviews_settled)
-
-
 def _checkpointed_operation(env, parent):
     operation = review_operation.ReviewOperation(parent=parent, request=_request(),
         task_id=parent.task_id, result_root=env.root)
@@ -185,37 +163,49 @@ def test_concurrent_close_publishes_the_final_pointer_once(env, monkeypatch):
     assert operation.owner_id not in review_operation._LIVE and review_operation.local_reviews_settled()
 
 
-@pytest.mark.parametrize("owed", [True, False])
-def test_server_maintenance_retries_a_direct_turns_failed_final_pointer_without_a_worker_probe(
-        env, monkeypatch, owed):
-    """Reviewer counterexample (C1): the server never runs the worker probe, so maintenance skipped it."""
-    from ouroboros import acceptance_settlement
+def _maintenance_pass(root, monkeypatch):
+    """The server's real off-loop maintenance pass with its unrelated steps idle."""
+    from types import SimpleNamespace
+
+    import supervisor.workspace_preparation as preparation
+    from ouroboros import server_maintenance as maintenance
+
+    monkeypatch.setattr(maintenance, "DATA_DIR", root)
+    monkeypatch.setattr(maintenance, "_periodic_zombie_reconcile", lambda **_kw: None)
+    monkeypatch.setattr(maintenance, "_run_reconcile_prunes", lambda *_a: None)
+    monkeypatch.setattr(maintenance, "_run_drive_custody_pass", lambda *_a: None)
+    monkeypatch.setattr(maintenance, "_tick_maintenance_child", lambda: None)
+    monkeypatch.setattr(preparation, "recover_interrupted_preparations", lambda *_a, **_kw: None)
+    maintenance._run_periodic_reconcile_sweep([0], latch=SimpleNamespace(release=lambda: None))
+
+
+def test_server_maintenance_retries_a_direct_turns_failed_final_pointer_without_a_worker_probe(env, monkeypatch):
+    """Reviewer counterexample (C1): the server never runs the worker probe, so maintenance skipped it.
+    Its periodic pass retries this process's failed final pointer (``local_reviews_settled``); the
+    acceptance late publication the orphaned collector once owed left with task acceptance, so the
+    closed operation's pointer is simply removed."""
     from ouroboros.task_results import load_task_result
 
-    healthy, settled = [False], []
+    healthy = [False]
     original = review_operation._mark_operation
     monkeypatch.setattr(review_operation, "_mark_operation",
                         lambda *a, **kw: original(*a, **kw) if healthy[0] else False)
-    monkeypatch.setattr(acceptance_settlement, "late_publication_owed", lambda *a: owed)
-    monkeypatch.setattr(acceptance_settlement, "acceptance_actor_ended", lambda *a: True)
-    monkeypatch.setattr(acceptance_settlement, "settle_acceptance_operation",
-                        lambda ctx, **kw: settled.append(kw["checkpoint"]["owner_id"]) or "published")
     with _parent(env) as parent:
         operation = _checkpointed_operation(env, parent)
-        pointer = {"state": review_operation.OPERATION_DISPATCHED, "surface": "task_acceptance",
+        pointer = {"state": review_operation.OPERATION_DISPATCHED, "surface": "plan_review",
                    "controller": operation.identity, "retry_key": operation.retry_key, "task_attempt": 1}
         review_operation._update_operations(env.root, TASK, lambda rows: {**rows, operation.owner_id: pointer},
                                             create=True)
         try:
             operation.maybe_close()  # a direct turn in the server process: the final write fails once
-            review_operation.collect_orphaned_operations_softly(env.root)
-            assert review_operation._LIVE.get(operation.owner_id) is operation and settled == []
+            _maintenance_pass(env.root, monkeypatch)
+            assert review_operation._LIVE.get(operation.owner_id) is operation
+            assert operation.owner_id in load_task_result(env.root, TASK)[review_operation.OPERATIONS_FIELD]
             healthy[0] = True
-            review_operation.collect_orphaned_operations_softly(env.root)  # the next ordinary pass
+            _maintenance_pass(env.root, monkeypatch)  # the next ordinary pass
             assert operation.owner_id not in review_operation._LIVE
-            rows = load_task_result(env.root, TASK)[review_operation.OPERATIONS_FIELD]
-            expected = ([operation.owner_id], "collected") if owed else ([], "closed")
-            assert (settled, rows[operation.owner_id]["state"]) == expected
+            rows = load_task_result(env.root, TASK).get(review_operation.OPERATIONS_FIELD) or {}
+            assert operation.owner_id not in rows
         finally:
             with review_operation._LOCK:
                 review_operation._LIVE.pop(operation.owner_id, None)

@@ -858,7 +858,7 @@ def test_m1_the_no_settings_file_path_reaches_the_factory_pool(tmp_path, monkeyp
 
 DIRECT_PROVIDER_CELLS = [
     ("OPENAI_API_KEY", "openai", "openai::gpt-5.6-terra"),
-    ("ANTHROPIC_API_KEY", "anthropic", "anthropic::claude-opus-5"),
+    ("ANTHROPIC_API_KEY", "anthropic", "anthropic::claude-opus-5-5"),
 ]
 
 

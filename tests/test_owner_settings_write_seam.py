@@ -167,9 +167,9 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     assert "owner-test-key" not in json.dumps(change)
 
 
-@pytest.mark.parametrize("mode,status", [("cyber_pro", 200), ("pro", 409)])
+@pytest.mark.parametrize("mode,status", [("cyber_pro", 200), ("pro", 200)])
 @pytest.mark.parametrize("context_mode", ["low", "nano"])
-def test_context_owner_endpoint_allows_cyber_during_work(cyber_settings, monkeypatch, mode, status, context_mode):
+def test_context_owner_endpoint_updates_future_actors_during_work(cyber_settings, monkeypatch, mode, status, context_mode):
     from ouroboros import config as cfg
     from ouroboros.gateway import settings as settings_mod
     from supervisor.active_activity import get_direct_activity_registry
@@ -524,7 +524,7 @@ def _pool_world(monkeypatch, *, records=None):
     monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda: {
         "api-critic": {"surface": "commit_gate", "observed_model": "openai/gpt-5.6-luna", "record_id": "rec-1"}})
     monkeypatch.setattr(server_maintenance, "review_pool_migration_records", lambda: records or {})
-    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items, env: {
+    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items: {
         "api-critic": {"usd_per_review": 0.12, "basis": "route_tariff"},
         "session-critic": {"usd_per_review": None, "basis": "subscription_seat"},
         "helper": {"usd_per_review": None, "basis": "unknown"}})
@@ -668,7 +668,7 @@ def test_review_pool_payload_carries_the_migration_outcome_that_decides_the_docu
     from ouroboros.gateway import settings as settings_mod
 
     monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda: {})
-    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items, env: {})
+    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items: {})
 
     loaded, body = _served(settings_mod, {"OUROBOROS_REVIEWER_SLOTS": _AUTHORED_LANES, "OPENROUTER_API_KEY": "present"})
     (snapshot,) = sorted((pool_root / "state" / "review_migrations").glob("*-slots-to-pool.json"))
@@ -691,7 +691,7 @@ def test_review_pool_payload_names_the_reason_a_broken_lanes_key_was_retained(po
     from ouroboros.gateway import settings as settings_mod
 
     monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda: {})
-    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items, env: {})
+    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items: {})
 
     loaded, body = _served(settings_mod, {"OUROBOROS_REVIEWER_SLOTS": _BROKEN_LANES, "OPENROUTER_API_KEY": "present"})
     assert loaded["OUROBOROS_REVIEWER_SLOTS"] == _BROKEN_LANES, "retained for the owner's catalog save"
@@ -721,7 +721,7 @@ def test_the_live_handler_judges_the_receipt_by_the_document_on_disk_not_the_pro
     from ouroboros.gateway import settings as settings_mod
     from tests.test_review_pool_migration import N1_DOC, _served_from_disk
 
-    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items, env: {})
+    monkeypatch.setattr(settings_mod, "_review_pool_costs", lambda items: {})
     monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
     loaded = _served_from_disk(pool_root, monkeypatch, {"OUROBOROS_REVIEWER_SLOTS": _BROKEN_LANES} if refused
                                else dict(N1_DOC))
@@ -814,6 +814,7 @@ def test_settings_get_reads_a_legacy_actor_through_the_seam_without_materializin
     # gateway test pins the real reader it is meant to exercise.
     monkeypatch.setattr(settings_mod, "load_settings", cfg.load_settings)
     original = {
+        "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
         "OUROBOROS_SUBAGENT_HARNESS": "codex=gpt-5.6-sol:high",
         "OUROBOROS_SUBAGENT_PROFILE": "owner-profile",
     }
@@ -846,6 +847,7 @@ def test_settings_get_reads_the_factory_reviewers_in_place_of_an_unsaved_api_can
         settings_mod, "apply_runtime_provider_defaults", apply_runtime_provider_defaults,
     )
     original = {
+        "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
         "OPENROUTER_API_KEY": "configured",
         "OUROBOROS_MODEL": "openai/gpt-5.6-sol",
         "OUROBOROS_MODEL_LIGHT": "openai/gpt-5.6-luna",
@@ -895,6 +897,8 @@ _OWNER_SETTINGS_WRITERS = [
 
 def _owner_app(handler_name, route, isolated_settings):
     from ouroboros.gateway import settings as settings_mod
+    if handler_name == "api_owner_safety_mode":
+        from ouroboros.gateway import safety_settings as settings_mod
 
     app = Starlette(routes=[
         Route(route, endpoint=getattr(settings_mod, handler_name), methods=["POST"])])
@@ -1068,14 +1072,12 @@ def test_settings_save_body_runs_off_the_event_loop():
         "_api_owner_runtime_mode_sync",
         "_api_owner_auto_grant_sync",
         "_api_owner_context_mode_sync",
-        "_api_owner_safety_mode_sync",
     }
     # The loop must NEVER hold the document lock: every async settings writer
     # delegates its locked body to a worker thread.
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.AsyncFunctionDef) and node.name in {
             "api_owner_runtime_mode", "api_owner_auto_grant", "api_owner_context_mode",
-            "api_owner_safety_mode",
         }:
             # Off the loop through the ONE writer seam (itself pinned above to
             # asyncio.to_thread + the typed busy mapping), never inline.

@@ -83,6 +83,7 @@ class ResolvedResourceBinding:
     skill_name: str
     state_drive_root: pathlib.Path
     logical_base_path: pathlib.Path | None = None
+    repository_path: pathlib.Path | None = None
 
 
 _ALL_ROOTS: frozenset[str] = frozenset({

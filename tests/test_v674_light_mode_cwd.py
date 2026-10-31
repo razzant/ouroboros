@@ -24,6 +24,7 @@ def _registry(tmp_path):
     repo.mkdir(parents=True, exist_ok=True)
     reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "drive")
     reg._ctx.task_id = "t1"
+    reg._ctx.task_metadata = {"work_kind": "owner"}  # an owner task's minted kind
     return reg
 
 

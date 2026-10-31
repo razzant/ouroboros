@@ -51,7 +51,7 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TOP_KEYS = frozenset({"enabled", "items"})
 _ROW_KEYS = frozenset({
     "subagent_id", "name", "recommended_use", "route", "effort", "processing_preference", "access", "enabled",
-    "review_eligible", "delivery", "minted_from",
+    "review_eligible", "rechecks_flags", "delivery", "minted_from",
     # `coupling_focus` (a row's standing coupling brief) is NOT a key yet: step R
     # decides whether it exists; the parser must refuse it until then.
 })
@@ -105,6 +105,7 @@ class ConfiguredSubagent:
     # pool (every review surface reads the pool; nothing else configures a
     # reviewer). Absent in older saved bytes, which means unmarked.
     review_eligible: bool = False
+    rechecks_flags: bool = False
     # ``native``/``packet`` on an api_model row (see REVIEW_DELIVERIES); "" on a
     # session row, which always retrieves. Absent in saved bytes means native.
     delivery: str = ""
@@ -251,6 +252,14 @@ def parse_configured_subagents(raw: Any) -> ConfiguredSubagents:
         review_eligible = row.get("review_eligible", False)
         if not isinstance(review_eligible, bool):
             raise ValueError(f"{SUBAGENTS_SETTING}: {where}.review_eligible must be a boolean")
+        rechecks = row.get("rechecks_flags", False)
+        if not isinstance(rechecks, bool):
+            raise ValueError(f"{SUBAGENTS_SETTING}: {where}.rechecks_flags must be a boolean")
+        delivery = _delivery(row, route, where)
+        if rechecks and (route.kind != ROUTE_KIND_API_MODEL or delivery != REVIEW_DELIVERY_PACKET):
+            raise ValueError(f"{SUBAGENTS_SETTING}: rechecks_flags requires an api_model row with packet delivery")
+        if rechecks and any(item.rechecks_flags for item in items):
+            raise ValueError(f"{SUBAGENTS_SETTING}: at most one row may recheck flags")
         items.append(
             ConfiguredSubagent(
                 subagent_id=row_id,
@@ -261,7 +270,8 @@ def parse_configured_subagents(raw: Any) -> ConfiguredSubagents:
                 access=access,
                 enabled=row_enabled,
                 review_eligible=review_eligible,
-                delivery=_delivery(row, route, where),
+                rechecks_flags=rechecks,
+                delivery=delivery,
                 minted_from=_minted_from(row.get("minted_from", ""), where),
             )
         )
@@ -320,6 +330,8 @@ def configured_subagents_dict(config: ConfiguredSubagents) -> dict[str, Any]:
         # existed serializes to the same bytes.
         if row.review_eligible:
             payload["review_eligible"] = True
+        if row.rechecks_flags:
+            payload["rechecks_flags"] = True
         if row.delivery == REVIEW_DELIVERY_PACKET:
             payload["delivery"] = REVIEW_DELIVERY_PACKET
         if row.minted_from:

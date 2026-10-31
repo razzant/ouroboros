@@ -105,8 +105,16 @@ def make_serving(root: pathlib.Path) -> pathlib.Path:
     return repo
 
 
+def stub_adoption_evidence(monkeypatch) -> None:
+    """Miniature bodies exercise switching, not the battery; the real full-evidence
+    acceptance/refusal boundary is exercised in test_preflight_selection.py."""
+    monkeypatch.setattr("ouroboros.preflight_qualification.adoption_test_evidence",
+                        lambda *args, **kwargs: {"tier": "full", "source": "stub", "head": args[2]})
+
+
 def isolate(monkeypatch, root: pathlib.Path) -> pathlib.Path:
     """Point the worktree registry and data root at ``root``; returns the data dir."""
+    stub_adoption_evidence(monkeypatch)
     data = root / "data"
     (data / "state").mkdir(parents=True, exist_ok=True)
     (data / "logs").mkdir(parents=True, exist_ok=True)
@@ -118,8 +126,9 @@ def isolate(monkeypatch, root: pathlib.Path) -> pathlib.Path:
 def make_ctx(serving: pathlib.Path, data: pathlib.Path, task_id: str, **overrides):
     from ouroboros.tools.registry import ToolContext
 
+    # An owner task carries the work kind its admission minted; an unmarked context is consciousness.
     fields = dict(repo_dir=serving, drive_root=data, system_repo_dir=serving, task_id=task_id,
-                  branch_dev="ouroboros", task_metadata={"root_task_id": task_id})
+                  branch_dev="ouroboros", task_metadata={"root_task_id": task_id, "work_kind": "owner"})
     fields.update(overrides)
     return ToolContext(**fields)
 
@@ -164,3 +173,31 @@ def restart_receipt(data, expected_sha, reason, branch="ouroboros"):
     from supervisor.evolution_lifecycle import write_pending_restart_marker
 
     return write_pending_restart_marker(data, expected_sha=expected_sha, expected_branch=branch, reason=reason)
+
+
+def host_restart_ack(ctx, data, status="accepted"):
+    """Stand in for the supervisor's restart intake on ``ctx``'s live event queue.
+
+    Each restart intent the tool sends is answered the way the host answers it: a queue
+    publication in the host's own data root ``data`` whose ``restart_intent`` names that
+    request, beside a ``queue.alive`` of the same generation. ``request_restart_intent``
+    reads it with the real reader. ``status=None`` publishes nothing (a lost ACK). Returns
+    the intents received, in order.
+    """
+    from types import SimpleNamespace
+    from tests._shared import write_queue_document
+
+    received = []
+
+    def put_nowait(event):
+        received.append(dict(event))
+        if event.get("type") != "restart_request" or status is None:
+            return
+        receipt = {key: event[key] for key in ("request_id", "task_id", "task_attempt", "reason")}
+        receipt.update(status=status, **({"refusal": "fixture_refusal"} if status in {"refused", "released"} else {}))
+        state = pathlib.Path(data) / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        write_queue_document(state / "queue_snapshot.json", {"restart_intent": receipt})
+
+    ctx.event_queue = SimpleNamespace(put_nowait=put_nowait)
+    return received

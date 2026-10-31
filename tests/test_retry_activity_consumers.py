@@ -22,6 +22,7 @@ from tests.test_retry_pause_identity import _assign, _loop_once, reaper  # noqa:
 from tests.test_retry_resume_stop_authority import paused_retry
 from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
+from tests._work_projection_shared import state_fields
 
 pytestmark = pytest.mark.serial
 
@@ -32,15 +33,22 @@ def test_census_uses_physical_actor_and_keeps_actual_late_work(
         host, monkeypatch, clock, reaper, door, separate_late_work):  # noqa: F811
     task, _child, _plan = paused_retry(host, monkeypatch, clock, reaper, door)
     if separate_late_work:
-        # Addressed late-phase producer fact, not an extra current queue actor.
+        # Addressed late-phase producer fact (its upkeep still open under the Pause),
+        # not an extra current queue actor.
         patch_document(host.root, "held", lambda row: {**row, "status": "completed",
-            "root_phase_checkpoint": {"post_task_synthesis": "paused"}})
+            "root_phase_checkpoint": {"post_task_synthesis": "running"}})
     available = {"complete": True}
     rows = _chat_activities_snapshot_safe(host.root, direct_turns=[], availability=available)
     expected = [task["id"], *(["held"] if separate_late_work else [])]
     print("Physical census", {"door": door, "late_work": separate_late_work, "rows": rows})
     assert available["complete"] and [r["activity_id"] for r in rows] == expected
     assert all(r["phase"] == "budget_paused" for r in rows)
+    if separate_late_work:
+        # That upkeep still writes: the tree's Resume waits for it, then admits the same actor.
+        refused = queue.resume_budget_paused_task(task["id"])
+        assert not refused["ok"] and "late_phase_running" in json.dumps(refused), refused
+        patch_document(host.root, "held", lambda row: {
+            **row, "root_phase_checkpoint": {"post_task_synthesis": "degraded"}})
     assert queue.resume_budget_paused_task(task["id"])["ok"]
 
 
@@ -80,8 +88,9 @@ def test_browser_resumes_current_retry_once(host, monkeypatch, clock, reaper, su
                 posts.append({"path": path, "status": response.status_code, "body": response.json()})
             route.fulfill(status=response.status_code, content_type="application/json", body=response.content)
         def census(route):
+            # The real census and the server's own work projection of it, which the page reads.
             facts = {"supervisor_ready": True, "projects": [], "active_chat_activities_complete": True,
-                     "active_chat_activities": _chat_activities_snapshot_safe(host.root, {}, direct_turns=[])}
+                     **state_fields(host.root, {}, direct_turns=[])}
             snapshots.append(facts)
             route.fulfill(content_type="application/json", body=json.dumps(facts))
         page.route("**/api/chat/history*", forward)

@@ -1,7 +1,7 @@
 """The supervisor event bus: one Manager-backed queue, two lanes, one consumer.
 
 The bus is the ordinary ``queue.Queue`` the process-lifetime manager serves,
-with three facts kept under its own mutex and nothing else:
+with these facts kept under its own mutex and nothing else:
 
 * **Two lanes.** Every event kind rides the lane its ``EventDisposition``
   declares (``supervisor/event_taxonomy.py``): ``control`` for chat sends,
@@ -24,11 +24,16 @@ with three facts kept under its own mutex and nothing else:
   queued or in-flight original is never duplicated and never counted as a
   retry. Volatile: a new server generation starts empty; the durable outbox
   stays the authority on what is owed.
+* **Lane depth and age.** Each envelope keeps the manager process's own
+  monotonic stamp of its put; ``lane_facts`` answers per lane how many wait
+  and how long the oldest has (the per-minute ``supervisor_load`` row reads
+  it), one process and one clock. A re-put envelope ages from its new put.
 """
 from __future__ import annotations
 
 import logging
 import queue
+import time
 from collections import Counter, deque
 from multiprocessing.managers import SyncManager
 from typing import Any
@@ -87,7 +92,7 @@ class ObservedEventQueue(queue.Queue):
         addresses = idle_input_addresses(item)
         # Retain the addresses by value: an in-process producer may keep or
         # mutate its original dict, while the manager transport copies it.
-        self._lanes[event_lane(item)].append((item, addresses))
+        self._lanes[event_lane(item)].append((item, addresses, time.monotonic()))
         self._pending.update(addresses)
         delivery_id = outstanding_delivery_id(item)
         if delivery_id:
@@ -95,7 +100,7 @@ class ObservedEventQueue(queue.Queue):
 
     def _get(self) -> Any:
         lane = self._lanes[CONTROL_LANE] or self._lanes[TELEMETRY_LANE]
-        item, addresses = lane.popleft()
+        item, addresses, _put_at = lane.popleft()
         for address in addresses:
             self._pending[address] -= 1
             if not self._pending[address]:
@@ -106,6 +111,13 @@ class ObservedEventQueue(queue.Queue):
         """One atomic snapshot of addresses with an unconsumed idle input, both lanes."""
         with self.mutex:
             return set(self._pending)
+
+    def lane_facts(self) -> dict[str, dict[str, Any]]:
+        """Per lane: the envelopes waiting and the age in seconds of the oldest (None when empty)."""
+        with self.mutex:
+            now = time.monotonic()
+            return {name: {"depth": len(lane), "oldest_age_sec": round(now - lane[0][2], 1) if lane else None}
+                    for name, lane in self._lanes.items()}
 
     def release_delivery(self, delivery_id: str) -> None:
         """The consumer's receipt: one queued send of this id left the handler."""
@@ -176,4 +188,16 @@ def delivery_outstanding(event_queue: Any, delivery_id: str) -> bool | None:
         return outstanding
     except Exception:
         log.warning("Supervisor delivery membership is unobservable for %s", delivery_id, exc_info=True)
+        return None
+
+
+def lane_observations(event_queue: Any) -> dict[str, dict[str, Any]] | None:
+    """``lane_facts`` read outside Q; a bus that cannot answer is unknown (None), never empty."""
+    try:
+        facts = event_queue.lane_facts()
+        if not isinstance(facts, dict):
+            raise ValueError("invalid supervisor lane observation")
+        return facts
+    except Exception:
+        log.debug("Supervisor lane depths are unobservable", exc_info=True)
         return None

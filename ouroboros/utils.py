@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import datetime as _dt
 import hashlib
+import io
 import json
 import logging
 import math
@@ -16,7 +17,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -89,9 +90,9 @@ def emit_cognitive_operation_event(
     """Publish one typed lifecycle fact for a live cognitive operation.
 
     This is deliberately a direct worker event, rather than a UI ``log_event``
-    envelope.  The supervisor uses it only to spare its idle rail while the
-    physical call is in flight; deadlines, budgets, cancellation and the
-    absolute task ceiling remain independent.  Callers may omit ``lease_until``
+    envelope. Work leases spare the idle rail; display-only wait marks classify
+    reply preparation without granting that exemption. Deadlines, budgets,
+    cancellation and the task ceiling stay independent. Omit ``lease_until``
     so the supervisor derives a bounded ceiling from the task it owns.
     """
     if event_queue is None:
@@ -335,62 +336,6 @@ def atomic_write_json(path: pathlib.Path, payload: Any, *, trailing_newline: boo
     write_text_atomic(pathlib.Path(path), content, fsync=fsync)
 
 
-def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0,
-                           atomic_temps: bool = True, scripts: bool = True) -> int:
-    """Remove orphaned atomic-write temp files left behind by a hard kill.
-
-    ``atomic_write_json`` writes to a unique ``.{name}.tmp.<pid>.<tid>.<uuid>``
-    sibling then ``os.replace``s it into place; a SIGKILL between create and
-    rename can orphan the temp file (its try/finally cleanup never runs). This
-    sweeps the tree for such temp files older than ``min_age_sec`` — the age
-    guard avoids deleting a temp file from an in-flight write in another process.
-    Returns the number removed. Best-effort: never raises.
-
-    Only files whose suffix after the final ``.tmp.`` is the atomic signature
-    (pid/tid/uuid → hex digits and dots) are reaped, so a legitimate user dotfile
-    such as ``.config.tmp.backup`` is never deleted.
-
-    The data-root ``tmp_scripts/`` fallback is in scope too (CPL4-C20):
-    ``tools/shell.py`` unlinks its ``script_<uuid>.<ext>`` files in a
-    ``finally``, so one that survived is a hard-kill orphan. Only the
-    TOP-LEVEL fallback dir is swept here — task-drive copies die with their
-    drive's own GC prune — and only at startup, when no script can be live
-    (``scripts``); the whole-tree walk for atomic temps (``atomic_temps``) is the
-    expensive half and runs off the loop thread, in the first reconcile pass.
-    """
-    root = pathlib.Path(root)
-    if not root.is_dir():
-        return 0
-    hex_chars = set("0123456789abcdef.")
-    removed = 0
-    now = time.time()
-    try:
-        candidates = list(root.rglob(".*.tmp.*")) if atomic_temps else []
-        if scripts:
-            candidates.extend(root.glob("tmp_scripts/script_*"))
-    except OSError:
-        return 0
-    fallback_scripts = root / "tmp_scripts"
-    for tmp in candidates:
-        try:
-            if not tmp.is_file():
-                continue
-            if not (tmp.parent == fallback_scripts and tmp.name.startswith("script_")):
-                # Require the post-".tmp." suffix to be the atomic signature
-                # (hex/dot only) so we never delete an unrelated dotfile that
-                # happens to match.
-                suffix = tmp.name.rsplit(".tmp.", 1)
-                if len(suffix) != 2 or not suffix[1] or set(suffix[1]) - hex_chars:
-                    continue
-            if now - tmp.stat().st_mtime < min_age_sec:
-                continue
-            tmp.unlink()
-            removed += 1
-        except OSError:
-            continue
-    return removed
-
-
 def read_json_dict(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     """Return a JSON object from ``path`` or ``None`` when absent/invalid.
 
@@ -408,6 +353,84 @@ def read_json_dict(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+# path -> (file identity, object, parse error, its bytes while racy): one entry per path in use
+_JSON_SNAPSHOTS: Dict[str, tuple] = {}
+# A filesystem clock bound, not a policy: a coarse file clock (FAT's two seconds, HFS+ seconds,
+# Linux's jiffy, Windows' tick) can give a later write the same stamp, so a file changed this
+# recently when it was read is compared byte for byte at the next read (the racy-git rule).
+_RACY_NS = 2_000_000_000
+
+
+def file_identity(st: Any) -> tuple:
+    """What every write changes: a rename-replace is a new inode, an in-place write a new change
+    time (``st_ctime_ns``, which no ``utime`` sets back on POSIX; Windows reports creation time)."""
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def json_snapshot(path: pathlib.Path, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+    """The JSON object at ``path``, parsed once per file identity and shared: no reader mutates it.
+
+    For read-mostly state its writers replace by rename (``atomic_write_json``); a writer reads
+    its own fresh copy (``read_json_dict``). ``None`` when absent. A malformed or non-object
+    document is ``None``, with ``strict`` a ``ValueError`` (also once a lenient read remembered
+    it); an unreadable file is ``None``, with ``strict`` its ``OSError``, never remembered.
+    A file changed within ``_RACY_NS`` of its read is read again and parsed only if its bytes moved.
+    """
+    key = str(path)
+    try:
+        held = _JSON_SNAPSHOTS.get(key)
+        if held is None or held[3] is not None or held[0] != file_identity(os.stat(key)):
+            started = time.time_ns()
+            with open(key, "rb") as handle:  # the identity and the bytes come from one open file
+                info, raw = os.fstat(handle.fileno()), handle.read()
+            if held is not None and held[3] == raw:
+                data, error = held[1], held[2]
+            else:
+                try:
+                    data, error = json.loads(raw.decode("utf-8")), None
+                except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError alike
+                    data, error = None, exc
+                if error is None and not isinstance(data, dict):
+                    data, error = None, ValueError(f"not a JSON object but {type(data).__name__}")
+                if error is not None:
+                    log.warning("Failed to parse JSON file %s: %s", key, error)
+            racy = max(info.st_mtime_ns, info.st_ctime_ns) >= started - _RACY_NS
+            held = _JSON_SNAPSHOTS[key] = (file_identity(info), data, error, raw if racy else None)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        if strict:
+            raise
+        log.warning("Failed to read JSON file %s", key, exc_info=True)
+        return None
+    if strict and held[2] is not None:
+        raise ValueError(f"{key} holds no readable JSON object: {held[2]}") from held[2]
+    return held[1]
+
+
+@contextlib.contextmanager
+def json_update_lock(path: pathlib.Path, *, timeout_sec: float = 4.0, stale_sec: float = 90.0) -> Iterator[None]:
+    """Hold the sidecar ``<file>.lock`` that serializes the locked writers of the JSON file ``path``.
+
+    Never the file itself, whose inode each atomic write replaces. ``update_json_locked`` holds it
+    around its read-modify-write; a store with its own load and save holds it around those. Raises
+    ``TimeoutError`` past ``timeout_sec``: proceeding unlocked would reopen the lost update.
+    """
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    path = pathlib.Path(path)
+    lock_path = path.with_name(path.name + ".lock")
+    lock_fd = acquire_exclusive_file_lock(
+        lock_path, timeout_sec=timeout_sec, stale_sec=stale_sec, owner_aware_stale=True,
+    )
+    if lock_fd is None:
+        raise TimeoutError(f"could not acquire {lock_path} within {timeout_sec}s")
+    try:
+        yield
+    finally:
+        release_exclusive_file_lock(lock_path, lock_fd)
+
+
 def update_json_locked(
     path: pathlib.Path,
     mutator: Any,
@@ -420,7 +443,7 @@ def update_json_locked(
 ) -> Dict[str, Any]:
     """Locked read-modify-write of a durable JSON dict file.
 
-    Acquires a sidecar ``<file>.lock``, re-reads the CURRENT on-disk JSON
+    Acquires the sidecar ``<file>.lock`` (``json_update_lock``), re-reads the CURRENT on-disk JSON
     inside the lock (so the mutator always sees the latest state, closing the
     lost-update window of unlocked load→merge→write sequences), applies
     ``mutator(current) -> dict | None`` (``None`` aborts: the file is left
@@ -435,21 +458,8 @@ def update_json_locked(
     from an existing empty object for schema-bearing callers: only absence may
     initialize a new schema.
     """
-    from ouroboros.platform_layer import (
-        acquire_exclusive_file_lock,
-        release_exclusive_file_lock,
-    )
-
     path = pathlib.Path(path)
-    lock_path = path.with_name(path.name + ".lock")
-    lock_fd = acquire_exclusive_file_lock(
-        lock_path, timeout_sec=timeout_sec, stale_sec=stale_sec, owner_aware_stale=True,
-    )
-    if lock_fd is None:
-        raise TimeoutError(
-            f"update_json_locked: could not acquire {lock_path} within {timeout_sec}s"
-        )
-    try:
+    with json_update_lock(path, timeout_sec=timeout_sec, stale_sec=stale_sec):
         existed = path.exists()
         current = read_json_dict(path)
         if current is None:
@@ -469,8 +479,6 @@ def update_json_locked(
         if after_write is not None:
             after_write(updated)  # still under the writer lock; a crash leaves extra debt
         return updated
-    finally:
-        release_exclusive_file_lock(lock_path, lock_fd)
 
 
 def jsonl_append_lock_path(path: pathlib.Path) -> pathlib.Path:
@@ -513,7 +521,7 @@ def assert_test_data_path(path: pathlib.Path) -> None:
 
 def append_jsonl(
     path: pathlib.Path, obj: Dict[str, Any], *, ensure_record_boundary: bool = False,
-    require_lock: bool = False, lock_timeout_sec: float = 2.0,
+    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True,
 ) -> bool:
     """Append a JSON object as a line to a JSONL file (concurrent-safe).
 
@@ -527,7 +535,8 @@ def append_jsonl(
     shutdown callers whose grace has expired; unlocked fallback is unchanged.
     Runtime ``logs/*.jsonl`` rows are streamed to the ``set_log_sink`` sink, minus
     types with a dedicated live owner (``WORKER_LOG_SINK_SUPPRESSED_TYPES``, server
-    superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame.
+    superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame, so a
+    durable replica of a row its writer already streamed passes ``live=False``.
     Returns ``True`` on successful write, ``False`` when all retries
     failed (which is also logged at WARNING). Important events
     (``task_done``, ``llm_round``, escalation messages) need that signal
@@ -554,9 +563,8 @@ def append_jsonl(
     _written = False
 
     try:
-        # One owner-aware lock primitive for both lanes: a live holder (e.g. the
-        # memory-journal compactor) is waited out, never displaced; the
-        # non-required lane then appends unlocked.
+        # Both lanes wait out a live lock holder, never displacing it;
+        # the non-required lane then appends unlocked.
         lock_fd = acquire_exclusive_file_lock(
             lock_path,
             timeout_sec=lock_timeout_sec,
@@ -597,7 +605,8 @@ def append_jsonl(
 
         for attempt in range(write_retries):
             try:
-                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                # Byte-exact: a Windows descriptor is text mode without O_BINARY and would write CRLF.
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o644)
             except Exception:
                 if attempt < write_retries - 1:
                     time.sleep(retry_sleep_base_sec * (2 ** attempt))
@@ -622,8 +631,8 @@ def append_jsonl(
 
         for attempt in range(write_retries):
             try:
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(append_data.decode("utf-8"))
+                with path.open("ab") as f:
+                    f.write(append_data)
                 _written = True
                 return True
             except Exception:
@@ -637,6 +646,7 @@ def append_jsonl(
         # and state/memory/receipt stores are durable data, not a log feed.
         if (
             _written
+            and live
             and _log_sink is not None
             and path.parent.name == "logs"
             and path.suffix == ".jsonl"
@@ -651,6 +661,15 @@ def append_jsonl(
     return _written
 
 
+def jsonl_window(handle: Any, size: int, tail_bytes: Optional[int] = None) -> bytes:
+    """The whole lines of the last ``tail_bytes`` of a ``size``-byte file in ONE read (no per-block GIL hand-off)."""
+    if tail_bytes is None or size <= tail_bytes:
+        return handle.read(size)
+    handle.seek(size - tail_bytes - 1)
+    data = handle.read(tail_bytes + 1)
+    return data[data.find(b"\n") + 1:] if b"\n" in data else b""
+
+
 def iter_jsonl_objects(
     path: pathlib.Path,
     max_entries: Optional[int] = None,
@@ -659,19 +678,15 @@ def iter_jsonl_objects(
     gap_reasons: Optional[set[str]] = None,
     _handle: Any = None,  # Internal borrowed stream; its caller owns closing.
 ) -> Iterator[Any]:
-    """Yield parseable JSONL entries; max_entries applies to raw tail lines."""
+    """Yield parseable JSONL entries; max_entries applies to raw tail lines; a tail is one read."""
     path = pathlib.Path(path)
     if (max_entries is not None and max_entries <= 0) or (tail_bytes is not None and tail_bytes <= 0):
         return
     try:
         with (contextlib.nullcontext(_handle) if _handle is not None else path.open("rb")) as handle:
             if tail_bytes is not None:
-                file_size = path.stat().st_size
-                if file_size > tail_bytes:
-                    start = file_size - tail_bytes
-                    handle.seek(start - 1)
-                    if handle.read(1) != b"\n":
-                        handle.readline()
+                handle = io.BytesIO(jsonl_window(handle, os.fstat(handle.fileno()).st_size
+                                                 if _handle is None else path.stat().st_size, tail_bytes))
             if max_entries:
                 # Keep one raw sentinel so callers can distinguish an exact
                 # bounded tail from a suffix. Parsed-object counts cannot prove
@@ -764,19 +779,60 @@ def jsonl_archive_segments(
     return sorted(found)
 
 
+_CLOSED_SEGMENTS: Dict[str, tuple] = {}  # chain path -> (live identity, archive/ mtime, closed segments)
+
+
+def _closed_segments(path: pathlib.Path, live_stat: Any, *, strict: bool) -> List[Tuple[pathlib.Path, Any]]:
+    """A chain's rotated segments with their stats, oldest first, without the live file's alias; a complete
+    listing is reused while the live inode and ``archive/``'s mtime hold, the newest archive re-stat'ed."""
+    try:
+        key = (live_stat.st_dev, live_stat.st_ino, os.stat(path.parent.parent / "archive").st_mtime_ns)
+    except (AttributeError, OSError):
+        key = None
+    if key is not None and (cached := _CLOSED_SEGMENTS.get(str(path))) is not None and cached[0] == key:
+        with contextlib.suppress(OSError):
+            return [*cached[1][:-1], *((segment, segment.stat()) for segment, _stat in cached[1][-1:])]
+    try:  # a listing that skipped anything is never reused
+        segments, complete, closed = jsonl_archive_segments(path, strict=True), True, []
+    except JsonlChainUnreadable:
+        if strict:
+            raise
+        segments, complete, closed = [], False, []
+    for segment in segments:
+        try:
+            stat = segment.stat()
+        except OSError as exc:
+            if strict and not isinstance(exc, FileNotFoundError):
+                raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
+            complete = False
+            continue
+        if key is None or (stat.st_dev, stat.st_ino) != key[:2]:
+            closed.append((segment, stat))
+    if key is not None and complete:
+        _CLOSED_SEGMENTS[str(path)] = (key, tuple(closed))
+    return closed
+
+
 @contextlib.contextmanager
 def jsonl_chain_handles(
     path: pathlib.Path, *, strict: bool = False,
     start_offset: Optional[int] = None,
     snapshot: Optional[Dict[str, Any]] = None,
-) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
+    sequential: bool = False,
+) -> Iterator[Iterable[Tuple[pathlib.Path, Any]]]:
     """Open binary handles for a rotated JSONL chain; the context owns closing.
 
-    By default yield every ``(path, handle)`` in archive filename order, with
-    the initially opened live generation last. Open live BEFORE enumeration;
-    device/inode identity excludes its renamed archive alias after rotation.
-    On Windows that open handle can prevent the rotator's rename. This is not
-    an atomic content snapshot, a JSON-row deduplicator, or an event-time sort.
+    By default yield the list of every ``(path, handle)`` in archive filename
+    order, with the initially opened live generation last. Open live BEFORE
+    enumeration; device/inode identity excludes its renamed archive alias after
+    rotation. On Windows that open handle can prevent the rotator's rename. This
+    is not an atomic content snapshot, a JSON-row deduplicator, or an event-time sort.
+
+    ``sequential`` yields the same pairs lazily: each archive opens when reached
+    and closes when the caller moves on, so a whole-chain pass holds the live
+    handle pinned at entry plus one archive, whatever the chain's length, and
+    reads the live generation through that handle to its EOF at read time.
+    Strict failures then raise during iteration; a lenient one skips its segment.
 
     ``start_offset`` counts bytes across the captured chain lengths, skipping
     consumed segments without opening them and seeking within selected ones.
@@ -821,15 +877,8 @@ def jsonl_chain_handles(
                     raise JsonlChainUnreadable(f"cannot open or stat {path}: {exc}") from exc
                 live_stat = None
             entries, ends, total = [], [], 0
-            for segment in [*jsonl_archive_segments(path, strict=strict), path]:
-                try:
-                    stat = live_stat if segment == path else segment.stat()
-                except OSError as exc:
-                    if strict and not isinstance(exc, FileNotFoundError):
-                        raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
-                    continue
-                if stat is None or (segment != path and live_stat is not None
-                        and (stat.st_dev, stat.st_ino) == (live_stat.st_dev, live_stat.st_ino)):
+            for segment, stat in [*_closed_segments(path, live_stat, strict=strict), (path, live_stat)]:
+                if stat is None:
                     continue
                 total += stat.st_size
                 entries.append([segment, stat, segment == path])
@@ -842,15 +891,15 @@ def jsonl_chain_handles(
             raise JsonlChainUnreadable(f"shortened or missing chain at {path}")
         first = bisect_right(ends, start_offset) if start_offset is not None else 0
         stop = min(len(entries), first + 1) if snapshot is not None else len(entries)
-        handles = []
-        for index in range(first, stop):
+
+        def opened(index: int, owner: contextlib.ExitStack) -> Optional[Tuple[pathlib.Path, Any]]:
             segment, expected, was_live = entries[index]
             try:
                 if was_live:
                     handle = live_handle
                     if handle is None:
                         with contextlib.suppress(FileNotFoundError):
-                            handle = stack.enter_context(segment.open("rb"))
+                            handle = owner.enter_context(segment.open("rb"))
                     identity = (expected.st_dev, expected.st_ino)
                     actual = os.fstat(handle.fileno()) if handle is not None else None
                     if actual is None or (actual.st_dev, actual.st_ino) != identity:
@@ -864,18 +913,30 @@ def jsonl_chain_handles(
                                     break
                         else:
                             raise JsonlChainUnreadable(f"original live generation missing at {path}")
-                        handle = stack.enter_context(segment.open("rb"))
+                        handle = owner.enter_context(segment.open("rb"))
                 else:
-                    handle = stack.enter_context(segment.open("rb"))
+                    handle = owner.enter_context(segment.open("rb"))
                 if start_offset is not None:
                     if os.fstat(handle.fileno()).st_size < expected.st_size:
                         raise JsonlChainUnreadable(f"shortened chain segment {segment}")
                     handle.seek(max(0, start_offset - (ends[index - 1] if index else 0)))
-                handles.append((segment, handle))
+                return segment, handle
             except OSError as exc:
                 if strict:
                     raise JsonlChainUnreadable(f"cannot read {segment}: {exc}") from exc
-        yield handles
+                return None
+
+        def one_at_a_time() -> Iterator[Tuple[pathlib.Path, Any]]:
+            for index in range(first, stop):
+                with contextlib.ExitStack() as owner:
+                    pair = opened(index, owner)
+                    if pair:
+                        yield pair
+
+        if sequential:
+            yield stack.enter_context(contextlib.closing(one_at_a_time()))
+        else:
+            yield [pair for pair in (opened(index, stack) for index in range(first, stop)) if pair]
 
 def iter_jsonl_chain_objects(
     path: pathlib.Path,
@@ -920,6 +981,15 @@ def llm_usage_cost(event: Dict[str, Any]) -> float:
 
 def safe_relpath(p: str) -> str:
     """Normalize relative paths and reject traversal/NUL/control-char payloads."""
+    p = normalized_path_text(p).lstrip("/")
+    if ".." in pathlib.PurePosixPath(p).parts:
+        raise ValueError("Path traversal is not allowed.")
+    return p
+
+
+def normalized_path_text(p: str) -> str:
+    """The character refusal and separator spelling ``safe_relpath`` applies before its
+    traversal rule; a caller that judges ``..`` by the resolved location reuses only this."""
     if not isinstance(p, str):
         raise ValueError("Path must be a string.")
     for ch in p:
@@ -929,10 +999,7 @@ def safe_relpath(p: str) -> str:
             raise ValueError(
                 f"Path contains control character U+{ord(ch):04X}."
             )
-    p = p.replace("\\", "/").lstrip("/")
-    if ".." in pathlib.PurePosixPath(p).parts:
-        raise ValueError("Path traversal is not allowed.")
-    return p
+    return p.replace("\\", "/")
 
 def truncate_for_log(s: str, max_chars: int = 4000) -> str:
     if len(s) <= max_chars:
@@ -1124,7 +1191,9 @@ def run_cmd(
     # Tool output is PARSED (git error signatures, porcelain text), so it must not
     # depend on the operator's locale: a Russian-locale git answers «метка … уже
     # существует» where the code and its tests match "already exists".
-    env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+    from ouroboros.git_observation import host_git_env
+
+    env = host_git_env()
     res = subprocess.run(
         cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, env=env,
         timeout=timeout,
@@ -1335,198 +1404,6 @@ def sanitize_tool_args_for_log(
         log.debug("Failed to sanitize tool arguments for logging", exc_info=True)
         return {"_error": "sanitization_failed"}
 
-
-
-async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) -> list[dict]:
-    """Collect evolution metrics (LOC, prompt sizes, memory) for each git tag."""
-    import asyncio
-    import subprocess as sp
-
-    def _parse_journal(filepath: str, size_key: str) -> list[tuple[_dt.datetime, float]]:
-        """Parse a JSONL journal into sorted (datetime, size_kb) tuples."""
-        entries: list[tuple[_dt.datetime, float]] = []
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        ts = _dt.datetime.fromisoformat(obj["ts"])
-                        size_chars = obj.get(size_key, 0)
-                        entries.append((ts, size_chars / 1024))
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        continue
-        except FileNotFoundError:
-            pass
-        entries.sort(key=lambda x: x[0])
-        return entries
-
-    identity_journal: list[tuple[_dt.datetime, float]] = []
-    scratchpad_journal: list[tuple[_dt.datetime, float]] = []
-    if data_dir:
-        mem_path = os.path.join(data_dir, "memory")
-        identity_journal = _parse_journal(
-            os.path.join(mem_path, "identity_journal.jsonl"), "new_len"
-        )
-        scratchpad_journal = _parse_journal(
-            os.path.join(mem_path, "scratchpad_journal.jsonl"), "content_len"
-        )
-
-    def _interpolate_from_journal(
-        journal_entries: list[tuple[_dt.datetime, float]], tag_date: str,
-    ) -> float:
-        """Find the latest journal entry whose timestamp is <= tag_date."""
-        if not journal_entries or not tag_date:
-            return 0
-        try:
-            dt = _dt.datetime.fromisoformat(tag_date)
-        except ValueError:
-            return 0
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=_dt.timezone.utc)
-        best = 0.0
-        for entry_dt, size_kb in journal_entries:
-            entry_dt_aware = entry_dt if entry_dt.tzinfo else entry_dt.replace(tzinfo=_dt.timezone.utc)
-            if entry_dt_aware <= dt:
-                best = size_kb
-            else:
-                break
-        return round(best, 2)
-
-    result = sp.run(
-        ["git", "tag", "-l", "--sort=creatordate",
-         "--format=%(refname:short)\t%(creatordate:iso-strict)"],
-        cwd=repo_dir, capture_output=True, text=True
-    )
-
-    tags = []
-    for line in result.stdout.strip().split(chr(10)):
-        if not line.strip():
-            continue
-        parts = line.split(chr(9))
-        tag = parts[0]
-        date = parts[1] if len(parts) > 1 else ""
-        tags.append((tag, date))
-
-    cache_path: pathlib.Path | None = None
-    cached_by_tag: dict[str, dict[str, Any]] = {}
-    if data_dir:
-        cache_path = pathlib.Path(data_dir) / "state" / "evolution_metrics_cache.json"
-        try:
-            cache_obj = json.loads(cache_path.read_text(encoding="utf-8"))
-            if isinstance(cache_obj, dict) and cache_obj.get("schema") == 1 and isinstance(cache_obj.get("points"), dict):
-                cached_by_tag = {
-                    str(tag): point
-                    for tag, point in cache_obj["points"].items()
-                    if isinstance(point, dict)
-                }
-        except (OSError, json.JSONDecodeError):
-            cached_by_tag = {}
-
-    def _metrics_for_tag(tag: str, date: str) -> dict | None:
-        ls_result = sp.run(
-            ["git", "ls-tree", "-r", "--name-only", tag],
-            cwd=repo_dir, capture_output=True, text=True
-        )
-        if ls_result.returncode != 0:
-            return None
-
-        files = ls_result.stdout.strip().split(chr(10))
-
-        python_lines = 0
-        for f in files:
-            if f.endswith(".py"):
-                show = sp.run(
-                    ["git", "show", f"{tag}:{f}"],
-                    cwd=repo_dir, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace",
-                )
-                if show.returncode == 0 and show.stdout:
-                    python_lines += len(show.stdout.splitlines())
-
-        def get_file_size_kb(filepath: str) -> float:
-            show = sp.run(
-                ["git", "show", f"{tag}:{filepath}"],
-                cwd=repo_dir, capture_output=True, text=True,
-                encoding="utf-8", errors="replace",
-            )
-            if show.returncode == 0 and show.stdout:
-                return round(len(show.stdout.encode("utf-8")) / 1024, 2)
-            return 0
-
-        bible_kb = get_file_size_kb("BIBLE.md")
-        system_kb = get_file_size_kb("prompts/SYSTEM.md")
-
-        identity_kb = _interpolate_from_journal(identity_journal, date)
-        scratchpad_kb = _interpolate_from_journal(scratchpad_journal, date)
-        memory_kb = round(identity_kb + scratchpad_kb, 2)
-
-        return {
-            "tag": tag,
-            "date": date,
-            "code_lines": python_lines,
-            "bible_kb": bible_kb,
-            "system_kb": system_kb,
-            "identity_kb": identity_kb,
-            "scratchpad_kb": scratchpad_kb,
-            "memory_kb": memory_kb,
-        }
-
-    cached_points: list[dict[str, Any]] = []
-    missing_tags: list[tuple[str, str]] = []
-    for tag, date in tags:
-        cached = cached_by_tag.get(tag)
-        if cached and cached.get("date") == date:
-            cached_points.append(dict(cached))
-        else:
-            missing_tags.append((tag, date))
-
-    loop = asyncio.get_running_loop()
-    semaphore = asyncio.Semaphore(4)
-
-    async def _bounded_metrics(tag: str, date: str) -> dict | None:
-        async with semaphore:
-            return await loop.run_in_executor(None, _metrics_for_tag, tag, date)
-
-    results = await asyncio.gather(*[
-        _bounded_metrics(tag, date)
-        for tag, date in missing_tags
-    ])
-
-    new_points = [r for r in results if r is not None]
-    points_by_tag = {point["tag"]: point for point in cached_points + new_points}
-    points = [points_by_tag[tag] for tag, _date in tags if tag in points_by_tag]
-
-    if cache_path and new_points:
-        try:
-            atomic_write_json(cache_path, {
-                "schema": 1,
-                "points": points_by_tag,
-                "updated_at": utc_now_iso(),
-            })
-        except OSError:
-            log.warning("Failed to write evolution metrics cache: %s", cache_path, exc_info=True)
-
-    # Latest tag uses live identity+scratchpad sizes.
-    if data_dir and points:
-        mem_dir = os.path.join(data_dir, "memory")
-        if os.path.isdir(mem_dir):
-            def _file_kb(path: str) -> float:
-                try:
-                    return os.path.getsize(path) / 1024
-                except OSError:
-                    return 0
-
-            identity_kb = _file_kb(os.path.join(mem_dir, "identity.md"))
-            scratchpad_kb = _file_kb(os.path.join(mem_dir, "scratchpad.md"))
-
-            points[-1]["identity_kb"] = round(identity_kb, 2)
-            points[-1]["scratchpad_kb"] = round(scratchpad_kb, 2)
-            points[-1]["memory_kb"] = round(identity_kb + scratchpad_kb, 2)
-
-    return points
 
 def truncate_review_artifact(text: str | None, limit: int = 4000) -> str:
     """Return a display-safe preview with explicit OMISSION NOTE, never silent clipping.

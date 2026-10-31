@@ -84,6 +84,16 @@
         "stateKey": "lightModel"
       },
       {
+        "inputId": "safety-model",
+        "label": "Safety Supervisor",
+        "note": "Empty uses the Light model.",
+        "settingKey": "OUROBOROS_MODEL_SAFETY",
+        "settingsInputId": "s-model-safety",
+        "settingsToggleId": "",
+        "slot": "safety",
+        "stateKey": "safetyModel"
+      },
+      {
         "inputId": "vision-model",
         "label": "Vision Model",
         "note": "Caption and VLM lane. Empty uses Main.",
@@ -265,7 +275,7 @@
       },
       "minimax": {
         "label": "MiniMax",
-        "modelCopy": "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M2.7.",
+        "modelCopy": "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M3.1-Flash.",
         "providerCopy": "MiniMax is present, so the next step prefills MiniMax's own model ids."
       },
       "openai": {
@@ -292,7 +302,7 @@
     "reviewModes": [
       {
         "className": "advisory",
-        "copy": "Review still runs. After feedback, Ouroboros can fix, reject or finish; raw reviewer findings remain visible.",
+        "copy": "Reviewers read plans, results and changes; their findings stay visible and Ouroboros decides what to do with them.",
         "label": "Advisory",
         "tone": "Flexible",
         "value": "advisory"
@@ -351,7 +361,7 @@
         "title": "Choose models"
       },
       {
-        "copy": "Decide how strict pre-commit review should be before Ouroboros starts modifying itself.",
+        "copy": "Reviewers read how Ouroboros understood a request, its plans, its results and its changes. Decide whether their critical findings block the work or only inform Ouroboros.",
         "footer": "Pick both review enforcement and the initial runtime mode before Ouroboros starts.",
         "id": "review_mode",
         "railCopy": "Advisory vs blocking",
@@ -395,6 +405,7 @@
     "cloudruKey": "",
     "compatibleApiKey": "",
     "compatibleBaseUrl": "",
+    "connections": [],
     "consciousnessModel": "",
     "deepseekKey": "",
     "fallbackModel": "openai/gpt-5.6-luna",
@@ -419,6 +430,7 @@
     "providerProfile": "openrouter",
     "reviewEnforcement": "advisory",
     "runtimeMode": "advanced",
+    "safetyModel": "",
     "skillsRepoPath": "",
     "totalBudget": 200.0,
     "visionModel": "",
@@ -451,10 +463,11 @@
   "modelDefaults": {
     "anthropic": {
       "consciousness": "",
-      "deep_self_review": "anthropic::claude-opus-5",
+      "deep_self_review": "anthropic::claude-opus-5-5",
       "fallback": "anthropic::claude-sonnet-5",
       "light": "anthropic::claude-sonnet-5",
-      "main": "anthropic::claude-opus-5",
+      "main": "anthropic::claude-opus-5-5",
+      "safety": "",
       "vision": ""
     },
     "cloudru": {
@@ -462,6 +475,7 @@
       "fallback": "cloudru::zai-org/GLM-4.7",
       "light": "cloudru::zai-org/GLM-4.7",
       "main": "cloudru::zai-org/GLM-4.7",
+      "safety": "",
       "vision": ""
     },
     "deepseek": {
@@ -470,6 +484,7 @@
       "fallback": "deepseek::deepseek-v4-flash",
       "light": "deepseek::deepseek-v4-flash",
       "main": "deepseek::deepseek-v4-pro",
+      "safety": "",
       "vision": ""
     },
     "direct-multi": {
@@ -477,6 +492,7 @@
       "fallback": "",
       "light": "",
       "main": "",
+      "safety": "",
       "vision": ""
     },
     "local": {
@@ -484,13 +500,15 @@
       "fallback": "",
       "light": "",
       "main": "google/gemini-3.8-flash",
+      "safety": "",
       "vision": ""
     },
     "minimax": {
       "consciousness": "",
-      "fallback": "minimax::MiniMax-M2.7",
-      "light": "minimax::MiniMax-M2.7",
+      "fallback": "minimax::MiniMax-M3.1-Flash",
+      "light": "minimax::MiniMax-M3.1-Flash",
       "main": "minimax::MiniMax-M3",
+      "safety": "",
       "vision": ""
     },
     "openai": {
@@ -499,6 +517,7 @@
       "fallback": "openai::gpt-5.6-sol",
       "light": "openai::gpt-5.6-luna",
       "main": "openai::gpt-5.6-terra",
+      "safety": "",
       "vision": ""
     },
     "openai-compatible": {
@@ -506,6 +525,7 @@
       "fallback": "",
       "light": "",
       "main": "",
+      "safety": "",
       "vision": ""
     },
     "openrouter": {
@@ -513,6 +533,7 @@
       "fallback": "openai/gpt-5.6-luna",
       "light": "openai/gpt-6-luna",
       "main": "google/gemini-3.8-flash",
+      "safety": "",
       "vision": ""
     },
     "zai": {
@@ -520,6 +541,7 @@
       "fallback": "zai::glm-5.3-flash",
       "light": "zai::glm-5.3-flash",
       "main": "zai::glm-5.3",
+      "safety": "",
       "vision": "zai::glm-5.3-flash"
     }
   },
@@ -538,6 +560,7 @@
     "anthropic/claude-sonnet-5",
     "anthropic/claude-opus-5",
     "anthropic::claude-sonnet-5",
+    "anthropic::claude-opus-5-5",
     "anthropic::claude-opus-5",
     "anthropic::claude-opus-4-6",
     "deepseek/deepseek-v4-pro",
@@ -548,7 +571,7 @@
     "openai-compatible::meta-llama/compatible",
     "cloudru::zai-org/GLM-4.7",
     "minimax::MiniMax-M3",
-    "minimax::MiniMax-M2.7"
+    "minimax::MiniMax-M3.1-Flash"
   ],
   "secretPlaceholder": "***set***",
   "stepOrder": [

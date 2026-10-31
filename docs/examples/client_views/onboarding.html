@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Independent setup example</title>
+  <link rel="stylesheet" href="/auth/style.css">
+  <script type="module" src="/static/setup.js"></script>
+</head>
+<body data-client-view="setup">
+  <main>
+    <p class="eyebrow">Independent client example</p>
+    <h1>Set up your client</h1>
+    <p>A minimal example for an OpenAI-compatible endpoint that needs no API key.</p>
+    <p id="status" role="status">Reading setup information…</p>
+    <form id="setup">
+      <label for="endpoint">Endpoint URL</label>
+      <input id="endpoint" type="url" required placeholder="http://127.0.0.1:11434/v1">
+      <label for="model">Model ID</label>
+      <input id="model" required placeholder="your-model">
+      <p class="note">This example skips subscription discovery and permits an empty review pool.
+        Use the built-in wizard for a complete provider and reviewer configuration.</p>
+      <button id="save" disabled>Save setup</button>
+    </form>
+    <button id="check" type="button" hidden>Check current status</button>
+    <p id="restart" hidden>Settings were saved, but a restart is still required to apply the access mode.
+      <a href="/">Continue in the current mode</a></p>
+    <p><a href="/onboarding?builtin=1">Open built-in setup</a></p>
+  </main>
+</body>
+</html>

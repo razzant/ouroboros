@@ -116,6 +116,12 @@ def test_chat_activities_snapshot_projects_queue_roots_with_phases(tmp_path, mon
         "can_resume": False,
         "cancelable": True,
         "task_attempt": 1,
+        # K8: no narration, no calls, not detached, no registered room for "proj-a" yet.
+        "last_line": "",
+        "last_line_at": "",
+        "tool_calls": 0,
+        "detached": False,
+        "project_name": "",
     }
     assert rows["running-root"]["phase"] == "working"
     assert rows["running-root"]["started_at"] == 111.0
@@ -158,7 +164,9 @@ def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatc
         "client_message_id": "", "task_attempt": 1,
         "can_resume": False, "cancelable": True,
     }
-    assert rows == [{**expected, **bindings.get("root", {})}]
+    # K8: the census row's own facts (no narration, no calls, not detached, no registered room).
+    k8 = {"last_line": "", "last_line_at": "", "tool_calls": 0, "detached": False, "project_name": ""}
+    assert rows == [{**expected, **k8, **bindings.get("root", {})}]
     assert direct_rows == original_direct
     assert registry.snapshot() == original_direct
     assert running == original_running
@@ -259,7 +267,9 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
     additional_keys = {
         "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
         "status", "outcome_axes", "reason_code", "root_phase_checkpoint", "timeout_retry_from", "original_task_id",
-        "finishing_reviews", "late_work", "can_resume", "cancelable",
+        "finishing_reviews", "late_work", "can_resume", "cancelable", "cancel_origin", "delegated_runs_unreconciled",
+        # K8 census facts for every chat (project_id is already a direct-turn field).
+        "last_line", "last_line_at", "tool_calls", "detached", "project_name",
     }
     assert {key: value for key, value in fields.items() if key not in additional_keys} == ActiveDirectTurn.__annotations__
     assert set(fields) - set(ActiveDirectTurn.__annotations__) == additional_keys
@@ -571,11 +581,11 @@ def test_history_failed_main_keeps_outcome_and_post_work_controls_until_close(tm
         root_phase_checkpoint={"post_task_synthesis": post_work},
         model_waits={wait["wait_id"]: wait},
     )
-    with (tmp_path / "logs" / "progress.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({
-            "type": "task_model_wait", "task_id": "fin-task", "chat_id": 1,
-            "ts": "2026-08-17T10:00:06+00:00", **wait,
-        }) + "\n")
+    from ouroboros import dialogue_store as ds
+    ds.append(tmp_path, "progress", {
+        "type": "task_model_wait", "task_id": "fin-task", "chat_id": 1,
+        "ts": "2026-08-17T10:00:06+00:00", **wait,
+    })
 
     messages = _history_messages(tmp_path)
     rows = [m for m in messages if m.get("task_id") == "fin-task"]
@@ -633,13 +643,15 @@ def test_owner_project_message_survives_into_history_with_annotation(tmp_path, m
 
     project = create_project(tmp_path, "racer")
     chat_id = int(project["chat_id"])
-    pending = [{
-        "id": "pending-root",
+    # The room's sole reader is a live executor (D6); a queued root no longer
+    # consumes ordinary room input (tests/test_room_reader.py pins that half).
+    running = {"running-root": {"task": {
+        "id": "running-root",
         "chat_id": chat_id,
-        "root_task_id": "pending-root",
+        "root_task_id": "running-root",
         "delegation_role": "root",
         "drive_root": str(tmp_path),
-    }]
+    }}}
     acks = []
 
     class Bridge:
@@ -667,8 +679,8 @@ def test_owner_project_message_survives_into_history_with_annotation(tmp_path, m
 
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,
-        PENDING=pending,
-        RUNNING={},
+        PENDING=[],
+        RUNNING=running,
         load_state=lambda: {"owner_id": 1, "owner_chat_id": 1, "session_id": "s-1"},
         update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}),
         consciousness=_Consciousness(),
@@ -695,11 +707,17 @@ def test_owner_project_message_survives_into_history_with_annotation(tmp_path, m
     row = owner_rows[0]
     assert row["role"] == "user"
     assert row["text"] == "please also fix the failing test"
+    destination = {  # #968: the live work the words reached and its room; a nameless work is never named by its id
+        "project_id": "racer", "project_chat_id": chat_id, "project_name": "racer",
+        "target_task_ids": ["running-root"], "target_titles": [],
+    }
     assert row["chat_annotation"] == {
         "action": "mailbox_delivery",
-        "target": "pending-root",
+        "target": "running-root",
         "target_label": "Task",
         "status": "delivered",
         "attachment_manifest": [],
+        **destination,
     }
-    assert acks[-1][1]["target_label"] == row["chat_annotation"]["target_label"]
+    for key in ("target_label", *destination):
+        assert acks[-1][1][key] == row["chat_annotation"][key]

@@ -108,8 +108,11 @@ def test_checkout_reset_fetch_uses_configured_bound_and_keeps_local_head(tmp_pat
     monkeypatch.setattr(git_ops, "save_state", state.update)
     monkeypatch.setattr(git_ops, "update_state", lambda mutator, **_kw: mutator(state) or state)
     monkeypatch.setattr(git_ops, "append_jsonl", lambda _path, row: events.append(row))
+    real_process = git_ops._run_git_process_bounded
 
     def fake_process(cmd, *, timeout, cwd, env, text):
+        if "fetch" not in cmd:  # the reset's own local Git shares this runner and runs for real
+            return real_process(cmd, timeout=timeout, cwd=cwd, env=env, text=text)
         captured.update(cmd=cmd, timeout=timeout, cwd=cwd, env=env)
         return git_ops.FETCH_TIMEOUT_RC, "", "timed out"
 
@@ -209,7 +212,7 @@ def test_git_network_bounded_timeout_kills_tree_and_repo_stays_operable(tmp_path
     assert _git(clone, "rev-parse", "origin/main") == new_tip
 
 
-def test_push_to_remote_timeout_surfaces_as_todays_failure_shape(monkeypatch):
+def test_push_to_remote_timeout_keeps_diagnostics_in_logs(monkeypatch, caplog):
     monkeypatch.setattr(git_ops, "_has_remote", lambda _name: True)
     monkeypatch.setattr(
         git_ops,
@@ -218,11 +221,16 @@ def test_push_to_remote_timeout_surfaces_as_todays_failure_shape(monkeypatch):
     )
     ok, message = git_ops.push_to_remote("feature")
     assert ok is False
-    assert message.startswith("git push failed:")
-    assert "exceeded" in message
+    assert message == "Branch publication failed or is unconfirmed; see Logs. No automatic retry"
+    assert "exceeded 300s" in caplog.text and "exceeded" not in message
 
 
-def test_push_to_remote_tags_timeout_stays_best_effort(monkeypatch):
+def test_push_to_remote_tags_timeout_stays_best_effort(tmp_path, monkeypatch, caplog):
+    repo = _seed_repo(tmp_path / "repo")
+    _git(repo, "branch", "feature")
+    _git(repo, "tag", "-a", "v1", "-m", "release")
+    commit = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.setattr(git_ops, "REPO_DIR", repo)
     monkeypatch.setattr(git_ops, "_has_remote", lambda _name: True)
     results = iter([
         (0, "", ""),
@@ -231,10 +239,12 @@ def test_push_to_remote_tags_timeout_stays_best_effort(monkeypatch):
     monkeypatch.setattr(
         git_ops, "_git_network_bounded", lambda _cmd, **_kw: next(results),
     )
-    ok, message = git_ops.push_to_remote("feature", push_tags=True)
-    assert ok is True
+    ok, message = git_ops.push_to_remote("feature", push_tags=True, created_tag="v1", expected_commit_sha=commit)
+    assert ok is True  # the compatibility boolean describes the successful branch push
     assert "Pushed feature to origin" in message
-    assert "tags push failed" in message
+    assert "partial publication: tag v1" in message
+    assert "no automatic retry" in message
+    assert "exceeded 300s" in caplog.text and "exceeded" not in message
 
 
 def test_ff_pull_fetch_is_bounded_with_repo_cwd_and_keeps_error_shape(tmp_path, monkeypatch):
@@ -349,8 +359,8 @@ def test_commit_path_auto_push_timeout_is_best_effort_warning(tmp_path, monkeypa
     result = git_module._repo_commit_push(ctx, "netres: best-effort push test")
 
     assert result.startswith("OK: committed to ouroboros:")
-    assert "[push skipped: git push failed:" in result
-    assert "exceeded" in result
+    assert "[push skipped: Branch publication failed or is unconfirmed; see Logs. No automatic retry]" in result
+    assert "exceeded" not in result
     assert ctx.last_push_succeeded is False
 
 
@@ -387,8 +397,8 @@ _DONE = {"status": "completed", "conclusion": "success"}
 
 
 def test_ci_note_names_every_push_workflow_and_none_stands_for_the_others(monkeypatch):
-    """One push starts the code workflow, the browser lane and the provider
-    canaries. A finished canary run listed first is not "CI passed"."""
+    """A repository may run several push workflows, or none.
+    A finished canary run listed first is not "CI passed"."""
     note = _ci_note(monkeypatch, [
         {"name": "Provider canaries", **_DONE},
         {"name": "CI", "status": "in_progress", "conclusion": None},
@@ -396,13 +406,13 @@ def test_ci_note_names_every_push_workflow_and_none_stands_for_the_others(monkey
     ])
     assert note.startswith("\n\n⏳ CI: push runs in progress — ") and "✅" not in note
     # The hint names the repository the push went to: a bare SHA is read in the Project's repository.
-    assert note.endswith(f". Read the results later: get_github_checks(sha='{'a' * 40}', repo='example/project').")
+    assert note.endswith(f". Read the results later: github_read(method='checks', target='{'a' * 40}', repo='example/project').")
     assert "Provider canaries: success; CI: in progress; UI browser (ouroboros push): queued" in note
 
     note = _ci_note(monkeypatch, [{"name": "Provider canaries", **_DONE}, {"name": "CI", **_DONE}])
     assert note == ("\n\n✅ CI: registered push runs passed for this commit — "
                     "Provider canaries: success; CI: success.")
-    assert _ci_note(monkeypatch, []) == "\n\n⏳ CI: Run not yet registered — check GitHub Actions in ~30s."
+    assert _ci_note(monkeypatch, []) == "\n\nCI: No push workflow run is registered for this commit."
 
 
 def test_ci_note_attributes_a_failure_to_its_workflow(monkeypatch):

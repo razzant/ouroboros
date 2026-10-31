@@ -16,7 +16,7 @@ def _registry(tmp_path: pathlib.Path) -> ToolRegistry:
     repo.mkdir()
     data.mkdir()
     reg = ToolRegistry(repo_dir=repo, drive_root=data)
-    reg.set_context(ToolContext(repo_dir=repo, drive_root=data))
+    reg.set_context(ToolContext(repo_dir=repo, drive_root=data, task_metadata={"work_kind": "owner"}))  # an owner task
     return reg
 
 

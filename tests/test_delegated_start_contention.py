@@ -11,6 +11,7 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.review_execution import ReviewRouteUnavailable
 from ouroboros.task_results import write_task_result
 from tests.test_admission_contention import database_reader
+from tests._store_journal_shared import use_journal
 from tests._review_session_route_shared import (
     FakeGateway, _run_session_directly,
     fake_route as _fake_route,
@@ -36,6 +37,8 @@ def posts():
 
 
 def hold_request(monkeypatch, stack, root, *, exclusive=False):
+    """Contend the first start claim: every access (``exclusive``), else its write, as the store's
+    journal mode contends one (a reader holding a rollback COMMIT, a writer holding a WAL one)."""
     publish = current.publish
     release, events = [], []
 
@@ -43,7 +46,7 @@ def hold_request(monkeypatch, stack, root, *, exclusive=False):
         if event["type"] == custody.START_REQUESTED:
             events.append(dict(event))
             if not release:
-                release.append(stack.enter_context(database_reader(root, exclusive=exclusive)))
+                release.append(stack.enter_context(database_reader(root, exclusive=exclusive, write=not exclusive)))
         return publish(root_arg, event, **kwargs)
 
     monkeypatch.setattr(current, "publish", held)
@@ -52,6 +55,8 @@ def hold_request(monkeypatch, stack, root, *, exclusive=False):
 
 @pytest.mark.parametrize("exclusive", [False, True], ids=["reader-commit", "exclusive-acquisition"])
 def test_actual_review_start_retains_one_request_and_post(start, tmp_path, monkeypatch, exclusive):
+    if not exclusive:  # a reader holds only a rollback-journal COMMIT; a WAL COMMIT waits for no reader
+        use_journal(monkeypatch, "PERSIST")
     waited = []
     with ExitStack() as stack:
         release, events = hold_request(monkeypatch, stack, tmp_path, exclusive=exclusive)
@@ -71,8 +76,10 @@ def test_actual_review_start_retains_one_request_and_post(start, tmp_path, monke
     assert custody.invocation_record(tmp_path, events[0]["invocation_id"])["request"] == posts()[0][0]
 
 
+@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
 @pytest.mark.parametrize("control", ["pause", "stop", "deadline", "closed"])
-def test_current_controls_end_the_unsent_wait_without_post(start, tmp_path, monkeypatch, control):
+def test_current_controls_end_the_unsent_wait_without_post(start, tmp_path, monkeypatch, control, journal):
+    use_journal(monkeypatch, journal)  # a held write fails its COMMIT (rollback journal), its BEGIN (WAL)
     stopped, waited = [], []
     with task_model_wait_scope(task={"id": "t-b", "_attempt": 1}, drive_root=tmp_path,
             event_queue=None, worker_slot_held=False,
@@ -137,7 +144,7 @@ def test_hard_unknown_and_uncertain_claim_fail_once(start, monkeypatch, error):
 
 def test_default_emit_retains_boolean_failure(tmp_path):
     write_task_result(tmp_path, "root", "running", root_task_id="root")
-    with database_reader(tmp_path), store.admission_acquisition():
+    with database_reader(tmp_path, write=True), store.admission_acquisition():
         assert custody.emit(tmp_path, custody.START_REQUESTED, {
             "task_id": "root", "invocation_id": "default-bool", "idempotency_key": "one"}) is False
 

@@ -189,8 +189,8 @@ def test_retry_refusal_preserves_live_owner_handoff_and_pending_invocation(
 
     assert result["reason"] == "pending_recovery_deferred"
     assert result["pending_invocation_id"] == invocation_id
-    assert recovery._read(tmp_path, task["id"])["status"] == "adopted"
-    assert task["id"] not in recovery.recoverable_task_ids(tmp_path)
+    assert recovery._read(tmp_path, task["id"])["holders"][0]["status"] == "deferred"
+    assert task["id"] in recovery.recoverable_task_ids(tmp_path)
     assert [row["invocation_id"] for row in custody.pending_invocations(tmp_path)] == [
         invocation_id
     ]
@@ -215,7 +215,7 @@ def test_retry_refusal_preserves_live_owner_handoff_and_pending_invocation(
         gateway_factory=lambda: OrphanGateway(),
         replay_pending=lambda: True,  # the admitted sweep is the one surface that replays
     )
-    assert replayed == [invocation_id]
+    assert replayed == []  # the exact deferred handle remains reserved
     custody._CUSTODY.clear()
 
 
@@ -291,7 +291,7 @@ def test_started_retry_race_adopts_same_durable_invocation(monkeypatch, tmp_path
 
     result = recovery.adopt_handoff(ctx, task)
 
-    assert result == {
+    assert {key: result[key] for key in ("status", "run_id", "cause")} == {
         "status": "adopted",
         "run_id": "run-started-race",
         "cause": recovery.CAUSE_WORKER_CRASH,
@@ -355,7 +355,8 @@ def test_a_review_panels_work_never_displaces_the_actors_own_handoff_holder(
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"])
     ctx.budget_drive_root = str(tmp_path)
 
-    assert recovery.adopt_handoff(ctx, task) == {
+    adopted = recovery.adopt_handoff(ctx, task)
+    assert {key: adopted[key] for key in ("status", "run_id", "cause")} == {
         "status": "adopted",
         "run_id": "run-leaf",
         "cause": recovery.CAUSE_WORKER_CRASH,

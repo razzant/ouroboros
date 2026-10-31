@@ -25,10 +25,8 @@ from typing import Any
 from ouroboros import evidence_packs as packs
 
 _WALK = contextvars.ContextVar("immutable_source_retention", default=None)
-# Negative observations belong only to this maintenance process/generation.
-# They confer no completeness or GC authority and hold no decoded source bytes.
-_UNAVAILABLE_RETRIES: dict[tuple, tuple] = {}
-_RETENTION_LOG_FACTS: dict[tuple, str] = {}
+# The maintenance job whose row keeps the promotion retry's durable observations (``RetentionMemo``).
+MEMO_JOB = "child_ref_promotion"
 
 
 class InvalidRetainedSource(ValueError):
@@ -50,16 +48,28 @@ def active_walk():
 
 def retained_child_root(canonical: pathlib.Path, child: pathlib.Path, task_id: str = "") -> bool:
     """Only the installation's physical child layouts confer fallback custody."""
-    canonical = pathlib.Path(canonical).resolve()
-    child = pathlib.Path(child)
+    from ouroboros.confined_files import physical_path, root_spellings
+
+    spellings = root_spellings(canonical)  # a configured child keeps its layout checks
+    canonical, child = spellings[0], physical_path(spellings, child)
     try:
         relative = child.relative_to(canonical)
         parts = relative.parts
         layout = ((len(parts) == 4 and parts[:2] == ("state", "headless_tasks") and parts[3] == "data")
                   or (len(parts) == 2 and parts[0] == "task_drives"))
-        if not layout or child.resolve() != child or not child.is_dir():
+        if not layout:
             return False
         owner = parts[2] if len(parts) == 4 else parts[1]
+        if task_id and task_id != owner:
+            # Prove a retry's execution placement from canonical facts BEFORE
+            # touching scratch or reading the alleged occupant's store.
+            from ouroboros.task_store import read_document
+            from ouroboros.task_custody import recorded_execution_drive
+            if not recorded_execution_drive(read_document(canonical, task_id) or {}, child, spellings):
+                return False
+        from ouroboros.confined_files import confined_directory
+        with confined_directory(canonical, parts):
+            pass
         if not task_id or task_id == owner:
             return True
         # A timeout successor may occupy the original drive. Its own durable
@@ -73,40 +83,47 @@ def retained_child_root(canonical: pathlib.Path, child: pathlib.Path, task_id: s
 
 def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.Path]:
     """Read-only source candidates for the task's own retained execution bytes."""
-    root = pathlib.Path(canonical).resolve()
+    from ouroboros.confined_files import physical_path, root_spellings
+
+    spellings = root_spellings(canonical)
+    root = spellings[0]
     candidates = [root / "state" / "headless_tasks" / task_id / "data", root / "task_drives" / task_id]
     try:
+        from ouroboros.task_custody import child_drive_candidates
         from ouroboros.task_store import read_document
         row = read_document(root, task_id) or {}
-        candidates.extend(pathlib.Path(row[key]) for key in ("child_drive_root", "headless_child_drive_root")
-                          if isinstance(row.get(key), str) and row[key])
+        # Rows name drives in the configured spelling, in the vocabulary the retry proof reads.
+        candidates.extend(physical_path(spellings, path) for path in child_drive_candidates(row))
     except Exception:
         pass
-    return list(dict.fromkeys(path for path in candidates if retained_child_root(root, path, task_id)))
+    return list(dict.fromkeys(path for path in candidates if retained_child_root(canonical, path, task_id)))
 
 
-def read_retained_task_source(root, task_id, ref):
+def read_retained_task_source(root, task_id, ref, *, anchor=None):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
 
-    for source_root, owner in _source_locations(root, task_id):
+    for source_root, owner in _source_locations(root, task_id, anchor=anchor):
         try:  # loose or packed at this placement; damage is explicit, absence tries the next one
-            return read_actor_source_bytes(source_root, owner, ref, retained=False)
+            return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor)
         except FileNotFoundError:
             continue
     raise FileNotFoundError(f"actor source unavailable: {ref['path']}")
 
 
-def _source_locations(root, task_id):
+def _source_locations(root, task_id, *, anchor=None):
     """Own sources first, then the reaper's exact, reciprocal retry links; no scan/copy."""
+    from ouroboros.confined_files import physical_path, root_spellings
     from ouroboros.task_results import load_task_result, validate_task_id
 
     root, owner, seen = pathlib.Path(root), validate_task_id(task_id), set()
-    start = load_task_result(root, owner, strict=True) or {}
-    canonical = pathlib.Path(start.get("budget_drive_root") or root)
+    start = (load_task_result(root, owner, strict=True) or {}) if anchor is None else {}
+    canonical = pathlib.Path(anchor if anchor is not None else start.get("budget_drive_root") or root)
+    # An anchor stays as configured for its row facts; one physical root is read once.
+    spellings = root_spellings(anchor) if anchor is not None else ()
     while owner not in seen:
         seen.add(owner)
-        if root != canonical:
+        if physical_path(spellings, root) != physical_path(spellings, canonical):
             yield root, owner
         yield canonical, owner
         yield from ((child, owner) for child in retained_task_roots(canonical, owner))
@@ -119,6 +136,11 @@ def _source_locations(root, task_id):
         if previous.get("retry_task_id") != owner:
             return
         owner = predecessor
+
+
+def retry_lineage_owns(root, task_id, owner) -> bool:
+    """Whether ``owner`` is ``task_id`` or one of its predecessors on those same retry links."""
+    return any(found == owner for _root, found in _source_locations(root, task_id))
 
 
 def retained_actor_source_read_target(root, task_id, relative):
@@ -161,24 +183,48 @@ def _check_open():
     fence_publication()
 
 
-def _retry_key(parent, child, task_id):
-    return (str(pathlib.Path(parent).resolve()), str(pathlib.Path(child).resolve()), str(task_id))
+def memo_epoch() -> str:
+    """The body that judged a refusal: a new release looks again at every remembered one."""
+    from ouroboros import __version__
+
+    return str(__version__)
 
 
-def begin_retention_retries(parent, present, generation):
-    root = str(pathlib.Path(parent).resolve())
-    for key in list(_UNAVAILABLE_RETRIES):
-        if key[0] == root and (key[2] not in present or _UNAVAILABLE_RETRIES[key][0] is not generation):
-            _UNAVAILABLE_RETRIES.pop(key, None)
-    for key in list(_RETENTION_LOG_FACTS):
-        if key[0] == root and key[1] not in present:
-            _RETENTION_LOG_FACTS.pop(key, None)
+def _plain(value):
+    return json.loads(json.dumps(value, default=str))
 
 
-def forget_retention_retry(parent, child, task_id):
-    key = _retry_key(parent, child, task_id)
-    _UNAVAILABLE_RETRIES.pop(key, None)
-    _RETENTION_LOG_FACTS.pop((key[0], key[2]), None)
+class RetentionMemo:
+    """The promotion retry's durable observations, one ``maintenance_jobs`` row of PARENT's store:
+    per task the basis a deterministic refusal was observed with (``observed``) and the problem
+    fact last logged (``logged``). They confer no completeness or GC authority and hold no
+    decoded source bytes; only members of the current promotions set (PRESENT) are kept, and
+    nothing is written while nothing changes, so a restart neither forgets nor rewalks them."""
+
+    def __init__(self, parent, present):
+        from ouroboros import maintenance_jobs
+
+        self.parent = pathlib.Path(parent)
+        self.present = {str(task_id) for task_id in present}
+        row = maintenance_jobs.job(self.parent, MEMO_JOB) or {}
+        self.observed = {key: value for key, value in (row.get("observed") or {}).items() if isinstance(value, dict)}
+        self.logged = dict(row.get("logged") or {})
+
+    def save(self):
+        from ouroboros import maintenance_jobs
+
+        maintenance_jobs.record(self.parent, MEMO_JOB,
+                                observed={key: value for key, value in self.observed.items() if key in self.present},
+                                logged={key: value for key, value in self.logged.items() if key in self.present})
+
+
+def retention_memo(parent, present) -> RetentionMemo:
+    return RetentionMemo(parent, present)
+
+
+def forget_retention_retry(memo, task_id):
+    if memo.observed.pop(str(task_id), None) is not None:
+        memo.save()
 
 
 def _result_facts(parent, child, task_id):
@@ -286,44 +332,66 @@ def _unavailable_basis(parent, child, task_id, result):
     return (json.dumps((pending, unavailable), sort_keys=True, default=str), facts)
 
 
-def unchanged_unavailable_retry(parent, child, task_id, result, *, generation):
-    """True only while this generation still sees the pending rows and watched files the
-    remembered deterministic refusal was observed with; a changed file, row or generation retries."""
-    key = _retry_key(parent, child, task_id)
-    previous = _UNAVAILABLE_RETRIES.get(key)
-    basis = _unavailable_basis(parent, child, task_id, result) if previous is not None else None
-    if previous is not None and previous[0] is generation and basis is not None and basis == previous[1]:
-        return True
-    _UNAVAILABLE_RETRIES.pop(key, None)
-    return False
+def unchanged_unavailable_retry(memo, child, task_id) -> bool:
+    """True only while the watched files and both result rows are what the remembered
+    deterministic refusal was observed with, under the same body; nothing is decoded here.
+    A changed file, row, child placement or release retries."""
+    entry = memo.observed.get(str(task_id))
+    if not entry or entry.get("epoch") != memo_epoch() or entry.get("child") != str(pathlib.Path(child).resolve()):
+        return False
+    facts = [[path, _path_fact(pathlib.Path(path))] for path, _fact in entry.get("facts") or ()
+             if not str(path).startswith("task:")]
+    return _plain([*facts, *_result_facts(memo.parent, child, task_id)]) == entry.get("facts")
 
 
-def remember_unavailable_retry(parent, child, task_id, result, *, generation):
-    key = _retry_key(parent, child, task_id)
-    basis = _unavailable_basis(parent, child, task_id, result)
-    if basis is not None:
-        _UNAVAILABLE_RETRIES[key] = (generation, basis)
-    else:
-        _UNAVAILABLE_RETRIES.pop(key, None)
+def remember_unavailable_retry(memo, child, task_id, result):
+    """Remember a deterministic refusal by its basis (``_unavailable_basis``), or forget one."""
+    from ouroboros.task_store import signature
+
+    basis = _unavailable_basis(memo.parent, child, task_id, result)
+    if basis is None:
+        forget_retention_retry(memo, task_id)
+        return
+    memo.observed[str(task_id)] = {
+        "child": str(pathlib.Path(child).resolve()), "epoch": memo_epoch(), "facts": _plain(basis[1]),
+        "signature": _plain(signature(memo.parent, task_id)), "fact": _retention_fingerprint(task_id, result)}
+    memo.save()
 
 
-def log_retention_change(parent, task_id, result, *, stop=None):
+def retention_logged(memo, task_id) -> bool:
+    """Whether the problem fact of the remembered refusal was logged (a failed append retries)."""
+    entry = memo.observed.get(str(task_id)) or {}
+    return bool(entry.get("fact")) and memo.logged.get(str(task_id)) == entry.get("fact")
+
+
+def _retention_fact(task_id, result):
     from ouroboros.history_retention import retention_diagnostics, retention_summary
+
+    return {"type": "history_retention", "task_id": task_id, **retention_summary(result),
+            "diagnostics": retention_diagnostics(result),
+            **{key: result[key] for key in ("chat_id", "project_id", "parent_task_id", "root_task_id") if key in result}}
+
+
+def _retention_fingerprint(task_id, result) -> str:
+    raw = json.dumps(_retention_fact(task_id, result), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def log_retention_change(parent, task_id, result, *, memo, stop=None):
+    """Append the task's ``history_retention`` problem fact once per distinct fact (durable dedupe)."""
     from ouroboros.task_custody import PublicationClosed, fence_publication, publication_fence
     from ouroboros.utils import append_jsonl, utc_now_iso
 
-    fact = {"type": "history_retention", "task_id": task_id, **retention_summary(result),
-            "diagnostics": retention_diagnostics(result),
-            **{key: result[key] for key in ("chat_id", "project_id", "parent_task_id", "root_task_id") if key in result}}
-    key = (str(pathlib.Path(parent).resolve()), str(task_id))
-    fingerprint = json.dumps(fact, ensure_ascii=False, sort_keys=True, default=str)
-    if _RETENTION_LOG_FACTS.get(key) == fingerprint:
+    fingerprint = _retention_fingerprint(task_id, result)
+    if memo.logged.get(str(task_id)) == fingerprint:
         return
     try:
         with publication_fence(stop):
             fence_publication()
-            if append_jsonl(pathlib.Path(parent) / "logs" / "events.jsonl", {"ts": utc_now_iso(), **fact}):
-                _RETENTION_LOG_FACTS[key] = fingerprint
+            if append_jsonl(pathlib.Path(parent) / "logs" / "events.jsonl",
+                            {"ts": utc_now_iso(), **_retention_fact(task_id, result)}):
+                memo.logged[str(task_id)] = fingerprint
+                memo.save()
     except PublicationClosed:
         raise
     except OSError:

@@ -15,10 +15,11 @@ import subprocess
 import sys
 import tarfile
 import threading
+from types import SimpleNamespace
 
 import pytest
 
-from devtools.benchmarks.cybergym import cybergym_executor as executor_module
+from devtools.benchmarks.cybergym import cybergym_docker, cybergym_executor as executor_module
 from devtools.benchmarks.cybergym.cybergym_adapter import final_poc_record
 from devtools.benchmarks.cybergym.cybergym_executor import (
     CommandResult,
@@ -1101,12 +1102,13 @@ def test_start_uses_same_absolute_server_root_and_docs_probe(tmp_path, monkeypat
 
 @_requires_posix_mount_paths
 def test_readiness_rejects_openapi_without_private_submit_fix(tmp_path, monkeypatch):
-    config = _config(tmp_path)
+    slept = []
+    config = _config(tmp_path, sleep=slept.append)
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret-value")
-    import devtools.benchmarks.cybergym.cybergym_executor as executor_module
-
-    ticks = iter((0.0, 121.0))
-    monkeypatch.setattr(executor_module.time, "monotonic", lambda: next(ticks))
+    # Only the readiness loop's clock (deadline, one poll, past it): global time.monotonic serves teardown too.
+    ticks = iter((0.0, 0.0, 121.0))
+    clock = SimpleNamespace(**{**vars(cybergym_docker.time), "monotonic": lambda: next(ticks)})
+    monkeypatch.setattr(cybergym_docker, "time", clock)
 
     def command(argv, *, cwd=None, env=None, timeout=None):
         if "network" in argv and "create" in argv:
@@ -1129,14 +1131,20 @@ def test_readiness_rejects_openapi_without_private_submit_fix(tmp_path, monkeypa
             )
         return CommandResult(0, "", "")
 
+    seen_http = []
+
     def http(method, url, **kwargs):
+        seen_http.append((method, url))
         return {"openapi": "3.0.0", "paths": {"/submit-vul": {}, "/query-poc": {}, "/verify-agent-pocs": {}}}
 
     executor = CyberGymExecutor(
         dataclasses_replace(config, command_runner=command, http_runner=http, provider_probe=False)
     )
-    with pytest.raises(ExecutorFailure, match="documented route"):
+    with pytest.raises(ExecutorFailure, match="documented route") as refused:
         executor.start()
+    # The answered OpenAPI document was read and refused (no /submit-fix) before the deadline ended the wait.
+    assert seen_http == [("GET", "http://127.0.0.1:8667/openapi.json")] and slept == [1]
+    assert "misses a required route" in str(refused.value.__cause__)
 
 
 def test_runtime_attestation_reinspects_immutable_ids_before_gateway_boundary(tmp_path, monkeypatch):

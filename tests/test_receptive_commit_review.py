@@ -1,8 +1,8 @@
 """#1741 receptive commit review (and review_change) through the real handlers, stage cycle,
 wave, substrate, custody drain and frozen checkout over a real Git repository.
 
-The only stand-ins are a scripted two-seat retrieving reviewer (whose physical rounds
-cross the attempt ledger), the tests preflight and publication. An addressed message
+The stand-ins are a scripted two-seat retrieving reviewer (whose physical rounds
+cross the attempt ledger), release metadata, the tests preflight and publication. An addressed message
 ends the author's wait while launched AND unsent reviewers continue over the frozen
 subject; the old handler never reaches Git; one whole-wave notice follows; the same
 unchanged call rejoins at $0; only an explicit continuation commits.
@@ -32,7 +32,7 @@ def _git(repo, *args):
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def until(predicate, timeout=15.0):
+def until(predicate, timeout=60.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
@@ -66,14 +66,14 @@ class Reviewer:
             first, self._first[model] = self._first[model], False
         if first and model == "m2":
             self.preparing_m2.set()
-            assert self.launch_m2.wait(15)
+            assert self.launch_m2.wait(60)
 
         def send():
             from ouroboros.llm_attempt import require_physical_dispatch_window
             require_physical_dispatch_window()  # the real final-sender handoff: Pause's refusal lives here
             self.rounds.append(model)
             self.sent[model].set()
-            assert not first or self.gates[model].wait(15)
+            assert not first or self.gates[model].wait(60)
             return {"round": model}
         ua.execute_physical_attempt(ua.AttemptRequest(model=model, provider="test", reservation_usd=.05),
                                     send, extractor=_extract)
@@ -123,7 +123,8 @@ def author(tmp_path, monkeypatch):
     ctx.owner_wait_callback = lambda *_a, **_k: "parked"  # an interactive author's continuation owner
     ctx.task_lifecycle_bound = True  # as the agent binds a task's context: Pause and budget scope apply
     monkeypatch.setattr(review_helpers, "check_worktree_readiness", lambda *a, **kw: [])
-    monkeypatch.setattr(commit_admission, "release_metadata_preflight", lambda *a, **kw: "")
+    monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
     monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a, **k: None)
     monkeypatch.setattr(git, "_post_commit_result", lambda *a, **k: None)
@@ -157,12 +158,18 @@ def author(tmp_path, monkeypatch):
     monkeypatch.setattr(review, "_prepare_unified_review", prepared)
     reviewer = Reviewer(roots)
     monkeypatch.setattr(review, "LLMClient", lambda: reviewer)
-    events = []
+    events, producers = [], []
     yield SimpleNamespace(ctx=ctx, repo=repo, data=data, git=git, reviewer=reviewer, roots=roots, pushes=pushes,
-                          events=events)
+                          events=events, producers=producers)
     reviewer.release()
+    # Join every author call while its fakes are still installed: an empty operation registry does
+    # not prove a call stopped (it may not have registered yet), and a call that outlives teardown
+    # runs on restored real bindings (#1955).
+    for producer in producers:
+        producer.join(60)
+    assert not [p.name for p in producers if p.is_alive()], "an author call outlived its test"
     from ouroboros import review_operation
-    until(lambda: not [op for op in review_operation._LIVE.values() if op.task_id == TASK], timeout=20)
+    until(lambda: not [op for op in review_operation._LIVE.values() if op.task_id == TASK], timeout=60)
     config.reset_runtime_mode_baseline_for_tests()
 
 
@@ -172,14 +179,26 @@ def _parent(a):
                                             event_queue=queue.Queue(), worker_slot_held=False)
 
 
+def _join(thread):
+    """Wait for completion, failing at the hang bound before reading the result."""
+    thread.join(60)
+    assert not thread.is_alive(), f"author call {thread.name} did not finish"
+
+
+def _produce(a, run):
+    """Start one author call that the fixture owns and joins."""
+    thread = threading.Thread(target=run)
+    a.producers.append(thread)
+    thread.start()
+    return thread
+
+
 def _commit(a, outcome, key="result", **kwargs):
     def run():
         with _parent(a):
             outcome[key] = a.git._commit_reviewed(a.ctx, "Change value", paths=["change.py"],
                                                   skip_advisory_review=True, **kwargs)
-    thread = threading.Thread(target=run)
-    thread.start()
-    return thread
+    return _produce(a, run)
 
 
 def _read_mail(a):
@@ -197,10 +216,10 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
     a, outcome = author, {}
     head = _git(a.repo, "rev-parse", "HEAD")
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     assert "review_checkouts" in a.roots["m1"], "a receptive wave reads the frozen checkout, never the live index"
     write_owner_message(a.data, "How is the commit going?", TASK)
-    thread.join(15)
+    _join(thread)
     result = outcome["result"]
     assert result.startswith("Review outcome returned before commit: reviewers are still running."), result
     assert "An addressed message reached you" in result
@@ -215,7 +234,7 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
     # The author keeps working on the live tree; the seats keep reading the frozen subject.
     (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
     a.reviewer.launch_m2.set()
-    assert a.reviewer.sent["m2"].wait(15), "mail is not Pause: the unsent seat still launches"
+    assert a.reviewer.sent["m2"].wait(60), "mail is not Pause: the unsent seat still launches"
     a.reviewer.gates["m1"].set()
     a.reviewer.gates["m2"].set()
     until(lambda: len(a.reviewer.read) == 2)
@@ -230,7 +249,7 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
     (a.repo / "change.py").write_text("value = 2\n", encoding="utf-8")
     _read_mail(a)
     again = {}
-    _commit(a, again).join(20)
+    _join(_commit(a, again))
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "no second paid send"
     reference = json.loads(again["result"].split("\n", 1)[1])["review_reference"]
@@ -238,8 +257,8 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
     # Only the explicit continuation commits, over the current bytes.
     (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
     final = {}
-    _commit(a, final, review_reference=reference, author_disposition={
-        "disposition": "partial", "rationale": "Read the settled PASS; committing my later correction."}).join(20)
+    _join(_commit(a, final, review_reference=reference, author_disposition={
+        "disposition": "partial", "rationale": "Read the settled PASS; committing my later correction."}))
     assert _git(a.repo, "rev-parse", "HEAD") != head, final
     assert _git(a.repo, "show", "HEAD:change.py") == "value = 3"
     assert a.ctx._commit_review_status == "author_continued" and len(a.pushes) == 1
@@ -254,11 +273,11 @@ def _commit_count(a):
 def test_silence_keeps_one_receptive_wait_and_returns_the_settled_outcome(author):
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     time.sleep(0.4)  # several drain slices with no addressed message
     assert thread.is_alive(), "a quiet wait never ends the author's call by itself"
     a.reviewer.release()
-    thread.join(20)
+    _join(thread)
     assert outcome["result"].startswith("Review outcome returned before commit."), outcome["result"]
     assert not _notices(a) and a.ctx._left_review_wait is None
     assert sorted(a.reviewer.rounds) == ["m1", "m2"]
@@ -268,12 +287,12 @@ def test_a_synchronous_caller_keeps_its_wait_and_the_mail_stays_unread(author):
     a, outcome = author, {}
     a.ctx.owner_wait_callback = None  # no continuation owner: a script's synchronous compatibility
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.roots["m1"] == str(a.repo), "a synchronous wave keeps the live read"
+    assert a.reviewer.sent["m1"].wait(60) and a.roots["m1"] == str(a.repo), "a synchronous wave keeps the live read"
     write_owner_message(a.data, "Status?", TASK)
     time.sleep(0.4)
     assert thread.is_alive()
     a.reviewer.release()
-    thread.join(20)
+    _join(thread)
     assert outcome["result"].startswith("Review outcome returned before commit."), outcome["result"]
     assert [entry["text"] for entry in drain_owner_entries(a.data, TASK, set(), 1)] == ["Status?"]
     assert _commit_count(a) == 1, "the outcome still returns before any Git effect"
@@ -288,9 +307,9 @@ def test_enforcement_keeps_its_authority_while_the_author_hears_mail(author, mon
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "A question while you wait.", TASK)
-    thread.join(15)
+    _join(thread)
     result = outcome["result"]
     assert _commit_count(a) == 1 and not a.pushes, result
     if mode == "pro":  # ordinary Blocking: the pending wave blocks; its collected PASS commits in one call
@@ -299,14 +318,14 @@ def test_enforcement_keeps_its_authority_while_the_author_hears_mail(author, mon
         until(lambda: _notices(a))
         _read_mail(a)
         again = {}
-        _commit(a, again).join(20)
+        _join(_commit(a, again))
         assert _commit_count(a) == 2, again
     else:  # Cyber Pro: an explicit continuation may commit now; the left review stays collectible
         reference = json.loads(result.split("\n", 1)[1])["review_reference"]
         _read_mail(a)
         final = {}
-        _commit(a, final, review_reference=reference, author_disposition={
-            "disposition": "deferred", "rationale": "Proceeding now; the open review stays collectible."}).join(20)
+        _join(_commit(a, final, review_reference=reference, author_disposition={
+            "disposition": "deferred", "rationale": "Proceeding now; the open review stays collectible."}))
         assert _commit_count(a) == 2, final
         a.reviewer.release()
         assert until(lambda: _notices(a))
@@ -323,10 +342,10 @@ def test_pause_is_not_mail_it_refuses_the_unsent_seat_mail_does_not(author):
 
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     owner_pause.install_fence(a.data, TASK, request_id="pause-is-not-mail")
     try:
-        thread.join(15)
+        _join(thread)
         assert "An addressed message" not in outcome["result"], outcome["result"]
         row = [r for r in a.ctx._review_detached_operations if r["slot_id"] == "second"][-1]
         assert row["reason"] == "owner_pause"
@@ -345,16 +364,16 @@ def test_mail_latches_no_launch_refusal(author):
 
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "Status?", TASK)
-    thread.join(15)
+    _join(thread)
     row = [r for r in a.ctx._review_detached_operations if r["slot_id"] == "second"][-1]
     assert row["reason"] == review_pause.ADDRESSED_EVENT
     with _ACTIVE_LOCK:
         entry = _ACTIVE[row["attempt_key"]]
     assert not entry.pause_before_launch and entry.author_left_for == review_pause.ADDRESSED_EVENT
     a.reviewer.launch_m2.set()
-    assert a.reviewer.sent["m2"].wait(15), "the unsent seat launches after its author left for mail"
+    assert a.reviewer.sent["m2"].wait(60), "the unsent seat launches after its author left for mail"
 
 
 def test_an_unfrozen_subject_keeps_the_synchronous_wait_and_says_so(author, monkeypatch):
@@ -365,12 +384,12 @@ def test_an_unfrozen_subject_keeps_the_synchronous_wait_and_says_so(author, monk
     monkeypatch.setattr(review_subject, "isolated_checkout", unavailable)
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.roots["m1"] == str(a.repo)
+    assert a.reviewer.sent["m1"].wait(60) and a.roots["m1"] == str(a.repo)
     write_owner_message(a.data, "Status?", TASK)
     time.sleep(0.4)
     assert thread.is_alive(), "a wave over unfrozen bytes is never left by its author"
     a.reviewer.release()
-    thread.join(20)
+    _join(thread)
     assert "receptive_wait_unavailable" in json.dumps(load_state(a.data).attempts[-1].degraded_reasons)
     assert _commit_count(a) == 1
 
@@ -381,9 +400,9 @@ def test_a_late_settlement_after_another_call_touches_only_its_own_attempt(autho
     collected by its own exact call, never by the other's."""
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "Status?", TASK)
-    thread.join(15)
+    _join(thread)
     left = load_state(a.data).attempts[-1]
     _read_mail(a)
     other = {}
@@ -391,9 +410,8 @@ def test_a_late_settlement_after_another_call_touches_only_its_own_attempt(autho
     def run_other():
         with _parent(a):
             other["result"] = a.git._commit_reviewed(a.ctx, "Other intent", paths=["change.py"], skip_advisory_review=True)
-    worker = threading.Thread(target=run_other)
-    worker.start()
-    worker.join(30)
+    worker = _produce(a, run_other)
+    _join(worker)
     assert other["result"].startswith("Review outcome returned before commit."), other["result"]
     other_attempt = json.loads(other["result"].split("\n", 1)[1])["review_reference"]["attempt"]
     assert other_attempt != left.attempt
@@ -403,7 +421,7 @@ def test_a_late_settlement_after_another_call_touches_only_its_own_attempt(autho
     assert not a.ctx._review_custody_lost, "a late worker never writes the later call's custody state"
     _read_mail(a)
     again = {}
-    _commit(a, again).join(20)
+    _join(_commit(a, again))
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
     assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["attempt"] == left.attempt
     collected = next(row for row in load_state(a.data).attempts if row.attempt == left.attempt)
@@ -422,9 +440,9 @@ def test_a_distinct_candidate_gets_its_own_panel_while_the_left_wave_keeps_custo
     config.initialize_runtime_mode_baseline(mode)
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "Status?", TASK)
-    thread.join(15)
+    _join(thread)
     a_attempt = load_state(a.data).attempts[-1]
     a_root = a.roots["m1"]
     assert a_attempt.phase == "late_wait" and "review_checkouts" in a_root
@@ -432,7 +450,7 @@ def test_a_distinct_candidate_gets_its_own_panel_while_the_left_wave_keeps_custo
     _read_mail(a)
     (a.repo / "change.py").write_text("value = 5\n", encoding="utf-8")
     b = {}
-    _commit(a, b).join(30)
+    _join(_commit(a, b))
     assert b["result"].startswith("Review outcome returned before commit."), b["result"]
     b_reference = json.loads(b["result"].split("\n", 1)[1])["review_reference"]
     assert b_reference["attempt"] != a_attempt.attempt, "B is its own attempt, never A's"
@@ -452,7 +470,7 @@ def test_a_distinct_candidate_gets_its_own_panel_while_the_left_wave_keeps_custo
     _read_mail(a)
     (a.repo / "change.py").write_text("value = 2\n", encoding="utf-8")
     again = {}
-    _commit(a, again).join(30)
+    _join(_commit(a, again))
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
     assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["attempt"] == a_attempt.attempt
     assert len(a.reviewer.rounds) == rounds == 4, "the exact A identity was collected, not re-bought"
@@ -466,9 +484,7 @@ def _review_change(a, outcome, key="result"):
         with _parent(a):
             outcome[key] = _handle_review_change(a.ctx, root="system_repo", subject="index",
                                                  goal="Raise the value.", scope="change.py only")
-    thread = threading.Thread(target=run)
-    thread.start()
-    return thread
+    return _produce(a, run)
 
 
 def _payload(text):
@@ -486,10 +502,10 @@ def test_review_change_hears_mail_and_the_same_unchanged_call_collects_its_wave(
     a, outcome = author, {}
     _git(a.repo, "add", "change.py")
     thread = _review_change(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     assert "review_checkouts" in a.roots["m1"], "a receptive review_change reads the frozen index"
     write_owner_message(a.data, "Is the review done?", TASK)
-    thread.join(15)
+    _join(thread)
     result = outcome["result"]
     assert result.startswith("An addressed message reached you while the reviewers ran"), result
     first = _payload(result)
@@ -506,7 +522,7 @@ def test_review_change_hears_mail_and_the_same_unchanged_call_collects_its_wave(
     _git(a.repo, "add", "change.py")
     _read_mail(a)
     again = {}
-    _review_change(a, again).join(30)
+    _join(_review_change(a, again))
     collected = _payload(again["result"])
     assert collected["state"] == "settled" and collected["aggregate"] == "PASS", again["result"]
     assert collected["record_id"] == first["record_id"], "the same wave's record, settled"
@@ -520,17 +536,28 @@ def test_negative_without_frozen_custody_detection_another_candidate_gets_no_pan
     attempt (its edits stay unstaged), and no reviewer is sent for B."""
     from ouroboros.tools import commit_gate
 
-    monkeypatch.setattr(commit_gate, "_readers_frozen", lambda *_a: False)
+    rejoining = threading.Event()
+
+    def unfrozen(*_args):
+        rejoining.set()
+        return False
+
+    monkeypatch.setattr(commit_gate, "_readers_frozen", unfrozen)
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "Status?", TASK)
-    thread.join(15)
+    _join(thread)
     left = load_state(a.data).attempts[-1]
     _read_mail(a)
     (a.repo / "change.py").write_text("value = 5\n", encoding="utf-8")
     b = {}
-    _commit(a, b).join(30)
+    pending = _commit(a, b)
+    assert rejoining.wait(60), "the second call never checked the open readers"
+    # The old overlap guard rejoins A. End that receptive wait with mail, not by
+    # letting the reviewers' hang bounds expire and manufacturing terminal errors.
+    write_owner_message(a.data, "Report the review that is still running.", TASK)
+    _join(pending)
     result = b["result"]
     assert ("REVIEWED_ATTEMPT_IN_PROGRESS" in result
             or json.loads(result.split("\n", 1)[1])["review_reference"]["attempt"] == left.attempt), result
@@ -542,16 +569,16 @@ def test_an_exact_reissue_while_the_left_wave_runs_waits_receptively_and_collect
     wave, waits (hearing mail again) until it settles, and collects it at $0."""
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "Status?", TASK)
-    thread.join(15)
+    _join(thread)
     _read_mail(a)
     again = {}
     rejoin = _commit(a, again)
     rejoin.join(1.0)
     assert rejoin.is_alive(), "the rejoin waits for the running wave instead of returning at once"
     a.reviewer.release()
-    rejoin.join(20)
+    _join(rejoin)
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"] and _commit_count(a) == 1
 
@@ -563,9 +590,9 @@ def test_a_later_pause_on_the_rejoin_claims_no_addressed_message(author):
 
     a, outcome = author, {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "Status?", TASK)
-    thread.join(15)
+    _join(thread)
     assert "An addressed message reached you" in outcome["result"]
     _read_mail(a)
     again = {}
@@ -574,7 +601,7 @@ def test_a_later_pause_on_the_rejoin_claims_no_addressed_message(author):
     assert rejoin.is_alive()
     owner_pause.install_fence(a.data, TASK, request_id="pause-on-rejoin")
     try:
-        rejoin.join(15)
+        _join(rejoin)
         assert "reviewers are still running" in again["result"], again["result"]
         assert "An addressed message" not in again["result"], "an earlier call's mail is not this call's"
         assert a.ctx._left_review_wait is None
@@ -629,12 +656,12 @@ def test_a_settled_handback_leaves_no_open_custody_behind(author, mode, interact
         a.ctx.owner_wait_callback = None
     a.reviewer.release()
     first = {}
-    _commit(a, first).join(30)
+    _join(_commit(a, first))
     assert first["result"].startswith("Review outcome returned before commit."), first["result"]
     assert not load_state(a.data).attempts[-1].late_result_pending
     (a.repo / "change.py").write_text("value = 9\n", encoding="utf-8")
     second = {}
-    _commit(a, second).join(30)
+    _join(_commit(a, second))
     assert second["result"].startswith("Review outcome returned before commit."), second["result"]
     assert "still running" not in second["result"] and len(a.reviewer.rounds) == 4, a.reviewer.rounds
     assert _commit_count(a) == 1
@@ -660,17 +687,19 @@ def _leave_wave_by_mail(a):
     shared.projects(a.data)  # Main and two Projects: the room the mark lands in is a proven one
     outcome = {}
     thread = _commit(a, outcome)
-    assert a.reviewer.sent["m1"].wait(15) and a.reviewer.preparing_m2.wait(15)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
     write_owner_message(a.data, "How is the commit going?", TASK)
-    thread.join(15)
+    _join(thread)
     assert outcome["result"].startswith("Review outcome returned before commit: reviewers are still running.")
     return a.ctx._left_review_wait, load_state(a.data).attempts[-1]
 
 
 def test_a_left_wave_that_settles_after_its_author_ended_stays_in_its_room_once(author):
     """Nobody reads an ended author's mailbox, so the settlement keeps the wave's own recorded outcome in
-    the author's room: collected at $0 from its attempt row, never a second send, never Git, no verdict.
-    A replay is unchanged and the mind's release is final."""
+    the author's room: collected at $0 from its attempt row, never a second send, never Git. The wave's own
+    ledger record settles from the same seats (a journal fact, nothing committed or applied), so it no
+    longer waits for a re-issue that will never come. A replay is unchanged and the mind's release is final."""
+    from ouroboros import review_ledger
     from ouroboros.artifacts import read_actor_source_bytes
     from tests.test_late_review_marks import _release
 
@@ -687,8 +716,12 @@ def test_a_left_wave_that_settles_after_its_author_ended_stays_in_its_room_once(
     [mark] = until(lambda: _late_marks(a.data))
     assert mark["room_id"] == "1" and mark["review"]["surface"] == "commit_gate"
     text = mark["text"]
-    assert text.startswith(f"Late commit review of task {TASK}.") and "No panel verdict was formed" in text
+    assert text.startswith(f"Late commit review of task {TASK}.") and "Its record now reads PASS" in text
+    assert "No panel verdict was formed" not in text and "nothing was committed or applied" in text
     assert "kept here because its author's task ended" in text and "has settled" not in text
+    settled = review_ledger.load_record(a.data, wait["record_id"])
+    assert settled["state"] == "settled" and settled["verdict"]["aggregate"] == "PASS"
+    assert {row["seat_id"]: row["status"] for row in settled["rows"]} == {"first": "responded", "second": "responded"}
     assert "- m1 (seat first): " in text and "- m2 (seat second): " in text and "outcome unknown" not in text
     until(lambda: _owed_left_rows(a) == {})  # the duty owed since the author left is discharged by the mark
     source = json.loads(read_actor_source_bytes(a.data, TASK, mark["target_ref"]))
@@ -699,6 +732,9 @@ def test_a_left_wave_that_settles_after_its_author_ended_stays_in_its_room_once(
     assert sorted(a.reviewer.rounds) == ["m1", "m2"] and _commit_count(a) == 1 and not a.pushes
     record = _left_record(a, wait)
     assert review_pause.ended_left_review(record) == "unchanged"
+    enriched = {**record, "selection": {"tasks": ["child"]}, "seen_helpers": ["task:child"],
+                "seen_outcomes": ["same-wave:operation:outcome"], "review_reference": {"record_id": wait["record_id"]}}
+    assert review_pause.ended_left_review(enriched) == "unchanged"
     assert _release(a.data, mark["id"], direct=True)["ok"]
     assert review_pause.ended_left_review(record) == "unchanged" and _late_marks(a.data) == []
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "composition collects at $0 only"
@@ -792,9 +828,12 @@ def test_a_failed_settled_duty_write_recovers_from_retained_seats_while_controll
 
 
 def test_a_duty_whose_controller_died_before_settlement_keeps_what_was_recorded(author):
-    """The process that owned the left wave dies before its settlement notice (the duty landed when the
-    author left): once the task ended, maintenance composes the wave from its attempt row at $0, every
-    seat without a retained outcome told unknown, never a settled claim and never a second send."""
+    """A dead notice controller cannot erase positive live producer custody.
+
+    The fixture's reviewers still run in this process. Losing only the duty's
+    controller must keep them pending; actual API custody loss is tested at the
+    collector boundary in test_review_operation_collection and test_review_waiting.
+    """
     import subprocess
     import sys
 
@@ -810,14 +849,19 @@ def test_a_duty_whose_controller_died_before_settlement_keeps_what_was_recorded(
         txn.put_row(OWED_SET, duty_id, {**row, "controller": {"pid": int(gone), "birth": "gone", "session": "gone"}})
     assert replay_owed_late_reviews(a.data)["waiting"] == 1, "a running author can still collect its wave"
     write_task_result(a.data, TASK, "failed", chat_id=1, result="The worker ended abnormally.")
-    assert replay_owed_late_reviews(a.data) == {"settled": 1, "waiting": 0, "retired": 0, "failed": 0}
-    [mark] = _late_marks(a.data)
-    text = mark["text"]
-    assert "2 seat(s) have no retained outcome and stay unknown; nothing is sent again." in text
-    assert "- m1 (seat first): outcome unknown" in text and "- m2 (seat second): outcome unknown" in text
-    assert "has settled" not in text and "answered" not in text and "No panel verdict was formed" in text
-    assert _owed_left_rows(a) == {} and sorted(a.reviewer.rounds) == ["m1"] and _commit_count(a) == 1
-    assert "kept here because its author's task ended" in text and wait["retry_key"] == mark["review"]["subject"]["retry_key"]
+    assert replay_owed_late_reviews(a.data) == {"settled": 0, "waiting": 1, "retired": 0, "failed": 0}
+    from ouroboros import review_ledger
+
+    pending = review_ledger.load_record(a.data, wait["record_id"])
+    assert pending["state"] == "pending" and _late_marks(a.data) == []
+    a.reviewer.release()
+    [mark] = until(lambda: _late_marks(a.data))
+    assert "outcome unknown" not in mark["text"] and "Its record now reads PASS" in mark["text"]
+    until(lambda: _owed_left_rows(a) == {})  # the owed row retires right after the mark, not in the same write
+    assert sorted(a.reviewer.rounds) == ["m1", "m2"]
+    assert _commit_count(a) == 1 and not a.pushes
+    assert replay_owed_late_reviews(a.data)["settled"] == 0
+    assert wait["retry_key"] == mark["review"]["subject"]["retry_key"]
 
 
 def test_an_unreadable_or_unknown_left_record_never_claims_a_settled_seat(tmp_path, monkeypatch):

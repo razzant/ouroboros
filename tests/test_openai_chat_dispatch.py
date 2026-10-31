@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import ouroboros.context_compaction as context_compaction
 import ouroboros.llm_fallback as llm_fallback
 import ouroboros.openai_chat_dispatch as dispatch
 from ouroboros.context_fit import estimate_context_prompt_tokens
@@ -730,60 +729,6 @@ def test_function_origin_remains_schema_tolerant(tmp_path):
     )
     assert result["is_error"] is False
     assert tools.calls == [("probe", {"marker": "wrong"})]
-
-
-def test_structured_compaction_returns_one_bounded_tool_error_continuation(monkeypatch, tmp_path):
-    message, receipts = _invalid_custom_exchange(
-        context_compaction._CONTEXT_SUMMARIES_TOOL,
-        '{"summaries":"wrong"}',
-    )
-    valid_message = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{
-            "id": "call-valid",
-            "type": "function",
-            "function": {
-                "name": "emit_context_summaries",
-                "arguments": '{"summaries":[{"source_id":"source:0:4:x","summary":"ok"}]}',
-            },
-        }],
-    }
-    calls = []
-
-    def fake_chat_observed(_client, **kwargs):
-        assert kwargs['max_tokens'] == 100
-        calls.append(copy.deepcopy(kwargs["messages"]))
-        if len(calls) == 1:
-            return copy.deepcopy(message), _receipt_usage(receipts)
-        return valid_message, {}
-
-    import ouroboros.llm_observability as observed
-
-    monkeypatch.setattr(observed, "chat_observed", fake_chat_observed)
-    part = context_compaction._part("source", "text")
-    expected_id = part.source_id
-    valid_message["tool_calls"][0]["function"]["arguments"] = (
-        '{"summaries":[{"source_id":"' + expected_id + '","summary":"ok"}]}'
-    )
-    result = context_compaction._call_summarizer(
-        [part],
-        drive_root=tmp_path,
-        task_id="compaction",
-        phase="map",
-        spec={
-            "model": "openai::future-model-without-prefix",
-            "effort": "low",
-            "output_budget": 100,
-            "use_local": False,
-        },
-        summary_budgets={"source": 100},
-        usage_total={},
-    )
-    assert result == {expected_id: "ok"}
-    assert len(calls) == 2
-    assert calls[1][-1]["role"] == "tool"
-    assert "TOOL_ARG_ERROR" in calls[1][-1]["content"]
 
 
 def test_context_fit_counts_larger_direct_custom_projection():

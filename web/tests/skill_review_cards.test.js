@@ -5,7 +5,6 @@ import test from 'node:test';
 import {
     SKILL_REVIEW_DETAIL_CAP,
     loadSkillReviewDetail,
-    nestedSkillReviewRef,
     renderSkillReviewDisclosure,
     summarizeSkillReviewMessage,
     wireSkillReviewDisclosure,
@@ -145,7 +144,7 @@ test('loaded and in-flight containers are never refetched', async () => {
     assert.equal(attempts, 1);
 });
 
-test('nested attempts reuse the instance exact-job store after DOM rebuild', async () => {
+test('a rebuilt detail container reuses the instance exact-job store', async () => {
     const store = new Map();
     let fetches = 0;
     const deps = {
@@ -158,9 +157,6 @@ test('nested attempts reuse the instance exact-job store after DOM rebuild', asy
     await loadSkillReviewDetail(rebuilt, { skill: 'alpha', jobId: 'nested-job' }, deps);
     assert.equal(fetches, 1);
     assert.match(rebuilt.innerHTML, /cached exact detail/);
-    assert.deepEqual(nestedSkillReviewRef({ dataset: {
-        skillReviewSkill: 'alpha', skillReviewJob: 'nested-job',
-    } }), { skill: 'alpha', jobId: 'nested-job' });
 });
 
 test('the instance store is trimmed FIFO past the cap by the loader itself (issue #135)', async () => {
@@ -278,12 +274,13 @@ test('a missing reference is a no-op (defensive)', async () => {
 
 // ---- wiring (the real bubble hookup, DOM stubbed) ---------------------------
 
-function makeBubble({ skill = '', jobId = '' } = {}) {
+function makeBubble({ skill = '', jobId = '', recordId = '' } = {}) {
     const listeners = new Map();
     const disclosure = { dataset: {
         expanded: '0',
         ...(skill ? { skillReviewSkill: skill } : {}),
         ...(jobId ? { skillReviewJob: jobId } : {}),
+        ...(recordId ? { skillReviewRecord: recordId } : {}),
     } };
     const full = {
         dataset: {},
@@ -380,4 +377,60 @@ test('wiring: non-review bubbles are left untouched', () => {
 test('the inline review body opts out of the chat pre-wrap in the template itself', () => {
     const source = fs.readFileSync(new URL('../modules/skill_review_card.js', import.meta.url), 'utf8');
     assert.match(source, /class="skill-review-full" data-skill-review-full data-chat-markdown-enhanced="1"/);
+});
+
+// --- the review ledger record: a reused review keeps its record under a fresh job id ---------------------
+
+test('a row naming its review record carries it and the detail request asks for the record, not the job', async () => {
+    const html = renderSkillReviewDisclosure(REFERENCE_TEXT, { skill: 'alpha', jobId: 'skill-job-2', recordId: 'rec-1' });
+    assert.match(html, /data-skill-review-job="skill-job-2"/);
+    assert.match(html, /data-skill-review-record="rec-1"/);
+    const calls = [];
+    const full = makeFull();
+    const state = await loadSkillReviewDetail(full, { skill: 'alpha', jobId: 'skill-job-2', recordId: 'rec-1' }, {
+        fetchImpl: async (url) => { calls.push(url); return okResponse('record body'); },
+        render: (markdown) => markdown,
+    });
+    assert.equal(state, 'loaded');
+    assert.deepEqual(calls, ['/api/skills/alpha/review-history/rec-1']);
+});
+
+test('a row without a record id (an earlier version) still asks by job id', async () => {
+    const html = renderSkillReviewDisclosure(REFERENCE_TEXT, { skill: 'alpha', jobId: 'skill-job-1' });
+    assert.doesNotMatch(html, /data-skill-review-record/);
+    const calls = [];
+    await loadSkillReviewDetail(makeFull(), { skill: 'alpha', jobId: 'skill-job-1' }, {
+        fetchImpl: async (url) => { calls.push(url); return okResponse('job body'); },
+        render: (markdown) => markdown,
+    });
+    assert.deepEqual(calls, ['/api/skills/alpha/review-history/skill-job-1']);
+});
+
+test('one job reads its record once; a later job of the same record reads it again', async () => {
+    const store = new Map();
+    const bodies = ['pending: the review is still running', 'blockers: path_confinement'];
+    let fetches = 0;
+    const deps = { store, fetchImpl: async () => okResponse(bodies[fetches++]), render: (m) => m };
+    const left = makeFull();
+    assert.equal(await loadSkillReviewDetail(left, { skill: 'alpha', jobId: 'job-left', recordId: 'rec-1' }, deps), 'loaded');
+    assert.match(left.innerHTML, /still running/);
+    const sameJob = makeFull();
+    assert.equal(await loadSkillReviewDetail(sameJob, { skill: 'alpha', jobId: 'job-left', recordId: 'rec-1' }, deps), 'loaded');
+    assert.equal(fetches, 1);
+    const collected = makeFull();
+    assert.equal(await loadSkillReviewDetail(collected, { skill: 'alpha', jobId: 'job-collected', recordId: 'rec-1' }, deps), 'loaded');
+    assert.equal(fetches, 2);
+    assert.match(collected.innerHTML, /blockers: path_confinement/);
+});
+
+test('a wired bubble carries the record id into the reference', async () => {
+    const stub = makeBubble({ skill: 'alpha', jobId: 'j2', recordId: 'rec-9' });
+    const calls = [];
+    wireSkillReviewDisclosure(stub.bubble, {
+        fetchImpl: async (url) => { calls.push(url); return okResponse('full body'); },
+        render: (markdown) => markdown,
+    });
+    stub.listeners.get('toggle:click')();
+    await flushAsync();
+    assert.deepEqual(calls, ['/api/skills/alpha/review-history/rec-9']);
 });

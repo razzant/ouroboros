@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
-
 import pytest
+
+from ouroboros import dialogue_store
 from tests._store_shared import seed_result
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
@@ -17,17 +17,16 @@ def test_ui_smoke_final_only_child_stays_inside_child_card(direct_server_with_da
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
-    logs = data_dir / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    (logs / "progress.jsonl").write_text(json.dumps({
+    # The running server reads its own dialogue store (#1982), never log files written after it started.
+    dialogue_store.append(data_dir, "progress", {
         "ts": "2026-08-21T10:00:00Z", "chat_id": 1, "task_id": "parent-final-only",
         "content": "Parent is working", "is_progress": True,
-    }) + "\n", encoding="utf-8")
+    })
     sentinel = "FINAL_ONLY_CHILD_SENTINEL"
-    (logs / "chat.jsonl").write_text(json.dumps({
+    dialogue_store.append(data_dir, "chat", {
         "ts": "2026-08-21T10:00:01Z", "chat_id": 1, "direction": "out",
         "task_id": "child-final-only", "text": sentinel, "format": "markdown",
-    }) + "\n", encoding="utf-8")
+    })
     results = data_dir / "task_results"
     results.mkdir(parents=True, exist_ok=True)
     seed_result(data_dir, "child-final-only", {
@@ -53,7 +52,7 @@ def test_ui_smoke_final_only_child_stays_inside_child_card(direct_server_with_da
                 # The final text lives INSIDE the child card: in its (collapsed-hidden)
                 # activity node, and on screen once the child is expanded.
                 assert sentinel in child.locator(":scope > [data-live-summary-button] [data-live-activity]").text_content()
-                child.locator(":scope > [data-live-summary-button]").click()
+                child.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
                 assert sentinel in child.inner_text()
                 assert child.locator("xpath=ancestor::*[@data-subagents-for='parent-final-only']").count() == 1
                 assert page.locator(".chat-bubble", has_text=sentinel).count() == 0

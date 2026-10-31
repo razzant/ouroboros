@@ -18,7 +18,8 @@ import ouroboros.loop_transport as loop_transport
 from ouroboros import owner_mailbox
 from ouroboros import usage_accounting as ua
 from ouroboros.loop import run_llm_loop
-from ouroboros.loop_model_call import _route_candidates, _route_facts_text
+from ouroboros.loop_model_call import _route_candidates
+from ouroboros.primary_route_observation import route_facts_text
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
 from ouroboros.tools.control_runtime import _switch_model
 from ouroboros.tools.registry import ToolRegistry
@@ -27,6 +28,7 @@ from tests.test_llm_claudexor import ROUTE, result
 from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_transport_death_retry import _events, _ledger
 from tests._usage_store_testing import dispatched_attempts
+from tests._shared import saved_settings
 
 setup = gateway_fixture
 PRIMARY = "primary/model"
@@ -209,7 +211,7 @@ def test_non_unknown_candidate_failure_cannot_buy_a_forced_summary_after_unknown
 def test_without_a_configured_route_a_direct_turn_waits_and_continues_inside_its_bound(data_root, tmp_path, monkeypatch):
     """The existing managed recovery, extended to a direct turn: upstream observation, then a
     NEW attempt with facts-only input; never a paid same-request repeat."""
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     observed = []
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable",
                         lambda *_a, **_kw: observed.append(1) or {"kind": "upstream_http", "status_code": 200})
@@ -228,7 +230,7 @@ def test_without_a_configured_route_a_direct_turn_waits_and_continues_inside_its
 
 
 def test_direct_stop_during_the_unknown_wait_sends_nothing_further(data_root, tmp_path, monkeypatch):
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: {})
 
     def stop_arrives(_seconds, _wake):
@@ -305,7 +307,7 @@ def test_an_adopted_fallback_that_fails_retains_the_primary_as_a_route(data_root
 # -- binding identity -----------------------------------------------------------------------------
 
 
-def test_route_candidates_compare_complete_bindings_not_model_strings(monkeypatch):
+def test_route_candidates_compare_complete_bindings_not_model_strings(monkeypatch, tmp_path):
     main = "claudexor::codex=gpt-test"
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", main)
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
@@ -314,9 +316,9 @@ def test_route_candidates_compare_complete_bindings_not_model_strings(monkeypatc
     assert _route_candidates(tool_ctx, main, False, "main", None) == [(main, "fallback:0", False, False)]
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"fallback": [""]}))
     assert _route_candidates(tool_ctx, main, False, "main", None) == []  # the same binding is no alternative
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     assert _route_candidates(tool_ctx, main, False, "main", None) == []  # an empty chain stays empty
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", f"{main},other/model")
+    saved_settings(monkeypatch, None, OUROBOROS_MODEL_FALLBACKS=f"{main},other/model")  # a saved chain beats the env
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"fallback": ["account-b", ""]}))
     acting = _route_candidates(tool_ctx, main, False, "fallback:0", None)
     assert acting == [(main, "main", False, True), ("other/model", "fallback:1", False, False)]
@@ -366,6 +368,7 @@ def test_primary_return_rebinds_role_and_leaves_auto_unpinned(monkeypatch):
     ctx = SimpleNamespace(primary_route={"model": "consc/model", "use_local": False, "role": "consciousness"},
                           model_wait_context=None, active_model_override=None, active_use_local_override=None,
                           active_effort_override=None)
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "consc/model")  # the CURRENT slot: a return re-reads it
     _switch_model(ctx, primary="return")
     messages = [{"role": "user", "content": "go"}]
     route = _apply_round_route_overrides(ctx, SimpleNamespace(_ctx=ctx), messages, ("fb/one", False, "high"),
@@ -385,15 +388,17 @@ def test_initial_route_records_a_role_slot_primary(tmp_path):
 
 def test_route_facts_name_both_bindings_the_dated_failure_and_the_choices():
     ctx = SimpleNamespace(primary_route={"model": "claudexor::codex=gpt-test", "use_local": False, "role": "main"})
-    text = _route_facts_text(ctx, model="fb/one", use_local=False, role="fallback:0",
-                             failed_model="claudexor::codex=gpt-test",
-                             failure={"failure_code": "subscription_window_exhausted", "ts": "2026-09-30T12:00:00Z",
-                                      "reset_at": "2026-09-30T18:00:00Z"}, waiter=None)
+    text = route_facts_text(ctx, model="fb/one", use_local=False, role="fallback:0",
+                            failed_model="claudexor::codex=gpt-test",
+                            failure={"failure_code": "subscription_window_exhausted", "ts": "2026-09-30T12:00:00Z",
+                                     "reset_at": "2026-09-30T18:00:00Z"}, waiter=None)
     assert text.startswith("[ROUTE FACTS]") and "(role main; account Auto)" in text and "(role fallback:0)" in text
     assert "subscription_window_exhausted at 2026-09-30T12:00:00Z" in text and "2026-09-30T18:00:00Z" in text
-    assert 'switch_model(primary="return")' in text and "No catalog check or timer" in text
-    assert _route_facts_text(SimpleNamespace(), model="m", use_local=False, role="r", failed_model="p",
-                             failure={}, waiter=None) == ""
+    # A primary observation may have just reported catalog or quota metadata: the facts no longer deny one.
+    assert 'switch_model(primary="return")' in text and "No catalog check" not in text
+    assert "No timer returns this task" in text and "never proves that the primary generates" in text
+    assert route_facts_text(SimpleNamespace(), model="m", use_local=False, role="r", failed_model="p",
+                            failure={}, waiter=None) == ""
 
 
 def test_route_facts_reach_only_the_acting_routes_own_next_round(monkeypatch):
@@ -516,3 +521,28 @@ def test_chosen_primary_refusal_keeps_existing_episode_bounds_and_unknown_custod
     assert not loop_transport.primary_refusal_wait(ctx, kind)
     ctx.current_task_type, ctx.exact_model_route = "task", True
     assert not loop_transport.primary_refusal_wait(ctx, kind)
+
+
+# -- The capability no-salvage verdict belongs to the acting route ------------------------------
+
+
+def _model_refusal(code):
+    from ouroboros.llm_claudexor import ClaudexorModelError
+
+    return ClaudexorModelError({"code": code, "message": "The provider refused this request.", "retryable": False,
+                                "context": {"httpStatus": 400}})
+
+
+@pytest.mark.parametrize("other", ["invalid_request", "unsupported_parameter"])
+@pytest.mark.parametrize("primary_refused", [True, False], ids=["primary_cannot_serve", "fallback_cannot_serve"])
+def test_the_salvage_decision_belongs_to_the_acting_route(data_root, tmp_path, monkeypatch, primary_refused, other):
+    """A route that cannot serve its model gets no salvage summary; a failed configured fallback's
+    refusal neither grants nor takes away the acting route's own salvage."""
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
+    capability = "model_capability_refused"
+    llm = _RouteLLM(data_root, **{PRIMARY: [lambda: _model_refusal(capability if primary_refused else other)],
+                                  "fb/one": [lambda: _model_refusal(other if primary_refused else capability)]})
+    text, _usage, _trace, _registry = _run(tmp_path, llm, direct=True)
+    assert [model for model, _messages in llm.sent] == [PRIMARY, "fb/one"] + ([] if primary_refused else [PRIMARY])
+    if not primary_refused:
+        assert "answer from " + PRIMARY in text

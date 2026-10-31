@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ouroboros.delegate_start_instructions import HOST_FACTS_INSTRUCTION, HOST_INSTRUCTIONS
+from ouroboros.delegate_start_instructions import (
+    HOST_FACTS_INSTRUCTION, HOST_INSTRUCTIONS, SHARED_ENVIRONMENT_INSTRUCTION,
+)
 from ouroboros.review_session_preparation import render_review_session_prompt
 from ouroboros.subagents import delegated_run_shape
 from ouroboros.tools.delegate import _host_instructions
@@ -31,9 +33,11 @@ def test_every_delegated_run_shape_carries_the_sentence_exactly_once():
                   delegated_run_shape(True, "full")):
         text = _host_instructions(shape)
         assert text.count(HOST_FACTS_INSTRUCTION) == 1
+        assert text.count(SHARED_ENVIRONMENT_INSTRUCTION) == 1
         assert text.index(HOST_FACTS_INSTRUCTION) < text.index("ACCESS:"), "facts before the access line"
     payload = _host_instructions(delegated_run_shape(True), payload_skill="alpha", assignment="ASSIGNMENT\nx")
     assert payload.count(HOST_FACTS_INSTRUCTION) == 1 and payload.endswith("\n\nASSIGNMENT\nx")
+    assert payload.count(SHARED_ENVIRONMENT_INSTRUCTION) == 1
 
 
 def test_the_reviewer_agent_session_preamble_carries_it_and_the_raw_api_prompt_does_not():
@@ -42,6 +46,7 @@ def test_the_reviewer_agent_session_preamble_carries_it_and_the_raw_api_prompt_d
         slot = SimpleNamespace(slot_id="s1", role_hint="", session_access=access)
         prompt = render_review_session_prompt(request, slot, "review this")
         assert prompt.count(HOST_FACTS_INSTRUCTION) == 1
+        assert prompt.count(SHARED_ENVIRONMENT_INSTRUCTION) == 1
         assert prompt.splitlines()[0].endswith(HOST_FACTS_INSTRUCTION.strip()), "one line: the preamble sentence"
     from ouroboros import review_execution, review_native_episode
 

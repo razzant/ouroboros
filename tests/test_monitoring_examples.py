@@ -47,9 +47,25 @@ def test_the_collector_reads_the_passport_planes_and_survives_long_rows_rotation
     assert source["max_line_bytes"] >= 1024 * 1024 and source["ignore_older_secs"] > 0
 
 
+def test_a_row_written_to_both_planes_reaches_the_sink_once():
+    """A replicated row the collector reads from a child drive too is deduplicated by its natural key; tools
+    rows are read from the canonical file only, and every other row bypasses the dedupe."""
+    config = yaml.safe_load(COLLECTOR.read_text(encoding="utf-8"))
+    [source] = config["sources"].values()
+    child = {path.rsplit("/", 1)[-1][:-len(".jsonl")] for path in source["include"] if "headless_tasks" in path}
+    replicated = [row for row in rc.ANCHOR_ROWS if row.plane == "both" and row.log in child]
+    assert [row.type for row in replicated] == ["llm_api_error"]
+    route, once = config["transforms"]["ouroboros_api_errors"], config["transforms"]["ouroboros_api_error_once"]
+    assert route["inputs"] == ["ouroboros_metadata"] and route["route"] == {"api_error": '.type == "llm_api_error"'}
+    assert once["type"] == "dedupe" and once["inputs"] == ["ouroboros_api_errors.api_error"]
+    assert set(rc.ANCHOR_BY_TYPE["llm_api_error"].natural_key) | {"type"} <= set(once["fields"]["match"])
+    [sink] = config["sinks"].values()
+    assert sorted(sink["inputs"]) == ["ouroboros_api_error_once", "ouroboros_api_errors._unmatched"]
+
+
 def test_the_collector_forwards_only_anchor_rows_and_their_metadata_and_no_money():
     config = yaml.safe_load(COLLECTOR.read_text(encoding="utf-8"))
-    [transform] = config["transforms"].values()
+    transform = config["transforms"]["ouroboros_metadata"]
     assert set(_vrl_list(transform["source"], "anchors")) == set(rc.ANCHOR_BY_TYPE)
     allowed = set(_vrl_list(transform["source"], "allowed"))
     metadata = set().union(*(row.metadata for row in rc.ANCHOR_ROWS))
@@ -59,7 +75,7 @@ def test_the_collector_forwards_only_anchor_rows_and_their_metadata_and_no_money
     assert not {name for name in allowed if "cost" in name or name.endswith("_usd")}  # ACCOUNTING_RULE
     assert set(rc.CORRELATION_IDS) <= allowed  # every join key ships
     assert {"record_contract_version", "prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens",
-            "session_id", "review_wave_id", "review_slot_id", "logged_at"} <= allowed
+            "session_id", "review_wave_id", "review_slot_id", "logged_at", "provider_code", "provider_error_type"} <= allowed
     # Filtering preserves values (including null); it must never coerce null to
     # zero or stamp a historical row with the current writer's contract version.
     assert '. = filter(row)' in transform["source"]

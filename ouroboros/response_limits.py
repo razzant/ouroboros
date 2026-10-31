@@ -51,15 +51,17 @@ def _response_fingerprint(*, provider, model, base_url="", options=None):
         base_url = f"http://127.0.0.1:{int(port)}/v1"
     if provider in SINGLE_ENDPOINT_PROVIDERS:
         base_url = ""  # Never reaches a send; Claudexor's account options bind its route.
-    if provider == "openrouter" and model.startswith("openrouter::"):
-        model = model[len("openrouter::"):]
-    # Direct route spellings (:: selection and / usage label) identify the same
-    # endpoint/model. Never fold a vendor/model OpenRouter id into a direct route.
+    # Route spellings (``kind[@name]::`` selection, ``kind/`` usage label) identify the same
+    # endpoint/model: a connection's key changes no maximum, its endpoint stays in base_url.
+    # Never fold a vendor/model OpenRouter id into a direct route.
+    from ouroboros.provider_models import parse_model_route
+
+    route = parse_model_route(model)
+    if route.valid and route.kind == provider and provider not in {"local", "claudexor"}:
+        model = route.model
+    elif provider not in {"openrouter", "local", "claudexor"} and model.startswith(provider + "/"):
+        model = model[len(provider) + 1:]
     if provider not in {"openrouter", "local", "claudexor"}:
-        for prefix in (provider + "::", provider + "/"):
-            if model.startswith(prefix):
-                model = model[len(prefix):]
-                break
         if provider == "anthropic":
             # Direct dispatch sends the canonical id (llm_routing); a dotted alias names the same model.
             from ouroboros.provider_models import normalize_anthropic_model_id
@@ -87,27 +89,34 @@ def record_metadata_limit(drive_root, **observation) -> ResponseLimit:
 
 
 def record_catalog_limits(drive_root, rows, *, provider, base_url, field, source):
-    """Persist one catalog observation atomically, without one file write per model."""
-    from ouroboros.capability_evidence import _load, _save, _STORE_LOCK
+    """Persist one catalog observation atomically, without one file write per model.
+
+    Best-effort: a busy or unwritable store (``OSError``, the lock's ``TimeoutError`` included)
+    skips this write and keeps its previous records, so the catalog read it observed stands."""
+    from ouroboros.capability_evidence import _load, _save, _store_transaction
     from ouroboros.utils import utc_now_iso
 
     stamp = utc_now_iso()
-    with _STORE_LOCK:
-        data = _load(drive_root)
-        records = data.setdefault("response_limits", {})
-        for model, maximum in rows:
-            if not model:
-                continue
-            fp = _response_fingerprint(provider=provider, model=model, base_url=base_url)
-            value = positive_limit(maximum)
-            records[fp] = asdict(ResponseLimit(value, "confirmed" if value else "unprobeable",
-                                               source + " " + field, stamp, route_fp=fp))
-        _save(drive_root, data)
+    try:
+        with _store_transaction(drive_root):
+            data = _load(drive_root)
+            records = data.setdefault("response_limits", {})
+            for model, maximum in rows:
+                if not model:
+                    continue
+                fp = _response_fingerprint(provider=provider, model=model, base_url=base_url)
+                value = positive_limit(maximum)
+                records[fp] = asdict(ResponseLimit(value, "confirmed" if value else "unprobeable",
+                                                   source + " " + field, stamp, route_fp=fp))
+            _save(drive_root, data)
+    except OSError:
+        import logging
+        logging.getLogger(__name__).debug("catalog response limits not recorded", exc_info=True)
 
 
 def record_response_ack(drive_root, *, provider, model, base_url="", options=None,
                         max_output_tokens=0, expected_route_fp=""):
-    from ouroboros.capability_evidence import (_load, _save, _STORE_LOCK,
+    from ouroboros.capability_evidence import (_load, _save, _store_transaction,
                                               _claudexor_metadata_evidence)
     from ouroboros.utils import utc_now_iso
 
@@ -124,7 +133,7 @@ def record_response_ack(drive_root, *, provider, model, base_url="", options=Non
         if ev is None or ev.stale or not ev.account_fingerprint:
             raise ValueError("Refresh the exact subscription account before acknowledging its maximum")
     record = asdict(ResponseLimit(maximum, "asserted", "owner_ack", utc_now_iso(), route_fp=fp))
-    with _STORE_LOCK:
+    with _store_transaction(drive_root):  # a busy store raises TimeoutError: never reported as saved
         data = _load(drive_root)
         acks = data.setdefault("response_acks", {})
         if maximum:
@@ -138,11 +147,11 @@ def record_response_ack(drive_root, *, provider, model, base_url="", options=Non
 
 def resolve_response_limit(drive_root, *, provider, model, base_url="", options=None,
                            allow_fetch=False, api_key=None) -> ResponseLimit:
-    from ouroboros.capability_evidence import (_load, _age_seconds,
+    from ouroboros.capability_evidence import (_read, _age_seconds,
         _CONFIRMED_TTL_SEC, _FAILED_TTL_SEC, _openai_compatible_metadata_window, _claudexor_metadata_evidence)
 
     fp = _response_fingerprint(provider=provider, model=model, base_url=base_url, options=options)
-    data = _load(drive_root)
+    data = _read(drive_root)
     ack = data.get("response_acks", {}).get(fp)
     if ack:
         return ResponseLimit(**ack)
@@ -161,8 +170,11 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
             elif provider == "openrouter":
                 from ouroboros.llm import LLMClient
                 # The process window cache answers a listed model without reading; an absent or
-                # expired output record needs the catalog itself, observed now (one bounded GET).
+                # expired output record needs the catalog itself, observed now (one bounded GET),
+                # unless the process's read of it just failed: that failure answers this reader too.
                 LLMClient._fetch_openrouter_capabilities()
+                if LLMClient.metadata_fetch_attempted_and_failed():
+                    read = "metadata read failed"
             elif provider == "claudexor":
                 ev = _claudexor_metadata_evidence(model, base_url, None, options, evidence_root=drive_root)
                 if ev.account_fingerprint:
@@ -173,7 +185,7 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
                 read = ""  # No metadata source for this provider: nothing was read.
         except Exception:
             read = "metadata read failed"  # No inferred maximum after a failed metadata read.
-        cached = _load(drive_root).get("response_limits", {}).get(fp)
+        cached = _read(drive_root).get("response_limits", {}).get(fp)
         absent = not cached or (not cached.get("max_output_tokens")
                                 and _age_seconds(cached.get("observed_at", "")) > _FAILED_TTL_SEC)
         if read and absent:
@@ -202,14 +214,11 @@ def response_limit_for_target(target: dict) -> ResponseLimit:
         base_url=target.get("base_url", ""), options=target.get("capability_options"))
 
 
-def dispatch_target(model: str) -> dict:
+def dispatch_target(model: str, settings: Any = None) -> dict:
     """The provider target dispatch resolves for ``model``; resolving it builds no model client."""
-    from ouroboros.llm_routing import _ProviderRoutingMixin
+    from ouroboros.llm_routing import resolve_target
 
-    class _Routing(_ProviderRoutingMixin):
-        _api_key_override, _base_url = None, "https://openrouter.ai/api/v1"  # LLMClient's defaults
-
-    return _Routing()._resolve_remote_target(model)
+    return resolve_target(model, settings)
 
 
 def _dispatch_route(route: dict) -> tuple:
@@ -218,13 +227,15 @@ def _dispatch_route(route: dict) -> tuple:
     A configured endpoint is the one its send uses; an unset one (a legacy or default
     endpoint) and a single-endpoint provider take the endpoint dispatch resolves.
     """
+    from ouroboros.llm_attempt import ConnectionUnavailable
+
     provider, base_url, key = route["provider"], str(route.get("base_url") or ""), route.get("api_key")
     if provider == "local" or route.get("use_local"):
         return "local", "", key
     try:
         target = dispatch_target(route["model"])
-    except ValueError:
-        target = {}  # A malformed identity reaches no send; its window route keeps its own facts.
+    except (ValueError, ConnectionUnavailable):
+        target = {}  # A malformed identity or a refused connection reaches no send; the route keeps its own facts.
     if not base_url or provider in SINGLE_ENDPOINT_PROVIDERS:
         base_url = str(target.get("base_url") or "")
     return provider, base_url, key if key is not None else target.get("api_key")
@@ -241,27 +252,52 @@ def probe_response_limit(drive_root, evidence, route: dict) -> ResponseLimit:
         options=options or None, allow_fetch=route.get("allow_fetch", True), api_key=api_key)
 
 
-def response_limit_preview(drive_root, route: dict, *, account="", settings=None) -> dict:
-    """Owner editor projection of the dispatch endpoint and exact advertised account; it stores nothing."""
-    from ouroboros.capability_evidence import model_account_options, _claudexor_metadata_evidence
+def response_limit_preview(drive_root, route: dict, *, account="", settings=None, role="main", window=None) -> dict:
+    """Owner projection: stored API evidence and a live local subscription catalog, without writes."""
+    from ouroboros import capability_evidence as ce
+    from ouroboros.context_fit import main_output_reserve_tokens
+    from ouroboros.context_view_facts import window_projection
+    from ouroboros.context_window import resolve_window, route_observation_scope
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, model_role_option
 
     model = route["model"]
     provider, base_url, _key = _dispatch_route(route)
-    options = model_account_options(model, credential_profile_id=account, settings=settings) if provider == "claudexor" else None
+    options = ce.model_account_options(model, credential_profile_id=account, settings=settings) if provider == "claudexor" else {}
+    data = ce._read(drive_root)
     observed = None
-    if options is not None:
+    if provider == "claudexor":
         try:
-            bound = _claudexor_metadata_evidence(model, base_url, None, options, record=False)
+            bound = ce._claudexor_metadata_evidence(model, base_url, None, options, record=False)
             if bound.account_fingerprint:
                 options.update(credential_profile_id=bound.credential_profile_id, account_fingerprint=bound.account_fingerprint)
-                observed = ResponseLimit(**{**bound.response_limit, "stale": bool(bound.stale)})  # an expired catalog is no current maximum
+                observed = {**bound.response_limit, "stale": bool(bound.stale)}
         except Exception:
             pass  # Unread account capacity remains unknown, never a fabricated cap.
-    evidence = resolve_response_limit(drive_root, provider=provider, model=model, base_url=base_url, options=options)
-    if observed is not None and evidence.source != "owner_ack":
-        evidence = observed  # This read's catalog fact, shown without being stored.
-    return {"route": {**route, "provider": provider, "base_url": base_url, "options": options},
-            "response_limit": asdict(evidence)}
+    window_route = {key: route[key] for key in ("provider", "model", "base_url", "use_local") if key in route}
+    window_route.update(provider=provider, options=options)
+    evidence = ce.probe(drive_root, **window_route, allow_fetch=False)
+    if observed is not None and evidence.response_limit.get("source") != "owner_ack":
+        evidence.response_limit = observed  # This read's catalog fact, shown without being stored.
+    response = evidence.response_limit
+    window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role, settings=settings)) if window is None else int(window)
+    evidence = ce.with_role_window(evidence, window)
+    reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
+    if role in {"light", "deep_review"}:
+        from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
+        from ouroboros.deep_self_review import _DEEP_MAX_OUTPUT_TOKENS
+        reserve = LIGHT_ANSWER_CEILING_TOKENS if role == "light" else _DEEP_MAX_OUTPUT_TOKENS
+        if route.get("use_local"):
+            from ouroboros.llm_local import local_context_limits
+            reserve = local_context_limits(reserve)[1]
+        reserve = ResponseLimit(**response).ceiling(reserve)
+    scope = route_observation_scope({**window_route, "use_local": bool(route.get("use_local"))}, settings)
+    record = resolve_window(evidence, reserve, root=drive_root, observation_fp=scope,
+                            bound=provider != "claudexor" or bool(account))
+    window_route.pop("use_local", None)
+    return {"route": {**route, "provider": provider, "base_url": base_url, "options": options or None},
+            "response_limit": response, "window": window_projection(record),
+            "window_route": {**window_route, "route_fp": evidence.route_fp},
+            "window_ack": bool(data.get("owner_acks", {}).get(evidence.route_fp))}
 
 
 def response_allowance(model: str, requested: int, *, use_local=False, model_role="", credential_profile_id=None,
@@ -271,10 +307,12 @@ def response_allowance(model: str, requested: int, *, use_local=False, model_rol
     if use_local is None:
         from ouroboros.provider_models import review_model_uses_local
         use_local = review_model_uses_local(model)
+    from ouroboros.llm_attempt import ConnectionUnavailable
+
     try:
         target = {"provider": "local", "model": model, "base_url": ""} if use_local else dispatch_target(model)
-    except ValueError:
-        return requested  # A malformed identity has no known maximum.
+    except (ValueError, ConnectionUnavailable):
+        return requested  # A malformed identity or a refused connection has no known maximum.
     provider = target.get("provider", "")
     options = model_account_options(model, role=model_role, credential_profile_id=credential_profile_id,
         model_route=model_route) if provider == "claudexor" else None

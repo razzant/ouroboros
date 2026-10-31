@@ -119,7 +119,13 @@ def test_nested_part_suffixes_reuse_period_sources_and_rendered_members(tmp_path
 
 
 def _legacy_two_row_input(tmp_path, monkeypatch, *, middle=False):
-    rooms = shared.world(tmp_path, activate=False)
+    from tests import _dialogue as dialogue_test
+
+    # The legacy chain files are edited before the dialogue import reads them (a frozen segment is
+    # imported once; a later edit of the file is a mismatch, never a new row).
+    with monkeypatch.context() as deferred:
+        deferred.setattr(shared, 'import_all', lambda root: None)
+        rooms = shared.world(tmp_path, activate=False)
     _consciousness(monkeypatch, False)
     # A real imported legacy segment; both source rows remain in the original archive.
     archive = tmp_path / 'archive' / shared.ARCHIVE_TWO
@@ -146,6 +152,7 @@ def _legacy_two_row_input(tmp_path, monkeypatch, *, middle=False):
         blocks[1]['message_count'] += 1
         next(room for room in blocks[1]['rooms'] if room['room_id'] == str(rooms['beta']))['message_count'] += 1
         blocks_path.write_text(json.dumps(blocks))
+    dialogue_test.import_all(tmp_path)
     store = ChronicleStore(tmp_path)
     store.ensure_activated()
     unit = next(u for u in mf.candidate_units(tmp_path, store, None, allow_legacy=True)

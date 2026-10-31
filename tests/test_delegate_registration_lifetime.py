@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import delegate_custody as custody
+from ouroboros import delegate_collection, delegate_custody as custody
 from ouroboros.delegate_continuation import bind_continuation
 from ouroboros.owner_continue import binding_sha
 from tests._store_shared import seed_result, unreadable_result
@@ -33,8 +33,8 @@ def result(root, tid, **fields):
                                'status': 'completed', **fields})
 
 
-def seed(root, *, task_id='owner', root_task_id='', source='', project='project'):
-    row = custody.RunCustody(run_id='run', task_id=task_id, root_task_id=root_task_id,
+def seed(root, *, task_id='owner', root_task_id='', source='', project='project', run_id='run', invocation_id=''):
+    row = custody.RunCustody(run_id=run_id, task_id=task_id, root_task_id=root_task_id, invocation_id=invocation_id,
                             route_id='route', model='model', project_id=project,
                             project_owned=True, source=source, ledger_root=str(root))
     assert custody.record_started(root, row, shape={'access': 'readonly', 'mode': 'ask'})
@@ -185,9 +185,36 @@ def test_unknown_authority_or_reserved_owner_keeps_registration(tmp_path, monkey
         settle(tmp_path, gateway, row)
     custody.reconcile_orphaned_runs(tmp_path, None if authority == 'unknown_live' else set(),
         gateway_factory=lambda: gateway,
-        recoverable_task_ids={'owner'} if authority == 'reserved' else set())
+        recoverable_handles={(row.task_id, row.run_id, row.invocation_id)} if authority == 'reserved' else set())
     assert gateway.removed == []
     assert custody.replay(tmp_path)['run'].project_owned
+
+
+@pytest.mark.parametrize('handle', [('owner', 'run-a', 'inv-a'), ('owner', 'run-a', '')])
+def test_reserved_handle_keeps_only_its_registration_until_released(tmp_path, handle):
+    gateway = Gateway()
+    first = seed(tmp_path, run_id='run-a', invocation_id='inv-a', project='project-a')
+    second = seed(tmp_path, run_id='run-b', invocation_id='inv-b', project='project-b')
+    result(tmp_path, 'owner')
+    for row in (first, second):
+        settle(tmp_path, gateway, row)
+    custody.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: gateway,
+                                   recoverable_handles={handle})
+    assert gateway.removed == ['project-b']
+    assert custody.replay(tmp_path)['run-a'].project_owned
+    sweep(tmp_path, gateway, set())
+    assert gateway.removed == ['project-b', 'project-a']
+
+
+@pytest.mark.parametrize('handle', [('other', 'run', 'inv'), ('owner', 'run', 'other')])
+def test_foreign_or_mismatched_invocation_reservation_does_not_keep_registration(tmp_path, handle):
+    gateway = Gateway()
+    row = seed(tmp_path, invocation_id='inv')
+    result(tmp_path, 'owner')
+    settle(tmp_path, gateway, row)
+    custody.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: gateway,
+                                   recoverable_handles={handle})
+    assert gateway.removed == ['project']
 
 
 def test_review_settlement_keeps_immediate_retirement(tmp_path):
@@ -219,15 +246,23 @@ def test_continuable_owned_project_never_pays_the_full_chain_read(tmp_path, monk
     row = seed(tmp_path)
     result(tmp_path, 'owner', status='failed', reason_code='worker_crash_signal')
     settle(tmp_path, gateway, row)
+    # Terminal collection belongs to the body after readiness, not to the orphan sweep.
+    delegate_collection.collect_terminal(tmp_path, 'run', gateway=gateway)
     calls = _counting_full_reads(monkeypatch)
     sweep(tmp_path, gateway, set())
     sweep(tmp_path, gateway, set())
     assert gateway.removed == [] and calls == []
+    assert custody.replay(tmp_path)['run'].output_source, 'the body retained the terminal output'
+    result(tmp_path, 'owner')  # Closing the Continue offer makes retirement eligible.
+    sweep(tmp_path, gateway, set())
+    assert gateway.removed == ['project'] and calls
 
 
 def test_shared_project_kept_by_a_settled_sharer_reads_the_full_chain_once(tmp_path, monkeypatch):
     # The production sweep reads the held rows; a settled sharer that does not
     # own the registration is reached by one indexed read of the project's runs.
+    from ouroboros import delegate_custody_current as current
+
     gateway = Gateway()
     owner = seed(tmp_path, task_id='a')
     sharer = custody.RunCustody(run_id='run-b', task_id='b', route_id='route', model='model',
@@ -237,6 +272,12 @@ def test_shared_project_kept_by_a_settled_sharer_reads_the_full_chain_once(tmp_p
     result(tmp_path, 'b', status='failed', reason_code='worker_crash_signal')
     settle(tmp_path, gateway, owner)
     settle(tmp_path, gateway, sharer)
+    # Settlement retains an observation; the body (not the orphan sweep) finishes collection,
+    # so the unowned sharer really is outside the held projection whose lookup this measures.
+    for run_id in (owner.run_id, sharer.run_id):
+        delegate_collection.collect_terminal(tmp_path, run_id, gateway=gateway)
+    sweep(tmp_path, gateway, set())
+    assert set(current.runs(tmp_path, 'state=?', ('held',))) == {owner.run_id}
     calls = _counting_full_reads(monkeypatch)
     sweep(tmp_path, gateway, set())
     first = len(calls)

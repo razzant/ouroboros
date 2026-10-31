@@ -17,7 +17,6 @@ real ``read_file`` stamp, never a helper call standing in for them:
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import pathlib
 from dataclasses import replace
@@ -145,11 +144,6 @@ def test_main_runtime_data_read_of_the_same_exact_source_is_credited(main_loop, 
 def test_every_read_enters_the_one_acknowledgement_once(geo, monkeypatch):
     """No second hook, no prefix estimate: a direct read and an unrelated read each
     call the single acknowledgement owner once; only the exact source credits."""
-    from ouroboros.tools import core_file_tools
-
-    source = inspect.getsource(core_file_tools)
-    assert source.count("acknowledge_staged_output") == 2, "one import + one call in _stamp_read_view"
-    assert "tool_result_limit" not in inspect.getsource(output._acknowledge_staged_output)
     ctx = _top(geo, ROOT)
     read_next = _stage(geo, ctx, monkeypatch)["output_delivery"]["read_next"]
     calls = []

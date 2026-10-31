@@ -25,9 +25,11 @@ def isolated_retry_state(monkeypatch):
     monkeypatch.setattr(delegate, "_CUSTODY", memo)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
 
 
-def retry_context(tmp_path, monkeypatch, *, chain=("retry-a", "retry-b"), split=False):
+def retry_context(tmp_path, monkeypatch, *, chain=("retry-a", "retry-b"), split=False,
+                  fixed_ownership_clock=False):
     """Durable host retry mirrors and the supervisor's current execution census."""
     data, repo, target = (tmp_path / name for name in ("data", "repo", "target"))
     for path in (data, repo, target):
@@ -50,6 +52,16 @@ def retry_context(tmp_path, monkeypatch, *, chain=("retry-a", "retry-b"), split=
     ctx.budget_drive_root = data
     ctx.task_metadata = {"root_task_id": chain[0], "parent_task_id": "", "delegation_role": "root"}
     queue_snapshot(ctx, [chain[-1]])
+    if fixed_ownership_clock:
+        from types import SimpleNamespace
+        from ouroboros import task_status
+
+        # No supervisor refreshes this synthetic queue during capture or EOF
+        # reads. Only these consumers opt in; stale-authority tests stay real.
+        clock = task_status.time
+        now = clock.time()
+        monkeypatch.setattr(task_status, "time", SimpleNamespace(
+            time=lambda: now, monotonic=clock.monotonic, sleep=clock.sleep))
     return ctx
 
 
@@ -221,9 +233,8 @@ def test_registered_wait_refuses_unproven_successor_without_touching_gateway(
 @pytest.mark.parametrize("tool,options", [
     ("delegate_cancel", {"reason": "finished"}),
     ("delegate_answer", {"interaction_id": "question-one", "answers": [{"question_id": "q", "free_text": "yes"}]}),
-    ("delegate_message", {"text": "continue"}),
 ])
-def test_retry_never_inherits_cancel_answer_or_message(tmp_path, monkeypatch, tool, options, state):
+def test_retry_never_inherits_cancel_or_answer(tmp_path, monkeypatch, tool, options, state):
     ctx = retry_context(tmp_path, monkeypatch)
     held = durable_run(ctx, state=state)
     gateway = TerminalGateway()
@@ -232,6 +243,26 @@ def test_retry_never_inherits_cancel_answer_or_message(tmp_path, monkeypatch, to
     assert result.status == "error", result.text
     assert json.loads(result.text)["reason"] == "run_not_owned"
     assert gateway.reads == []
+
+
+@pytest.mark.parametrize("state", [None, "succeeded"])
+def test_retry_can_message_a_live_same_tree_run_but_not_a_settled_one(tmp_path, monkeypatch, state):
+    from tests.test_delegate_message import _Stub, _row
+
+    ctx = retry_context(tmp_path, monkeypatch)
+    held = durable_run(ctx, state=state)
+    gateway = _Stub(result={"accepted": True, "outcome": "accepted"}, harnesses=[_row("test-route")])
+    bind_gateway(monkeypatch, gateway)
+    result = call(ctx, "delegate_message", run_id=held.run_id, text="continue")
+    payload = json.loads(result.text)
+    if state is None:
+        assert result.status == "ok", result.text
+        assert payload["status"] == "accepted" and payload["accepted"] is True
+        assert len(gateway.posts) == 1 and gateway.posts[0]["run_id"] == held.run_id
+        assert custody.lookup(custody.custody_root(ctx), ctx.task_id, held.run_id)[0] == custody.FOREIGN
+    else:
+        assert result.status == "error" and payload["reason"] == "run_settled"
+        assert gateway.reads == gateway.posts == []
 
 
 def test_terminal_result_read_refuses_a_now_live_engine_without_live_effects(tmp_path, monkeypatch):

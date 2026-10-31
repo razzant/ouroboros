@@ -121,7 +121,8 @@ def test_pending_recovery_handoff_is_excluded_with_pause_and_wait_is_outside_loc
         thread.join(5)
     assert not thread.is_alive() and not errors
     assert submissions == [True]
-    assert observed == [(record["request"], record["invocation_id"], "requested")]
+    assert record["request"] is None and record["request_ref"]
+    assert observed == [({"prompt": "original full request"}, record["invocation_id"], "requested")]
     assert results[0]["action"] == "recovery_pending"
     assert dc.pending_invocations(tmp_path) == [record]
 

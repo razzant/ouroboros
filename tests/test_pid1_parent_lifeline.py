@@ -190,7 +190,7 @@ def test_maintenance_job_names_its_spawner(tmp_path, monkeypatch):
     captured = {}
     _capture_spawn(monkeypatch, captured)
     with pytest.raises(_SpawnCaptured):
-        spawn_maintenance_job(tmp_path, REPO_ROOT, "evidence_packer")
+        spawn_maintenance_job(tmp_path, REPO_ROOT, "maintenance")
     assert captured[PARENT_PID_ENV] == str(os.getpid())
 
 

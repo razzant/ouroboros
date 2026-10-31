@@ -2,9 +2,11 @@
 // and the worker readiness frames state the fields they carry (#1073). Both are
 // projections of already-typed producer facts — no name substrings, no taxonomy.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
+import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
 
 import {
     summarizeChatLiveEvent,
@@ -15,12 +17,16 @@ import {
 test('#931 every typed checkpoint kind names itself; only a kindless one is periodic', () => {
     // One family per producer module, so a kind that loses its label shows up here.
     for (const [kind, label] of [
-        ['context_fit_low_retry', 'Context rebuilt in Low mode'],
+        ['context_fit_low_retry', 'Books shown as chapter navigation during context-size recovery'],
+        ['context_fit_refused', 'Context-size check found no room for results'],
         ['context_fit_route_rebound', 'Context fit rebound the route'],
         ['context_fit_physical_mode', 'Context starts in a smaller mode (window too small)'],
         ['context_reclaim_manual', 'Context reclaimed on request'],
         ['context_reclaim_automatic', 'Context reclaimed automatically'],
         ['context_view', 'Context inspected'],
+        ['context_view_renewed', 'Working view renewed: same task, fresh window'],
+        ['context_reclaim_emergency', 'Context shrunk during context-size recovery (no model)'],
+        ['context_memory_coarsened', 'Memory shown coarser during context-size recovery'],
         ['prompt_prefix_break', 'Prompt prefix rebuilt'],
         ['cost_budget_milestone', 'Cost budget milestone'],
         ['cost_budget_wrapup', 'Cost budget wrap-up'],
@@ -37,6 +43,14 @@ test('#931 every typed checkpoint kind names itself; only a kindless one is peri
         assert.equal(taskCheckpointLabel({ checkpoint_kind: kind, round: 30 }), label);
         assert.equal(summarizeLogEvent({ type: 'task_checkpoint', checkpoint_kind: kind, round: 30 }).headline, label);
     }
+    const outputRecovery = { type: 'task_checkpoint', checkpoint_kind: 'context_reclaim_emergency', cause: 'output_exhaustion' };
+    assert.equal(taskCheckpointLabel(outputRecovery), 'Source-address recovery after empty length-limited replies (no model)');
+    assert.equal(summarizeLogEvent(outputRecovery).headline, taskCheckpointLabel(outputRecovery));
+    // The mind's applied fold names what it saved; an inspection or a no-op stays an inspection.
+    assert.equal(taskCheckpointLabel({ checkpoint_kind: 'context_view', status: 'applied', reclaimed_tokens: 129000 }),
+        'Ouroboros folded its context (−129,000 tokens)');
+    assert.equal(taskCheckpointLabel({ checkpoint_kind: 'context_view', status: 'no_op', reclaimed_tokens: 0 }),
+        'Context inspected');
     // An unknown kind names ITSELF rather than borrowing the periodic sentence.
     assert.equal(taskCheckpointLabel({ checkpoint_kind: 'brand_new_kind', round: 30 }),
         'Checkpoint · brand_new_kind');
@@ -62,7 +76,7 @@ test('#931 typed checkpoints are task facts in the expanded card, never narratio
     });
     assert.equal(lowRetry.visible, true);
     assert.equal(lowRetry.phase, 'warn');
-    assert.equal(lowRetry.headline, 'Context rebuilt in Low mode — retrying the same model once');
+    assert.equal(lowRetry.headline, 'Books shown as chapter navigation during context-size recovery');
     // Distinct kinds on the same round are distinct rows, so one never hides another.
     const keyOf = (kind) => summarizeChatLiveEvent({
         type: 'task_checkpoint', task_id: 't1', checkpoint_kind: kind, round: 4,
@@ -72,6 +86,19 @@ test('#931 typed checkpoints are task facts in the expanded card, never narratio
     assert.equal(summarizeChatLiveEvent({ type: 'task_checkpoint', checkpoint_number: 2, round: 30 }).visible, false);
     assert.equal(summarizeChatLiveEvent({ type: 'task_checkpoint', checkpoint_kind: 'context_reclaim_manual', status: 'summarizer_failed' }).visible, false);
     assert.equal(summarizeChatLiveEvent({ type: 'context_reclaim', checkpoint_kind: 'context_reclaim_automatic' }).visible, true);
+});
+
+test('a Low size-recovery checkpoint does not claim a physical retry', () => {
+    const event = {
+        type: 'task_checkpoint', checkpoint_kind: 'context_fit_low_retry',
+        model: 'openai/test-model', round: 4, context_tokens: 23000,
+    };
+    const view = summarizeLogEvent(event);
+    assert.equal(view.headline, 'Books shown as chapter navigation during context-size recovery');
+    assert.equal(view.phase, 'warn');
+    assert.ok(view.meta.includes('r4') && view.meta.includes('~23000 tok'));
+    assert.ok(!view.meta.some(item => /retry/i.test(item)));
+    assert.equal(summarizeChatLiveEvent(event).terminal, false);
 });
 
 test('#1073 the worker readiness frames render their own fields in Logs', () => {
@@ -103,6 +130,54 @@ test('#1073 the worker readiness frames render their own fields in Logs', () => 
 });
 
 
+test('a paged reload and a reconnect place the folded wait row where live did', () => {
+    // The newest history page arrives first; an older page brings an earlier episode of the same row.
+    const at = (sec) => `2026-10-27T10:00:${String(sec).padStart(2, '0')}Z`;
+    const wait = (episode_id, phase, sec, elapsed_sec) => ({ type: 'task_checkpoint', task_id: 't1',
+        checkpoint_kind: 'usage_lock_wait', episode_id, phase, elapsed_sec, ts: at(sec) });
+    const note = (text, sec) => ({ note: true, text, ts: at(sec) });
+    const rows = [note('note1', 1), wait('A', 'entered', 2, 0), wait('A', 'ended', 3, 0.4), note('note2', 4),
+        wait('B', 'entered', 5, 0), wait('B', 'ended', 6, 0.7), note('note3', 7)];
+    const summaryOf = (row) => (row.note
+        ? { phase: 'thinking', headline: row.text, body: '', visible: true, dedupeKey: `progress|${row.text}`, human: true }
+        : summarizeChatLiveEvent(row));
+    const live = (part, record = { items: [] }) => {
+        for (const row of part) {
+            const summary = summaryOf(row);
+            updateLiveTimelineItem(record, summary, { ts: row.ts, rawTs: row.ts, syntheticKey: summary.dedupeKey,
+                headline: summary.headline, inPlaceByKey: false });
+        }
+        return record;
+    };
+    const replay = (part, record = { items: [] }) => {
+        for (const row of part) {
+            const index = rows.indexOf(row);
+            mergeHistoricalTimelineItem(record, summaryOf(row), { ...row, history_id: `progress:${index}`,
+                history_position: { source: 'progress', offset: index } }, row.ts);
+        }
+        return record;
+    };
+    const view = (record) => record.items.map((item) => `${item.sourceTs.slice(17, 19)} ${item.headline}`);
+    const expected = view(live(rows));
+    assert.deepEqual(expected, ['01 note1', '02 Accounting waits ×2 · longest 0.7 s', '04 note2', '07 note3']);
+    assert.deepEqual(view(replay(rows)), expected);
+    assert.deepEqual(view(replay(rows.slice(0, 3), replay(rows.slice(3)))), expected, 'paged reload');
+    assert.deepEqual(view(replay(rows, live(rows.slice(4, 6)))), expected, 'reconnect');
+});
+
+test('host wait folds word the shared Python/browser cases', () => {
+    const { cases } = JSON.parse(readFileSync(new URL('./fixtures/wait_fold_parity.json', import.meta.url), 'utf8'));
+    for (const { kind, rows, line } of cases) {
+        const record = { items: [] };
+        for (const [episode_id, phase, elapsed_sec] of rows) {
+            const evt = { checkpoint_kind: kind, episode_id, phase, elapsed_sec };
+            foldWaitRow(record, { waitEpisode: waitEpisode(evt), dedupeKey: `wait:${kind}` });
+        }
+        assert.equal(record.items.length, 1);
+        assert.equal(record.items[0].headline, line, JSON.stringify(rows));
+    }
+});
+
 for (const [kind, labels] of [
     ['usage_lock_wait', ['Waiting for accounting access', 'Accounting wait ended']],
     ['control_store_wait', ['Waiting for control storage', 'Control storage wait ended']],
@@ -121,20 +196,28 @@ for (const [kind, labels] of [
         }
     });
 
-    test(`${kind} episodes survive live delivery, redelivery, history and reconnect`, () => {
-        const events = ['first', 'second'].flatMap(episode_id => ['entered', 'ended'].map(phase => ({
-            type: 'task_checkpoint', task_id: 't1', checkpoint_kind: kind, episode_id, phase,
+    test(`${kind} episodes fold into one receipt row through live delivery, redelivery, history and reconnect`, () => {
+        // A host wait is how the host ran, not the turn's work: one row per kind, live while an
+        // episode is open, then the count and the longest closed one; it never makes a block.
+        const [waiting, ended] = labels;
+        const plural = ended.replace(' wait ended', ' waits');
+        const events = [['first', 0.3], ['second', 0.5]].flatMap(([episode_id, elapsed_sec]) => ['entered', 'ended'].map(phase => ({
+            type: 'task_checkpoint', task_id: 't1', checkpoint_kind: kind, episode_id, phase, elapsed_sec,
         }))).map((event, index) => ({ ...event, ts: `2026-09-27T01:00:0${index}Z` }));
         const live = { items: [] }, replay = { items: [] };
+        const seen = [];
         const deliver = event => {
             const summary = summarizeChatLiveEvent(event);
+            assert.equal(summary.receipt, true);
             updateLiveTimelineItem(live, summary, { ts: event.ts, rawTs: event.ts,
                 syntheticKey: summary.dedupeKey, headline: summary.headline, inPlaceByKey: false });
+            seen.push(live.items.map(row => row.headline));
         };
         events.forEach(deliver);
-        assert.deepEqual(live.items.map(row => row.headline), [...labels, ...labels]);
+        assert.deepEqual(seen, [[waiting], [`${ended} · 0.3 s`], [`${waiting} · ${ended} · 0.3 s`], [`${plural} ×2 · longest 0.5 s`]]);
         events.forEach(deliver);
-        assert.equal(live.items.length, 4, 'redelivery adds no rows');
+        assert.deepEqual(live.items.map(row => [row.headline, row.receipt]), [[`${plural} ×2 · longest 0.5 s`, true]],
+            'redelivery counts each episode once');
         events.forEach((event, index) => {
             const summary = summarizeChatLiveEvent(event);
             const row = { ...event, history_id: `progress:${index}`,
@@ -142,8 +225,12 @@ for (const [kind, labels] of [
             mergeHistoricalTimelineItem(replay, summary, row, event.ts);
             mergeHistoricalTimelineItem(live, summary, row, event.ts);
         });
-        assert.deepEqual(replay.items.map(row => row.headline), [...labels, ...labels]);
+        assert.deepEqual(replay.items.map(row => [row.headline, row.receipt]), [[`${plural} ×2 · longest 0.5 s`, true]]);
         assert.deepEqual(live.items.map(row => row.headline), replay.items.map(row => row.headline));
+        // An episode still open after the others closed keeps the row live.
+        const open = { type: 'task_checkpoint', task_id: 't1', checkpoint_kind: kind, episode_id: 'third', phase: 'entered' };
+        deliver(open);
+        assert.equal(live.items[0].headline, `${waiting} · ${plural} ×2 · longest 0.5 s`);
     });
 }
 

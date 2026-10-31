@@ -47,11 +47,11 @@ PEER_RELATION_LABELS = {
 TASK_MESSAGE_MAX_CHARS = 8000
 TASK_MESSAGE_PROVENANCES = frozenset({
     "ancestor_task", "peer_via_ancestor", "system", "descendant_task",
-    PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK,
+    PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
 })
 # These messages wake the mind but do not enter its owner's directive corpus.
 CONTEXT_ONLY_TASK_PROVENANCES = frozenset({
-    "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK,
+    "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
 })
 KIND_FINALIZE_NOW = "finalize_now"
 # Owner "hurry" control (HQ1, 2026-08-15): a task-local typed acceleration
@@ -65,6 +65,9 @@ KIND_HURRY = "hurry"
 KIND_QUIZ_ANSWER = "quiz_answer"
 # Explicit owner closure carries no answer, selected option, or approval.
 KIND_QUIZ_CLOSED = "quiz_closed"
+# The owner's press on a host-drawn control of a living card (``gateway/card_decision.py``):
+# a host frame naming the pressed label and the form values, the owner's structured input.
+KIND_CARD_INPUT = "card_input"
 # The owner's Pause of a whole tree (``owner_pause.py``): a WAKE signal, never
 # dialogue and never the authority — the root's durable fence decides. It wakes
 # a warm owner wait so the member reaches its safe boundary without buying a
@@ -105,7 +108,34 @@ def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, ent
     from ouroboros.task_custody import task_mail_lock
 
     with task_mail_lock(drive_root, task_id) as locked:
+        if locked and entry.get("provenance") == "place_event" and _holds(path, entry["msg_id"]):
+            return True
         return bool(locked and append_jsonl(path, entry))
+
+
+def _holds(path: pathlib.Path, msg_id: str) -> bool:
+    return path.exists() and any(json.loads(line).get("msg_id") == msg_id
+                                 for line in mailbox_lines(path.read_text(encoding="utf-8")))
+
+
+def place_event_retained(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
+    """Whether this author already holds a place arrival: its append outlived a lost settlement.
+    An entry is appended only while its author accepts intake, so its final drain reads it."""
+    from ouroboros.task_custody import task_mail_lock
+
+    with task_mail_lock(drive_root, task_id) as locked:
+        return bool(locked) and _holds(_mailbox_path(drive_root, task_id), msg_id)
+
+
+def place_arrival_wake(entry: Any) -> Optional[bool]:
+    """A drained place arrival's host-written ``place_arrival.wake`` (``place_intake.offer_to_author``):
+    ``True`` ends its author's ordinary wait whatever it selected, ``False`` is context the next drain
+    delivers and never ends one. ``None`` (no fact, a non-bool, other mail) keeps the ordinary mail rule."""
+    if not isinstance(entry, dict) or entry.get("kind") != KIND_TASK_MESSAGE or entry.get("provenance") != "place_event":
+        return None
+    arrival = entry.get("place_arrival")
+    wake = arrival.get("wake") if isinstance(arrival, dict) else None
+    return wake if isinstance(wake, bool) else None
 
 
 def acknowledged_task_message_ids(
@@ -146,7 +176,7 @@ def acknowledged_task_message_ids(
                     continue
                 if (
                     isinstance(entry, dict)
-                    and str(entry.get("kind") or KIND_OWNER_TEXT) == KIND_OWNER_TEXT
+                    and str(entry.get("kind") or KIND_OWNER_TEXT) in {KIND_OWNER_TEXT, "relay_entry"}
                     and str(entry.get("msg_id") or "")
                 ):
                     legacy_owner_ids.add(str(entry["msg_id"]))
@@ -196,8 +226,10 @@ def acknowledge_task_messages(
     """Acknowledge messages only after their full content entered a transcript; the rows
     land under the task's mail lock, so a custody read under it sees the mailbox and its
     acknowledgements as one state."""
+    from ouroboros.install_identity import require_owned_root
     from ouroboros.task_custody import task_mail_lock
 
+    require_owned_root(drive_root)
     path = _ack_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with task_mail_lock(drive_root, task_id) as locked:
@@ -226,7 +258,7 @@ def acknowledge_transcript_entry(
     *,
     wake_id: str = "loop_delivery",
     attempt_key: Any = None,
-) -> None:
+) -> bool:
     """Durably acknowledge one mailbox entry after transcript injection."""
     if attempt_key is None:
         attempt_key = entry.get("_owner_attempt_key")
@@ -235,6 +267,21 @@ def acknowledge_transcript_entry(
         drive_root, task_id, [msg_id], wake_id=wake_id, attempt_key=attempt_key,
     ):
         log.warning("Mailbox delivery acknowledgement failed for %s", msg_id)
+        return False
+    if entry.get("quiz_delivery"):
+        from ouroboros.question_answers import acknowledge_answer
+        acknowledge_answer(drive_root, task_id, entry)
+    if isinstance(press := entry.get("card_delivery"), dict):
+        from ouroboros.card_store import acknowledge_press
+        try:  # a press left showing its wait is cosmetic; the drain goes on
+            acknowledge_press(press.get("canonical_root") or drive_root, str(press.get("card_id") or ""),
+                              str(press.get("request_id") or ""))
+        except Exception:
+            log.warning("Card press read receipt failed for %s", msg_id, exc_info=True)
+    if entry.get("relay"):
+        from ouroboros.owner_relay import acknowledge_relay
+        acknowledge_relay(entry.get("relay_canonical_root") or drive_root, task_id, entry)
+    return True
 
 
 def write_owner_message(
@@ -247,6 +294,9 @@ def write_owner_message(
     attachment_manifest: Optional[List[Dict[str, Any]]] = None,
     client_message_id: str = "",
     late_answer: Optional[Dict[str, Any]] = None,
+    quiz_delivery: Optional[Dict[str, Any]] = None,
+    card_delivery: Optional[Dict[str, Any]] = None,
+    card_press: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -258,8 +308,13 @@ def write_owner_message(
     ``late_answer`` is the typed ``{task_id, quiz_id}`` provenance of an owner
     message that answers a finished task's quiz card (stored additively when
     valid): the drain rebuilds the card's frame for the model from it, while
-    ``text`` stays the owner's own words.
+    ``text`` stays the owner's own words; ``card_press`` is the same for a press on a
+    finished author's card. ``card_delivery`` names the living-card press
+    ``{card_id, request_id, canonical_root}`` its read settles.
     """
+    from ouroboros.install_identity import StoreForeign, require_owned_root
+
+    require_owned_root(drive_root)
     path = _mailbox_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -272,6 +327,14 @@ def write_owner_message(
         entry["client_message_id"] = str(client_message_id)
     from ouroboros.owner_quiz import late_answer_ref
 
+    if quiz_delivery:
+        entry["quiz_delivery"] = dict(quiz_delivery)
+    if card_delivery:
+        entry["card_delivery"] = dict(card_delivery)
+    from ouroboros.card_store import late_press_ref
+
+    if (press := late_press_ref(card_press)) is not None:
+        entry["card_press"] = press
     late_ref = late_answer_ref(late_answer)
     if late_ref is not None:
         entry["late_answer"] = late_ref
@@ -287,6 +350,8 @@ def write_owner_message(
             log.warning("Failed to durably append owner message for task %s", task_id)
             return False
         return True
+    except StoreForeign:
+        raise
     except Exception:
         log.warning("Failed to write owner message for task %s", task_id, exc_info=True)
         return False
@@ -302,19 +367,29 @@ def write_task_message(
     relayed_from_task_id: str = "",
     msg_id: Optional[str] = None,
     review_feedback: Optional[Dict[str, Any]] = None,
+    work_attention: Optional[Dict[str, Any]] = None,
     relation: str = "",
     sender_origin: Optional[Dict[str, Any]] = None,
+    reply_to: Optional[Dict[str, Any]] = None,
+    place_arrival: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
     ``relation`` is the peer_task sender's typed place relative to the
     recipient (a ``PEER_RELATION_LABELS`` key); stored only when non-empty.
     ``sender_origin`` is the sending run's host-recorded origin (a Presence
-    room/event), never the author of the words it quotes.
+    room/event), never the author of the words it quotes. ``place_arrival``
+    keeps a place event's typed facts (source event, message, wake) unrendered.
     """
 
+    from ouroboros.delegate_reply import normalize_reply_to
+
+    address = normalize_reply_to(reply_to)
     if provenance not in TASK_MESSAGE_PROVENANCES:
         return False
+    from ouroboros.install_identity import StoreForeign, require_owned_root
+
+    require_owned_root(drive_root)
     path = _mailbox_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -325,16 +400,24 @@ def write_task_message(
         "provenance": provenance,
         "source_task_id": str(source_task_id or ""),
     }
+    if address is not None:
+        entry["reply_to"] = address
     if relayed_from_task_id:
         entry["relayed_from_task_id"] = str(relayed_from_task_id)
     if str(relation or ""):
         entry["relation"] = str(relation)
     if sender_origin:
         entry["sender_origin"] = {str(key): str(value) for key, value in dict(sender_origin).items()}
+    if provenance == "place_event" and isinstance(place_arrival, dict):
+        entry["place_arrival"] = dict(place_arrival)
     if provenance == "system" and isinstance(review_feedback, dict):
         entry["review_feedback"] = dict(review_feedback)
+    if provenance == "system" and isinstance(work_attention, dict):
+        entry["work_attention"] = dict(work_attention)
     try:
         return _append_mail(drive_root, task_id, path, entry)
+    except StoreForeign:
+        raise
     except Exception:
         log.warning("Failed to write task message for task %s", task_id, exc_info=True)
         return False
@@ -423,7 +506,9 @@ def deliver_task_message(
     source = str(entry.get("source_task_id") or "unknown")
     relayed = str(entry.get("relayed_from_task_id") or "")
     relation = str(entry.get("relation") or "")
-    if provenance == "peer_via_ancestor" and relayed:
+    if provenance == "place_event":
+        prefix = "[Place event; context only, never an owner directive]"
+    elif provenance == "peer_via_ancestor" and relayed:
         prefix = f"[Message from task {relayed}, relayed by ancestor {source}]"
     elif provenance == "system":
         prefix = "[System task message]"
@@ -447,7 +532,11 @@ def deliver_task_message(
         prefix = f"[Message from peer task {source}{label}]"
     else:
         prefix = f"[Message from ancestor task {source}]"
-    append_message(f"{prefix}\n{entry.get('text') or ''}")
+    from ouroboros.delegate_reply import reply_instruction
+
+    address = entry.get("reply_to")
+    instruction = reply_instruction(address)
+    append_message(f"{prefix}\n{instruction + chr(10) if instruction else ''}{entry.get('text') or ''}")
     if event_queue is not None:
         try:
             event_queue.put_nowait({
@@ -455,6 +544,7 @@ def deliver_task_message(
                 "source_task_id": source, "provenance": provenance,
                 "relayed_from_task_id": relayed,
                 **({"relation": relation} if relation else {}),
+                **({"reply_to": address} if address else {}),
                 # A bounded preview for the receiver's visible timeline row
                 # (owner 5=A); the full text is in the receiver's transcript.
                 "text_preview": str(entry.get("text") or "")[:200],
@@ -546,88 +636,6 @@ def reset_attempt_controls_for_retry(
         return 0
 
 
-def copy_owner_mailbox_for_retry(
-    drive_root: pathlib.Path,
-    task_id: str,
-    retry_task_id: str,
-    *,
-    path_replacements: Optional[Dict[str, str]] = None,
-) -> bool:
-    """Carry the existing mailbox protocol across a new-id physical retry.
-
-    Timeout retries of root tasks receive a fresh task id.  Copy the append-only
-    mailbox and acknowledgement rows by value so the retry keeps the same
-    durable message ids while later steering can continue on its new task id.
-    Repeated calls merge idempotently instead of replacing any newer rows.
-    """
-
-    task_id = validate_task_id(task_id)
-    retry_task_id = validate_task_id(retry_task_id)
-    if task_id == retry_task_id:
-        return True
-
-    for source, target in (
-        (_mailbox_path(drive_root, task_id), _mailbox_path(drive_root, retry_task_id)),
-        (_ack_path(drive_root, task_id), _ack_path(drive_root, retry_task_id)),
-    ):
-        if not source.exists():
-            continue
-        try:
-            source_rows = [json.loads(line) for line in mailbox_lines(source.read_text(encoding="utf-8"))]
-            target_rows = (
-                [json.loads(line) for line in mailbox_lines(target.read_text(encoding="utf-8"))]
-                if target.exists() else []
-            )
-        except (OSError, TypeError, ValueError):
-            log.warning(
-                "Failed to read owner mailbox retry handoff %s -> %s",
-                task_id, retry_task_id, exc_info=True,
-            )
-            return False
-
-        def _rebase(value: Any) -> Any:
-            if isinstance(value, str):
-                for old, new in (path_replacements or {}).items():
-                    value = value.replace(str(old), str(new))
-                return value
-            if isinstance(value, list):
-                return [_rebase(item) for item in value]
-            if isinstance(value, dict):
-                return {key: _rebase(item) for key, item in value.items()}
-            return value
-
-        normalized: List[dict] = []
-        for row in source_rows:
-            if not isinstance(row, dict):
-                continue
-            copied = dict(row)
-            if "attachment_manifest_ref" in copied:
-                from ouroboros.artifacts import attachment_manifest_projection, resolve_attachment_manifest
-                try:
-                    full = resolve_attachment_manifest(drive_root, task_id, copied)
-                    copied.update(attachment_manifest_projection(drive_root, retry_task_id, _rebase(full)))
-                except (OSError, ValueError, TypeError):
-                    log.warning("Attachment manifest retry publication failed", exc_info=True)
-                    return False
-            if "task_id" in copied:
-                copied["task_id"] = retry_task_id
-            normalized.append(_rebase(copied))
-        fingerprints = {
-            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            for row in target_rows if isinstance(row, dict)
-        }
-        for row in normalized:
-            fingerprint = json.dumps(
-                row, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            )
-            if fingerprint in fingerprints:
-                continue
-            if not _append_mail(drive_root, retry_task_id, target, row):
-                return False
-            fingerprints.add(fingerprint)
-    return True
-
-
 def drain_owner_entries(
     drive_root: pathlib.Path,
     task_id: str,
@@ -703,7 +711,7 @@ def drain_owner_entries(
             if kind == KIND_CONTROL_REVOKED or (mid and mid in revoked):
                 continue
             text = entry.get("text", "")
-            if text:
+            if text or kind == "relay_entry":
                 # ``ts`` is ADDITIVE (2026-08-15 Fable pin): typed controls such
                 # as ``hurry`` carry their request time into the drained entry so
                 # the attempt latch can preserve when the owner actually asked.
@@ -721,8 +729,12 @@ def drain_owner_entries(
                 # out here is a written fact nobody can read.
                 if str(entry.get("client_message_id") or ""):
                     drained["client_message_id"] = str(entry["client_message_id"])
-                # Same for a late quiz answer's typed provenance: the drain
-                # rebuilds the card frame for the model from it.
+                # Same for a late quiz answer's typed provenance (the drain rebuilds
+                # the card frame for the model from it) and a card press's read receipt.
+                for relay_field in ("relay", "owner_rows", "source_task_id", "source_row", "quiz_delivery", "card_delivery",
+                                    "card_press", "relay_canonical_root", "sender_origin"):
+                    if relay_field in entry:
+                        drained[relay_field] = entry[relay_field]
                 if isinstance(entry.get("late_answer"), dict):
                     drained["late_answer"] = dict(entry["late_answer"])
                 if isinstance(entry.get("attachment_manifest"), list):
@@ -732,12 +744,16 @@ def drain_owner_entries(
                     ]
                 if entry.get("attachment_manifest_ref"):
                     drained["attachment_manifest_ref"] = dict(entry["attachment_manifest_ref"])
-                if attempt_key is not None and kind == KIND_OWNER_TEXT:
+                if attempt_key is not None and kind in {KIND_OWNER_TEXT, "relay_entry"}:
                     drained["_owner_attempt_key"] = attempt_key
                 if kind == KIND_TASK_MESSAGE:
+                    if isinstance(entry.get("reply_to"), dict):
+                        drained["reply_to"] = dict(entry["reply_to"])
                     drained["provenance"] = str(entry.get("provenance") or "ancestor_task")
                     if drained["provenance"] == "system" and isinstance(entry.get("review_feedback"), dict):
                         drained["review_feedback"] = dict(entry["review_feedback"])
+                    if drained["provenance"] == "system" and isinstance(entry.get("work_attention"), dict):
+                        drained["work_attention"] = dict(entry["work_attention"])
                     drained["source_task_id"] = str(entry.get("source_task_id") or "")
                     drained["relayed_from_task_id"] = str(entry.get("relayed_from_task_id") or "")
                     # The peer relation is a written fact the renderer reads;
@@ -746,6 +762,8 @@ def drain_owner_entries(
                         drained["relation"] = str(entry["relation"])
                     if isinstance(entry.get("sender_origin"), dict) and entry.get("sender_origin"):
                         drained["sender_origin"] = dict(entry["sender_origin"])  # rendered beside the words
+                    if drained["provenance"] == "place_event" and isinstance(entry.get("place_arrival"), dict):
+                        drained["place_arrival"] = dict(entry["place_arrival"])  # wake and anchor facts, unrendered
                 entries.append(drained)
         if _read_status is not None:
             _read_status["complete"] = complete
@@ -756,10 +774,14 @@ def drain_owner_entries(
 
 
 class OwnerMailboxPeek:
-    """One wait's proven-empty mailbox snapshot; never delivery or ACK authority."""
+    """One wait's proven-empty mailbox snapshot; never delivery or ACK authority.
 
-    def __init__(self) -> None:
+    ``waking_only`` (an ordinary wait's peek) does not count a ``False`` place arrival
+    (``place_arrival_wake``): it stays unread for the next drain."""
+
+    def __init__(self, *, waking_only: bool = False) -> None:
         self._empty_key: Any = None
+        self._waking_only = waking_only
 
     @staticmethod
     def _fingerprint(root: pathlib.Path, task_id: str, attempt: Any, seen: set) -> tuple:
@@ -783,6 +805,8 @@ class OwnerMailboxPeek:
         status: Dict[str, bool] = {}
         # Drain changes only this private set; normal loop delivery owns the real one.
         entries = drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
+        if self._waking_only:
+            entries = [entry for entry in entries if place_arrival_wake(entry) is not False]
         if not entries and before is not None and status.get("complete"):
             try:
                 if before == self._fingerprint(root, task_id, attempt, seen):
@@ -820,32 +844,21 @@ def cleanup_task_mailbox(drive_root: pathlib.Path, task_id: str, *, canonical_ro
                                carry_inputs=carry_inputs, stop=stop)
 
 
-def discard_mailbox_copy(drive_root: pathlib.Path, task_id: str) -> None:
-    """Drop a by-value mailbox copy made for a retry id that will never run: the original
-    id keeps every row, so no custody is owed; appends still serialize with the unlink."""
-    from ouroboros.task_custody import task_mail_lock
-
-    with task_mail_lock(drive_root, task_id) as locked:
-        if locked:
-            for path in (_mailbox_path(drive_root, task_id), _ack_path(drive_root, task_id)):
-                path.unlink(missing_ok=True)
-
-
 def mailbox_drain_ended(task_drive: pathlib.Path, task_id: str) -> bool:
     """The actor's own result row is settled: no solve loop drains this mailbox.
 
     A worker may stay RUNNING to finish paid post-work after its answer settled
     (TZ-2 D15). Its mailbox is then only cleaned up, never read again, so owner
     mail and quiz answers must not be labelled delivered into it — the routing
-    guard and the quiz ingress both ask this one fact. The actor's drive is read,
-    not the canonical row: split-root copyback can lag the settlement. Mail that
-    lands after the drain ended is ``MAIL_RETAINED_UNREAD`` (``mail_write_receipt``):
-    the task's result keeps it as unread mail.
+    guard and the quiz ingress both ask this one fact: the typed status column of
+    the actor's drive, never its body (split-root copyback can lag the settlement
+    in the canonical row). Mail that lands after the drain ended is
+    ``MAIL_RETAINED_UNREAD`` (``mail_write_receipt``): the result keeps it unread.
     """
-    from ouroboros.task_results import load_task_result
     from ouroboros.task_status import SETTLED_STATUSES
+    from ouroboros.task_store import task_drive_status
 
-    return str((load_task_result(task_drive, task_id) or {}).get("status") or "") in SETTLED_STATUSES
+    return task_drive_status(task_drive, [task_id]).get(str(task_id), ("", ""))[0] in SETTLED_STATUSES
 
 
 # Receipt vocabulary for a message written into a task's mailbox. A write proves only
@@ -862,6 +875,21 @@ def mail_write_receipt(recipient_status: str, *, drain_ended: bool = False) -> D
              else MAIL_QUEUED if str(recipient_status or "") in {"requested", "scheduled"} else MAIL_DELIVERED)
     return {"receipt": state, "read": False,
             "read_evidence": "the recipient's task_message_acknowledged row (mail_read_state)"}
+
+
+def mailbox_holds(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
+    """True while TASK_ID's mailbox still carries MSG_ID: written and not yet drained away."""
+    try:
+        content = _mailbox_path(drive_root, task_id).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    for line in mailbox_lines(content):
+        try:
+            if json.loads(line).get("msg_id") == msg_id:
+                return True
+        except (ValueError, AttributeError):
+            continue
+    return False
 
 
 def mail_read_state(drive_root: pathlib.Path, task_id: str, msg_id: str) -> Optional[bool]:
@@ -898,7 +926,7 @@ def sweep_settled_owner_mailboxes(drive_root: pathlib.Path, *, stop: Any = None)
     """Off-loop sweep of canonical mailboxes whose task settled without a cleanup (CPL4-C18:
     a task that never reached the task_done dispatch - crash, lost event, hard kill - leaked
     its mailbox forever) or whose cleanup the loop thread declined because unread rows carry
-    inputs to verify or copy (carried here). Startup and the drive-custody pass call it. A
+    inputs to verify or copy (carried here). The drive-custody pass calls it. A
     mailbox goes only with a settled result, settled post-task work, no pending input copy and
     every unread row in verified canonical custody. No result keeps it. ``stop()`` (the
     maintenance generation) is asked before each mailbox and fences its cleanup's copies,

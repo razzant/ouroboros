@@ -1,6 +1,10 @@
-# Ouroboros v7.7.0 — Architecture & Reference
+# Ouroboros v7.9.0 — Architecture & Reference
 
-This present-tense map (BIBLE P6) covers structure, operation (files, environment, state, endpoints, flows) and rationale. Replace each chapter's affected descriptions. Keep WHYs here and mechanisms in named module docstrings, so guards, review gates and lifecycles need no old commits to explain them. History belongs in README.md, tags and Git.
+This present-tense map (BIBLE P6) explains structure and rationale; module docstrings own mechanisms. Its three mandatory layers: **Structural**, components/modules/endpoints/flows/boundaries; **Operational**, the complete registry of logs/state/configs/paths/environment variables/tools, their locations and use; **Rationale**, why non-trivial decisions hold. Replace affected descriptions. Guards, review and lifecycles need no historical search. History: README.md, tags and Git.
+
+Two helpers support [Agent Core](architecture/06-agent-core.md): `ouroboros/consciousness_view.py` projects places, counted roots and bounded recent wakes; `ouroboros/usage_origin.py` owns task usage scopes and immutable billing/cause attribution in the usage ledger.
+
+Chat/work Subagents choices are live per room (§6–7); Context/Effort retain actor snapshots.
 
 ## Chapters
 

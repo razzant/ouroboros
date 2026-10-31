@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 import pytest
+from tests._safety_fixtures import disable_safety, owner_registry as _registry
 
 from ouroboros.onboarding_wizard import build_onboarding_html
 from ouroboros.runtime_mode_policy import protected_path_category
@@ -337,14 +338,6 @@ def test_settings_js_reads_and_writes_phase2_keys():
     assert "fieldValue(id).trim()" in src
 
 
-def test_chat_context_mode_toggle_reports_owner_endpoint_errors():
-    # The composer's owner controls (context mode, effort range) live in one module.
-    src = (REPO / "web" / "modules" / "composer_owner_controls.js").read_text(encoding="utf-8")
-    assert "/api/owner/context-mode" in src
-    assert "resp.json()" in src
-    assert "showToast(message, 'error')" in src
-
-
 def test_onboarding_js_has_runtime_mode_selector_and_save_payload():
     src = (REPO / "web" / "modules" / "onboarding_wizard.js").read_text(encoding="utf-8")
     agents = (REPO / "web" / "modules" / "onboarding_agents_step.js").read_text(encoding="utf-8")
@@ -355,19 +348,6 @@ def test_onboarding_js_has_runtime_mode_selector_and_save_payload():
     assert "onboardingSettingsDraft" in src
     assert "OUROBOROS_RUNTIME_MODE" in agents
     assert "OUROBOROS_SKILLS_REPO_PATH" in agents
-
-
-def test_phase4_ui_copy_matches_shipped_runtime():
-    settings_ui = (REPO / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
-    onboarding_html = build_onboarding_html({})
-
-    assert "Phase 2 plumbing only" not in settings_ui
-    assert "land in Phase 3" not in settings_ui
-    assert "data/skills/" in settings_ui
-    assert "Pick both review enforcement and the initial runtime mode" in onboarding_html
-    assert "normal review gate" in onboarding_html
-    assert "triad + scope" not in onboarding_html
-    assert "Phase 6+:" not in onboarding_html
 
 
 def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(monkeypatch):
@@ -393,14 +373,12 @@ def test_skills_ui_reads_live_extension_state_fields():
     orchestration = (REPO / "web" / "modules" / "skills.js").read_text(encoding="utf-8")
     src = renderer + "\n" + orchestration
     assert "live_loaded" in src
-    assert "review_gate?.executable_review" in src or "review_gate.executable_review" in src
+    assert "gate.executable_review" in src  # the card reads the host's executable-review gate
     assert "executable_review" in src
     assert "skill.review_status === 'blockers' && !reviewReady(skill)" in src
     assert "function statusBadge(status, gate = null, profile = '')" in src
     assert "statusBadge(skill.review_status, skill.review_gate, skill.review_profile)" in src
-    assert "Open widgets" in src
-    assert "retry_install" in src
-    assert "Retry install" in src
+    assert "find_in_browse" in src  # a failed install row leads back to Browse
     assert "result.error" in src
 
 
@@ -533,10 +511,6 @@ def test_api_settings_post_silently_drops_runtime_mode_changes(monkeypatch):
 # ===========================================================================
 # Part 6: ToolRegistry runtime-mode gating
 # ===========================================================================
-
-
-def _registry(tmp_path):
-    return ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
 
 
 class _CommitCtx:
@@ -764,9 +738,13 @@ def test_advanced_commit_blocks_rename_from_protected_path(tmp_path, monkeypatch
 def test_pro_commit_uses_normal_review_for_protected_paths(tmp_path, monkeypatch):
     from ouroboros.tools import git as git_mod
 
-    repo = _git_repo(tmp_path)
+    serving = _git_repo(tmp_path)
+    repo = tmp_path / "candidate"
+    subprocess.run(["git", "worktree", "add", "-qb", "candidate", str(repo)], cwd=serving, check=True)
     (repo / "BIBLE.md").write_text("changed\n", encoding="utf-8")
     ctx = _CommitCtx(repo, tmp_path / "drive")
+    ctx.serving_repo_dir = serving
+    ctx.task_metadata = {"body_candidate": {"path": str(repo)}}
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "0")
 
@@ -972,6 +950,7 @@ def test_restore_to_head_does_not_mangle_leading_dot_paths(tmp_path, monkeypatch
 def test_revert_commit_blocks_protected_contract_path(tmp_path, monkeypatch):
     from ouroboros.tools import git as git_mod
 
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     repo = _git_repo(tmp_path)
     (repo / "ouroboros" / "contracts").mkdir(parents=True)
     (repo / "ouroboros" / "contracts" / "plugin_api.py").write_text("old\n", encoding="utf-8")
@@ -982,7 +961,7 @@ def test_revert_commit_blocks_protected_contract_path(tmp_path, monkeypatch):
     ctx = _CommitCtx(repo, tmp_path / "drive")
     result = git_mod._revert_commit(ctx, target_sha, confirm=True)
 
-    assert "REVERT_BLOCKED" in result
+    assert "CORE_PROTECTION_BLOCKED" in result
     assert "ouroboros/contracts/plugin_api.py" in result
 
 
@@ -1079,7 +1058,7 @@ def test_default_lane_allows_minusC_retarget_from_default_cwd(tmp_path, monkeypa
 def test_shell_python_writer_reaches_the_selected_process(tmp_path, tmp_path_factory, monkeypatch, mode):
     """Source text is executed under selected supervision without guessed targets."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    disable_safety(monkeypatch)
     # Only an argv LIST is interpreter-resolved; this string form launches the bare
     # `python` from PATH, which a host shipping only `python3` (stock macOS) lacks.
     # Put the running interpreter there under that name, outside the repo root.
@@ -1129,7 +1108,7 @@ def test_runtime_identity_deletion_uses_the_selected_mode(tmp_path, monkeypatch,
     from ouroboros.tools.registry import ToolContext
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    disable_safety(monkeypatch)
     repo, data = tmp_path / "repo", tmp_path / "data"
     repo.mkdir()
     (data / "memory").mkdir(parents=True)
@@ -1268,7 +1247,7 @@ def test_run_shell_allows_readonly_mentions_of_protected_paths(cmd, tmp_path, mo
 ])
 def test_light_mode_preserves_direct_repo_write_authority(cmd, tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    disable_safety(monkeypatch)
     reg = _registry(tmp_path)
     result = reg.execute("run_command", {"cmd": cmd})
     assert "LIGHT_MODE_BLOCKED" in result, result

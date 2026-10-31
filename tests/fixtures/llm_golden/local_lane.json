@@ -452,14 +452,21 @@
       }
     },
     {
-      "id": "local.dispatch.compaction_then_overflow",
-      "route": "safe compaction runs first and an unfittable context raises before any send",
+      "id": "local.dispatch.intact_core_is_sent_whole_then_typed",
+      "route": "a confirmed window too small for the intact core sends it whole (no local compactor, #1018); the server's refusal becomes LocalContextTooLargeError",
       "spec": {
         "env": {
           "LOCAL_MODEL_PORT": "8799"
         },
         "local_context_length": 1024,
-        "transport": [],
+        "transport": [
+          {
+            "kind": "error",
+            "message": "prompt is too long",
+            "status_code": 400,
+            "code": "context_length_exceeded"
+          }
+        ],
         "call": {
           "kind": "method",
           "name": "chat",
@@ -496,9 +503,47 @@
       "expected": {
         "raised": {
           "type": "LocalContextTooLargeError",
-          "message": "Local model context too large after safe compaction (11835 chars > target 2112)."
+          "message": "prompt is too long"
         },
-        "sends": [],
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "local",
+              "base_url": "http://127.0.0.1:8799/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "local-model",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "## BIBLE.md\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\n\n\n## Identity\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\n\n\n## Scratchpad\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\n"
+                },
+                {
+                  "role": "user",
+                  "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                }
+              ],
+              "max_tokens": 256
+            },
+            "payload_sha256": "b98b4ee286f35c5bf5a0b92813451be49c0cce7895d718a5c73c95c08d74a9bf"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.local",
+            "model": "local-model",
+            "provider": "local",
+            "candidate_raw_sha256": "b98b4ee286f35c5bf5a0b92813451be49c0cce7895d718a5c73c95c08d74a9bf",
+            "candidate_raw_size_bytes": 12562,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "state": "unresolved",
+            "transitions": 4
+          }
+        ],
         "unused_script_steps": 0
       }
     }

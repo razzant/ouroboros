@@ -1,9 +1,9 @@
-"""Typed active-operation facts shared by supervisor idle enforcement.
+"""Typed operation and wait facts shared by idle enforcement and reply preparation.
 
 In-flight LLM, review, VLM and tool work is leased as typed ``cognitive_operation``
-facts for the idle rail: a typed in-flight call is not idleness, while silent
-reasoning alone is not host progress. A lease is bounded by the task deadline and
-absolute ceiling; deadlines, budget, cancellation and ceilings never read it.
+facts for the idle rail; display-only in_slot_wait marks classify what a call awaits,
+not progress or permission. Leases are bounded by deadline and execution ceiling;
+deadline, budget, cancellation and ceiling enforcement never depend on these facts.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ def _active_operation_progressing(meta: Dict[str, Any], now: float) -> bool:
         except (TypeError, ValueError):
             until = 0.0
         if until > now:
-            live = True
+            if not isinstance(row, dict) or row.get("kind") != "in_slot_wait":
+                live = True
         else:
             active.pop(operation_id, None)
     if not active:
@@ -38,7 +39,7 @@ def _active_operation_progressing(meta: Dict[str, Any], now: float) -> bool:
 
 
 def _handle_cognitive_operation(evt: Dict[str, Any], ctx: Any) -> None:
-    """Track active LLM/review/VLM work for the idle rail only."""
+    """Track bounded operation/wait facts; only work leases spare the idle rail."""
     task_id = str(evt.get("task_id") or "")
     operation_id = str(evt.get("operation_id") or "")
     phase = str(evt.get("phase") or "").strip().lower()
@@ -123,6 +124,8 @@ def _handle_cognitive_operation(evt: Dict[str, Any], ctx: Any) -> None:
             "execution_id": str(evt.get("execution_id") or ""),
             "round_id": str(evt.get("round_id") or ""),
             "slot_id": str(evt.get("slot_id") or ""),
+            "owner_id": str(evt.get("model_wait_owner_id") or ""),
+            "wait_for_tasks": list(evt.get("wait_for_tasks") or ()) if evt.get("kind") == "in_slot_wait" else [],
         }
 
 

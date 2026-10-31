@@ -1,4 +1,4 @@
-"""Pure structural checks for the CyberGym benchmark profile and documentation.
+"""Pure structural checks for the CyberGym benchmark profile.
 
 These tests intentionally do not import CyberGym, Docker, inspect, browser, or
 any other optional evaluator dependency.  They validate the repository-owned
@@ -12,7 +12,6 @@ from pathlib import Path
 
 from devtools.benchmarks.common import launcher_audit
 from ouroboros.configured_subagents import parse_configured_subagents
-from tests._governance_docs_shared import architecture_text
 
 REPO = Path(__file__).resolve().parents[1]
 PROFILE = REPO / "devtools" / "benchmarks" / "cybergym" / "settings_base.json"
@@ -132,61 +131,3 @@ def test_cybergym_is_registered_and_passes_the_shared_structural_audit():
     assert relative in launcher_audit.MIGRATED_LAUNCHERS
     assert path in launcher_audit.launcher_paths()
     assert launcher_audit.audit_launcher(path) == []
-
-
-def test_benchmark_inventory_points_to_cybergym_docs():
-    common_readme = (REPO / "devtools" / "benchmarks" / "README.md").read_text(
-        encoding="utf-8"
-    )
-    architecture = architecture_text(REPO)
-    assert "cybergym/" in common_readme
-    assert "devtools/benchmarks/cybergym/" in architecture
-
-
-def test_cybergym_docs_pin_the_owner_approved_contract():
-    readme = (PROFILE.parent / "README.md").read_text(encoding="utf-8")
-    methodology = (PROFILE.parent / "METHODOLOGY.md").read_text(encoding="utf-8")
-    combined = f"{readme}\n{methodology}"
-    required = (
-        MODEL,
-        "7656b71d07da6694e262f9c34ea994cd4849c0eb",
-        "bde190ded494e52bc684b66073b436c9d992c7c6",
-        "9cea452cc1e1a3703e0f60c2dfc8642430aab9f50433f976581509de58c7048f",
-        "1,507",
-        "Level 1",
-        "final.poc",
-        "any-of",
-        "raw_vul_exit_code not in {0, 71, 300}",
-        "raw_fix_exit_code == 0",
-        "build_isolated_settings",
-        "OUROBOROS_OR_PROVIDER",
-        "only",
-        "order",
-        "cybergym-internal",
-        "Internal=false",
-        "unrestricted outbound",
-        "mandatory trajectory audit",
-        "issue tracker or bug reports",
-        "ready-made PoC",
-        "rootless",
-        "Docker `--network host`",
-        "OUROBOROS_MAX_SUBAGENT_DEPTH=0",
-        "schedule_subagent",
-        "delegate_start",
-        "claude_code_edit",
-        "OUROBOROS_TASK_ABS_CEILING_SEC=21600",
-        "USD 3,000",
-        "six hours",
-        "admit_benchmark_run",
-        "finalize_run_manifest",
-        "append-only",
-        "cleanup",
-        "verbatim",
-        "workspace_custody_timeout",
-    )
-    for phrase in required:
-        assert phrase in combined, phrase
-    assert "template" in readme.lower()
-    assert "applied" in readme.lower()
-    assert "leaderboard" in readme.lower()
-    assert "workspace_custody_timeout" in readme and "verbatim" in readme

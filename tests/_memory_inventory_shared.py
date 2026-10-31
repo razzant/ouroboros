@@ -12,6 +12,8 @@ import pathlib
 from typing import Any, Dict, List
 
 from ouroboros.chronicle_store import ChronicleStore
+from ouroboros import dialogue_store as ds
+from tests._dialogue import import_all
 from ouroboros.utils import jsonl_generation_signature
 
 ARCHIVE_ONE = "chat_20260901T120000.jsonl"
@@ -25,6 +27,10 @@ def msg(ts: str, text: str, *, chat_id: int = 1, direction: str = "in", **extra:
 
 
 def append(path: pathlib.Path, *rows: Any) -> None:
+    if ds.present(path.parent.parent):
+        for row in rows:
+            ds.append(path.parent.parent, "chat", row)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         for row in rows:
@@ -120,6 +126,7 @@ def world(root: pathlib.Path, *, legacy: bool = True, cursor: bool = True, flat:
         (memory / "dialogue_meta.json").write_text(json.dumps(meta), encoding="utf-8")
     if flat:
         (memory / "dialogue_summary.md").write_text(flat, encoding="utf-8")
+    import_all(root)
     if activate:
         assert ChronicleStore(root).ensure_activated()["kind"] == "activation"
     return rooms

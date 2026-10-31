@@ -418,6 +418,7 @@ def test_the_membership_token_survives_the_preflight_env_scrub(tmp_path, monkeyp
     outer = CONTAINMENT_ENV_PREFIX + "outer0123456789"
     monkeypatch.setenv(outer, "1")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
 
     env = _preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
 

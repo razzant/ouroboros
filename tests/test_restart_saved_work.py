@@ -53,11 +53,47 @@ def _stop_and_boot(queue, workers, *, age_sec=0):
     return queue.restore_pending_from_snapshot()
 
 
+def _crash(queue, workers, monkeypatch, task_id):
+    """The worker running ``task_id`` dies before any terminal: the live same-id crash requeue
+    (``worker_health``) runs on the real queue. Doubled: the dead process, cost reconstruction and
+    the slot's respawn."""
+    from supervisor import worker_health
+    from tests.test_worker_crash_retry import _make_worker
+
+    meta = workers.RUNNING[task_id]
+    wid = int(meta["worker_id"])
+    dead = _make_worker(wid=wid, busy_task_id=task_id, exitcode=1)
+    dead.reaping = True
+    workers.WORKERS[wid] = dead
+    monkeypatch.setattr(workers, "QUEUE_MAX_RETRIES", 2)  # the configurable limit, wide enough for two losses
+    monkeypatch.setattr(workers, "reconstruct_task_cost", lambda *_a, **_k: {})
+    worker_health._recover_crashed_task_without_terminal(dict(
+        worker=dead, task_id=task_id, task=meta["task"], meta=meta, worker_id=wid, exitcode=1,
+        attempt=int(meta["attempt"]), drive_root=str(workers.DRIVE_ROOT)), queue)
+    workers.WORKERS.pop(wid, None)
+
+
 def _ack(root, transaction_id):
     from ouroboros import delegate_recovery as dr
 
     row = dr._read_restart_transaction(root, transaction_id)
     dr._write_restart_transaction(root, {**row, "status": "normal_exit_acknowledged", "exit_code": 42})
+
+
+@pytest.mark.parametrize("promised", ["task_ids", "return_ids", "none"])
+def test_refused_return_reports_planned_and_saved_promises(tmp_path, monkeypatch, promised):
+    from supervisor.restart_retention import recover_saved_running
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _plain_run(tmp_path, workers, "unsaved")
+    assert recover_saved_running(workers.RUNNING.values(), tmp_path,
+        transaction={promised: ["unsaved"]}, cause="restart") == []
+    path = tmp_path / "logs/supervisor.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    refused = [row for row in rows if row.get("type") == "restart_return_refused"]
+    assert bool(refused) is (promised != "none")
+    if refused:
+        assert refused[-1]["refused"] == {"unsaved": "no_usable_recovery_source"}
 
 
 @pytest.mark.parametrize("age_sec", [0, 7 * 86400], ids=["fresh", "week-old"])
@@ -76,7 +112,7 @@ def test_quit_keeps_running_work_and_all_accepted_queue_held_for_resume(tmp_path
     assert set(rows) == {"saved-root", "saved-child", "queued"}
     for task_id in ("saved-root", "saved-child", "queued"):
         hold = budget_hold_fact(rows[task_id])
-        assert hold and hold["reason"] == HOLD_SAVED_WORK and hold["stop_cause"] == "app_stop"
+        assert hold and hold["reason"] == HOLD_SAVED_WORK and hold["door"] == "app_stop"
         assert load_task_result(tmp_path, task_id)["status"] == STATUS_SCHEDULED
     handoff = rows["saved-root"]["_working_recovery"]
     assert handoff["from_attempt"] == 1 and rows["saved-root"]["_attempt"] == 2 and handoff["cause"] == "app_stop"
@@ -176,7 +212,7 @@ def test_saved_successor_keeps_frozen_source_across_another_crash_before_dispatc
     assert wc.load_recovery(ctx, source)["working"]["boundary"] == "pre_effect"
 
 
-@pytest.mark.parametrize("origin", ["restarted", "resumed", "idle_retry"])
+@pytest.mark.parametrize("origin", ["restarted", "resumed", "crash_retry"])
 @pytest.mark.parametrize("door", ["restart", "quit", "crash", "panic"])
 def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp_path, monkeypatch, origin, door):
     """A pending successor still owns saved work; another stop does not buy an attempt."""
@@ -188,14 +224,8 @@ def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_events(workers, monkeypatch)
     _working_run(tmp_path, workers, "saved-root")
-    if origin == "idle_retry":
-        from supervisor import task_reaper
-
-        task = workers.RUNNING.pop("saved-root")["task"]
-        accepted, attempt, _reason, _ = task_reaper._enqueue_retry(
-            queue, task, task_id="saved-root", retry_task_id="", attempt=1,
-            terminal_reason="idle_timeout", recon_fields={})
-        assert accepted and attempt == 2
+    if origin == "crash_retry":  # the one automatic retry left: same id, continuing saved work
+        _crash(queue, workers, monkeypatch, "saved-root")
     else:
         if origin == "restarted":
             prepare_restart_returns(tmp_path, workers.RUNNING, workers.PENDING, transaction_id="first-restart")
@@ -303,7 +333,7 @@ def test_a_panic_after_an_acknowledged_restart_returns_nothing_by_itself(tmp_pat
     _stop_and_boot(queue, workers)
     rows = {row["id"]: row for row in workers.PENDING}
     assert set(rows) == {"saved-root", "queued"}
-    assert budget_hold_fact(rows["saved-root"])["stop_cause"] == "panic"
+    assert budget_hold_fact(rows["saved-root"])["door"] == "panic"
     assert budget_hold_fact(rows["queued"]) is not None, "the queue waits for Resume too"
 
 
@@ -340,7 +370,7 @@ def test_panic_holds_and_a_stop_or_an_earlier_hold_is_never_lifted(tmp_path, mon
     workers.PENDING[:] = []
     queue.restore_pending_from_snapshot()
     rows = {row["id"]: row for row in workers.PENDING}
-    assert budget_hold_fact(rows["saved-root"])["stop_cause"] == "panic"
+    assert budget_hold_fact(rows["saved-root"])["door"] == "panic"
     assert "stopped-root" not in rows, "Stop wins over saved work"
     assert budget_hold_fact(rows["held-before"])["reason"] == HOLD_OWNER_RESTART
 
@@ -357,6 +387,9 @@ def test_an_owner_restart_returns_its_named_work_instead_of_cancelling_it(tmp_pa
     _pool_events(workers, monkeypatch)
     _working_run(tmp_path, workers, "saved-root")
     _plain_run(tmp_path, workers, "unsaved")
+    from tests._work_stop_helpers import live_restart
+    transaction = live_restart(tmp_path, monkeypatch)
+    monkeypatch.setattr(server_restart, "_LAST_RETURN_TX", {"id": transaction["transaction_id"]})
     monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server_restart, "_stop_owned_daemon", lambda *_a, **_k: None)
     monkeypatch.setattr("ouroboros.delegate_custody.reconcile_orphaned_runs", lambda *_a, **_k: None)
@@ -476,9 +509,9 @@ def test_a_managed_update_window_never_times_out_the_saved_work_it_returns(tmp_p
             reaped.append(job["task_id"])
             queue._reap_timed_out_task(job)
 
-    assert asked == {"resolver": ("idle_timeout", ["finalize_now"]),
-                     "deadline-run": ("deadline", ["finalize_now"])}
-    assert sorted(reaped) == ["deadline-run", "resolver"]
+    assert asked == {"deadline-run": ("deadline", ["finalize_now"])}
+    assert reaped == ["deadline-run"]
+    assert workers.RUNNING["resolver"]["silence_attention"]["state"] == "pending_attention"
     assert load_task_result(tmp_path, "deadline-run")["reason_code"] == "deadline"
     for task_id in ("saved-a", "saved-b"):
         assert workers.RUNNING[task_id].get("finalization_requested_at") is None
@@ -495,3 +528,134 @@ def test_a_managed_update_window_never_times_out_the_saved_work_it_returns(tmp_p
     for task_id in ("saved-a", "saved-b"):
         assert budget_hold_fact(rows[task_id]) is None and rows[task_id]["_attempt"] == 2
         assert rows[task_id]["_working_recovery"]["cause"] == "restart"
+
+
+_SAVED_QUEUE_TIMES = {"ordinary": "2026-09-29T08:00:00+00:00", "held": "2026-10-05T09:30:00+00:00",
+                      "saved-run": "2026-10-11T11:15:28.500000+00:00", "nested": "2026-10-11T02:44:00+00:00"}
+
+
+def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_path, monkeypatch):
+    """#1805: the snapshot keeps ``queued_at`` on its outer row and restore carries it back
+    on every return path (ordinary, Project-held, saved running work), across a second
+    restore too; a row that kept none stays unknown, and only a new task is stamped now."""
+    import datetime
+
+    from ouroboros import server_routing_context as routing
+    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from tests.test_project_routing_v664 import _ctx
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _working_run(tmp_path, workers, "saved-run")
+    workers.RUNNING["saved-run"]["task"]["queued_at"] = _SAVED_QUEUE_TIMES["saved-run"]
+    for task_id in ("ordinary", "held", "nested", "legacy"):
+        write_task_result(tmp_path, task_id, STATUS_SCHEDULED, chat_id=0)
+    workers.PENDING += [
+        _queued("ordinary", root_task_id="ordinary", queued_at=_SAVED_QUEUE_TIMES["ordinary"]),
+        _queued("held", root_task_id="held", queued_at=_SAVED_QUEUE_TIMES["held"], _project_admission_restore_hold={
+            "reason": "project_routing_fence_lookup_failed", "detail": "verify the Project first"}),
+        _queued("nested", root_task_id="nested", queued_at=_SAVED_QUEUE_TIMES["nested"]),
+        _queued("legacy", root_task_id="legacy", queued_at=_SAVED_QUEUE_TIMES["ordinary"]),
+    ]
+    workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
+                         stop_source="server_shutdown", retain_saved_work=True)
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    saved = {row["id"]: row for row in snap["pending"]}
+    assert saved["ordinary"]["queued_at"] == _SAVED_QUEUE_TIMES["ordinary"], "serialized on the outer row"
+    # An older writer kept the time only inside its task; another row kept it nowhere.
+    saved["nested"].pop("queued_at")
+    saved["nested"]["task"]["queued_at"] = _SAVED_QUEUE_TIMES["nested"]
+    saved["legacy"].pop("queued_at")
+    saved["legacy"]["task"].pop("queued_at", None)
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap))
+    workers.PENDING[:] = []
+    workers.RUNNING.clear()
+    queue.restore_pending_from_snapshot()
+
+    expected = {**{key: value for key, value in _SAVED_QUEUE_TIMES.items()}, "legacy": None}
+    rows = {row["id"]: row for row in workers.PENDING}
+    assert {task_id: rows[task_id]["queued_at"] for task_id in expected} == expected
+    assert rows["held"]["_project_admission_restore_hold"] and rows["saved-run"]["_working_recovery"]
+
+    def epoch(value):
+        return datetime.datetime.fromisoformat(value).timestamp() if value else 0.0
+
+    census = {row["activity_id"]: row["started_at"] for row in _chat_activities_snapshot_safe(tmp_path, direct_turns=[])}
+    assert {task_id: census[task_id] for task_id in expected} == {
+        task_id: epoch(value) for task_id, value in expected.items()}, "an unknown age is never this boot's"
+    roots = {row["task_id"]: row["started_at"] for row in routing.addressable_roots(
+        _ctx(tmp_path, pending=list(workers.PENDING))).rows()}
+    assert {task_id: roots[task_id] for task_id in expected} == expected
+
+    workers.PENDING.clear()  # the restore published its own snapshot; a second crash reads it back
+    queue.restore_pending_from_snapshot()
+    assert {row["id"]: row["queued_at"] for row in workers.PENDING} == expected
+
+    before = datetime.datetime.now(datetime.timezone.utc)
+    write_task_result(tmp_path, "new", STATUS_SCHEDULED, chat_id=0)
+    fresh = queue.enqueue_task(_queued("new", root_task_id="new", queued_at=_SAVED_QUEUE_TIMES["ordinary"]))
+    assert datetime.datetime.fromisoformat(fresh["queued_at"]) >= before, "a new admission is stamped now"
+
+
+@pytest.mark.parametrize(("outer", "nested", "expected"), [
+    ({"queued_at": "2026-10-01T00:00:00+00:00"}, "2026-01-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00"),
+    ({"queued_at": None}, "2026-01-01T00:00:00+00:00", None),
+    ({}, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    ({}, None, None),
+    ({"queued_at": 1760000000.25}, None, 1760000000.25),
+    ({"queued_at": 1760000000}, None, 1760000000),
+    ({"queued_at": True}, None, None),
+    ({"queued_at": float("nan")}, None, None),
+    ({"queued_at": float("inf")}, None, None),
+    ({"queued_at": 0}, None, None),
+    ({"queued_at": ""}, "2026-01-01T00:00:00+00:00", None),
+    ({"queued_at": ["2026-10-01"]}, None, None),
+], ids=["outer", "explicit-null", "nested-fallback", "absent", "epoch-float", "epoch-int", "bool", "nan", "inf",
+        "zero", "blank", "not-a-time"])
+def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, expected):
+    """The outer value decides; only its absence falls back to a nested copy; nothing is guessed."""
+    from supervisor.queue_snapshot import _saved_pending_task
+    from supervisor.task_admission import restore_terminalization_retry
+
+    task = {"id": "t", **({"queued_at": nested} if nested else {})}
+    decoded = _saved_pending_task({"id": "t", **outer, "task": task})
+    assert decoded["queued_at"] == expected and task.get("queued_at") == nested
+    pending: list = []
+    retry = restore_terminalization_retry({**decoded, "_terminalization_retry": {"status": "cancelled"}},
+                                          pending=pending, running={}, queue_seq_counter_ref={"value": 0},
+                                          sort_pending=lambda: None)
+    assert retry["queued_at"] == expected, "a shutdown-custody row keeps the saved time or its unknown"
+
+
+def test_a_direct_hold_keeps_its_numeric_queue_time_through_snapshot_and_restore(tmp_path, monkeypatch):
+    """R1 #1805: ``direct_pause.retain_direct_hold`` stamps a numeric epoch; the snapshot keeps it on
+    the outer row and restore returns that known time to the queue and its readers, never unknown."""
+    import datetime
+
+    from ouroboros import server_routing_context as routing
+    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from supervisor.direct_pause import retain_direct_hold
+    from tests.test_project_routing_v664 import _ctx
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    write_task_result(tmp_path, "direct-held", STATUS_RUNNING, chat_id=0, _is_direct_chat=True,
+                      root_task_id="direct-held")
+    before = time.time()
+    retain_direct_hold({"id": "direct-held", "type": "task", "chat_id": 0, "root_task_id": "direct-held",
+                        "_attempt": 1, "text": "direct work"}, unsaved=True)
+    [held] = workers.PENDING
+    stamped = held["queued_at"]
+    assert isinstance(stamped, float) and before <= stamped <= time.time(), "the producer's own numeric epoch"
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    assert [row["queued_at"] for row in snap["pending"]] == [stamped], "serialized on the outer row"
+    workers.PENDING[:] = []
+    queue.restore_pending_from_snapshot()
+    [restored] = [row for row in workers.PENDING if row["id"] == "direct-held"]
+    assert restored["queued_at"] == stamped
+    census = {row["activity_id"]: row["started_at"] for row in _chat_activities_snapshot_safe(tmp_path, direct_turns=[])}
+    assert census["direct-held"] == stamped
+    roots = {row["task_id"]: row["started_at"] for row in routing.addressable_roots(
+        _ctx(tmp_path, pending=list(workers.PENDING))).rows()}
+    assert roots["direct-held"] == stamped
+    assert datetime.datetime.fromtimestamp(stamped, datetime.timezone.utc).year >= 2026

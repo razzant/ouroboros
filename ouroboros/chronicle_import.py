@@ -58,7 +58,7 @@ _UNKNOWN_RANGE = {"status": "unknown", "pos": None, "first": None, "last": None,
 LEGACY_ROOM_ID = "legacy"
 LEGACY_ROOM_LABEL = "Unknown provenance [legacy mixed record]"
 
-Kept = Dict[int, Tuple[str, int, Dict[str, Any]]]
+Kept = Dict[int, Dict[str, Any]]
 
 
 def _digest(value: Any) -> str:
@@ -112,7 +112,13 @@ def ensure_activated(store: Any, *, wait: bool = False) -> Dict[str, Any]:
         except OSError:
             return {"kind": "import_pending", "reason": "legacy_memory_lock_busy"}
         try:
-            return store.activation() or _import(store)
+            from ouroboros.store import StoreMigrating, StoreError
+            try:
+                return store.activation() or _import(store)
+            except StoreMigrating as exc:
+                return {"kind": "import_pending", "reason": "dialogue_history_importing", "detail": str(exc)}
+            except StoreError as exc:
+                return {"kind": "import_refused", "reason": "dialogue_history_unreadable", "detail": str(exc)}
         finally:
             file_unlock(fd)
     finally:
@@ -167,8 +173,7 @@ def _import(store: Any) -> Dict[str, Any]:
     def address(pos: int) -> Optional[Dict[str, Any]]:
         if pos not in kept:
             return None
-        gen, line, row = kept[pos]
-        return chat_chain.row_address(row, gen=gen, line=line)
+        return kept[pos]
 
     exact = reason is None and sized and not gapped and sum(sizes) == cursor
     ranges = [{"status": "exact", "pos": [start, stop], "first": address(start) if stop > start else None,
@@ -207,10 +212,16 @@ def _import(store: Any) -> Dict[str, Any]:
                     "offset": meta.get("last_consolidated_offset") if meta else None, "reason": reason}
         records.append(_cursor_gap(refs, reason, chain_end, LEGACY_ROOM_ID))
     records.extend(_nomination_marks(refs, meta or {}, LEGACY_ROOM_ID))
+    from ouroboros.dialogue_positions import skipped_between
+
+    # Unreadable dialogue intervals are disclosed by every reader's coverage and by this receipt; they
+    # are not a retold record the mind must fold: the old memory never held their bytes either.
+    skipped = [gap._asdict() for gap in skipped_between(root, "chat")]
     receipt = {"id": "legacy-import-" + _digest({name: ref.get("sha256") for name, ref in refs.items()})[:16],
                "kind": "activation", "room_id": "", "author": {"kind": "host", "operation": "legacy_import"},
                "metadata": {"source_refs": refs, "imported_records": len(records), "paid_calls": 0,
-                            "legacy_files_unchanged": True, "lineage_epoch": epoch, "chain_end": chain_end}}
+                            "legacy_files_unchanged": True, "lineage_epoch": epoch, "chain_end": chain_end,
+                            "dialogue_gaps": skipped}}
     # The records, their receipt and the frontier become visible together; ids are deterministic.
     result = store.publish([*records, receipt], scan_state={"legacy_frontier": frontier})
     if not result.ok:
@@ -301,59 +312,44 @@ def _bounds(sizes: List[int]) -> List[Tuple[int, int]]:
 # --- the chat stream -------------------------------------------------------------------------------
 
 def _cursor_start(root: pathlib.Path, meta: Optional[Dict[str, Any]], has_blocks: bool,
-                  error: Optional[str]) -> Tuple[Optional[pathlib.Path], int, Optional[str]]:
-    """The old cursor's generation and offset, as the old writer resolved them, or why not."""
-    from ouroboros.chat_chain import _resolve_generation_segments
+                  error: Optional[str]) -> Tuple[Optional[int], int, Optional[str]]:
+    """The old generation-relative row cursor translated by the store's durable ordinals."""
+    from ouroboros.chat_chain import generation_cursor
 
     if meta is None:
         return None, 0, f"the old cursor is unreadable ({error})"
     if not meta and has_blocks:
         return None, 0, "the old cursor file is missing while legacy blocks exist"
-    segments, offset, missing = _resolve_generation_segments(meta, root / "logs" / "chat.jsonl")
+    cursor, missing = generation_cursor(root, meta)
     if missing:
         return None, 0, "the old cursor's chat generation no longer exists"
-    return segments[0], offset, None
+    return cursor, 0, None
 
 
-def _survey(root: pathlib.Path, wanted: Set[int], start: Optional[pathlib.Path],
+def _survey(root: pathlib.Path, wanted: Set[int], start: Optional[int],
             offset: int) -> Tuple[List[Any], Kept, Optional[Dict[str, Any]], int]:
-    """One pass over the chat stream: ``ts`` by position, the rows at ``wanted`` positions (plus
-    the last row covered by the old cursor and the chain's last row), the lineage epoch (the
-    first row carrying delegation lineage, else the chain end when rows exist), and the
-    cursor's stream position (rows before its generation + offset).
-    """
-    from ouroboros.chat_chain import _stream_rows, chat_chain_paths, generation_signatures, row_address
-    from ouroboros.dialogue_provenance import _LINEAGE_FIELDS  # the fields row_author reads
+    """The one-time legacy import surveys its requested whole stream in SQL order."""
+    from ouroboros.chat_chain import iter_rows
+    from ouroboros.dialogue_provenance import _LINEAGE_FIELDS
 
-    order = {path: index for index, path in enumerate(chat_chain_paths(root))}
+    cursor = (start + offset) if start is not None else None
     wanted = set(wanted)
-    stamps: List[Any] = []
-    kept: Kept = {}
-    epoch: Optional[Dict[str, Any]] = None
-    cursor = -1
-    previous = None
-    for _index, path, gen, line, row, pos in _stream_rows(generation_signatures(root)):
-        if cursor < 0 and start is not None and order[path] >= order[start]:
-            cursor = pos + offset
-            if offset:
-                wanted.add(cursor - 1)
-            elif previous is not None:
-                kept[pos - 1] = previous
-        here = (gen, line, row)
+    if cursor:
+        wanted.add(cursor - 1)
+    stamps, kept, epoch, previous = [], {}, None, None
+    for address, row, pos in iter_rows(root):
         if pos in wanted:
-            kept[pos] = here
+            kept[pos] = address
         if epoch is None and any(str(row.get(key) or "").strip() for key in _LINEAGE_FIELDS):
-            epoch = {"pos": pos, "ts": str(row.get("ts") or ""), "address": row_address(row, gen=gen, line=line),
+            epoch = {"pos": pos, "ts": str(row.get("ts") or ""), "address": address,
                      "basis": "first_lineage_row"}
         stamps.append(row.get("ts"))
-        previous = here
+        previous = address
     if previous is not None:
         kept[len(stamps) - 1] = previous
-    if epoch is None and stamps:  # no row proves lineage was recorded: every row so far precedes the epoch
+    if epoch is None and stamps:
         epoch = {"pos": len(stamps), "ts": None, "address": None, "basis": "chain_end"}
-    if cursor < 0:  # the cursor's generation holds no row yet
-        cursor = len(stamps) + offset
-    return stamps, kept, epoch, cursor
+    return stamps, kept, epoch, len(stamps) + offset if cursor is None else cursor
 
 
 # --- records ---------------------------------------------------------------------------------------
@@ -389,7 +385,7 @@ def _cursor_gap(refs: Dict[str, Dict[str, Any]], reason: str, chain_end: Dict[st
     text = (f"[MEMORY GAP] {reason[0].upper()}{reason[1:]}, so which chat rows the legacy retelling covers is "
             "unknown, and any knowledge nominations it held are known only from its retained copy. The "
             "retelling stays readable beside this gap; rows after the chain end observed at activation are "
-            "open. Earlier rows are read from logs/chat.jsonl and archive/chat_*.jsonl, never rebuilt by a model.")
+            "open. Earlier rows are addressed in state/dialog.sqlite, never rebuilt by a model.")
     meta_ref = refs.get("meta")
     return {"id": "legacy-cursor-gap-" + _digest([(meta_ref or {}).get("sha256"), reason])[:16], "kind": "legacy",
             "room_id": room, "text": text, "author": _COVERAGE_GAP_AUTHOR,

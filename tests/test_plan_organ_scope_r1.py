@@ -55,16 +55,15 @@ def test_a_seat_refused_before_dispatch_is_not_reached_and_an_all_refused_ask_is
     rows = {p["seat_id"]: p for p in _record(harness)["asks"][0]["participants"]}
     assert all(p["status"] == "not_dispatched" and p["dispatched"] is False for p in rows.values())
     assert rows["s1"]["failure_code"] == "subscription_window_exhausted" and "not sent" in text
-    decision = oh.force_plan_decision(ctx, {}, enforcement="blocking")
-    assert decision["asks_dispatched"] == 0 and decision["asks_unroutable"] == 1 and decision["force_plan_met"] is False
-    assert decision["status"] == "force_plan_unmet" and decision["allow"] is True and decision["holding"] == []
-    assert oh.unmet_force_plan_obligation(ctx)["unmet"] is True, "unmet (nobody reached), so a promote still carries it"
+    decision = oh.plan_gate_decision(ctx, {}, enforcement="blocking")
+    assert decision["asks_dispatched"] == 0 and decision["asks_unroutable"] == 1
+    assert decision["status"] == "clear" and decision["allow"] is True and decision["holding"] == []
     # The other direction: one seat refused and one reached is a reached ask; the refused seat never saw the plan.
     other = harness.make_ctx(task_id="task-2", force_plan=True)
     harness.install({"s1": dict(REFUSED), "s2": CLEAN})
     _write(other, ask="council")
-    met = oh.force_plan_decision(other, {}, enforcement="blocking")
-    assert met["asks_dispatched"] == 1 and met["force_plan_met"] is True and met["asks_unroutable"] == 0
+    met = oh.plan_gate_decision(other, {}, enforcement="blocking")
+    assert met["asks_dispatched"] == 1 and met["asks_unroutable"] == 0
     views = plan_record.participant_views(_record(harness, "task-2"))
     assert views["s1"]["last_seen_revision"] is None and views["s2"]["last_seen_revision"] == 1
 
@@ -74,7 +73,7 @@ def test_a_late_pre_dispatch_refusal_through_the_custody_hook_withdraws_the_disp
     sub = harness.install({"s1": dict(PENDING), "s2": dict(PENDING)})
     ctx = harness.make_ctx(force_plan=True)
     _write(ctx, ask="council")
-    assert oh.force_plan_decision(ctx, {}, enforcement="blocking")["asks_dispatched"] == 1, "pending seats were sent"
+    assert oh.plan_gate_decision(ctx, {}, enforcement="blocking")["asks_dispatched"] == 1, "pending seats were sent"
     request = sub.calls[0]["request"]
     for seat in ("s1", "s2"):
         slot = next(s for s in harness.state["slots"] if s.slot_id == seat)
@@ -82,11 +81,11 @@ def test_a_late_pre_dispatch_refusal_through_the_custody_hook_withdraws_the_disp
                                   operation_id=f"op-{seat}-refused", operation_state="not_dispatched",
                                   failure_code="subscription_window_exhausted", reset_at=REFUSED["reset_at"])
         plan_ask.settle_released_reply(ctx, request=request, task_id="task-1", actor=actor, slot=slot, settled_wave={}, roster_size=2)
-        decision = oh.force_plan_decision(ctx, {}, enforcement="blocking")
+        decision = oh.plan_gate_decision(ctx, {}, enforcement="blocking")
         row = next(p for p in _record(harness)["asks"][0]["participants"] if p["seat_id"] == seat)
         assert row["status"] == "not_dispatched" and row["dispatched"] is False and row["reset_at"] == REFUSED["reset_at"]
     assert decision["asks_dispatched"] == 0 and decision["asks_unroutable"] == 1 and decision["allow"] is True
-    assert decision["status"] == "force_plan_unmet"
+    assert decision["status"] == "clear"
 
 
 def test_an_exception_after_the_hand_off_is_unknown_never_nobody_reached(harness):
@@ -109,8 +108,8 @@ def test_an_exception_after_the_hand_off_is_unknown_never_nobody_reached(harness
     rows = _record(harness)["asks"][0]["participants"]
     assert rows and all(p["status"] == "pending" and p["unresolved"] is True and p["dispatched"] is True
                         and p["error"] == "dispatch outcome unknown: substrate down after hand-off" for p in rows)
-    decision = oh.force_plan_decision(ctx, {}, enforcement="blocking")
-    assert decision["asks_unroutable"] == 0 and decision["asks_dispatched"] == 1 and decision["force_plan_met"] is True
+    decision = oh.plan_gate_decision(ctx, {}, enforcement="blocking")
+    assert decision["asks_unroutable"] == 0 and decision["asks_dispatched"] == 1
     assert decision["allow"] is True and decision["status"] == "awaiting" and decision["unknown_outcome"] == ["a1"]
     assert "Dispatch outcome unknown for s1, s2, s3" in text and "pay twice" in text and "reached nobody" not in text
     assert "pending — outcome unknown (dispatch outcome unknown: substrate down after hand-off)" in text
@@ -125,8 +124,8 @@ def test_an_exception_after_the_hand_off_is_unknown_never_nobody_reached(harness
     other = harness.make_ctx(task_id="task-2", force_plan=True)
     harness.install({"s1": dict(REFUSED), "s2": dict(REFUSED), "s3": dict(REFUSED)})
     _write(other, ask="council")
-    refused = oh.force_plan_decision(other, {}, enforcement="blocking")
-    assert refused["asks_unroutable"] == 1 and refused["status"] == "force_plan_unmet" and refused["allow"] is True
+    refused = oh.plan_gate_decision(other, {}, enforcement="blocking")
+    assert refused["asks_unroutable"] == 1 and refused["status"] == "clear" and refused["allow"] is True
 
 
 # ---------------------------------------------------------------- F2: a late peer reply to an earlier ask reaches the next delivery
@@ -196,12 +195,12 @@ def test_the_tools_read_and_the_gate_agree_that_an_unreadable_earlier_state_hold
     text, _result = _write(ctx)
     assert "HELD: this task's earlier plan-review state cannot be read" in text and "PLAN_REVIEW_STATE_INVALID" in text
     assert "Nothing holds your final answer." not in text
-    assert oh.force_plan_decision(ctx, {}, enforcement="blocking")["status"] == "unreadable"
+    assert oh.plan_gate_decision(ctx, {}, enforcement="blocking")["status"] == "unreadable"
     # The other direction: a readable, closed earlier state holds nothing, in the tool and at the gate alike.
     seed_result(harness.drive, "task-2", {"task_id": "task-2", "status": "running", "plan_review_state": _v2(closed=True)})
     other = harness.make_ctx(task_id="task-2")
     text, _result = _write(other)
-    assert "Nothing holds your final answer." in text and oh.force_plan_decision(other, {}, enforcement="blocking")["status"] == "clear"
+    assert "Nothing holds your final answer." in text and oh.plan_gate_decision(other, {}, enforcement="blocking")["status"] == "clear"
 
 
 # ---------------------------------------------------------------- A3 / Fable 9: the owner's progress line speaks typed facts

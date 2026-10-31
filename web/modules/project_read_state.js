@@ -1,4 +1,4 @@
-// When a Project room has READ a visible revision (DESIGN "Project unread dot").
+// When a Project room has READ a visible revision (DESIGN "Unread").
 //
 // A revision is read only when a history read covering it has crossed a real
 // browser paint while the room stayed shown AND the reader is at the newest
@@ -22,7 +22,7 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
 
 /**
  * @param {{
- *   read: (fresh: boolean) => Promise<boolean>,  // true when the recent read succeeded
+ *   read: (fresh: boolean, whole: boolean) => Promise<boolean>,  // true when the read succeeded; `whole`: the newest page
  *   isShown: () => boolean,
  *   isReadingLatest: (latest: undefined|null|object) => boolean,  // the reader is at `latest`
  *   onReadingLatest?: () => void,
@@ -31,10 +31,11 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
  *   older?: (current: () => boolean) => Promise<{status?: string}>,  // one older page, while `current()`
  *   present?: (current: () => boolean) => Promise<unknown>,  // the newest page, if not drawn, while `current()`
  *   delivered?: (id: string) => boolean,  // a drawn page holds this row
+ *   onNote?: () => void,  // every reading moment (a scroll edge, a paint, an arrival): read_ahead.js samples there
  * }} facts
  */
 export function createProjectReadReceipt({ read, isShown, isReadingLatest, onReadingLatest = () => {}, land = () => {},
-    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false }) {
+    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false, onNote = () => {} }) {
     let generation = 0;
     let coveredRevision = 0;
     let readingLatest = false;
@@ -66,7 +67,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
             : latest === null && !carried() && searched(recentRead.window);
     };
     // The unread opening lands once on the newest message, wherever it lies (DESIGN
-    // "Project unread dot"). While it is still to reach, the room's older pages are
+    // "Unread"). While it is still to reach, the room's older pages are
     // read for that opening alone, one at a time, re-reading what the newest recent
     // read and the pages name after each. The reader's own move, a question, the
     // room hidden or closed, a failed page or the chat's start ends it; a page
@@ -101,6 +102,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
     // Scroll edges report arrivals only; a discrete change (the page or the
     // window shown again, another newest message) reports the current position once.
     const note = ({ discrete = false } = {}) => {
+        onNote();
         const latest = isReadingLatest(newest());
         if (latest && (discrete || !readingLatest)) onReadingLatest();
         readingLatest = latest;
@@ -135,10 +137,12 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
         // is read again: a repaired source can name it without a new revision.
         // The current opening read consumes its landing even on a gap: a later
         // arrival must not inherit that navigation. Unknown/hidden content never lands.
+        // A fresh read takes only what arrived since the newest read, except while the
+        // newest message is unknown and unsearched: only the newest page can name it.
         async refresh({ revision = 0 } = {}) {
             const own = ++generation;
             const target = Math.max(0, Number(revision) || 0);
-            const readable = await read(target > coveredRevision);
+            const readable = await read(target > coveredRevision, newest() === null && !searched(recentRead.window));
             const covered = readable && newest() !== null;
             if (covered && target > coveredRevision) coveredRevision = target;
             if (own !== generation) return { painted: false, revision: target };
@@ -147,6 +151,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
             // Two frames cover layout followed by paint/composite.
             await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             const painted = own === generation && isShown();
+            if (painted) onNote();
             const atLatest = painted && isReadingLatest(newest());
             // A withheld read lowers the edge, so the next arrival retries it.
             if (painted && !atLatest) readingLatest = false;
@@ -159,6 +164,15 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
         recent({ window, coverage, recentVersion }) {
             recentRead = { window, coverage, recentVersion };
             if (newest() === null) coveredRevision = 0;
+        },
+        // Rows an `after_cursor` read added, once drawn: the newest message among them
+        // (`history_paging.latest_arrival` names it) is the room's newest, on the same
+        // recent read's bytes; none named leaves the newest as it was. A read that
+        // cannot name it never comes here (the newest page is read instead).
+        arrived(window) {
+            const named = window?.latest_message;
+            if (named) recentRead = { ...recentRead, window: { ...recentRead.window, latest_message: named } };
+            settle();
         },
         // An older page, once drawn, can show the newest message or, on a quiet
         // chain, name it, prove there is none or end the search unknown. The recent
@@ -178,7 +192,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
 // The feed the reader can see: its viewport less the chrome drawn over it, the
 // header above and the composer below; chrome covering it all leaves an empty
 // band, where nothing is on screen. Eviction keeps the whole viewport.
-function readBand(viewport, header, composer) {
+export function readBand(viewport, header, composer) {
     let { top, bottom } = viewport.getBoundingClientRect();
     if (header?.getClientRects?.().length) top = Math.max(top, header.getBoundingClientRect().bottom);
     if (composer?.getClientRects?.().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);
@@ -196,7 +210,7 @@ function shownBy(node) {
 
 /**
  * How far the feed moves to show the newest message when an unread room is opened
- * (DESIGN "Project unread dot"): it lands at the top of the read band, so what came
+ * (DESIGN "Unread"): it lands at the top of the read band, so what came
  * after it shows below. 0 when it is already on screen or no node of this page can
  * show it: absent (the bottom decides), unknown, or not loaded (the pager reaches it).
  *

@@ -483,3 +483,15 @@ def _normalize_path(path: str) -> str:
     while cleaned.startswith("./"):
         cleaned = cleaned[2:]
     return pathlib.PurePosixPath(cleaned).as_posix() if cleaned else ""
+
+
+def index_material() -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the index's frame over
+    placeholder facts, empty and filled, and one touched row with and without importers. Paths, sizes, symbols and
+    counts are data."""
+    row = {"path": "⟨path⟩", "size": 1, "language": "⟨language⟩", "sha256": "⟨sha⟩", "disposition": "⟨disposition⟩",
+           "symbols": ["⟨symbol⟩"], "symbols_total": 2, "imports": ["⟨module⟩"], "imports_total": 2}
+    facts = {"⟨path⟩": _FileFacts("⟨path⟩"), "⟨dir⟩/⟨file⟩": _FileFacts("⟨dir⟩/⟨file⟩", disposition="excluded_dir")}
+    return [_render_index_text({}, detail_paths=set(), touched_rows=[], importer_rows=[]),
+            _render_index_text(facts, detail_paths=set(), touched_rows=[row],
+                               importer_rows=[{**row, "imported_by": ["⟨path⟩"], "imported_by_total": 2}])]

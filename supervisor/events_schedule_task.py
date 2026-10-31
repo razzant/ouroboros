@@ -13,6 +13,7 @@ import functools
 import logging
 from typing import Any, Dict, Optional
 from ouroboros.headless_status import ARTIFACT_STATUS_FAILED
+from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.task_results import (
     STATUS_FAILED,
@@ -43,6 +44,7 @@ from supervisor.message_bus import coerce_chat_identity, notification_chat_route
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID
 from supervisor.task_dispatch import build_scheduled_task_payload as _build_scheduled_task_payload
 import uuid
+from types import SimpleNamespace
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +65,19 @@ def _events():
 VALID_SUBAGENT_MEMORY_MODES = frozenset({"forked", "empty"})
 
 
+def _subagent_room_mode(ctx: Any, task: dict) -> tuple[str, Optional[tuple[str, str]]]:
+    """A room removed during preparation retains the Project admission refusal."""
+    from ouroboros.settings_integrity import live_subagents_mode
+
+    try:
+        return live_subagents_mode(task=task, drive_root=ctx.DRIVE_ROOT), None
+    except ValueError as exc:
+        if not task.get("project_id"):
+            raise
+        return "", ("project_routing_fence_lookup_failed",
+                    f"Task not scheduled: Project state could not be checked: {exc}")
+
+
 def _cleanup_rejected_worktree(tid: str, result_fields: Dict[str, Any]) -> None:
     """Tear down a write surface provisioned for an acting subagent that is then
     rejected by a later gate, so rejected schedules never leak a worktree or an
@@ -75,12 +90,12 @@ def _cleanup_rejected_worktree(tid: str, result_fields: Dict[str, Any]) -> None:
     if not write_root:
         return
     try:
-        from ouroboros import subagent_worktrees
+        from ouroboros import genesis_project, subagent_worktrees
 
         if surface == "self_worktree":
             subagent_worktrees.remove_worktree(task_id=str(tid))
         elif surface == "genesis":
-            subagent_worktrees.remove_genesis_project(write_root)
+            genesis_project.remove_genesis_project(write_root, task_id=str(tid))
     except Exception:
         log.debug("Failed to clean up rejected acting write surface for %s", tid, exc_info=True)
 
@@ -237,9 +252,11 @@ def _active_cap_state(root: str, parent: Any, pending: list, running: dict, maxi
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None) -> None:
     """Admit one ``schedule_subagent`` request (the dispatcher's two-argument entry).
 
-    An acting child's workspace preparation leaves the event loop: the entry
-    hands the request to ``supervisor.workspace_preparation``, whose FIFO thread
-    calls back with ``preparation`` (its claim) to run these same gates there.
+    On the event loop the entry only claims the request in memory and hands it to
+    ``supervisor.workspace_preparation``, whose lane calls back with
+    ``preparation`` (its claim) to run these same gates there; a host without a
+    generation runs them inline. The gates compose the payload; its final
+    admission (``_admit_scheduled_payload``) runs on the admission lane.
     """
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
@@ -272,39 +289,33 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
     # Idempotency/ownership is checked before parsing for every scheduling role
     # so a malformed replay cannot terminalize an already-owned task id. Fresh
     # events still reach the typed depth rejection below before provisioning or
-    # enqueue; events without an explicit id use the normal fresh-id path.
+    # enqueue; events without an explicit id use the normal fresh-id path. A
+    # storage gap here is the claim's lane's to retry; inline it propagates.
     from supervisor.task_admission import subagent_schedule_preflight
-    try:
-        preflight = functools.partial(subagent_schedule_preflight,
-            ctx, evt, chat_id, delegation_role=delegation_role,
-            admission_token=getattr(preparation, "token", ""), defer_contention=True,
-        )
-        preflight_result = preflight() if preparation is None else preparation.store_gate(preflight)
-        if preflight_result:
-            return
-        from supervisor.task_admission import parse_schedule_task_depth
+    preflight = functools.partial(subagent_schedule_preflight,
+        ctx, evt, chat_id, delegation_role=delegation_role,
+        admission_token=getattr(preparation, "token", ""), defer_contention=True,
+    )
+    if preflight() if preparation is None else preparation.store_gate(preflight):
+        return
+    from supervisor.task_admission import parse_schedule_task_depth
 
-        parse_depth = functools.partial(parse_schedule_task_depth,
-            ctx,
-            evt,
-            tid=tid,
-            chat_id=chat_id,
-            delegation_role=delegation_role,
-            parent_id=parent_id,
-            root_task_id=root_task_id,
-            role=role,
-            desc=desc,
-            expected_output=expected_output,
-            constraints=constraints,
-            task_context=task_context,
-            preparation=preparation, defer_contention=True,
-        )
-        depth, depth_rejected = parse_depth() if preparation is None else preparation.store_gate(parse_depth)
-    except Exception as exc:
-        if preparation is None and workspace_preparation.store_contention(exc):
-            workspace_preparation.defer_schedule_event(ctx, {**evt, "task_id": tid})
-            return
-        raise
+    parse_depth = functools.partial(parse_schedule_task_depth,
+        ctx,
+        evt,
+        tid=tid,
+        chat_id=chat_id,
+        delegation_role=delegation_role,
+        parent_id=parent_id,
+        root_task_id=root_task_id,
+        role=role,
+        desc=desc,
+        expected_output=expected_output,
+        constraints=constraints,
+        task_context=task_context,
+        preparation=preparation, defer_contention=True,
+    )
+    depth, depth_rejected = parse_depth() if preparation is None else preparation.store_gate(parse_depth)
     if depth_rejected:
         return
     memory_mode = str(evt.get("memory_mode") or "").strip()
@@ -369,7 +380,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
                 workspace_mode=workspace_mode, base_sha=str(evt.get("base_sha") or ""),
                 parent_task_id=str(parent_id or ""), handle_out=handle_out)
 
-        # The copy runs on the caller's thread: the preparation FIFO, or (no
+        # The copy runs on the caller's thread: the preparation lane, or (no
         # generation executor) the historical inline path.
         resolved = resolve() if preparation is None else preparation.prepare(resolve)
         if resolved is None:
@@ -445,6 +456,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
         "parent_cognitive_route": parent_cognitive_route,
     }
     view = _gate_view(ctx, preparation)
+    parent_budget, count_roots, direct_child_count = {}, [], None
     if delegation_role == "subagent":
         parent_budget = _events()._parent_delegation_budget(
             view, parent_id, budget_drive_root or getattr(ctx, "DRIVE_ROOT", "")
@@ -454,8 +466,18 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
         if canonical_root and str(canonical_root) != str(count_roots[0]):
             count_roots.append(canonical_root)
         direct_child_count = _direct_child_count(count_roots, parent_id, tid)
+        room_mode, room_refusal = _subagent_room_mode(ctx, {
+            "id": parent_id, "root_task_id": root_task_id, "project_id": project_id, "chat_id": chat_id,
+            "metadata": {**(evt.get("origin_metadata") or {}),
+                         **{key: evt[key] for key in (PRESENCE_BINDING_AUTHORITY_KEY,) if key in evt}}})
+        if room_refusal:
+            reject(ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+                   parent_id=parent_id, root_task_id=root_task_id, role=role, result_fields=result_fields,
+                   reason_code=room_refusal[0], detail=room_refusal[1],
+                   extra_fields={"admission_outcome": "never_admitted"})
+            return
         rights = check_delegation_admission(
-            parent_budget,
+            parent_budget, room_mode=room_mode,
             direct_child_count=direct_child_count,
         )
         # An unknown count is the interlocked re-check's to decide (it defers contention).
@@ -604,259 +626,244 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
             fallback_message=f"⚠️ Task {tid} not scheduled: worker pool unavailable.",
         )
         return
+    if not desc:
+        return
+    request = SimpleNamespace(
+        evt=evt, tid=tid, chat_id=chat_id, desc=desc, expected_output=expected_output, constraints=constraints,
+        role=role, task_context=task_context, parent_id=parent_id, root_task_id=root_task_id,
+        session_id=session_id, actor_id=actor_id, delegation_role=delegation_role, memory_mode=memory_mode,
+        drive_root=drive_root, child_drive_root=child_drive_root, budget_drive_root=budget_drive_root,
+        root_cost_ceiling_usd=root_cost_ceiling_usd, task_constraint=task_constraint,
+        workspace_root=workspace_root, workspace_mode=workspace_mode, workspace_copy=workspace_copy,
+        allowed_resources=allowed_resources, task_contract=task_contract, depth=depth, max_depth=max_depth,
+        result_fields=result_fields, intent=intent, requested_model_lane=requested_model_lane,
+        task_group_id=task_group_id, task_group=task_group, subagent_envelope=subagent_envelope,
+        configured_subagent=configured_subagent, parent_cognitive_route=parent_cognitive_route,
+        required_capabilities=required_capabilities, project_id=project_id, project_basis=project_basis,
+        parent_budget=parent_budget, count_roots=count_roots, direct_child_count=direct_child_count,
+        reconciliation_inputs=reconciliation_inputs, reject=reject)
+    step = functools.partial(_admit_scheduled_payload, ctx, preparation, request)
+    if preparation is None:
+        step()
+    else:
+        preparation.admit(step)
 
-    if desc:
-        from supervisor.queue import PENDING as QUEUE_PENDING, RUNNING as QUEUE_RUNNING
-        pending_ref = getattr(ctx, "PENDING", QUEUE_PENDING)  # the live list admission may roll back
-        pending_view = getattr(view, "PENDING", pending_ref)
-        running_view = getattr(view, "RUNNING", QUEUE_RUNNING)
-        max_active = get_max_active_subagents_per_root()
-        queued_behind_active_cap = False
-        if delegation_role == "subagent":
+
+def _admitted_cognitive_route(ctx: Any, r: SimpleNamespace) -> Optional[dict]:
+    """Reject a malformed new carrier through the ordinary admission rollback."""
+    from ouroboros.subagent_runtime import SubagentSelectionError
+    from ouroboros.supervisor_route import validate_cognitive_route
+
+    try:
+        return validate_cognitive_route(r.parent_cognitive_route)
+    except SubagentSelectionError as exc:
+        r.reject(ctx, tid=r.tid, chat_id=r.chat_id, delegation_role=r.delegation_role,
+                 parent_id=r.parent_id, root_task_id=r.root_task_id, role=r.role,
+                 result_fields=r.result_fields, detail=exc.detail, reason_code=exc.code)
+        return None
+
+
+def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> None:
+    """The composed request's final admission: the receipt-then-put interlock, its refusals, the
+    scheduled notice and the snapshot. On a claim this runs on the admission lane."""
+    from supervisor.queue import PENDING as QUEUE_PENDING, RUNNING as QUEUE_RUNNING
+    from supervisor.task_admission import enqueue_subagent_with_scheduled_result, scheduled_admission_rejection
+
+    cognitive_route = _admitted_cognitive_route(ctx, r)
+    if cognitive_route is None:
+        return
+    tid, delegation_role, root_task_id, parent_id, role = r.tid, r.delegation_role, r.root_task_id, r.parent_id, r.role
+    view = _gate_view(ctx, preparation)
+    pending_ref = getattr(ctx, "PENDING", QUEUE_PENDING)  # the live list admission may roll back
+    pending_view = getattr(view, "PENDING", pending_ref)
+    running_view = getattr(view, "RUNNING", QUEUE_RUNNING)
+    max_active = get_max_active_subagents_per_root()
+    queued_behind_active_cap = False
+    if delegation_role == "subagent":
+        queued_behind_active_cap, detail = _active_cap_state(
+            root_task_id, parent_id, pending_view, running_view, max_active)
+        if detail:
+            log.warning("Rejected subagent due to hard active child cap: root=%s desc=%s", root_task_id, r.desc[:100])
+            r.reject(ctx, tid=tid, chat_id=r.chat_id, delegation_role=delegation_role, parent_id=parent_id,
+                     root_task_id=root_task_id, role=role, result_fields=r.result_fields, detail=detail,
+                     reason_code="active_subagent_hard_cap")
+            return
+
+    # Assignment, not admission, proves achieved depth.
+    admitted_task_contract, admitted_depth_provenance = stamp_depth_provenance(
+        r.task_contract, attempted_depth=r.depth, max_depth=r.max_depth, achieved_depth=None)
+    text = _compose_subagent_text(
+        r.desc, role=role, expected_output=r.expected_output, constraints=r.constraints, context=r.task_context,
+        task_constraint=r.task_constraint,
+        delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
+    ) if delegation_role == "subagent" else r.desc
+    evt = r.evt
+    task = _build_scheduled_task_payload({
+        "tid": tid, "chat_id": r.chat_id, "text": text, "desc": r.desc, "expected_output": r.expected_output,
+        "constraints": r.constraints, "role": role, "task_context": r.task_context, "depth": r.depth,
+        "root_task_id": root_task_id, "session_id": r.session_id, "actor_id": r.actor_id,
+        "delegation_role": delegation_role, "memory_mode": r.memory_mode, "drive_root": r.drive_root,
+        "child_drive_root": r.child_drive_root, "budget_drive_root": r.budget_drive_root,
+        "root_cost_ceiling_usd": r.root_cost_ceiling_usd, "task_constraint": r.task_constraint,
+        "workspace_root": r.workspace_root, "workspace_mode": r.workspace_mode,
+        "parent_workspace": evt.get("parent_workspace"),
+        **({"workspace_copy": r.workspace_copy} if r.workspace_copy else {}),
+        **{key: evt[key] for key in ("directory_strategy", "scope_paths", "execution_timeout_sec") if key in evt},
+        "project_id": r.project_id, "allowed_resources": r.allowed_resources,
+        "task_contract": admitted_task_contract, "depth_provenance": admitted_depth_provenance,
+        "required_capabilities": r.required_capabilities, "model_lane": r.requested_model_lane,
+        **r.intent, "task_group_id": r.task_group_id, "task_group": r.task_group,
+        "subagent_envelope": r.subagent_envelope, "configured_subagent": r.configured_subagent,
+        "parent_cognitive_route": cognitive_route, "parent_id": parent_id,
+        "origin_metadata": evt.get("origin_metadata"),
+        **({"presence_binding_authority": evt["presence_binding_authority"]}
+           if "presence_binding_authority" in evt else {}),
+    })
+    if r.project_basis is not None:
+        task["_project_admission"] = r.project_basis
+    direct_child_count = r.direct_child_count
+    scheduled_failure_reason = scheduled_failure_detail = ""
+    persist_scheduled_failure = False
+    if delegation_role == "subagent":
+        from ouroboros.tools.control_delegation import effective_delegation_budget
+        from supervisor import workspace_preparation
+
+        room_mode = "auto"
+        room_refusal = None
+
+        def durable_child_count() -> Any:
+            # Read on the lane, outside Q: the declared rights stay the same, current
+            # counts cannot be borrowed from the pre-preparation queue snapshot.
+            nonlocal direct_child_count, room_mode, room_refusal
+            room_mode, room_refusal = _subagent_room_mode(ctx, task)
+            if room_refusal:
+                return direct_child_count
+            direct_child_count = _direct_child_count(
+                r.count_roots, parent_id, tid,
+                propagate_contention=preparation is not None or not workspace_preparation._requests_preparation(evt))
+            return direct_child_count
+
+        def recheck_child_admission(count: Any) -> tuple[str, str]:
+            # Under Q, memory only, with the count the lane read.
+            nonlocal queued_behind_active_cap
+            if room_refusal:
+                return room_refusal
+            rights = check_delegation_admission(r.parent_budget, direct_child_count=count, room_mode=room_mode)
+            if not rights.ok:
+                return rights.reason_code, f"Subagent rejected: {rights.reason_code}: {rights.detail}"
+            running = getattr(ctx, "RUNNING", QUEUE_RUNNING)
+            if r.reconciliation_inputs is not None:
+                decision = effective_delegation_budget(
+                    admitted_task_contract.get("delegation_budget", {}), **r.reconciliation_inputs,
+                    active_child_count=_active_subagent_count(root_task_id, pending_ref, running))
+                if not decision.ok:
+                    return decision.reason_code, f"Subagent rejected: {decision.reason_code}: {decision.detail}"
             queued_behind_active_cap, detail = _active_cap_state(
-                root_task_id, parent_id, pending_view, running_view, max_active)
-            if detail:
-                log.warning("Rejected subagent due to hard active child cap: root=%s desc=%s", root_task_id, desc[:100])
-                reject(
-                    ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
-                    parent_id=parent_id, root_task_id=root_task_id, role=role,
-                    result_fields=result_fields, detail=detail,
-                )
-                return
+                root_task_id, parent_id, pending_ref, running, get_max_active_subagents_per_root())
+            return ("active_subagent_hard_cap" if detail else ""), detail
 
-        # Assignment, not admission, proves achieved depth.
-        admitted_task_contract, admitted_depth_provenance = stamp_depth_provenance(
-            task_contract,
-            attempted_depth=depth,
-            max_depth=max_depth,
-            achieved_depth=None,
+        (admitted, scheduled_failure_reason, scheduled_failure_detail, persist_scheduled_failure,
+         ) = enqueue_subagent_with_scheduled_result(
+            ctx, task, result_fields=r.result_fields, admitted_task_contract=admitted_task_contract,
+            admitted_depth_provenance=admitted_depth_provenance, direct_child_count=direct_child_count,
+            pending_ref=pending_ref, preparation=preparation, recheck_child_admission=recheck_child_admission,
+            durable_child_count=durable_child_count,
+            transition_id=evt.setdefault("_scheduled_transition_id", uuid.uuid4().hex),
         )
-        text = _compose_subagent_text(
-            desc,
-            role=role,
-            expected_output=expected_output,
-            constraints=constraints,
-            context=task_context,
-            task_constraint=task_constraint,
-            delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
-        ) if delegation_role == "subagent" else desc
-        task = _build_scheduled_task_payload({
-            "tid": tid,
-            "chat_id": chat_id,
-            "text": text,
-            "desc": desc,
-            "expected_output": expected_output,
-            "constraints": constraints,
-            "role": role,
-            "task_context": task_context,
-            "depth": depth,
-            "root_task_id": root_task_id,
-            "session_id": session_id,
-            "actor_id": actor_id,
-            "delegation_role": delegation_role,
-            "memory_mode": memory_mode,
-            "drive_root": drive_root,
-            "child_drive_root": child_drive_root,
-            "budget_drive_root": budget_drive_root,
-            "root_cost_ceiling_usd": root_cost_ceiling_usd,
-            "task_constraint": task_constraint,
-            "workspace_root": workspace_root,
-            "workspace_mode": workspace_mode,
-            "parent_workspace": evt.get("parent_workspace"),
-            **({"workspace_copy": workspace_copy} if workspace_copy else {}),
-            **{key: evt[key] for key in ("directory_strategy", "scope_paths", "execution_timeout_sec") if key in evt},
-            "project_id": project_id,
-            "allowed_resources": allowed_resources,
-            "task_contract": admitted_task_contract,
-            "depth_provenance": admitted_depth_provenance,
-            "required_capabilities": required_capabilities,
-            "model_lane": requested_model_lane,
-            **intent,
-            "task_group_id": task_group_id,
-            "task_group": task_group,
-            "subagent_envelope": subagent_envelope,
-            "configured_subagent": configured_subagent,
-            "parent_cognitive_route": parent_cognitive_route,
-            "parent_id": parent_id,
-            "origin_metadata": evt.get("origin_metadata"),
-            **({"presence_binding_authority": evt["presence_binding_authority"]}
-               if "presence_binding_authority" in evt else {}),
-        })
-        if project_basis is not None:
-            task["_project_admission"] = project_basis
-        scheduled_failure_reason = ""
-        scheduled_failure_detail = ""
-        persist_scheduled_failure = False
-        if delegation_role == "subagent":
-            from supervisor.task_admission import enqueue_subagent_with_scheduled_result
-
-            def recheck_child_admission() -> tuple[str, str, Any]:
-                # Called under the enqueue/receipt interlock with no store wait.
-                # The declared rights/constraints stay the same; current counts
-                # cannot be borrowed from the pre-preparation queue snapshot.
-                nonlocal direct_child_count, queued_behind_active_cap
-                direct_child_count = _direct_child_count(
-                    count_roots, parent_id, tid,
-                    propagate_contention=preparation is not None or not workspace_preparation._requests_preparation(evt))
-                rights = check_delegation_admission(parent_budget, direct_child_count=direct_child_count)
-                if not rights.ok:
-                    return rights.reason_code, f"Subagent rejected: {rights.reason_code}: {rights.detail}", direct_child_count
-                running = getattr(ctx, "RUNNING", QUEUE_RUNNING)
-                if reconciliation_inputs is not None:
-                    decision = effective_delegation_budget(
-                        admitted_task_contract.get("delegation_budget", {}), **reconciliation_inputs,
-                        active_child_count=_active_subagent_count(root_task_id, pending_ref, running))
-                    if not decision.ok:
-                        return decision.reason_code, f"Subagent rejected: {decision.reason_code}: {decision.detail}", direct_child_count
-                queued_behind_active_cap, detail = _active_cap_state(
-                    root_task_id, parent_id, pending_ref, running, get_max_active_subagents_per_root())
-                return ("active_subagent_hard_cap" if detail else ""), detail, direct_child_count
-
-            (
-                admitted,
-                scheduled_failure_reason,
-                scheduled_failure_detail,
-                persist_scheduled_failure,
-            ) = enqueue_subagent_with_scheduled_result(
-                ctx,
-                task,
-                result_fields=result_fields,
-                admitted_task_contract=admitted_task_contract,
-                admitted_depth_provenance=admitted_depth_provenance,
-                direct_child_count=direct_child_count,
-                pending_ref=pending_ref,
-                preparation=preparation,
-                recheck_child_admission=recheck_child_admission,
-                # The readonly resolver is pure; no copy/side effect preceded this interlock.
-                defer_contention=preparation is None and not workspace_preparation._requests_preparation(evt),
-                transition_id=evt.setdefault("_scheduled_transition_id", uuid.uuid4().hex),
-            )
-        else:
-            admitted = ctx.enqueue_task(task)
-        if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
-            from supervisor.task_admission import scheduled_admission_rejection
-
-            reject(
-                ctx,
-                tid=tid,
-                chat_id=chat_id,
-                delegation_role=delegation_role,
-                parent_id=parent_id,
-                root_task_id=root_task_id,
-                role=role,
-                result_fields=result_fields,
-                **scheduled_admission_rejection(
-                    admitted, project_id=project_id, root_task_id=root_task_id,
-                ),
-            )
+    else:
+        admitted = ctx.enqueue_task(task)
+    if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
+        r.reject(ctx, tid=tid, chat_id=r.chat_id, delegation_role=delegation_role, parent_id=parent_id,
+                 root_task_id=root_task_id, role=role, result_fields=r.result_fields,
+                 **scheduled_admission_rejection(admitted, project_id=r.project_id, root_task_id=root_task_id))
+        return
+    if isinstance(admitted, dict) and admitted.get("_admission_uncertain"):
+        ctx.persist_queue_snapshot(reason="schedule_subagent_receipt_unconfirmed")
+        log.warning("%s: %s", tid, admitted["_admission_uncertain"])
+        return
+    if scheduled_failure_reason:
+        if scheduled_failure_reason == "scheduled_event_replay":
+            if preparation is not None:
+                preparation.abandon()  # another owner holds the row: free only this token's copy
             return
-        if isinstance(admitted, dict) and admitted.get("_admission_uncertain"):
-            ctx.persist_queue_snapshot(reason="schedule_subagent_receipt_unconfirmed")
-            log.warning("%s: %s", tid, admitted["_admission_uncertain"])
-            return
-        if scheduled_failure_reason == "schedule_observation_pending":
-            workspace_preparation.defer_schedule_event(ctx, {**evt, "task_id": tid})
-            return
-        if scheduled_failure_reason:
-            if scheduled_failure_reason == "scheduled_event_replay":
-                if preparation is not None:
-                    preparation.abandon()  # another owner holds the row: free only this token's copy
-                return
-            result_fields["delegation_admission"] = {
-                "status": "rejected",
-                "reason_code": scheduled_failure_reason,
-                "direct_child_count": direct_child_count,
-            }
-            reject(
-                ctx,
-                tid=tid,
-                chat_id=chat_id,
-                delegation_role=delegation_role,
-                parent_id=parent_id,
-                root_task_id=root_task_id,
-                role=role,
-                result_fields=result_fields,
-                detail=scheduled_failure_detail,
-                reason_code=scheduled_failure_reason,
-                persist_result=persist_scheduled_failure,
-            )
-            ctx.persist_queue_snapshot(reason="schedule_subagent_receipt_rollback")
-            return
-        if delegation_role == "subagent" and queued_behind_active_cap:
-            _record_delegation_constraint(
-                root_task_id, task_id=tid, role=role, directive="cap_children",
-                scope={"max_children": max_active},
-                rationale=f"Queued behind active subagent cap {max_active}; wait for a slot before additional fan-out.",
-                advisory=True,
-            )
-        if delegation_role != "subagent":
-            result_fields["task_contract"] = admitted_task_contract
-            result_fields["depth_provenance"] = admitted_depth_provenance
-            try:
-                write_task_result(
-                    ctx.DRIVE_ROOT,
-                    tid,
-                    STATUS_SCHEDULED,
-                    **result_fields,
-                    result="Task accepted and scheduled.",
-                )
-            except Exception:
-                log.warning("Failed to persist scheduled task status for %s", tid, exc_info=True)
-        progress_meta = {
-            "root_task_id": root_task_id,
-            "parent_task_id": parent_id,
-            "delegation_role": delegation_role,
-            "task_group_id": task_group_id,
-            "required_capabilities": required_capabilities,
-            "requested_model_lane": requested_model_lane,
-            # v6.82 (P5): host-attested cancelability, ROOTS ONLY. Every task
-            # admitted here is a supervisor-queue task the cancel endpoint can
-            # reach, but the marker exists to gate the ROOT card's "Cancel run"
-            # button — a subagent row must never carry it (its card is a child
-            # card, and a lineage-less replay of a marked child row could mint a
-            # root-shaped card with a live Cancel). Direct-chat turns never pass
-            # through this path (or RUNNING).
-            "cancelable": delegation_role != "subagent",
+        r.result_fields["delegation_admission"] = {
+            "status": "rejected", "reason_code": scheduled_failure_reason, "direct_child_count": direct_child_count,
         }
-        view = _gate_view(ctx, preparation)
-        if delegation_role == "subagent":
-            progress_meta.update(_subagent_scheduled_meta(
-                tid=tid, role=role, task_constraint=task_constraint,
-                task_group_id=task_group_id, requested_model_lane=requested_model_lane,
-                active_subagent_count=_active_subagent_count(
-                    root_task_id, getattr(view, "PENDING", pending_ref), getattr(view, "RUNNING", running_view)),
-                max_active_subagents=max_active,
-            ))
-            if queued_behind_active_cap:
-                progress_meta["queued_behind_active_cap"] = True
-        else:
-            progress_meta["task_event"] = "scheduled"
-        workers = getattr(view, "WORKERS", {}) or {}
-        from supervisor import workers as pool
-        active = [w for w in workers.values() if getattr(w, "active_capacity", True)]
-        if len(active) >= pool.MAX_WORKERS and all(getattr(w, "busy_task_id", None) for w in active):
-            progress_meta["worker_saturation_warning"] = True
-            suffix = " (all workers are currently busy; it will start when one is free)"
-        else:
-            suffix = ""
-        if delegation_role == "subagent" and queued_behind_active_cap:
-            suffix = (
-                f" (queued behind active subagent cap {max_active}; it will start when a slot frees)"
-            )
-        # A subagent's scheduled notice routes to its root project thread by lineage (C4.4); else its own chat, the hidden partition included (membership, not truthiness).
-        _notice_chat = notification_chat_route(
-            (_bound_project_chat_id(ctx, tid, parent_id, root_task_id) or None)
-            if delegation_role == "subagent" else None,
-            chat_id,
+        r.reject(ctx, tid=tid, chat_id=r.chat_id, delegation_role=delegation_role, parent_id=parent_id,
+                 root_task_id=root_task_id, role=role, result_fields=r.result_fields,
+                 detail=scheduled_failure_detail, reason_code=scheduled_failure_reason,
+                 persist_result=persist_scheduled_failure)
+        ctx.persist_queue_snapshot(reason="schedule_subagent_receipt_rollback")
+        return
+    if delegation_role == "subagent" and queued_behind_active_cap:
+        _record_delegation_constraint(
+            root_task_id, task_id=tid, role=role, directive="cap_children",
+            scope={"max_children": max_active},
+            rationale=f"Queued behind active subagent cap {max_active}; wait for a slot before additional fan-out.",
+            advisory=True,
         )
-        # A LIVE toast needs a chat a human reads. The hidden partition has none,
-        # and a headless run's progress log is a benchmark trajectory input, so a
-        # host toast there would be published as the agent's own narration. The
-        # durable record still keeps the true address (row_chat_identity).
-        if _notice_chat is not None and _notice_chat != HIDDEN_CHAT_ID:
-            ctx.send_with_budget(
-                _notice_chat,
-                f"🗓️ Scheduled subagent {tid}{' (' + role + ')' if role else ''}: {desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {desc}",
-                is_progress=True, task_id=tid, progress_meta=progress_meta,
-                role="system", system_type="task_scheduled")
-        ctx.persist_queue_snapshot(reason="schedule_subagent_event")
+    if delegation_role != "subagent":
+        r.result_fields["task_contract"] = admitted_task_contract
+        r.result_fields["depth_provenance"] = admitted_depth_provenance
+        try:
+            write_task_result(ctx.DRIVE_ROOT, tid, STATUS_SCHEDULED, **r.result_fields,
+                              result="Task accepted and scheduled.")
+        except Exception:
+            log.warning("Failed to persist scheduled task status for %s", tid, exc_info=True)
+    progress_meta = {
+        "root_task_id": root_task_id,
+        "parent_task_id": parent_id,
+        "delegation_role": delegation_role,
+        "task_group_id": r.task_group_id,
+        "required_capabilities": r.required_capabilities,
+        "requested_model_lane": r.requested_model_lane,
+        # v6.82 (P5): host-attested cancelability, ROOTS ONLY. Every task
+        # admitted here is a supervisor-queue task the cancel endpoint can
+        # reach, but the marker exists to gate the ROOT card's "Cancel run"
+        # button — a subagent row must never carry it (its card is a child
+        # card, and a lineage-less replay of a marked child row could mint a
+        # root-shaped card with a live Cancel). Direct-chat turns never pass
+        # through this path (or RUNNING).
+        "cancelable": delegation_role != "subagent",
+    }
+    view = _gate_view(ctx, preparation)
+    if delegation_role == "subagent":
+        progress_meta.update(_subagent_scheduled_meta(
+            tid=tid, role=role, task_constraint=r.task_constraint,
+            task_group_id=r.task_group_id, requested_model_lane=r.requested_model_lane,
+            active_subagent_count=_active_subagent_count(
+                root_task_id, getattr(view, "PENDING", pending_ref), getattr(view, "RUNNING", running_view)),
+            max_active_subagents=max_active,
+        ))
+        progress_meta["parent_cognitive_route"] = cognitive_route
+        if queued_behind_active_cap:
+            progress_meta["queued_behind_active_cap"] = True
+    else:
+        progress_meta["task_event"] = "scheduled"
+    workers = getattr(view, "WORKERS", {}) or {}
+    from supervisor import workers as pool
+    active = [w for w in workers.values() if getattr(w, "active_capacity", True)]
+    if len(active) >= pool.MAX_WORKERS and all(getattr(w, "busy_task_id", None) for w in active):
+        progress_meta["worker_saturation_warning"] = True
+        suffix = " (all workers are currently busy; it will start when one is free)"
+    else:
+        suffix = ""
+    if delegation_role == "subagent" and queued_behind_active_cap:
+        suffix = f" (queued behind active subagent cap {max_active}; it will start when a slot frees)"
+    # A subagent's scheduled notice routes to its root project thread by lineage (C4.4); else its own chat, the hidden partition included (membership, not truthiness).
+    _notice_chat = notification_chat_route(
+        (_bound_project_chat_id(ctx, tid, parent_id, root_task_id) or None)
+        if delegation_role == "subagent" else None,
+        r.chat_id,
+    )
+    # A LIVE toast needs a chat a human reads. The hidden partition has none,
+    # and a headless run's progress log is a benchmark trajectory input, so a
+    # host toast there would be published as the agent's own narration. The
+    # durable record still keeps the true address (row_chat_identity).
+    if _notice_chat is not None and _notice_chat != HIDDEN_CHAT_ID:
+        ctx.send_with_budget(
+            _notice_chat,
+            f"🗓️ Scheduled subagent {tid}{' (' + role + ')' if role else ''}: {r.desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {r.desc}",
+            is_progress=True, task_id=tid, progress_meta=progress_meta,
+            role="system", system_type="task_scheduled")
+    ctx.persist_queue_snapshot(reason="schedule_subagent_event")

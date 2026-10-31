@@ -126,7 +126,12 @@ def test_declared_child_excludes_prior_carriers_keeps_authority_and_restarts(
 @pytest.mark.parametrize("options", [{}, {"input_sources": "shared"}])
 def test_ordinary_child_keeps_parent_context_notes_and_attachment_route(registry, monkeypatch, options):
     import ouroboros.tools.control_scheduling as scheduling
+    from ouroboros.task_results import write_task_result
 
+    before = copy.deepcopy(registry._ctx.task_contract)
+    previous = before["predecessor_authority"]
+    write_task_result(registry._ctx.drive_root, "previous", "completed",
+                      result=previous["result"], task_contract=previous["task_contract"])
     calls = []
     def inherit(parent, *_args, **_kwargs):
         calls.append(parent)
@@ -140,9 +145,17 @@ def test_ordinary_child_keeps_parent_context_notes_and_attachment_route(registry
     assert contract["context"] == "PREVIOUS_CASE_CONTEXT"
     assert contract["notes"] == "PREVIOUS_CASE_NOTES"
     assert contract["review_notes"] == "PREVIOUS_CASE_REVIEW"
-    assert "PREVIOUS_CASE_RESULT" in json.dumps(contract["predecessor_authority"])
-    assert contract["predecessor_authority"]["task_contract"] == registry._ctx.task_contract[
-        "predecessor_authority"]["task_contract"]
+    brief = contract["predecessor_authority"]
+    assert brief["source"] == previous["source"]
+    assert brief["authority_sha256"] == previous["authority_sha256"]
+    for key in ("result", "task_contract", "verification_receipts"):
+        assert key not in brief and brief["omitted_fields"][key] > 0
+    assert registry._ctx.task_contract == before
+    saved = json.loads(control._get_task_result(registry._ctx, brief["task_id"],
+                                                include_authority=True))["authority"]
+    assert saved["result"] == previous["result"]
+    assert saved["task_contract"]["context"] == previous["task_contract"]["context"]
+    assert saved["task_contract"]["constraints"] == previous["task_contract"]["constraints"]
     assert "PREVIOUS_CASE_RECEIPT" not in json.dumps(contract)
     assert event["context"] == "CHILD_REFERENCE"
     assert ("input_sources" in contract) == bool(options)

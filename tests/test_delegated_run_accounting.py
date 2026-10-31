@@ -520,24 +520,36 @@ def test_an_unreported_token_count_is_unknown_not_zero(tmp_path, monkeypatch):
     assert silent["cached_tokens"] is None, "and the third field obeys the same sentence"
 
     _, real_zero, _ = _settled_run(tmp_path / "zero", monkeypatch, {
-        "state": "succeeded", "spendUsd": 0, "inputTokens": 0, "outputTokens": 0,
-        "cachedInputTokens": 0})
+        "state": "succeeded", "spendUsd": 0, "inputTokens": 0, "outputTokens": 0, "cachedInputTokens": 0,
+        "inputTokenUsage": {"total_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}})
     assert real_zero["prompt_tokens"] == 0 and real_zero["completion_tokens"] == 0, \
         "a disclosed zero is a fact and must survive as 0, not become None"
     assert real_zero["cached_tokens"] == 0
 
+    # A harness's own counters differ in meaning (this one counts the uncached rest, 10, beside
+    # 34.8M cache reads); the ledger's input axes are its normalized split, a direct call's meaning.
+    harness = {"inputTokens": 10, "outputTokens": 5, "cachedInputTokens": 34808493}
     _, counted, _ = _settled_run(tmp_path / "counted", monkeypatch, {
-        "state": "succeeded", "spendUsd": 0, "inputTokens": 10, "outputTokens": 5,
-        "cachedInputTokens": 34808493})
-    assert (counted["prompt_tokens"], counted["completion_tokens"]) == (10, 5)
-    assert counted["cached_tokens"] == 34808493, \
+        "state": "succeeded", "spendUsd": 0, **harness,
+        "inputTokenUsage": {"total_tokens": 34808503, "cache_read_tokens": 34808493, "cache_write_tokens": None}})
+    assert (counted["prompt_tokens"], counted["completion_tokens"]) == (34808503, 5)
+    assert counted["cached_tokens"] == 34808493 and counted["cache_write_tokens"] is None, \
         "a reported cache hit is real usage and must reach the ledger, not be dropped"
-    # It reaches the reader that renders it, and is NOT folded into the grand total —
-    # required, because cached is a SUBSET of input for some harnesses and disjoint for
-    # others, so a sum across them means nothing.
+    assert counted["harness_tokens"] == {"prompt_tokens": 10, "cached_tokens": 34808493}
+    # It reaches the reader that renders it, and is NOT folded into the grand total:
+    # cached is a part of the whole input, which the total already counts.
     bucket = ua.usage_breakdown(tmp_path / "counted")
     assert bucket["cached_tokens"] == 34808493
-    assert bucket["total_tokens"] == 15
+    assert bucket["total_tokens"] == 34808508
+
+    _, unsplit, _ = _settled_run(tmp_path / "unsplit", monkeypatch, {"state": "succeeded", "spendUsd": 0, **harness})
+    assert unsplit["prompt_tokens"] is None and unsplit["cached_tokens"] is None, \
+        "without the split the input is unknown, never a harness counter of another meaning"
+    assert unsplit["completion_tokens"] == 5 and unsplit["harness_tokens"] == counted["harness_tokens"]
+    from supervisor.state import reconstruct_task_cost
+    task = reconstruct_task_cost("t-a", fields=True, drive_root=tmp_path / "unsplit")
+    assert task["prompt_tokens"] is None and task["completion_tokens"] == 5, "the task total keeps unknown, never 0"
+    assert reconstruct_task_cost("t-a", fields=True, drive_root=tmp_path / "counted")["prompt_tokens"] == 34808503
 
 
 def test_the_start_request_asks_for_the_substrate_it_claims(tmp_path, monkeypatch):
@@ -607,10 +619,11 @@ def test_a_202_handle_without_a_run_id_is_a_live_run_not_a_failure(tmp_path, mon
 
 def test_a_failed_ledger_write_leaves_the_session_retryable(tmp_path, monkeypatch):
     """The ledger lock can time out under worker concurrency. That is a transient, not a
-    decision — marking custody settled would burn the only chance to record the row."""
+    decision: an explicit wait retries owed money even when output is already retained."""
     import ouroboros.tools.delegate as delegate
     import ouroboros.usage_accounting as ua
     from ouroboros.gateways import claudexor as gw
+    from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
     from ouroboros.tools.registry import ToolContext
 
     retired = []
@@ -637,17 +650,24 @@ def test_a_failed_ledger_write_leaves_the_session_retryable(tmp_path, monkeypatc
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a"}
 
-    json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    failed = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    assert failed["output_delivery"]["complete"] and not failed["settlement"]["settled"]
     assert custody.settled is False, "a lost write must stay retryable"
+    pending = dcust.replay(tmp_path)["run-1"]
+    assert not pending.settled and not pending.ledger_recorded
+    assert not [row for row in ledger_rows(tmp_path) if row.get("kind") == "subscription_session"]
     assert retired == [], "failed accounting must preserve the continuation's project"
     monkeypatch.setattr(ua, "record_subscription_session", record_session)
+    assert not retained_terminal_result(ctx, "run-1")["settlement"]["settled"], "a plain read does not retry money"
     ready = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
-    assert ready["output_delivery"]["complete"] and not ready["settlement"]["settled"]
-    assert not dcust.replay(tmp_path)["run-1"].settled
-    dcust.release_task_runs(tmp_path, "t-a", gateway_factory=_Stub)
+    assert ready["output_delivery"]["complete"] and ready["settlement"]["settled"]
+    assert ready["settlement"]["ledger_recorded"] and not ready["settlement"]["project_retired"]
     custody = dcust.replay(tmp_path)["run-1"]
-    assert custody.settled is True
+    assert custody.settled and custody.ledger_recorded
+    assert custody.project_id == "prj-ours" and custody.project_owned
     sessions = [row for row in ledger_rows(tmp_path) if row.get("kind") == "subscription_session"]
     assert len(sessions) == 1 and sessions[0]["cost_final"] is True
+    dcust.release_task_runs(tmp_path, "t-a", gateway_factory=_Stub)
+    assert [row for row in ledger_rows(tmp_path) if row.get("kind") == "subscription_session"] == sessions
     assert retired == [], "successful retry still defers retirement to the owner-line sweep"
     delegate._CUSTODY.clear()

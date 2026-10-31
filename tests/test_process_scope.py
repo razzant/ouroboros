@@ -108,14 +108,16 @@ def test_census_reads_pid_pgid_birth_and_visible_markers():
         _end(child)
 
 
-@pytest.mark.skipif(not _pl.IS_MACOS, reason="the SIP finding is a macOS fact")
-def test_on_macos_a_platform_binary_shows_no_environment_so_the_marker_alone_is_blind():
+@pytest.mark.skipif(not _pl.IS_MACOS, reason="native macOS process observation")
+def test_on_macos_a_platform_binary_keeps_its_identity_with_either_marker_visibility():
     marker = ps.mint_marker(ps.TASK_SCOPE_PREFIX)
     child = _sleeper({marker: "1"}, argv=["/bin/sleep", "120"])
     try:
         rows = ps.census([marker])
         assert rows is not None and child.pid in rows
-        assert marker not in (rows[child.pid].markers or set()), "env invisible: the group is the only source"
+        row = rows[child.pid]
+        assert row.pgid == child.pid and row.birth == ps.measure_birth(child.pid)
+        assert row.markers in (set(), {marker})  # visibility depends on this host's protection policy
     finally:
         _end(child)
 

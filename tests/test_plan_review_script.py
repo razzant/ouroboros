@@ -113,12 +113,39 @@ def test_run_plan_review_script_has_no_personal_key_fallback():
     assert "file1.txt" not in text
 
 
-def test_run_plan_review_script_has_only_the_new_form_flags():
+def test_run_plan_review_script_has_only_the_new_form_flags(monkeypatch, capsys):
     import pathlib
+    import sys
+
+    import pytest
 
     repo = pathlib.Path(__file__).resolve().parents[1]
-    text = (repo / "scripts" / "run_plan_review.py").read_text(encoding="utf-8")
-    for flag in ("--goal", "--plan", "--done-when-json", "--affected-path", "--attach", "--ask", "--message", "--dry-run"):
-        assert flag in text
+    script = _load_script_module(repo)
+    received = []
+    monkeypatch.setattr(script, "_load_settings_into_env", lambda: None)
+    monkeypatch.setattr(script, "_run", lambda args: received.append(vars(args)) or "parsed")
+    monkeypatch.setattr(sys, "argv", [
+        "run_plan_review.py", "--goal", "goal", "--plan", "plan.md",
+        "--done-when-json", "outcomes.json", "--affected-path", "a.py", "--affected-path", "b.py",
+        "--attach", "notes.txt", "--attach", "task:evidence", "--ask", "council",
+        "--message", "review this", "--dry-run",
+    ])
+
+    assert script.main() == 0
+    assert capsys.readouterr().out == "parsed\n"
+    [args] = received
+    assert {key: args[key] for key in (
+        "goal", "plan", "done_when_json", "affected_path", "attach", "ask", "message", "dry_run",
+    )} == {
+        "goal": "goal", "plan": "plan.md", "done_when_json": "outcomes.json",
+        "affected_path": ["a.py", "b.py"], "attach": ["notes.txt", "task:evidence"],
+        "ask": ["council"], "message": "review this", "dry_run": True,
+    }
+
     for retired in ("--spec-json", "--evidence", "--context-level", "--plan-class", "--files-to-touch", "--include-tests", "--scout-handoff"):
-        assert retired not in text
+        monkeypatch.setattr(sys, "argv", ["run_plan_review.py", "--plan", "plan.md", retired, "fixture"])
+        with pytest.raises(SystemExit) as exc:
+            script.main()
+        assert exc.value.code == 2
+        assert f"unrecognized arguments: {retired}" in capsys.readouterr().err
+    assert len(received) == 1, "invalid CLI arguments must not dispatch a review"

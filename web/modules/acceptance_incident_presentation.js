@@ -1,12 +1,11 @@
-// Pure projection of a local preparation incident; no reviewer or lifecycle authority.
+// Read-only projection of an old record's local preparation incident (stored before the result
+// review replaced task acceptance; nothing writes one now); no reviewer or lifecycle authority.
 const text = (value) => String(value ?? '').trim();
 
 // The host's own LOCAL acceptance-evidence failure, read from whichever carrier
-// this frame holds: the review projection the checkpoint publishes (reached
-// live through the existing review_reference → hydrate → keyed group merge,
-// and on history/reconnect through the terminal record), or the terminal
-// acceptance decision. One incident id, one host attempt count — a replayed
-// frame therefore states the same row rather than a second incident.
+// the stored record holds: the review projection an old checkpoint published,
+// or the terminal acceptance decision. One incident id, one host attempt count —
+// a replayed frame therefore states the same row rather than a second incident.
 export function acceptanceIncidentFromTaskDetail(detail) {
     const fromProjection = detail?.review_projection?.acceptance_incident;
     const decision = detail?.outcome_axes?.review?.acceptance_decision
@@ -84,7 +83,7 @@ export function acceptanceIncidentAttempt(incident) {
 // when the decision carries the typed incident, so historical records read
 // exactly as before; a resolved incident states nothing. `phrases` is the
 // caller's own cause vocabulary — the browser twin of
-// acceptance_preparation.incident_cause_clauses.
+// project_dialogue._incident_cause_clauses.
 export function acceptanceIncidentClauses(decision, reason, phrases) {
     const incident = decision?.acceptance_incident;
     if (!incident || typeof incident !== 'object' || String(incident.status || '') === 'resolved') return [];

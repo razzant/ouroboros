@@ -58,7 +58,8 @@ def test_owned_running_skill_process_can_be_cancelled_without_survivors(tmp_path
     thread.start()
     own = None
     try:
-        until = time.monotonic() + 20
+        # Go compiles the skill first: a cold build on a loaded Windows runner can take longer than 20 s.
+        until = time.monotonic() + (60 if runtime == 'go' else 20)
         while time.monotonic() < until and thread.is_alive():
             with skill_exec._subprocess_lock:
                 for proc in skill_exec._active_subprocesses:

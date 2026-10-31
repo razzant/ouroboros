@@ -1,6 +1,7 @@
 """A money-store refusal must preserve the response already paid for."""
 
 import asyncio
+import contextlib
 import errno
 import pathlib
 
@@ -37,7 +38,7 @@ def test_paid_response_survives_kernel_lock_refusal(
     sends = 0
     refused = []
     actual_acquire = platform_layer.acquire_exclusive_file_lock
-    actual_connect = usage_store._connect
+    actual_connection = usage_store._core.connection
 
     def name_lock_refused_after_response(path, **kwargs):
         if sends and pathlib.Path(path).name == usage_ledger.LOCK_REL.name:
@@ -47,11 +48,14 @@ def test_paid_response_survives_kernel_lock_refusal(
             return None
         return actual_acquire(path, **kwargs)
 
-    def store_refused_after_response(*args, **kwargs):
-        if sends:
-            refused.append(args[0])
+    @contextlib.contextmanager
+    def store_refused_after_response(path, *args, **kwargs):
+        # Every money transaction enters the store's (cached) connection here.
+        if sends and pathlib.Path(path).name == usage_store.STORE_REL.name:
+            refused.append(path)
             raise usage_ledger.UsageAccountingError("usage store unavailable after response")
-        return actual_connect(*args, **kwargs)
+        with actual_connection(path, *args, **kwargs) as conn:
+            yield conn
 
     def send():
         nonlocal sends
@@ -65,7 +69,7 @@ def test_paid_response_survives_kernel_lock_refusal(
         if tier == "name":
             failure.setattr(platform_layer, "acquire_exclusive_file_lock", name_lock_refused_after_response)
         else:
-            failure.setattr(usage_store, "_connect", store_refused_after_response)
+            failure.setattr(usage_store._core, "connection", store_refused_after_response)
         if asynchronous:
             actual = asyncio.run(usage_accounting.execute_physical_attempt_async(
                 request, send_async,

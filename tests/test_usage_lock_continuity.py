@@ -272,9 +272,8 @@ def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisition
              if item.get("data", {}).get("checkpoint_kind") == "usage_lock_wait"]
     assert [row["phase"] for row in waits] == ["entered", "ended"]
     from ouroboros.memory import Memory
-    summary = Memory(root).summarize_progress(waits)
-    assert "Waiting for accounting access" in summary
-    assert "Accounting wait ended" in summary
+    summary = Memory(root).summarize_progress(waits)  # the model reads the episode as one line
+    assert len(summary.splitlines()) == 1 and "Accounting wait ended · " in summary
 
 
 @pytest.mark.parametrize("reason", ["cancelled", "deadline", "finalize_requested"])
@@ -679,6 +678,19 @@ def test_interactive_expiry_rejoins_real_loop_no_call_terminal(root, short_acqui
     assert all(item["owner_visible"] for item in waits)
     assert waits[-1]["elapsed_sec"] >= waits[0]["elapsed_sec"]
     assert trace["forced_finalization"]["control_reason"] == "accounting_wait_expired"
+    # The terminal this producer records is a technical interruption the owner may Continue
+    # (``owner_continue.TECHNICAL_REASON_CODES``), never retried automatically.
+    from ouroboros.agent_task_pipeline import _durable_terminal_status
+    from ouroboros.outcomes import derive_loop_outcome
+    from ouroboros.owner_continue import continuation_eligibility
+
+    outcome = derive_loop_outcome(text, usage, trace)
+    status = _durable_terminal_status(SimpleNamespace(drive_root=root), {"id": "child"},
+                                      outcome["outcome_axes"]["execution"]["status"], existing={})
+    assert (status, outcome["reason_code"]) == ("failed", "accounting_wait_expired")
+    assert continuation_eligibility({"status": status, "reason_code": outcome["reason_code"],
+                                     "root_task_id": "r"}, "r") == {
+        "eligible": True, "cause": "accounting_wait_expired", "refusal": ""}
 
 
 def test_unreadable_named_identity_is_not_positive_contention(root, monkeypatch):

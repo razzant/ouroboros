@@ -41,6 +41,9 @@ EXPECTED = {
         "reasoning": ["reasoning.encrypted"], "calls": ["lookup", "lookup"], "encrypted_id": "rs_"},
     "openrouter/claude-sonnet-5/tool_stream.sse": {
         "reasoning": ["reasoning.text"], "calls": ["lookup", "lookup"]},
+    "openrouter/claude-opus-5.5/twoblock_stream.sse": {
+        "reasoning": ["reasoning.text", "reasoning.text"], "calls": ["run_command", "search_code"],
+        "args": [{"cmd", "timeout_sec"}, {"max_results", "path", "query", "regex", "root"}]},
     "openrouter/claude-fable-5/refusal_stream.sse": {
         "reasoning": [], "calls": [], "finish": "content_filter", "refusal": True},
     "openrouter/claude-fable-5/refusal_stream_v2.sse": {
@@ -147,8 +150,7 @@ def test_recorded_chat_stream_assembles_completely(path, size):
     calls = msg.get("tool_calls") or []
     assert [_call_name(call) for call in calls] == expected["calls"]
     assert [call["type"] for call in calls] == expected.get("kinds", ["function"] * len(calls))
-    for call in calls:
-        assert set(_call_args(call)) == {"query"}
+    assert [set(_call_args(call)) for call in calls] == expected.get("args", [{"query"}] * len(calls))
     details = msg.get("reasoning_details") or []
     assert [detail["type"] for detail in details] == expected["reasoning"]
     if "encrypted_id" in expected:
@@ -159,6 +161,25 @@ def test_recorded_chat_stream_assembles_completely(path, size):
         assert msg["refusal"] and not calls
     if "usage" in body:
         assert usage["prompt_tokens"] and usage["completion_tokens"]
+
+
+def _wire_opaque_values(path: pathlib.Path) -> list:
+    values = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("data: ") and line != "data: [DONE]":
+            for choice in json.loads(line[6:]).get("choices") or []:
+                for item in (choice.get("delta") or {}).get("reasoning_details") or []:
+                    values += [item[key] for key in ("signature", "data") if isinstance(item.get(key), str) and item[key]]
+    return values
+
+
+@pytest.mark.parametrize("path", _streams(), ids=_rel)
+def test_each_opaque_wire_payload_is_one_whole_record_value(path):
+    """A signature or encrypted payload is minted whole: each arrives in one delta and
+    must stay one record's entire value, never fused with a neighbour's."""
+    details = _assemble(path, 0)[0]["choices"][0]["message"].get("reasoning_details") or []
+    assembled = [detail[key] for detail in details for key in ("signature", "data") if detail.get(key)]
+    assert sorted(assembled) == sorted(_wire_opaque_values(path))
 
 
 @pytest.mark.parametrize("path", _streams(), ids=_rel)

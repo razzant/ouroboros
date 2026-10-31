@@ -51,15 +51,10 @@ export function ownerLevelIndex(tier) {
     return OWNER_TIERS.findIndex((owner) => effortRank(owner) >= rank);
 }
 
-/**
- * The server's tolerant read of the three stored keys: an unknown value is that key's
- * default; the minimum is lowered to the recommended level and the maximum raised to it,
- * so the triple always orders min ≤ recommended ≤ max.
- */
+/** The primary is independent; tolerant helper bounds are ordered without moving it. */
 export function normalizeEffortRange(range = {}) {
-    const pick = (key) => effortTier(range?.[key]) || EFFORT_RANGE_DEFAULT[key];
-    const recommended = pick('recommended');
-    const lower = (a, b) => (effortRank(a) <= effortRank(b) ? a : b);
-    const higher = (a, b) => (effortRank(a) >= effortRank(b) ? a : b);
-    return { min: lower(pick('min'), recommended), recommended, max: higher(pick('max'), recommended) };
+    const pick = key => effortTier(range?.[key]) || EFFORT_RANGE_DEFAULT[key];
+    const min = pick('min'), max = pick('max');
+    const ordered = effortRank(min) <= effortRank(max);
+    return { min: ordered ? min : max, recommended: pick('recommended'), max: ordered ? max : min };
 }

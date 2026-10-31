@@ -1,4 +1,5 @@
 """Each stored child-speech occurrence stays one card line through live delivery and replay."""
+from tests._dialogue import advance_room_revision
 
 import json
 import os
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ouroboros import dialogue_store
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 from tests.test_project_unread_read_band_browser import PANEL, _open_room, _seed_room, _wait_for
@@ -17,7 +19,7 @@ _CHILD_WORDS = """(messages, taskId) => {
     const card = messages.querySelector(`.chat-live-card[data-task-id="${taskId}"]`);
     if (!card) return null;
     for (let node = card; node; node = node.parentElement?.closest('.chat-live-card')) {
-        if (node.dataset.expanded !== '1') node.querySelector('[data-live-summary-button]').click();
+        if (node.dataset.expanded !== '1') node.querySelector('[data-live-disclosure]').click();
     }
     card.scrollIntoView({block: 'center'});
     return [...card.querySelectorAll('.chat-live-line')].filter(line => line.closest('.chat-live-card') === card)
@@ -34,7 +36,6 @@ def test_a_childs_words_said_again_are_another_line_of_its_card_live_and_after_a
     included: as the bridge delivers them, once a read adopts them, past its final, and on reload."""
     from playwright.sync_api import sync_playwright
 
-    from ouroboros.projects_registry import increment_project_visible_revision
     from ouroboros.task_results import write_task_result
 
     data = direct_server_with_data["data_dir"]
@@ -44,15 +45,15 @@ def test_a_childs_words_said_again_are_another_line_of_its_card_live_and_after_a
     meta = {**lineage, "subagent_task_id": "kid-words", "narration": False}
     rows = [{"ts": at(minute), "direction": "out", "text": f"Reply {minute}"} for minute in range(3)]
     rows.append({"ts": at(5), "direction": "out", "text": "ROOT_ANSWER: the scout is on it.", "task_id": "root-words"})
-    chat_id, chat_log, _ = _seed_room(data, "words-room", "Words room", rows)
+    chat_id, _ = _seed_room(data, "words-room", "Words room", rows)
     write_task_result(data, "kid-words", "running", **lineage)
     progress = lambda ts, task_id, text, **fields: {  # noqa: E731
         "ts": ts, "type": "send_message", "task_id": task_id, "is_progress": True, "direction": "out",
         "chat_id": chat_id, "text": text, "content": text, "format": "markdown", "role": "assistant",
         "system_type": "", **fields}
-    (data / "logs" / "progress.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
-        progress(at(4), "root-words", "Reading the brief.", narration=True),
-        progress(at(6), "kid-words", "Listing the repository root.", **meta))), encoding="utf-8")
+    for row in (progress(at(4), "root-words", "Reading the brief.", narration=True),
+                progress(at(6), "kid-words", "Listing the repository root.", **meta)):
+        dialogue_store.append(data, "progress", row)
     said = ["CHILD_WORDS_1: halfway through.", "CHILD_WORDS_2: found the README.",
             "CHILD_WORDS_2: found the README.", "CHILD_WORDS_1: halfway through."]
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", data.parent))
@@ -68,9 +69,8 @@ def test_a_childs_words_said_again_are_another_line_of_its_card_live_and_after_a
             def speak(index, text, **fields):
                 """message_bus.send_with_budget: the stored row, then the bridge's frame of it."""
                 ts = f"2026-09-28T10:20:{index:02d}.{123456 + index:06d}+00:00"
-                with chat_log.open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps({"ts": ts, "direction": "out", "chat_id": chat_id, "text": text,
-                                             "format": "markdown", "task_id": "kid-words", **fields, **meta}) + "\n")
+                dialogue_store.append(data, "chat", {"ts": ts, "direction": "out", "chat_id": chat_id, "text": text,
+                                                     "format": "markdown", "task_id": "kid-words", **fields, **meta})
                 frame = {"type": "chat", "role": "assistant", "content": text, "markdown": True, "is_progress": False,
                          "ts": ts, "task_id": "kid-words", "chat_id": chat_id, "project_thread": True, **meta,
                          **({"system_type": fields["type"]} if "type" in fields else {})}
@@ -95,10 +95,9 @@ def test_a_childs_words_said_again_are_another_line_of_its_card_live_and_after_a
             assert words() == live, "its final keeps every line it spoke"
 
             # A counted reply moves the room's revision: the read that follows adopts the live lines.
-            with chat_log.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps({"ts": at(30), "direction": "out", "chat_id": chat_id,
-                                         "text": "Reply after the child"}) + "\n")
-            increment_project_visible_revision(data, chat_id=chat_id)
+            dialogue_store.append(data, "chat", {"ts": at(30), "direction": "out", "chat_id": chat_id,
+                                                 "text": "Reply after the child"})
+            advance_room_revision(data, chat_id=chat_id)
             _emit_ws_frame(page, {"type": "projects_changed"})
             messages.locator(".chat-bubble").filter(has_text="Reply after the child").wait_for(state="attached")
             page.evaluate(_SETTLE_RESTORE_FRAMES)
@@ -137,7 +136,7 @@ def test_running_child_occurrences_survive_history_live_ordering(direct_server_w
     from supervisor import message_bus
 
     data = direct_server_with_data["data_dir"]
-    chat_id, _, _ = _seed_room(data, "occurrence-room", "Occurrence room", [
+    chat_id, _ = _seed_room(data, "occurrence-room", "Occurrence room", [
         {"ts": "2026-10-11T12:00:00+00:00", "direction": "out", "text": "ROOT_ANSWER: the scout is on it.",
          "task_id": "root-occurrence"}])
     lineage = {"delegation_role": "subagent", "parent_task_id": "root-occurrence",

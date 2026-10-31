@@ -74,8 +74,9 @@ def test_fresh_install_is_unlimited_and_an_existing_document_keeps_its_bounds(is
     assert not isolated_settings.exists(), "a read created the document"
 
     # A document an earlier release wrote without the keys: the finite values it ran
-    # under, and the read leaves its bytes alone (no proactive rewrite).
-    isolated_settings.write_text(json.dumps({"TOTAL_BUDGET": 10.0}), encoding="utf-8")
+    # under, and an already Safety-migrated read leaves its bytes alone.
+    isolated_settings.write_text(json.dumps({"TOTAL_BUDGET": 10.0,
+        "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}), encoding="utf-8")
     before = isolated_settings.read_bytes()
     legacy = cfg.load_settings()
     assert (legacy["OUROBOROS_MAX_ROUNDS"], legacy["OUROBOROS_TASK_ABS_CEILING_SEC"]) == (200, 21600)
@@ -164,7 +165,7 @@ def test_round_limit_resolution_keeps_the_presence_inline_cap(monkeypatch):
 
 
 def test_presence_inline_cap_stays_finite_without_a_global_limit():
-    from ouroboros.presence_runtime import (
+    from tests.frozen_presence_runtime import (
         PresenceRuntimeDefaults, PresenceRuntimeError, PresenceRuntimeOverrides, resolve_presence_runtime,
     )
 

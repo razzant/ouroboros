@@ -140,7 +140,8 @@ def test_source_less_resume_still_refuses_genuinely_spent_lifetime(tmp_path, mon
     queue, task, _row, _clock, _origin = _after_second_pause_crash(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 480.0)
     result = queue.resume_budget_paused_task(task["id"])
-    assert result == {"ok": False, "error": "lifetime_exhausted", "executed_sec": 480.0}
+    assert {k: v for k, v in result.items() if k != "message"} == {
+        "ok": False, "error": "lifetime_exhausted", "executed_sec": 480.0}
     assert "_budget_pause_resume" not in task
 
 
@@ -155,7 +156,8 @@ def test_legacy_source_without_clock_does_not_invent_prior_pauses(tmp_path, monk
     queue, task, row, _clock, origin = _after_second_pause_crash(
         tmp_path, monkeypatch, legacy="missing_clock")
     result = queue.resume_budget_paused_task(task["id"])
-    assert result == {"ok": False, "error": "lifetime_exhausted", "executed_sec": 780.0}
+    assert {k: v for k, v in result.items() if k != "message"} == {
+        "ok": False, "error": "lifetime_exhausted", "executed_sec": 780.0}
     assert row["started_at"] == origin and row["model_wait_quota_clock"] == {}
     assert not row.get("paused_duration_sec")
 

@@ -108,9 +108,21 @@ def test_same_id_recovers_once_with_original_resources_and_visible_wait(host, tm
     assert not sent[0].get("_project_admission_restore_hold") and not host.attempts
     assert not effective_task_result(host.root, load_task_result(host.root, "held"),
                                      materialize_artifacts=False)["project_admission_hold"]
-    write_task_result(host.root, "held", "completed", result="Done.")  # outside the queue: key absent
-    assert "project_admission_hold" not in effective_task_result(
-        host.root, load_task_result(host.root, "held"), materialize_artifacts=False)
+    # A Project task's completion without its artifact outcome is still finalizing, and
+    # while the queue lists it the overlay is the explicit empty hold.
+    write_task_result(host.root, "held", "completed", result="Done.")
+    finalizing = effective_task_result(host.root, load_task_result(host.root, "held"), materialize_artifacts=False)
+    assert (finalizing["status"], finalizing["artifact_status"], finalizing["child_status"]) == (
+        "running", "finalizing", "completed")
+    assert finalizing["project_admission_hold"] == {}
+    # Terminal artifact evidence settles the result even while the queue still lists it.
+    # This tests result finality, not the worker's separate queue-departure mechanism.
+    write_task_result(host.root, "held", "completed", result="Done.", artifact_status="ready_no_changes")
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    assert "held" in {row.get("id") or row.get("task_id") for row in snap["running"]}
+    settled = effective_task_result(host.root, load_task_result(host.root, "held"), materialize_artifacts=False)
+    assert settled["status"] == "completed" and settled["artifact_status"] == "ready_no_changes"
+    assert "project_admission_hold" not in settled
 
 
 @pytest.mark.parametrize("guard", ["owner_hold", "budget_pause", "budget_root", "acceptance", "reservation",
@@ -307,7 +319,9 @@ def test_invalid_independent_snapshot_fence_cannot_be_cleared_by_project_recover
     path.write_bytes(original)
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
-    assert not sent and host.pending[0]["_owner_hold"]
+    from ouroboros.work_stop import continuation_refusal
+    assert not sent and continuation_refusal(host.pending[0])
+    assert not host.pending[0].get("_owner_hold")
 
 
 @pytest.mark.parametrize("frozen", [True, False])
@@ -338,9 +352,11 @@ def test_room_rebind_and_back_cannot_redirect_original_preparation(host, tmp_pat
                                       "unreadable_receipt", "started", "owner_pause", "panic"])
 @pytest.mark.parametrize("readable", [False, True])
 def test_held_deadline_keeps_custody_without_replay(host, tmp_path, monkeypatch, expiry, dispatch, readable):  # noqa: F811
-    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+    from supervisor.events_budget import HOLD_PANIC, HOLD_SAVED_WORK, budget_hold_fact, hold_budget_row
 
-    accepted(host, tmp_path)
+    task = accepted(host, tmp_path)
+    if dispatch == "panic":
+        hold_budget_row(task, reason=HOLD_PANIC, result_root=host.root)
     path, original = restore_unreadable(host)
     if readable:
         path.write_bytes(original)
@@ -362,11 +378,14 @@ def test_held_deadline_keeps_custody_without_replay(host, tmp_path, monkeypatch,
         from supervisor.owner_pause_control import request_owner_pause
 
         assert request_owner_pause("held", request_id="held-pause")["ok"]
-    elif dispatch == "panic":
-        (host.root / "state" / "panic_stop.flag").write_text("panic")
     sent = worker(host, monkeypatch)
     # Retention grants no execution; a positive never-started receipt still expires.
-    assert budget_hold_fact(held)["reason"] == HOLD_SAVED_WORK
+    if dispatch == "owner_pause":
+        from ouroboros.work_stop import current_stop
+        assert not budget_hold_fact(held)
+        assert current_stop(held, {"budget": queue.BUDGET_ROOT_FENCES})["cause"] == "pause"
+    else:
+        assert budget_hold_fact(held)["reason"] == (HOLD_PANIC if dispatch == "panic" else HOLD_SAVED_WORK)
     for _ in range(2):
         queue.enforce_task_timeouts()
         workers.assign_tasks()
@@ -385,7 +404,7 @@ def test_held_deadline_keeps_custody_without_replay(host, tmp_path, monkeypatch,
 
 def test_unchanged_hold_does_not_rewrite_snapshot_but_changed_reason_does(host, tmp_path, monkeypatch):  # noqa: F811
     accepted(host, tmp_path)
-    restore_unreadable(host)
+    path, original = restore_unreadable(host)
     sent = worker(host, monkeypatch)
     workers.assign_tasks()  # First failure projects its current cause.
     writes = []
@@ -398,6 +417,9 @@ def test_unchanged_hold_does_not_rewrite_snapshot_but_changed_reason_does(host, 
     workers.assign_tasks()
     assert not writes and not sent
     host.pending[0]["_project_admission"] = None
+    workers.assign_tasks()
+    assert not writes  # Unreadable placement authority still owns the refusal.
+    path.write_bytes(original)
     workers.assign_tasks()
     assert len(writes) == 1
     assert "original" in host.pending[0]["_project_admission_restore_hold"]["detail"].lower()

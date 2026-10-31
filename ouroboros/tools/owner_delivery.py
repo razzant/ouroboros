@@ -1,7 +1,7 @@
 """Live-first delivery of owner-directed chat events from a running task.
 
 One seam for the send family (``send_user_message`` / ``send_photo`` /
-``send_video`` / ``send_file`` / ``send_links``): try the live worker event
+``send_video`` / ``send_file`` / ``send_links`` / ``show_card``): try the live worker event
 queue first so the owner sees the frame while the task is still RUNNING, and
 fall back to ``ctx.pending_events`` (the end-of-task drain) when live
 transport is unavailable. The transport contract mirrors
@@ -64,17 +64,24 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
     row = {**evt, "direction": "system" if evt.get("role") == "system" else "out",
            "delegation_role": "subagent" if evt.get("parent_task_id") else meta.get("delegation_role", "root")}
     attribution = row_class(row)
+    private_contact = evt.get("presence_contact") or (evt.get("progress_meta") or {}).get("presence_contact")
     if (attribution["lane"] != 1 or attribution["author"]["kind"] != "ouroboros"
-            or is_a2a_chat_id(evt.get("chat_id")) or presence_caller_binding(ctx) is not None):
+            or is_a2a_chat_id(evt.get("chat_id"))
+            or (presence_caller_binding(ctx) is not None and not private_contact)):
         return
     kind = evt.get("type")
     fields = {"send_message": ("text",), "send_photo": ("caption",),
               "send_video": ("caption",), "send_document": ("caption",),
-              "send_links": ("title", "actions"),
+              "send_links": ("title", "actions"), "send_card": ("title", "fallback_text"),
               "send_quiz": ("question", "options", "stake", "assumption")}.get(kind, ())
     words = {key: evt[key] for key in fields if evt.get(key) not in (None, "", [])}
     if not words:
         return
+    if mode == "live" and kind == "send_message":
+        from ouroboros.loop_messages import owner_input_revision
+
+        # The owner rows admitted so far now have a live reply (loop_messages.owner_reply_owed).
+        ctx._owner_reply_revision = owner_input_revision(ctx)
     # Card labels, details and declared assumptions remain exact too. Binary
     # attachments and host-composed card facts are not addressed model prose.
     text = str(next(iter(words.values()))) if len(fields) == 1 else json.dumps(words, ensure_ascii=False, indent=2)
@@ -121,32 +128,41 @@ def publish_pending_owner_dialogue(ctx: Any, messages: list) -> None:
     acknowledge_owner_dialogue(ctx, rows)
 
 
+def stamp_lineage(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
+    """The producing task's lineage (``task_id`` / ``parent_task_id`` / ``root_task_id``) on an owner-directed
+    event, kept where already set: what the supervisor resolves the project binding from. A caller that owes the
+    event durably before delivering it (a relay's answer) stamps it first, so a replay is the same producer's."""
+    meta = getattr(ctx, "task_metadata", {})
+    meta = meta if isinstance(meta, dict) else {}
+    evt.setdefault("task_id", str(getattr(ctx, "task_id", "") or ""))
+    evt.setdefault("parent_task_id", str(meta.get("parent_task_id") or ""))
+    evt.setdefault("root_task_id", str(meta.get("root_task_id") or ""))
+    return evt
+
+
 def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
     """Deliver an owner-directed chat event live, or buffer it. Returns
     ``"live"`` or ``"deferred"`` — the caller words its receipt honestly.
 
-    Lineage (``task_id`` / ``parent_task_id`` / ``root_task_id``) is stamped
-    for every task frame so the supervisor can resolve project binding for
-    live deliveries exactly as it does for the end-of-task drain.
+    Lineage is stamped for every task frame (``stamp_lineage``) so the supervisor
+    can resolve project binding for live deliveries exactly as it does for the
+    end-of-task drain.
     """
-    meta = getattr(ctx, "task_metadata", {})
-    meta = meta if isinstance(meta, dict) else {}
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+
+    def _accepted(mode: str) -> str:
+        if not is_a2a_chat_id(evt.get("chat_id")):
+            ctx._owner_message_sent = True
+        _retain_dialogue(ctx, evt, mode)
+        return mode
 
     def _deferred() -> str:
         ctx.pending_events.append(evt)
-        _retain_dialogue(ctx, evt, "deferred")
-        return "deferred"
+        return _accepted("deferred")
 
-    evt.setdefault("task_id", str(getattr(ctx, "task_id", "") or ""))
-    evt.setdefault("parent_task_id", str(meta.get("parent_task_id") or ""))
-    evt.setdefault("root_task_id", str(meta.get("root_task_id") or ""))
-    try:
-        from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-
-        if is_a2a_chat_id(int(evt.get("chat_id"))):
-            return _deferred()
-    except (TypeError, ValueError):
-        pass
+    stamp_lineage(ctx, evt)
+    if is_a2a_chat_id(evt.get("chat_id")):
+        return _deferred()
     if getattr(ctx, _STICKY_ATTR, False):
         return _deferred()
     event_queue = getattr(ctx, "event_queue", None)
@@ -160,5 +176,4 @@ def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
         except Exception:
             pass
         return _deferred()
-    _retain_dialogue(ctx, evt, "live")
-    return "live"
+    return _accepted("live")

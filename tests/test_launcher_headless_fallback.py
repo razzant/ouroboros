@@ -74,7 +74,7 @@ def test_native_boot_preserves_panic_but_owner_can_start(
     monkeypatch.setattr(launcher, "bootstrap_repo", bootstrap)
     if intent == "systemd":
         unit = (Path(__file__).resolve().parents[1] / "packaging" / "systemd"
-                / "ouroboros.service").read_text(encoding="utf-8")
+                / "ouroboros.service.in").read_text(encoding="utf-8")
         command = next(line.removeprefix("ExecStart=") for line in unit.splitlines()
                        if line.startswith("ExecStart="))
         argv = shlex.split(command)[1:]
@@ -355,7 +355,7 @@ def test_run_headless_main_shuts_down_cleanly_on_event(monkeypatch, capsys):
     alive_thread = types.SimpleNamespace(is_alive=lambda: True)
 
     with pytest.raises(SystemExit) as excinfo:
-        launcher._run_headless_main("http://127.0.0.1:8765", 8765, alive_thread)
+        launcher._run_headless_main("http://127.0.0.1:1", 1, alive_thread)
 
     assert excinfo.value.code == 0
     # Round c4: shutdown was ALREADY requested at entry — the launcher must
@@ -370,7 +370,7 @@ def test_run_headless_main_shuts_down_cleanly_on_event(monkeypatch, capsys):
     # lock file a NEWER launcher may already own.
     assert "release_pid_lock" not in order
     out = capsys.readouterr().out
-    assert "http://127.0.0.1:8765" not in out, "no URL announcement mid-shutdown"
+    assert "http://127.0.0.1:1" not in out, "no URL announcement mid-shutdown"
 
 
 def test_run_headless_main_exits_nonzero_when_lifecycle_thread_dies(monkeypatch):
@@ -384,12 +384,12 @@ def test_run_headless_main_exits_nonzero_when_lifecycle_thread_dies(monkeypatch)
     dead_thread = types.SimpleNamespace(is_alive=lambda: False)
 
     with pytest.raises(SystemExit) as excinfo:
-        launcher._run_headless_main("http://127.0.0.1:8765", 8765, dead_thread)
+        launcher._run_headless_main("http://127.0.0.1:1", 1, dead_thread)
 
     assert excinfo.value.code == 1
     # No shutdown was requested at entry, so the URL/browser announcement DID
     # happen (the positive half of the round-c4 pin).
-    assert order[0] == ("browser", "http://127.0.0.1:8765")
+    assert order[0] == ("browser", "http://127.0.0.1:1")
     # Teardown still ran in full despite the abnormal exit; the PID-lock
     # release belongs to atexit on this sys.exit path (single release).
     assert order[-2:] == ["stop_agent", ("kill_orphans", "crash_fuse")]
@@ -409,7 +409,7 @@ def test_run_headless_main_crash_fuse_survives_event_set_during_stop_agent(monke
     dead_thread = types.SimpleNamespace(is_alive=lambda: False)
 
     with pytest.raises(SystemExit) as excinfo:
-        launcher._run_headless_main("http://127.0.0.1:8765", 8765, dead_thread)
+        launcher._run_headless_main("http://127.0.0.1:1", 1, dead_thread)
 
     assert excinfo.value.code == 1
     assert order[-2:] == ["stop_agent", ("kill_orphans", "crash_fuse")]
@@ -494,7 +494,7 @@ def test_headless_teardown_sweeps_no_port_and_names_the_published_one():
     abort_at = src.index("Shutdown requested during startup")
     fail_at = src.index("failed to become healthy")
     for section_start, reason in ((abort_at, "startup_abort"), (fail_at, "startup_failure")):
-        assert f'_kill_orphaned_children(reason="{reason}")' in src[section_start:section_start + 700]
+        assert f'_cleanup_recorded_server_process("{reason}")' in src[section_start:section_start + 700]
     assert "kill_process_on_port(" not in inspect.getsource(launcher._kill_orphaned_children).split(
         "for companion_port")[0], "only the disclosed companion ports remain"
 
@@ -532,7 +532,7 @@ def test_headless_first_run_onboarding_opens_no_window(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "webview", None)
 
     outcome = launcher_onboarding.present_first_run_onboarding(
-        {}, 8765, headless=True,
+        {}, 1, headless=True,
         open_external_url=lambda url: pytest.fail("headless setup opened a link"),
     )
 

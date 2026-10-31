@@ -149,28 +149,3 @@ def test_reprepare_keeps_affinity_and_a_reroute_changes_the_session(tmp_path, fi
     changed = waiter.prepare({**sent, "model": "openai/gpt-5.5"})
     assert changed["cache_affinity"] == sent["cache_affinity"]
     assert _remote(changed, changed["model"])["extra_body"]["session_id"] != _remote(sent)["extra_body"]["session_id"]
-
-
-@pytest.mark.parametrize("use_local", [False, True])
-def test_compaction_summarizer_shares_one_affinity_per_data_root(tmp_path, monkeypatch, use_local):
-    import json
-    from ouroboros import context_compaction as cc
-    from ouroboros import llm_observability
-
-    seen = []
-
-    def chat_observed(_client, **kwargs):
-        seen.append(kwargs)
-        if kwargs.get("tools"):
-            raise RuntimeError("structured lane unavailable in this fixture")
-        return {"content": json.dumps({"summaries": [{"source_id": part.source_id, "summary": "s"}]})}, {}
-
-    monkeypatch.setattr(llm_observability, "chat_observed", chat_observed)
-    part = cc._part("unit-1", "tool output " * 20)
-    spec = {"model": "openai/gpt-6-sol", "use_local": use_local, "effort": "low", "output_budget": 256}
-    for task in ("task-a", "task-b"):
-        result = cc._call_summarizer([part], drive_root=tmp_path, task_id=task, phase="map", spec=spec,
-                                     summary_budgets={part.root_id: 64}, usage_total={})
-        assert result == {part.source_id: "s"}
-    affinities = {call["cache_affinity"] for call in seen}
-    assert affinities == ({""} if use_local else {f"context_compaction:{tmp_path}"})

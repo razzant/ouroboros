@@ -6,10 +6,8 @@ this module owns the thin runtime seams under an ask: the deadline rail, the rev
 pool's rows as ``ReviewSlot`` objects (both delivery kinds), the pre-fan-out lane
 health snapshot and fit, one substrate call, the typed row projection of each
 seat's actor, and the structural helpers (payload exemption, governance text) that
-need a ``ToolContext``. ``plan_wave_slot_census`` still classifies the seats of an
-earlier-schema (v2) wave for the read-only reflection. Transport is NEVER chosen
-here: every slot carries its route and ``review_execution._review_route_executor``
-binds it.
+need a ``ToolContext``. Transport is NEVER chosen here: every slot carries its
+route and ``review_execution._review_route_executor`` binds it.
 """
 
 from __future__ import annotations
@@ -60,16 +58,15 @@ def _governance_text(system_root: pathlib.Path, rel_path: str) -> str:
 def _session_task_text(system_prompt: str, user_content: str, session_root: str) -> str:
     return (
         "RETRIEVING REVIEWER (agent session): you review "
-        f"{session_root or 'the active workspace'} (read-only, or in a private checking copy of it "
-        "when your seat holds write access). The evidence below is the host's REDACTED "
-        "snapshot — the same bytes every reviewer sees — so do NOT re-read the raw evidence "
-        "locators (a session reading originals would leak what the api route redacts, 4e133c8a); "
-        "the ONE exception is the governance pack — its named sources are public "
+        f"{session_root or 'the active workspace'} (read-only, or from your own private checking folder "
+        "when your seat holds write access; its checking instructions say what it holds). The evidence below is the host's "
+        "snapshot — the same bytes every reviewer sees, each item naming its source sha256; a locator you "
+        "read yourself may hold later bytes than your peers reviewed. The governance pack's named sources are public "
         "repository documents you MAY read raw, and MUST read in full when the pack marks them "
         "MANDATORY FULL READS (a self-modification plan), even if the agent also declared them as "
         "evidence. Retrieve any OTHER repository context with your own tools.\n\n"
-        + "The own-room source handle is the canonical redacted dialogue. Read omitted ranges "
-        "from that artifact only; raw chat/mailbox logs do not replace the redacted source.\n\n"
+        + "The own-room source handle is the canonical dialogue. Read omitted ranges "
+        "from that artifact only; raw chat/mailbox logs do not replace that snapshot.\n\n"
         + system_prompt + "\n\n" + user_content
     )
 
@@ -243,11 +240,14 @@ def _typed_facts_from(source: Any, get: Any) -> Dict[str, Any]:
     """The B1 typed failure facts off one source via ``get(source, key)`` — the
     ONE key list is ``review_substrate.TYPED_FAILURE_FACT_KEYS`` (shared with the
     last-execution recorder; sources differ, keys must not). ``http_status`` stays
-    raw (int-or-None); the rest coerce to honest-empty strings."""
+    raw (int-or-None), ``failure_details`` stays a dict; the rest are strings."""
     from ouroboros.review_substrate import TYPED_FAILURE_FACT_KEYS
 
-    return {key: (get(source, key) if key == "http_status" else str(get(source, key) or ""))
-            for key in TYPED_FAILURE_FACT_KEYS}
+    facts = {key: get(source, key) for key in TYPED_FAILURE_FACT_KEYS}
+    details = facts.get("failure_details")
+    facts["failure_details"] = dict(details) if isinstance(details, dict) else {}
+    return {key: value if key in {"http_status", "failure_details"} else str(value or "")
+            for key, value in facts.items()}
 
 
 def _plan_row_from_actor(actor: Dict[str, Any], slot: Any) -> dict:
@@ -581,55 +581,6 @@ def plan_reviewer_config_fingerprint(slots: list) -> str:
         for row, slot in zip(rows, slots):
             row.append("native" if getattr(slot, "native_retrieval", False) else "packet")
     return sha256(json.dumps(rows, ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def _plan_rows_reading_pending(wave: Dict[str, Any]) -> tuple[list[dict], list[dict]]:
-    """``(pending, uncollected)``: the rows whose typed facts still read pending, split
-    by whether a settled historical supplement of this cycle already supersedes the
-    operation — its terminal state exists and was simply not collected into the row."""
-    settled = {
-        row.get("operation_id") for row in wave.get("historical_supplements") or []
-        if row.get("cycle_index") == wave.get("cycle_index")
-        and row.get("operation_state") in {"settled", "late_settled", "not_dispatched"}
-    }
-    reading = [row for row in wave.get("actors") or [] if isinstance(row, dict)
-               and (row.get("late_result_pending") or row.get("operation_state") in {"pending_dispatch", "in_flight"})]
-    return ([row for row in reading if row.get("operation_id") not in settled],
-            [row for row in reading if row.get("operation_id") in settled])
-
-
-def plan_wave_slot_census(wave: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Every roster row of one earlier-schema (v2) wave in exactly ONE typed class (pure;
-    the rows are the wave's own records), for the read-only reflection over finished
-    records: an answer that has not arrived is a gap, never a failure and never a verdict.
-
-    ``awaiting`` = ``operation_state=pending_dispatch`` (``review_slot_awaiting``);
-    ``unresolved`` = other pending rows (``in_flight``/``custody_lost``;
-    ``late_result_pending`` is true for both, only ``operation_state`` splits them);
-    ``uncollected`` = pending but a settled supplement holds its state; ``skipped`` = a typed
-    $0 ``not_dispatched`` refusal; ``answered`` = ok; ``failed`` = the rest. Pending custody
-    outranks ``ok`` so an inconsistent row stays fail-closed. A roster that is not a list
-    classifies nothing: the custody ingress owns that anomaly."""
-    from ouroboros.review_records import review_slot_awaiting
-
-    census: Dict[str, Any] = {name: [] for name in (
-        "answered", "awaiting", "unresolved", "uncollected", "skipped", "failed")}
-    roster = wave.get("actors") if isinstance(wave, dict) else None
-    rows = [row for row in roster if isinstance(row, dict)] if isinstance(roster, list) else []
-    census["configured"] = len(rows)
-    pending, uncollected = _plan_rows_reading_pending(wave) if rows else ([], [])
-    pending_ids, uncollected_ids = {id(row) for row in pending}, {id(row) for row in uncollected}
-    for row in rows:
-        if id(row) in pending_ids:
-            name = "awaiting" if review_slot_awaiting(row) else "unresolved"
-        elif id(row) in uncollected_ids:
-            name = "uncollected"
-        elif row.get("ok"):
-            name = "answered"
-        else:
-            name = "skipped" if row.get("operation_state") == "not_dispatched" else "failed"
-        census[name].append(row)
-    return census
 
 
 def effective_plan_slots(slots: list) -> list:

@@ -4,6 +4,8 @@ from dataclasses import asdict, fields
 import json
 import os
 from pathlib import Path
+import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -36,7 +38,7 @@ def _install_child_fixture(mode, events_path):
         polls = 0
         lost = False
 
-        def operations(self):
+        def operations(self, **_kwargs):
             return []  # Legacy model-operation catalog.
 
         def upload_model_request(self, payload, *, idempotency_key):
@@ -95,7 +97,7 @@ def _install_child_fixture(mode, events_path):
             event("close")
 
     gateway = Gateway()
-    transport.ensure_owned_gateway = lambda: gateway
+    transport.ensure_owned_gateway = lambda **_kw: gateway
     transport.config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC = 0.01
     pricing._fetch_live_rows = lambda *_: pytest.fail("VLM fixture must never fetch live pricing")
     original_write = vision_process._private_json
@@ -136,7 +138,7 @@ def _install_child_fixture(mode, events_path):
 
 @pytest.fixture
 def child_fixture(tmp_path, monkeypatch):
-    from ouroboros.tools import shell
+    from ouroboros.tools import shell, shell_process
 
     events = tmp_path / "events.jsonl"
     original = shell._tracked_subprocess_run
@@ -153,6 +155,10 @@ def child_fixture(tmp_path, monkeypatch):
         child_argv[2] = (f"import runpy; runpy.run_path({__file__!r})['_install_child_fixture']"
                          f"({state['mode']!r}, {str(events)!r}); " + argv[2])
         try:
+            if state.get("window_from_checkpoint"):
+                with monkeypatch.context() as patch:
+                    patch.setattr(shell_process, "subprocess", _window_from_checkpoint(events))
+                    return original(child_argv, **kwargs)
             return original(child_argv, **kwargs)
         finally:
             for path in payload.parent.iterdir():
@@ -172,6 +178,35 @@ def child_fixture(tmp_path, monkeypatch):
 
 def _events(path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _checkpointed(events):
+    """Whether the child has published its exact operation checkpoint (a complete custody row naming it)."""
+    try:
+        lines = events.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        return False
+    for line in lines:
+        if line.endswith("\n"):
+            row = json.loads(line)
+            if row["kind"] == "custody" and row["operation_id"]:
+                return True
+    return False
+
+
+def _window_from_checkpoint(events, ceiling_sec=120):
+    """The tracked runner's ``subprocess`` with one change: the child's execution window opens only once the child
+    has published its operation checkpoint. A loaded runner can spend any fixed window on the child's imports
+    before it creates the operation (#2113); the expiry, the kill and the parent's read stay the real ones."""
+
+    class Popen(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            ceiling = time.monotonic() + ceiling_sec  # a bound for a child that never gets there, not a window
+            while self.poll() is None and not _checkpointed(events) and time.monotonic() < ceiling:
+                time.sleep(0.02)
+            return super().communicate(input, timeout)
+
+    return SimpleNamespace(**{**vars(subprocess), "Popen": Popen})
 
 
 def _call(client=None, *, timeout=1.0, **kwargs):
@@ -254,7 +289,7 @@ def test_real_child_reconstructs_provider_field_display_after_settlement(child_f
     assert error.code == "invalid_request" and error.status_code == 400 and error.retryable is False
     assert error.operation_id == "operation-exact" and error.route == ROUTE and error.model_role == "vision"
     assert error.body == error.problem and error.problem["context"]["providerMessage"] == "private provider body"
-    assert "provider_code=string_above_max_length, parameter=instructions" in error.display_message[:220]
+    assert "provider_error_type=string_above_max_length, parameter=instructions" in error.display_message[:220]
     assert "private provider body" not in error.display_message
     assert str(error) == "invalid_request: controlled refusal"
     assert error.physical_attempt_capture.state == "settled"
@@ -307,8 +342,9 @@ def test_dead_child_without_checkpoint_is_unknown_not_free(monkeypatch):
 def test_killed_child_retains_exact_operation_checkpoint(child_fixture):
     state, events, root = child_fixture
     state["mode"] = "pending"
+    state["window_from_checkpoint"] = True  # the window expires half a second after the operation exists
     with pytest.raises(ClaudexorModelError) as caught:
-        vision_process.run_vision_child(child_timeout=5, subscription=True, model_role="vision",
+        vision_process.run_vision_child(child_timeout=0.5, subscription=True, model_role="vision",
                                         model=MODEL, prompt="one image", images=[], timeout=0.02)
     error = caught.value
     assert error.code == "model_outcome_unknown" and error.operation_id == "operation-exact"
@@ -323,12 +359,30 @@ def test_killed_child_retains_exact_operation_checkpoint(child_fixture):
     assert rows[-1]["state"] == "dispatched" and not any(row["state"] == "released" for row in rows)
 
 
-def test_strict_child_schema_rejects_false_capture_and_wrong_receipt():
+@pytest.mark.parametrize("reserve,bound", [(0, False), (65536, True)])
+def test_strict_child_schema_rejects_false_capture_and_wrong_receipt(reserve, bound):
     assert set(vision_process._CAPTURE["properties"]) == {field.name for field in fields(ua.PhysicalAttemptCapture)}
     assert set(vision_process._CONTEXT["properties"]) == {field.name for field in fields(ua.PhysicalAttemptContext)}
     capture = asdict(ua.PhysicalAttemptCapture("a", MODEL, "claudexor", "released", "opaque"))
+    capture["physical_context"] = asdict(ua.PhysicalAttemptContext(
+        "owner_low", "low", "cold_estimate", "route", "round", None, None, False, False,
+        view_kind="focus", response_reserve_tokens=reserve, window_witness_bound=bound))
     receipt = {"receipt_id": "ours", "custody": None, "capture": capture}
     vision_process._read_receipt(receipt, "ours")
+    restored = vision_process._restore_capture(capture).physical_context
+    assert restored.view_kind == "focus"
+    assert restored.response_reserve_tokens == reserve and restored.window_witness_bound is bound
+    for key, invalid in (("response_reserve_tokens", -1), ("response_reserve_tokens", "8192"),
+                         ("response_reserve_tokens", True), ("window_witness_bound", "true")):
+        saved = capture["physical_context"][key]
+        capture["physical_context"][key] = invalid
+        with pytest.raises(Exception):
+            vision_process._read_receipt(receipt, "ours")
+        capture["physical_context"][key] = saved
+    capture["physical_context"]["view_kind"] = ["focus"]
+    with pytest.raises(Exception):
+        vision_process._read_receipt(receipt, "ours")
+    capture["physical_context"]["view_kind"] = "focus"
     with pytest.raises(ValueError, match="another invocation"):
         vision_process._read_receipt(receipt, "theirs")
     capture["effort"] = ["not", "an", "evidence", "object"]
@@ -406,3 +460,59 @@ def test_real_parent_quota_controller_polls_metadata_then_rejoins_image_call(chi
     persisted = read_result(root, "image-task")
     wait, = persisted["model_waits"].values()
     assert wait["state"] == "resolved" and wait["resolution"] == "resource_available"
+
+
+def _vlm_ctx():
+    from ouroboros.tools.registry import BrowserState
+
+    state = BrowserState()
+    state.last_screenshot_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    from ouroboros.tools.tool_result import _TOOL_RESULT_ATTR
+
+    # The attribute the registry's result sidecar uses, so the typed result is observable.
+    return SimpleNamespace(browser_state=state, event_queue=None, task_id="image-task", task_attempt=None,
+                           _accumulated_usage={}, pending_events=[], **{_TOOL_RESULT_ATTR: None})
+
+
+@pytest.mark.parametrize("tool,label", [("vlm_query", "VLM_QUERY_FAILED"), ("analyze_screenshot", "VLM_ANALYSIS_FAILED")])
+def test_tool_result_carries_the_reconstructed_typed_provider_projection(child_fixture, monkeypatch, tool, label):
+    """#763: the provider field the child's receipt carries reaches the tool's returned text."""
+    from ouroboros.tools.tool_result import _published_tool_result
+
+    state, _, _ = child_fixture
+    state["mode"] = "field"
+    monkeypatch.setattr(vision, "_get_llm_client", lambda: None)
+    monkeypatch.setattr(vision, "_resolve_vlm_model", lambda *a, **k: MODEL)
+    ctx = _vlm_ctx()
+    text = (vision._vlm_query(ctx, prompt="Describe only this image", image_url="data:image/png;base64,AAAA")
+            if tool == "vlm_query" else vision._analyze_screenshot(ctx, prompt="Describe only this image"))
+    first = text.splitlines()[0]
+    assert first.startswith(f"⚠️ {label}: ") and "provider_error_type=string_above_max_length" in first
+    assert "parameter=instructions" in first and "invalid_request: controlled refusal" in first
+    assert "private provider body" not in text  # the raw provider body never joins the projection
+    published = _published_tool_result(ctx, None)
+    assert published.text == text and published.code == "VLM_ERROR"
+    # Machine metadata is unchanged; only the returned text gained the typed projection.
+    assert dict(published.meta) == {"model": MODEL, "provider_status_code": 400}
+
+
+@pytest.mark.parametrize("error,shown", [
+    (RuntimeError("HTTP 400 image input is not supported"), "HTTP 400 image input is not supported"),
+    (ClaudexorModelError({"code": "invalid_request", "message": "plain refusal"}), "invalid_request: plain refusal"),
+])
+def test_an_error_without_typed_fields_keeps_its_own_text(monkeypatch, error, shown):
+    monkeypatch.setattr(vision, "_get_llm_client", lambda: None)
+    monkeypatch.setattr(vision, "_resolve_vlm_model", lambda *a, **k: MODEL)
+    monkeypatch.setattr(vision, "_vision_query_with_timeout", lambda *a, **k: (_ for _ in ()).throw(error))
+    assert vision._vlm_query(_vlm_ctx(), prompt="p", image_url="data:image/png;base64,AAAA") == f"⚠️ VLM_QUERY_FAILED: {shown}"
+
+
+def test_an_unknown_outcome_is_still_raised_not_turned_into_a_result(monkeypatch):
+    unknown = ClaudexorModelError({"code": "provider_failed", "message": "lost",
+                                   "context": {"vendorCode": "should_not_show"}}, unknown=True)
+    monkeypatch.setattr(vision, "_get_llm_client", lambda: None)
+    monkeypatch.setattr(vision, "_resolve_vlm_model", lambda *a, **k: MODEL)
+    monkeypatch.setattr(vision, "_vision_query_with_timeout", lambda *a, **k: (_ for _ in ()).throw(unknown))
+    with pytest.raises(ClaudexorModelError) as caught:
+        vision._vlm_query(_vlm_ctx(), prompt="p", image_url="data:image/png;base64,AAAA")
+    assert caught.value is unknown and "should_not_show" not in unknown.display_message

@@ -4,8 +4,8 @@ substrate: never a transport failure, a malformed answer or a verdict.
 Two halves, both directions each. The WORDS about an awaited slot change (the
 per-actor projection, the panel fold, the aggregate's reasons).
 The ARITHMETIC does not: aggregate, quorum and the per-actor gate fields equal the
-literal values pinned below for every input, and the loud rows (expired window, lost
-custody, settled failure, typed refusal, reservation shape) keep their words. A slot
+literal values pinned below for every input. Canonical unfinished workers remain
+pending after a drain expires; lost custody, settled failures and refusals remain typed. A slot
 is awaited only while it carries no answer: a row that carries one is judged by its
 answer exactly as before, words included, whatever its custody state says.
 """
@@ -20,19 +20,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.review_actor_aggregation import aggregate_review_actors, contract_valid_actors
+from ouroboros.review_seat_outcome import aggregate_outcomes, finalize_seat_outcome
 from ouroboros.review_projection import (
     AWAITING_PROJECTION,
     _review_actor_projection,
     compact_review_projection,
 )
 from ouroboros.review_records import (
-    HARDNESS_ADVISORY_VISIBLE,
     ReviewActorRecord,
     review_outcome_received,
     review_slot_awaiting,
 )
-from ouroboros.review_verdict import _criteria_shape_valid
 
 PASS_TEXT = json.dumps({
     "verdict": "PASS", "outcome_tier": "solved", "summary": "done",
@@ -93,15 +91,12 @@ def row(shape: str, slot: str) -> ReviewActorRecord:
 
 
 POLICIES = {
-    "acceptance": ("task_acceptance", {"min_successful_slots": 2, "fail_closed_on_errors": True,
-                                       "classify_outcome_tier": True}),
-    "acceptance_flat": ("task_acceptance", {"min_successful_slots": 2, "fail_closed_on_errors": True}),
     "fail_closed": ("plan_review", {"min_successful_slots": 2, "fail_closed_on_errors": True}),
     "open": ("skill_review", {"min_successful_slots": 2}),
     "quorum3": ("plan_review", {"min_successful_slots": 3, "fail_closed_on_errors": True}),
-    "quorum0": ("task_acceptance", {"min_successful_slots": 0}),
+    "quorum0": ("scope_review", {"min_successful_slots": 0}),
     "quorum_negative": ("skill_review", {"min_successful_slots": -2}),
-    "quorum9": ("task_acceptance", {"min_successful_slots": 9}),
+    "quorum9": ("scope_review", {"min_successful_slots": 9}),
 }
 
 # The gate-visible row per shape and the aggregate per (case, policy), captured by running
@@ -119,55 +114,55 @@ BASE_ROW = {
 }
 P, F, D = "PASS", "FAIL", "DEGRADED"
 BASE_AGGREGATE = {  # columns follow POLICIES
-    ("pass", "pass", "pass"): (P, P, P, P, P, P, P, D),
-    ("pass", "pending", "pending"): (D, D, D, D, D, P, P, D),
-    ("pass", "pass", "pending"): (P, P, D, P, D, P, P, D),
-    ("fail", "pending", "pending"): (F, F, F, F, F, F, F, F),
-    ("pending", "pending", "pending"): (D, D, D, D, D, D, D, D),
-    ("pending", "not_dispatched", "not_dispatched"): (D, D, D, D, D, D, D, D),
-    ("run_failed", "pending", "pending"): (D, D, D, D, D, D, D, D),
-    ("degraded", "pending", "pending"): (D, D, D, D, D, D, D, D),
-    ("timeout", "pending", "pending"): (D, D, D, D, D, D, D, D),
-    ("custody_lost", "pending", "pending"): (D, D, D, D, D, D, D, D),
-    ("reservation", "reservation", "reservation"): (D, D, D, D, D, D, D, D),
-    ("pass", "custody_lost", "custody_lost"): (D, D, D, D, D, P, P, D),
-    ("pass", "pass", "custody_lost"): (P, P, D, P, D, P, P, D),
-    ("timeout", "timeout", "timeout"): (D, D, D, D, D, D, D, D),
-    ("pass", "pass", "timeout"): (P, P, D, P, D, P, P, D),
-    ("not_dispatched", "not_dispatched", "not_dispatched"): (D, D, D, D, D, D, D, D),
-    ("pass", "run_failed", "run_failed"): (D, D, D, D, D, P, P, D),
-    ("pass", "pass", "empty"): (P, P, D, P, D, P, P, D),
-    ("pass", "pass", "malformed"): (P, P, P, P, D, P, P, D),
-    ("late_settled_pass", "late_settled_pass", "late_settled_pass"): (P, P, P, P, P, P, P, D),
-    ("late_settled_pass", "late_settled_pass", "pending"): (P, P, D, P, D, P, P, D),
-    (): (D, D, D, D, D, D, D, D),
+    ("pass", "pass", "pass"): (P, P, P, P, P, D),
+    ("pass", "pending", "pending"): (D, D, D, P, P, D),
+    ("pass", "pass", "pending"): (D, P, D, P, P, D),
+    ("fail", "pending", "pending"): (F, F, F, F, F, F),
+    ("pending", "pending", "pending"): (D, D, D, D, D, D),
+    ("pending", "not_dispatched", "not_dispatched"): (D, D, D, D, D, D),
+    ("run_failed", "pending", "pending"): (D, D, D, D, D, D),
+    ("degraded", "pending", "pending"): (D, D, D, D, D, D),
+    ("timeout", "pending", "pending"): (D, D, D, D, D, D),
+    ("custody_lost", "pending", "pending"): (D, D, D, D, D, D),
+    ("reservation", "reservation", "reservation"): (D, D, D, D, D, D),
+    ("pass", "custody_lost", "custody_lost"): (D, D, D, P, P, D),
+    ("pass", "pass", "custody_lost"): (D, P, D, P, P, D),
+    ("timeout", "timeout", "timeout"): (D, D, D, D, D, D),
+    ("pass", "pass", "timeout"): (D, P, D, P, P, D),
+    ("not_dispatched", "not_dispatched", "not_dispatched"): (D, D, D, D, D, D),
+    ("pass", "run_failed", "run_failed"): (D, D, D, P, P, D),
+    ("pass", "pass", "empty"): (D, P, D, P, P, D),
+    ("pass", "pass", "malformed"): (P, P, D, P, P, D),
+    ("late_settled_pass", "late_settled_pass", "late_settled_pass"): (P, P, P, P, P, D),
+    ("late_settled_pass", "late_settled_pass", "pending"): (D, P, D, P, P, D),
+    (): (D, D, D, D, D, D),
     # A pending-dispatch row that carries an answer votes exactly as the base votes it.
-    ("pass", "held_raw_pass", "pending"): (P, P, D, P, D, P, P, D),
-    ("pass", "held_raw_pass", "pass"): (P, P, D, P, D, P, P, D),
-    ("pass", "held_raw_pass", "run_failed"): (P, P, D, P, D, P, P, D),
-    ("pass", "pass", "held_raw_fail"): (F, F, F, F, F, F, F, F),
-    ("pass", "pass", "held_raw_prose"): (P, P, D, P, D, P, P, D),
-    ("pass", "ok_pending", "pending"): (P, P, D, P, D, P, P, D),
-    ("ok_pending", "pass", "pass"): (P, P, P, P, P, P, P, D),
+    ("pass", "held_raw_pass", "pending"): (D, P, D, P, P, D),
+    ("pass", "held_raw_pass", "pass"): (D, P, D, P, P, D),
+    ("pass", "held_raw_pass", "run_failed"): (D, P, D, P, P, D),
+    ("pass", "pass", "held_raw_fail"): (F, F, F, F, F, F),
+    ("pass", "pass", "held_raw_prose"): (D, P, D, P, P, D),
+    ("pass", "ok_pending", "pending"): (D, P, D, P, P, D),
+    ("ok_pending", "pass", "pass"): (P, P, P, P, P, D),
 }
 INPUT_FIELDS = ("status", "operation_state", "late_result_pending", "error", "failure_code",
                 "operation_id", "raw_text")
 
 
-def aggregate(shapes, policy="acceptance"):
+def aggregate(shapes, policy="open"):
     surface, settings = POLICIES[policy]
     actors = [row(shape, f"s{index + 1}") for index, shape in enumerate(shapes)]
     slots = [SimpleNamespace(slot_id=actor.slot_id, role_hint="") for actor in actors]
-    result = aggregate_review_actors(
-        request=SimpleNamespace(surface=surface, policy=dict(settings)), slots=slots, actors=actors,
-        slots_by_id={slot.slot_id: slot for slot in slots},
-        actor_projection=_review_actor_projection, criteria_shape_valid=_criteria_shape_valid,
-        advisory_hardness=HARDNESS_ADVISORY_VISIBLE,
-    )
+    # These historical object assessments exercise the compatibility projections;
+    # live array/two-part surfaces are covered by test_review_seat_outcome.
+    request = SimpleNamespace(surface="task_acceptance", policy=dict(settings), resolved_wave_id="", task_id="test")
+    for actor, slot in zip(actors, slots):
+        finalize_seat_outcome(request, slot, actor)
+    result = aggregate_outcomes(request, slots, actors)
     return result, actors
 
 
-def panel_of(shapes, policy="acceptance", **run_fields):
+def panel_of(shapes, policy="open", **run_fields):
     surface, settings = POLICIES[policy]
     result, actors = aggregate(shapes, policy)
     run = {"request": {"surface": surface, "policy": dict(settings)}, "authority": "host_root",
@@ -249,10 +244,10 @@ def test_aggregate_quorum_and_gate_fields_equal_the_base(shapes, policy):
 
 
 def test_an_awaited_slot_holds_the_fail_closed_place_without_becoming_a_pass():
-    # Both directions of the hold: a fail-closed surface stays DEGRADED, the advisory
-    # acceptance surface keeps its quorum PASS, and a reviewer FAIL stays a FAIL.
+    # Both directions of the hold: a fail-closed surface stays DEGRADED, a surface that
+    # does not fail closed keeps its quorum PASS, and a reviewer FAIL stays a FAIL.
     assert aggregate(("pass", "pass", "pending"), "fail_closed")[0]["aggregate_signal"] == "DEGRADED"
-    assert aggregate(("pass", "pass", "pending"), "acceptance")[0]["aggregate_signal"] == "PASS"
+    assert aggregate(("pass", "pass", "pending"), "open")[0]["aggregate_signal"] == "PASS"
     assert aggregate(("pass", "pass", "pass"), "fail_closed")[0]["aggregate_signal"] == "PASS"
     assert aggregate(("fail", "pending", "pending"), "fail_closed")[0]["aggregate_signal"] == "FAIL"
     assert aggregate(("pass", "pass", "pending"), "quorum3")[0]["aggregate_signal"] == "DEGRADED"
@@ -276,7 +271,6 @@ def test_awaited_slots_are_reported_once_and_never_as_a_fault():
 
 @pytest.mark.parametrize("shapes, real", [
     (("run_failed", "pending", "pending"), [f"s1:{RUN_FAILED_ERROR}", "s1:degraded"]),
-    (("timeout", "pending", "pending"), [f"s1:{TIMEOUT_ERROR}", "s1:degraded"]),
     (("custody_lost", "pending", "pending"), [f"s1:{CUSTODY_ERROR}", "s1:degraded"]),
     (("degraded", "pending", "pending"), ["s1:degraded"]),
 ])
@@ -297,12 +291,10 @@ def test_a_refusal_beside_a_wait_keeps_both_of_its_entries():
     (("not_dispatched",) * 3,
      [f"s1:{REFUSAL_ERROR}", f"s2:{REFUSAL_ERROR}", f"s3:{REFUSAL_ERROR}",
       "s1:degraded", "s2:degraded", "s3:degraded"]),
-    (("timeout",) * 3,
-     [f"s1:{TIMEOUT_ERROR}", f"s2:{TIMEOUT_ERROR}", f"s3:{TIMEOUT_ERROR}",
-      "s1:degraded", "s2:degraded", "s3:degraded"]),
+    (("timeout",) * 3, ["awaiting 3 of 3 reviewer slot(s): s1, s2, s3 — no verdict"]),
     (("pass", "custody_lost", "custody_lost"),
      [f"s2:{CUSTODY_ERROR}", f"s3:{CUSTODY_ERROR}", "s2:degraded", "s3:degraded"]),
-    (("reservation",) * 3, ["s1:", "s2:", "s3:", "s1:degraded", "s2:degraded", "s3:degraded"]),
+    (("reservation",) * 3, ["awaiting 3 of 3 reviewer slot(s): s1, s2, s3 — no verdict"]),
     (("pass", "pass", "empty"), ["s3:empty", "s3:degraded"]),
     (("pass", "pass", "malformed"), ["s3:degraded"]),
     ((), ["quorum_not_met: pass_count=0 < min_successful=2"]),
@@ -344,7 +336,6 @@ def test_a_pending_row_that_carries_an_answer_is_judged_by_its_answer(shape, wor
     assert (truth["transport_status"], truth["parse_status"], truth["semantic_verdict"],
             truth["outcome_tier"], truth["reason"]) == words
     assert actor.quorum_contribution is vote
-    assert ("s3" in {voter["slot_id"] for voter in contract_valid_actors(SimpleNamespace(actors=[stored]))}) is vote
     # Its reasons are the base's: a participation fault by name, never an awaited slot.
     assert result["degraded_reasons"] == {
         "held_raw_pass": [f"s3:{PENDING_ERROR}"], "held_raw_fail": [f"s3:{PENDING_ERROR}"],
@@ -356,7 +347,7 @@ def test_a_pending_row_that_carries_an_answer_is_judged_by_its_answer(shape, wor
         ("success", 3) if shape == "ok_pending" else ("partial", 2))
 
 
-def test_a_stored_parsed_answer_on_a_pending_row_projects_and_votes_as_before():
+def test_a_stored_parsed_answer_on_a_pending_row_projects_as_before():
     stale = {"slot_id": "s1", "model": "m", "status": "error", "error": PENDING_ERROR,
              "operation_state": "pending_dispatch", "late_result_pending": True,
              "parsed": {**json.loads(PASS_TEXT), "dialogue_status": "continue_actionable"}}
@@ -366,12 +357,10 @@ def test_a_stored_parsed_answer_on_a_pending_row_projects_and_votes_as_before():
         "transport_status": "provider_transport_error", "parse_status": "valid", "semantic_verdict": "PASS",
         "outcome_tier": "solved", "dialogue_status": "continue_actionable",
         "coverage": {"criteria_total": 1, "findings": 0}, "reason": "done", "findings": []}
-    assert [voter["slot_id"] for voter in contract_valid_actors(SimpleNamespace(actors=[stale]))] == ["s1"]
-    # Without the answer the same row is a gap, and a gap never votes.
+    # Without the answer the same row is a gap.
     silent = {key: value for key, value in stale.items() if key != "parsed"}
     truth = _review_actor_projection(silent, "task_acceptance")
     assert (truth["transport_status"], truth["parse_status"], truth["semantic_verdict"]) == ("awaiting", "awaiting", "")
-    assert contract_valid_actors(SimpleNamespace(actors=[{**silent, **truth, "parsed": json.loads(PASS_TEXT)}])) == []
 
 
 # ── the panel ───────────────────────────────────────────────────────────────
@@ -384,16 +373,16 @@ def test_a_stored_parsed_answer_on_a_pending_row_projects_and_votes_as_before():
     # A real failure beside a wait keeps its own word.
     (("run_failed", "pending", "pending"), "provider_transport_error", "malformed"),
     (("custody_lost", "pending", "pending"), "provider_transport_error", "malformed"),
-    (("timeout", "pending", "pending"), "timeout", "malformed"),
+    (("timeout", "pending", "pending"), "awaiting", "awaiting"),
     (("pending", "not_dispatched", "not_dispatched"), "not_dispatched", "malformed"),
     (("pass", "run_failed", "pending"), "partial", "malformed"),
     # No awaited slot: the base fold, literally.
     (("pass", "pass", "pass"), "success", "valid"),
-    (("pass", "pass", "timeout"), "partial", "malformed"),
+    (("pass", "pass", "timeout"), "awaiting", "awaiting"),
     (("pass", "pass", "malformed"), "success", "malformed"),
-    (("timeout",) * 3, "timeout", "malformed"),
+    (("timeout",) * 3, "awaiting", "awaiting"),
     (("not_dispatched",) * 3, "not_dispatched", "malformed"),
-    (("reservation",) * 3, "provider_transport_error", "malformed"),
+    (("reservation",) * 3, "awaiting", "awaiting"),
     ((), "provider_transport_error", "malformed"),
 ])
 def test_panel_words_follow_the_collected_slots(shapes, transport, parse):
@@ -436,10 +425,8 @@ def test_a_superseded_awaited_panel_keeps_its_words_and_its_flag():
 
 # ── end to end through the substrate ────────────────────────────────────────
 
-def test_a_released_acceptance_run_reads_as_awaiting_and_then_as_its_answers(tmp_path, monkeypatch):
+def test_a_released_run_reads_as_awaiting_and_then_as_its_answers(tmp_path, monkeypatch):
     import ouroboros.review_custody as custody
-    from ouroboros.loop_acceptance_review import acceptance_run_pending
-    from ouroboros.review_dispatch import collect_task_acceptance_run
     from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 
     release, settled, entered = threading.Event(), threading.Semaphore(0), threading.Semaphore(0)
@@ -457,11 +444,15 @@ def test_a_released_acceptance_run_reads_as_awaiting_and_then_as_its_answers(tmp
         def chat(self, **kwargs):
             entered.release()
             assert release.wait(10), "fixture did not release its model"
-            return {"content": PASS_TEXT}, {"prompt_tokens": 5, "completion_tokens": 2}
+            return {"content": "[]\nNO_FINDINGS"}, {"prompt_tokens": 5, "completion_tokens": 2}
+
+    class Unused:
+        def chat(self, **kwargs):
+            pytest.fail("the settled wave was bought again")
 
     ctx = SimpleNamespace(task_id="awaiting-root", task_attempt=1, drive_root=tmp_path,
                           budget_drive_root=tmp_path, task_metadata={}, pending_events=[], event_queue=None)
-    request = ReviewRequest(surface="task_acceptance", task_id=ctx.task_id, goal="goal", subject="result",
+    request = ReviewRequest(surface="skill_review", task_id=ctx.task_id, goal="goal", subject="result",
                             evidence={"requirement": "exact"}, retry_key="awaiting-subject",
                             policy={"min_successful_slots": 2}, drain_deadline=time.monotonic())
     slots = [ReviewSlot(slot_id=f"s{index}", model=f"model/{index}", effort="high", timeout_sec=20)
@@ -477,7 +468,7 @@ def test_a_released_acceptance_run_reads_as_awaiting_and_then_as_its_answers(tmp
             assert (actor["signal"], actor["quorum_contribution"], actor["enforcement_impact"]) == (
                 "DEGRADED", False, "abstains")
         assert (first.aggregate_signal, first.degraded) == ("DEGRADED", True)
-        assert acceptance_run_pending(first) and not review_outcome_received(first.actors)
+        assert not review_outcome_received(first.actors)
         # The words about those rows.
         assert {(actor["transport_status"], actor["parse_status"]) for actor in first.actors} == {
             ("awaiting", "awaiting")}
@@ -490,8 +481,9 @@ def test_a_released_acceptance_run_reads_as_awaiting_and_then_as_its_answers(tmp
         assert panel["coverage"]["transport_success"] == 0
         release.set()
         assert all(settled.acquire(timeout=5) for _ in slots)
-        result = collect_task_acceptance_run(frozen, drive_root=tmp_path, usage_ctx=ctx)
-        assert not acceptance_run_pending(result)
+        # The same wave rejoined after its reviewers answered collects the same paid operations.
+        result = run_review_request(request, slots=slots, drive_root=tmp_path, usage_ctx=ctx, llm=Unused())
+        assert not any(actor["operation_state"] in {"pending_dispatch", "in_flight"} for actor in result.actors)
         assert (result.aggregate_signal, result.degraded_reasons) == ("PASS", [])
         assert [actor["operation_id"] for actor in result.actors] == [
             actor["operation_id"] for actor in first.actors]

@@ -66,27 +66,6 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
     state = {"current_sha": target_sha.strip()}
     _record_checkout_facts(state)
 
-    warning = ""
-    branch = repo_state.get("current_branch") or _g.BRANCH_DEV
-    if _g._has_remote("origin") and branch and branch not in {"HEAD", "unknown"}:
-        should_sync = True
-        rc, counts, _error = _g.git_capture(
-            ["git", "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"]
-        )
-        if rc == 0:
-            try:
-                ahead, behind = (int(part) for part in counts.split())
-                should_sync = ahead > 0 or behind > 0
-            except Exception:
-                pass
-        if should_sync:
-            rc, _out, push_error = _g._git_network_bounded(
-                ["push", "--force-with-lease", "origin", branch]
-            )
-            if rc != 0:
-                warning = f" ⚠️ Remote not synced: {push_error}"
-                _g.log.warning("Rollback remote sync failed for %s: %s", branch, push_error)
-
     _g.append_jsonl(
         _g.DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
@@ -96,13 +75,13 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
             "reason": reason,
             "new_sha": state["current_sha"],
             "keep_branch": keep_branch,
-            "remote_synced": not bool(warning),
-            "branch": branch,
+            "remote_pushed": False,
+            "branch": repo_state.get("current_branch") or _g.BRANCH_DEV,
         },
     )
     return True, (
         f"Rolled back to {tag_or_sha} ({state['current_sha'][:8]}). "
-        f"Previous HEAD is preserved on {keep_branch}.{warning}"
+        f"Previous HEAD is preserved on {keep_branch}. Nothing was pushed."
     )
 
 

@@ -323,6 +323,25 @@ def test_api_discovery_is_source_qualified_and_unknown_stays_unknown(monkeypatch
     assert not _summary(ig._list_image_models(ctx, model="openai::unlisted-image"))["models"]
 
 
+def test_an_added_image_key_lists_its_models_on_its_own_spelling(monkeypatch, ctx):
+    """Each image connection that can serve lists its models under the key that pays for them; an
+    exact inspection keeps the connection it names, and a switched-off key lists nothing."""
+    import json as _json
+
+    monkeypatch.setattr(image_api, "fetch_image_models", lambda base_url: [])
+    rows = [{"kind": "openai", "name": "pictures", "api_key": "fixture-added"},
+            {"kind": "openai", "name": "off", "api_key": "fixture-off", "enabled": False}]
+    monkeypatch.setenv("OUROBOROS_CONNECTIONS", _json.dumps(rows))
+    listed = {row["model"]: row for row in _summary(ig._list_image_models(ctx))["models"]}
+    assert listed["openai@pictures::gpt-image-2"]["source"] == "openai@pictures"
+    assert "openai::gpt-image-2" in listed and not any(model.startswith("openai@off::") for model in listed)
+    exact = _summary(ig._list_image_models(ctx, model="openai@pictures::unlisted-image"))["models"]
+    assert [row["model"] for row in exact] == ["openai@pictures::unlisted-image"]
+    monkeypatch.delenv("OPENAI_API_KEY")  # an added key alone still serves its own spelling
+    assert [row["model"] for row in _summary(ig._list_image_models(ctx, model="openai::unlisted-image"))["models"]] == []
+    assert _summary(ig._list_image_models(ctx, model="openai@pictures::gpt-image-2"))["models"]
+
+
 def test_catalog_failure_does_not_deny_unknown_explicit_model(monkeypatch, ctx):
     def fail(base_url):
         raise httpx.ConnectError("offline")
@@ -430,8 +449,9 @@ def test_readonly_and_network_constraints_block_generation(monkeypatch, ctx):
 
 
 def test_presence_requires_exact_tool_and_input_grants(monkeypatch, ctx):
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceResourceTarget, PresenceToolTarget
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceResourceTarget, PresenceToolTarget
     from tests.test_presence_authority import _resolution
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     def grant(*targets):

@@ -64,6 +64,8 @@ _GUI_ACTION_TOOLS = frozenset({
     # both triad reviewers on the release diff). Any future click alias MUST be
     # added here in the same commit that registers it.
     "double_click", "triple_click",
+    # 0.5.3: activate_app changes which guest window is in front (a mutating desktop effect without a click).
+    "activate_app",
 })
 
 
@@ -79,7 +81,7 @@ _GUI_ACTION_TOOLS = frozenset({
 # port from a tool result went looking for `<bridge>/evaluate`, i.e. for the grader. The
 # runner pins the connection itself, so the agent never needs either tool.
 _DENIED_SKILL_EXT_TOOLS = ("add_connection", "activate_connection", "use_local",
-                           "clear_active_connection", "list_connections", "test_connection")
+                           "list_connections", "test_connection")
 
 
 def _effective_disabled_tools(allow_a11y: bool, *, gate_phase: bool = False) -> list[str]:
@@ -111,5 +113,5 @@ def _effective_disabled_tools(allow_a11y: bool, *, gate_phase: bool = False) -> 
 _COMPUTER_USE_SHORT_TOOLS = (
     "list_connections", "test_connection", "screenshot", "click", "move",
     "left_click_drag", "mouse_down", "mouse_up", "type_text", "key", "hold_key",
-    "scroll", "wait", "window_list", "ax_tree", "cursor_position", "remote_exec",
+    "scroll", "wait", "activate_app", "window_list", "ax_tree", "cursor_position", "remote_exec",
 )

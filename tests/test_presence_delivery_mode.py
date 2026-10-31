@@ -1,7 +1,8 @@
 """The original turn owns whether autobiography awaits provider receipts."""
 from __future__ import annotations
 
-import json
+from tests import _dialogue as dialogue_test
+
 from dataclasses import replace
 
 import pytest
@@ -29,7 +30,7 @@ def test_receipt_mode_defers_only_outgoing_log_until_transport_confirmation(tmp_
         repo_dir=tmp_path / "repo", drive_root=tmp_path / "data",
         agent_factory=lambda **_kwargs: Agent(), gate=PresenceTurnGate(2),
     )
-    rows = [json.loads(line) for line in (tmp_path / "data/logs/chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = dialogue_test.log_rows(tmp_path / "data/logs/chat.jsonl")
     assert result.text == "The reply" and result.delivery_reporting_version == version
     assert captured["metadata"]["presence"]["delivery_reporting_version"] == version
     assert [row["direction"] for row in rows] == (["in", "out"] if version == 0 else ["in"])
@@ -61,4 +62,4 @@ def test_retry_echoes_original_mode_instead_of_new_request(tmp_path, original):
                                drive_root=tmp_path, agent_factory=no_reexecution, gate=PresenceTurnGate(2))
     assert result.delivery_reporting_version == (original or 0)
     assert result.text == "Old reply"
-    assert not (tmp_path / "logs/chat.jsonl").exists()
+    assert not dialogue_test.log_rows(tmp_path / "logs/chat.jsonl")

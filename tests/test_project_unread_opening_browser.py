@@ -1,5 +1,5 @@
 """Opening an unread Project room shows the message that arrived last however far below the
-first history page it lies (owner decision 2026-10-11; DESIGN "Project unread dot").
+first history page it lies (owner decision 2026-10-11; DESIGN "Unread").
 
 Real server, real producer seam (``message_bus.send_with_budget``), real history endpoint and
 read cursor. A reply is buried by its children's words — card content, so the reply stays the
@@ -10,14 +10,17 @@ hidden room or a failed page ends that reach, and a later read never resumes it.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from tests.test_project_unread_read_band_browser import PANEL, _client, _wait_for
+from ouroboros.gateway.history_paging import _ARRIVAL_SEARCH_ROWS, _RECENT_WINDOW_ROWS
+from tests.test_project_unread_read_band_browser import PANEL, _client, _unread, _wait_for
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
@@ -35,14 +38,11 @@ _SHOWN = """(messages, text) => {
 }"""
 
 
-def _buried_room(data, monkeypatch, project_id, children, padding=0, chat_id=None):
+def _buried_room(data, monkeypatch, project_id, children, chat_id=None):
     """A reply, then ``children`` words of 40 child tasks through the real producer, in a new room or
-    after what ``chat_id`` holds. With ``padding`` all but the newest 150 (the recent read's quota) are
-    long and, as the server's rotation leaves a long room, archived: the recent read's live tail then
-    starts the search above them."""
+    after what ``chat_id`` holds."""
     from ouroboros.projects_registry import create_project, get_project
     from supervisor import message_bus
-    from supervisor.state import rotate_chat_log_if_needed
 
     chat_id = chat_id or create_project(data, project_id, name=project_id.replace("-", " ").title())["chat_id"]
     bridge = message_bus.LocalChatBridge({})
@@ -54,23 +54,28 @@ def _buried_room(data, monkeypatch, project_id, children, padding=0, chat_id=Non
     message_bus.send_with_budget(chat_id, REPLY)
     revision = get_project(data, project_id)["visible_revision"]
     for index in range(children):
-        if padding and index == children - 150:
-            rotate_chat_log_if_needed(data, max_bytes=1)
         child = f"child-{index % 40}"
-        filler = " filler" * padding * (index < children - 150)
-        message_bus.send_with_budget(chat_id, f"Child word {index}{filler}", task_id=child, progress_meta={
+        message_bus.send_with_budget(chat_id, f"Child word {index}", task_id=child, progress_meta={
             "delegation_role": "subagent", "subagent_task_id": child, "parent_task_id": "root-1", "root_task_id": "root-1"})
     assert get_project(data, project_id)["visible_revision"] == revision, "a child's words are card content"
-    size = (data / "logs" / "chat.jsonl").stat().st_size
-    assert size < 800_000, ("below the server's chat rotation", size)
     return chat_id, revision
 
 
+def _cursor_kind(url):
+    """The read a history request's cursor names: ``older`` walks a chain's pages, ``page`` reads one
+    again, ``after`` takes what arrived since the window's newest read; None reads the newest page."""
+    cursor = parse_qs(urlparse(url).query).get("cursor")
+    if not cursor:
+        return None
+    return json.loads(base64.urlsafe_b64decode(cursor[0] + "=" * (-len(cursor[0]) % 4)))["kind"]
+
+
 class _Room:
-    """One client opening the unread room; older page requests are recorded, and one may be held or failed."""
+    """One client opening the unread room; older page requests are recorded, and one may be held or failed.
+    Every other history read with a cursor (an ``after`` read of new arrivals) is recorded in ``reads``."""
 
     def __init__(self, browser, url, project_id, hold=None, fail=None, init=()):
-        self.acks, self.older, self.held = [], [], []
+        self.acks, self.older, self.held, self.reads = [], [], [], []
         self.page, self.row = _client(browser, url, project_id, self.acks, init)
         self.project_id = project_id
 
@@ -82,7 +87,9 @@ class _Room:
                 route.fulfill(status=503, content_type="application/json", body='{"error": "unavailable"}')
             else:
                 route.continue_()
-        self.page.route(lambda url: _OLDER in url and "cursor=" in url, route)
+        self.page.route(lambda url: _OLDER in url and _cursor_kind(url) == "older", route)
+        self.page.on("request", lambda request: self.reads.append((_cursor_kind(request.url), request.url))
+                     if _OLDER in request.url and _cursor_kind(request.url) not in (None, "older") else None)
         self.messages = self.page.locator(PANEL)
 
     def open(self):
@@ -109,6 +116,14 @@ class _Room:
         return self.messages.evaluate(_SHOWN, REPLY)
 
 
+def _texts(response):
+    """The texts of the rows a history read answered with (none for a read that failed)."""
+    try:
+        return [row.get("text") for row in response.json().get("messages", [])]
+    except Exception:  # noqa: BLE001 - a failed or non-JSON answer brought no rows
+        return []
+
+
 def _evidence(data, name, **facts):
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", data.parent))
     evidence.mkdir(parents=True, exist_ok=True)
@@ -125,20 +140,21 @@ def _in_band(box):
     return box is not None and box["bottom"] > box["feedTop"] and box["top"] < box["bandBottom"]
 
 
-@pytest.mark.parametrize(("children", "padding"), [(160, 0), (900, 0), (610, 130)],
-                         ids=["buried", "past-kept-pages", "past-bounded-search"])
+@pytest.mark.parametrize("children", [160, 900, 1310], ids=["buried", "past-kept-pages", "past-bounded-search"])
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_an_unread_room_opens_on_its_reply_however_deep_its_childrens_words_bury_it(
-        direct_server_with_data, monkeypatch, engine, children, padding):
+        direct_server_with_data, monkeypatch, engine, children):
     """160 child words fill the recent read (the retained regression); 900 put the reply past the
-    three pages the pager keeps; 460 archived rows of ~1.3 KB outrun the recent read's 512 KiB search, so
-    its quiet chain carries the search on, four pages down. The opening reads the older pages itself, lands on the reply and
-    reads it; a later read never pages again, and the room reopened once read opens at its bottom."""
+    three pages the pager keeps; 1310 outrun the recent read's bounded search (its window of the room's
+    newest rows and the rows it searches past it), so its quiet chain carries the search on, eight pages
+    down. The opening reads the older pages itself, lands on the reply and reads it; a later read never
+    pages again, and the room reopened once read opens at its bottom."""
     from playwright.sync_api import sync_playwright
 
     data = direct_server_with_data["data_dir"]
     project_id = f"buried-{children}"
-    chat_id, revision = _buried_room(data, monkeypatch, project_id, children, padding)
+    searched = children > _RECENT_WINDOW_ROWS + _ARRIVAL_SEARCH_ROWS
+    chat_id, revision = _buried_room(data, monkeypatch, project_id, children)
     url = direct_server_with_data["url"]
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
@@ -148,7 +164,7 @@ def test_an_unread_room_opens_on_its_reply_however_deep_its_childrens_words_bury
             window = recent.get("window") or {}
             assert REPLY not in [row.get("text") for row in recent.get("messages") or []], "below the recent read"
             assert (window.get("latest_message") is None and isinstance(window.get("latest_before"), int)
-                    if padding else window["latest_message"]["history_id"]), ("searched, or named", window)
+                    if searched else window["latest_message"]["history_id"]), ("searched, or named", window)
             started = time.monotonic()
             room.open()
             read = _wait_for(room.page, lambda: room.seen() == [revision], attempts=200)
@@ -160,8 +176,8 @@ def test_an_unread_room_opens_on_its_reply_however_deep_its_childrens_words_bury
                                  seconds=seconds)
             room.page.screenshot(path=str(evidence / f"{name}.png"))
             assert read and _on_screen(landed), ("the opening lands on the reply and reads it", landed, room.acks)
-            assert pages >= {160: 1, 900: 5, 610: 4}[children], ("it read the older pages itself", room.older)
-            room.row.locator(".nav-unread-dot").wait_for(state="detached")
+            assert pages >= {160: 1, 900: 5, 1310: 8}[children], ("it read the older pages itself", room.older)
+            _unread(room.row).wait_for(state="detached")
 
             _emit_ws_frame(room.page, {"type": "projects_changed"})
             room.settled(800)
@@ -244,7 +260,7 @@ def test_the_readers_own_move_ends_the_reach(direct_server_with_data, monkeypatc
             evidence = _evidence(data, name, landed=landed, older=room.older, acks=room.acks, before=before)
             room.page.screenshot(path=str(evidence / f"{name}.png"))
             assert len(room.older) == 2, ("nothing more is asked once the reader moved", room.older)
-            assert room.seen() == [] and room.row.locator(".nav-unread-dot").count() == 1, room.acks
+            assert room.seen() == [] and _unread(room.row).count() == 1, room.acks
             assert not _on_screen(landed), ("nothing lands over the reader's move", landed)
         finally:
             browser.close()
@@ -296,7 +312,7 @@ def test_a_question_opened_from_main_during_the_reach_owns_the_room(direct_serve
             assert len(room.older) == 2, ("nothing more is asked once the question owns the room", room.older)
             assert asked["focused"] and asked["feedTop"] <= asked["top"] < asked["feedBottom"], asked
             assert not _on_screen(landed), ("the reply is not landed on", landed)
-            assert room.seen() == [] and room.row.locator(".nav-unread-dot").count() == 1, room.acks
+            assert room.seen() == [] and _unread(room.row).count() == 1, room.acks
         finally:
             browser.close()
 
@@ -321,12 +337,13 @@ def test_a_room_kept_hidden_during_the_reach_asks_for_nothing_until_it_is_opened
             assert _wait_for(room.page, lambda: len(room.held) == 1, attempts=200), room.older
             _stage_file(room.page)
             room.page.locator("#project-panel-close").evaluate("el => el.click()")
+            room.page.locator('.chat-instance-panel[data-pending-work="1"]').wait_for(state='attached')
             assert room.page.locator('.chat-instance-panel[data-pending-work="1"]').count() == 1
             room.release()
             room.settled()
             hidden = list(room.older)
             assert len(hidden) == 2 and room.seen() == [], ("a hidden room asks for nothing more", hidden, room.acks)
-            assert room.row.locator(".nav-unread-dot").count() == 1
+            assert _unread(room.row).count() == 1
             room.open()
             read = _wait_for(room.page, lambda: room.seen() == [revision], attempts=200)
             room.settled(300)
@@ -354,6 +371,8 @@ def test_a_reopened_room_lands_once_after_its_superseded_reach(direct_server_wit
             room.open()
             assert _wait_for(room.page, lambda: len(room.held) == 1, attempts=200), room.older
             room.page.locator("#project-panel-close").evaluate("el => el.click()")
+            # After the exit, the replacement reads independently of the destroyed room's held page.
+            room.messages.wait_for(state='detached')
             room.open()
             read = _wait_for(room.page, lambda: room.seen() == [revision], attempts=200)
             room.release()
@@ -386,10 +405,11 @@ def _read_receipts(text):
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_a_reply_arriving_while_the_opening_proves_a_quiet_start_is_reached_after_its_return(
         direct_server_with_data, monkeypatch, engine):
-    """The read-band quiet room past the pages kept: only the owner's own notes, the start four older pages
-    down. While its opening walks there, a reply arrives and 160 child words bury it below the next recent
-    read. The clean start proven, the opening returns to the newest page once, reads on to the reply that
-    fresh read names, lands there and reads it. Its receipt names the revision the client's state then
+    """The read-band quiet room past the pages kept: only the owner's own notes, more than the recent
+    read's bounded search covers, the start eight older pages down. While its opening walks there, a reply
+    arrives and 160 child words bury it below the next recent read. The clean start proven, the opening returns to the newest page once, reads on to the reply that
+    fresh read names, lands there and reads it; a state refresh that reads the arrivals first brings the reply
+    itself, and the opening lands on it with no return. Its receipt names the revision the client's state then
     holds: the opened one, or the reply's if a state refresh came first; the next refresh reads the reply's
     where the reader already is. Every receipt is posted with the reply shown, and the cursor ends at its revision."""
     from playwright.sync_api import sync_playwright
@@ -399,18 +419,21 @@ def test_a_reply_arriving_while_the_opening_proves_a_quiet_start_is_reached_afte
     data = direct_server_with_data["data_dir"]
     note = lambda index: {"ts": f"2026-09-28T10:{(10 + index) // 60:02d}:{(10 + index) % 60:02d}Z",  # noqa: E731
                           "direction": "in", "text": f"Owner note {index}: " + "a long thought " * 270}
-    chat_id, _log, revision = _seed_room(data, "late-room", "Late room", [note(i) for i in range(170, 330)])
-    (data / "archive").mkdir(parents=True, exist_ok=True)
-    (data / "archive" / "chat_20260928T101000.jsonl").write_text(
-        "".join(json.dumps({**note(i), "chat_id": chat_id}) + "\n" for i in range(170)), encoding="utf-8")
-    (data / "archive" / "chat_20260928T095900.jsonl").write_text("".join(json.dumps({
-        "ts": f"2026-09-28T09:{i // 60:02d}:{i % 60:02d}Z", "direction": "in", "chat_id": chat_id,
-        "text": f"Early note {i}"}) + "\n" for i in range(400)), encoding="utf-8")
+    early = [{"ts": f"2026-09-28T09:{i // 60:02d}:{i % 60:02d}Z", "direction": "in", "text": f"Early note {i}"}
+             for i in range(1000)]
+    assert len(early) + 330 > _RECENT_WINDOW_ROWS + _ARRIVAL_SEARCH_ROWS, "the notes outrun the recent read's search"
+    chat_id, revision = _seed_room(data, "late-room", "Late room", [note(i) for i in range(170, 330)], archives=[
+        ("chat_20260928T095900.jsonl", early), ("chat_20260928T101000.jsonl", [note(i) for i in range(170)])])
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
         try:
             url = direct_server_with_data["url"]
             room = _Room(browser, url, "late-room", hold=3, init=(_read_receipts(REPLY),))
+            # How far the walk had asked when a refresh's read of what arrived brought the reply (#1954).
+            brought = []
+            room.page.on("response", lambda response: brought.append(len(room.older))
+                         if _cursor_kind(response.url) == "after" and _OLDER in response.url
+                         and REPLY in _texts(response) else None)
             room.open()
             assert _wait_for(room.page, lambda: len(room.held) == 1, attempts=200), room.older
             _chat_id, newer = _buried_room(data, monkeypatch, "late-room", 160, chat_id=chat_id)
@@ -424,16 +447,21 @@ def test_a_reply_arriving_while_the_opening_proves_a_quiet_start_is_reached_afte
                         room.page.evaluate("() => window.__receipts") if "late-room" in (posted.get("seen") or {})]
             cursor = room.page.request.get(f"{url}/api/ui/preferences").json()["project_seen_revision"]
             name = f"unread-opening-{engine}-reply-after-return"
-            evidence = _evidence(data, name, landed=landed, older=room.older, acks=room.acks, receipts=receipts,
-                                 cursor=cursor, revisions=[revision, newer])
+            evidence = _evidence(data, name, landed=landed, older=room.older, reads=room.reads, acks=room.acks,
+                                 receipts=receipts, cursor=cursor, revisions=[revision, newer])
             room.page.screenshot(path=str(evidence / f"{name}.png"))
             assert read and _on_screen(landed), ("the opening reaches the reply the return named", landed, room.acks)
-            assert len(room.older) == 5, ("four pages to the start, then the page holding the reply", room.older)
+            # The walk reaches the start, eight pages down, then reads the page holding the reply; unless a state
+            # refresh's read of what arrived brings the reply first: the opening lands on it with no return and asks
+            # for no page past the one it had asked for.
+            assert len(room.older) == 9 or (brought and len(room.older) <= brought[0] + 1), \
+                ("eight pages to the start, then the page holding the reply, or a refresh brought it first",
+                 room.older, brought)
             assert receipts and all(_in_band(box) for _seen, box in receipts), ("read only while shown", receipts)
             assert newest and room.seen() == sorted(room.seen()) and set(room.seen()) <= {revision, newer}, \
                 ("the newer revision is read where the reader already is", room.acks)
             assert cursor.get("late-room") == newer, ("the shared cursor covers the reply's revision", cursor)
-            room.row.locator(".nav-unread-dot").wait_for(state="detached")
+            _unread(room.row).wait_for(state="detached")
         finally:
             browser.close()
 
@@ -461,7 +489,7 @@ def test_a_failed_page_ends_the_reach_and_its_repair_moves_no_one(direct_server_
             room.page.screenshot(path=str(evidence / f"{name}.png"))
             assert len(room.older) == 2, ("no automatic retry and no later reach", room.older)
             assert room.messages.evaluate("n => n.scrollTop") == top, "the repair moves no one"
-            assert room.seen() == [] and room.row.locator(".nav-unread-dot").count() == 1, room.acks
+            assert room.seen() == [] and _unread(room.row).count() == 1, room.acks
             assert room.page.locator(f"{PANEL} .chat-load-older button").count() == 1, "Retry stays the reader's"
         finally:
             browser.close()

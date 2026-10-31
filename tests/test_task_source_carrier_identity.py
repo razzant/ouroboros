@@ -27,6 +27,7 @@ import pytest
 
 from ouroboros import artifacts, context_compaction as cc, headless, observability
 from ouroboros.task_results import load_task_result, write_task_result
+from tests._store_shared import remove_store_tree
 from tests.test_context_reclaim_materializer import _request, _unit
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -62,7 +63,7 @@ def _capsule_request(child: pathlib.Path, task_id: str, handles: list) -> dict:
     checkpoint = cc._persist_reclaim_checkpoint(messages, request, SimpleNamespace(fingerprint="c" * 64, units=[]),
                                                 drive_root=child, task_id=task_id)
     unit = dataclasses.replace(unit, source_refs=(*unit.source_refs, *({"source_ref": ref} for ref in handles)))
-    capsule, _ = cc._capsule_message(cc._SelectedUnit(unit, 0, ""), "summary",
+    capsule, _ = cc._capsule_message(unit, "summary",
                                      [cc._part(unit.unit_id, unit.source_text)], checkpoint, request)
     assert cc._capsule_metadata(capsule)[1] is not None  # the walk follows a valid capsule's sources
     return observability.persist_call(child, task_id=task_id, call_id="capsule-request", call_type="llm_request",
@@ -123,7 +124,7 @@ def test_every_task_source_carrier_keeps_its_reference_in_either_registration_or
     # Byte-identical, key order and the producer's marker spacing included.
     assert {key: json.dumps(copied[key], ensure_ascii=False) for key in SOURCE_FIELDS} == before
     assert copied["completion_observations"]["messages"][0]["content"] == body["completion_observations"]["messages"][0]["content"]
-    shutil.rmtree(child)
+    remove_store_tree(child)
     for ref, raw in zip(full, originals):  # verified and copied, whatever shape reached the file first
         assert artifacts.read_actor_source_bytes(parent, task_id, ref) == raw
         assert artifacts.read_actor_source_bytes(parent, task_id, _compact(ref)) == raw
@@ -255,7 +256,7 @@ def test_a_pending_legacy_row_heals_on_one_retry_and_leaves_the_ledger(tmp_path)
     with pytest.raises(PlanReviewSourceUnavailable):
         load_plan_review_state(parent, task_id)  # the strict decider sees the damage
 
-    report = observability.retry_pending_child_ref_promotions(parent, generation=object())
+    report = observability.retry_pending_child_ref_promotions(parent)
 
     assert (report["scanned"], report["completed"], report["errors"]) == (1, [task_id], [])
     row = load_task_result(parent, task_id)
@@ -263,9 +264,9 @@ def test_a_pending_legacy_row_heals_on_one_retry_and_leaves_the_ledger(tmp_path)
     assert wave["wave_artifact"] == _compact(original["wave_artifact"])
     assert wave["spec_source_ref"] == _compact(original["spec_source_ref"])
     assert (row["child_ref_promotion"]["status"], row["child_ref_promotion"]["unavailable_refs"]) == ("complete", [])
-    shutil.rmtree(child)
+    remove_store_tree(child)
     assert load_plan_review_state(parent, task_id)["waves"][-1]["spec"] == spec  # verified canonical bytes
-    assert observability.retry_pending_child_ref_promotions(parent, generation=object())["scanned"] == 0
+    assert observability.retry_pending_child_ref_promotions(parent)["scanned"] == 0
 
 
 def test_a_complete_legacy_row_is_readable_in_memory_and_never_rewritten(tmp_path):
@@ -333,12 +334,14 @@ def test_a_gap_without_exactly_one_own_recorded_path_stays_a_gap(case):
         "waves": [{"spec_source_ref": _compact(ref)}]}
 
 
-def test_a_successor_review_binds_every_addressed_source_past_an_unrestorable_gap(tmp_path):
-    """A gap no own recorded path restores rides into a started successor's task contract;
-    reader binding skips it (it names no address) and still binds every addressed source."""
+def test_a_successor_starts_past_an_unrestorable_gap_and_keeps_every_addressed_source(tmp_path):
+    """A gap no own recorded path restores rides into a started successor's task contract as a
+    named plan-review source gap; it names no address, and every addressed source beside it keeps
+    its own."""
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.contracts.task_contract import build_task_contract
-    from ouroboros.review_source_closure import _reader_bindings
+    from ouroboros.tools.control import _get_task_result
+    from ouroboros.tools.registry import ToolContext
     from tests.test_doc_context import _make_env_and_memory
 
     env, _memory = _make_env_and_memory(tmp_path)
@@ -355,11 +358,15 @@ def test_a_successor_review_binds_every_addressed_source_past_an_unrestorable_ga
                                              "arguments": {"task_id": pred, "include_authority": True}}}
     assert validate_task_authority_sources(env, task) == {}
     assert task["predecessor_authority"]["plan_review_source_gap"]["code"] == "PLAN_REVIEW_SOURCE_UNAVAILABLE"
-    own = artifacts.store_actor_source_bytes(root, "succ", category="tool_results", source_id="own",
-                                             data=b"own bytes", extension="txt")
-    request = {"evidence": {"task_contract": build_task_contract(task), "source_refs": [own]}}
 
-    bindings = _reader_bindings(request, root, "succ")
+    carried = build_task_contract(task)["predecessor_authority"]
 
-    assert [(row["owner_task_id"], row["source_path"]) for row in bindings] == [
-        (pred, intact["path"]), ("succ", own["path"])]
+    assert carried["plan_review_source_gap"]["code"] == "PLAN_REVIEW_SOURCE_UNAVAILABLE"
+    # The review history itself stays behind the reader (THESIS I-7, C5); its addresses keep their own there.
+    assert "plan_review_state" not in carried and carried["omitted_fields"]["plan_review_state"] > 0
+    read = json.loads(_get_task_result(ToolContext(repo_dir=env.repo_dir, drive_root=root), pred,
+                                       include_authority=True))
+    carried_wave = read["authority"]["plan_review_state"]["waves"][-1]
+    assert carried_wave["wave_artifact"]["path"] == intact["path"]
+    assert carried_wave["spec_source_ref"]["availability"] == "unavailable"
+    assert "path" not in carried_wave["spec_source_ref"]

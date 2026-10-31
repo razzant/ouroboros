@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import launcher as _launcher_loaded_before_settings  # noqa: F401 -- import before per-test root rebinding
 
 from ouroboros import launcher_background as lb
 from ouroboros import platform_layer
@@ -30,6 +31,7 @@ NODE_BIN = (
     else "node"
 )
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
+OTHER = "Ouroboros 7.9.0 is already running from /Users/me/Desktop/Ouroboros.app. Quit it, then open this copy."
 
 
 class Hook:
@@ -43,7 +45,7 @@ class Hook:
 
 class Window:
     def __init__(self, answer=None):
-        self.events = SimpleNamespace(closing=Hook(), before_show=Hook(), shown=Hook(), closed=Hook())
+        self.events = SimpleNamespace(closing=Hook(), before_show=Hook(), before_load=Hook(), shown=Hook(), closed=Hook())
         self.localization = {"global.ok": "OK", "global.cancel": "Cancel"}
         self.visible, self.calls, self.answer = True, [], answer
 
@@ -102,7 +104,7 @@ class Answer:
 
 @pytest.fixture(autouse=True)
 def no_real_server(monkeypatch):
-    """No test here may reach a real server (the live install listens on 8765): HTTP is refused
+    """No test here may reach a real server: HTTP is refused
     unless a test answers it, and sign-in startup reads "on" unless a test asks the real reader."""
     def refused(*_args, **_kwargs):
         raise OSError("no server in these tests")
@@ -139,7 +141,7 @@ def make(monkeypatch):
 
     def factory(*, indicator=FakeIndicator, answer=None):
         monkeypatch.setattr(lb, "indicator_class", lambda: indicator)
-        background = lb.Background(lambda: background.events.append("exit"), lambda: 8765, threading.Event())
+        background = lb.Background(lambda: background.events.append("exit"), lambda: 1, threading.Event())
         background.events = []
         created.append(background.shutdown)
         window = Window(answer)
@@ -175,9 +177,9 @@ def wait_for(predicate, timeout=5.0):
 def test_close_with_background_off_quits(settings, monkeypatch, make):
     choose(settings, "false")
     background, window = make()
-    assert close(background, window) is None
-    assert background.events == ["exit"]
-    assert window.calls == []
+    assert close(background, window) is False  # the window and its loop stay until the closer exits
+    wait_for(lambda: background.events == ["exit"])
+    assert background.shutdown.is_set() and window.calls == []
 
 
 def test_first_close_asks_once_and_stores_the_answer(settings, monkeypatch, make):
@@ -244,7 +246,8 @@ def test_the_window_is_hidden_outside_the_indicators_state_lock(settings, monkey
 
     window.hide = hide_while_the_icon_dies
     close(background, window)
-    assert background.events == ["exit"] and not background.indicator.hidden, "no hidden window without its icon"
+    wait_for(lambda: background.events == ["exit"])
+    assert not background.indicator.hidden, "no hidden window without its icon"
 
 
 def test_no_indicator_means_close_quits_even_when_background_is_on(settings, monkeypatch, make):
@@ -255,13 +258,15 @@ def test_no_indicator_means_close_quits_even_when_background_is_on(settings, mon
 
     background, window = make(indicator=NoIcon)
     close(background, window)
-    assert background.events == ["exit"] and window.calls == []
+    wait_for(lambda: background.events == ["exit"])
+    assert window.calls == []
 
 
 def test_without_an_adapter_or_native_hooks_closing_quits_and_never_asks(settings, monkeypatch, make):
     background, window = make(indicator=None)  # Linux
     close(background, window)
-    assert background.events == ["exit"] and window.calls == []
+    wait_for(lambda: background.events == ["exit"])
+    assert window.calls == []
 
     class Broken(FakeIndicator):
         def attach_native(self, window):
@@ -269,15 +274,16 @@ def test_without_an_adapter_or_native_hooks_closing_quits_and_never_asks(setting
 
     background, window = make(indicator=Broken)
     close(background, window)
-    assert background.events == ["exit"] and window.calls == []
+    wait_for(lambda: background.events == ["exit"])
+    assert window.calls == []
 
 
 def test_quit_requests_bypass_the_question_and_are_never_cancelled(settings, monkeypatch, make):
     background, window = make(answer=True)
     background.quit.set()  # Cmd+Q / Dock Quit / logout (macOS delegate) or a tray Quit
-    assert close(background, window) is None
-    assert background.events == ["exit"] and window.calls == []
-    assert not settings.exists()
+    assert close(background, window) is False  # handed to the closer, never asked
+    wait_for(lambda: background.events == ["exit"])
+    assert window.calls == [] and not settings.exists()
 
 
 def test_tray_quit_is_a_plain_exit_without_panic(settings, monkeypatch, tmp_path, make):
@@ -287,34 +293,59 @@ def test_tray_quit_is_a_plain_exit_without_panic(settings, monkeypatch, tmp_path
     monkeypatch.setattr(lb.urllib.request, "urlopen", no_http)
     background, window = make()
     background.request_quit()
-    assert background.quit.is_set() and background.events == ["exit"]
+    assert background.shutdown.is_set() and background.quit.is_set()  # latched before the call returns
+    wait_for(lambda: background.events == ["exit"])
     assert not (tmp_path / "state" / "panic_stop.flag").exists()
 
 
-def test_tray_panic_posts_the_servers_emergency_stop_and_shows_the_window_on_failure(settings, monkeypatch, make):
-    sent = []
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-    def urlopen(request, timeout):
-        sent.append((request.full_url, request.get_method(), json.loads(request.data)))
-        if len(sent) > 1:
-            raise OSError("server gone")
-        return Response()
-
-    monkeypatch.setattr(lb.urllib.request, "urlopen", urlopen)
+def test_tray_panic_needs_neither_server_reply_nor_registered_fallback(settings, monkeypatch, make):
+    from ouroboros import server_control
     background, window = make()
+    stopped = threading.Event()
+    monkeypatch.setattr(lb.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("Panic must not connect"))
+    monkeypatch.setattr(server_control, "execute_panic_stop", lambda *a, **kw: stopped.set())
+    assert not hasattr(background, "panic_fallback")
     background.request_panic()
-    wait_for(lambda: len(sent) == 1)
-    assert sent[0] == ("http://127.0.0.1:8765/api/command", "POST", {"cmd": "/panic"})
+    assert stopped.wait(2)
+    assert background.events == [] and window.calls == []
+    assert background.shutdown.is_set() and background.quit.is_set()
+
+
+@pytest.mark.parametrize("failed_writer", [None, "flag", "controls"])
+def test_early_tray_panic_latches_stop_and_exits_even_when_persistence_fails(settings, monkeypatch, make, failed_writer):
+    from ouroboros import server_control
+    from ouroboros.launcher_bootstrap import automatic_launch_allowed
+    from tests.test_launcher_panic import disarm_emergency_owners
+
+    background, window = make()
+    background.window = None  # early icon: no server and no pywebview window yet
+    disarm_emergency_owners(monkeypatch, background.events)
+    writes, write_flag = [], server_control._write_panic_flag
+    exit_threads = []
+    monkeypatch.setattr(server_control.os, "_exit", lambda code: (
+        exit_threads.append(threading.current_thread().daemon), background.events.append("exit")))
+
+    def persist(kind, root):
+        assert background.shutdown.is_set() and background.quit.is_set(), "fence before I/O"
+        writes.append(kind)
+        if failed_writer == kind:
+            raise OSError("unwritable state")
+        if kind == "flag":
+            write_flag(root)
+
+    monkeypatch.setattr(server_control, "_write_panic_flag", lambda root: persist("flag", root))
+    monkeypatch.setattr(server_control, "_persist_panic_controls", lambda root: persist("controls", root))
     background.request_panic()
-    wait_for(lambda: "show" in window.calls)
-    assert background.events == []
+    wait_for(lambda: "exit" in background.events)
+    assert writes == ["flag", "controls"], "each persistence attempt is independent"
+    assert exit_threads == [False], "returning from main must not kill the pending Panic writer"
+    assert background.shutdown.is_set() and background.quit.is_set()
+    assert not background._open_pending and window.calls == []
+    if failed_writer != "flag":
+        assert (settings.parent / "state" / "panic_stop.flag").read_text() == "panic"
+        assert not automatic_launch_allowed("automatic", settings.parent, lb.log)
+
+
 
 
 @pytest.mark.parametrize("answer,hidden", [
@@ -341,7 +372,7 @@ def test_a_quiet_start_needs_sign_in_startup_on_as_the_os_reports_it(settings, m
     monkeypatch.setattr(lb, "signin_startup_on", SIGN_IN)
     assert background.start_hidden("owner") is False and asked == [], "a manual launch never asks and is shown"
     assert background.start_hidden("automatic") is hidden
-    assert asked == ["http://127.0.0.1:8765/api/desktop/autostart"]  # the server's own autostart_status()
+    assert asked == ["http://127.0.0.1:1/api/desktop/autostart"]  # the server's own autostart_status()
     assert background.indicator.hidden is hidden
 
 
@@ -439,7 +470,7 @@ def test_the_page_plays_no_second_sound_after_the_launchers_banner(settings, mon
     answer = background.attention(True, "Task finished", "")  # the real request_native_attention, sound off
     assert answer == {"ok": True, "status": "background", "banner": True, "sound_played": False}, "never claims it played"
     assert _page_tones(answer) == 0, "the banner owns the sound"
-    assert _page_tones({**answer, "banner": False}) == 1, "no banner and no system sound: the page's one tone"
+    assert _page_tones({**answer, "banner": False}) == 0, "legacy attention is no permission for a fallback tone"
 
 
 def test_attention_never_raises_a_window_hidden_on_purpose(settings, monkeypatch, make):
@@ -480,18 +511,47 @@ def test_panic_removes_the_indicator_without_waiting_and_before_the_lock(monkeyp
         def stop(self, *, wait):
             calls.append((self.name, wait))
 
-    monkeypatch.setattr(lb, "_active", Started("indicator"))
-    monkeypatch.setattr(lb, "_notifier", Started("notifications"))  # Windows' notification icons
+    monkeypatch.setattr(lb, "_active", Started("indicator"))  # Windows: also the notifications' one icon
     lb.request_tray_cleanup()
     lb.stop_tray_before_exit(lambda: calls.append("release"), wait=0)
-    assert calls == [("indicator", 0), ("notifications", 0), ("indicator", 0), ("notifications", 0), "release"]
+    assert calls == [("indicator", 0), ("indicator", 0), "release"]
     calls.clear()
     lb.stop_tray_before_exit(lambda: calls.append("release"))
-    assert calls == [("indicator", 0.5), ("notifications", 0.5), "release"]
+    assert calls == [("indicator", 0.5), "release"]
     monkeypatch.setattr(lb, "_active", None)
     calls.clear()
     lb.stop_tray_before_exit(lambda: calls.append("release"))
-    assert calls == [("notifications", 0.5), "release"], "no background icon: the notification icons still go"
+    assert calls == ["release"], "no icon: only the lock"
+
+
+@pytest.mark.parametrize("idle,restarts", [(True, True), (True, False), (False, True)])
+def test_failed_handoff_restores_the_icon_or_a_hidden_window_without_a_second_pump(
+        settings, monkeypatch, make, idle, restarts):
+    choose(settings, "true")
+    background, window = make()
+    assert close(background, window) is False
+    lb.stop_tray_before_exit(lambda: None)
+    if not idle:
+        background.indicator._idle.clear()  # removal acknowledged, pump has not ended
+    background.indicator.comes_up = restarts
+    monkeypatch.setattr(lb, "INDICATOR_WAIT_SEC", 0.01)
+    lb.restore_tray_after_handoff()
+    if idle and restarts:
+        assert background.indicator.ready.is_set() and not window.visible
+        background.show_window()
+        assert window.visible
+    else:
+        assert not background.indicator.ready.is_set() and window.visible
+        assert not background.indicator.hidden, "no hidden shell without a way back"
+
+
+def test_panic_does_not_restore_an_indicator_after_handoff_failure(settings, monkeypatch, make):
+    background, window = make()
+    assert background._indicator_up()
+    lb.stop_tray_before_exit(lambda: None)
+    background.shutdown.set()
+    lb.restore_tray_after_handoff()
+    assert not background.indicator.ready.is_set() and window.calls == []
 
 
 def test_turning_background_off_removes_the_icon_only_while_the_window_is_visible(settings, monkeypatch, make):
@@ -513,41 +573,196 @@ def test_turning_background_off_removes_the_icon_only_while_the_window_is_visibl
     assert ("dispose", 0.0) in background.events and not background.indicator.ready.is_set()
 
 
-READY = {"supervisor_ready": True, "supervisor_error": None, "active_chat_activities_complete": True}
+class NotifyingIndicator(FakeIndicator):
+    carries_notifications = True  # Windows: system notifications are balloons on this icon
 
 
-def census(*phases, **facts):
-    return {**READY, "active_chat_activities": [{"phase": phase} for phase in phases], **facts}
+@pytest.mark.parametrize("quit_during_boot", [False, True, "listen", "settings"])
+def test_main_owns_one_windows_icon_before_bootstrap_and_early_quit_is_callable(
+        settings, monkeypatch, quit_during_boot):
+    import atexit
+    import launcher
+    from ouroboros import launcher_tray
+    from tests.test_launcher_source_handoff import Continued, Exited
+
+    choose(settings, "false")
+    events, owners, finalizers = [], [], []
+
+    class EarlyIndicator(NotifyingIndicator):
+        def _launch(self):
+            events.append("icon")
+            return super()._launch()
+
+        def _dispose(self, wait):
+            events.append("remove icon")
+            self._stopped()
+
+    original_background = lb.Background
+
+    def owner(*args, **kwargs):
+        background = original_background(*args, **kwargs)
+        owners.append(background)
+        return background
+
+    def check_git():
+        background = owners[0]
+        assert background.window is None and background.indicator.ready.is_set()
+        assert events == ["runtime", "lock", "allowed", "listen", "icon"]
+        background.show_window()
+        assert background._open_pending, "Open before the window exists is kept"
+        if quit_during_boot == "settings":
+            return True
+        if quit_during_boot:
+            background.request_quit()  # callback must already exist, even before Git/bootstrap
+            return True
+        raise Continued()
+
+    def leave(code):
+        events.append(("exit", code))
+        raise Exited(code)
+
+    monkeypatch.setattr(lb, "indicator_class", lambda: EarlyIndicator)
+    monkeypatch.setattr(lb, "_active", None)
+    monkeypatch.setattr(lb.Background, "_watch", lambda self: None)
+    monkeypatch.setattr(lb.sys, "platform", "win32")
+    def listen(*args):
+        events.append("listen")
+        if quit_during_boot == "listen":
+            owners[0].request_quit()  # the exit closure must already know its Background owner
+
+    monkeypatch.setattr(launcher_tray, "listen_for_activation", listen)
+    if quit_during_boot == "settings":
+        monkeypatch.setattr(launcher, "bootstrap_repo", lambda: True)
+        monkeypatch.setattr(launcher, "launcher_sources_changed", lambda *a, **kw: False)
+        monkeypatch.setattr(launcher, "_prepare_first_run_settings",
+                            lambda: (owners[0].request_quit(), ({}, False))[1])
+    monkeypatch.setattr(atexit, "register", finalizers.append)
+    webview = types.ModuleType("webview")
+    webview.windows = []  # pywebview's real registry exists before the first window
+    monkeypatch.setitem(sys.modules, "webview", webview)
+    monkeypatch.setattr(launcher.os, "_exit", leave)
+    for name in ("_headless", "_external_ui", "_external_host_update", "_external_seed_bundle", "_launch_argv",
+                 "_launch_intent"):
+        monkeypatch.setattr(launcher, name, getattr(launcher, name))
+    for name, value in (("IS_WINDOWS", True), ("_headless", False), ("_detect_headless", lambda: None),
+                        ("_shutdown_event", threading.Event()), ("Background", owner),
+                        ("_prepare_windows_webview_runtime", lambda: events.append("runtime") or (True, "")),
+                        ("acquire_pid_lock", lambda: events.append("lock") or True),
+                        ("release_pid_lock", lambda: events.append("release")),
+                        ("automatic_launch_allowed", lambda *args: events.append("allowed") or True),
+                        ("stop_agent", lambda: events.append("stop agent")),
+                        ("_kill_orphaned_children", lambda: events.append("reap")), ("check_git", check_git)):
+        monkeypatch.setattr(launcher, name, value)
+    if quit_during_boot:
+        launcher.main([])
+    else:
+        with pytest.raises(Continued):
+            launcher.main([])
+    background = owners[0]
+    if quit_during_boot:
+        assert background.shutdown.is_set()
+        assert "stop agent" not in events and "reap" not in events, "boot Quit cannot kill stale companion PIDs"
+        finalizers[0]()
+        assert events[-2:] == ["remove icon", "release"]
+    else:
+        background.window = Window()
+        background.run()
+        assert events.count("icon") == 1, "webview's later callback reuses the early icon"
+        finalizers[0]()  # startup return/exception cleanup removes the icon before releasing the lock
+        assert events[-2:] == ["remove icon", "release"]
+
+
+@pytest.mark.parametrize("value", ["false", ""])  # background off, or not decided yet
+def test_windows_keeps_its_one_icon_for_the_whole_run_and_background_decides_only_the_close(
+        settings, monkeypatch, make, value):
+    """Owner decision 1A: the icon carrying the notifications comes up with the window whatever the background
+    choice, and turning background off never removes it; the choice still decides what a close does. An icon
+    that carries no notifications (macOS) keeps coming up only for background, as before."""
+    class OneTick(threading.Event):
+        def wait(self, timeout=None):
+            return True  # one poll iteration, then stop
+
+    choose(settings, value)
+    plain, _window = make()
+    plain.run()
+    assert not plain.indicator.ready.is_set(), "no background, no item: unchanged where notifications go elsewhere"
+    background, window = make(indicator=NotifyingIndicator)
+    background.run()
+    assert background.indicator.ready.is_set() and not background.indicator.hidden
+    background.shutdown.set()
+    background._poller.join(timeout=5)
+    background.shutdown = OneTick()
+    background._poll()
+    assert background.indicator.ready.is_set() and not any(event[0] == "dispose" for event in background.events
+                                                           if isinstance(event, tuple))
+    outcome = close(background, window)
+    if value == "false":
+        assert outcome is False, "background off: closing quits, icon or not, through the closer"
+        wait_for(lambda: background.events[-1:] == ["exit"])
+    else:
+        assert outcome is False and window.visible, "undecided: the one question, the window stays meanwhile"
+
+
+READY = {"supervisor_ready": True, "supervisor_error": None, "works_complete": True}
+
+
+def projection(*works, confirmed=True, **facts):
+    """A /api/state work projection: each work is (activity, transition, has_turn)."""
+    rows = [{"work_id": f"w{index}", "activity": activity, "transition": transition,
+             "turn": [{"kind": "question", "task_id": f"w{index}"}] if turn else [],
+             **({"confirmed": confirmed} if confirmed is not None else {})}
+            for index, (activity, transition, turn, confirmed) in enumerate(works)]
+    return {**READY, "works": rows, "work_summary": {"counts": {}, "turn": 0, "confirmed": confirmed}, **facts}
+
+
+def work(activity, transition="none", turn=False, confirmed=None):
+    return (activity, transition, turn, confirmed)
 
 
 @pytest.mark.parametrize("body,line", [
     (OSError("refused"), "Ouroboros: not responding"),  # refused, timed out (a busy server is not "stopped")
     (b"<html>", "Ouroboros: not responding"),
-    (census(), "Ouroboros: waiting"),
-    (census("queued"), "Ouroboros: waiting"),
-    (census("working", "finalizing", "thinking", "queued"), "Ouroboros: working on 3 tasks"),
-    (census("working"), "Ouroboros: working on 1 task"),
-    (census("budget_paused"), "Ouroboros: paused"),
-    (census("budget_pausing", "budget_paused"), "Ouroboros: pausing"),  # settling a Pause is not work (page)
-    (census("working", "budget_pausing"), "Ouroboros: working on 1 task"),
+    (projection(), "Ouroboros: waiting"),
+    (projection(work("queued")), "Ouroboros: queued"),
+    (projection(work("queued"), work("paused")), "Ouroboros: queued"),  # the server's order: queued before paused
+    (projection(work("working", "finalizing")), "Ouroboros: finalizing"),  # an answer's upkeep is not a new task
+    (projection(work("working", "finalizing"), work("working")), "Ouroboros: working on 2 tasks"),
+    (projection(work("working", "pausing"), work("working", "finalizing")), "Ouroboros: pausing"),  # as the room says
+    (projection(work("working"), work("working", "finalizing"), work("working"), work("queued")),
+     "Ouroboros: working on 3 tasks"),
+    (projection(work("working")), "Ouroboros: working on 1 task"),
+    (projection(work("paused")), "Ouroboros: paused"),
+    (projection(work("working", "pausing"), work("paused")), "Ouroboros: pausing"),  # settling a Pause is not work
+    (projection(work("working"), work("working", "pausing")), "Ouroboros: working on 1 task"),
+    # A direct turn preparing its request is work, not an unknown phase (it used to read "unconfirmed").
+    (projection(work("working")), "Ouroboros: working on 1 task"),
+    # What waits for the owner is counted on the same line.
+    (projection(work("working"), work("waiting", turn=True)), "Ouroboros: working on 1 task · 1 waits for you"),
+    (projection(work("paused", turn=True), work("waiting", turn=True)), "Ouroboros: waiting · 2 wait for you"),
     # What the server says it does not know is neither "waiting" nor "working" (review r1).
-    (census(supervisor_ready=False, supervisor_error="Supervisor init failed: boom"),
+    (projection(supervisor_ready=False, supervisor_error="Supervisor init failed: boom"),
      "Ouroboros: error, tasks are not running"),
-    (census(supervisor_ready=False), "Ouroboros: starting"),
-    (census(active_chat_activities_complete=False), "Ouroboros: activity unconfirmed"),
-    (census("unknown", active_chat_activities_complete=False), "Ouroboros: activity unconfirmed"),
-    (census("unknown"), "Ouroboros: activity unconfirmed"),
-    (census("working", active_chat_activities_complete=False), "Ouroboros: activity unconfirmed"),
+    (projection(supervisor_ready=False), "Ouroboros: starting"),
+    (projection(works_complete=False), "Ouroboros: activity unconfirmed"),
+    (projection(work("unknown")), "Ouroboros: activity unconfirmed"),
+    # A confirmed work whose only remainder is a run nobody can confirm is counted beside the rest, not all of it.
+    (projection(work("unknown", confirmed=True)), "Ouroboros: 1 task unconfirmed"),
+    (projection(work("working"), work("unknown", confirmed=True), work("unknown", confirmed=True)),
+     "Ouroboros: working on 1 task · 2 unconfirmed"),
+    # What waits for the owner comes first, so a cut line keeps it.
+    (projection(work("working"), work("waiting", turn=True), work("unknown", confirmed=True)),
+     "Ouroboros: working on 1 task · 1 waits for you · 1 unconfirmed"),
+    (projection(work("working"), confirmed=False), "Ouroboros: activity unconfirmed"),
 ])
 def test_the_state_line_reads_the_servers_own_activity(monkeypatch, body, line):
     def urlopen(url, timeout):
-        assert url == "http://127.0.0.1:8765/api/state"
+        assert url == "http://127.0.0.1:1/api/state"
         if isinstance(body, Exception):
             raise body
         return Answer(body if isinstance(body, bytes) else json.dumps(body).encode())
 
     monkeypatch.setattr(lb.urllib.request, "urlopen", urlopen)
-    assert lb.status_line(8765) == line
+    assert lb.status_line(1) == line
 
 
 def test_windows_form_closing_decides_with_the_close_reason(settings, monkeypatch, make):
@@ -568,7 +783,9 @@ def test_windows_form_closing_decides_with_the_close_reason(settings, monkeypatc
 
     shutdown = SimpleNamespace(CloseReason="shutdown", Cancel=False)
     form_closing(None, shutdown)  # sign-out with the question never answered
-    assert background.events == ["exit"] and shutdown.Cancel is False and window.calls == []
+    # The quit is never cancelled: only the form's own close is, so its loop stays until the closer exits.
+    assert shutdown.Cancel is True and background.quit.is_set() and window.calls == []
+    wait_for(lambda: background.events == ["exit"])
 
     background.events.clear()
     background.quit.clear()
@@ -584,16 +801,17 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
     objc = types.ModuleType("objc")
     objc.super = lambda cls, obj: super(cls, obj)
     appkit = types.ModuleType("AppKit")
-    appkit.NSObject = object
+    appkit.NSObject, appkit.NSTerminateLater = object, 2
     monkeypatch.setitem(sys.modules, "objc", objc)
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
     from ouroboros import launcher_tray_macos as mac
 
     monkeypatch.setattr(mac, "_shared", {})
+    answers = ["pywebview decides"]
 
     class PywebviewDelegate:
         def applicationShouldTerminate_(self, sender):
-            return "pywebview decides" if background.quit.is_set() else "asked as a close"
+            return answers[-1] if background.quit.is_set() else "asked as a close"
 
     background = SimpleNamespace(quit=threading.Event(), shown=[])
     background.show_window = lambda: background.shown.append(True)
@@ -601,6 +819,8 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
     delegate_class, _target = mac._classes(PywebviewDelegate)
     delegate = delegate_class()
     assert delegate.applicationShouldTerminate_(None) == "pywebview decides"
+    answers.append(False)  # pywebview's NO: closing kept the window because the quit's closer owns the exit
+    assert delegate.applicationShouldTerminate_(None) == 2, "NSTerminateLater: a logout waits, never cancelled"
     assert delegate.applicationShouldHandleReopen_hasVisibleWindows_(None, False) is False
     assert background.shown == [True]
 
@@ -610,17 +830,20 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
     assert window.localization == {"global.ok": "OK", "global.cancel": "Cancel"}, "labels restored"
 
 
-@pytest.mark.parametrize("intent,answered,expected", [
-    ("automatic", True, []),  # a sign-in start of a second copy stays quiet
-    ("owner", True, ["activate"]),  # a manual one shows the running window
-    ("owner", False, ["activate", "notice window"]),  # nobody answered: the old notice
+@pytest.mark.parametrize("intent,answered,other,expected", [
+    ("automatic", True, OTHER, []),  # a sign-in start of a second copy stays quiet, another copy too
+    ("owner", True, "", ["activate"]),  # a manual one shows the running window
+    ("owner", False, "", ["activate", "notice window"]),  # nobody answered: the old notice
+    ("owner", True, OTHER, ["notice window: " + OTHER, "activate"]),  # another copy: its line, then the running one
+    ("owner", False, OTHER, ["notice window: " + OTHER, "activate"]),  # never a second notice window
 ])
-def test_second_launch_shows_the_running_window_only_when_manual(monkeypatch, caplog, intent, answered, expected):
+def test_second_launch_shows_the_running_window_only_when_manual(monkeypatch, caplog, intent, answered, other, expected):
     import launcher
 
     calls = []
     fake_webview = types.ModuleType("webview")
-    fake_webview.create_window = lambda *args, **kwargs: calls.append("notice window")
+    fake_webview.create_window = lambda *args, **kwargs: calls.append(
+        "notice window" + (f": {OTHER}" if OTHER in kwargs.get("html", "") else ""))
     fake_webview.start = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "webview", fake_webview)
     monkeypatch.setattr(launcher, "IS_WINDOWS", False)
@@ -630,6 +853,7 @@ def test_second_launch_shows_the_running_window_only_when_manual(monkeypatch, ca
     monkeypatch.setattr(launcher, "acquire_pid_lock", lambda: False)
     monkeypatch.setattr(launcher, "activate_running_instance",
                         lambda lock: calls.append("activate") or answered)
+    monkeypatch.setattr(launcher, "other_copy_line", lambda *_args: other)
     launcher.main(["--launch-intent", intent])
     assert calls == expected
     assert "Another instance already running." in caplog.text
@@ -677,7 +901,7 @@ def test_an_open_request_before_the_window_exists_is_kept_and_cancels_the_quiet_
     """A manual second launch while the first copy still boots (review r1): kept, never dropped."""
     monkeypatch.setattr(lb, "indicator_class", lambda: FakeIndicator)
     choose(settings, "true")
-    background = lb.Background(lambda: None, lambda: 8765, threading.Event())
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
     background.show_window()  # the listener's call during bootstrap: there is no window yet
     assert background.start_hidden("automatic") is False, "the owner asked for the window"
     window = Window()
@@ -689,7 +913,7 @@ def test_an_open_request_before_the_window_exists_is_kept_and_cancels_the_quiet_
     background.show_window()  # once shown, a request acts at once
     assert window.calls == ["show", "show"]
 
-    background = lb.Background(lambda: None, lambda: 8765, threading.Event())
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
     assert background.start_hidden("automatic") is True  # no request yet: a quiet start
     window = Window()
     background.attach(window)
@@ -709,7 +933,7 @@ def test_a_real_sigurg_during_the_boot_opens_the_window_once_it_exists(settings,
     choose(settings, "true")
     previous = signal.getsignal(signal.SIGURG)
     try:
-        background = lb.Background(lambda: None, lambda: 8765, threading.Event()).listen(tmp_path / "ouroboros.pid")
+        background = lb.Background(lambda: None, lambda: 1, threading.Event()).listen(tmp_path / "ouroboros.pid")
         signal.raise_signal(signal.SIGURG)  # a second launch while bootstrap and the server start run
         assert background.start_hidden("automatic") is False
         window = Window()
@@ -733,7 +957,7 @@ def test_the_launcher_listens_for_a_second_launch_before_its_long_boot(monkeypat
     order = []
 
     class Recorder:
-        def __init__(self, exit_launcher, read_port, shutdown_event):
+        def __init__(self, exit_launcher, read_port, shutdown_event, **kwargs):
             order.append("background")
 
         def listen(self, lock_path):

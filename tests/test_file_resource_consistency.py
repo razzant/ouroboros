@@ -44,6 +44,7 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setenv('OUROBOROS_USER_FILES_ROOT', str(home))
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'advanced')
     monkeypatch.setenv('OUROBOROS_SAFETY_MODE', 'off')
+    monkeypatch.setenv('OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'off')
     ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=work,
                       workspace_mode='external', task_id='task')
     reg = ToolRegistry(repo_dir=system, drive_root=data)
@@ -506,6 +507,7 @@ def test_parent_runtime_read_rules_follow_physical_files_across_root_labels(tmp_
     monkeypatch.setattr(config, 'DATA_DIR', data)
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', mode)
     monkeypatch.setenv('OUROBOROS_SAFETY_MODE', 'off')
+    monkeypatch.setenv('OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'off')
     registry = ToolRegistry(repo, data)
     ctx = registry._ctx
     if actor != 'parent':
@@ -601,6 +603,7 @@ def test_explicit_user_files_retains_parent_mode_policy(tmp_path, monkeypatch, m
     monkeypatch.setenv('OUROBOROS_USER_FILES_ROOT', str(home))
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', mode)
     monkeypatch.setenv('OUROBOROS_SAFETY_MODE', 'off')
+    monkeypatch.setenv('OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'off')
     registry = ToolRegistry(repo, data)
     ctx = registry._ctx
     if actor != 'parent':

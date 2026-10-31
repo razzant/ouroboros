@@ -74,6 +74,7 @@ def test_tool_descriptor_owner_facades_preserve_identity():
         ("current_chat_id", None),
         ("current_task_type", None),
         ("pending_restart_reason", None),
+        ("pending_restart_request", None),
         ("last_push_succeeded", False),
         ("last_reviewed_commit_sha", ""),
         ("emit_progress_fn", "callable:<lambda>"),

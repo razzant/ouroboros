@@ -1,14 +1,16 @@
 """Closing the chat-id truthiness class must not move a benchmark's answer.
 
-Terminal-Bench reads a run's final answer straight out of ``chat.jsonl``: the
+Terminal-Bench reads a run's final answer from SQL chat rows: the
 LAST untyped row with ``direction == "out"`` (``atif._final_answer``). It ALSO
-reads ``progress.jsonl`` and publishes those rows as the agent's own narration
-(``atif.build_trajectory``). Headless benchmark roots run in the hidden partition
-(chat 0), which is exactly the partition the class fix stops dropping — so a
-notice that now reaches chat 0 must be a typed or system chat row (invisible to
-the answer reader), and a live host TOAST must not be written there at all, or a
-supervisor line would be published as something the model said.
+reads SQL progress rows and publishes those rows as narration, the model's or,
+by their typed voice, the host's (``atif.build_trajectory``). Headless benchmark
+roots run in the hidden partition (chat 0), which is exactly the partition the
+class fix stops dropping — so a notice that now reaches chat 0 must be a typed or
+system chat row (invisible to the answer reader), and a live host TOAST must not
+be written there at all, or a supervisor line would be published in the trajectory.
 """
+
+from tests import _dialogue as dialogue_test
 
 import json
 import pathlib
@@ -31,13 +33,14 @@ def _agent_dir(tmp_path, chat_rows):
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in chat_rows),
         encoding="utf-8",
     )
+    dialogue_test.import_all(data)
     return tmp_path
 
 
 def test_progress_notices_never_enter_the_answer_stream(tmp_path):
     """The reaper/scheduler toasts the class fix un-drops are progress rows.
 
-    ``send_with_budget(is_progress=True)`` appends to progress.jsonl, so a
+    ``send_with_budget(is_progress=True)`` appends to SQL progress, so a
     grace toast for a hidden-partition root cannot be mistaken for its answer.
     """
     from types import SimpleNamespace
@@ -60,8 +63,8 @@ def test_progress_notices_never_enter_the_answer_stream(tmp_path):
     finally:
         monkey.undo()
     assert sent, "the notice still reaches the live bridge"
-    assert (data / "logs" / "progress.jsonl").exists()
-    assert not (data / "logs" / "chat.jsonl").exists()
+    assert dialogue_test.log_rows(data / "logs" / "progress.jsonl")
+    assert not dialogue_test.log_rows(data / "logs" / "chat.jsonl")
 
 
 def test_a_system_incident_row_is_not_read_as_the_answer(tmp_path):
@@ -140,7 +143,7 @@ def test_the_degraded_reason_change_moves_no_benchmark_classification():
 
 
 def test_the_two_toasts_this_sprint_touched_stay_out_of_a_headless_progress_log():
-    """ATIF republishes progress rows as the agent's own narration.
+    """ATIF republishes progress rows as narration.
 
     The scheduled-subagent and subagent-rejection notices are host lines, not
     the model's. They were dropped for chat 0 before this sprint and stay
@@ -149,9 +152,8 @@ def test_the_two_toasts_this_sprint_touched_stay_out_of_a_headless_progress_log(
 
     Scope, stated so this is not read as a general guarantee: OTHER host toasts
     (the finalization-grace warning, for one) already reached the progress log
-    before this sprint and still do. They carry a HOST_NARRATION marker the
-    trajectory builder does not yet consult, which is a pre-existing gap in the
-    harness rather than something this change introduced — filed separately.
+    before this sprint and still do; the trajectory shows them as ``system``
+    steps (#539, pinned by the grace-toast test below).
     """
     # v7 split supervisor/events.py: _handle_schedule_task moved to
     # events_schedule_task.py and the subagent-admission notice to
@@ -162,8 +164,8 @@ def test_the_two_toasts_this_sprint_touched_stay_out_of_a_headless_progress_log(
     assert "if chat_id is None or chat_id == HIDDEN_CHAT_ID:" in admission
 
     atif = (REPO / "devtools/benchmarks/terminal_bench/atif.py").read_text(encoding="utf-8")
-    assert 'progress.jsonl' in atif and 'narration_rows' in atif, (
-        "if ATIF stops reading progress.jsonl this guard can be revisited"
+    assert '_dialogue_rows(data_dir, "progress"' in atif and 'narration_rows' in atif, (
+        "if ATIF stops reading progress rows this guard can be revisited"
     )
 
 
@@ -174,7 +176,7 @@ def test_the_real_terminal_producer_leaves_the_model_answer_as_the_hidden_partit
 
     The other tests in this file state the extraction rule over hand-written
     rows. This one runs emit_task_results -> _handle_send_message ->
-    send_with_budget -> chat.jsonl -> atif._final_answer, so a change to WHICH
+    send_with_budget -> SQL chat -> atif._final_answer, so a change to WHICH
     rows the host writes, or to HOW they are authored and typed, is caught here
     instead of in a Terminal-Bench trajectory. Exactly one untyped outbound row
     may exist and it must be the model's own answer; every host disclosure has
@@ -211,7 +213,6 @@ def test_the_real_terminal_producer_leaves_the_model_answer_as_the_hidden_partit
     monkeypatch.setattr(message_bus, "DATA_DIR", data)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat: None)
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_kw: None)
     monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     delivery._handle_send_message(event, SimpleNamespace(
@@ -219,9 +220,50 @@ def test_the_real_terminal_producer_leaves_the_model_answer_as_the_hidden_partit
         send_with_budget=message_bus.send_with_budget,
     ))
 
-    rows = [json.loads(line) for line
-            in (data / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = dialogue_test.log_rows(data / "logs" / "chat.jsonl")
     untyped_outbound = [row["text"] for row in rows
                         if row["direction"] == "out" and not row.get("type")]
     assert untyped_outbound == [answer]
     assert _final_answer(tmp_path) == answer
+
+
+def test_the_real_grace_toast_reaches_the_trajectory_as_a_system_step(tmp_path, monkeypatch):
+    """#539, end to end: request_finalization_grace -> _handle_send_message ->
+    send_with_budget -> SQL progress -> atif.build_trajectory, in chat 0.
+
+    The toast is HOST_NARRATION: addressed to the task's card, authored by the
+    supervisor. The run keeps it, the send seam types its voice, and the
+    trajectory publishes it as a ``system`` step instead of the model's words."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    from devtools.benchmarks.terminal_bench.atif import build_trajectory
+    from ouroboros.utils import append_jsonl
+    from supervisor import events_chat_delivery as delivery, message_bus, task_reaper, workers
+
+    data = tmp_path / "ouroboros-data"
+    (data / "logs").mkdir(parents=True)
+    put: list = []
+    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=put.append), raising=False)
+    assert task_reaper.request_finalization_grace(data, "bench-root", "idle_timeout",
+                                                  chat_id=HIDDEN_CHAT_ID, stamp=1000)
+    (toast,) = put
+    assert toast[delivery.HOST_NARRATION] is True
+
+    bridge = message_bus.LocalChatBridge({})
+    bridge._broadcast_fn = lambda _frame: None
+    monkeypatch.setattr(message_bus, "DATA_DIR", data)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_kw: None)
+    monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
+    delivery._handle_send_message(toast, SimpleNamespace(
+        DRIVE_ROOT=data, RUNNING={}, append_jsonl=append_jsonl,
+        send_with_budget=message_bus.send_with_budget,
+    ))
+
+    (row,) = dialogue_test.log_rows(data / "logs" / "progress.jsonl")
+    assert row["text"] == toast["text"] and row["narration"] is False
+    steps = build_trajectory(tmp_path)["steps"]
+    assert [(s["source"], s["message"]) for s in steps if s["source"] == "system"] == [("system", toast["text"])]
+    assert all(toast["text"] not in s["message"] for s in steps if s["source"] != "system")

@@ -6,8 +6,10 @@ import bisect
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import re
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.skill_payload_policy import (
@@ -396,7 +398,7 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
             items.append(f"...(truncated at {max_entries})")
             break
         suffix = "/" if entry.is_dir() else ""
-        items.append(str(entry.relative_to(root)) + suffix)
+        items.append(entry.relative_to(root).as_posix() + suffix)
     return items
 
 
@@ -425,7 +427,7 @@ def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.P
         # the whole listing on relative_to (v6.54.3: the TB2.1
         # "'/app/…' is not in the subpath of '/root'" class).
         try:
-            rendered = str(entry.relative_to(root))
+            rendered = entry.relative_to(root).as_posix()
         except ValueError:
             rendered = str(entry)
         items.append(rendered + suffix)
@@ -434,6 +436,95 @@ def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.P
     return items
 
 
+_TREE_SCAN_DEFAULT, _TREE_SCAN_MAX, _TREE_DEPTH_MAX, _TREE_GAP_NAMES = 2_000, 20_000, 20, 20
+_TREE_GAP_HINTS = {
+    "depth_limit": "directories at the depth limit, not opened; raise depth or list one directly",
+    "generated_not_descended": "generated/vendor directories (search's skip set), not opened; list one directly",
+    "protected_not_descended": "directories whose listing the resource policy refuses",
+    "symlink_not_followed": "symlinks are named, never followed", "unreadable": "directories that could not be opened",
+    "packed_index_not_scanned": "packed checkpoint names were not enumerated; list this exact directory with depth=1 and no include",
+}
+_TREE_ORDER = ("breadth-first live walk, not a snapshot; each directory's examined entries are sorted by name, "
+               "but a directory cut by max_scan holds whichever entries the filesystem yielded first")
+
+
+def _tree_list(ctx: ToolContext, binding: ResolvedResourceBinding, depth: int, include: str,
+               max_entries: int, max_scan: int) -> str:
+    """Bounded BFS: max_scan examined + one look-ahead, sorted within the bound; ordinary per-entry policy and named gaps."""
+    from ouroboros.code_intelligence import SKIP_DIRS
+    from ouroboros.code_search_rg import matches_include
+    from ouroboros.evidence_packs import _checkpoint_path
+
+    base, target, user_files = binding.base_path, binding.target_path, binding.root == "user_files"
+
+    def shown(entry: pathlib.Path) -> str:  # an external user_files workspace has no home-relative form
+        return entry.relative_to(base).as_posix() if entry.is_relative_to(base) else str(entry)
+
+    if not user_files and not target.resolve().is_relative_to(base.resolve()):
+        raise _ListingFailure(f"Path escapes root: {shown(target)}")
+    if not target.is_dir():
+        raise _ListingMiss(f"{'Not a directory' if target.exists() else 'Directory not found'}: {shown(target)}")
+    hidden_by_policy = _runtime_data_read_check(ctx, listing=True, root=binding.root)
+    gaps: Dict[str, List[str]] = {kind: [] for kind in _TREE_GAP_HINTS}
+    entries: List[str] = []
+    scanned, hidden, stop, cut, queue, folder = 0, 0, "", False, deque([(target, 1)]), target
+    while queue and not stop:
+        if scanned >= max_scan:
+            stop = "scan_cap"  # the queued directories stay unopened
+            break
+        folder, level = queue.popleft()
+        # Recheck queued paths after earlier iterations; directory snapshots are not atomic.
+        if folder != target and (folder.is_symlink() or not folder.resolve().is_relative_to(target.resolve())):
+            gaps["symlink_not_followed"].append(shown(folder))
+            continue
+        batch: List[pathlib.Path] = []
+        try:
+            with os.scandir(folder) as stream:
+                for item in stream:
+                    if scanned + len(batch) >= max_scan:
+                        cut = True  # the one look-ahead entry: the directory goes on; it is not examined
+                        break
+                    batch.append(pathlib.Path(item.path))
+        except OSError as exc:
+            if folder == target:
+                raise  # the requested directory itself: the first-class LIST_FILES_ERROR
+            gaps["unreadable"].append(f"{shown(folder)}/ ({type(exc).__name__})")
+            continue
+        checkpoint = _checkpoint_path(folder)
+        if checkpoint and len(checkpoint[2]) == 2:
+            gaps["packed_index_not_scanned"].append(shown(folder))
+        scanned += len(batch)
+        for child in sorted(batch):
+            if hidden_by_policy(child) or (user_files and user_files_path_block_reason(ctx, child, operation="list")):
+                hidden += 1
+                continue
+            rel, link = shown(child), child.is_symlink()
+            is_dir = not link and child.is_dir()
+            gap = ("symlink_not_followed" if link else "" if not is_dir else "depth_limit" if level >= depth
+                   else "generated_not_descended" if binding.root in {"active_workspace", "system_repo", "skill_payload"} and child.name in SKIP_DIRS
+                   else "protected_not_descended" if block_reason_for_path(ctx, child, "static_introspection", binding) else "")
+            if gap:
+                gaps[gap].append(rel + ("/" if is_dir else ""))
+            elif is_dir:
+                queue.append((child, level + 1))
+            if (include and is_dir) or not matches_include(child.name, include):
+                continue
+            if len(entries) >= max_entries:
+                stop = "entry_cap"
+                break
+            entries.append(rel + ("/" if is_dir else ""))
+        stop = stop or ("scan_cap" if cut else "")
+    rows: List[Dict[str, Any]] = [{"kind": stop, "detail": (
+        f"stopped at {'max_scan' if stop == 'scan_cap' else 'max_entries'} after examining {scanned} entries; "
+        + (f"the rest of {shown(folder)}/ was not {'examined' if stop == 'entry_cap' else 'read'}; " if cut or stop == "entry_cap" else "")
+        + f"{len(queue)} queued director(ies) were not opened")}] if stop else []
+    rows += [{"kind": kind, "count": len(names), "paths": names[:_TREE_GAP_NAMES], "paths_omitted": max(0, len(names) - _TREE_GAP_NAMES), "detail": _TREE_GAP_HINTS[kind]}
+             for kind, names in gaps.items() if names]
+    rows += [{"kind": "policy_hidden", "count": hidden, "detail": "entries the list policy omits"}] if hidden else []
+    complete = not rows
+    return json.dumps({"path": f"{binding.root}:{shown(target)}", "depth": depth, **({"include": include} if include else {}),
+                       "scanned": scanned, "max_scan": max_scan, "complete": complete, "order": _TREE_ORDER,
+                       "entries": entries, "gaps": rows}, ensure_ascii=False, indent=2)
 
 
 _MEMORY_AT_DRIVE_MEMORY = frozenset({
@@ -668,20 +759,14 @@ def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, 
 
 
 def _root_display_path(root: str, path: str) -> str:
-    rel = safe_relpath(str(path or "."))
-    if rel.startswith("./"):
-        rel = rel[2:]
-    return f"{root}:{rel or '.'}"
+    return f"{root}:{safe_relpath(str(path or '.')).removeprefix('./') or '.'}"
 
 
 def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: int, result: str,
                      start_char: int = 0, max_chars: Optional[int] = None) -> str:
-    """Append an advisory hint when the SAME file slice is re-read unchanged.
-
-    Per-task, key on (resolved path, slice); the change signal is (size, mtime).
-    A repeat read of an unchanged slice is usually wasted budget — nudge the model
-    to act on what it has. Advisory only (never blocks; different slices and
-    changed files are not flagged)."""
+    """Nudge against unchanged rereads, keyed per task by resolved path and slice.
+    Size/mtime changes or different slices suppress the hint. Advisory only:
+    it asks the mind to act on already-read text, never blocks."""
     try:
         resolved = pathlib.Path(target).resolve(strict=False)
         st = resolved.stat()
@@ -693,34 +778,40 @@ def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: 
     sig = (st.st_size, st.st_mtime_ns)
     seen = getattr(ctx, "_read_file_seen", None)
     if not isinstance(seen, dict):
-        seen = {}
-        ctx._read_file_seen = seen
-    prev = seen.get(key)
+        ctx._read_file_seen = seen = {}
+    unchanged = seen.get(key) == sig
     seen[key] = sig
-    if prev is not None and prev == sig:
-        return (
-            result
-            + "\n\nℹ️ This exact view is unchanged since you already read it this task — "
-            "re-reading is usually wasted budget; act on what you have."
-        )
-    return result
+    return result + (
+        "\n\nℹ️ This exact view is unchanged since you already read it this task — "
+        "re-reading is usually wasted budget; act on what you have." if unchanged else "")
 
 
 def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: str,
                      extent: Dict[str, Any], rendered: str) -> str:
-    """Record on the context what THIS read delivered (``ctx.last_read_view``:
-    the resolved ``target``, ``opened_path`` — the root-relative path the reader
-    ACTUALLY opened, i.e. the binding's target under its root, not the model's
-    spelling (the registry normalizes absolute in-repo, whitespace-padded and
-    redundant-root spellings before the handler runs) — ``opened_root``, the
-    NORMALIZED root the binding actually used (a padded ``" system_repo "`` is
-    read as ``system_repo``), and the renderer's window facts). Same
-    per-context bookkeeping class as ``_annotate_reread``; consumed by the
-    native review episode's receipts. The stamp's binding to ONE call is
-    structural: ``_read_file`` resets it on entry and the episode clears it
-    before every dispatch (these are the ONLY writers — a static test pins the
-    writer set). Disclosure only — never gates or alters the read."""
+    """Stamp this read's resolved target, root-relative opened_path, normalized
+    opened_root and renderer window as ctx.last_read_view for native review receipts.
+    The registry normalizes absolute, padded and redundant-root spellings first.
+    Per-call binding: _read_file resets on entry; the episode clears before dispatch.
+    These sole writers are statically pinned. Like reread hints, this is per-context
+    disclosure, never a gate or a change to the actual read."""
+    identity_note = ""
+    if opened_root == "runtime_data" and opened == "memory/identity.md":
+        from ouroboros.tool_access import canonical_data_root
+        from ouroboros.tool_access_reads import canonical_runtime_reader
+
+        canonical = canonical_data_root(ctx)
+        physical = pathlib.Path(target).resolve(strict=False)
+        source = ("canonical" if physical == (canonical / opened).resolve(strict=False) else
+                  "execution_drive" if physical == (pathlib.Path(ctx.drive_root) / opened).resolve(strict=False)
+                  else "inherited_runtime")
+        identity_note = (f"identity_source={source}; source_path={physical}\n"
+                         "Any revision identifies only the bytes returned here. For shared identity publication, read:\n"
+                         f"{canonical_runtime_reader(ctx, canonical, opened)}\n")
     if "body_start" in extent:
+        if opened_root == "runtime_data" and opened in ("memory/identity.md", "memory/WORLD.md") and extent.get("source_revision"):
+            revision_line = f"revision={extent['source_revision']}\n" + identity_note
+            rendered = revision_line + rendered
+            extent["body_start"] += len(revision_line)
         view = {"target": str(target), "opened_path": str(opened), "opened_root": str(opened_root), **extent}
         ctx.last_read_view = view
         from ouroboros.delegate_output import acknowledge_staged_output_read
@@ -738,6 +829,10 @@ def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: st
                   ToolResult(status="ok", code="OK", text=rendered, meta={"read_view": compact}))
         rendered = _publish_tool_result(ctx, result)
         acknowledge_staged_output_read(ctx, compact, rendered)
+    elif identity_note:
+        from ouroboros.tools.tool_result import append_published_text
+
+        rendered = append_published_text(ctx, rendered, "\n" + identity_note)
     return rendered
 
 
@@ -772,16 +867,10 @@ def _read_file(
         )
     except UserFilesPathBlockedError as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="blocked",
-            code="USER_FILES_PATH_BLOCKED",
-            text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}",
-        ))
+            status="blocked", code="USER_FILES_PATH_BLOCKED", text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}"))
     except Exception as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error",
-            code="LEGACY_TOOL_ERROR",
-            text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}",
-        ))
+            status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"))
     target = binding.target_path
     try:
         opened = target.relative_to(binding.base_path).as_posix()  # what is read, relative to its root
@@ -793,34 +882,20 @@ def _read_file(
     protected_block = block_reason_for_path(ctx, target, "read_bytes", binding)
     if protected_block:
         return protected_block
-    if normalized in {"active_workspace", "system_repo"}:
-        display_path = (
-            f"{target} (project room)"
-            if binding.source == "project_room"
-            else _root_display_path(normalized, opened)
-        )
-        return _stamp_read_view(ctx, target, opened, opened_root, extent, _annotate_reread(ctx, target, start_line, max_lines, _repo_read(
-            ctx,
-            path,
-            max_lines=max_lines,
-            start_line=start_line,
-            start_char=start_char,
-            display_path=display_path,
-            _resolved_binding=binding,
-            extent=extent,
-            max_chars=max_chars,
-        ), start_char=start_char, max_chars=max_chars))
-    if normalized == "runtime_data":
-        return _stamp_read_view(ctx, target, opened, opened_root, extent, _annotate_reread(ctx, target, start_line, max_lines, _data_read(
-            ctx,
-            path,
-            max_lines=max_lines,
-            start_line=start_line,
-            start_char=start_char,
-            display_path=_root_display_path(normalized, path),
-            _resolved_binding=binding,
-            extent=extent,
-            max_chars=max_chars,
+    if target.is_dir():  # admitted, but no file here: the read becomes the listing call to make
+        call = f"list_files(root={json.dumps(normalized)}, path={json.dumps(str(target))}" + (  # preserve canonical/physical identity
+            f", bucket={json.dumps(bucket or binding.source)}, skill_name={json.dumps(skill_name or binding.skill_name)}"
+            if normalized == "skill_payload" else "")
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="LEGACY_WARNING", text=(
+            f"⚠️ NOT_FOUND: {_root_display_path(normalized, opened)} is a directory, not a file. List it:\n"
+            f"  {call})")))
+    if normalized in {"active_workspace", "system_repo", "runtime_data"}:
+        reader, display_path = ((_data_read, _root_display_path(normalized, path)) if normalized == "runtime_data" else
+                                (_repo_read, f"{target} (project room)" if binding.source == "project_room"
+                                 else _root_display_path(normalized, opened)))
+        return _stamp_read_view(ctx, target, opened, opened_root, extent, _annotate_reread(ctx, target, start_line, max_lines, reader(
+            ctx, path, max_lines=max_lines, start_line=start_line, start_char=start_char, display_path=display_path,
+            _resolved_binding=binding, extent=extent, max_chars=max_chars,
         ), start_char=start_char, max_chars=max_chars))
     try:
         content = _read_source_text(target, extent)
@@ -832,26 +907,17 @@ def _read_file(
                                                  start_char=start_char, max_chars=max_chars))
     except FileNotFoundError:
         return _publish_tool_result(ctx, ToolResult(
-            status="ok",
-            code="LEGACY_WARNING",
-            text=f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)} (resolved: {target})",
-        ))
+            status="ok", code="LEGACY_WARNING", text=f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)} (resolved: {target})"))
     except UserFilesPathBlockedError as exc:
         # Typed POLICY refusal, not an executor failure: the runtime said "no"
         # to this read. The distinct prefix routes it into the v6.57.0
         # policy-denial partition instead of a generic error that falsely
         # degrades a shipped task to tool_failure.
         return _publish_tool_result(ctx, ToolResult(
-            status="blocked",
-            code="USER_FILES_PATH_BLOCKED",
-            text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}",
-        ))
+            status="blocked", code="USER_FILES_PATH_BLOCKED", text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}"))
     except Exception as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error",
-            code="LEGACY_TOOL_ERROR",
-            text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}",
-        ))
+            status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"))
 
 
 @completed_local_read
@@ -863,7 +929,16 @@ def _list_files(
     bucket: str = "",
     skill_name: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
+    depth: int = 1,
+    include: str = "",
+    max_scan: int = _TREE_SCAN_DEFAULT,
 ) -> str:
+    try:  # the default (depth 1, no include) is the unchanged single-level listing
+        depth = min(max(1, int(depth or 1)), _TREE_DEPTH_MAX)
+        max_scan = min(max(1, int(max_scan or _TREE_SCAN_DEFAULT)), _TREE_SCAN_MAX)
+    except (TypeError, ValueError):
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR", text="⚠️ TOOL_ARG_ERROR: depth and max_scan must be integers."))
     normalized, block = _access_or_block(ctx, root, "list")
     if block:
         return block
@@ -874,21 +949,13 @@ def _list_files(
         )
     except UserFilesPathBlockedError as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="blocked",
-            code="USER_FILES_PATH_BLOCKED",
-            text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}",
-        ))
+            status="blocked", code="USER_FILES_PATH_BLOCKED", text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}"))
     except Exception as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error",
-            code="LEGACY_TOOL_ERROR",
-            text=f"⚠️ LIST_FILES_ERROR ({type(exc).__name__}): {exc}",
-        ))
+            status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ LIST_FILES_ERROR ({type(exc).__name__}): {exc}"))
     if runtime_block := _runtime_data_read_block(ctx, binding.target_path, listing=True, root=binding.root):
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block))
-    protected_list_block = block_reason_for_path(
-        ctx, binding.target_path, "static_introspection", binding
-    )
+    protected_list_block = block_reason_for_path(ctx, binding.target_path, "static_introspection", binding)
     if protected_list_block:
         return protected_list_block
     try:
@@ -896,24 +963,17 @@ def _list_files(
         # race failure from any helper becomes the first-class LIST_FILES_ERROR
         # below (v6.54.3, review round 3 — helpers no longer swallow it into an
         # ok-shaped listing).
-        if normalized in {"active_workspace", "system_repo"}:
-            return _repo_list(
-                ctx, dir=path, max_entries=max_entries,
-                _resolved_binding=binding,
-            )
-        if normalized == "runtime_data":
-            return _data_list(
-                ctx, dir=path, max_entries=max_entries,
-                _resolved_binding=binding,
-            )
+        if depth > 1 or include:
+            return _tree_list(ctx, binding, depth, str(include), max_entries, max_scan)
+        if normalized in {"active_workspace", "system_repo", "runtime_data"}:
+            lister = _data_list if normalized == "runtime_data" else _repo_list
+            return lister(ctx, dir=path, max_entries=max_entries, _resolved_binding=binding)
         if normalized == "skill_payload":
             rel = binding.target_path.relative_to(binding.base_path).as_posix() or "."
             items = _list_dir(binding.base_path, rel, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)
         if normalized == "user_files":
-            items = _list_user_files_dir(
-                ctx, binding.base_path, binding.target_path, max_entries
-            )
+            items = _list_user_files_dir(ctx, binding.base_path, binding.target_path, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)
         rel = binding.target_path.relative_to(binding.base_path).as_posix() or "."
         items = _list_dir(binding.base_path, rel, max_entries)
@@ -931,16 +991,10 @@ def _list_files(
     except UserFilesPathBlockedError as exc:
         # Typed POLICY refusal (see _read_file): policy denial, not tool_failure.
         return _publish_tool_result(ctx, ToolResult(
-            status="blocked",
-            code="USER_FILES_PATH_BLOCKED",
-            text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}",
-        ))
+            status="blocked", code="USER_FILES_PATH_BLOCKED", text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}"))
     except Exception as exc:
         # A hard failure is a first-class tool error, never a JSON "listing" that
         # reads as success with an error string inside (v6.54.3: that shape
         # silently poisoned reasoning in 63% of TB2.1 trials).
         return _publish_tool_result(ctx, ToolResult(
-            status="error",
-            code="LEGACY_TOOL_ERROR",
-            text=f"⚠️ LIST_FILES_ERROR ({type(exc).__name__}): {exc}",
-        ))
+            status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ LIST_FILES_ERROR ({type(exc).__name__}): {exc}"))

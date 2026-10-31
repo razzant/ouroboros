@@ -193,3 +193,75 @@ def test_original_session_assignment_attaches_only_with_its_exact_invocation_tok
         assert actor["recovery_binding"] == row["recovery_binding"]
         assert actor["usage"]["invocation_id"] == row["pending_invocation_id"]
         assert calls == [("handshake",), ("get_run", "run-existing"), ("close",)]
+
+
+# ``_attempt_key`` of the ``completed_late`` request and slot as ouroboros 88a70130d computed it,
+# when ReviewSlot.processing_preference defaulted to "" and an empty value stayed out of the key.
+LEGACY_EMPTY_PROCESSING_KEY = "87dee94e5f8986727a2bfee91c5a213574d170c71f5e89c6a656b90dd6cf6b0f"
+
+
+def _with_prompt_processing(root, row, value, binding=None):
+    manifest, payload, _ = read_call_payload(root, task_id="late-cas", call_id=f'{row["operation_id"]}_prompt')
+    payload["slot"]["processing_preference"] = value
+    _rewrite(root, row, "prompt", {**manifest, **({"review_operation_binding": binding} if binding else {})}, payload)
+
+
+def _bound(row, binding):
+    """The frozen row a writer of the captured key would have recorded."""
+    return {**row, "recovery_binding": dict(binding)}
+
+
+def test_a_paid_review_recorded_with_the_old_empty_processing_collects_its_original_answer(paid):
+    """Before processing became optional, a seat's ``""`` was unspecified: the executors sent ``None`` and
+    the request key left it out. That record's paid answer is collected as recorded, at zero new sends."""
+    root, original_slot, row, calls, text = paid
+    assert row["recovery_binding"]["request_key"] == LEGACY_EMPTY_PROCESSING_KEY
+    _with_prompt_processing(root, row, "")  # the bytes the old ``asdict(slot)`` wrote beside that key
+    request, slot = review_operation.recorded_review_assignment(root, **_inputs(row))
+    assert slot == original_slot and slot.processing_preference is None
+    assert review_operation_binding(request, slot, row["operation_id"]) == row["recovery_binding"]
+    captured = dataclasses.replace(slot, processing_preference="")
+    assert review_operation_binding(request, captured, row["operation_id"]) != row["recovery_binding"]
+    actor = review_operation.collect_recorded_review_actor(root, **_inputs(row))
+    assert actor["raw_text"] == text and actor["operation_state"] == "late_settled"
+    assert actor["recovery_binding"] == {**row["recovery_binding"], "pending_invocation_id": ""}
+    assert len(calls) == 1
+
+
+def test_a_captured_empty_processing_operation_keeps_its_own_identity(paid):
+    """Today's captured ``""`` is a different operation: its own binding collects it as ``""``."""
+    root, original_slot, row, calls, text = paid
+    request, _ = review_operation.recorded_review_assignment(root, **_inputs(row))
+    binding = review_operation_binding(
+        request, dataclasses.replace(original_slot, processing_preference=""), row["operation_id"])
+    assert binding["request_key"] != LEGACY_EMPTY_PROCESSING_KEY
+    _with_prompt_processing(root, row, "", binding)
+    manifest, payload, _ = read_call_payload(root, task_id="late-cas", call_id=row["operation_id"] + "_response")
+    payload["producer_outcome"]["recovery_binding"] = {**binding, "pending_invocation_id": ""}
+    _rewrite(root, row, "response", {**manifest, "review_operation_binding": payload["producer_outcome"]["recovery_binding"]},
+             payload)
+    captured = _bound(row, binding)
+    _request, slot = review_operation.recorded_review_assignment(root, **_inputs(captured))
+    assert slot.processing_preference == ""
+    actor = review_operation.collect_recorded_review_actor(root, **_inputs(captured))
+    assert actor["raw_text"] == text and actor["operation_state"] == "late_settled"
+    _gap(review_operation.collect_recorded_review_actor(root, **_inputs(row)), row)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("defect", ["named_preference", "captured_binding", "foreign_key"])
+def test_the_old_empty_processing_reading_needs_its_exact_legacy_binding(paid, defect):
+    """Only an empty value bound to exactly the legacy key reads as unspecified; nothing else is regenerated."""
+    root, original_slot, row, calls, _text = paid
+    request, _ = review_operation.recorded_review_assignment(root, **_inputs(row))
+    if defect == "named_preference":
+        _with_prompt_processing(root, row, "fast")
+    elif defect == "captured_binding":
+        _with_prompt_processing(root, row, "", review_operation_binding(
+            request, dataclasses.replace(original_slot, processing_preference=""), row["operation_id"]))
+    else:
+        _with_prompt_processing(root, row, "", {**row["recovery_binding"], "request_key": "0" * 64})
+    with pytest.raises(ValueError, match="original prompt operation binding mismatch|recorded wave binding mismatch"):
+        review_operation.recorded_review_assignment(root, **_inputs(row))
+    _gap(review_operation.collect_recorded_review_actor(root, **_inputs(row)), row)
+    assert len(calls) == 1

@@ -5,7 +5,7 @@
 // this module only decides which positive/negative facts a card may honestly
 // claim.
 
-import { accountRows, familyLabel, nextUpAccount, quotaConstraintFact } from './claudexor_status_store.js';
+import { accountRows, familyLabel, nextUpAccount } from './claudexor_status_store.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
     describeExecutionEvidence,
@@ -18,6 +18,7 @@ import {
     accountScopedModelCatalog,
     sessionModelMatches,
     CLAUDE_BASE_QUALIFIER,
+    routeSupportsAccount,
 } from './route_editor_primitives.js';
 
 /**
@@ -33,11 +34,11 @@ export function rowIdentity(row, state = {}) {
     // mark. Never split the stored target here: only the model-sources catalog
     // maps an opaque source id to a harness.
     const fields = routeModelFields(row?.route, state.modelSources, {
-        providerProfiles: state.providerProfiles,
+        providerProfiles: state.providerProfiles, connections: state.connections,
     });
     const label = sourceIdentityLabel(row?.route, {
         modelSources: state.modelSources,
-        providerProfiles: state.providerProfiles,
+        providerProfiles: state.providerProfiles, connections: state.connections,
         harnesses: [{
             id: fields.harness,
             display_name: familyLabel(fields.harness, state.snapshot, { catalogKnown: state.catalogKnown }),
@@ -54,37 +55,80 @@ export function harnessMap(snapshot) {
         .map((harness) => [String(harness.id), harness]));
 }
 
-function modelScopeMatches(model, aliases) {
-    const routeModel = String(model || '').trim().toLowerCase();
-    const scopes = (Array.isArray(aliases) ? aliases : [])
-        .map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
-    if (!scopes.length || !routeModel) return true;
-    return scopes.some((scope) => scope === routeModel
-        || routeModel.includes(scope) || scope.includes(routeModel));
+// The same field ranges as claudexor_observations._INSTANT. Date.parse rolls an
+// impossible day forward (Feb 29 of a non-leap year becomes Mar 1), so the day is
+// checked against its month here, as Python's datetime does.
+const INSTANT = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+
+/** A still-future engine instant in ms, else NaN: invalid timing is no live block. */
+function liveInstantMs(value, nowMs) {
+    const parts = INSTANT.exec(typeof value === 'string' ? value : '');
+    if (!parts) return NaN;
+    const [year, month, day] = parts.slice(1, 4).map(Number);
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    if (day > [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]) return NaN;
+    const at = Date.parse(value);
+    return at > nowMs ? at : NaN;
 }
 
-/** UI projection of the same positive quota facts dispatch checks again. */
-function routeQuotaFact(snapshot, harness, model, profileId = '', nowMs = Date.now()) {
-    const pin = String(profileId || '');
-    let observed = false;
-    let usable = false;
-    let spent = false;
-    let unknown = false;
-    for (const row of snapshot?.quota || []) {
-        const subject = row?.subject || {};
-        if (String(subject.harness || '') !== String(harness || '')) continue;
-        if (pin && String(subject.subject_id || '') !== pin) continue;
-        if (String(row?.freshness || '') !== 'fresh') continue;
-        observed = true;
-        const facts = (row?.constraints || [])
-            .filter((constraint) => modelScopeMatches(model, constraint?.applies_to_models))
-            .map((constraint) => quotaConstraintFact(constraint, nowMs));
-        const spentHere = facts.some((fact) => fact.exhausted);
-        if (spentHere) spent = true;
-        else if (facts.some((fact) => fact.unknown)) unknown = true;
-        else usable = true;
+// One window that measured this request (finite ratio, every model, the kind):
+// evidence of an applicable observation, never a headroom policy.
+function applicableMeasurement(constraint, requestKind) {
+    if (!constraint || typeof constraint !== 'object') return false;
+    const ratio = constraint.used_ratio;
+    const models = constraint.applies_to_models;
+    const prefixes = Object.hasOwn(constraint, 'applies_to_model_prefixes') ? constraint.applies_to_model_prefixes : [];
+    const kinds = Object.hasOwn(constraint, 'applies_to_request_kinds') ? constraint.applies_to_request_kinds : ['text', 'image'];
+    return typeof ratio === 'number' && ratio >= 0 && ratio <= 1
+        && (models === undefined || models === null || (Array.isArray(models) && !models.length))
+        && Array.isArray(prefixes) && !prefixes.length && Array.isArray(kinds) && kinds.includes(requestKind);
+}
+
+// Simultaneous rows of ONE subject are constraints, never alternatives: a dated,
+// still-live engine block wins; available needs every row fresh and available,
+// no absence and one applicable measured window.
+function subjectQuotaVerdict(rows, absent, requestKind, nowMs) {
+    const blocks = rows.filter((row) => ['exhausted', 'cooldown'].includes(row.availability?.state)
+        && !Number.isNaN(liveInstantMs(row.availability.resets_at, nowMs)));
+    if (blocks.length) {
+        const earliest = blocks.reduce((first, row) => (Date.parse(row.availability.resets_at)
+            < Date.parse(first.availability.resets_at) ? row : first));
+        return { state: blocks.some((row) => row.availability.state === 'exhausted') ? 'exhausted' : 'cooldown',
+            resets_at: earliest.availability.resets_at };
     }
-    return { known: usable || (observed && !unknown), exhausted: spent && !usable && !unknown };
+    if (rows.length && !absent && rows.every((row) => row.freshness === 'fresh' && row.availability?.state === 'available')
+        && rows.some((row) => Array.isArray(row.constraints)
+            && row.constraints.some((constraint) => applicableMeasurement(constraint, requestKind)))) {
+        return { state: 'available', resets_at: null };
+    }
+    return { state: 'unknown', resets_at: null };
+}
+
+/** Engine verdict for an honored exact scope, as in claudexor_observations.
+ * Catalog/account facts remain useful when quota scope is unknown; neither a
+ * model-name substring nor a raw ratio certifies this actor's availability,
+ * and a pin answers only to its exact subject (a null one belongs to no pin).
+ * Each full subject (harness, credential route, id) is judged alone; observed
+ * subjects are alternatives, and an unknown one prevents an all-blocked claim.
+ */
+export function routeQuotaFact(snapshot, harness, model, profileId = '', nowMs = Date.now(), requestKind = 'text') {
+    const scope = snapshot?.availability_scope;
+    const unknown = { known: false, exhausted: false, state: 'unknown', resets_at: null };
+    if (!scope || !Object.hasOwn(scope, 'model') || scope.model !== (model || null)
+        || scope.requestKind !== requestKind || scope.basis !== 'quota_block') return unknown;
+    const pin = String(profileId || '');
+    const subjectRows = (rows) => (Array.isArray(rows) ? rows : []).filter((row) => row?.subject
+        && typeof row.subject === 'object' && row.subject.harness === harness && (!pin || row.subject.subject_id === pin));
+    const key = (row) => JSON.stringify([row.subject.harness, row.subject.credential_route ?? null, row.subject.subject_id ?? null]);
+    const rows = subjectRows(snapshot?.quota);
+    const absent = new Set(subjectRows(snapshot?.quota_absences).map(key));
+    const verdicts = [...new Set([...rows.map(key), ...absent])]
+        .map((subject) => subjectQuotaVerdict(rows.filter((row) => key(row) === subject), absent.has(subject), requestKind, nowMs));
+    if (verdicts.some((verdict) => verdict.state === 'available')) return { known: true, exhausted: false, state: 'available', resets_at: null };
+    if (!verdicts.length || verdicts.some((verdict) => verdict.state === 'unknown')) return unknown;
+    const earliest = verdicts.reduce((first, verdict) => (Date.parse(verdict.resets_at) < Date.parse(first.resets_at) ? verdict : first));
+    return { known: true, exhausted: true, resets_at: earliest.resets_at,
+        state: verdicts.some((verdict) => verdict.state === 'exhausted') ? 'exhausted' : 'cooldown' };
 }
 
 // One verdict per branch: the short `label` (what a card head has room for),
@@ -108,7 +152,7 @@ function routePin(route) {
     return String(route?.credential_profile_id || route?.profile_id || '');
 }
 
-export function sessionRouteVerdict(row, state, nowMs = Date.now()) {
+function sessionRouteAvailability(row, state, nowMs) {
     const { harness, model } = splitSessionTarget(row?.route?.target_id);
     if (!state?.catalogKnown || !state?.accountsKnown) {
         return verdict(NOT_CHECKED, 'Agent session · live availability not checked');
@@ -120,11 +164,6 @@ export function sessionRouteVerdict(row, state, nowMs = Date.now()) {
         return verdict(NOT_CHECKED, `${harness} · model availability not checked`);
     }
     const matches = sessionModelMatches(harnessEntry, model);
-    const available = (text, applicable = matches) => {
-        const baseOnly = applicable.length && applicable.every((match) => match.basis === 'claude_1m_base');
-        return { ...verdict(AVAILABLE, `${text}${baseOnly ? ` · ${CLAUDE_BASE_QUALIFIER}` : ''}`),
-            ...(baseOnly ? { qualifier: CLAUDE_BASE_QUALIFIER } : {}) };
-    };
     if (model && !matches.length) {
         return verdict(UNAVAILABLE, `${harness} · selected model ${model} currently unavailable`, { specific: true });
     }
@@ -140,7 +179,7 @@ export function sessionRouteVerdict(row, state, nowMs = Date.now()) {
         const quota = routeQuotaFact(state.snapshot, harness, model, pin, nowMs);
         if (quota.exhausted) return verdict(LIMIT, `${harness} · pinned account ${pin} limit reached`, { specific: true });
         if (!quota.known) return verdict(NOT_CHECKED, `${harness} · pinned account ready; quota availability not proven`);
-        return available(`${harness} · available now`);
+        return verdict(AVAILABLE, `${harness} · available now`);
     }
 
     // The owner's switch refuses, exactly as dispatch reads it; the aggregate doctor
@@ -167,14 +206,32 @@ export function sessionRouteVerdict(row, state, nowMs = Date.now()) {
     }
     const carriers = new Set(applicable.map((match) => match.profile));
     const attributed = carriers.size && !carriers.has('');
-    if (!attributed && (pool?.kind === 'profile' || pool?.kind === 'native')) {
-        return available(`${harness} · compatible account selected; exact model quota checked at start`, applicable);
-    }
-    const quotaSnapshot = attributed ? { ...state.snapshot, quota: (state.snapshot.quota || []).filter((row) => carriers.has(String(row?.subject?.subject_id || ''))) } : state.snapshot;
+    // Absences are subjects too: a non-carrier's gap must not hide the carriers' block.
+    const carried = (rows) => (rows || []).filter((row) => carriers.has(String(row?.subject?.subject_id || '')));
+    const quotaSnapshot = attributed ? { ...state.snapshot, quota: carried(state.snapshot.quota),
+        quota_absences: carried(state.snapshot.quota_absences) } : state.snapshot;
     const quota = routeQuotaFact(quotaSnapshot, harness, model, '', nowMs);
     if (quota.exhausted) return verdict(LIMIT, `${harness} · all known accounts reached a limit`, { specific: true });
-    if (quota.known) return available(`${harness} · available now`, applicable);
+    if (quota.known) return verdict(AVAILABLE, `${harness} · available now`);
     return verdict(NOT_CHECKED, `${harness} · live availability not checked`);
+}
+
+// Catalog evidence is independent of whether quota scope was checked. Reuse
+// the account-scoped matcher; an unusable sibling cannot supply the qualifier.
+function sessionCatalogQualifier(row, state) {
+    if (!state?.catalogKnown || !state?.accountsKnown) return '';
+    const { harness, model } = splitSessionTarget(row?.route?.target_id);
+    const pin = routePin(row?.route);
+    const catalog = accountScopedModelCatalog(harnessMap(state.snapshot)[harness], pin);
+    if (!catalog || !harnessModelsKnown(catalog, state.catalogKnown)) return '';
+    const matches = sessionModelMatches(catalog, model, { snapshot: state.snapshot, pin });
+    return matches.length && matches.every((match) => match.basis === 'claude_1m_base') ? CLAUDE_BASE_QUALIFIER : '';
+}
+
+export function sessionRouteVerdict(row, state, nowMs = Date.now()) {
+    const live = sessionRouteAvailability(row, state, nowMs);
+    const qualifier = sessionCatalogQualifier(row, state);
+    return qualifier ? { ...live, text: `${live.text} · ${qualifier}`, qualifier } : live;
 }
 
 // The card head carries the AVAILABILITY axis alone: one short word and its
@@ -188,7 +245,7 @@ export function rowStatus(row, state) {
         // "API model" alone left two rows on different providers reading
         // identically (owner decision 4A).
         const fields = routeModelFields(row.route, state.modelSources, {
-            providerProfiles: state.providerProfiles,
+            providerProfiles: state.providerProfiles, connections: state.connections,
         });
         return {
             label: 'Checked at start', tone: 'neutral', reason: '',
@@ -232,8 +289,8 @@ function executionFor(snapshot, subagentId) {
 // stamped by the save attempt on the rows that existed then — an entry added
 // afterwards is fresh again); the neutral hint while its route is still
 // unchosen (a fresh entry is an invitation, not an error); a twin; the
-// conditional qualifier of an Available session verdict (a Claude `[1m]`
-// judged by its listed base); nothing.
+// catalog qualifier of a session model (Claude `[1m]` listed only by its base,
+// even when quota availability is Not checked); nothing.
 // History and the stored spelling live in the card's Details (`rowTaskRun`).
 export function rowMeta(row, state, errors) {
     if (row._uiAttempted && errors.length) return { text: errors[0], tone: 'error' };
@@ -246,8 +303,8 @@ export function rowMeta(row, state, errors) {
     const items = state.setting?.items || [];
     const twin = sameEngineAs(items, items.indexOf(row), state.processingPreference);
     if (twin >= 0 && !reviewTwinAllowed(items[twin], row)) return { text: `Runs the same engine as Subagent ${twin + 1} — change one of them to tell them apart.`, tone: '' };
-    // A conditional availability qualifier must stay readable where no hover exists.
-    const qualifier = session ? sessionRouteVerdict(row, state).qualifier : '';
+    // The independent catalog qualifier stays readable where no hover exists.
+    const qualifier = session ? sessionCatalogQualifier(row, state) : '';
     return qualifier ? { text: qualifier, tone: '', qualifier: true } : { text: '', tone: '' };
 }
 
@@ -274,4 +331,29 @@ export function rowTaskRun(row, state) {
     const qualifier = identityComplete ? (sameRoute ? '' : 'Earlier settings')
         : identity ? 'Settings not fully reported' : 'Settings not reported';
     return [qualifier, evidence].filter(Boolean).join(' · ');
+}
+
+/** What one review by this row actually cost — the median of its measured reviews with their count
+ * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero. */
+export function reviewCostText(row, cost = null) {
+    if (routeSupportsAccount(row?.route || {})) return 'uses a session seat and time';
+    if (!cost) return 'price appears after saving';
+    if (cost.basis === 'local_route') return 'no API cost per review';
+    const usd = cost.usd_per_review;
+    if (cost.basis !== 'observed_reviews' || typeof usd !== 'number' || !Number.isFinite(usd)) return 'cost unknown';
+    const high = Number(cost.high);
+    if (usd === 0 && !(high > 0)) return 'no API cost per review';
+    const money = (value) => `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
+    const reviews = Number(cost.reviews) || 0;
+    return reviews < 2 ? `≈${money(usd)} per review (1 measured)`
+        : `≈${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
+}
+
+/** What actually ran the last time this row reviewed, with its review record (the card's "Last review"). */
+export function lastReviewRunText(entry) {
+    const text = describeExecutionEvidence(entry?.effective || !entry?.observed_model ? entry
+        : { ...entry, effective: { model: entry.observed_model } });
+    if (!text) return '';
+    const record = String(entry?.review_record_id || entry?.record_id || '');
+    return `${text}${record ? ` · record ${record}` : ''}`;
 }

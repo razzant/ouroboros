@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {"path": "Ouroboros/Ouroboros.exe"},
+    {
+      "path": "Ouroboros/_internal/python-standalone/python.exe",
+      "upstreamSha256": "3fbdcdd370c8840fa15b4f8b6c7162c1812895dd7c0c0a0cc59f49789e27f211"
+    },
+    {
+      "path": "Ouroboros/_internal/python-standalone/pythonw.exe",
+      "upstreamSha256": "352c77af580d5941b2b60b1afedd738782bc95f84028a482ae451fde48bbc9d4"
+    }
+  ],
+  "pythonUpstream": {
+    "release": "20261009",
+    "pythonVersion": "3.10.22",
+    "archive": "cpython-3.10.22+20261009-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "archiveSha256": "f20288c45ff11e7fe026f40ddcfb2acfe695cec18860746639e289142a589745"
+  }
+}

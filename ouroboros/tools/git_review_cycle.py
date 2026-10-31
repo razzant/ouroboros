@@ -30,21 +30,22 @@ def _git():
     return git
 
 
-def _review_custody_pending(ctx: ToolContext) -> bool:
-    """Keep the prepared candidate while the panel's physical review custody is unresolved.
-    A preflight never holds it: its wave froze its own tree and keeps its custody on its own
-    ``review_change`` rows, so cleaning the commit's index cannot strand it."""
-    if bool(getattr(ctx, "_review_custody_lost", False)):
-        return True
+def _review_custody_pending(ctx: ToolContext, *, counted_only: bool = False) -> bool:
+    """Retain physical custody, or judge only counted seats when deciding a hold."""
     triad = list(getattr(ctx, "_last_triad_raw_results", []) or [])
     scope_raw = getattr(ctx, "_last_scope_raw_result", {}) or {}
     scope_rows = list(scope_raw.get("raw_results") or [scope_raw]) if isinstance(scope_raw, dict) else []
-    return any(
-        bool(row.get("late_result_pending"))
-        or str(row.get("operation_state") or "") in {"in_flight", "custody_lost"}
-        for row in [*triad, *scope_rows]
-        if isinstance(row, dict)
-    )
+    if counted_only:
+        from ouroboros.review_ledger import build_rows, counted_pending
+
+        structured = getattr(ctx, "_last_review_structured", {}) or {}
+        rows = build_rows({"triad_raw": triad, "structured": structured})
+        return counted_pending(rows if structured.get("rows") else [*rows, *scope_rows],
+                               pending=bool(getattr(ctx, "_review_custody_lost", False)))
+    if bool(getattr(ctx, "_review_custody_lost", False)):
+        return True
+    return any(row.get("late_result_pending") or row.get("operation_state") in {"in_flight", "custody_lost"}
+               for row in [*triad, *scope_rows] if isinstance(row, dict))
 
 
 def _release_review_evidence_if_settled(ctx: ToolContext) -> None:
@@ -301,9 +302,16 @@ def _finalize_pending_review(
     from ouroboros.tools.commit_gate import watch_left_commit_review
 
     if watch_left_commit_review(ctx):
-        message += " An addressed message ended your wait; a [Review settled] notice follows the whole wave."
+        event = ("A selected outcome or wake time" if any(row.get("reason") in {"helper_result", "review_result", "wake_at"} for row in
+                 getattr(ctx, "_review_detached_operations", []) or []) else "An addressed message")
+        message += f" {event} ended your wait; a [Review settled] notice follows the whole wave."
     # The index is part of this live wave's identity. Retain it for exact
     # reconciliation; rebuilding it from the worktree could review new bytes.
+    from ouroboros.tools.review_collection import reference_for
+    from ouroboros.review_ledger import ledger_root, load_record
+    record = load_record(ledger_root(ctx), str(getattr(ctx, "_current_review_record_id", "") or ""))
+    if record:
+        message += "\n" + json.dumps({"review_reference": {**reference_for(record), "surface": "commit"}})
     return _publish_pending_review(ctx, message, custody_lost)
 
 
@@ -345,26 +353,6 @@ def _finalize_blocked_review(
         warning = f"⚠️ GIT_WARNING (reset): {_sanitize_git_error(str(e))}"
         return f"{combined_msg}\n\n---\n{warning}"
     return combined_msg
-
-_DOC_ONLY_EXTENSIONS = (".md", ".txt", ".rst")
-
-
-def _diff_is_doc_only(staged_paths: List[str]) -> bool:
-    """Return True only for docs outside tests; JSON/config keep preflight."""
-    if not staged_paths:
-        return False
-    saw_any = False
-    for raw in staged_paths:
-        p = str(raw).strip()
-        if not p:
-            continue
-        saw_any = True
-        if p.startswith("tests/") or "/tests/" in p:
-            return False
-        if not p.lower().endswith(_git()._DOC_ONLY_EXTENSIONS):
-            return False
-    return saw_any
-
 
 def _review_cycle_infra_failure(
     ctx: ToolContext,
@@ -506,15 +494,16 @@ def _stage_candidate_for_review(
 
 
 def _receptive_wave(ctx: ToolContext, wave: contextlib.ExitStack, *, review_only: bool) -> tuple:
-    """Bind this panel wave's receptive author over an immutable reading root
-    (``review_pause.receptive_author``, ``review_subject.gate_reading_checkout``).
-    The operator's review-only cycle and a managed resolution keep the live
-    synchronous read; a subject that could not be frozen keeps it too, disclosed."""
+    """Bind receptive custody over frozen bytes; managed/read-only calls stay synchronous."""
     from ouroboros import review_pause
     from ouroboros.tools.review_subject import gate_reading_checkout
 
     binding = (None if review_only or _git()._authorized_managed_update_resolver(ctx)
-               else review_pause.receptive_binding(ctx))
+               else review_pause.receptive_binding(ctx, state=getattr(ctx, "_review_wait_selection", None)))
+    if binding is not None and getattr(ctx, "_review_reconcile_only", False):
+        with review_pause.receptive_author(binding):
+            binding = review_pause.rejoin_binding(ctx, str(getattr(ctx, "_current_review_record_id", "") or
+                                                           getattr(ctx._pending_review_attempt, "review_record_id", "")))
     subject, unfrozen = None, ""
     try:
         subject = wave.enter_context(gate_reading_checkout(
@@ -546,13 +535,14 @@ def _reset_commit_review_state(ctx):
     ctx._last_review_slot_executions = {}
     ctx._review_custody_lost = False
     ctx._current_review_attempt_number = None
+    ctx._collect_commit_source = None
     ctx._author_commit_source = None
     ctx._author_commit_decision = None
     ctx._author_commit_record = None
     ctx._commit_review_status = "unknown"
     ctx._commit_preflight = None
     ctx._commit_review_panel = None
-    ctx._preflight_execution = None
+    ctx._preflight_execution, ctx._review_since = None, ""
     ctx._review_detached_operations = []  # what THIS call's author left (``review_pause.watch_left_review``)
 
 
@@ -692,7 +682,11 @@ def _reviewed_stage_cycle(
         preflight = bind_author_commit_candidate(ctx, commit_message, pre_fingerprint)
         if preflight:
             from ouroboros.commit_admission import preflight_evidence_unavailable
-            return {"status": "blocked", "message": preflight, "block_reason": "infra_failure" if preflight_evidence_unavailable(preflight) else "preflight"}
+            from ouroboros.tools.review import _handle_review_block_or_warning
+
+            ctx._last_review_block_reason = "infra_failure" if preflight_evidence_unavailable(preflight) else "preflight"
+            if refusal := _handle_review_block_or_warning(ctx, True, preflight, ""):
+                return {"status": "blocked", "message": refusal, "block_reason": ctx._last_review_block_reason}
         advisory_replay = {"advisory_replay": "Explicit current-author continuation; original reviewer facts retained.", "replay_reason": "author_finish"}
     if gate_outcome is not None:
         if "advisory_replay" in gate_outcome:
@@ -746,7 +740,7 @@ def _reviewed_stage_cycle(
             skip_advisory_pre_review=skip_advisory_pre_review,
             skip_tests=skip_tests,
             review_rebuttal=review_rebuttal,
-            goal=goal, scope=scope,
+            goal=goal, scope=scope, review_only=review_only,
         )
     if preflight_gate_outcome is not None:
         _release_review_evidence_if_settled(ctx)
@@ -805,7 +799,7 @@ def _reviewed_stage_cycle(
     # pending too, before Git; the review-only cycle keeps Advisory's material handback; Blocking keeps authority.
     ordinary_advisory = get_review_enforcement() == "advisory" and review_enforcement_blocks("blocking")
     hand_back_all = not review_only and not review_enforcement_blocks(get_review_enforcement())
-    if author_source is None and _git()._review_custody_pending(ctx) and (pending_message := _git()._finalize_pending_review(
+    if author_source is None and _git()._review_custody_pending(ctx, counted_only=True) and (pending_message := _git()._finalize_pending_review(
             ctx, commit_message, commit_start,
             pre_fingerprint=pre_fingerprint, post_fingerprint=post_fingerprint)):
         custody_lost = bool(getattr(ctx, "_review_custody_lost", False))
@@ -944,18 +938,9 @@ def _run_non_committing_review_cycle(
     unstage_warning = ""
     try:
         outcome = _git()._run_reviewed_stage_cycle(
-            ctx,
-            commit_message,
-            commit_start,
-            paths=paths,
-            skip_advisory_pre_review=skip_advisory_pre_review,
-            goal=goal,
-            scope=scope,
-            review_rebuttal=review_rebuttal,
-            preflight_reviewer=preflight_reviewer,
-            panel=panel,
-            review_only=True,
-        )
+            ctx, commit_message, commit_start, paths=paths,
+            skip_advisory_pre_review=skip_advisory_pre_review, goal=goal, scope=scope,
+            review_rebuttal=review_rebuttal, preflight_reviewer=preflight_reviewer, panel=panel, review_only=True)
         if outcome.get("status") == "passed":
             pre_fingerprint = outcome.get("pre_fingerprint", {}) or {}
             post_fingerprint = outcome.get("post_fingerprint", {}) or {}

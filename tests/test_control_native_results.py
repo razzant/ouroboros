@@ -343,3 +343,37 @@ def test_a_refused_steer_is_seen_as_a_refusal_without_degrading_execution():
     # error bucket.
     delivered = "✉️ Steering task t-1: mailbox delivery is durably confirmed (queue)."
     assert LegacyTextResultAdapter.from_text("steer_task", delivered).code == "OK"
+
+
+@pytest.mark.parametrize("receipt,mode,first_line", [
+    ({"status": "rejected", "reason": "target_not_steerable"}, "live", "TELL_REJECTED: t-1: target_not_steerable."),
+    ({"status": "unconfirmed", "reason": "confirmation_timeout"}, "queue", "TELL_UNCONFIRMED: t-1: confirmation_timeout"),
+])
+def test_a_refused_or_unconfirmed_tell_is_published_as_a_refusal(tmp_path, monkeypatch, receipt, mode, first_line):
+    """Owner item I23 on the verb that replaced steer_task (one-bubble change).
+
+    The STEER_* text producers are gone, so the identifier table no longer answers
+    for them; tell_task publishes its refusal itself. The text alone reads as ok to
+    the adapter, so the divergence is real: the agent SEES the refusal (is_error,
+    policy-denial bucket) and execution health is not degraded. A delivered tell
+    publishes nothing and stays ok.
+    """
+    from ouroboros._outcome_tool_errors import _classify_tool_errors
+    from ouroboros.loop_tool_execution import _typed_execution_failure, _typed_result_metadata
+    from ouroboros.tools import control_relay
+
+    ctx = _routing_ctx(tmp_path, monkeypatch, receipt, mode=mode)
+    published = _published(ctx, "tell_task", lambda: control_relay._tell_task(ctx, "t-1", "keep the PR small"),
+                           owner_delta="A.I23")
+    assert published.text.startswith(first_line)
+    assert (published.code, published.status) == ("TOOL_REPORTED_FAILURE", "error")
+    is_error = _typed_execution_failure(True, published)
+    status = _typed_result_metadata("tell_task", published.text, is_error, published)["status"]
+    assert (is_error, status) == (True, "tool_reported_failure")
+    buckets = _classify_tool_errors({"tool_calls": [
+        {"tool": "tell_task", "status": status, "is_error": is_error, "result": published.text}]})
+    assert [row["tool"] for row in buckets["policy_denials"]] == ["tell_task"] and buckets["unresolved"] == []
+    delivered_ctx = _routing_ctx(tmp_path, monkeypatch, {"status": "delivered"})
+    delivered = control_relay._tell_task(delivered_ctx, "t-1", "keep the PR small")
+    assert delivered.startswith("Message written to t-1")
+    assert LegacyTextResultAdapter.from_text("tell_task", delivered).code == "OK"

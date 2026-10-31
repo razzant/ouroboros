@@ -161,6 +161,42 @@ def test_recovery_freezes_exact_bytes_but_a_live_park_or_an_owed_final_wins(tmp_
         "an answer the host already owes is never answered twice"
 
 
+def test_a_retained_wait_parks_only_while_the_pause_that_retained_it_is_live(tmp_path):
+    """A stop moves a warm wait into an exact pause and marks the wait ``retained``. Its Resume
+    continues the SAME attempt, so once that pause is consumed the attempt's newer working
+    state is the source: restart and retry recovery freeze it instead of refusing (19.10.2026,
+    two updates in a row cancelled work the restart had promised to return)."""
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.owner_wait import checkpoint_owner_wait, set_owner_wait
+
+    ctx, limit_ctx = _loop_ctx(tmp_path)
+    write_task_result(tmp_path, "pause-task", "running")
+    wait = checkpoint_owner_wait(ctx, limit_ctx.messages, {}, {}, 4, [], set())
+    set_owner_wait(tmp_path, "pause-task", {**wait, "state": "retained"})
+    pause = {"pause_id": "owner-pause-1", "pause_generation": 1, "task_attempt": 1, "reason": "owner",
+             "rail": "owner_pause", "scope": "root", "source_ref": wait["source_ref"],
+             "retained_owner_wait_id": wait["wait_id"], "state": budget_pause.STATE_PAUSED}
+    budget_pause.set_budget_pause(tmp_path, "pause-task", pause)
+    wc.save_round(limit_ctx, "post_batch")
+    assert wc.live_park(tmp_path, "pause-task", 1) == "owner_wait", "the live pause's own source still wins"
+    assert wc.prepare_recovery(tmp_path, "pause-task", from_attempt=1, cause="restart") == {}
+
+    budget_pause.set_budget_pause(tmp_path, "pause-task", {**pause, "state": budget_pause.STATE_RESUMED})
+    assert wc.live_park(tmp_path, "pause-task", 1) == ""
+    limit_ctx.messages.append({"role": "user", "content": "[owner] work after the Resume"})
+    wc.save_round(limit_ctx, "ready")
+    handoff = wc.prepare_recovery(tmp_path, "pause-task", from_attempt=1, cause="restart")
+    assert handoff["source_kind"] == wc.SOURCE_WORKING
+    frozen = json.loads(read_actor_source_bytes(tmp_path, "pause-task", handoff["source_ref"]))
+    assert frozen["messages"][-1]["content"] == "[owner] work after the Resume"
+
+    # A newer live pause that never retained this wait is the park; the old wait is history.
+    budget_pause.set_budget_pause(tmp_path, "pause-task", {
+        **pause, "pause_id": "budget-2", "pause_generation": 2, "reason": "budget", "rail": "global_exhausted",
+        "retained_owner_wait_id": "", "state": budget_pause.STATE_PAUSED})
+    assert wc.live_park(tmp_path, "pause-task", 1) == "budget_pause"
+
+
 def test_a_sourceless_pausing_seed_is_completed_from_the_same_attempts_working_state(tmp_path):
     from ouroboros.artifacts import read_actor_source_bytes
 
@@ -246,10 +282,12 @@ def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_c
         return {"role": "assistant", "content": "Continued from the saved state", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    noted = []  # a continued task's view was captured at its start: no second Low-start line
+    monkeypatch.setattr(loop, "_note_low_start", lambda *a, **kw: noted.append(a))
     kwargs = _loop_kwargs(tmp_path, registry, [])
     kwargs["task_id"] = task_id
     result, usage, _trace = loop.run_llm_loop(**kwargs)
-    assert result == "Continued from the saved state" and not ran
+    assert result == "Continued from the saved state" and not ran and noted == []
     contents = [str(row.get("content") or "") for row in seen_messages]
     assert "Saved object 42" in contents, "completed results are restored"
     unknown = [row for row in seen_messages if row.get("tool_call_id") == "inflight"]

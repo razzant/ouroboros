@@ -18,7 +18,7 @@ globalThis.document = {
         get innerHTML() { return this._html; },
     }),
 };
-const { joinMarkdownHeadings, renderMarkdown } = await import('../modules/utils.js');
+const { projectMarkdownLines, renderMarkdown } = await import('../modules/utils.js');
 test.after(() => { globalThis.document = priorDocument; });
 
 // The #1367 fence: every compact substitution has something to grab inside it.
@@ -49,7 +49,7 @@ test('punctuation labels and normal fence whitespace preserve code and preview b
             const source = '```' + label + ending + FENCE_BODY + '\n```';
             assert.equal(renderMarkdown(source), `<pre><code>${escaped(FENCE_BODY)}\n</code></pre>`);
             assert.equal(renderMarkdown(source, { inlineHeadingBreaks: true }), renderMarkdown(source));
-            assert.equal(joinMarkdownHeadings(source), '```' + label + '\n' + FENCE_BODY + '\n```');
+            assert.equal(projectMarkdownLines(source), '```' + label + '\n' + FENCE_BODY + '\n```');
         }
     }
 });
@@ -111,7 +111,7 @@ test('a hostile parking-token run stays literal and costs one scan', () => {
     const html = renderMarkdown(`${run} ${'`a` '.repeat(2000)}**b**`);
     assert.ok(Date.now() - started < 1000, 'the parking stem must be found in one scan');
     assert.equal(html, `${run} ${'<code class="inline-code">a</code> '.repeat(2000)}<strong>b</strong>`);
-    assert.equal(joinMarkdownHeadings(`## \`x\` ${run}\nbody`), `\`x\` ${run}\nbody`);
+    assert.equal(projectMarkdownLines(`## \`x\` ${run}\nbody`), `\`x\` ${run}\nbody`);
     // Every short tag after the prefix taken: the stem still misses them all.
     const tags = Array.from({ length: 26 }, (_, i) => `OUROBOROSCODE${String.fromCharCode(65 + i)}0`).join(' ');
     assert.equal(renderMarkdown(`${tags} \`c\``), `${tags} <code class="inline-code">c</code>`);
@@ -132,10 +132,10 @@ test('heading length counts code as visible text in the renderer and in previews
     const long = '`' + '**' + 'x'.repeat(40) + '**' + 'y'.repeat(37) + '`';
     assert.equal(renderMarkdown(`## ${long}`), `<code class="inline-code">**${'x'.repeat(40)}**${'y'.repeat(37)}</code>`);
     // The preview projection agrees: the 81-character line is prose (no separator).
-    assert.equal(joinMarkdownHeadings(`## ${long}\nbody`), `${long}\nbody`);
-    assert.equal(joinMarkdownHeadings(`## ${short}\nbody`), `${short} —\nbody`);
+    assert.equal(projectMarkdownLines(`## ${long}\nbody`), `${long}\nbody`);
+    assert.equal(projectMarkdownLines(`## ${short}\nbody`), `${short} —\nbody`);
     // A link inside code is text, not a label with a hidden destination.
-    assert.equal(joinMarkdownHeadings('## `[a](b)` label\nbody'), '`[a](b)` label —\nbody');
+    assert.equal(projectMarkdownLines('## `[a](b)` label\nbody'), '`[a](b)` label —\nbody');
 });
 
 // Every anchor the compact renderer writes, in its one fixed shape: an href with

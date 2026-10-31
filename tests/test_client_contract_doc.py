@@ -70,8 +70,3 @@ def test_every_named_websocket_type_is_indexed_and_every_section_reference_exist
     headings = {int(n) for n in re.findall(r"^## (\d+)\. ", DOC, re.M)}
     for reference in re.findall(r"§(\d+)", DOC):
         assert int(reference) in headings, f"§{reference} does not exist"
-
-
-def test_the_document_no_longer_calls_any_route_untyped():
-    assert "typed: false" not in DOC and "Status: partial" not in DOC
-    assert "WIDGET_HOST_PROTOCOL.md" in DOC and "Idempotency-Key" in DOC

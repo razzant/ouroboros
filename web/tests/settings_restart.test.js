@@ -37,14 +37,17 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
     assert.match(seenOptions[0].body, /already paused stay paused/);
     assert.match(seenOptions[0].body, /Runnable queued tasks return to the queue/);
     assert.match(seenOptions[0].body, /Existing holds and limits still apply/);
+    // Live routing: resumed work that follows a role takes its current model; an explicit choice stays.
+    assert.match(seenOptions[0].body,
+        /work that follows a model setting resumes on the current setting; task-specific choices stay\./);
     assert.doesNotMatch(seenOptions[0].body, /queued tasks stop/);
     assert.doesNotMatch(seenOptions[0].body, /still pausing/);
 });
 
 test('Settings and the chat header share ONE restart confirmation (owner quiz 285597)', () => {
     assert.equal(confirmAndSendRestart, sharedRestart);
-    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const header = chat.slice(chat.indexOf("if (command === 'restart')"), chat.indexOf("if (command === 'panic')"));
+    const bar = readFileSync(new URL('../modules/chat_header.js', import.meta.url), 'utf8');
+    const header = bar.slice(bar.indexOf("if (command === 'restart')"), bar.indexOf("if (command === 'panic')"));
     // The header no longer sends /restart directly: it runs the same dialog.
     assert.match(header, /await confirmAndSendRestart\(\{ openConfirmDialog, ws \}\)/);
     assert.doesNotMatch(header, /ws\.send/);

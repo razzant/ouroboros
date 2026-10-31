@@ -13,6 +13,16 @@ from tests.test_restart_retention import _pool_events, _restart_door
 pytestmark = pytest.mark.serial
 
 
+def _next_generation(monkeypatch):
+    """The old stop latches end with its process; the transaction remains for the new boot."""
+    import threading
+    from ouroboros import delegate_recovery, server_restart
+
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+    monkeypatch.setattr(server_restart, "_owner_restart_requested", threading.Event())
+    monkeypatch.setattr(delegate_recovery, "_PROCESS_GENERATION", "next-boot")
+
+
 def test_worker_preparation_cannot_launch_after_pause(tmp_path, monkeypatch):
     from tests.test_budget_pause_holds import _idle_worker
     from ouroboros.task_results import write_task_result
@@ -44,6 +54,7 @@ def test_mcp_initialization_pause_fences_call_across_async_runner(tmp_path, monk
     _running(tmp_path, workers)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = registry._ctx.root_task_id = "root"
+    registry._ctx.task_metadata = {"work_kind": "owner"}  # an owner task's minted kind
     sent = []
     initialized = []
     monkeypatch.setattr(registry, "_mcp_name_miss", lambda _name: None)
@@ -93,7 +104,7 @@ def test_business_metadata_does_not_outlive_a_joined_builtin(tmp_path, monkeypat
         assert not load_task_result(tmp_path, "root").get("launch_handoffs")
 
 
-@pytest.mark.parametrize("veto", ["unknown_dispatch", "stop", "foreign_hold", "snapshot", "fence_write"])
+@pytest.mark.parametrize("veto", ["unknown_dispatch", "stop", "point_refusal", "snapshot", "fence_write"])
 @pytest.mark.parametrize("app_stopped", [False, True])
 def test_unstarted_combined_resume_retains_other_vetoes(tmp_path, monkeypatch, veto, app_stopped):
     from ouroboros import owner_pause
@@ -108,6 +119,7 @@ def test_unstarted_combined_resume_retains_other_vetoes(tmp_path, monkeypatch, v
     workers.PENDING.append(task)
     assert request_owner_pause("root", request_id="pause")["ok"]
     _restart_door(tmp_path, monkeypatch, workers)
+    _next_generation(monkeypatch)
     if app_stopped:
         hold_budget_row(task, reason=HOLD_SAVED_WORK)
     if veto == "unknown_dispatch":
@@ -115,7 +127,7 @@ def test_unstarted_combined_resume_retains_other_vetoes(tmp_path, monkeypatch, v
     elif veto == "stop":
         from ouroboros.cancel_intents import request_cancel
         request_cancel(tmp_path, "root", reason="stop", source="owner", requested_by="owner")
-    elif veto == "foreign_hold":
+    elif veto == "point_refusal":
         hold_budget_row(task, reason="opaque_control_hold")
     elif veto == "snapshot":
         monkeypatch.setattr(q, "persist_queue_snapshot", lambda **_k: False)
@@ -123,12 +135,16 @@ def test_unstarted_combined_resume_retains_other_vetoes(tmp_path, monkeypatch, v
         monkeypatch.setattr(owner_pause, "set_fence_state", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk")))
     before = copy.deepcopy(task)
     outcome = q.resume_budget_paused_task("root")
+    if veto == "point_refusal":  # A1: the known never-started source revalidates this unknown refusal.
+        assert outcome["ok"] and budget_hold_fact(task) is None, outcome
+        assert owner_pause.read_fence(tmp_path, "root")["state"] == "released"
+        return
     assert not outcome["ok"], outcome
     assert task == before and task["_admission_owner_token"] == "original"
     assert owner_pause.read_fence(tmp_path, "root")["state"] != "released"
     # Owner 2026-10-08 (quiz d2f7532b): the owner's Restart names its never-started row
     # for return instead of holding it; the Pause's own fence and queue latch still veto.
-    assert q.BUDGET_ROOT_FENCES["root"] and bool(budget_hold_fact(task)) is (app_stopped or veto == "foreign_hold")
+    assert q.BUDGET_ROOT_FENCES["root"] and bool(budget_hold_fact(task)) is app_stopped
 
 
 def test_cold_request_exempts_only_its_own_invocation(tmp_path, monkeypatch):
@@ -200,7 +216,7 @@ def test_warm_restart_restores_after_failed_conversion(tmp_path, monkeypatch, di
     if direct:
         workers.RUNNING.clear()
         monkeypatch.setattr(active_activity, "get_direct_activity_registry", lambda: SimpleNamespace(
-            snapshot=lambda: [{"activity_id": "root"}]))
+            snapshot=lambda: [{"activity_id": "root"}], actors=lambda: []))
         monkeypatch.setattr(q, "PRIOR_DIRECT_ROOTS", {"task_ids": ["root"]})
     monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
     assert "root" not in server_restart._owned_live_task_ids(SimpleNamespace(RUNNING=workers.RUNNING))
@@ -208,7 +224,8 @@ def test_warm_restart_restores_after_failed_conversion(tmp_path, monkeypatch, di
         failing.setattr(budget_pause, "set_budget_pause", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("disk")))
         _restart_door(tmp_path, monkeypatch, workers)
     if direct:
-        monkeypatch.setattr(active_activity, "get_direct_activity_registry", lambda: SimpleNamespace(snapshot=lambda: []))
+        monkeypatch.setattr(active_activity, "get_direct_activity_registry", lambda: SimpleNamespace(snapshot=lambda: [], actors=lambda: []))
+    _next_generation(monkeypatch)
     workers.PENDING.clear()
     assert q.restore_pending_from_snapshot() == 1
     task = workers.PENDING[0]
@@ -260,6 +277,7 @@ def test_resume_crash_before_durable_commit_restores_usable_fence(tmp_path, monk
                             "admitted_dispatch": "none", "_attempt": 1, "_admission_owner_token": "original"})
     assert request_owner_pause("root", request_id="pause")["ok"]
     _restart_door(tmp_path, monkeypatch, workers)
+    _next_generation(monkeypatch)
     with monkeypatch.context() as crash:
         crash.setattr(owner_pause, "set_fence_state", lambda *_a, **_kw: (_ for _ in ()).throw(SystemExit("crash")))
         with pytest.raises(SystemExit):
@@ -268,9 +286,9 @@ def test_resume_crash_before_durable_commit_restores_usable_fence(tmp_path, monk
     q.BUDGET_ROOT_FENCES.clear()
     assert q.restore_pending_from_snapshot() == 1
     assert "root" in q.BUDGET_ROOT_FENCES
-    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+    from supervisor.events_budget import HOLD_OWNER_RESTART, budget_hold_fact
 
-    assert budget_hold_fact(workers.PENDING[0])["reason"] == HOLD_SAVED_WORK
+    assert budget_hold_fact(workers.PENDING[0])["reason"] == HOLD_OWNER_RESTART
     resumed = q.resume_budget_paused_task("root")
     assert resumed["ok"], resumed
     assert workers.PENDING[0]["_admission_owner_token"] == "original"
@@ -391,6 +409,7 @@ def test_timed_out_mcp_runner_cannot_start_after_caller_return(tmp_path, monkeyp
     _running(tmp_path, workers)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = registry._ctx.root_task_id = "root"
+    registry._ctx.task_metadata = {"work_kind": "owner"}  # an owner task's minted kind
     monkeypatch.setattr(registry, "_mcp_name_miss", lambda _name: None)
     release, entered = threading.Event(), threading.Event()
     threads, sent = [], []

@@ -9,10 +9,12 @@ from f-strings.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import posixpath
 from typing import List, Optional
 
+from ouroboros.git_observation import numstat_paths
 from ouroboros.runtime_mode_policy import format_protected_paths
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tool_access import ResolvedResourceBinding
@@ -38,7 +40,7 @@ def _limit_git_output(text: str, max_chars: int = 0) -> str:
     limit = int(max_chars or 0)
     if limit <= 0 or len(text) <= limit:
         return text
-    return text[:limit] + f"\n⚠️ OUTPUT_TRUNCATED: git output limited to {limit} characters by max_chars."
+    return text[:limit] + f"\n⚠️ OUTPUT_TRUNCATED: git output limited to {limit} characters by max_chars. Narrow with path, or ref/max_count for history."
 
 
 def _vcs_binding(
@@ -68,9 +70,11 @@ def _vcs_binding(
     return resolved
 
 
-def _vcs_result(text: str, binding: ResolvedResourceBinding) -> str:
-    receipt = f"VCS target: root={binding.root}; repo={binding.base_path}"
-    rendered = str(text or "").rstrip()
+def _vcs_result(text: str, binding: ResolvedResourceBinding, *, preserve_text: bool = False) -> str:
+    receipt = f"VCS target: root={binding.root}; repo={binding.repository_path or binding.base_path}"
+    rendered = str(text or "") if preserve_text else str(text or "").rstrip()
+    if preserve_text:
+        return f"{rendered}\n\n{receipt}"
     return f"{rendered}\n\n{receipt}" if rendered else receipt
 
 
@@ -81,14 +85,10 @@ def _vcs_validation_refusal(ctx: ToolContext, text: str) -> str:
         result, meta_updates={"operation_outcome": "completed_no_effect"}))
 
 
-def _binding_relative_path(binding: ResolvedResourceBinding, requested: str) -> str:
-    if not str(requested or "").strip():
-        return ""
-    try:
-        relative = binding.target_path.relative_to(binding.base_path)
-    except ValueError as exc:
-        raise ValueError("VCS path escapes the selected repository") from exc
-    return str(relative) if str(relative) != "." else ""
+def _binding_relative_path(ctx: ToolContext, binding: ResolvedResourceBinding, requested: str) -> str:
+    from ouroboros.tools.vcs_read import _literal_path
+
+    return _literal_path(ctx, binding, requested, worktree_spelling=True)
 
 
 def _git_status(
@@ -101,10 +101,11 @@ def _git_status(
     try:
         binding = _git()._vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
         cmd = ["git", "status", "--porcelain"]
-        if relative := _git()._binding_relative_path(binding, path):
-            cmd.extend(["--", _git().safe_relpath(relative)])
+        if relative := _git()._binding_relative_path(ctx, binding, path):
+            cmd.extend(["--", relative])  # an ordinary pathspec, as before: globs keep working
+        output = _git().run_cmd(cmd, cwd=binding.repository_path or binding.base_path)
         return _git()._vcs_result(
-            _git()._limit_git_output(_git().run_cmd(cmd, cwd=binding.base_path), max_chars),
+            _git()._limit_git_output(output, max_chars),
             binding,
         )
     except Exception as e:
@@ -127,11 +128,11 @@ def _git_diff(
 ) -> str:
     try:
         binding = _git()._vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
-        repo_dir = binding.base_path
+        repo_dir = binding.repository_path or binding.base_path
         base, head = str(kwargs.get("base") or ""), str(kwargs.get("head") or "")
         if head and (not base or staged):
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-                text="⚠️ TOOL_ARG_ERROR (vcs_diff): head requires base and cannot be combined with staged=true.",
+                text="⚠️ TOOL_ARG_ERROR (vcs_read diff): head requires base and cannot be combined with staged=true.",
                 meta={"operation_outcome": "completed_no_effect"}))
         comparison = {}
         revisions = []
@@ -144,12 +145,20 @@ def _git_diff(
         if staged:
             cmd.append("--staged")
         if name_only:
-            cmd.append("--name-only")
+            # With index refresh disabled, name-only can mistake stat dirt for edits.
+            cmd.extend(["--numstat", "-z"])
         elif stat:
             cmd.append("--stat")
         cmd.extend(revisions)
-        if relative := _git()._binding_relative_path(binding, path):
-            cmd.extend(["--", _git().safe_relpath(relative)])
+        if relative := _git()._binding_relative_path(ctx, binding, path):
+            cmd.extend(["--", relative])
+        if not (stat or name_only):
+            from ouroboros.tools.vcs_read import _protected_content_reason
+
+            # A pathspec pattern can reach protected files its literal target does not name.
+            scope = "" if any(ch in relative for ch in "*?[") else relative
+            if reason := _protected_content_reason(ctx, binding, scope, "show"):
+                return _git()._vcs_result(reason, binding)
         from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
 
         protected_block = protected_artifact_shell_block_reason(
@@ -157,9 +166,13 @@ def _git_diff(
         )
         if protected_block:
             return _git()._vcs_result(protected_block, binding)
-        text = _git()._vcs_result(_git()._limit_git_output(_git().run_cmd(cmd, cwd=repo_dir), max_chars), binding)
+        output = _git().run_cmd(cmd, cwd=repo_dir)
+        if name_only:
+            paths = numstat_paths(output, cmd, lambda args: _git().run_cmd(args, cwd=repo_dir))
+            output = "\n".join(json.dumps(path, ensure_ascii=False)
+                               if any(ord(c) < 32 or c in '\\"' for c in path) else path for path in paths)
+        text = _git()._vcs_result(_git()._limit_git_output(output, max_chars), binding)
         if comparison:
-            import json
             comparison["kind"] = "tree_to_tree" if head else "tree_to_index" if staged else "tree_to_worktree"
             text += "\nComparison: " + json.dumps(comparison, ensure_ascii=False, sort_keys=True)
             return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta={"comparison": comparison}))
@@ -446,12 +459,15 @@ def _revert_commit(
         if _git().binding_targets_system_repo(ctx, binding)
         else []
     )
-    if protected_changes:
+    from ouroboros.consciousness_authority import effective_runtime_mode
+    from ouroboros.runtime_mode_policy import mode_allows_protected_write
+
+    mode = effective_runtime_mode(_git()._current_runtime_mode(), getattr(ctx, "task_metadata", None))
+    if protected_changes and not (mode_allows_protected_write(mode) or _git()._authorized_managed_update_resolver(ctx)):
         return _git()._vcs_result(
-            f"⚠️ REVERT_BLOCKED: Commit {sha[:8]} touches protected file(s): "
+            f"⚠️ CORE_PROTECTION_BLOCKED: Runtime mode {mode} cannot revert protected file(s): "
             f"{format_protected_paths(protected_changes)}. "
-            "Direct vcs_revert cannot create protected-path commits; stage the intended "
-            "revert manually and use commit_reviewed so the normal panel review covers it.",
+            "Mechanical revert is review-exempt, but retains the caller's runtime-mode authority.",
             binding,
         )
     try:

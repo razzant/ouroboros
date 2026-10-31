@@ -33,6 +33,31 @@ class ClaudexorPassiveReadError(TypedDict):
     status_code: NotRequired[int]
 
 
+class ClaudexorStatusResponse(TypedDict, total=False):
+    """``GET /api/claudexor/status`` — owned-daemon lifecycle plus the daemon's
+    own catalog/account/quota truth, each stamped with its read state. Read-only;
+    never spawns the daemon (waking it is the owner-initiated POST)."""
+
+    daemon: Dict[str, Any]
+    config_dir: str
+    harnesses: List[Dict[str, Any]]
+    profiles: Dict[str, Any]
+    quota: List[Dict[str, Any]]
+    quota_absences: List[Dict[str, Any]]
+    resources: List[Dict[str, Any]]
+    availability_scope: Dict[str, Any]  # Optional engine binding {model, requestKind, basis: quota_block}.
+    resource_capabilities: Dict[str, bool]
+    resource_capabilities_read: ClaudexorReadState
+    reads: ClaudexorStatusReads
+    # True when this read's roster is the unified account model (named rows, routing in
+    # `profiles.accountPools`); a pre-unified roster fails `accounts` as `account_model_unsupported`.
+    unified_accounts: bool
+    # Per facet: `observed_at`, `stale`, `error`; a failed or unasked facet serves its last read (stale).
+    facets: Dict[str, Dict[str, Any]]
+    subagent_last_delegation: Dict[str, Any]
+    error: str
+
+
 class ClaudexorQuotaResponse(TypedDict):
     """``GET /api/claudexor/status?view=quota`` — passive roster/quota projection."""
 
@@ -40,7 +65,10 @@ class ClaudexorQuotaResponse(TypedDict):
     profiles: Dict[str, Any]
     quota: List[Dict[str, Any]]
     quota_absences: List[Dict[str, Any]]
+    resources: NotRequired[List[Dict[str, Any]]]
+    availability_scope: NotRequired[Dict[str, Any]]
     unified_accounts: bool
     reads: ClaudexorStatusReads
+    # A pre-unified roster: accounts `failed` with read_errors.accounts.code `account_model_unsupported`.
     read_errors: Dict[Literal["discovery", "accounts", "quota"], ClaudexorPassiveReadError]
     timings_ms: Dict[str, int]

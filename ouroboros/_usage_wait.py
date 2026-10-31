@@ -29,15 +29,16 @@ ACQUISITION_SLICE_SEC = 0.25
 class _PresendWait:
     """One caller's local admission episode. Nothing here repeats a provider or tool body."""
 
-    def __init__(self, check=True):
+    def __init__(self, check=True, *, before_task_start=False):
         from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
         from ouroboros.config import get_task_idle_timeout_sec
 
         self.check = check
+        self.before_task_start = before_task_start
         self.owner = current_model_wait()
         self.owned = self.owner is not None or dispatch_deadline_remaining_sec() is not None
         self.interactive_bound = (float(get_task_idle_timeout_sec()) if self.owner is not None
-                                  and self.owner.task.get("_is_direct_chat") else None)
+                                  and self.owner.task.get("_is_direct_chat") and not before_task_start else None)
         self.started = time.monotonic()
         self.publication_waited = 0.0
         self.publication_started = None
@@ -67,19 +68,20 @@ class _PresendWait:
                 if self.check or self.publication_started is not None:
                     _check()
                 elif self.owner is not None:
-                    reason = self.owner.control_reason()
+                    from ouroboros.model_wait import dispatch_control_reason
+                    reason = (dispatch_control_reason(self.owner, before_task_start=True)
+                              if self.before_task_start else self.owner.control_reason())
                     if reason:
                         from ouroboros.llm_attempt import PhysicalDispatchInterrupted
                         raise PhysicalDispatchInterrupted(reason)
         except StoreBusy as busy:
-            if busy.reason != "contention":
+            if busy.reason != "contention" or getattr(busy, "rollback_confirmed", None) is False:
                 raise
         elapsed = time.monotonic() - self.started
         if self.interactive_bound is not None and elapsed >= self.interactive_bound:
             from ouroboros.llm_attempt import PhysicalDispatchInterrupted
             raise PhysicalDispatchInterrupted("accounting_wait_expired")
-        remaining = DISPATCH_PUBLICATION_WAIT_SEC - max(self.publication_waited,
-            time.monotonic() - self.publication_started if self.publication_started is not None else 0.0)
+        remaining = DISPATCH_PUBLICATION_WAIT_SEC - self.publication_waited
         if pending and remaining <= 0:
             raise ControlAuthorityUnavailable(str(error), cause="dispatch_publication_unconfirmed") from error
         if not self.owned and elapsed >= USAGE_LOCK_TIMEOUT_SEC:
@@ -87,37 +89,63 @@ class _PresendWait:
         if not self.entered:
             self.entered = True
             _hold(self.owner, "entered", self.started, self.episode_id)
-        delay = min(DISPATCH_PUBLICATION_POLL_SEC, remaining) if pending else ACQUISITION_SLICE_SEC
+        return min(DISPATCH_PUBLICATION_POLL_SEC, remaining) if pending else ACQUISITION_SLICE_SEC
+
+    @contextlib.contextmanager
+    def wait(self, error):
+        """Charge only a publication probe and its wait, across reacquisitions.
+
+        A contended store neither proves continuous publication absence nor resets
+        the already spent publication budget. Other elapsed bounds remain separate.
+        """
+        from ouroboros.queue_observation import DispatchPublicationPending
+
+        pending = isinstance(error, DispatchPublicationPending)
         if pending:
-            self.publication_waited += delay
-        return delay
+            self.publication_waited += error.probe_elapsed_sec
+        delay = self.delay(error)
+        started = time.monotonic()
+        try:
+            yield delay
+        finally:
+            if pending:
+                self.publication_waited += max(delay, time.monotonic() - started)
 
     def close(self):
         if self.entered:
             _hold(self.owner, "ended", self.started, self.episode_id)
 
 
-def retry_presend(function, *, check=True):
+def retry_presend(function, *, check=True, before_task_start=False):
     """Retry only a supplied unsent preparation/transaction AFTER it unwound its locks.
 
     The caller must keep invocation identity outside the callback and must stop using
     this helper once it has submitted an executor. In particular, never wrap send(),
     mark_dispatched's physical claim, or an arbitrary tool handler.
+    ``before_task_start`` is a task's own unpaid preparation before its body runs (owner
+    2026-10-21, A: an unstarted message waits for storage and starts once): no direct-turn
+    idle window ends it; Stop, Panic, deadlines and the execution ceiling still do. A readable
+    accepted Pause ends preparation before the body, for its existing zero-dispatch park.
     """
     from ouroboros.store import admission_acquisition
     from ouroboros import queue_observation
 
-    episode = _PresendWait(check)
+    episode = _PresendWait(check, before_task_start=before_task_start)
     try:
         while True:
             try:
                 with admission_acquisition():
                     if check or episode.publication_started is not None:
                         _check()
+                    elif before_task_start and episode.entered and episode.owner is not None:
+                        from ouroboros.model_wait import dispatch_control_reason
+                        from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+                        if reason := dispatch_control_reason(episode.owner, before_task_start=True):
+                            raise PhysicalDispatchInterrupted(reason)
                     return function()
             except Exception as exc:
-                delay = episode.delay(exc)  # callback's transaction and launch lock have exited
-                queue_observation._sleep(delay)
+                with episode.wait(exc) as delay:  # transaction/launch lock have exited
+                    queue_observation._sleep(delay)
     finally:
         episode.close()
 
@@ -135,7 +163,8 @@ async def retry_presend_async(function, *, check=True):
                         _check()
                     return function()
             except Exception as exc:
-                await asyncio.sleep(episode.delay(exc))
+                with episode.wait(exc) as delay:
+                    await asyncio.sleep(delay)
     finally:
         episode.close()
 

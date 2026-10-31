@@ -81,8 +81,9 @@ def test_host_task_facts_render_their_status_fields_when_text_is_empty():
     author = row_author(facts)
     assert author == {"kind": "host", "label": "host", "type": "task_summary", "summary_kind": "host_task_facts"}
     assert row_class(facts)["lane"] == 2
-    assert render_row_text(facts) == (
-        "host facts for t9: status=completed; outcome=Completed; phase=done; result: get_task_result(task_id=t9)")
+    # A host facts row that recorded no finality (one written before the field) says so; it never reads as final.
+    assert render_row_text(facts) == ("host facts for t9: status=completed; outcome=Completed; phase=done; "
+                                      "final=unknown; result: get_task_result(task_id=t9)")
     # A summary row that has its own text keeps it; nothing is synthesized over it.
     spoken = {**facts, "summary_kind": "terminal_root_projection", "text": "Completed. Root task t9."}
     assert render_row_text(spoken) == "Completed. Root task t9."

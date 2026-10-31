@@ -490,7 +490,7 @@ def test_ui_smoke_widget_launch_policy_and_ordered_stop(direct_server_with_data,
                 assert facade_height == 360, facade_height
                 page.screenshot(path=str(evidence_dir / f"widget-lifecycle-cards-{browser_name}.png"), full_page=True)
                 page.locator(f"{card('manual')} [data-widget-menu-trigger]").click()
-                page.locator("body > .skills-card-menu-dialog[open] [data-widget-start-mode=\"manual\"]").wait_for(state="visible", timeout=5_000)
+                page.locator("body > .skills-card-menu-dialog:not([data-leaving])[open] [data-widget-start-mode=\"manual\"]").wait_for(state="visible", timeout=5_000)
                 page.screenshot(path=str(evidence_dir / f"widget-lifecycle-menu-{browser_name}.png"), full_page=True)
                 page.keyboard.press("Escape")
                 page.locator(f"{card('manual')} [data-widget-start-mode=\"manual\"]").wait_for(state="hidden", timeout=5_000)
@@ -578,7 +578,7 @@ def test_ui_smoke_widget_launch_policy_and_ordered_stop(direct_server_with_data,
                 # Owner override from the card menu: Manual program → Auto starts it now and
                 # persists the whole map through the preferences API.
                 page.locator(f"{card('manual')} [data-widget-menu-trigger]").click()
-                page.locator("body > .skills-card-menu-dialog[open] [data-widget-start-mode=\"auto\"]").click()
+                page.locator("body > .skills-card-menu-dialog:not([data-leaving])[open] [data-widget-start-mode=\"auto\"]").click()
                 wait_frame(page, "manual", True)
                 prefs = page.evaluate("async () => (await fetch('/api/ui/preferences')).json()")
                 assert prefs["widget_start_mode"] == {f"{skill}:manual": "auto"}, prefs
@@ -638,9 +638,8 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
     promised) and its bridged ticks still reaching the host while the
     declarative poll issues nothing. A keyboard reorder changes the visible
     position without moving the node or reloading the frame. The page carries
-    no Refresh control: the window reload is the only hard reset, it ends the
-    kept frame with its window, and it forgets an owner Stop (which lives in
-    the page session only). Owner Stop frees the frame and its timers.
+    no Refresh control: the window reload is the only hard reset and ends the kept frame with its window.
+    Owner Stop frees the frame and its timers and survives the reload on this device until Start.
     Disabling the skill while Widgets is hidden force-stops the kept frame
     before the next visit."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
@@ -839,11 +838,12 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
                 late = [row for row in page.evaluate("window.__hostFetchLog") if "ping?tick=" in row["url"]]
                 assert late == [], late
 
-                # The owner Stop lives in the page session only: a window reload forgets it
-                # and the retain card starts again on the next entry.
+                # The owner Stop survives a window reload on this device: the retain card rests until Start.
                 page.reload(wait_until="domcontentloaded", timeout=30_000)
                 page.click('[data-nav-page="widgets"]')
-                page.locator(card("kept")).wait_for(state="visible", timeout=30_000)
+                page.locator(f"{card('kept')} [data-widget-facade]").wait_for(state="visible", timeout=30_000)
+                assert frame_count(page, "kept") == 0 and page.locator(f"{card('kept')} [data-widget-power]").inner_text() == "Start"
+                page.locator(f"{card('kept')} [data-widget-power]").click()
                 wait_frame(page, "kept", True, timeout=15_000)
                 wait_status(page, "kept", "Keeps running", timeout=15_000)
 

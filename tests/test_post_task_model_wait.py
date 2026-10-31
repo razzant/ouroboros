@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from tests._dialogue import chat_rows
 
 from ouroboros import agent_task_pipeline as pipeline, config, model_wait
 from ouroboros import llm_claudexor as transport
@@ -44,13 +45,13 @@ def phase(tmp_path, monkeypatch):
     events, done, ready = queue.Queue(), threading.Event(), threading.Event()
     engine = Gateway([result(outcome="failed", problem={"code": "subscription_window_exhausted", "message": "quota"}), result()],
                      ["not_started", "response_received"])
-    monkeypatch.setattr(transport, "ensure_owned_gateway", lambda: engine)
+    monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **_kw: engine)
     monkeypatch.setattr(transport, "model_sources", lambda **_kwargs: {"sources": [{"id": "codex", "credentialHarness": "fixture"}]})
     monkeypatch.setattr(transport, "model_catalog", lambda _source, account=None, *, requested_model=None: {
         "source": "codex", "credentialProfileId": account or "account-a",
         "models": [{"id": "exact-model"}] if ready.is_set() else []})
     stages = []
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a: stages.append("scratch"))
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", lambda *a: stages.append("draft"))
     monkeypatch.setattr(pipeline, "_record_task_facts", lambda *a, **k: stages.append("facts"))
     from ouroboros import post_task_evolution
     real_promote = post_task_evolution.maybe_promote
@@ -119,13 +120,13 @@ def test_detached_parent_returns_and_post_wait_keeps_override_and_prior_stages(p
     until(lambda: active(f))
     owner = active(f)
     assert owner is not parent and not owner.closed and owner.worker_slot_held is False
-    assert f.stages == ["facts", "scratch", "promotion"] and not f.done.is_set()
+    assert f.stages == ["facts", "draft", "promotion"] and not f.done.is_set()
     assert load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]["post_task_synthesis"] == "running"
     assert f.engine.uploads[0][0]["account"] == {"mode": "pin", "profileId": "original-choice"}
     f.ready.set()
     assert f.done.wait(5)
     until(lambda: post_task_model_wait(f.root, f.task["id"]) is None)
-    assert f.stages == ["facts", "scratch", "promotion"]
+    assert f.stages == ["facts", "draft", "promotion"]
     assert len(f.engine.creates) == 2 and f.engine.uploads[0][0]["messages"] == f.engine.uploads[1][0]["messages"]
     until(lambda: owner.closed)
     assert load_task_result(f.root, f.task["id"])["status"] == main_status
@@ -178,10 +179,10 @@ def test_paid_stage_interruption_closes_checkpoint_without_buying_following_stag
         "unknown": transport.ClaudexorModelError({"code": "model_outcome_unknown", "message": "unknown"}, unknown=True),
         "ordinary": RuntimeError("one stage failed"),
     }
-    def scratch(*_args):
-        f.stages.append("scratch")
+    def draft(*_args):
+        f.stages.append("draft")
         raise failures[cause]
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", scratch)
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", draft)
     monkeypatch.setattr("ouroboros.post_task_evolution.maybe_promote", lambda *a: f.stages.append("promotion"))
     launch(f)
     assert f.done.wait(5)
@@ -189,9 +190,9 @@ def test_paid_stage_interruption_closes_checkpoint_without_buying_following_stag
     checkpoint = stored["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded"
     if cause == "ordinary":
-        assert f.stages == ["facts", "scratch", "promotion"]
+        assert f.stages == ["facts", "draft", "promotion"]
     else:
-        assert f.stages == ["facts", "scratch"]
+        assert f.stages == ["facts", "draft"]
         assert checkpoint["post_task_stop_reason"].startswith({
             "budget": "budget_exhausted", "deadline": "deadline", "unknown": "provider_outcome_unknown"}[cause])
         assert checkpoint["post_task_stop_reason"].endswith("skipped=promotion")
@@ -199,11 +200,13 @@ def test_paid_stage_interruption_closes_checkpoint_without_buying_following_stag
 
 
 @pytest.mark.parametrize("cause", ["budget", "api_unknown", "ordinary"])
-def test_real_consolidation_error_controls_remaining_post_task_stages(
+def test_real_light_error_controls_remaining_post_task_stages(
     phase, monkeypatch, cause,
 ):
-    """Exercise the real scratchpad consolidation catch and stage adapter, not a throwing stage stub."""
-    from ouroboros import consolidator, context_fit, post_task_synthesis
+    """Exercise the real shared Light catch and the real fallback stage adapter, not a throwing stage
+    stub (the retired scratchpad pass used to carry this; #918). The draft's unit selection, which
+    needs an activated chronicle, stands in as one Light call."""
+    from ouroboros import consolidator, context_fit, memory_fallback, post_task_synthesis
     from ouroboros.capability_evidence import CapabilityEvidence
     from ouroboros.usage_accounting import BudgetExceeded
 
@@ -213,23 +216,23 @@ def test_real_consolidation_error_controls_remaining_post_task_stages(
         {"model": task["model"], "provider": "openrouter"},
         CapabilityEvidence(100_000, "confirmed", "test", "route-test",
                            model=task["model"], provider="openrouter")))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: 1.0)
     error = BudgetExceeded("root wallet spent") if cause == "budget" else RuntimeError("provider failed")
     if cause == "api_unknown":
         error.physical_attempt_capture = SimpleNamespace(state="unresolved")
 
     class FailingLight:
         def chat(self, **_kwargs):
-            f.stages.append("scratch-model")
+            f.stages.append("draft-model")
             raise error
 
+    def run_fallback_draft(_env, _task, llm, _drive_logs, _trace):
+        _text, usage = consolidator._call_consolidation_llm(llm, "captured draft", memory_fallback.LABEL)
+        return memory_fallback.FallbackRun("failed", usage=usage, errors=usage["_consolidation_errors"])
+
     monkeypatch.setattr("ouroboros.llm.LLMClient", FailingLight)
-    monkeypatch.setattr(consolidator, "should_consolidate_scratchpad", lambda *_args: True)
-    monkeypatch.setattr(consolidator, "consolidate_scratchpad", lambda memory, llm, identity:
-                        consolidator._call_consolidation_llm(
-                            llm, "captured scratchpad", "Post-task scratchpad consolidation",
-                        )[1])
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", post_task_synthesis._run_scratchpad_consolidation)
+    monkeypatch.setattr(memory_fallback, "run_fallback_draft", run_fallback_draft)
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", post_task_synthesis._run_memory_fallback_draft)
     monkeypatch.setattr("ouroboros.post_task_evolution.maybe_promote", lambda *_args: f.stages.append("promotion"))
 
     launch(f)
@@ -241,12 +244,12 @@ def test_real_consolidation_error_controls_remaining_post_task_stages(
         # degraded, never completed, and nothing was skipped.
         assert checkpoint["post_task_synthesis"] == "degraded"
         assert not checkpoint.get("post_task_stop_reason")
-        assert f.stages == ["facts", "scratch-model", "promotion"]
+        assert f.stages == ["facts", "draft-model", "promotion"]
     else:
         assert checkpoint["post_task_synthesis"] == "degraded"
         assert checkpoint["post_task_stop_reason"].startswith(
             "budget_exhausted:" if cause == "budget" else "provider_outcome_unknown:")
-        assert f.stages == ["facts", "scratch-model"]
+        assert f.stages == ["facts", "draft-model"]
         assert checkpoint["post_task_stop_reason"].endswith("skipped=promotion")
 
 
@@ -271,20 +274,20 @@ def test_budget_refusal_inside_promotion_is_never_swallowed_into_completed(phase
     checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded"
     assert checkpoint["post_task_stop_reason"] == "budget_exhausted:skipped="
-    assert f.stages[-2:] == ["scratch", "promotion-model"]
+    assert f.stages[-2:] == ["draft", "promotion-model"]
 
 
 def test_returned_paid_error_stops_post_task_after_its_own_stage(phase, monkeypatch):
-    """A returned typed failure from scratchpad compression also stops the later paid stage."""
-    from ouroboros import consolidator, post_task_synthesis
+    """A returned typed failure from the fallback draft (formerly scratchpad compression, retired by
+    #918) also stops the later paid stage."""
+    from ouroboros import memory_fallback, post_task_synthesis
 
     f = phase
     error = {"kind": "provider_outcome_unknown"}
-    monkeypatch.setattr(consolidator, "should_consolidate_scratchpad", lambda *_: True)
-    monkeypatch.setattr(consolidator, "consolidate_scratchpad", lambda *_: {
-        "_consolidation_errors": [error]})
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation",
-                        post_task_synthesis._run_scratchpad_consolidation)
+    monkeypatch.setattr(memory_fallback, "run_fallback_draft", lambda *_: memory_fallback.FallbackRun(
+        "failed", usage={}, errors=[error]))
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft",
+                        post_task_synthesis._run_memory_fallback_draft)
     launch(f)
     assert f.done.wait(5)
     checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
@@ -305,7 +308,7 @@ def test_stop_or_unknown_never_marks_post_work_completed(phase, unknown):
         f.task["_skip_post_task_synthesis"] = True
     assert f.done.wait(5)
     assert load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]["post_task_synthesis"] == "degraded"
-    assert len(f.engine.creates) == 1 and f.stages == ["facts", "scratch", "promotion"]
+    assert len(f.engine.creates) == 1 and f.stages == ["facts", "draft", "promotion"]
     assert ledger(f.root)[-1]["state"] == ("unresolved" if unknown else "released")
 
 
@@ -316,7 +319,7 @@ def test_blocking_post_work_exempts_solve_ceiling_only_within_its_scope(phase, m
     observed = []
     def check(*_args):
         observed.append(model_wait.current_model_wait().control_reason())
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", check)
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", check)
     with model_wait.task_model_wait_scope(task=f.task, drive_root=f.root, event_queue=f.events,
                                           worker_slot_held=True) as owner:
         monkeypatch.setattr(owner, "executed_seconds", lambda **_kwargs: 100)
@@ -360,17 +363,15 @@ def test_pooled_post_work_holds_return_but_delivers_answer_early_once(phase, mon
 
 
 def test_outer_paid_stage_cannot_swallow_typed_unknown(tmp_path, monkeypatch):
-    from ouroboros import post_task_synthesis as synthesis, consolidator
+    from ouroboros import memory_fallback, post_task_synthesis as synthesis
 
     error = transport.ClaudexorModelError({"code": "unknown", "message": "paid outcome unknown"}, unknown=True)
     def fail(*args, **kwargs):
         raise error
     env = SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
-    memory = SimpleNamespace(load_identity=lambda: "identity")
-    monkeypatch.setattr(consolidator, "should_consolidate_scratchpad", lambda *a: True)
-    monkeypatch.setattr(consolidator, "consolidate_scratchpad", fail)
+    monkeypatch.setattr(memory_fallback, "run_fallback_draft", fail)
     with pytest.raises(transport.ClaudexorModelError) as raised:
-        synthesis._run_scratchpad_consolidation(env, memory, None)
+        synthesis._run_memory_fallback_draft(env, {"id": "task"}, None, tmp_path / "logs", {})
     assert raised.value is error
 
 
@@ -432,11 +433,11 @@ def _controlled_worker(input_queue, output_queue, data_root, repo_root, resume):
             "ouroboros.extension_loader.reload_all": lambda *args, **kwargs: None,
             "supervisor.worker_process._prepare_worker_task_runtime": lambda: None,
             "supervisor.worker_process._adopt_published_extensions": lambda *_: None,
-            "ouroboros.llm_claudexor.ensure_owned_gateway": lambda: engine,
+            "ouroboros.llm_claudexor.ensure_owned_gateway": lambda **_kw: engine,
             "ouroboros.llm_claudexor.model_sources": lambda **_kwargs: {"sources": [{"id": "codex", "credentialHarness": "fixture"}]},
             "ouroboros.llm_claudexor.model_catalog": lambda source, account=None, **kwargs: {
                 "source": source, "credentialProfileId": account or "account-a", "models": [{"id": "exact-model"}] if resume.is_set() else []},
-            "ouroboros.agent_task_pipeline._run_scratchpad_consolidation": lambda *_: None,
+            "ouroboros.agent_task_pipeline._run_memory_fallback_draft": lambda *_: None,
             "ouroboros.agent_task_pipeline._record_task_facts": lambda *args, **kwargs: None,
             "ouroboros.post_task_evolution.maybe_promote": promote,
         }
@@ -565,7 +566,7 @@ def test_budget_refusal_inside_the_promotion_chooser_degrades_the_checkpoint(pha
     checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded"
     assert checkpoint["post_task_stop_reason"] == "budget_exhausted:skipped="
-    assert f.stages[-2:] == ["scratch", "chooser"] and callbacks == []
+    assert f.stages[-2:] == ["draft", "chooser"] and callbacks == []
 
 
 def test_budget_refusal_below_the_global_promotion_adapter_is_re_raised(tmp_path, monkeypatch):
@@ -603,7 +604,7 @@ def test_ordinary_promotion_failure_degrades_the_checkpoint_but_keeps_the_global
     checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded"
     assert not checkpoint.get("post_task_stop_reason")
-    assert f.stages[-2:] == ["scratch", "promotion-model"] and len(callbacks) == 1
+    assert f.stages[-2:] == ["draft", "promotion-model"] and len(callbacks) == 1
 
 
 def _generic_unknown(carrier):
@@ -657,7 +658,7 @@ def test_generic_unknown_outcome_in_a_real_adapter_stops_every_later_paid_call(p
     checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded"
     assert checkpoint["post_task_stop_reason"] == "provider_outcome_unknown:skipped="
-    assert f.stages == ["facts", "scratch", "post_task_evolution_decision"], "no paid call after an unknown outcome"
+    assert f.stages == ["facts", "draft", "post_task_evolution_decision"], "no paid call after an unknown outcome"
     assert callbacks == [] and not f.engine.creates
 
 
@@ -667,7 +668,6 @@ def test_split_root_facts_row_counts_the_actor_store_when_synthesis_runs_canonic
     two identical canonical stores into one, and a file present only in the actor's
     child store (before copy-back) was never walked — a confirmed-looking zero. Through
     the real dispatch the actor store is the row's recorded ``child_drive_root``."""
-    import json
     from ouroboros import post_task_synthesis
     from ouroboros.headless import task_artifacts_dir
 
@@ -685,7 +685,7 @@ def test_split_root_facts_row_counts_the_actor_store_when_synthesis_runs_canonic
         budget_drive_root=str(f.root), split_drive=True, project_scoped=False, project_task=False,
         parent_env=f.env, parent_task=parent_task)
     assert f.done.wait(5)
-    rows = [json.loads(line) for line in (f.root / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = chat_rows(f.root)
     [row] = [r for r in rows if r.get("summary_id") == f"task-facts:{f.task['id']}"]
     fact = row["files_rescued"]
     assert (fact["count"], fact["state"], fact["hash_computed"]) == (1, "positive", False)

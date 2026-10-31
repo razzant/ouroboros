@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import dialogue_store, store
 from ouroboros.task_results import load_task_result, write_task_result
+from tests._dialogue import chat_rows
 from ouroboros.terminal_projection import SETTLEMENT_DEFERRED, settle_terminal_projection
 from supervisor import terminal_delivery as delivery
 
@@ -144,18 +146,17 @@ def test_strict_chat_failure_cannot_acknowledge_then_repair_survives_registry_ag
     monkeypatch.setattr(bus, "load_state", lambda: {"owner_id": 1})
     monkeypatch.setattr(bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(bus, "publish_event", lambda *_a, **_kw: None)
-    monkeypatch.setattr(bus, "_advance_project_visible_revision", lambda *_a: None)
     monkeypatch.setattr(handler, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     context = SimpleNamespace(DRIVE_ROOT=owed.root, RUNNING={}, send_with_budget=bus.send_with_budget,
                               append_jsonl=append_jsonl)
-    real_append = bus.append_jsonl
-    monkeypatch.setattr(bus, "append_jsonl", lambda *_a, **_kw: False)
+    real_append = dialogue_store.append
+    monkeypatch.setattr(dialogue_store, "append", lambda *_a, **_kw: (_ for _ in ()).throw(store.StoreBusy("refused")))
     handler._handle_send_message(owed.event, context)
     assert not frames
     assert not delivery.already_delivered(owed.root, owed.event["delivery_id"])
     assert load_task_result(owed.root, "root")["canonical_terminal_projection_ready"]
     assert owed.event["delivery_id"] in {r["delivery_id"] for r in delivery.pending_deliveries(owed.root)}
-    monkeypatch.setattr(bus, "append_jsonl", real_append)
+    monkeypatch.setattr(dialogue_store, "append", real_append)
     handler._handle_send_message(owed.event, context)
     assert frames[-1]["delivery_id"] == owed.event["delivery_id"]
     row = load_task_result(owed.root, "root")
@@ -206,16 +207,16 @@ def test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt(tmp_
     sent = []
     monkeypatch.setattr(bus, "get_bridge", lambda: SimpleNamespace(
         send_message=lambda *args, **kwargs: sent.append((args, kwargs)) or receipt))
-    real_append = bus.append_jsonl
-    monkeypatch.setattr(bus, "append_jsonl", lambda *_a, **_kw: False)
+    real_append = dialogue_store.append
+    monkeypatch.setattr(dialogue_store, "append", lambda *_a, **_kw: (_ for _ in ()).throw(store.StoreBusy("refused")))
     with pytest.raises(RuntimeError, match="could not be persisted"):
         bus.send_with_budget(1, "Startup notice", role="system", fmt=fmt, require_write=True)
     assert not sent
-    monkeypatch.setattr(bus, "append_jsonl", real_append)
+    monkeypatch.setattr(dialogue_store, "append", real_append)
     bus.send_with_budget(1, "Startup notice", role="system", fmt=fmt, require_write=True)
     assert len(sent) == 1
-    [row] = (tmp_path / "logs/chat.jsonl").read_text().splitlines()
-    assert json.loads(row)["text"] == "Startup notice"
+    [row] = chat_rows(tmp_path)
+    assert row["text"] == "Startup notice"
 
 
 @pytest.mark.parametrize("fmt", ["", "markdown"])
@@ -242,8 +243,7 @@ def test_bound_delivery_keeps_debt_without_a_positive_transport_receipt(owed, mo
     assert not delivery.already_delivered(owed.root, event["delivery_id"])
     assert load_task_result(owed.root, "root")["canonical_terminal_projection_ready"]
     assert event["delivery_id"] in {r["delivery_id"] for r in delivery.pending_deliveries(owed.root)}
-    assert any(row.get("delivery_id") == event["delivery_id"] for row in (
-        json.loads(line) for line in (owed.root / "logs/chat.jsonl").read_text().splitlines()))
+    assert any(row.get("delivery_id") == event["delivery_id"] for row in chat_rows(owed.root))
 
     monkeypatch.setattr(bridge, "send_message", send)
     handler._handle_send_message(event, context)
@@ -329,12 +329,11 @@ def test_every_terminal_delivery_id_requires_durable_chat_before_ack(tmp_path, m
     monkeypatch.setattr(bus, "load_state", lambda: {"owner_id": 1})
     monkeypatch.setattr(bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(bus, "publish_event", lambda *_a, **_kw: None)
-    monkeypatch.setattr(bus, "_advance_project_visible_revision", lambda *_a: None)
     monkeypatch.setattr(handler, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     context = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, append_jsonl=append_jsonl,
                               send_with_budget=bus.send_with_budget)
-    real_append = bus.append_jsonl
-    monkeypatch.setattr(bus, "append_jsonl", lambda *_a, **_kw: False)
+    real_append = dialogue_store.append
+    monkeypatch.setattr(dialogue_store, "append", lambda *_a, **_kw: (_ for _ in ()).throw(store.StoreBusy("refused")))
     handler._handle_send_message(event, context)
     assert frames == []
     assert not delivery.already_delivered(tmp_path, did)
@@ -343,7 +342,7 @@ def test_every_terminal_delivery_id_requires_durable_chat_before_ack(tmp_path, m
     assert not (stored.get("cancel_receipt") or {}).get("delivered_chat_id")
     assert not stored.get("canonical_terminal_projection_ready")
 
-    monkeypatch.setattr(bus, "append_jsonl", real_append)
+    monkeypatch.setattr(dialogue_store, "append", real_append)
     handler._handle_send_message(event, context)
     assert len(frames) == 1 and frames[0]["delivery_id"] == did
     assert delivery.already_delivered(tmp_path, did)

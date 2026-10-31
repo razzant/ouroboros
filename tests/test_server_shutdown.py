@@ -16,12 +16,14 @@ def _stop_restart_watcher(server):
 
 
 def test_owned_stop_runs_every_in_memory_owner_and_reads_records_from_the_set(monkeypatch, tmp_path):
-    """One failing owner does not skip the others; durable records come from the set, never a walk."""
+    """One failing owner does not skip the others, and its failure keeps the outcome unconfirmed
+    beside the durable records (none here); those come from the set, never a walk."""
     from ouroboros import owned_shutdown
 
     order = []
-    def shell_failure():
+    def shell_failure(*, deadline):
         order.append("shell")
+        assert deadline == owned_shutdown._GENERATION_STOP.deadline  # the first door's one grace
         raise OSError("shell custody unavailable")
     monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", shell_failure)
     monkeypatch.setattr("ouroboros.workspace_executor.kill_all_foreground",
@@ -30,7 +32,8 @@ def test_owned_stop_runs_every_in_memory_owner_and_reads_records_from_the_set(mo
                         lambda root, **kw: order.append(("services", root, kw)))
     monkeypatch.setattr(os, "walk", lambda *_a, **_kw: pytest.fail("the exit never walks data/state"))
     outcome = owned_shutdown.stop_owned_work(tmp_path)
-    assert outcome["state"] == "completed" and outcome["targets"] == 0
+    assert outcome["state"] == "unconfirmed" and outcome["targets"] == 0 and outcome["unconfirmed"] == []
+    assert outcome["memory_unconfirmed"] == {"commands": {"state": "failed"}}
     assert sorted(order, key=str) == sorted(["shell", ("services", tmp_path.resolve(),
                                                        {"wait": True, "durable": False})], key=str)
 
@@ -197,6 +200,7 @@ def test_managed_update_restart_arms_prepared_transaction_for_direct_reexec(
     import ouroboros.gateway.control as control
     import supervisor.git_ops as git_ops
     import supervisor.update_merge as update_merge
+    from ouroboros import server_process, server_restart
     import server
 
     prepared = {
@@ -214,19 +218,27 @@ def test_managed_update_restart_arms_prepared_transaction_for_direct_reexec(
     )
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+    owner, restart = threading.Event(), threading.Event()
+    monkeypatch.setattr(server_process, "_owner_restart_requested", owner)
+    monkeypatch.setattr(server_process, "_restart_requested", restart)
+    monkeypatch.setattr(server, "_owner_restart_requested", owner)
+    monkeypatch.setattr(server_restart, "_owner_restart_requested", owner)
     monkeypatch.setattr(server, "_restart_current_process_impl", lambda *_a, **_kw: None)
     monkeypatch.setattr(update_merge, "read_update_tx_strict", lambda: ("valid", {"phase": "pending_boot_smoke"}))
     monkeypatch.delenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, raising=False)
 
-    request = type("Request", (), {"app": type("App", (), {"state": type("State", (), {
-        "request_restart": lambda _self, owner=False: None,
-    })()})()})()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        request_restart=server_process._request_restart_exit)))
     response = control._restart_response(request, strategy="auto_merge", plan={})
 
     assert response.status_code == 200
+    assert owner.is_set() and restart.is_set()
     assert delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV not in os.environ
     server._restart_current_process("127.0.0.1", 8765)
     assert os.environ[delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV] == "tx-owner-wait"
+    assert not delegate_recovery.owner_restart_in_progress(tmp_path)
 
 
 def test_failed_managed_update_restart_disarms_transaction_token(monkeypatch, tmp_path):
@@ -740,7 +752,7 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     monkeypatch.setattr("ouroboros.upgrade_notices.startup_upgrade_notices", noop)
     for name in (
         "_resume_interrupted_project_deletions", "_startup_prune_sweeps", "_startup_custody_sweep",
-        "_startup_worktree_prune", "_prune_delegated_snapshots", "_periodic_supervisor_maintenance",
+        "_prune_worktrees", "_prune_delegated_snapshots", "_periodic_supervisor_maintenance",
         # Its own owner notice is another startup side effect, asserted by
         # tests/test_retired_settings_chat_notice.py; here it would be a
         # crash alert (this harness's send_with_budget double records every
@@ -750,7 +762,7 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
         monkeypatch.setattr(server, name, noop)
     monkeypatch.setattr(server, "_start_supervisor_liveness_watchdog",
                         lambda _liveness, stop_event=None: rec.watchdog_stops.append(stop_event))
-    monkeypatch.setattr(server, "_process_bridge_updates", lambda _bridge, offset, _ctx: offset)
+    monkeypatch.setattr(server, "_process_bridge_updates", lambda _bridge, offset, _ctx, **_kw: offset)
     monkeypatch.setattr(server, "_check_pending_restart_drain", lambda _ctx: True)
     monkeypatch.setattr(bus_mod, "init", noop)
     monkeypatch.setattr(bus_mod, "LocalChatBridge", _Bridge)
@@ -761,10 +773,11 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     monkeypatch.setattr(state_mod, "init", noop)
     monkeypatch.setattr(state_mod, "init_state", lambda **_k: state_mod.StateRead("current", "primary", {}))
     monkeypatch.setattr(state_mod, "load_state", lambda: {"owner_chat_id": 7})
-    for name in ("save_state", "update_state", "append_jsonl", "update_budget_from_usage",
-                 "rotate_jsonl_log_if_needed"):
+    for name in ("save_state", "update_state", "append_jsonl", "update_budget_from_usage"):
         monkeypatch.setattr(state_mod, name, noop)
-    monkeypatch.setattr(state_mod, "rotate_chat_log_if_needed", _tick_head)
+    # The tick's first rotator call (events.jsonl; the dialogue chains no longer rotate) is the tick head.
+    monkeypatch.setattr(state_mod, "rotate_jsonl_log_if_needed",
+                        lambda root, name, *_a, **_k: _tick_head(root) if name == "events.jsonl" else None)
     for name in ("enqueue_task", "enforce_task_timeouts", "enqueue_evolution_task_if_needed",
                  "cancel_task_by_id", "queue_deep_self_review_task",
                  "sort_pending", "check_scheduled_tasks"):
@@ -788,15 +801,15 @@ def _run(rec, server):
 
 
 @pytest.mark.parametrize("restored, fenced, expected", [
-    (0, ["a"], "♻️ Cancelling 1 task that was still running when the server stopped."),
+    (0, ["a"], "♻️ Settling 1 task that was still running when the server stopped."),
     (2, ["a", "b"],
-     "♻️ Restored pending queue from snapshot: 2 tasks. "
-     "Cancelling 2 tasks that were still running when the server stopped."),
+     "♻️ Restored pending queue: 2 tasks. "
+     "Settling 2 tasks that were still running when the server stopped."),
 ])
-def test_boot_notice_states_the_restart_cancellations_as_an_intent(
+def test_boot_notice_states_recovery_as_an_intent(
         monkeypatch, tmp_path, restored, fenced, expected):
     """A window closed on live work: the boot line names how many tasks the
-    restart interrupted and says they are BEING cancelled. It cannot claim they
+    restart interrupted and says they are BEING settled. It cannot claim they
     ENDED: restore only minted the durable intent, and cancellation custody
     writes each terminal result a watchdog window later."""
     import server
@@ -876,6 +889,23 @@ def test_healthy_tick_between_crashes_resets_the_count(monkeypatch, tmp_path):
     assert rec.stop.waits == [2, 4, 2, 4]
 
 
+@pytest.mark.parametrize("published", [None, False])
+def test_a_kept_saved_queue_is_not_a_failed_tick(monkeypatch, tmp_path, published):
+    """A process that has not taken the saved queue into custody (its restore could not read it) keeps
+    that snapshot at every tick's publication (None): durable as it is, so the loop runs on. Only a
+    failed publication (False) is a crash."""
+    import server
+    import supervisor.queue as queue_pkg
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["ok", "ok", "ok", "stop"])
+    monkeypatch.setattr(queue_pkg, "persist_queue_snapshot", lambda **_k: published)
+    _run(rec, server)
+    if published is None:
+        assert rec.alerts == [] and server._supervisor_error is None and rec.stop.waits == []
+    else:
+        assert len(rec.alerts) == 1 and "died after repeated crashes" in rec.alerts[0][1]
+
+
 def test_lifespan_teardown_stops_and_joins_the_loop_before_the_bus_goes_down():
     """Source-order pin (the file's style for lifespan ordering): the stop flag is
     the FIRST teardown statement, and the bounded join precedes the worker kill,
@@ -910,20 +940,24 @@ def test_terminal_custody_precedes_every_best_effort_wait_in_the_teardown():
     goes AFTER the custody write too: `append_jsonl` waits up to two seconds for
     the log lock and then does file I/O, so on slow storage or a held lock it can
     eat the launcher's force-exit budget before a single worker is terminalized.
-    Nothing between the join and `kill_workers` may do I/O."""
+    Nothing between the join and `kill_workers` may do I/O. The early cause is the
+    door's lock-free entry write, made before the join, so a kill before the row
+    still leaves the cause."""
     import inspect
     import server
 
     teardown = inspect.getsource(server.lifespan).split("\n    finally:\n", 1)[1]
     stop_idx = teardown.index("_supervisor_stop.set()")
+    entry_idx = teardown.index("begin_owned_stop(lifespan_drive_root, cause=server_stop_cause())")
     join_idx = teardown.index("supervisor_thread.join(timeout=2)")
     kill_idx = teardown.index("kill_workers(")
     append_idx = teardown.index('"server_shutdown"')
     extension_idx = teardown.index("extension_reconcile_task.cancel()")
     host_idx = teardown.index("host_service_listener.close()")
     sweeps_idx = teardown.index("stop_owned_work(lifespan_drive_root)")
-    assert stop_idx < join_idx < kill_idx < extension_idx < host_idx < sweeps_idx
+    assert stop_idx < entry_idx < join_idx < kill_idx < extension_idx < host_idx < sweeps_idx
     assert kill_idx < append_idx < extension_idx
+    assert teardown.count("begin_owned_stop(") == 1 and "shutdown_entry" not in teardown[join_idx:kill_idx]
 
 
 def test_supervisor_revival_clears_a_stale_stop_flag(monkeypatch):

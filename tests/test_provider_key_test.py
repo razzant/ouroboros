@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import copy
 import json
@@ -12,8 +14,12 @@ import pytest
 
 import ouroboros.gateway.models as provider_api
 from ouroboros.llm import LLMClient
+from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.usage_accounting import current_usage_scope
 from tests._usage_store_testing import ledger_rows
+from tests._safety_fixtures import settings_install as install_fixture
+
+install = install_fixture
 
 
 class _Request:
@@ -82,6 +88,59 @@ def _bypass_accounting(monkeypatch):
     return observed
 
 
+@pytest.mark.parametrize("slot", ["safety", "light", "main"])
+@pytest.mark.parametrize("consumer", ["credential-plan", "provider-test"])
+def test_safety_routes_reach_credential_plan_and_provider_test_without_losing_inheritance(install, monkeypatch, slot, consumer):
+    from ouroboros import config
+    from ouroboros.model_slots import get_safety_model
+    from ouroboros.provider_models import declared_model_settings, provider_credential_plan
+    from ouroboros.settings_integrity import TaskSettingsSnapshot, task_settings_scope
+
+    route = "zai::owner-checker"
+    document = {
+        "OPENAI_API_KEY": "fixture-openai-key", "ZAI_API_KEY": "fixture-zai-key",
+        "OUROBOROS_MODEL": "openai::owner-main", "OUROBOROS_MODEL_LIGHT": "openai::owner-light",
+        "OUROBOROS_MODEL_SAFETY": "", "OUROBOROS_MODEL_FALLBACKS": "",
+    }
+    document[{"safety": "OUROBOROS_MODEL_SAFETY", "light": "OUROBOROS_MODEL_LIGHT", "main": "OUROBOROS_MODEL"}[slot]] = route
+    if slot == "main":
+        document["OUROBOROS_MODEL_LIGHT"] = ""
+    install.write_text(json.dumps(document))
+    loaded = config.load_settings()
+    before = install.read_bytes()
+    if consumer == "credential-plan":
+        declared = declared_model_settings(loaded)
+        plan = provider_credential_plan(loaded)
+        assert plan["providers"]["zai"] == [route]
+        assert "ZAI_API_KEY" in plan["planned_keys"] and plan["fail_open"] is False
+        if slot == "safety":
+            assert declared["OUROBOROS_MODEL_SAFETY"] == route
+            without_pin = provider_credential_plan({**loaded, "OUROBOROS_MODEL_SAFETY": ""})
+            assert "ZAI_API_KEY" not in without_pin["planned_keys"]
+        else:
+            assert "OUROBOROS_MODEL_SAFETY" not in declared
+    projected = {}
+    config.apply_settings_to_env(loaded, environ=projected)
+    with task_settings_scope(TaskSettingsSnapshot(settings=loaded, environ=projected)):
+        assert get_safety_model() == route
+
+    if consumer == "credential-plan":
+        return
+    # Exercise the gateway, probe and request builder. Only the physical peer is fake.
+    remote, targets = _Remote([_Completion()]), []
+    def fake_remote(_client, target):
+        targets.append(target)
+        return remote
+    monkeypatch.setattr(LLMClient, "_new_remote_client", fake_remote)
+    _bypass_accounting(monkeypatch)
+    status, body = _post({"provider_id": "zai"})
+    assert status == 200 and body == {"ok": True}
+    assert len(remote.calls) == len(targets) == 1
+    assert targets[0]["provider"] == "zai" and targets[0]["api_key"] == "fixture-zai-key"
+    assert remote.calls[0]["model"] == "owner-checker"
+    assert install.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "payload,error",
     [
@@ -148,7 +207,7 @@ def test_minimax_region_validation_runs_in_worker(monkeypatch):
     assert body == {"error": "unknown MiniMax region"}
 
 
-def test_saved_key_and_draft_url_reach_request_local_target(monkeypatch):
+def test_typed_key_and_draft_url_reach_request_local_target(monkeypatch):
     saved = {
         "OPENAI_COMPATIBLE_API_KEY": "saved-key",
         "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1",
@@ -165,12 +224,13 @@ def test_saved_key_and_draft_url_reach_request_local_target(monkeypatch):
     monkeypatch.setattr(LLMClient, "probe_provider_readiness", fake_probe)
     request = {
         "provider_id": "openai-compatible",
-        "overrides": {"OPENAI_COMPATIBLE_BASE_URL": "https://draft.example/v1"},
+        "overrides": {"OPENAI_COMPATIBLE_BASE_URL": "https://draft.example/v1",
+                      "OPENAI_COMPATIBLE_API_KEY": "typed-key"},
     }
     request_before = copy.deepcopy(request)
     status, body = _post(request)
     assert status == 200 and body == {"ok": True}
-    assert captured["api_key"] == "saved-key"
+    assert captured["api_key"] == "typed-key"
     assert captured["base_url"] == "https://draft.example/v1"
     assert saved == original
     assert request == request_before
@@ -180,9 +240,10 @@ def test_saved_key_and_draft_url_reach_request_local_target(monkeypatch):
     "overrides,expected_key,expected_base_url",
     [
         (
-            {"OPENAI_COMPATIBLE_BASE_URL": "https://draft.example/v1"},
+            # The same endpoint, respelled: the kept legacy key may still test it.
+            {"OPENAI_COMPATIBLE_BASE_URL": "https://legacy.example/v1/"},
             "legacy-saved-key",
-            "https://draft.example/v1",
+            "https://legacy.example/v1/",
         ),
         (
             {"OPENAI_COMPATIBLE_API_KEY": "draft-key"},
@@ -233,7 +294,8 @@ def test_compatible_discovery_and_probe_share_the_legacy_pair_never_a_mixed_one(
     }
     calls = []
 
-    async def fake_catalog(_client, _provider_id, _label, api_key, base_url):
+    async def fake_catalog(_client, _provider_id, _label, api_key, base_url, *, record_image_input=False):
+        assert record_image_input is False
         calls.append(("catalog", api_key, base_url))
         return [{"value": "openai-compatible::catalog-model"}]
 
@@ -337,7 +399,7 @@ def test_cleared_compatible_draft_does_not_restore_legacy_pair(monkeypatch):
     ],
 )
 def test_explicit_settings_mapping_is_authoritative(monkeypatch, model, settings, expected):
-    for key in provider_api._PROVIDER_TEST_OVERRIDE_KEYS:
+    for key in ALL_PROVIDER_CREDENTIAL_KEYS:
         monkeypatch.setenv(key, "environment-value")
     original = copy.deepcopy(settings)
     client = LLMClient(api_key="constructor-key", base_url="https://constructor.example/v1")
@@ -368,6 +430,19 @@ def test_explicit_settings_mapping_is_authoritative(monkeypatch, model, settings
 )
 def test_provider_test_model_selection(provider, settings, expected):
     assert provider_api._provider_test_model(provider, settings) == expected
+
+
+def test_provider_test_of_an_added_key_takes_a_model_its_own_server_serves():
+    """Two compatible servers list different models: Test on one never sends the other's; a fixed
+    provider's ids serve on every key of it."""
+    settings = {"OUROBOROS_MODEL": "openai-compatible@alpha::only-alpha",
+                "OUROBOROS_MODEL_LIGHT": "openai-compatible@beta::only-beta",
+                "OUROBOROS_MODEL_FALLBACKS": "anthropic::light"}
+    pick = provider_api._provider_test_model
+    assert pick("openai-compatible", settings, "beta") == "openai-compatible@beta::only-beta"
+    assert pick("openai-compatible", settings, "alpha") == "openai-compatible@alpha::only-alpha"
+    assert pick("openai-compatible", settings, "gamma") == ""  # its own catalog decides
+    assert pick("anthropic", settings, "k2") == "anthropic@k2::light"
 
 
 def test_catalog_is_used_only_for_compatible_discovery(monkeypatch):
@@ -570,8 +645,6 @@ def test_gigachat_probe_uses_one_ephemeral_client(monkeypatch):
 
 def test_failure_and_malformed_success_never_retry_or_learn(monkeypatch):
     observed = _bypass_accounting(monkeypatch)
-    before_rejected = copy.deepcopy(LLMClient._REJECTED_PARAMS_CACHE)
-    before_ceilings = copy.deepcopy(LLMClient._EFFORT_CEILING_CACHE)
 
     class Unauthorized(RuntimeError):
         status_code = 401
@@ -594,8 +667,6 @@ def test_failure_and_malformed_success_never_retry_or_learn(monkeypatch):
         }
         assert len(remote.calls) == 1
     assert len(observed) == 2
-    assert LLMClient._REJECTED_PARAMS_CACHE == before_rejected
-    assert LLMClient._EFFORT_CEILING_CACHE == before_ceilings
 
 
 def test_typed_payment_required_maps_to_no_credits():
@@ -682,8 +753,8 @@ def test_provider_test_attempts_are_physically_accounted_without_chat_side_effec
     events = [json.loads(line) for line in events_path.read_text().splitlines()]
     assert not any(row.get("type") in {"llm_round", "llm_usage", "chat", "progress"} for row in events)
     assert not (tmp_path / "task_results").exists()
-    assert not (tmp_path / "logs" / "chat.jsonl").exists()
-    assert not (tmp_path / "logs" / "progress.jsonl").exists()
+    assert not dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
+    assert not dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")
 
 
 def test_response_log_and_accounting_expose_only_controlled_error(
@@ -727,7 +798,6 @@ def test_provider_test_registry_is_derived_from_provider_defaults():
         "openrouter", "openai", "anthropic", "cloudru", "gigachat", "minimax",
         "deepseek", "zai", "openai-compatible",
     }
-    assert provider_api._PROVIDER_TEST_OVERRIDE_KEYS == provider_api.ALL_PROVIDER_CREDENTIAL_KEYS
 
 
 def test_provider_test_and_active_model_enumeration_never_select_legacy_heavy():
@@ -737,7 +807,7 @@ def test_provider_test_and_active_model_enumeration_never_select_legacy_heavy():
     assert LEGACY_MODEL_SETTING_KEYS == ("OUROBOROS_MODEL_HEAVY",)
     assert provider_api._provider_test_model("anthropic", {
         "OUROBOROS_MODEL_HEAVY": "anthropic::owner-legacy-heavy",
-    }) == "anthropic::claude-opus-5"
+    }) == "anthropic::claude-opus-5-5"
 
 
 @pytest.mark.parametrize("retired_key", [

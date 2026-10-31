@@ -1,58 +1,23 @@
-# Provider canaries for the code that landed on a shared branch.
-#
-# The canaries call third-party models, so a red run here can mean a provider
-# misbehaved while the repository's code is fine. They live in their own
-# workflow so that outcome carries its own badge and never reddens `ci.yml`,
-# which reports the code. Each matching push starts one paid run: this trigger
-# carries the same three branches as the `ci.yml` push trigger and, on purpose,
-# its own path list, so a prompts- or skills-only push starts the code workflow
-# and no paid canary run. `ci.yml` calls the same reusable job only for manual runs
-# and `v*` tags, where the release chain requires it.
-name: Provider canaries
+# Manual, paid provider diagnostics; retain the filename for dispatch clients.
+# A provider outage can be red while the code is correct. This standalone run
+# selects all canaries; ci.yml's manual/tag runs select required and optional
+# groups separately, with the required group still gating release publication.
+name: Provider canaries (manual)
 
 on:
-  push:
-    branches: [main, ouroboros, ouroboros-stable]
-    paths:
-      - 'ouroboros/**'
-      - 'supervisor/**'
-      - 'server.py'
-      - 'tests/**'
-      - 'web/**'
-      - 'site/**'
-      - 'docs/**'
-      - 'assets/**'
-      - 'requirements-runtime.lock'
-      - 'uv.lock'
-      - 'pyproject.toml'
-      - '.github/workflows/**'
-      - '.github/actions/**'
-      - 'build.sh'
-      - 'build_linux.sh'
-      - 'build_windows.ps1'
-      - 'Dockerfile'
-      - 'scripts/**'
-      - 'devtools/**'
-      - 'packaging/**'
-      - 'android/**'
-      - 'VERSION'
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'LICENSE'
-      - '.github/PULL_REQUEST_TEMPLATE.md'
-      - 'launcher.py'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Deliberately NO concurrency group: each push keeps its own paid result, and a
-# group would cancel an in-progress run or replace a pending one.
+# No concurrency group: each requested paid result keeps its own run.
 
 jobs:
   integration-test:
     uses: ./.github/workflows/provider-canary.yml
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_PROVIDER_ROUTES_API_KEY: ${{ secrets.OPENROUTER_PROVIDER_ROUTES_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}

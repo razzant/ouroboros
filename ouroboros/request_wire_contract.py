@@ -45,12 +45,13 @@ OPTIONAL_REQUEST_FIELDS = OPTIONAL_SAMPLING_FIELDS + (
     "output_config",
     "thinking",
     "parallel_tool_calls",
-    "stream", "stream_options",
+    "stream", "stream_options", "prompt_cache_key",
 )
 NESTED_REASONING_FIELD = "extra_body.reasoning"
 NESTED_THINKING_FIELD = "extra_body.thinking"
 ANTHROPIC_REASONING_FIELDS = ("thinking", "output_config")
-DROP_FIELDS = frozenset((*OPTIONAL_REQUEST_FIELDS, NESTED_REASONING_FIELD))
+CACHE_HINT_FIELDS = ("cache_control.ttl", "tools.cache_control", "cache_control")  # narrowest first: cache_hint_holders
+DROP_FIELDS = frozenset((*OPTIONAL_REQUEST_FIELDS, NESTED_REASONING_FIELD, *CACHE_HINT_FIELDS))
 
 TOOL_DIALECTS = frozenset({
     "none",
@@ -122,14 +123,8 @@ def canonical_sha256(value: Any) -> str:
 
 def physical_candidate_bytes(payload: Mapping[str, Any]) -> bytes:
     """Serialize the exact final payload with the physical-send digest basis."""
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-        default=str,
-    ).encode("utf-8")
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                      default=str).encode("utf-8")
 
 
 def physical_candidate_sha256(payload: Mapping[str, Any]) -> str:
@@ -869,10 +864,7 @@ def _read_wire_action_records_at(
     try:
         data = read_json_dict(_state_path(drive_root)) or {}
         schema_version = data.get("schema_version")
-        if (
-            type(schema_version) is not int
-            or schema_version != REQUEST_WIRE_SCHEMA_VERSION
-        ):
+        if type(schema_version) is not int or schema_version != REQUEST_WIRE_SCHEMA_VERSION:
             return ()
         entries = data.get("profiles")
         entry = entries.get(profile.fingerprint) if isinstance(entries, Mapping) else None
@@ -881,33 +873,44 @@ def _read_wire_action_records_at(
         return ()
 
 
-def read_wire_action_records(
-    profile: RequestWireProfile,
-    *,
-    now: Any = None,
-) -> Tuple[StoredWireAction, ...]:
+def read_wire_action_records(profile: RequestWireProfile, *, now: Any = None) -> Tuple[StoredWireAction, ...]:
     return _read_wire_action_records_at(canonical_wire_evidence_root(), profile, now=now)
 
 
-def _read_wire_actions_at(
-    drive_root: Any,
-    profile: RequestWireProfile,
-    *,
-    now: Any = None,
-) -> Tuple[Dict[str, Any], ...]:
-    return tuple(_wire_action_dict(record.action) for record in _read_wire_action_records_at(
-        drive_root, profile, now=now
-    ))
+def _read_wire_actions_at(drive_root: Any, profile: RequestWireProfile, *,
+                          now: Any = None) -> Tuple[Dict[str, Any], ...]:
+    records = _read_wire_action_records_at(drive_root, profile, now=now)
+    return tuple(_wire_action_dict(record.action) for record in records)
 
 
-def read_wire_actions(
-    profile: RequestWireProfile,
-    *,
-    now: Any = None,
-) -> Tuple[Dict[str, Any], ...]:
-    return tuple(_wire_action_dict(record.action) for record in read_wire_action_records(
-        profile, now=now
-    ))
+def read_wire_actions(profile: RequestWireProfile, *, now: Any = None) -> Tuple[Dict[str, Any], ...]:
+    return tuple(_wire_action_dict(record.action) for record in read_wire_action_records(profile, now=now))
+
+
+_CACHE_HINTS = frozenset((*CACHE_HINT_FIELDS, "prompt_cache_key"))
+
+
+def endpoint_cache_hint_refusal(provider: str, base_url: Any, *, now: Any = None, drive_root: Any = None) -> str:
+    """The earliest fresh ``observed_at`` of a learned drop of a prompt-cache hint by any model of
+    ``provider`` at ``base_url``, else ``""``: what Settings says this server has taught."""
+    endpoint = normalize_endpoint(base_url)
+    try:
+        data = read_json_dict(_state_path(drive_root or canonical_wire_evidence_root())) or {}
+    except Exception:
+        return ""
+    entries = data.get("profiles") if endpoint and data.get("schema_version") == REQUEST_WIRE_SCHEMA_VERSION else None
+    route, seen = {"provider": provider, "endpoint_sha256": canonical_sha256(endpoint)}, []
+    for entry in entries.values() if isinstance(entries, Mapping) else ():
+        stored = entry.get("profile") if isinstance(entry, Mapping) else None
+        if not isinstance(stored, Mapping) or any(stored.get(key) != value for key, value in route.items()):
+            continue
+        for record in entry.get("records") if isinstance(entry.get("records"), list) else ():
+            action = record.get("action") if isinstance(record, Mapping) else None
+            if (isinstance(action, Mapping) and action.get("kind") == "drop_field"
+                    and _CACHE_HINTS & set(action.get("fields") or ())
+                    and _age_seconds(record.get("observed_at"), now=now) < REQUEST_WIRE_TTL_SEC):
+                seen.append(str(record["observed_at"]))
+    return min(seen, default="")
 
 
 def _commit_wire_compatibility_at(
@@ -936,10 +939,7 @@ def _commit_wire_compatibility_at(
     def _mutate(current: Dict[str, Any]) -> Dict[str, Any]:
         if current:
             schema_version = current.get("schema_version")
-            if (
-                type(schema_version) is not int
-                or schema_version != REQUEST_WIRE_SCHEMA_VERSION
-            ):
+            if type(schema_version) is not int or schema_version != REQUEST_WIRE_SCHEMA_VERSION:
                 raise ValueError("unsupported request-wire store schema")
             if not isinstance(current.get("profiles"), dict):
                 raise ValueError("malformed request-wire store profiles")

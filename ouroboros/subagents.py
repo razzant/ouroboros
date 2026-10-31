@@ -11,7 +11,7 @@ the applied one comes back on the engine receipt.
 Effort follows ONE rule (``settings_scales.choose_effort``): a level encoded in
 the row's model name, else the owner's pin (the row's ``effort``), else the
 parent's request clamped into the owner's effort range (Cyber Pro: unclamped,
-and a request beats a pin), else the range's recommended level. The decision is
+and a request beats a pin), else this room's primary clamped into its helper bounds. The decision is
 taken at dispatch, recorded as ``{requested, applied, source}`` on the child
 record (``SubagentDispatch.effort_fact``) and disclosed to the child, the parent
 and the chat; for a session row it is the delegated LEAF's level, while the
@@ -130,7 +130,7 @@ class DelegatedRunShape:
     investigation: bool = False
 
 
-def delegated_run_shape(acting: bool, access: str = "workspace_write") -> DelegatedRunShape:
+def delegated_run_shape(acting: bool, access: str = "workspace_write", mode: str | None = None) -> DelegatedRunShape:
     """The run shape a child's captured technical access entitles it to.
 
     TECHNICAL access alone decides the shape. A ``workspace_write``/``full`` run
@@ -148,10 +148,12 @@ def delegated_run_shape(acting: bool, access: str = "workspace_write") -> Delega
     Claudexor's default envelope, which is scoped already and needs no marker:
     one transport with one derived difference, not a second pipeline.
     """
-    if access == "readonly":
-        return DelegatedRunShape(access="readonly", mode="ask")
-    if access not in SESSION_ACCESS_PROFILES:
+    if mode not in (None, "ask", "plan", "agent"):
+        raise ValueError("mode must be ask, plan or agent")
+    if access != "readonly" and access not in SESSION_ACCESS_PROFILES:
         raise ValueError("Delegated session access must be readonly, workspace_write or full")
+    if access == "readonly" or mode in ("ask", "plan"):
+        return DelegatedRunShape(access="readonly", mode=mode or "ask")
     return DelegatedRunShape(access=access, mode="agent", isolation="live", delegated=True,
                              investigation=not acting)
 
@@ -820,6 +822,7 @@ def lane_delta_phrase(delta: Mapping[str, Any]) -> str:
 # be overwritten by "what was given" — the asymmetry `requested_model_lane` /
 # `effective_model_lane` already had, extended to every axis.
 SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
+    "delegated_mode",
     "requested_model_lane",
     "parent_model_lane",
     # The parent's effort request (``schedule_subagent(effort=…)``; "" = none): dispatch
@@ -832,6 +835,13 @@ SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
     # policy-overridden between admission and dispatch.
     "required_model_lane",
     "requested_executor",
+    # A writer's explicit placement (``schedule_subagent(workspace="in_place")``, owner 25.10 Q2-A).
+    "workspace",
+    # A session child's selected task documents for its first start (DELEGATED_ADMISSION §3a):
+    # the relpaths, reuse/new, and the one new-import intent saved when the parent chose new.
+    "attachment_paths",
+    "attachment_import",
+    "document_import_intent",
 )
 
 
@@ -1021,7 +1031,7 @@ def resolve_subagent_dispatch(
     from ouroboros.runtime_mode_policy import effort_range_binds
     from ouroboros.settings_scales import choose_effort, effort_fact
 
-    # A legacy (row-less) child: the parent's request inside the owner's range, else recommended.
+    # A row-less child: request or primary, clamped into this room's helper bounds.
     derived_effort, effort_source = choose_effort(
         task.get("requested_effort"), binds=effort_range_binds(task.get("metadata")))
 
@@ -1379,8 +1389,6 @@ def envelope_from_task(
 # v7next F2 (D07): moved spans live in their owner leaves; re-exported here
 # so this facade stays the single import surface for callers and tests.
 from ouroboros.subagent_route_health import (  # noqa: E402, F401 -- intentional public re-exports
-    _cooldown_active,
     _exhausted_window,
-    _model_scope_matches,
     route_health,
 )

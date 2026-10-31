@@ -1,12 +1,14 @@
 """The origin label of a consciousness wake-up survives every hop (P1).
 
 ``metadata.initiator = "consciousness"`` rides the turn's live frames (progress,
-heartbeat, terminal), the chat.jsonl row, the authored summary row and the
+heartbeat, terminal), the stored chat row, the authored summary row and the
 persisted result, and history replay returns it on each — so the block's meta
 line and the final bubble are labelled live and after a reload alike.
 """
 
 from __future__ import annotations
+
+from tests import _dialogue as dialogue_test
 
 import asyncio
 import json
@@ -20,7 +22,7 @@ WAKE_META = {
 }
 
 
-# --- the origin label: live frames, chat.jsonl rows, replay ----------------------
+# --- the origin label: live frames, stored chat rows, replay ----------------------
 
 
 def test_progress_heartbeat_and_final_frames_carry_the_initiator(monkeypatch, tmp_path):
@@ -78,7 +80,7 @@ def test_the_initiator_survives_the_chat_row_the_summary_row_and_replay(tmp_path
         _copy_task_summary_metadata,
         make_chat_history_endpoint,
     )
-    from ouroboros.utils import append_jsonl
+    from ouroboros import dialogue_store
     from supervisor.message_bus import log_chat
 
     (tmp_path / "logs").mkdir(parents=True)
@@ -90,7 +92,7 @@ def test_the_initiator_survives_the_chat_row_the_summary_row_and_replay(tmp_path
     plain = log_chat("out", 1, 0, "Hi.", ts="2026-09-16T12:00:03Z", task_id="o1",
                      message_meta={"task_terminal_status": "completed"}, drive_root=tmp_path, require_write=True)
     assert "initiator" not in plain
-    append_jsonl(tmp_path / "logs" / "progress.jsonl", {
+    dialogue_store.append(tmp_path, "progress", {
         "ts": "2026-09-16T12:00:01Z", "type": "send_message", "task_id": "w1", "is_progress": True,
         "direction": "out", "chat_id": 1, "user_id": 0, "text": "💬 thinking", "content": "💬 thinking",
         "format": "", "initiator": "consciousness",
@@ -101,7 +103,7 @@ def test_the_initiator_survives_the_chat_row_the_summary_row_and_replay(tmp_path
         usage={"rounds": 1, "cost": 0.0}, llm_trace={"tool_calls": [], "reasoning_notes": []},
         drive_logs=tmp_path / "logs",
     )
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert next(row for row in rows if row.get("type") == "task_summary")["initiator"] == "consciousness"
     assert "initiator" in _PROGRESS_META_FIELDS
 

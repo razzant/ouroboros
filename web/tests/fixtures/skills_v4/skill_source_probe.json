@@ -1,0 +1,24 @@
+{
+  "ok": {
+    "kind": "git",
+    "suggested_name": "Russian services",
+    "owner": "kuznetsoffandrey",
+    "found": [
+      "2gis",
+      "vkusvill",
+      "sber-ring",
+      "whoop-health",
+      "gdelt-mcp",
+      "sat3dgen",
+      "agentrq-bridge"
+    ]
+  },
+  "empty": {
+    "kind": "git",
+    "suggested_name": "notes",
+    "found": []
+  },
+  "unreadable": {
+    "error": "This computer could not read https://github.com/someone/missing: repository not found"
+  }
+}

@@ -20,18 +20,16 @@ def _frame(**overrides):
     return cb.request_context_budget(**args)
 
 
-def test_owner_targets_and_working_margins_are_the_ssot_values():
+def test_owner_targets_and_an_explicit_working_level():
     assert cb.OWNER_LOW_TARGET_TOKENS == 250_000
     assert cb.OWNER_NANO_TARGET_TOKENS == 85_000
-    assert cb.MEMORY_VIEW_WORKING_MARGINS == 2
-    assert cb.MODE_TARGET_WORKING_MARGINS == 1
     # One level under the owner's targets, the full reply reserve (the arithmetic in the comment).
     low = cb.request_context_budget(window_tokens=1_050_000, output_reserve_tokens=65_536, non_memory_tokens=0,
                                     target_tokens=cb.OWNER_LOW_TARGET_TOKENS,
-                                    margin_count=cb.MODE_TARGET_WORKING_MARGINS)
+                                    margin_count=1)
     nano = cb.request_context_budget(window_tokens=1_050_000, output_reserve_tokens=cb.NANO_MIN_HEADROOM_TOKENS,
                                      non_memory_tokens=0, target_tokens=cb.OWNER_NANO_TARGET_TOKENS,
-                                     margin_count=cb.MODE_TARGET_WORKING_MARGINS)
+                                     margin_count=1)
     assert low["with_margin_tokens"] == 153_214 and low["without_margin_tokens"] == 184_464
     assert nano["with_margin_tokens"] == 66_183 and nano["without_margin_tokens"] == 76_808
 

@@ -26,6 +26,8 @@ class WebSearchLeg(TypedDict):
     backend: str
     model: str  # the wire model; empty for ddgs
     model_source: Literal["selection", "provider_default"]
+    # Only on an ``unavailable`` leg: the locally known cause, never a provider probe.
+    unavailable_reason: NotRequired[Literal["no_credentials", "package_missing", "legacy_openai_base_url"]]
 
 
 class WebSearchRoute(TypedDict):
@@ -35,7 +37,7 @@ class WebSearchRoute(TypedDict):
     source: str  # auto, or one strict source
     model: str  # the selection as saved or drafted; empty means provider defaults
     legs: List[WebSearchLeg]  # eligible, in order
-    unavailable: List[WebSearchLeg]  # credential or package missing
+    unavailable: List[WebSearchLeg]  # each names its unavailable_reason
     note: str
     error: NotRequired[str]  # the selection has no built-in transport
     ignored_legacy_model: NotRequired[str]  # a saved bare model the Anthropic source does not apply
@@ -68,6 +70,9 @@ class ResponseLimitPreview(TypedDict):
 
     route: ResponseLimitRoute
     response_limit: ResponseLimit
+    window: Dict[str, Any]  # context_view_facts.window_projection
+    window_route: Dict[str, Any]  # the window acknowledgement's independent fingerprint
+    window_ack: bool
 
 
 class ResponseLimitAckResponse(TypedDict):
@@ -80,7 +85,7 @@ class ResponseLimitAckResponse(TypedDict):
 class CapabilityAckRequest(TypedDict):
     """``POST /api/owner/capability-ack``: the owner vouches for one exact route. With
     ``max_output_tokens`` present it records that route's maximum response (0 removes it);
-    otherwise ``window_tokens`` (a positive integer) records its context window. ``route_fp``,
+    otherwise ``window_tokens`` records its context window (0 removes it). ``route_fp``,
     when sent, must equal the fingerprint the preview showed, or the request is refused (400).
     It writes acknowledgement evidence, never settings; repeating it overwrites the same record."""
 

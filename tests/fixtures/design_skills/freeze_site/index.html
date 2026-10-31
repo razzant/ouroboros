@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A live page to freeze</title>
+<link rel="stylesheet" href="style.css">
+<style>.made { color: #2b5d34; }</style>
+</head>
+<body>
+  <section class="hero" id="hero"><h1>Live page</h1></section>
+  <img id="pic" src="pic.svg" width="40" height="40" alt="">
+  <div class="mark" id="mark"></div>
+  <div id="app"></div>
+  <label>Name <input id="name"></label>
+  <button id="go" onclick="document.title = 'clicked'">Go</button>
+  <div class="list" id="list"><div class="rows">Row 1<br>Row 2<br>Row 3<br>Row 4<br>Row 5<br>Row 6<br>Row 7<br>Row 8<br>Row 9<br>Row 10<br>Row 11<br>Row 12</div></div>
+  <script>document.getElementById('app').innerHTML = '<p class="made" id="made">Rendered by a script</p>';</script>
+</body>
+</html>

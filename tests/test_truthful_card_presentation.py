@@ -12,6 +12,8 @@ Three small contracts that the browser already keeps and the host did not:
 """
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import json
 
 import pytest
@@ -38,8 +40,7 @@ class TestHostNoteVoice:
         mb, sent = self._bus(tmp_path, monkeypatch)
         mb.send_with_budget(1, "startup notice", is_progress=True, task_id="t1",
                             role="system", system_type="startup_notice")
-        rows = [json.loads(line) for line in
-                (tmp_path / "logs" / "progress.jsonl").read_text(encoding="utf-8").splitlines()]
+        rows = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")
         # ONE meta dict reaches the durable record and the live bridge.
         assert rows[-1]["narration"] is False
         assert sent[-1]["progress_meta"]["narration"] is False
@@ -54,7 +55,11 @@ class TestHostNoteVoice:
         # A caller that already put the fact on its own meta keeps it.
         mb.send_with_budget(1, "carried", is_progress=True, task_id="t1",
                             progress_meta={"narration": True, "card_row": "timeline"})
-        assert sent[-1]["progress_meta"] == {"narration": True, "card_row": "timeline"}
+        from ouroboros.chat_references import resolve_progress_row
+        meta = dict(sent[-1]["progress_meta"])
+        stored = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")[-1]
+        assert resolve_progress_row(tmp_path, meta.pop("row_address")) == stored
+        assert meta == {"narration": True, "card_row": "timeline"}
 
     def test_markdown_and_the_callers_other_meta_are_untouched(self, tmp_path, monkeypatch):
         mb, sent = self._bus(tmp_path, monkeypatch)
@@ -63,7 +68,11 @@ class TestHostNoteVoice:
                             lambda *a, **kw: captured.append((a, kw)) or (True, ""))
         mb.send_with_budget(1, "**bold**", fmt="markdown", is_progress=True, task_id="t1",
                             progress_meta={"card_row": "timeline"})
-        assert captured[-1][1]["progress_meta"] == {"card_row": "timeline", "narration": False}
+        from ouroboros.chat_references import resolve_progress_row
+        meta = dict(captured[-1][1]["progress_meta"])
+        stored = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")[-1]
+        assert resolve_progress_row(tmp_path, meta.pop("row_address")) == stored
+        assert meta == {"card_row": "timeline", "narration": False}
 
     def test_the_legacy_read_is_unchanged(self):
         # ABSENT still means narration for every row written before the fact —
@@ -79,7 +88,7 @@ class TestHostNoteVoice:
 
         mb, sent = self._bus(tmp_path, monkeypatch)
         mb.send_with_budget(1, "Host note", task_id="t1", role="system", system_type="host_progress")
-        rows = [json.loads(line) for line in (tmp_path / "logs/chat.jsonl").read_text(encoding="utf-8").splitlines()]
+        rows = dialogue_test.log_rows(tmp_path / "logs/chat.jsonl")
         assert rows[-1]["narration"] is sent[-1]["progress_meta"]["narration"] is False
         response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
         replay = next(row for row in json.loads(response.body)["messages"] if row.get("text") == "Host note")

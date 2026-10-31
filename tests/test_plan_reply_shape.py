@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 
 from ouroboros.review_execution import (
-    ACCEPTANCE_SESSION_OUTPUT_SCHEMA, REVIEW_SESSION_OUTPUT_SCHEMA, TWO_PART_SESSION_OUTPUT_SCHEMA,
+    REVIEW_SESSION_OUTPUT_SCHEMA, TWO_PART_SESSION_OUTPUT_SCHEMA,
     AgentSessionReviewExecutor, ReviewAssignment, ReviewRouteKind, review_session_output_schema,
 )
 from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
@@ -113,11 +113,10 @@ def test_the_plan_surface_asks_for_the_reply_contract_on_every_retrieving_route(
 
 
 def test_the_other_surfaces_keep_their_shapes_and_the_array_shape_still_extracts():
-    assert review_output_shape("multi_model_review") == "two_part" and review_output_shape("task_acceptance") == "object"
+    assert review_output_shape("multi_model_review") == "two_part"
     assert review_output_shape("deep_self_review") == "report" and review_output_shape("skill_review") == "array"
     assert review_output_shape("advisory_review") == "array"
     assert review_session_output_schema("multi_model_review") is TWO_PART_SESSION_OUTPUT_SCHEMA
-    assert review_session_output_schema("task_acceptance") is ACCEPTANCE_SESSION_OUTPUT_SCHEMA
     assert review_session_output_schema("deep_self_review") is None
     assert review_session_output_schema("advisory_review") is REVIEW_SESSION_OUTPUT_SCHEMA
     # The very same text under the findings-array shape is what the bug did: one light call, "[]" replaces the words.
@@ -130,3 +129,31 @@ def test_the_other_surfaces_keep_their_shapes_and_the_array_shape_still_extracts
                                             llm=_NoLightModel()) == (REPLY_TEXT, "plan_reply", {})
     assert canonicalize_session_verdict(REPLY_TEXT, conformance_passed=False, shape="plan_reply",
                                         allow_extraction=False) == (REPLY_TEXT, "plan_reply", {})
+
+
+def test_a_result_wave_on_the_commit_surface_is_asked_and_read_as_the_findings_array(tmp_path):
+    """A result wave rides the commit surface (two-part) but names its own shape in its policy: the session
+    schema, the prompt contract and the canonicalizer of every retrieving route read the findings array.
+    Without it a session seat was handed the change/coupling schema and its result answer never counted."""
+    from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT, request_output_shape
+
+    def request(policy):
+        return ReviewRequest(surface="multi_model_review", goal="g", task_id="t", session_root=str(tmp_path),
+                             session_task="task", policy=policy)
+
+    result = request({"output_contract": REVIEW_JSON_ARRAY_CONTRACT, "output_shape": "array"})
+    assert [request_output_shape(r) for r in (result, request({}), request({"output_shape": "bogus"}))] == [
+        "array", "two_part", "two_part"]
+    assert review_session_output_schema(result.surface, request_output_shape(result)) is REVIEW_SESSION_OUTPUT_SCHEMA
+    assert review_session_output_schema("multi_model_review") is TWO_PART_SESSION_OUTPUT_SCHEMA
+    llm = _NoLightModel()
+    slot = ReviewSlot(slot_id="r1", model="api/model-a", effort="low", timeout_sec=30, route=ReviewRouteKind.AGENT_SESSION)
+    executor = AgentSessionReviewExecutor(
+        ReviewAssignment(request=result, slot=slot, call_id="op-result-session", custody_root=tmp_path), llm=llm)
+    assert executor._output_contract() is REVIEW_JSON_ARRAY_CONTRACT
+    executor._raw_transcript, executor._conformance_passed = '{"findings": []}', True
+    clean = executor._verdict_result()
+    assert clean.raw_text == "[]" and llm.calls == [], "the conformed findings object is the clean array, no light call"
+    native = ReviewSlot(slot_id="n", model="m", effort="low", subagent_id="api-critic", native_retrieval_override=True)
+    assert NativeToolRoundReviewExecutor(
+        ReviewAssignment(request=result, slot=native, call_id="c"))._output_contract() is REVIEW_JSON_ARRAY_CONTRACT

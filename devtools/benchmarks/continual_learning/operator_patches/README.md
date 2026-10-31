@@ -53,7 +53,7 @@ itself) is the supported path for v6.56.0 bridge runs.
    stateful paths, live-bridge path): the deliverable is the last terminal
    `ANSWER` receipt accepted by `task.step()` through the `clbench_remote`
    skill; a prose restatement is not a deliverable and an INCORRECT receipt
-   does not satisfy acceptance. `answer_protocol` deliberately stays EMPTY —
+   does not satisfy the claims. `answer_protocol` deliberately stays EMPTY —
    a final-answer text line would re-legitimise the very channel the grader
    ignores. Also appends the owner-approved knowledge-topic nudge to the
    `steer_note` slot (before `_ACTION_NOTE`, which must stay the prompt tail)

@@ -1,14 +1,20 @@
 """#1536 through the real Host boundary: /presence/turn, /presence/work and initiate_presence.
 
-The harness of ``test_presence_continuation`` supplies the real loop, acceptance
-coordinator, direct wait, mailbox settlement and pipeline terminal; here the Host's
-own gate, execution registry, admission, in-flight budget and endpoints decide.
+The harness of ``test_presence_continuation`` supplies the real loop, review coordinator,
+direct wait, mailbox settlement and pipeline terminal, and its kept trigger: the author
+reviews its own result, leaves that review for an addressed message and parks on it. Here
+the Host's own gate, execution registry, admission, in-flight budget and endpoints decide;
+the admitted behavior selects ``review_change``, so the Host's admission is the authority
+that lets the author review its result.
 """
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import functools
 import json
+import pathlib
 import time
 
 import pytest
@@ -17,8 +23,10 @@ from starlette.testclient import TestClient
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
-from tests.test_host_service_api import _seed_presence_behavior, _seed_token
-from tests.test_presence_continuation import ANSWER, NEW_WORDS, finish, harness as harness, wait_for
+from tests.test_host_service_api import _seed_token
+from tests.test_presence_continuation import (
+    ANSWER, NEW_WORDS, author, deliver, finish, harness as harness, parked, resumed, wait_for,
+)
 
 _TOKEN = "presence-token"
 _HEADERS = {"X-Skill-Token": _TOKEN}
@@ -37,12 +45,58 @@ class _Quick:
         return [{"type": "presence_result", "outcome": "message", "text": "Noted.", "work_ref": ""}]
 
 
+def _seed_reviewing_behavior(data_dir: pathlib.Path) -> str:
+    """``test_host_service_api``'s fixture behavior, bound to any room of the account, whose owner also
+    selected ``review_change``: its turns may review their own result (a result review takes no workspace
+    binding, so no resource is selected)."""
+    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
+    from tests.frozen_presence_bindings import new_presence_binding_id, save_presence_binding
+    from tests.frozen_presence_capabilities import (
+        PresenceSelection, PresenceState, PresenceToolTarget, presence_state_fingerprint, save_presence_state,
+    )
+    from tests.frozen_presence_profile import parse_presence_profile, presence_request_fingerprint
+    from ouroboros.skill_loader import SkillReviewState, load_skill, save_enabled, save_review_state
+
+    skill_dir = data_dir / "skills" / "external" / "community-helper"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: community-helper\ndescription: Neutral helper.\nversion: 0.1.0\n"
+        "type: instruction\npresence:\n  instructions: Participate helpfully.\n"
+        "  capability_requests:\n    - id: history\n      kind: tool\n      required: true\n"
+        "      purpose: Read history.\n    - id: review\n      kind: tool\n      required: true\n"
+        "      purpose: Review my own result.\n---\n# Helper\n",
+        encoding="utf-8",
+    )
+    loaded = load_skill(skill_dir, data_dir)
+    assert loaded is not None
+    save_enabled(data_dir, loaded.name, True)
+    save_review_state(data_dir, loaded.name, SkillReviewState(status="pass", content_hash=loaded.content_hash))
+    profile = parse_presence_profile(loaded.manifest, skill_dir)
+    assert profile is not None
+    targets = {"history": PresenceToolTarget("builtin", "chat_history"),
+               "review": PresenceToolTarget("builtin", "review_change")}
+    save_presence_state(
+        data_dir, loaded.name,
+        PresenceState(tuple(PresenceSelection(presence_request_fingerprint(request), targets[request.request_id])
+                            for request in profile.capability_requests)),
+        expected_state_fingerprint=presence_state_fingerprint(PresenceState()),
+    )
+    binding = save_presence_binding(data_dir, PresenceBinding(
+        new_presence_binding_id(), "telegram-bot", loaded.name, PresenceEndpoint("telegram", "bot-1", "*", ""),
+        PresenceEndpoint("telegram", "bot-1", "room-1", "topic-1")))
+    return binding.binding_id
+
+
 @pytest.fixture
 def host(harness, monkeypatch):
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, ""))
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("supervisor.consciousness_carriers.autonomous_work_enabled", lambda *_: True, raising=False)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})
     h = harness
     monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "1")
     _seed_token(h.data, skill="telegram-bot", token=_TOKEN, permissions=["presence"], manifest_permissions=["presence"])
-    h.binding = _seed_presence_behavior(h.data, account_wide=True)  # any room/thread of the account
+    h.binding = _seed_reviewing_behavior(h.data)  # any room/thread of the account
     h.quick = set()
 
     def runner(**kwargs):
@@ -52,7 +106,12 @@ def host(harness, monkeypatch):
 
     with TestClient(create_host_service_app(h.data, presence_runner=runner)) as client:
         h.client = client
-        yield h
+        try:
+            yield h
+        finally:
+            h.release.set()
+            executions = client.app.state.host_service_context.presence_turns
+            wait_for(lambda: not executions.live(), timeout=90, what="Host author teardown")
 
 
 def turn(h, number, text="Please prepare the status report", version=1, thread="topic-1", reporting=0, transport_queue=None):
@@ -75,19 +134,70 @@ def poll(h, ref):
 
 
 def test_identity_advertises_the_continuation_version(host):
-    assert host.client.get("/identity", headers=_HEADERS).json()["presence_continuation_version"] == 1
+    identity = host.client.get("/identity", headers=_HEADERS).json()
+    assert identity["presence_continuation_version"] == 1  # deployed consumers compare the scalar exactly
+    assert identity["presence_continuation_versions"] == [1, 2]
+
+
+def test_v2_early_answer_lends_nothing_and_the_real_park_returns_the_reservation_once(host, monkeypatch):
+    import threading
+    from ouroboros.conversation_lease import live_author
+
+    h = host
+    original = h.Agent.handle_task
+
+    def opens_intake(self, task):
+        # ``OuroborosAgent._handle_task_scoped`` fires it once its prepared loop opens intake; this harness
+        # agent runs the loop directly, so it fires it here, twice: a repeat answers nothing again.
+        callback = getattr(self, "intake_opened_callback", None)
+        for _ in range(2):
+            callback(task)
+        return original(self, task)
+
+    monkeypatch.setattr(h.Agent, "handle_task", opens_intake)
+    proceed, step = threading.Event(), author(deliver)
+
+    def held(messages):
+        assert proceed.wait(60), "the test never let the author's model call return"
+        return step(messages)
+
+    h.script = held
+    reservations = h.client.app.state.host_service_context._inflight
+    first = turn(h, 42, version=2).json()
+    ref = first["continuation_ref"]
+    assert (first["status"], first["continuation_version"], first["turn_ref"]) == ("continuing", 2, ref)
+    record = load_task_result(h.data, ref)["presence_continuation"]
+    assert "lent_at" not in record and "first_lent_at" not in record and record["continuation_version"] == 2
+    assert reservations["telegram-bot:presence"] == 1 and live_author(record["conversation_key"], drive_root=h.data) == ref
+    proceed.set()
+    wait_for(lambda: parked(h, ref), what="the review park")
+    wait_for(lambda: reservations["telegram-bot:presence"] == 0, what="the park's return of the reservation")
+    record = load_task_result(h.data, ref)["presence_continuation"]
+    assert record["lent_at"] and record["first_lent_at"] and record["initial"] == {
+        "status": "continuing", "outcome": "deferred", "text": "", "output_ref": "", "work_ref": ""}
+    h.quick.add("telegram:bot-1:43")  # the lent conversation and slot run the next event at once
+    assert turn(h, 43, NEW_WORDS, version=2).json()["text"] == "Noted."
+    assert turn(h, 42, version=2).json() == first  # still the write-once envelope
+    h.release.set()
+    wait_for(lambda: poll(h, ref).status_code == 200, timeout=60, what="the late result")
+    late = poll(h, ref).json()
+    assert (late["text"], late["continuation_version"]) == (ANSWER, 2)
+    # The resumed author's final model send carried event 43 whole in its reentry note: that is the last
+    # input its answer covers, so the reply anchors there, with 43's exact captured message.
+    assert "(event telegram:bot-1:43, taken by turn" in str(h.inputs[-1]) and NEW_WORDS in str(h.inputs[-1])
+    assert late["reply_anchor"] == {"source_event_id": "telegram:bot-1:43", "message": {"message_id": "43"}}
+    wait_for(lambda: reservations["telegram-bot:presence"] == 0, what="no second return")
+    assert reservations["telegram-bot:presence"] == 0
 
 
 def test_v1_consumer_gets_the_envelope_the_next_event_runs_and_the_late_result_polls_once(host):
     h = host
 
-    def scripted(messages):
-        if any("[PRESENCE CONVERSATION RESUMED]" in str(row.get("content")) for row in messages):
-            assert any(NEW_WORDS in str(row.get("content")) for row in messages)
-            return finish("final", answer_sha256=h.ctxs[0]._delivery_candidate.content_sha256)
-        return finish("nominate", message=ANSWER)
+    def after_wake(messages):
+        assert NEW_WORDS in resumed(messages)
+        return deliver()
 
-    h.script = scripted
+    h.script = author(after_wake)
     first = turn(h, 42).json()
     assert first["status"] == "continuing" and first["continuation_version"] == 1
     assert (first["outcome"], first["text"], first["output_ref"]) == ("deferred", "", "")
@@ -106,16 +216,14 @@ def test_v1_consumer_gets_the_envelope_the_next_event_runs_and_the_late_result_p
     assert late["output_ref"].startswith("presence-output-") and late["child_work_ref"] == ""
     assert poll(h, first["continuation_ref"]).json() == late  # a repeated poll is the same fact
     assert turn(h, 42).json() == first  # still the envelope after the author ended
-    assert h.calls == 2 and len(h.reviews) == 1
+    assert h.calls == 3 and len(h.reviews) == 1
 
 
 def test_v0_consumer_keeps_the_legacy_shape_and_waits_for_the_terminal(host):
     import threading
 
     h = host
-    h.script = lambda messages: (finish("final", answer_sha256=h.ctxs[0]._delivery_candidate.content_sha256)
-                                 if any("[PRESENCE CONVERSATION RESUMED]" in str(row.get("content")) for row in messages)
-                                 else finish("nominate", message=ANSWER))
+    h.script = author(deliver)
     box = {}
     worker = threading.Thread(target=lambda: box.update(body=turn(h, 42, version=None).json()), daemon=True)
     worker.start()
@@ -138,9 +246,7 @@ def _turn_id(h, number):
 
 def test_six_parked_same_skill_turns_return_their_in_flight_reservations(host):
     h = host
-    h.script = lambda messages: (finish("final", message=ANSWER)
-                                 if any("[PRESENCE CONVERSATION RESUMED]" in str(row.get("content")) for row in messages)
-                                 else finish("nominate", message=ANSWER))
+    h.script = author(deliver)
     # Six authors of one skill (its in-flight budget is five) all park; none needs a 429 retry.
     bodies = [turn(h, 100 + index, thread=f"topic-{index}").json() for index in range(6)]
     assert [body["status"] for body in bodies] == ["continuing"] * 6
@@ -161,13 +267,15 @@ def test_promoted_child_and_continuing_parent_keep_two_independent_refs(host, mo
 
     monkeypatch.setattr(h.Agent, "handle_task", with_child)
 
+    def after_wake(messages):
+        assert "your promoted work work-9 is scheduled" in resumed(messages)
+        return deliver()
+
+    step = author(after_wake)
+
     def scripted(messages):
         h.ctxs[0]._swarm_handoff_attempt = {"status": "scheduled", "task_id": "work-9"}
-        if any("[PRESENCE CONVERSATION RESUMED]" in str(row.get("content")) for row in messages):
-            note = next(str(row["content"]) for row in messages if "[PRESENCE CONVERSATION RESUMED]" in str(row.get("content")))
-            assert "your promoted work work-9 is scheduled" in note
-            return finish("final", answer_sha256=h.ctxs[0]._delivery_candidate.content_sha256)
-        return finish("nominate", message=ANSWER)
+        return step(messages)
 
     h.script = scripted
     first = turn(h, 42).json()
@@ -208,15 +316,43 @@ def test_a_crashed_continuing_author_is_shown_interrupted_and_never_rerun(host):
     replay = turn(h, 42).json()
     assert replay["status"] == "continuing" and replay["continuation_ref"] == task_id
     view = poll(h, task_id)
-    assert view.status_code == 200 and view.json()["status"] == "unresolved" and "text" not in view.json()
-    assert view.json()["disposition"] == "retained"
+    assert view.status_code == 200 and view.json()["status"] == "failed" and view.json()["text"] == ""
+    assert view.json()["code"] == "presence_attempt_outcome_unknown" and view.json()["work_ref"] == task_id
     legacy = turn(h, 42, version=None)
     assert legacy.status_code == 409 and legacy.json()["code"] == "presence_attempt_outcome_unknown"
     assert h.calls == 0
 
 
+def test_a_parked_author_still_live_in_this_process_stays_pending_and_is_never_rerun(host, monkeypatch):
+    """A positive live observation wins (``presence_recovery.attempt_ended``): even when the park's controller
+    witness reads as another process session, an author still live in this process is pending, never shown
+    ended; a replay returns the write-once envelope and nothing reruns it. A really lost process is the
+    child-Host suite's (``test_presence_continuation_process``), the dead-witness rule ``test_presence_attempt_end``'s."""
+    from ouroboros.review_operation import controller_identity
+
+    h = host
+    h.script = author(deliver)
+    first = turn(h, 42).json()
+    ref = first["continuation_ref"]
+    wait_for(lambda: parked(h, ref), what="the review park")
+    assert load_task_result(h.data, ref)["presence_continuation"]["author_controller"] == controller_identity()
+    assert poll(h, ref).status_code == 202  # its controller is this live process: still pending
+    with monkeypatch.context() as replaced:
+        replaced.setattr("ouroboros.process_custody.current_custody_session_id", lambda: "a-new-process-session")
+        from ouroboros.presence_continuation import continuation_status
+
+        assert continuation_status(load_task_result(h.data, ref), h.data) == "running"
+        assert poll(h, ref).status_code == 202
+        assert turn(h, 42).json() == first  # replay returns the write-once envelope; nothing reruns the author
+    assert h.calls == 2
+    # The projection wrote nothing: the (live) author finishes as usual.
+    h.release.set()
+    wait_for(lambda: poll(h, ref).status_code == 200, timeout=60, what="the author")
+    assert (poll(h, ref).json()["status"], poll(h, ref).json()["text"]) == ("completed", ANSWER) and h.calls == 3
+
+
 def _initiate(h, *args):
-    from ouroboros.tools.presence import get_tools
+    from tests.presence_legacy_helpers import legacy_tools as get_tools
     from ouroboros.tools.registry import ToolContext
 
     initiate = next(item for item in get_tools() if item.name == "initiate_presence")
@@ -235,7 +371,7 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
 
     h = host
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.setattr("ouroboros.tools.presence._INITIATION_MARGIN_SEC", 0.5)
+    monkeypatch.setattr("tests.presence_legacy_helpers._INITIATION_MARGIN_SEC", 0.5)
     monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
                         functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     gate = threading.Event()
@@ -284,59 +420,65 @@ def _proactive_id(h, prompt, dedupe):
     return presence_turn_task_id(h.binding, "presence-initiate:" + hashlib.sha256(stable.encode()).hexdigest()[:32])
 
 
-def test_an_initiated_advisory_release_reaches_the_initiating_call(host, monkeypatch):
-    """Finding 4: the initiating call is a version-1 consumer; an early release is not discarded."""
+def test_an_initiated_continuing_envelope_reaches_the_initiating_call(host, monkeypatch):
+    """Finding 4: the initiating call is a version-1 consumer; a continuing author's first envelope reaches it."""
     h = host
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
                         functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
-
-    def scripted(messages):
-        if any("[PRESENCE CONVERSATION RESUMED]" in str(row.get("content")) for row in messages):
-            return finish("again", answer_sha256=h.ctxs[0]._presence_released[0]["sha256"])
-        return finish("nominate", message=ANSWER, pending_review="finish")
-
-    h.script = scripted
+    h.script = author(deliver)
     result = _initiate(h, "Report the status.", "release")
-    assert (result["status"], result["outcome"], result["text"]) == ("continuing", "message", ANSWER)
-    assert set(result) == _INITIATION_FIELDS
-    assert result["output_ref"].startswith("presence-output-") and result["continuation_ref"] == result["turn_ref"]
+    assert (result["status"], result["outcome"], result["text"], result["output_ref"]) == ("continuing", "deferred", "", "")
+    assert set(result) == _INITIATION_FIELDS and result["delivered"] is False
+    assert result["continuation_ref"] == result["turn_ref"] == _proactive_id(h, "Report the status.", "release")
     record = load_task_result(h.data, result["turn_ref"])["presence_continuation"]
-    assert record["outputs"] == [{"output_ref": result["output_ref"], "outcome": "message", "text": ANSWER}]
+    assert record["initial"]["status"] == "continuing" and record["outputs"] == []
     h.release.set()
     from ouroboros.presence_runner import PROACTIVE_TURNS
 
     wait_for(lambda: not PROACTIVE_TURNS.live(), timeout=60, what="the initiated author")
     stored = load_task_result(h.data, result["turn_ref"])
-    # The author re-selected its released answer: the terminal says nothing new.
-    assert stored["status"] == "completed" and stored["metadata"]["presence_result_text"] == ""
-    assert h.calls == 2 and len(h.reviews) == 1
+    # Nothing was spoken while it waited: the same author's terminal speaks its answer.
+    assert stored["status"] == "completed" and stored["metadata"]["presence_result_text"] == ANSWER
+    assert h.calls == 3 and len(h.reviews) == 1
 
 
-def test_reporting_v1_release_is_receipt_owned_and_reaches_the_resuming_author(host, monkeypatch):
+def test_reporting_v1_receipts_own_outgoing_history_and_reach_the_resuming_author(host):
     h = host
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    second_ref = _turn_id(h, 43)
 
-    def scripted(messages):
-        notes = [str(row["content"]) for row in messages if "[PRESENCE CONVERSATION RESUMED]" in str(row.get("content"))]
-        if not notes:
-            return finish("nominate", message=ANSWER, pending_review="finish")
-        assert "delivery delivered for this turn" in notes[-1] and ANSWER in notes[-1]
-        return finish("again", answer_sha256=h.ctxs[0]._presence_released[0]["sha256"])
+    def after_wake(messages):
+        note = resumed(messages)
+        # The receipt of the newer turn's reply, reported while this author waited, is a fact of its reentry.
+        assert f"delivery delivered for turn {second_ref}" in note and "Noted." in note
+        return deliver()
 
-    h.script = scripted
+    h.script = author(after_wake)
     first = turn(h, 42, reporting=1).json()
-    assert (first["status"], first["outcome"], first["text"]) == ("continuing", "message", ANSWER)
-    assert first["delivery_reporting_version"] == 1 and first["output_ref"]
-    rows = [json.loads(line) for line in (h.data / "logs" / "chat.jsonl").read_text().splitlines()]
-    assert not [row for row in rows if row.get("direction") == "out"]  # mode 1: receipts own outgoing history
-    receipt = {"schema_version": 1, "delivery_id": f"auto:{first['output_ref']}", "part_id": "0",
-               "state": "delivered", "provider": "telegram", "account_id": "bot-1", "conversation_id": "room-1",
-               "thread_id": "topic-1", "text": ANSWER, "format": "markdown", "message": {"provider_message_id": "9"},
-               "origin": {"kind": "automatic", "task_id": first["turn_ref"], "source_event_id": "telegram:bot-1:42"}}
-    assert h.client.post("/presence/delivery", headers=_HEADERS, json=receipt).status_code == 200
+    assert (first["status"], first["outcome"], first["text"], first["output_ref"]) == ("continuing", "deferred", "", "")
+    assert first["delivery_reporting_version"] == 1
+    h.quick.add("telegram:bot-1:43")
+    second = turn(h, 43, NEW_WORDS, reporting=1).json()
+    assert (second["status"], second["text"], second["turn_ref"]) == ("completed", "Noted.", second_ref)
+    assert second["delivery_reporting_version"] == 1
+    chat = h.data / "logs" / "chat.jsonl"
+    assert not [row for row in dialogue_test.log_rows(chat) if row.get("direction") == "out"]  # mode 1: receipts own it
+
+    def receipt(output_ref, task_id, source_event_id, text):
+        return {"schema_version": 1, "delivery_id": f"auto:{output_ref}", "part_id": "0", "state": "delivered",
+                "provider": "telegram", "account_id": "bot-1", "conversation_id": "room-1", "thread_id": "topic-1",
+                "text": text, "format": "markdown", "message": {"provider_message_id": source_event_id[-2:]},
+                "origin": {"kind": "automatic", "task_id": task_id, "source_event_id": source_event_id}}
+
+    # The stub turn mints no output ref of its own (it never reaches the pipeline): its receipt names the turn.
+    sent = receipt(second["output_ref"] or second_ref, second_ref, "telegram:bot-1:43", "Noted.")
+    assert h.client.post("/presence/delivery", headers=_HEADERS, json=sent).status_code == 200
     h.release.set()
     wait_for(lambda: poll(h, first["continuation_ref"]).status_code == 200, timeout=60, what="the terminal")
     late = poll(h, first["continuation_ref"]).json()
-    assert (late["outcome"], late["text"], late["output_ref"]) == ("silent", "", "")  # never sent twice
-    assert late["outputs"] == [{"output_ref": first["output_ref"], "outcome": "message", "text": ANSWER}]
+    assert (late["outcome"], late["text"]) == ("message", ANSWER) and late["output_ref"].startswith("presence-output-")
+    assert late["delivery_reporting_version"] == 1 and late["outputs"] == []  # nothing was released while it waited
+    # The late terminal's speech is not host-written outgoing history either; only receipts are.
+    assert [row["text"] for row in dialogue_test.log_rows(chat) if row.get("direction") == "out"] == ["Noted."]
+    final = receipt(late["output_ref"], first["turn_ref"], "telegram:bot-1:42", ANSWER)
+    assert h.client.post("/presence/delivery", headers=_HEADERS, json=final).status_code == 200
+    assert [row["text"] for row in dialogue_test.log_rows(chat) if row.get("direction") == "out"] == ["Noted.", ANSWER]

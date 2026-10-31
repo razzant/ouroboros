@@ -1056,7 +1056,7 @@
     },
     {
       "id": "openrouter.payload.rejected_param_cache_applied",
-      "route": "durable rejected-parameter knowledge removes carriers before the first send",
+      "route": "negative control: stored model-global rejected-parameter rows leave temperature and the reasoning carrier on the payload",
       "spec": {
         "env": {
           "OPENROUTER_API_KEY": "or-fixture-key"
@@ -1119,7 +1119,7 @@
     },
     {
       "id": "openrouter.payload.learned_effort_ceiling",
-      "route": "a learned ceiling clamps the requested effort down before the payload is built",
+      "route": "negative control: a stored model-global effort ceiling leaves the requested xhigh on the payload",
       "spec": {
         "env": {
           "OPENROUTER_API_KEY": "or-fixture-key"
@@ -1178,7 +1178,7 @@
     },
     {
       "id": "openrouter.payload.learned_effort_floor",
-      "route": "a learned floor clamps the requested effort up before the payload is built",
+      "route": "negative control: a stored model-global effort floor leaves the requested none on the payload",
       "spec": {
         "env": {
           "OPENROUTER_API_KEY": "or-fixture-key"
@@ -1657,7 +1657,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -1857,7 +1858,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": {
@@ -2032,7 +2034,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -2211,7 +2214,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -2415,7 +2419,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -2619,7 +2624,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -2762,7 +2768,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -2995,7 +3002,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -3229,7 +3237,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null
@@ -3415,7 +3424,8 @@
               "base_url": "https://openrouter.ai/api/v1",
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
-                "X-OpenRouter-Title": "Ouroboros"
+                "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
               "http_client": null

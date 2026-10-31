@@ -41,6 +41,7 @@ def _pooled_agent(tmp_path, events, task_id="root-1", *, running=None, attempt=1
     agent._current_task_id = task_id
     agent._event_queue = events
     agent.tools = SimpleNamespace(_ctx=SimpleNamespace(task_attempt=attempt))
+    agent._fence_in_process = lambda: False  # a pooled worker is another process: it never holds the queue
     if running is not None:
         from supervisor import queue, workers
 
@@ -418,7 +419,7 @@ def test_direct_turn_uses_no_event_and_no_ack_file(monkeypatch, tmp_path, short_
     queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
     events: stdqueue.Queue = stdqueue.Queue()
     direct = _pooled_agent(tmp_path, events, task_id="direct-1")
-    direct.fence_transition = queue_mod.transition_acceptance_fence  # what ``_get_chat_agent`` injects
+    direct._fence_in_process = lambda: True  # the server process holds the queue (no injection exists)
     def forbidden_send(*_args, **_kwargs):
         pytest.fail("a direct fence transition must not send or poll an ACK")
 
@@ -440,12 +441,23 @@ def test_direct_turn_uses_no_event_and_no_ack_file(monkeypatch, tmp_path, short_
     assert [evt["type"] for evt in supervisor.seen] == ["acceptance_fence"]
 
 
-def test_only_the_direct_chat_agent_is_built_with_the_in_process_transition(monkeypatch, tmp_path):
+def test_the_transport_is_the_process_fact_not_a_factory_flag(monkeypatch, tmp_path):
     from ouroboros import agent as agent_module
-    from supervisor import queue, workers
+    from supervisor import workers
 
-    built = SimpleNamespace()
+    from pathlib import Path
+
+    real_make_agent, built = agent_module.make_agent, SimpleNamespace()
     monkeypatch.setattr(agent_module, "make_agent", lambda **_kwargs: built)
-    assert workers._get_chat_agent() is built
-    assert built.fence_transition is queue.transition_acceptance_fence
-    assert getattr(agent_module.OuroborosAgent, "fence_transition", None) is None  # pooled default
+    assert workers._get_chat_agent() is built and not hasattr(built, "fence_transition")
+    monkeypatch.setattr(agent_module.OuroborosAgent, "_log_worker_boot_once", lambda *_: None)
+    repo = str(Path(__file__).resolve().parents[1])
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    agent = real_make_agent(repo_dir=repo, drive_root=str(tmp_path), event_queue=stdqueue.Queue())
+    assert agent._fence_in_process() is True  # any actor built in the queue's process
+    monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")
+    assert agent._fence_in_process() is False  # a worker, even one forked with the maps
+    monkeypatch.delenv("OUROBOROS_IN_WORKER")
+    (tmp_path / "other").mkdir()
+    other = real_make_agent(repo_dir=repo, drive_root=str(tmp_path / "other"), event_queue=stdqueue.Queue())
+    assert other._fence_in_process() is False  # another data root's queue

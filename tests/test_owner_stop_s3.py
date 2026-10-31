@@ -1027,9 +1027,12 @@ def test_child_result_projection_is_bounded_and_includes_cancelled_children(tmp_
     assert projection.startswith("[CHILD_RESULTS]")
     for i in range(3):
         assert f"kid-{i} (cancelled):" in projection
-    # Each preview is bounded to the cap (240 chars + ellipsis).
-    for line in projection.splitlines()[1:]:
-        assert len(line) < 340
+    # Each task preview is bounded; its exact omission and full receipt reader survive.
+    for line in projection.splitlines():
+        if line.startswith("- kid-"):
+            assert len(line) < 340
+            assert "characters omitted" in line
+    assert "include_authority=True" in projection
     # A childless root projects nothing (the control stays the bare reason).
     assert ostop._child_result_projection(q, "t-lonely") == ""
 

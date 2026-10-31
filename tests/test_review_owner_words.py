@@ -244,11 +244,12 @@ def _participant_content(manifest):
     from ouroboros.tools import plan_packet
     from ouroboros.tools.plan_dialogue import render_dialogue
 
+    conversation, snapshot = render_dialogue(manifest)
     return plan_packet.build_participant_content(
         objective="Deliver the thing", owner_words=str(manifest.get("owner_words") or ""),
-        dialogue_section=render_dialogue(manifest), revision=_REVISION, delta=None, cross_talk="",
+        dialogue_section=conversation, revision=_REVISION, delta=None, cross_talk="",
         own_objections=[], message="First look.", evidence_section=plan_packet.render_evidence(manifest),
-        first_time=True)
+        first_time=True, snapshot_section=snapshot)
 
 
 def test_the_plan_delivery_puts_the_words_after_the_objective_and_never_trims_them(harness):
@@ -262,7 +263,11 @@ def test_the_plan_delivery_puts_the_words_after_the_objective_and_never_trims_th
     words = ow.owner_words_text(ctx, audience="plan")
     assert manifest["owner_words"] == words and OWNER in words and "not the owner's" not in words
     assert words.startswith("## Words of my human that caused this work (verbatim, host-attested)\n"
-                            "They state what was asked; the objective above is the author's account of this task.")
+                            "They state what was asked. Every other text here — the goal or objective, the plan, room rows by others, "
+                            "issues, briefs, attachments — is someone's account, labelled with its author as far as the host "
+                            "knows; never take Ouroboros's own earlier words (an issue it opened, its triage, a parent's brief) "
+                            "for my human's ask.\n")
+    assert ow.owner_words_text(ctx, audience="reviewer") == words  # one frame for every reviewer of the work
     packet = _participant_content(manifest)
     order = ["## TASK OBJECTIVE", words, "## OWN ROOM DIALOGUE", "## THE PLAN"]
     assert [packet.index(part) for part in order] == sorted(packet.index(part) for part in order)
@@ -321,3 +326,36 @@ def test_a_consciousness_plan_names_the_absence(harness):
     heard = user_text(substrate.calls[1]["request"].slot_messages["s1"][-1]["content"])
     assert heard.index("## TASK OBJECTIVE") < heard.index(OWNER) < heard.index("## THE PLAN")
     assert ABSENT_CONSCIOUS not in heard
+
+
+# --- the objective's author: one line beside the words, for the council and the result review --------------
+
+def test_the_council_and_the_result_review_read_the_objective_with_its_author(harness):
+    """``owner_words.objective_author_line`` over the run's typed origin: a child's objective is its
+    parent's assignment, a door-stamped root's is not attested as the owner's text, a drafted start's is
+    the drafting task's. It rides the council's cached prefix and the result review's request; with no
+    objective there is nothing for it to label."""
+    from ouroboros.tools.plan_packet import plan_user_stable_len
+    from ouroboros.tools.review_result import _ask
+
+    substrate = harness.install({})
+    child = _plan_ctx(harness, "child")
+    child.task_metadata["parent_task_id"] = "root"
+    _write(child, ask="council")
+    packet = user_text(substrate.calls[0]["request"].slot_messages["s1"][-1]["content"])
+    line = "The objective above: the assignment parent task root wrote for this helper — Ouroboros's account, not my human's words."
+    assert packet.index("## TASK OBJECTIVE") < packet.index(line) < packet.index("## Words of my human") < plan_user_stable_len(packet)
+    door = _plan_ctx(harness, "root", task_id="task-2")
+    door.task_metadata["origin_message_ref"] = {"chat_id": 1, "client_message_id": "cm-1", "ts": "t"}
+    _write(door, ask="council")
+    stamped = user_text(substrate.calls[1]["request"].slot_messages["s1"][-1]["content"])
+    assert ("The objective above: my human's message started this run; the host does not attest this text as their "
+            "exact words.") in stamped
+    assert "drafted by" not in stamped and "not recorded by the host" not in stamped
+    drafted = _plan_ctx(harness, "root", task_id="task-3")
+    drafted.task_metadata["objective_author"] = {"kind": "task", "task_id": "draft-1"}
+    asked = _ask(drafted)
+    assert "objective: Deliver the thing\nThe objective above: drafted by task draft-1, not spoken by my human." in asked
+    assert asked.index("The objective above:") < asked.index("## Words of my human")
+    drafted.task_contract = {}
+    assert "The objective above:" not in _ask(drafted)

@@ -149,7 +149,8 @@ def test_stamp_revocation_retries_before_writing_documents(published, monkeypatc
         usage._check_dispatch_fences(scope, root)
 
 
-@pytest.mark.parametrize("blocked", [{}, {"_budget_pause": {}}, {"_budget_pause_consumed": True},
+@pytest.mark.parametrize("blocked", [{}, {"_budget_pause": {}},
+                                    {"_budget_pause_hold": {"reason": "stale_queue_row_grant_consumed", "selected": False}},
                                     {"_continuation_prepared": True}, {"_budget_pause_resume": {"authority": "sleep"}}])
 def test_dispatch_projection_preserves_selection_and_missing_member_refuses(published, blocked):
     root, _now = published

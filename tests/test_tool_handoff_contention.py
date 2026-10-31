@@ -14,6 +14,7 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.review_native_episode import inspection_registry
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader
+from tests._store_journal_shared import use_journal
 
 pytestmark = pytest.mark.serial
 
@@ -38,14 +39,16 @@ def reader(tmp_path):
 
 
 def hold_claim(monkeypatch, stack, root, *, exclusive=False):
-    """Acquire an independent SQLite lock only AFTER launch validation passed."""
+    """Acquire an independent SQLite lock only AFTER launch validation passed: on every access
+    (``exclusive``), else on the claim's write as the journal mode contends one (a reader holding
+    a rollback COMMIT, a writer holding a WAL one)."""
     original = task_store.patch_handoff
     release, attempts, busy = [], [], []
 
     def contend(*args, **kwargs):
         attempts.append(args[3])
         if not release:
-            release.append(stack.enter_context(database_reader(root, exclusive=exclusive)))
+            release.append(stack.enter_context(database_reader(root, exclusive=exclusive, write=not exclusive)))
         try:
             return original(*args, **kwargs)
         except store.StoreBusy as exc:
@@ -58,6 +61,8 @@ def hold_claim(monkeypatch, stack, root, *, exclusive=False):
 
 @pytest.mark.parametrize("exclusive", [False, True], ids=["read-blocks-commit", "exclusive-blocks-open"])
 def test_real_sql_claim_contention_preserves_one_registry_read(reader, monkeypatch, exclusive):
+    if not exclusive:  # a reader holds only a rollback-journal COMMIT; a WAL COMMIT waits for no reader
+        use_journal(monkeypatch, "PERSIST")
     root, registry, calls = reader
     waited = []
     with ExitStack() as stack:
@@ -83,9 +88,11 @@ def test_real_sql_claim_contention_preserves_one_registry_read(reader, monkeypat
     (False, "pause"), (False, "stop"), (True, "pause"), (True, "stop"),
     (True, "deadline"), (True, "closed"),
 ])
+@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
 def test_wait_rechecks_current_controls_without_revoking_handed_pause(
-    reader, monkeypatch, handed, control,
+    reader, monkeypatch, handed, control, journal,
 ):
+    use_journal(monkeypatch, journal)  # a held write fails its COMMIT (rollback journal), its BEGIN (WAL)
     root, registry, calls = reader
     stopped, waited = [], []
     with task_model_wait_scope(task={"id": "root", "_attempt": 1}, drive_root=root,
@@ -187,6 +194,8 @@ def test_store_busy_after_handler_entry_never_replays_handler(reader, monkeypatc
 def test_ordinary_registry_tools_keep_one_real_effect(reader, monkeypatch, tool, contended):
     from ouroboros.tools.registry import ToolRegistry
 
+    if contended:  # the reader-held COMMIT is the rollback journal's (a WAL COMMIT waits for no reader)
+        use_journal(monkeypatch, "PERSIST")
     root, inspection, _calls = reader
     registry = ToolRegistry(repo_dir=inspection._ctx.repo_dir, drive_root=root)
     registry._ctx.task_id = registry._ctx.root_task_id = "root"

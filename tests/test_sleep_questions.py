@@ -292,7 +292,7 @@ def test_only_polls_and_implicit_question_reads_skip_store_contention_waits(tmp_
     monkeypatch.setattr(current, "runs", observed)
     ctx = _ctx(tmp_path)
     assert json.loads(_await_messages(ctx, mode="warm", runs=["run-one"]))["reason"] == "sleep_armed"
-    assert reads == [("task_id=?", None), ("task_id=?", None), ("task_id=? AND state=?", 0)], \
+    assert reads == [("task_id=?", None), ("task_id=? AND state=?", 0), ("task_id=?", None)], \
         "arming a selected run keeps the ordinary contention wait; only the implicit read is a probe"
     reads.clear()
     assert owner_wait._sleep_wake(ctx, {"sleep": ctx._model_sleep}) == ""
@@ -328,10 +328,15 @@ def test_implicit_question_poll_reads_open_rows_but_selected_settled_runs_still_
     ctx = _ctx(tmp_path)
     assert model_sleep.wake_reason(ctx, {"any_mail": False}) == "run_question:open"
     assert decoded == ["open"], "implicit attention never decodes closed history"
+    assert owner_wait._sleep_wake(ctx, {"sleep": {"runs": ["done-0"]}}) == "run_question:open"
+    raw = _await_messages(ctx, mode="warm", runs=["done-1"])
+    assert json.loads(raw)["woke_by"] == "run_question:open"
+    assert [question["run_id"] for question in json.loads(raw)["questions"]] == ["open"]
+    _deliver(ctx, raw, monkeypatch)
     assert owner_wait._sleep_wake(ctx, {"sleep": {"runs": ["done-0"]}}) == "run:done-0"
     ready = json.loads(_await_messages(ctx, mode="warm", runs=["done-1"]))
     assert ready["reason"] == "ready" and ready["woke_by"] == "run:done-1", "a settled selection answers at once"
-    assert [question["run_id"] for question in ready["questions"]] == ["open"]
+    assert not ready.get("questions")
 
 
 def test_cold_resume_retry_rolls_back_question_exposure_with_its_deleted_disclosure(tmp_path, monkeypatch):
@@ -392,9 +397,12 @@ def test_concurrent_ready_condition_delivers_all_unseen_questions(tmp_path, monk
         args = {"wake_at": "2000-01-01T00:00:00+00:00"}
     if woke_by != "timeout":
         raw = _await_messages(ctx, mode="warm", **args)
-        assert json.loads(raw)["woke_by"] == woke_by
+        # D4 keeps responsible-child questions ahead of selected terminal facts.
+        assert json.loads(raw)["woke_by"] == ("run_question:run-a" if woke_by.startswith("task:") else woke_by)
         assert {q["run_id"] for q in json.loads(raw)["questions"]} == {"run-a", "run-b"}
         _deliver(ctx, raw, monkeypatch)
+        if woke_by.startswith("task:"):
+            assert model_sleep.wake_reason(ctx, args) == woke_by
     else:
         messages = []
         model_sleep.append_question_notice(ctx, woke_by, messages)
@@ -454,12 +462,16 @@ def test_loop_acks_each_delivered_wake_but_exposes_only_questions_its_text_carri
     assert result.status == "error" and result.meta == {"supervision_wake_id": "wake"}
     text = render_result_view(result.text, head_chars=80, tail_chars=80)[0] if view == "partial" else result.text
     _deliver(ctx, text, monkeypatch, partial=view == "partial", error=True, tool="delegate_wait", meta=result.meta)
+    assert sup._load_state(ctx, "")["pending_wake"], "delivery alone cannot ACK unsaved content"
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    flush_content_acks(ctx)  # The incorporated save boundary; _deliver only appends.
     pending = sup._load_state(ctx, "").get("pending_wake")
     if view == "partial":
         assert pending and sleep_custody.seen_interactions(ctx) == {}, "a partial view proves no delivery"
     else:
         assert not pending, "a delivered refusal wake is acknowledged, so it never replays"
-        assert sleep_custody.seen_interactions(ctx) == {"run-a": ["q1"] if view == "complete_refusal" else []}
+        assert sleep_custody.seen_interactions(ctx) == ({"run-a": ["q1"]} if view == "complete_refusal" else {})
 
 
 def test_supervision_id_without_delivered_question_cannot_mark_sleep_exposure(tmp_path):
@@ -471,7 +483,7 @@ def test_supervision_id_without_delivered_question_cannot_mark_sleep_exposure(tm
     sup._save_state(ctx, {"run_id": "run-a", "pending_wake": {"wake_id": "wake",
         "interaction_ids": ["q1"], "payload": payload}})
     assert sup.acknowledge_pending_wake(ctx, {"supervision_wake_id": "wake"})
-    assert sleep_custody.seen_interactions(ctx).get("run-a") == []
+    assert sleep_custody.seen_interactions(ctx) == {}
     assert sup._load_state(ctx, "")["interaction_acknowledged_ids"] == ["q1"], "old ACK is not sleep exposure"
 
 

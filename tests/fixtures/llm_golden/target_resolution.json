@@ -22,12 +22,15 @@
             "base_url": "https://openrouter.ai/api/v1",
             "default_headers": {
               "HTTP-Referer": "https://ouroboros-agent.ai/",
-              "X-OpenRouter-Title": "Ouroboros"
+              "X-OpenRouter-Title": "Ouroboros",
+              "X-OpenRouter-Metadata": "enabled"
             },
             "supports_openrouter_extensions": true,
-            "supports_generation_cost": true
+            "supports_generation_cost": true,
+            "provider_routing": null,
+            "connection": ""
           },
-          "value_sha256": "90d81cc3c49473ad3fda24e76d38dec58c10df1e6f0ba5ad306c75c742537394"
+          "value_sha256": "c094917113e484809d20eaddcb8f56e41492912cd4bb9fb415628979685dae7d"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -55,12 +58,15 @@
             "base_url": "https://openrouter.ai/api/v1",
             "default_headers": {
               "HTTP-Referer": "https://ouroboros-agent.ai/",
-              "X-OpenRouter-Title": "Ouroboros"
+              "X-OpenRouter-Title": "Ouroboros",
+              "X-OpenRouter-Metadata": "enabled"
             },
             "supports_openrouter_extensions": true,
-            "supports_generation_cost": true
+            "supports_generation_cost": true,
+            "provider_routing": null,
+            "connection": ""
           },
-          "value_sha256": "ca8713d626ccfcea1aca3f5465dc78955bf28954b306828d53658925fb098500"
+          "value_sha256": "ef5f33b84c208352d7307b899332e342ef2200e8591875ee4bdf9a75f06e0648"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -92,12 +98,15 @@
             "base_url": "https://proxy.invalid/v1",
             "default_headers": {
               "HTTP-Referer": "https://ouroboros-agent.ai/",
-              "X-OpenRouter-Title": "Ouroboros"
+              "X-OpenRouter-Title": "Ouroboros",
+              "X-OpenRouter-Metadata": "enabled"
             },
             "supports_openrouter_extensions": true,
-            "supports_generation_cost": true
+            "supports_generation_cost": true,
+            "provider_routing": null,
+            "connection": ""
           },
-          "value_sha256": "60ebc6bea2f671e71690503c799cbe5dd6b3692b59cd76952b1ffbae94b5db3a"
+          "value_sha256": "cd2c4a3d53f6e2f616a79af29984d6aade47ac01a1f01bd024088caccd1c6de0"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -125,9 +134,10 @@
             "base_url": "https://api.openai.com/v1",
             "default_headers": {},
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "e43c41c3ae4d31acbffa76949c1bd754f9401e457ef76a9ff353024ac3ad1e6b"
+          "value_sha256": "9341c33be2d75324dea6bed9cf174f81be86c162498cbdb2d4e8dc5da4f126b0"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -158,9 +168,10 @@
               "anthropic-version": "2023-06-01"
             },
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "eb7f9278b64a769ba2bd6528f20553548d583299cd83040103e909db81edc110"
+          "value_sha256": "9837f1a4c7fbbad4abaf6f1460ad56bbb79e340fe5cfde136037599b5bbf16a0"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -190,9 +201,10 @@
             "default_headers": {},
             "reasoning_split": true,
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "ad8073731e77f81151b8a64c3702d3ac2e934676567d17940ff9cbc91f854437"
+          "value_sha256": "5305873cbdf90af5a23efc276e04379ed48dee3286a63b379fe3933b9ac177bc"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -221,9 +233,10 @@
             "base_url": "https://fm.fixture.invalid/v1",
             "default_headers": {},
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "b887776394f3c9f528e9603b20e1a06cd1b174c50bf8e57be3c9c1c2ac42af8f"
+          "value_sha256": "7371192e3c7d057dfea2be9265f45fef90b57e6e2d1c0298a8a7e53999aa0ee8"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -251,9 +264,10 @@
             "base_url": "https://foundation-models.api.cloud.ru/v1",
             "default_headers": {},
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "96963b265e7d38a998725d776580e942da64e97585e2a9b0e5b54d3aca633f02"
+          "value_sha256": "ac6c236bae0fb82b2483ff3792f1f0f0a54218984567592f39ad4332affa6f5b"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -287,9 +301,10 @@
             "verify_ssl_certs": false,
             "default_headers": {},
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "453d1026d62dfc53db7dd596e6431686e076f63dd1509193795f35cc7d7479d7"
+          "value_sha256": "6094224a1b8ac593bebfc6e56420b94a71fa660c8453946941129084a67b6b29"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -323,9 +338,10 @@
             "verify_ssl_certs": true,
             "default_headers": {},
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "d60f7ebb59dcfbefbbe1fbb0495edb16dd75cdd598e99cd9a095371a1a53b7f0"
+          "value_sha256": "0a901227aaf05bd3830f89c47880ab3293594c976bddd872cdc7d93ecddae670"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -357,9 +373,10 @@
             "keyless": false,
             "default_headers": {},
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "045d2f12800f3d144f61d669281e0a82c19a01e4e4bd8854d2ea24b68add9562"
+          "value_sha256": "b5817c4ad146d39070d39a794470222429f8a4cf15a1be4480d028299830107d"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -389,9 +406,10 @@
             "keyless": false,
             "default_headers": {},
             "supports_openrouter_extensions": false,
-            "supports_generation_cost": false
+            "supports_generation_cost": false,
+            "connection": ""
           },
-          "value_sha256": "495aa9ab4b2eacf87790078cf0304609ff2f260d8ba412b1ecd35ed414dfa9c7"
+          "value_sha256": "7969692fcbeb58ac4714689af8a20adda4125a6f6a08cbfcf6087d90509f9dfb"
         },
         "sends": [],
         "unused_script_steps": 0

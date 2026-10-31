@@ -1,20 +1,27 @@
-"""GitHub tools: issues, pull requests, comments, checks.
+"""GitHub tools: ``github_read``, ``github_write`` and ``pr_merge`` over one ``gh`` transport.
 
+The read methods live in ``github_read``, the write methods and their receipt in ``github_write``,
+the checks reader in ``github_checks`` and the merge receipt contract in ``merge_receipts``; this
+module owns the transport, the repository binding and the registration.
 ``_gh_run`` is the structured transport read; ``_gh_cmd`` projects it onto the string ABI.
 ``GH_TARGET_INVALID`` / ``GH_TARGET_REQUIRED`` refusals enter the tool-result sidecar. A target
 or missing-CLI refusal raised before the invocation's first ``gh`` launch is published
 ``completed_no_effect``. The checks reader's literal ``gh api`` annotation path is the one
-subcall that does not take the explicit repo.
+subcall that does not take the explicit repo, alongside workflow literal API paths.
+Exact captures stream stdout to a capped file with size/sha256 and retain CRLF and final bytes;
+the cap bounds this destination, not gh internal downloads/cache. Stderr is drained and bounded.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import pathlib
 import re
 import subprocess
+import threading
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import wraps
@@ -24,12 +31,19 @@ from ouroboros.secret_masking import redact_known_values
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import LegacyTextResultAdapter, ToolResult, _publish_tool_result, _replace_tool_result
 from ouroboros.utils import truncate_within_limit
-from ouroboros.utils import truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
 _GENERIC_TRANSPORT = object()
 # One public tool invocation's "a gh subprocess was already launched" fact.
 _SUBMITTED: ContextVar[Optional[List[bool]]] = ContextVar("github_invocation_submitted", default=None)
+
+
+def _canonical_github_args(args: dict) -> dict:
+    """Canonical constrained values, shared by compatibility admission and direct dispatch."""
+    for key in ("method", "kind", "state"):
+        if key in args:
+            args[key] = str(args[key] or "").strip()
+    return args
 
 
 def _one_invocation(handler):
@@ -64,8 +78,17 @@ _PR_MERGE_REFUSAL_RE = re.compile(
     r"  gh pr checkout (?P<checkout>\d+) && git fetch (?P<remote>\S+) (?P<base>\S+)"
     r" && git (?P<action>merge|rebase) (?P=remote)/(?P=base))?)"
 )
-# Commit counts for listed PRs, by GitHub node id: one fixed read, no commit objects.
-_PR_COMMIT_COUNTS_QUERY = "query($ids:[ID!]!){nodes(ids:$ids){...on PullRequest{id commits{totalCount}}}}"
+
+
+@dataclass(frozen=True)
+class GhCapture:
+    """The stdout bytes one exact-capture ``_gh_run`` wrote to its file, as written: no decoding, no strip."""
+    path: pathlib.Path
+    size: int
+    sha256: str
+    # The byte cap ended the read and the process; the file holds the first ``size`` bytes of a longer stream.
+    truncated: bool
+
 
 
 @dataclass(frozen=True)
@@ -77,14 +100,25 @@ class GhResult:
     # "target" is a local refusal and "deadline" a request the checks reader never sent;
     # neither is a subprocess exit or exception.
     failure: str
+    # The exact branch's capture; None for the text transport and for every failure.
+    capture: Optional[GhCapture] = None
+
+
+# One pipe read; stderr of an exact capture is kept up to this many bytes for classification. A stderr that
+# exceeds the cap is WITHHELD whole: any cut leaves a boundary a token can straddle, and redaction matches whole
+# values only, so no bounded tail is safe to show. The exit code stays; the HTTP status is then unknown.
+_CAPTURE_CHUNK = _CAPTURE_STDERR_CAP = 65536
+_CAPTURE_STDERR_WITHHELD = b"[stderr exceeded 64 KiB; diagnostics withheld]"
 
 
 def _merge_refused_before_effect(cmd: List[str], res: subprocess.CompletedProcess, stderr: str) -> bool:
     """Whether the complete stderr of the merge ``merge_receipts`` sends is gh's own pre-merge refusal.
 
-    Only ``pr merge N --METHOD --match-head-commit SHA [--repo R]``, exit 1 with empty
+    Only ``pr merge N --METHOD --match-head-commit SHA [--body-file -] [--repo R]``, exit 1 with empty
     stdout, the whole refusal for N and nothing else; a status, prefix or suffix proves nothing."""
     args = cmd[1:]
+    if args[6:8] == ["--body-file", "-"]:
+        args = args[:6] + args[8:]
     if (res.returncode != 1 or res.stdout.strip() or args[:2] != ["pr", "merge"] or len(args) not in (6, 8)
             or args[3] not in ("--merge", "--squash", "--rebase") or args[4] != "--match-head-commit"
             or args[6:7] not in ([], ["--repo"])):
@@ -94,6 +128,93 @@ def _merge_refused_before_effect(cmd: List[str], res: subprocess.CompletedProces
         return False
     return match["checkout"] is None or (len(args) == 6 and match["checkout"] == args[2]
                                          and match["action"] == ("rebase" if args[3] == "--rebase" else "merge"))
+
+
+def _exit_failure(cmd: List[str], res: subprocess.CompletedProcess, stderr: str) -> GhResult:
+    """Classify a nonzero exit from its complete stderr, then keep a bounded head.
+
+    Redact the WHOLE stderr first (a cut could split a token), read gh's own status marker before any
+    bounding, then keep a bounded head. gh writes the status in three deterministic shapes and nowhere
+    else: ``gh: <msg> (HTTP NNN)`` at the end of a line (``gh api`` with a message), ``gh: HTTP NNN``
+    (``gh api`` without one) and ``HTTP NNN: <msg> (<url>)`` — optionally wrapped as ``failed to fork:
+    HTTP NNN: …`` — from every other command. A marker quoted mid-sentence is prose, not a status.
+    HTTP status alone proves nothing about which CLI step failed."""
+    err = redact_known_values(stderr or "", [github_token_from_env_or_settings()])
+    status = _GH_STATUS_RE.search(err)
+    head = " | ".join([line.strip() for line in err.splitlines() if line.strip()][:3])
+    head = truncate_within_limit(head, 600)
+    return GhResult(False, "⚠️ GH_ERROR: " + head, res.returncode,
+                    int(status.group(1) or status.group(2)) if status else None,
+                    "pre_effect" if _merge_refused_before_effect(cmd, res, err) else "exit")
+
+
+
+def _capture_stdout(cmd: List[str], cwd: pathlib.Path, env: dict, timeout: int, path: pathlib.Path,
+                    max_bytes: int) -> tuple:
+    """Stream the process's stdout into ``path`` up to ``max_bytes``: (GhCapture, returncode, stderr, timed_out).
+
+    The cap stops stdout acquisition into our destination, not gh's internal network/cache work.
+    Stderr is drained on its own thread into a bounded buffer so neither pipe blocks the
+    other; the deadline kills the process from a timer. The file holds exactly the bytes hashed. The sink
+    is opened before the launch: an unwritable path fails here, never after a process started."""
+    sink = open(path, "wb")
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except BaseException:
+        sink.close()
+        raise
+    err_parts: List[bytes] = []
+    err_total = [0]
+    timed_out = [False]
+
+    def drain_stderr() -> None:
+        kept = 0
+        while True:
+            chunk = proc.stderr.read(_CAPTURE_CHUNK)
+            if not chunk:
+                return
+            err_total[0] += len(chunk)
+            if kept < _CAPTURE_STDERR_CAP:
+                err_parts.append(chunk[:_CAPTURE_STDERR_CAP - kept])
+                kept += len(err_parts[-1])
+
+    def expire() -> None:
+        timed_out[0] = True
+        proc.kill()
+
+    drain, timer = threading.Thread(target=drain_stderr, daemon=True), threading.Timer(timeout, expire)
+    digest, written, truncated = hashlib.sha256(), 0, False
+    try:
+        drain.start()
+        timer.start()
+        with sink:
+            while True:
+                chunk = proc.stdout.read(_CAPTURE_CHUNK)
+                if not chunk:
+                    break
+                keep = chunk[:max(0, max_bytes - written)]
+                if keep:
+                    sink.write(keep)
+                    digest.update(keep)
+                    written += len(keep)
+                if len(keep) < len(chunk):
+                    truncated = True
+                    proc.kill()
+                    break
+        proc.stdout.close()
+        returncode = proc.wait()
+    finally:
+        timer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        drain.join(timeout=5)
+        proc.stderr.close()
+    raw = _CAPTURE_STDERR_WITHHELD if err_total[0] > _CAPTURE_STDERR_CAP else b"".join(err_parts)
+    stderr = raw.decode("utf-8", errors="replace")
+    return GhCapture(path, written, digest.hexdigest(), truncated), returncode, stderr, timed_out[0]
+
 
 
 def _refuse(ctx: ToolContext, text: str, code: str = "TOOL_ARG_ERROR", *, no_effect: bool = False) -> str:
@@ -153,7 +274,8 @@ def github_cli_configured() -> bool:
 
 
 def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
-            *, repo: object = _GENERIC_TRANSPORT) -> GhResult:
+            *, repo: object = _GENERIC_TRANSPORT, capture_to: Optional[pathlib.Path] = None,
+            max_bytes: int = 0) -> GhResult:
     # Only omitted internal API/Hub calls keep the generic transport contract.
     # Public repository tools always pass repo, including '' for Project focus.
     # The target refusals below publish a typed argument error into the calling
@@ -170,6 +292,8 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                                          meta_updates={"operation_outcome": "completed_no_effect"})
         return GhResult(False, _publish_tool_result(ctx, typed) if typed else text, None, None, failure)
 
+    if capture_to is not None and (input_data is not None or type(max_bytes) is not int or max_bytes <= 0):
+        raise ValueError("an exact capture takes a positive max_bytes and no stdin")
     if repo is not _GENERIC_TRANSPORT and not isinstance(repo, str):
         return refused("", "target", ToolResult(
             status="error", code="TOOL_ARG_ERROR",
@@ -205,36 +329,37 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                                "target")
             if workspace or room_dir or project:
                 env.pop("GH_REPO", None)  # Ambient defaults cannot replace the selected Project.
-            if repo:
-                cmd.extend(["--repo", repo])
+            if repo and args[:1] != ["api"]:  # API routes carry the repository.
+                if args[:2] == ["repo", "view"]:
+                    # `gh repo view [<repository>] [flags]` names its target positionally; its INHERITED FLAGS list
+                    # only --help (gh 2.101 help), so `--repo` would be an unknown flag. Every other subcommand
+                    # this module sends lists `-R, --repo [HOST/]OWNER/REPO`.
+                    cmd[3:3] = [repo]
+                else:
+                    cmd.extend(["--repo", repo])
         if submitted is not None:
             submitted[0] = True
+        if capture_to is not None:
+            capture, returncode, stderr, timed_out = _capture_stdout(cmd, cwd, env, timeout, capture_to, max_bytes)
+            if timed_out:
+                return GhResult(False, f"⚠️ GH_TIMEOUT: exceeded {timeout}s.", None, None, "timeout")
+            if capture.truncated:  # The cap ended the process; its exit says nothing about the command.
+                return GhResult(True, "", None, None, "", capture)
+            if returncode != 0:
+                return _exit_failure(cmd, subprocess.CompletedProcess(cmd, returncode, "", stderr), stderr)
+            return GhResult(True, "", returncode, None, "", capture)
         res = subprocess.run(
             cmd,
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=timeout,
             input=input_data,
             env=env,
         )
         if res.returncode != 0:
-            # Redact the WHOLE stderr first (a cut could split a token), read gh's own
-            # status marker before any bounding, then keep a bounded head. gh writes the
-            # status in three deterministic shapes and nowhere else: ``gh: <msg> (HTTP NNN)``
-            # at the end of a line (``gh api`` with a message), ``gh: HTTP NNN`` (``gh api``
-            # without one) and ``HTTP NNN: <msg> (<url>)`` — optionally wrapped as
-            # ``failed to fork: HTTP NNN: …`` — from every other command. A marker quoted
-            # mid-sentence is prose, not a status.
-            err = redact_known_values(res.stderr or "", [github_token_from_env_or_settings()])
-            status = _GH_STATUS_RE.search(err)
-            head = " | ".join([line.strip() for line in err.splitlines() if line.strip()][:3])
-            head = truncate_within_limit(head, 600)
-            # Classified from the whole stderr, before the bounded head the receipt keeps.
-            # HTTP status alone proves nothing about which CLI step failed.
-            return GhResult(False, "⚠️ GH_ERROR: " + head, res.returncode,
-                            int(status.group(1) or status.group(2)) if status else None,
-                            "pre_effect" if _merge_refused_before_effect(cmd, res, err) else "exit")
+            return _exit_failure(cmd, res, res.stderr or "")
         return GhResult(True, res.stdout.strip(), res.returncode, None, "")
     except FileNotFoundError as e:
         missing = str(getattr(e, "filename", "") or "")
@@ -256,315 +381,140 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
     return _gh_run(args, ctx, timeout=timeout, input_data=input_data, repo=repo).text
 
 
-def _list_issues(ctx: ToolContext, state: str = "open", labels: str = "", limit: int = 20, repo: str = "") -> str:
-    args = [
-        "issue", "list",
-        "--state", state,
-        "--limit", str(min(limit, 50)),
-        "--json", "number,title,body,labels,createdAt,author,assignees,state",
-    ]
-    if labels:
-        args.extend(["--label", labels])
-
-    raw = _gh_cmd(args, ctx, repo=repo)
-    if raw.startswith("⚠️"):
-        return raw
-
-    try:
-        issues = json.loads(raw)
-    except json.JSONDecodeError:
-        return _refuse(ctx, f"⚠️ TOOL_ERROR: failed to parse issues JSON: {raw[:500]}", "TOOL_ERROR")
-
-    if not issues:
-        return f"No {state} issues found."
-
-    lines = [f"**{len(issues)} {state} issue(s):**\n"]
-    for issue in issues:
-        labels_str = ", ".join(l.get("name", "") for l in issue.get("labels", []))
-        author = issue.get("author", {}).get("login", "unknown")
-        lines.append(
-            f"- **#{issue['number']}** {issue['title']}"
-            f" (by @{author}{', labels: ' + labels_str if labels_str else ''})"
-        )
-        body = (issue.get("body") or "").strip()
-        if body:
-            preview = body[:200] + ("..." if len(body) > 200 else "")
-            lines.append(f"  > {preview}")
-
-    return "\n".join(lines)
+_REPO_RE = re.compile(r"^(?:(?P<host>[^/\s]+)/)?(?P<owner>[^/\s]+)/(?P<name>[^/\s]+)$")
+_GRAPHQL_LITERALS = re.compile(r'"""(?:\\.|(?!""")[\s\S])*"""|"(?:\\.|[^"\\])*"|#[^\r\n]*')
 
 
-def _get_issue(ctx: ToolContext, number: int, repo: str = "") -> str:
-    if number <= 0:
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: issue number must be positive", no_effect=True)
-
-    args = [
-        "issue", "view", str(number),
-        "--json", "number,title,body,labels,createdAt,author,assignees,state,comments",
-    ]
-
-    raw = _gh_cmd(args, ctx, repo=repo)
-    if raw.startswith("⚠️"):
-        return raw
-
-    try:
-        issue = json.loads(raw)
-    except json.JSONDecodeError:
-        return _refuse(ctx, f"⚠️ TOOL_ERROR: failed to parse issue JSON: {raw[:500]}", "TOOL_ERROR")
-
-    labels_str = ", ".join(l.get("name", "") for l in issue.get("labels", []))
-    author = issue.get("author", {}).get("login", "unknown")
-
-    lines = [
-        f"## Issue #{issue['number']}: {issue['title']}",
-        f"**State:** {issue['state']}  |  **Author:** @{author}",
-    ]
-    if labels_str:
-        lines.append(f"**Labels:** {labels_str}")
-
-    body = (issue.get("body") or "").strip()
-    if body:
-        lines.append(f"\n**Body:**\n{_truncate_with_notice(body, 3000)}")
-
-    comments = issue.get("comments", [])
-    if comments:
-        shown_comments = comments[:10]
-        lines.append(f"\n**Comments (showing {len(shown_comments)} of {len(comments)}):**")
-        for c in shown_comments:
-            c_author = c.get("author", {}).get("login", "unknown")
-            c_body = _truncate_with_notice((c.get("body") or "").strip(), 500)
-            lines.append(f"\n@{c_author}:\n{c_body}")
-
-    return "\n".join(lines)
+def _graphql_operations(document: str) -> set[str]:
+    """Operation keywords at definition starts, excluding strings, comments and selection sets."""
+    code = _GRAPHQL_LITERALS.sub(" ", document)
+    operations, braces, parentheses, start = set(), 0, 0, True
+    for token in re.findall(r"[A-Za-z_]\w*|[{}()]", code):
+        if start:
+            if token in ("query", "mutation", "subscription"):
+                operations.add(token)
+            elif token == "{":
+                operations.add("query")  # shorthand operation
+            start = False
+        if token == "(":
+            parentheses += 1
+        elif token == ")":
+            parentheses -= 1
+        elif not parentheses:
+            if token == "{":
+                braces += 1
+            elif token == "}":
+                braces -= 1
+                start = braces == 0
+    return operations
 
 
-def _comment_on_issue(ctx: ToolContext, number: int, body: str, repo: str = "") -> str:
-    if number <= 0:
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: issue number must be positive", no_effect=True)
-
-    if not body or not body.strip():
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: comment body cannot be empty.", no_effect=True)
-
-    args = ["issue", "comment", str(number), "--body-file", "-"]
-    raw = _gh_cmd(args, ctx, input_data=body, repo=repo)
-    if raw.startswith("⚠️"):
-        return raw
-    return f"✅ Comment added to issue #{number}."
+def _split_repo(repo: str) -> Optional[tuple]:
+    """``(host, owner, name)`` of an explicit ``[HOST/]OWNER/REPO``; None when it is not one."""
+    match = _REPO_RE.fullmatch(str(repo or "").strip())
+    return (match["host"] or "", match["owner"], match["name"]) if match else None
 
 
-def _close_issue(ctx: ToolContext, number: int, comment: str = "", repo: str = "") -> str:
-    if number <= 0:
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: issue number must be positive", no_effect=True)
+def _no_launch_yet() -> bool:
+    """Whether this public invocation has launched no ``gh`` yet, so a refusal can attest it had no effect.
 
-    if comment and comment.strip():
-        result = _comment_on_issue(ctx, number, comment, repo=repo)
-        if result.startswith("⚠️"):
-            return result
-
-    args = ["issue", "close", str(number)]
-    raw = _gh_cmd(args, ctx, repo=repo)
-    if raw.startswith("⚠️"):
-        return raw
-    return f"✅ Issue #{number} closed."
+    Only a public invocation scope proves it; a direct internal call attests nothing."""
+    submitted = _SUBMITTED.get()
+    return submitted is not None and not submitted[0]
 
 
-def _pr_commit_counts(ctx: ToolContext, prs: list) -> dict | str:
-    """Exact commit counts of the listed PRs by node id, or the error that withholds the list.
-
-    The list keeps its CLI target; the PR URLs GitHub returned name the one host and
-    repository the single fixed GraphQL read then asks. A count is never guessed."""
-    from ouroboros.merge_receipts import _PR_URL_RE
-
-    def unavailable(reason: str) -> str:
-        return _refuse(ctx, f"⚠️ TOOL_ERROR: commit counts of the listed PRs are unavailable ({reason}); "
-                            "no list is shown without them.", "TOOL_ERROR")
-
-    rows = [(pr, _PR_URL_RE.fullmatch(str(pr.get("url") or "")) if isinstance(pr, dict) else None) for pr in prs]
-    if any(where is None or where[4] != str(pr.get("number")) or not isinstance(pr.get("id"), str)
-           for pr, where in rows) or len({where.groups()[:3] for _pr, where in rows}) != 1:
-        return unavailable("GitHub returned rows without one consistent repository URL and id")
-    ids, host = [pr["id"] for pr, _where in rows], rows[0][1].group(1)
-    if len(set(ids)) != len(ids):
-        return unavailable("GitHub returned a repeated PR id")
-    res = _gh_run(["api", "graphql", "--hostname", host, "--input", "-"], ctx,
-                  input_data=json.dumps({"query": _PR_COMMIT_COUNTS_QUERY, "variables": {"ids": ids}}))
-    if not res.ok:
-        return res.text
-    try:
-        nodes = json.loads(res.text)["data"]["nodes"]
-        counts = {node["id"]: node["commits"]["totalCount"] for node in nodes}
-    except (ValueError, TypeError, KeyError):
-        return unavailable("the count response is malformed")
-    if len(counts) != len(nodes) or set(counts) != set(ids) or any(
-            type(count) is not int or count < 0 for count in counts.values()):
-        return unavailable("the count response does not hold one count for every listed PR")
-    return counts
+def _target_refusal(ctx: ToolContext, text: str) -> GhResult:
+    return GhResult(False, _refuse(ctx, text, no_effect=_no_launch_yet()), None, None, "target")
 
 
-def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20, repo: str = "") -> str:
-    args = [
-        "pr", "list",
-        "--state", state,
-        "--limit", str(min(limit, 50)),
-        "--json", "number,title,author,headRefName,baseRefName,createdAt,isDraft,reviewDecision,id,url",
-    ]
-    raw = _gh_cmd(args, ctx, repo=repo)
-    if raw.startswith("⚠️"):
-        return raw
+def _gh_api(ctx: ToolContext, route: str, *, repo: str, method: str = "GET", body: Optional[dict] = None,
+            include: bool = False, timeout: int = 30) -> GhResult:
+    """One REST call through ``gh api`` under the public repository binding.
 
-    try:
-        prs = json.loads(raw)
-    except json.JSONDecodeError:
-        return _refuse(ctx, f"⚠️ TOOL_ERROR: failed to parse PRs JSON: {raw[:500]}", "TOOL_ERROR")
-
-    if not prs:
-        return f"No {state} pull requests found."
-    counts = _pr_commit_counts(ctx, prs)
-    if isinstance(counts, str):
-        return counts
-
-    lines = [f"**{len(prs)} {state} PR(s):**\n"]
-    for pr in prs:
-        author = pr.get("author", {}).get("login", "unknown")
-        head = pr.get("headRefName", "?")
-        base = pr.get("baseRefName", "?")
-        draft = " [DRAFT]" if pr.get("isDraft") else ""
-        review = pr.get("reviewDecision") or ""
-        review_str = f" [{review}]" if review else ""
-        n_commits = counts[pr["id"]]
-        lines.append(
-            f"- **PR #{pr['number']}**{draft}{review_str} {pr['title']}"
-            f" (by @{author}, {head}→{base}, {n_commits} commits, created {pr['createdAt'][:10]})"
-        )
-
-    return "\n".join(lines)
+    A bound Project (``repo=""``) keeps gh's ``{owner}/{repo}`` placeholders, which gh resolves
+    from the bound directory exactly as ``gh issue list`` does; an explicit repo is substituted
+    into the route and its host passed as ``--hostname``. ``include`` keeps the status line and
+    headers in the output (pagination reads the ``Link`` header)."""
+    args = ["api"]
+    if method != "GET":
+        args.extend(["--method", method])
+    if include:
+        args.append("--include")
+    host = ""
+    if repo:
+        parts = _split_repo(repo)
+        if parts is None:
+            return _target_refusal(ctx, "⚠️ GH_TARGET_INVALID: repo must be [HOST/]OWNER/REPO; omit it to use the selected Project.")
+        host, owner, name = parts
+        route = route.replace("{owner}/{repo}", f"{owner}/{name}")
+    args.append(route)
+    if host:
+        args.extend(["--hostname", host])
+    input_data = None
+    if body is not None:
+        args.extend(["--input", "-"])
+        input_data = json.dumps(body)
+    return _gh_run(args, ctx, timeout=timeout, input_data=input_data, repo=repo)
 
 
-def _get_pr(ctx: ToolContext, number: int, repo: str = "") -> str:
-    if number <= 0:
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: PR number must be positive.", no_effect=True)
+def _gh_graphql(ctx: ToolContext, document: str, variables: dict, *, repo: str, repo_vars: bool = True,
+                timeout: int = 30) -> GhResult:
+    """One GraphQL call under the public repository binding; ``$owner``/``$name`` name the repository.
 
-    meta_args = [
-        "pr", "view", str(number),
-        "--json", "number,title,body,author,headRefName,baseRefName,headRepository,"
-                  "createdAt,updatedAt,state,isDraft,reviewDecision,mergeable,"
-                  "additions,deletions,changedFiles,commits,reviews,comments",
-    ]
-    raw = _gh_cmd(meta_args, ctx, timeout=30, repo=repo)
-    if raw.startswith("⚠️"):
-        return raw
+    The document and variables travel in one JSON envelope, preserving every variable's type."""
+    args = ["api", "graphql", "--input", "-"]
+    values = dict(variables or {})
+    host = ""
+    if repo:
+        parts = _split_repo(repo)
+        if parts is None:
+            return _target_refusal(ctx, "⚠️ GH_TARGET_INVALID: repo must be [HOST/]OWNER/REPO; omit it to use the selected Project.")
+        host, owner, name = parts
+        if repo_vars:
+            values = {"owner": owner, "name": name, **values}
+    elif repo_vars:
+        from ouroboros.tools.github_read import _Read
 
-    try:
-        pr = json.loads(raw)
-    except json.JSONDecodeError:
-        return _refuse(ctx, f"⚠️ TOOL_ERROR: failed to parse PR JSON: {raw[:500]}", "TOOL_ERROR")
-
-    author = pr.get("author", {}).get("login", "unknown")
-    head_repo = (pr.get("headRepository") or {}).get("nameWithOwner", "?")
-
-    lines = [
-        f"## PR #{pr['number']}: {pr['title']}",
-        f"**State:** {pr['state']}  |  **Author:** @{author}",
-        f"**Branch:** {head_repo}@{pr.get('headRefName','?')} → {pr.get('baseRefName','?')}",
-        f"**Changes:** +{pr.get('additions',0)} / -{pr.get('deletions',0)}"
-        f" across {pr.get('changedFiles',0)} file(s)",
-        f"**Mergeable:** {pr.get('mergeable', 'unknown')}",
-    ]
-    if pr.get("isDraft"):
-        lines.append("**⚠️ Draft PR**")
-    if pr.get("reviewDecision"):
-        lines.append(f"**Review decision:** {pr['reviewDecision']}")
-
-    body = (pr.get("body") or "").strip()
-    if body:
-        lines.append(f"\n**Description:**\n{_truncate_with_notice(body, 2000)}")
-
-    commits = pr.get("commits", [])
-    if commits:
-        lines.append(
-            f"\n**Commits ({len(commits)}) — original author preserved on cherry-pick:**"
-        )
-        shas_for_pick = []
-        for c in commits:
-            node = c.get("commit", c)
-            sha = c.get("oid", "?")[:12]
-            full_sha = c.get("oid", "?")
-            msg = (node.get("messageHeadline") or node.get("message") or "?")[:70]
-            authored_by = node.get("authors", {})
-            if isinstance(authored_by, dict):
-                authored_by = authored_by.get("nodes", [])
-            if authored_by:
-                a = authored_by[0]
-                author_str = f"{a.get('name','?')} <{a.get('email','?')}>"
-            else:
-                author_str = "unknown"
-            lines.append(f"  {sha} | {author_str} | {msg}")
-            shas_for_pick.append(full_sha)
-        lines.append(f"\nCommit SHAs:\n  {shas_for_pick}")
-
-    diff_names_raw = _gh_cmd(["pr", "diff", str(number), "--name-only"], ctx, timeout=30, repo=repo)
-    if not diff_names_raw.startswith("⚠️") and diff_names_raw.strip():
-        file_list = diff_names_raw.strip().splitlines()
-        lines.append(f"\n**Changed files ({len(file_list)}):**")
-        for f in file_list[:50]:
-            lines.append(f"  {f}")
-        if len(file_list) > 50:
-            lines.append(f"  ... and {len(file_list) - 50} more")
-
-    diff_raw = _gh_cmd(["pr", "diff", str(number)], ctx, timeout=60, repo=repo)
-    if not diff_raw.startswith("⚠️") and diff_raw.strip():
-        lines.append("\n**Diff (truncated to 8000 chars):**\n```diff")
-        lines.append(_truncate_with_notice(diff_raw, 8000))
-        lines.append("```")
-
-    reviews = pr.get("reviews", [])
-    comments = pr.get("comments", [])
-    if reviews or comments:
-        lines.append(f"\n**Reviews ({len(reviews)}) + PR comments ({len(comments)}):**")
-        for rv in reviews[:5]:
-            rv_author = (rv.get("author") or {}).get("login", "?")
-            rv_state = rv.get("state", "?")
-            rv_body = _truncate_with_notice((rv.get("body") or "").strip(), 300)
-            lines.append(f"  [{rv_state}] @{rv_author}: {rv_body}")
-        for cm in comments[:5]:
-            cm_author = (cm.get("author") or {}).get("login", "?")
-            cm_body = _truncate_with_notice((cm.get("body") or "").strip(), 300)
-            lines.append(f"  @{cm_author}: {cm_body}")
-
-    if not (repo or getattr(ctx, "workspace_root", None) or getattr(ctx, "project_id", "")):
-        lines.append(
-            f"\n**Integration steps:**\n"
-            f"  1. fetch_pr_ref(pr_number={number})\n"
-            f"  2. create_integration_branch(pr_number={number})\n"
-            f"  3. cherry_pick_pr_commits(shas=[...])  # SHAs above; use override_author only for placeholder identities\n"
-            f"  4. stage_adaptations()                 # optional; do NOT commit_reviewed on the integration branch\n"
-            f"  5. stage_pr_merge(branch='integrate/pr-{number}') → commit_reviewed\n"
-            f"  6. comment_on_pr(number={number}, body='Integrated as ...')"
-        )
-
-    return "\n".join(lines)
+        slug, error = _Read(ctx, "api", repo).slug()
+        if error:
+            return GhResult(False, error, None, None, "target")
+        owner, name = slug.split("/", 1)
+        values = {"owner": owner, "name": name, **values}
+    if host:
+        args.extend(["--hostname", host])
+    return _gh_run(args, ctx, timeout=timeout, repo=repo,
+                   input_data=json.dumps({"query": document, "variables": values}))
 
 
-def _comment_on_pr(ctx: ToolContext, number: int, body: str, repo: str = "") -> str:
-    if number <= 0:
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: PR number must be positive.", no_effect=True)
-    if not (body or "").strip():
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: comment body cannot be empty.", no_effect=True)
+def _send_facts(res: GhResult) -> str:
+    """The facts of a failed gh send, never a verdict: gh's exit and HTTP status, a timeout, or a lost answer.
 
-    args = ["pr", "comment", str(number), "--body-file", "-"]
-    raw = _gh_cmd(args, ctx, input_data=body, repo=repo)
-    if raw.startswith("⚠️"):
-        return raw
-    return f"✅ Comment added to PR #{number}."
+    A nonzero exit alone does not prove GitHub rejected the request (gh can fail after the server acted), so
+    callers report the effect as unconfirmed and read it back instead of calling it refused."""
+    if res.failure in ("exit", "pre_effect"):
+        facts = ", ".join(filter(None, [f"exit {res.exit_code}" if res.exit_code is not None else "",
+                                        f"HTTP {res.http_status}" if res.http_status else ""]))
+        return f"ended with {facts or 'a nonzero exit'}: {res.text}"
+    if res.failure == "timeout":
+        return f"timed out: {res.text}"
+    return f"failed without an answer ({res.failure}): {res.text}"
+
 
 
 def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str,
               review_task_ids: Optional[List[str]] = None, reviewed_head_sha: str = "",
               reviewed_base_sha: str = "", review_scope: str = "full", review_verdict: str = "",
-              review_record_id: str = "", repo: str = "") -> str:
+              review_record_id: str = "", repo: str = "", checks: Optional[List[dict]] = None) -> str:
     """Thin transport binding; the receipt contract lives in ``merge_receipts``."""
     from ouroboros.merge_receipts import REVIEW_SCOPES, _VERDICT_RE, _sha, run_pr_merge
     from ouroboros.tool_access import canonical_data_root
+    from ouroboros.update_qualification import STATES
+
+    if checks is not None and (not isinstance(checks, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip()
+            or row.get("status") not in STATES or not isinstance(row.get("detail", ""), str) for row in checks)):
+        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: checks need name, status (passed, failed, not_run, unknown) and optional detail.",
+                       no_effect=True)
 
     if review_scope not in REVIEW_SCOPES:
         return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: review_scope is full or delta; nothing was merged.", no_effect=True)
@@ -581,19 +531,37 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
         ctx, lambda args, **kw: _gh_run(args, ctx, repo=repo, **kw), lambda args, **kw: _gh_run(args, ctx, **kw),
         drive_root=canonical_data_root(ctx), task_id=str(ctx.task_id or ""), number=int(number or 0),
         expected_head_sha=expected_head_sha, method=method,
-        review={"declared": declared, "task_ids": list(review_task_ids or []), "record_id": record_id})
+        review={"declared": declared, "task_ids": list(review_task_ids or []), "record_id": record_id, "checks": checks})
     if receipt.get("refused"):
         code = "TOOL_ARG_ERROR" if receipt["refused"] == "arguments" else "TOOL_ERROR"
         return _refuse(ctx, f"⚠️ PR_MERGE_REFUSED: {receipt['refused']} — {receipt.get('detail', '')}", code, no_effect=True)
-    from ouroboros.merge_receipts import card_row_text
+    from ouroboros.merge_receipts import card_row_text, queued_earlier_note
 
     status = (receipt.get("outcome") or {}).get("status", "unknown")
     lines = [card_row_text(receipt), f"receipt_id={receipt['receipt_id']} (task result: merge_receipts)"]
-    if receipt.get("readback_only"):
+    prior = receipt.get("prior_status", "unknown") if receipt.get("readback_only") else None
+    if prior == "merged":
+        lines.append("This PR's merge is already recorded in this receipt, so this call only read GitHub back "
+                     "and sent no new merge request.")
+    elif prior == "":
+        lines.append("An earlier or concurrent request for this PR holds its merge intent with no recorded outcome "
+                     "yet, so this call only read GitHub back and sent no new merge request.")
+    elif prior is not None:
         lines.append("An earlier request for this PR had no confirmed outcome, so this call only read GitHub back "
                      "and sent no new merge request. Unknown and queued requests remain observation-only.")
-    if receipt.get("republished"):
-        lines.append("Receipt publication retried; the merge was not repeated.")
+    # The receipt's retained, already bounded and redacted gh facts belong in this local
+    # response (#1555); the public PR-body block never carries them.
+    effect = receipt.get("effect") or {}
+    if effect and not effect.get("ok"):
+        facts = ", ".join([f"failure={effect.get('failure') or 'unknown'}"] + [
+            f"{key}={effect[key]}" for key in ("exit_code", "http_status") if effect.get(key) is not None])
+        output = str(effect.get("output") or "").strip()
+        lines.append(("Earlier merge request: " if receipt.get("readback_only") else "Merge request: ")
+                     + facts + (f": {output}" if output else ""))
+    if (receipt.get("outcome") or {}).get("reason"):
+        # The first line already names the latest readback beside an earlier queue state.
+        lines.append(("Earlier GitHub readback: " if queued_earlier_note(receipt) else "GitHub readback: ")
+                     + f"{receipt['outcome']['reason']}.")
     publication = receipt.get("publication") or {}
     if receipt.get("receipt_write_gap"):
         lines.append("⚠️ Merge receipt persistence is unknown after the external effect: "
@@ -615,103 +583,27 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
         meta={"operation_outcome": outcome}))
 
 
-def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = "", repo: str = "") -> str:
-    if not title or not title.strip():
-        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: issue title cannot be empty.", no_effect=True)
+def _github_read(ctx: ToolContext, method: str = "", repo: str = "", **args) -> str:
+    """``github_read``: the methods live in ``github_read`` and call this module's transport."""
+    from ouroboros.tools.github_read import run_read
 
-    args = ["issue", "create", f"--title={title}"]
-    if body:
-        args.append("--body-file=-")
-        raw = _gh_cmd(args, ctx, input_data=body, repo=repo)
-    else:
-        raw = _gh_cmd(args, ctx, repo=repo)
-
-    if labels:
-        if not raw.startswith("⚠️"):
-            import re
-            match = re.search(r'/issues/(\d+)', raw)
-            if match:
-                issue_num = int(match.group(1))
-                label_args = ["issue", "edit", str(issue_num), f"--add-label={labels}"]
-                _gh_cmd(label_args, ctx, repo=repo)
-
-    if raw.startswith("⚠️"):
-        return raw
-    return f"✅ Issue created: {raw}"
+    return run_read(ctx, method, repo, **args)
 
 
-def _get_checks(ctx: ToolContext, number: int = 0, sha: str = "", wait_seconds: int = 0, repo: str = "") -> str:
-    """``get_github_checks``: the reader lives in ``github_checks`` and calls this module's transport."""
-    from ouroboros.tools.github_checks import get_checks
+def _github_write(ctx: ToolContext, method: str = "", repo: str = "", **args) -> str:
+    """``github_write``: the methods and the receipt live in ``github_write``; the transport is this module's."""
+    from ouroboros.tools.github_write import run_write
 
-    return get_checks(ctx, number=number, sha=sha, wait_seconds=wait_seconds, repo=repo)
+    return run_write(ctx, method, repo, **args)
 
 
 def get_tools() -> List[ToolEntry]:
+    from ouroboros.tools.github_read import SCHEMA as READ_SCHEMA
+    from ouroboros.tools.github_write import SCHEMA as WRITE_SCHEMA
+
     tools = [
-        ToolEntry("list_github_prs", {
-            "name": "list_github_prs",
-            "description": (
-                "List GitHub pull requests for the current repository. "
-                "Shows PR number, title, author, branch, commit count, and state. "
-                "Use before get_github_pr to identify which PR to inspect."
-            ),
-            "parameters": {"type": "object", "properties": {
-                "state": {"type": "string", "default": "open",
-                          "enum": ["open", "closed", "merged", "all"],
-                          "description": "Filter by PR state"},
-                "limit": {"type": "integer", "default": 20,
-                          "description": "Max PRs to return (max 50)"},
-            }, "required": []},
-        }, _list_prs),
-
-        ToolEntry("get_github_pr", {
-            "name": "get_github_pr",
-            "description": (
-                "Get full details of a GitHub PR: metadata, description, commit list "
-                "with original author names/emails, changed files list, diff/patch "
-                "(truncated to 8000 chars), review comments, and mergeable state. "
-                "Includes exact commit SHAs for the selected repository."
-            ),
-            "parameters": {"type": "object", "properties": {
-                "number": {"type": "integer", "description": "PR number"},
-            }, "required": ["number"]},
-        }, _get_pr),
-
-        ToolEntry("get_github_checks", {
-            "name": "get_github_checks",
-            "description": (
-                "Read what GitHub records about the checks of one commit: every workflow run (its latest attempt) with its state, the state "
-                "counts of its jobs (for a pull request, of the rollup's jobs), the failed, unfinished and cancelled jobs and their steps, "
-                "failure annotations (test names when the workflow publishes them) and, for a pull request, third-party "
-                "checks and commit statuses. Read-only: pushes and dispatches nothing. Reports facts and names each source "
-                "it could not read; it gives no verdict, and a workflow that did not start has no record to report."
-            ),
-            "parameters": {"type": "object", "properties": {
-                "number": {"type": "integer", "default": 0,
-                           "description": "Pull request number; its head commit is read. Pass exactly one of number / sha."},
-                "sha": {"type": "string", "default": "",
-                        "description": "Full 40-hex commit SHA (resolve a branch or tag with `git rev-parse <ref>`)."},
-                "wait_seconds": {"type": "integer", "default": 0,
-                                 "description": "Poll until a workflow run is registered and every registered run is completed, "
-                                                "or this many seconds pass (max 240); the report states what is unfinished. "
-                                                "A run-list read that fails, also during the wait, ends the call with that error."},
-            }, "required": []},
-        }, _get_checks),
-
-        ToolEntry("comment_on_pr", {
-            "name": "comment_on_pr",
-            "description": (
-                "Add a comment to a GitHub pull request. "
-                "Use to acknowledge receipt, report integration status, request changes, "
-                "or leave an audit trail after integration."
-            ),
-            "parameters": {"type": "object", "properties": {
-                "number": {"type": "integer", "description": "PR number"},
-                "body": {"type": "string", "description": "Comment text (markdown)"},
-            }, "required": ["number", "body"]},
-        }, _comment_on_pr),
-
+        ToolEntry("github_read", READ_SCHEMA, _github_read),
+        ToolEntry("github_write", WRITE_SCHEMA, _github_write),
         ToolEntry("pr_merge", {
             "name": "pr_merge",
             "description": (
@@ -726,6 +618,11 @@ def get_tools() -> List[ToolEntry]:
                 "number": {"type": "integer", "description": "PR number"},
                 "expected_head_sha": {"type": "string", "description": "The PR head you intend to merge; GitHub refuses if it moved"},
                 "method": {"type": "string", "enum": ["merge", "squash", "rebase"]},
+                "checks": {"type": "array", "description": "Execution declarations retained in the merge commit. Name full_battery and cost_contract explicitly; omissions stay unknown. Describe accepted FAILs and checks not run.",
+                           "items": {"type": "object", "properties": {
+                               "name": {"type": "string"},
+                               "status": {"type": "string", "enum": ["passed", "failed", "not_run", "unknown"]},
+                               "detail": {"type": "string"}}, "required": ["name", "status"]}},
                 "review_task_ids": {"type": "array", "items": {"type": "string"}, "default": [],
                                     "description": "Task ids of the reviews you rely on; the host records whether each "
                                                    "completed, not its kind or reviewed subject"},
@@ -742,52 +639,6 @@ def get_tools() -> List[ToolEntry]:
                                                     "of your declaration. An id with no record is refused before any merge"},
             }, "required": ["number", "expected_head_sha", "method"]},
         }, _pr_merge),
-
-        ToolEntry("list_github_issues", {
-            "name": "list_github_issues",
-            "description": "List GitHub issues. Use to check for new tasks, bug reports, or feature requests from the user or contributors.",
-            "parameters": {"type": "object", "properties": {
-                "state": {"type": "string", "default": "open", "enum": ["open", "closed", "all"], "description": "Filter by state"},
-                "labels": {"type": "string", "default": "", "description": "Filter by label (comma-separated)"},
-                "limit": {"type": "integer", "default": 20, "description": "Max issues to return (max 50)"},
-            }, "required": []},
-        }, _list_issues),
-
-        ToolEntry("get_github_issue", {
-            "name": "get_github_issue",
-            "description": "Get full details of a GitHub issue including body and comments.",
-            "parameters": {"type": "object", "properties": {
-                "number": {"type": "integer", "description": "Issue number"},
-            }, "required": ["number"]},
-        }, _get_issue),
-
-        ToolEntry("comment_on_issue", {
-            "name": "comment_on_issue",
-            "description": "Add a comment to a GitHub issue. Use to respond to issues, share progress, or ask clarifying questions.",
-            "parameters": {"type": "object", "properties": {
-                "number": {"type": "integer", "description": "Issue number"},
-                "body": {"type": "string", "description": "Comment text (markdown)"},
-            }, "required": ["number", "body"]},
-        }, _comment_on_issue),
-
-        ToolEntry("close_github_issue", {
-            "name": "close_github_issue",
-            "description": "Close a GitHub issue with optional closing comment.",
-            "parameters": {"type": "object", "properties": {
-                "number": {"type": "integer", "description": "Issue number"},
-                "comment": {"type": "string", "default": "", "description": "Optional closing comment"},
-            }, "required": ["number"]},
-        }, _close_issue),
-
-        ToolEntry("create_github_issue", {
-            "name": "create_github_issue",
-            "description": "Create a new GitHub issue. Use for tracking tasks, documenting bugs, or planning features.",
-            "parameters": {"type": "object", "properties": {
-                "title": {"type": "string", "description": "Issue title"},
-                "body": {"type": "string", "default": "", "description": "Issue body (markdown)"},
-                "labels": {"type": "string", "default": "", "description": "Labels (comma-separated)"},
-            }, "required": ["title"]},
-        }, _create_issue),
     ]
     # Wrapped here, not at definition: nested handler calls share one invocation.
     tools = [replace(entry, handler=_one_invocation(entry.handler)) for entry in tools]

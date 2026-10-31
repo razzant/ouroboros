@@ -34,6 +34,7 @@ from ouroboros import usage_accounting as ua
 from ouroboros import usage_store
 from ouroboros.runtime_limits import USAGE_DISPLAY_LOCK_TIMEOUT_SEC
 from ouroboros.usage_ledger import UsageLockUnavailable
+from tests._store_journal_shared import exclusive_hold
 from tests.worker_pool_support import affirm_ready
 
 pytestmark = pytest.mark.serial  # 64 real threads + supervisor.state module globals
@@ -115,14 +116,15 @@ def _held_ledger_lock(data_root):
 
 @contextlib.contextmanager
 def _held_exclusive(data_root):
-    """A commit in progress, held: SQLite's EXCLUSIVE lock, which readers wait on."""
+    """SQLite's EXCLUSIVE lock, held, which readers wait on: a commit in progress on the rollback
+    journal; under WAL, where a commit holds no reader off, the file's exclusive lock that a
+    handoff, a last close's checkpoint or a recovery takes (``exclusive_hold``)."""
     usage_store.store_tier(data_root, wait_sec=5.0)
     held, release = threading.Event(), threading.Event()
 
     def committer():
-        conn = usage_store._connect(data_root / usage_store.STORE_REL, usage_store.TIER_ENFORCED)
+        conn = exclusive_hold(data_root / usage_store.STORE_REL)
         try:
-            conn.execute("BEGIN EXCLUSIVE")
             held.set()
             release.wait(timeout=60)
             conn.execute("ROLLBACK")

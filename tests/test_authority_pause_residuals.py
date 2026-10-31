@@ -200,7 +200,7 @@ def test_control_authority_error_is_on_public_accounting_export_surface():
 
 @pytest.mark.parametrize("kind,exact", [("unreadable", True), ("unreadable", False), ("refused", True),
                                        ("control", True), ("control", False)])
-def test_real_loop_forced_admission_routes_authority_and_closes_only_terminal_revision(tmp_path, monkeypatch, kind, exact):
+def test_real_loop_forced_admission_routes_authority_and_keeps_late_owner_directives(tmp_path, monkeypatch, kind, exact):
     from types import SimpleNamespace
     from ouroboros.task_results import write_task_result
     from tests.test_billing_authority_unavailable import _loop_driver, _task_scope
@@ -218,14 +218,7 @@ def test_real_loop_forced_admission_routes_authority_and_closes_only_terminal_re
     write_task_result(tmp_path, tid, "running", billing_group=binding)
     loop, registry, ordinary = _loop_driver(tmp_path, monkeypatch, tid, exact_owner=exact)
     registry._ctx.inline_max_rounds = 0  # real round-limit caller before its first paid boundary
-    incoming, calls, sends, traces = queue.Queue(), [], [], []
-    actual_finalize = loop._finalize_limit_ctx
-
-    def context(ctx, tools, trace):
-        actual_finalize(ctx, tools, trace)
-        trace["acceptance_decision"] = {"status": "revision_requested", "reason": "review_requested_revision",
-                                        "source": "task_acceptance_review"}
-        traces.append(trace)
+    incoming, calls, sends = queue.Queue(), [], []
 
     def forced(_ctx):
         calls.append(True)
@@ -234,7 +227,6 @@ def test_real_loop_forced_admission_routes_authority_and_closes_only_terminal_re
             ua.AttemptRequest(model="fixture", provider="fixture", reservation_usd=0.1),
             lambda: sends.append(True))
 
-    monkeypatch.setattr(loop, "_finalize_limit_ctx", context)
     monkeypatch.setattr(loop, "_call_forced_model_once", forced)
     with ua.usage_scope(_task_scope(tmp_path, tid, tid)):
         def run():
@@ -245,14 +237,11 @@ def test_real_loop_forced_admission_routes_authority_and_closes_only_terminal_re
             with pytest.raises(bp.BudgetPauseRequested) as caught:
                 run()
             assert caught.value.pause["reason"] == "authority"
-            assert traces[-1]["acceptance_decision"]["status"] == "revision_requested"
             bp.end_dispatch_fence(tid)
         else:
-            text, usage, trace = run()
+            text, usage, _trace = run()
             assert usage["reason_code"] == ("control_authority_unreadable" if kind == "control" else "billing_authority_" + kind)
             assert usage["execution_status"] == "infra_failed"
-            assert trace["acceptance_decision"]["status"] == "finalized_unaccepted"
-            assert trace["acceptance_decision"]["reason"] == "revision_unavailable_on_forced_rail"
             assert "not a budget limit" in text
     assert calls == [True] and sends == ordinary == []
     assert [row["content"] for row in registry._ctx._owner_directives] == [
@@ -269,16 +258,6 @@ def test_explicit_host_non_task_start_keeps_its_admitted_uncapped_group(tmp_path
     assert len(task_snapshot(tmp_path, "host-operation")["pending"]) == 1
     assert tree_billing_group(tmp_path, "host-operation") == {
         "billing_group_id": "host-operation", "billing_group_limit_usd": None}
-
-
-@pytest.mark.parametrize("status", ["accepted", "finalized_unaccepted"])
-def test_authority_terminal_keeps_existing_acceptance_decision(tmp_path, status):
-    from tests.test_delivery_forced_finalization import _forced_test_context
-    loop, _registry, ctx, trace = _forced_test_context(tmp_path, usage={"reason_code": "control_authority_unreadable"})
-    decision = {"status": status, "reason": "original_decision", "source": "task_acceptance_review"}
-    trace["acceptance_decision"] = copy.deepcopy(decision)
-    loop._record_forced_acceptance_bypass(ctx, trace, "control_authority_unreadable")
-    assert trace["acceptance_decision"] == decision
 
 
 @pytest.mark.parametrize("rail", ["budget", "owner_stop", "deadline_grace"])

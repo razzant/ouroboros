@@ -39,7 +39,7 @@ def build_author_disposition(
     """Build one bounded, current-subject author-finality record.
 
     This is a record helper, not a second review ledger.  Callers persist the
-    returned object in their existing plan/skill/acceptance/commit owners and
+    returned object in their existing plan/skill/commit owners and
     continue to retain raw reviewer rows beside it.  A missing hash or reason
     is rejected so an author finish can never look like an unbound PASS.
     The author's act (``action``) is a final stance by itself: a record may
@@ -106,6 +106,11 @@ def validate_author_disposition(
             normalized["review_reference"] = json.loads(json.dumps(record["review_reference"], allow_nan=False))
         except (TypeError, ValueError):
             return None
+    from ouroboros.review_doctrine import carry_recorded_doctrine
+
+    normalized = carry_recorded_doctrine(normalized, record)
+    if normalized is None:
+        return None
     expected = str(subject_hash or "").strip()
     if expected and normalized["subject_hash"] != expected and not allow_stale:
         return None
@@ -113,7 +118,8 @@ def validate_author_disposition(
 
 
 def recorded_author_stop(decision: Any) -> bool:
-    """Whether a task acceptance decision records the author's explicit stop (TZ-2 C4).
+    """Whether a recorded task decision (the ``acceptance_decision`` shape historical
+    task records carry) records the author's explicit stop (TZ-2 C4).
 
     The typed ``author_stop`` reason, or the structured stop the producer records
     under its TRUE terminal cause when the review rounds ran out: ``author_action``
@@ -133,13 +139,18 @@ def recorded_author_stop(decision: Any) -> bool:
 def build_author_disposition_from_mapping(
     value: Any, *, subject_hash: str, reviewer_signal: str = "", enforcement: str = "",
 ) -> Dict[str, Any]:
-    """Parse the public two-field author finish envelope."""
-    if not isinstance(value, dict) or set(value) - {"disposition", "rationale"}:
+    """Parse the public author finish envelope, including an optional helper claim."""
+    if not isinstance(value, dict) or set(value) - {"disposition", "rationale", "subagent_check"}:
         raise ValueError("AUTHOR_DISPOSITION_INVALID: envelope fields are invalid")
-    return build_author_disposition(
+    built = build_author_disposition(
         disposition=value.get("disposition", ""), rationale=value.get("rationale", ""),
         subject_hash=subject_hash, reviewer_signal=reviewer_signal, enforcement=enforcement,
     )
+    if "subagent_check" in value:
+        from ouroboros.review_doctrine import parse_subagent_check
+
+        built["subagent_check"] = parse_subagent_check(value.get("subagent_check"))
+    return built
 
 
 def review_outcome_received(actors: Any, *, findings: Any = (), terminal: bool = False) -> bool:
@@ -231,8 +242,9 @@ class ReviewSlot:
     # compound route slug or the surface setting applied. Disclosure for the
     # last-execution projection; identity already rides ``effort``.
     declared_effort: str = ""
-    # Captured preference; empty explicitly preserves the legacy request shape.
-    processing_preference: str = ""
+    # Captured preference; empty explicitly preserves the legacy request shape. ``None`` is a slot
+    # built without one (a bare model): the send then resolves its role's, as any unbound call does.
+    processing_preference: Optional[str] = None
     # An api row's delivery, stated by whoever built the row: ``True`` — the
     # bounded native inspection episode on its own route (the catalog's
     # ``native``), ``False`` — the assembled packet (``packet``). The pool
@@ -281,8 +293,9 @@ class ReviewRequest:
     session_root: str = ""
     session_task: str = ""
     slot_session_tasks: Dict[str, str] = field(default_factory=dict)  # per-slot work order over session_task
-    # Per-slot source delivery of a retrieving row (``acceptance_retrieving``):
-    # inline, paged through an exact source this row can open, or unavailable.
+    # Historical: task acceptance's retrieving rows recorded their per-slot source
+    # delivery here. Kept so recorded prompts still rebuild through
+    # ``ReviewRequest(**stored)``; nothing fills or reads it now.
     slot_source_delivery: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     session_threads: Dict[str, str] = field(default_factory=dict)
     usage_attribution: Dict[str, str] = field(default_factory=dict)
@@ -312,8 +325,8 @@ def new_review_wave_id() -> str:
 def resolve_review_wave(request: ReviewRequest, review_meta: Mapping[str, Any], inherited: str = "") -> str:
     """The round every reviewer send of ``request`` is billed to: the caller's wave
     (skill and plan review), the inherited scope's, the round already recorded on the
-    request, the review's paid-cycle identity (``retry_key``: one per commit, scope or
-    acceptance cycle, shared by all its slots and by a resumed run of it), or a fresh
+    request, the review's paid-cycle identity (``retry_key``: one per review cycle,
+    shared by all its slots and by a resumed run of it), or a fresh
     id. Recorded as ``request.resolved_wave_id``, so the returned run and a replay of
     the stored request keep it; the caller's ``usage_attribution`` stays as given."""
     wave = str(review_meta.get("review_wave_id") or inherited or getattr(request, "resolved_wave_id", "")
@@ -329,9 +342,11 @@ class ReviewActorRecord:
     status: str
     raw_text: str = ""
     parsed: Any = None
-    # Per-actor parsed verdict (PASS/FAIL/DEGRADED/UNKNOWN). Carried here so the
-    # objective axis can aggregate outcome_tier from only the actors that
-    # CONTRIBUTED to a quorum PASS, instead of re-deriving the verdict downstream.
+    # The declared contract is finalized once, before producer persistence.
+    outcome: Dict[str, Any] = field(default_factory=dict)
+    # Per-actor parsed verdict (PASS/FAIL/DEGRADED/UNKNOWN). Carried here so a
+    # reader can take only the actors that CONTRIBUTED to the aggregate
+    # (``review_verdict._contributing_actors``) instead of re-deriving the verdict.
     signal: str = ""
     error: str = ""
     usage: Dict[str, Any] = field(default_factory=dict)
@@ -352,7 +367,11 @@ class ReviewActorRecord:
     http_status: Optional[int] = None
     # What the engine REPORTED about the failed run, bounded and redacted at the gateway
     # (``run_failure_cause``); "" when nothing was reported. Opaque: shown, never branched on.
+    # The ledger row keeps a plain fallback from the error text (``review_failure_facts``).
     reported_cause: str = ""
+    # Full safe structured refusal, before the short reported_cause view.
+    # These are evidence, never retry-policy inputs.
+    failure_details: Dict[str, Any] = field(default_factory=dict)
     parse_status: str = ""
     semantic_verdict: str = ""
     provider: str = ""
@@ -382,6 +401,38 @@ class ReviewActorRecord:
     review_wave_id: str = ""
 
 
+
+def review_failure_facts(row: Mapping[str, Any]) -> Dict[str, str]:
+    """A short reason a failed seat's durable row keeps before its raw evidence can be pruned.
+
+    Codes come from producers or structural status, never error-text matching; the cause is the
+    producer's own words (redacted and bounded), never an invented sentence. Existing typed facts
+    win; a seat that answered, or whose answer may still arrive, gains nothing.
+    """
+    code, cause = str(row.get("failure_code") or ""), str(row.get("reported_cause") or "")
+    status, state = str(row.get("status") or ""), str(row.get("operation_state") or "")
+    if state in {"in_flight", "pending_dispatch"} or (row.get("late_result_pending") and state != "custody_lost"):
+        return {"failure_code": code, "reported_cause": cause}
+    defaults = {
+        "error": ("review_error", "Reviewer execution failed without an error message."),
+        "not_dispatched": ("review_not_dispatched", "Reviewer was not dispatched."),
+        "empty": ("review_empty_response", "Reviewer returned no answer."),
+        "parse_failure": ("review_parse_failure", "Reviewer response did not satisfy the output contract."),
+        "partial": ("review_partial_response", "Reviewer response did not cover the required items."),
+    }
+    if status in defaults:
+        from ouroboros.gateways.claudexor import run_failure_cause
+
+        fallback_code, explanation = defaults[status]
+        code = code or fallback_code
+        words = str(row.get("error") or row.get("reason") or row.get("raw_text") or "").strip()
+        if not cause and words:
+            if status in {"parse_failure", "partial"}:
+                words = f"{explanation} {words}"
+            cause = " ".join(run_failure_cause({"safeMessage": words}).split())
+    return {"failure_code": code, "reported_cause": cause}
+
+
 @dataclass
 class ReviewRunResult:
     request: Dict[str, Any]
@@ -392,8 +443,8 @@ class ReviewRunResult:
     degraded_reasons: List[str] = field(default_factory=list)
     # Bible P3: a single configured reviewer is honored but the lost cross-model
     # diversity is recorded LOUDLY and DURABLY here (centralized for every surface
-    # that runs through ReviewCoordinator — acceptance, etc. — so a one-slot review
-    # can never quietly look like an ordinary multi-reviewer PASS).
+    # that runs through ReviewCoordinator, so a one-slot review can never quietly
+    # look like an ordinary multi-reviewer PASS).
     single_reviewer_no_diversity: bool = False
     panel_id: str = ""
     # The resolved roster belongs to this operation, including overrides in force
@@ -401,7 +452,7 @@ class ReviewRunResult:
     slot_roster: List[Dict[str, Any]] = field(default_factory=list)
 
 
-HARDNESS_ADVISORY_VISIBLE = "advisory_visible"  # fed back as a compact capsule, never blocks
+HARDNESS_ADVISORY_VISIBLE = "advisory_visible"  # shown to the author, never blocks
 
 
 HARDNESS_LABEL_ONLY = "label_only"              # recorded on the objective axis, not shown
@@ -410,4 +461,22 @@ HARDNESS_LABEL_ONLY = "label_only"              # recorded on the objective axis
 HARDNESS_HARD_GATE = "hard_gate"                # blocking commit/scope immune gate (unchanged)
 
 
-TYPED_FAILURE_FACT_KEYS = ("failure_code", "reset_at", "http_status", "transport_status", "reported_cause")
+TYPED_FAILURE_FACT_KEYS = ("failure_code", "reset_at", "http_status", "transport_status", "reported_cause", "failure_details")
+
+
+def review_failure_summary(row: Mapping[str, Any]) -> str:
+    """A failed seat's saved facts for author handback, without a retry diagnosis."""
+    import json
+    from ouroboros.observability import redact_projection
+
+    seat = str(row.get("slot_id") or row.get("seat_id") or "unknown seat")
+    model = str(row.get("model_id") or row.get("model") or "model not reported")
+    parts = [f"{seat} ({model})", str(row.get("status") or "unknown")]
+    parts.extend(f"{key}={row[key]}" for key in TYPED_FAILURE_FACT_KEYS
+                 if key != "failure_details" and row.get(key) not in (None, ""))
+    details = row.get("failure_details")
+    if isinstance(details, dict) and details:
+        parts.append(json.dumps(details, ensure_ascii=False, sort_keys=True))
+    elif not row.get("reported_cause"):
+        parts.append(str(row.get("error") or row.get("raw_text") or "No cause was recorded."))
+    return str(redact_projection(" · ".join(parts)).value)

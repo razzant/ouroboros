@@ -1,13 +1,15 @@
-"""A Project root's Main notice, end to end in the real SPA (#1412).
+"""A Project root's Main notice, end to end in the real SPA: one message in two rooms.
 
-A turn bound to a Project room may judge that the owner needs a short
-plain-text notice in Main (``send_user_message(destination="main")``). What no
-unit test certifies is the consumer: the shipped SPA must show that notice as
-an assistant message in Main and never in the Project thread, the Project card
-must not read it as the turn's answer while the turn still runs, the Project's
-unread authority must not move for it, and a reload must replay it into Main
-only while the Project keeps its own final answer. On a phone the Project room
-is a full-screen sheet over Main, so its surface must be opaque over the notice.
+A turn bound to a Project room may judge that the owner needs a notice in Main
+(``send_user_message(destination="main")``). The owner chose (28.10, A/A) that
+a Project keeps its whole conversation: the notice is written to Main and also
+stands in its Project, one message read once; his direct Reply to it in Main
+stands in the Project too, telling the work nothing. What no unit test certifies
+is the consumer: the shipped SPA must show the notice once in each room, count it
+unread in both, clear it in both when he reads it in Main without opening the
+Project, never read it as the turn's answer while the turn still runs, show his
+Reply in the Project, and replay the same rows after a reload. On a phone the
+Project room is a full-screen sheet over Main, so its surface must be opaque.
 
 The turn is a real keyless server turn. ``ModelGate`` holds it twice at the
 HTTP boundary: before its first round, so the owner can leave the chat page
@@ -16,7 +18,6 @@ returned and before the final answer, so "still running" is a fact, not a race.
 """
 
 import re
-import time
 import uuid
 
 import pytest
@@ -36,6 +37,7 @@ from tests.system_e2e.harness import (
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 from tests.ci_evidence import output_dir
+from tests.ui_console_errors import PageErrors
 from tests.ui_failure_evidence import FailureEvidence
 
 wait_clone = clone_fixture
@@ -43,8 +45,6 @@ pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
 
 # Tool-less namer calls answer with this, so it never matches a feed assertion.
 CARD_NAME = "Project audit turn"
-# One full period of the SPA's Project-list poll (app.js setInterval 20000) plus margin.
-PROJECT_POLL_WINDOW_SEC = 22
 
 _FEED_FACTS = """({feed, taskId, notice, answer}) => {
     const root = document.querySelector(feed);
@@ -80,15 +80,6 @@ _NAV_FACTS = """projectId => {
     };
 }"""
 
-# Every value the Project unread counter ever shows, so a transient unread
-# caused by the notice cannot pass by being overwritten before a later read.
-_OBSERVE_PROJECT_COUNT = """() => {
-    const node = document.querySelector('#nav-projects-count');
-    window.__projectCounts = [node?.textContent.trim() || ''];
-    new MutationObserver(() => window.__projectCounts.push(node.textContent.trim()))
-        .observe(node, {childList: true, characterData: true, subtree: true});
-}"""
-
 _PANEL_COVER = """() => {
     const panel = document.querySelector('#project-panel');
     const notice = document.querySelector('#chat-messages .chat-bubble[data-system-type="main_notice"]');
@@ -112,9 +103,11 @@ def _open_drawer(page):
     close = page.locator("#project-panel-close")
     if close.is_visible():
         close.click()
-    if not page.evaluate("() => document.body.classList.contains('nav-drawer-open')"):
-        page.locator(".page.active [data-mobile-nav-toggle]").click()
-        page.wait_for_function("() => document.body.classList.contains('nav-drawer-open')")
+    toggle = page.locator(".page.active [data-mobile-nav-toggle]")
+    # The handover keeps the drawer painted after its logical close.
+    if toggle.get_attribute("aria-expanded") != "true":
+        toggle.click()
+    page.wait_for_function("() => !document.querySelector('#primary-sidebar').inert")
 
 
 def _nav(page, name):
@@ -128,6 +121,12 @@ def _open_project(page, project):
     page.locator(f'.nav-project-row[data-project-id="{project["id"]}"]').click()
     feed = f'[id="pchat-{project["id"]}-messages"]'
     page.locator(feed).wait_for(state="visible", timeout=30_000)
+    # The drawer handover paints the room before it releases inert. WebKit's fill can
+    # otherwise return with an empty field, since the room cannot take focus yet.
+    page.wait_for_function("""selector => {
+        const room = document.querySelector(selector);
+        return room && !room.closest('[inert]');
+    }""", arg=feed)
     return feed
 
 
@@ -176,10 +175,52 @@ def _history(page, chat_id):
                          chat_id)
 
 
-@pytest.mark.parametrize("engine,width,theme", [("chromium", 1440, "dark"), ("webkit", 390, "light")],
-                         ids=["chromium-desktop-dark", "webkit-mobile-light"])
-def test_project_root_main_notice_reaches_main_only_and_keeps_the_project_answer(
-    wait_clone, tmp_path, monkeypatch, request, engine, width, theme,
+_PANEL_AT_REST = """() => {
+    const rect = JSON.stringify(document.querySelector('#project-panel')?.getBoundingClientRect() || null);
+    const same = window.__panelRect === rect;
+    window.__panelRect = rect;
+    return same;
+}"""
+
+
+def _shot(page, request, name):
+    """A screenshot of the state just asserted, kept with the run's evidence (never asserted on), taken once the
+    Project panel's motion has come to rest."""
+    root = output_dir(request.config)
+    if root is not None:
+        page.evaluate("() => { window.__panelRect = undefined; }")
+        try:
+            page.wait_for_function(_PANEL_AT_REST, polling=100, timeout=5_000)
+        except Exception:  # evidence only: a panel still moving is photographed as it is
+            pass
+        path = root / "screens" / f"{request.node.callspec.id}-{name}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(path))
+
+
+def _prefs(page):
+    return page.evaluate("async () => (await (await fetch('/api/ui/preferences', {cache: 'no-store'})).json())")
+
+
+def _around(page, chat_id, address):
+    """The page the history pager reads to land on one exact row (``around=``), as the shipped client asks it."""
+    return page.evaluate("async ([id, address]) => (await (await fetch("
+                         "`/api/chat/history?chat_id=${id}&around=${encodeURIComponent(address)}`)).json())",
+                         [chat_id, address])
+
+
+def _mailbox(server, task_id):
+    """The owner words waiting for one work (``owner_mailbox``): a Reply that told it something would be here."""
+    path = server.data_root / "memory" / "owner_mailbox" / f"{task_id}.jsonl"
+    return path.read_bytes() if path.exists() else b""
+
+
+@pytest.mark.parametrize("engine,width,height,theme", [
+    ("webkit", 1165, 851, "dark"), ("webkit", 1165, 851, "light"),
+    ("chromium", 1440, 900, "dark"), ("webkit", 390, 900, "light"),
+], ids=["webkit-desktop-dark", "webkit-desktop-light", "chromium-desktop-dark", "webkit-mobile-light"])
+def test_project_root_main_notice_is_one_message_in_main_and_its_project(
+    wait_clone, tmp_path, monkeypatch, request, engine, width, height, theme,
 ):
     from playwright.sync_api import sync_playwright
 
@@ -190,13 +231,17 @@ def test_project_root_main_notice_reaches_main_only_and_keeps_the_project_answer
     notice = (f"Owner action: the executor account needs its billing re-enabled in Settings; "
               f"I am continuing this Project audit meanwhile. [MAIN_NOTICE_{tag}]")
     answer = f"The Project audit is complete and nothing else needs your action. [PROJECT_ANSWER_{tag}]"
-    notice_mark, answer_mark = f"MAIN_NOTICE_{tag}", f"PROJECT_ANSWER_{tag}"
+    reply = f"Why only here? Keep the Project informed. [OWNER_REPLY_{tag}]"
+    main_answer = f"Noted here in Main. [MAIN_ANSWER_{tag}]"
+    notice_mark, answer_mark, reply_mark = f"MAIN_NOTICE_{tag}", f"PROJECT_ANSWER_{tag}", f"OWNER_REPLY_{tag}"
+    main_answer_mark = f"MAIN_ANSWER_{tag}"
     tool_results, strangers = [], []
 
     def turn_round(body, *, after_tool):
         results = [message_text(m) for m in body.get("messages", [])
                    if isinstance(m, dict) and str(m.get("role") or "") == "tool"]
-        matched = bool(body.get("tools")) and marker in body_text(body) and bool(results) is after_tool
+        matched = (bool(body.get("tools")) and marker in body_text(body) and reply_mark not in body_text(body)
+                   and bool(results) is after_tool)
         if matched and after_tool:
             # Read at the gate: the held round is the model's view of the tool's receipt.
             tool_results.extend(results)
@@ -206,11 +251,13 @@ def test_project_root_main_notice_reaches_main_only_and_keeps_the_project_answer
     before_answer = ModelGate(lambda body: turn_round(body, after_tool=True), timeout=300)
 
     def respond(body):
+        if reply_mark in body_text(body):
+            return {"final": main_answer}  # the owner's Reply is an ordinary Main turn
         if marker not in body_text(body):
             strangers.append(body_text(body)[:300])
             return {"final": "No scripted work for this actor."}
         if not any(str(m.get("role") or "") == "tool" for m in body.get("messages", []) if isinstance(m, dict)):
-            # The model's own judgment: one short plain-text notice for Main.
+            # The model's own judgment: one notice for Main.
             return {"tool": "send_user_message", "arguments": {
                 "text": notice, "reason": "owner-only remedy outside this Project", "destination": "main"}}
         return {"final": answer}
@@ -226,33 +273,33 @@ def test_project_root_main_notice_reaches_main_only_and_keeps_the_project_answer
     gates = lambda body: (before_notice(body), before_answer(body))  # noqa: E731
     # The stub narrates its tool round ("still working"): that durable progress row is
     # what a re-mounted Project panel rebuilds the running card from.
-    with ScriptedStubModel([respond] * 8, final_answer=CARD_NAME, gate=gates) as stub:
+    with ScriptedStubModel([respond] * 12, final_answer=CARD_NAME, gate=gates) as stub:
         server = start_server(wait_clone, tmp_path / "instance", keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
         oracle = ArtifactOracle(server.data_root)
         try:
             project = _api(server.base_url, "POST", "/api/projects", {"name": "Main notice room"})["project"]
             project_chat = int(project["chat_id"])
             assert project_chat != 1, project
+            unrelated = int(_api(server.base_url, "POST", "/api/projects", {"name": "Unrelated room"})["project"]["chat_id"])
             with sync_playwright() as pw:
                 browser = getattr(pw, engine).launch()
-                page = browser.new_page(viewport={"width": width, "height": 900}, has_touch=width < 980,
+                page = browser.new_page(viewport={"width": width, "height": height}, has_touch=width < 980,
                                         color_scheme=theme)
-                errors, state_reads = [], []
-                page.on("pageerror", lambda error: errors.append(str(error)))
-                page.on("request", lambda request: state_reads.append(time.monotonic())
-                        if request.url.split("?")[0].endswith("/api/state") else None)
+                errors = PageErrors(page, engine)
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
                 page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
                 main_feed = "#chat-messages"
                 with FailureEvidence(page, browser, evidence, request.node.nodeid, engine) as capture:
-                    capture.details.update({"theme": theme, "width": width})
+                    capture.details.update({"theme": theme, "width": width, "height": height})
                     page.goto(server.base_url, wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
 
                     # ---- the owner speaks in the Project room ----
                     project_feed = _open_project(page, project)
-                    page.locator(f'[id="pchat-{project["id"]}-input"]').fill(
-                        f"{marker} Audit this Project, and tell me in Main if something needs my action.")
+                    composer = page.locator(f'[id="pchat-{project["id"]}-input"]')
+                    prompt = f"{marker} Audit this Project, and tell me in Main if something needs my action."
+                    composer.fill(prompt)
+                    assert composer.input_value() == prompt
                     page.locator(f'[id="pchat-{project["id"]}-send"]').click()
                     task = wait_until(lambda: next((row["task"] for row in oracle.events("task_received")
                         if marker in str(row.get("task", {}).get("text") or "")), None), 90)
@@ -263,72 +310,69 @@ def test_project_root_main_notice_reaches_main_only_and_keeps_the_project_answer
 
                     # ---- the owner is away from chat before the notice exists ----
                     _nav(page, "dashboard")
-                    page.evaluate(_OBSERVE_PROJECT_COUNT)
                     revision_before = _revision(server, project["id"])
                     away_before = page.evaluate(_NAV_FACTS, project["id"])
                     assert away_before["main_badge"] == "" and away_before["projects_count"] == "", away_before
 
                     before_notice.release.set()
                     assert before_answer.arrived.wait(120), "the turn never returned from its notice tool"
-                    # The tool's "sent" receipt is the worker's enqueue; the supervisor persists the
-                    # row after it. Anchor the refresh window on the exact durable Main row itself.
+                    # One durable row, written to Main: the address the Project shows too.
                     main_row = ("out", 1, "main_notice", task_id)
                     wait_until(lambda: main_row in _identities(_chat_rows(oracle, notice_mark)), 60)
-                    notice_seen_at = time.monotonic()
                     notice_rows = _chat_rows(oracle, notice_mark)
                     assert _identities(notice_rows) == [main_row], notice_rows
                     assert any("notice sent to the main chat" in text for text in tool_results), tool_results
                     proactive = [row for row in oracle.events("proactive_message") if row.get("task_id") == task_id]
                     assert [row.get("destination") for row in proactive] == ["main"], proactive
-                    # A Main message while the owner is elsewhere is a Main unread.
+                    # Unread where it is shown, never silent before he reads it: Main and the Project.
                     page.wait_for_function(
                         "() => document.querySelector('[data-nav-page=\"chat\"] .unread-badge')?.textContent.trim() === '1'",
                         timeout=30_000)
-                    # Hold across one full Project poll: the notice must never read as Project unread.
-                    page.wait_for_timeout(PROJECT_POLL_WINDOW_SEC * 1000)
-                    polled = [t for t in state_reads if t > notice_seen_at]
-                    assert polled, "the SPA never re-read /api/state after the notice"
-                    counts_during_hold = page.evaluate("() => window.__projectCounts")
-                    assert set(counts_during_hold) == {""}, counts_during_hold
-                    revision_after_notice = _revision(server, project["id"])
-                    assert revision_after_notice == revision_before, (revision_before, revision_after_notice)
+                    page.wait_for_function(
+                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '1'", timeout=45_000)
+                    assert _revision(server, project["id"]) == revision_before + 1
                     assert str(oracle.task_result(task_id).get("status") or "") == "running"
-                    live = {row.get("activity_id") for row in _api(server.base_url, "GET", "/api/state")
-                            .get("active_direct_turns", [])}
-                    assert task_id in live, live
-                    away_notice = page.evaluate(_NAV_FACTS, project["id"])
-                    assert away_notice["main_badge"] == "1" and "Unread" not in away_notice["project_label"], away_notice
+                    seen_before = (_prefs(page).get("project_seen_revision") or {}).get(project["id"])
                     _open_drawer(page)
                     capture.checkpoint("1-away-after-notice")
 
-                    # ---- Main shows the notice as an assistant message ----
+                    # ---- he reads it in Main: read once, in both rooms, the Project never opened ----
                     _nav(page, "chat")
                     page.locator(f'{main_feed} .chat-bubble.assistant[data-system-type="main_notice"]').filter(
                         has_text=notice_mark).wait_for(timeout=30_000)
                     main_live = _feed(page, main_feed, task_id, notice_mark, answer_mark)
-                    assert page.evaluate(_NAV_FACTS, project["id"])["main_badge"] == ""
                     (bubble,) = main_live["notice_bubbles"]
                     assert "assistant" in bubble["classes"].split(), bubble
                     assert bubble["type"] == "main_notice" and bubble["task"] == task_id, bubble
                     assert bubble["sender"] == "Ouroboros", bubble
                     assert main_live["cards"] == 0 and not main_live["answer_anywhere"], main_live
+                    page.wait_for_function(
+                        "() => (document.querySelector('#nav-projects-count')?.textContent.trim() || '') === ''",
+                        timeout=45_000)
+                    prefs = _prefs(page)
+                    assert (prefs.get("project_seen_revision") or {}).get(project["id"]) == seen_before, prefs
+                    assert prefs["read_ahead_revisions"].get(str(project_chat)), prefs
+                    assert page.evaluate(_NAV_FACTS, project["id"])["main_badge"] == ""
+                    _shot(page, request, "2-main-notice-read-once")
                     capture.checkpoint("2-main-notice-live")
 
-                    # ---- the Project still runs; the notice is not its answer ----
+                    # ---- the Project shows the same message; the work still runs ----
                     _open_project(page, project)
                     card = page.locator(f'{project_feed} .chat-live-card[data-task-id="{task_id}"]')
                     card.wait_for(timeout=30_000)
+                    page.locator(f'{project_feed} .chat-bubble[data-system-type="main_notice"]').filter(
+                        has_text=notice_mark).wait_for(timeout=30_000)
                     project_held = _feed(page, project_feed, task_id, notice_mark, answer_mark)
                     assert project_held["card_finished"] == "0", project_held
-                    assert project_held["cards"] == 1, project_held
-                    assert not project_held["notice_anywhere"] and not project_held["answer_anywhere"], project_held
+                    assert project_held["cards"] == 1 and len(project_held["notice_bubbles"]) == 1, project_held
+                    assert not project_held["answer_anywhere"], project_held
                     capture.checkpoint("project_held:panel_cover")
                     _panel_cover(page)
+                    _shot(page, request, "3-project-shows-notice-while-running")
                     capture.checkpoint("3-project-held-running")
 
                     # ---- the answer lands in the Project while the owner is away ----
                     _nav(page, "dashboard")
-                    page.evaluate(_OBSERVE_PROJECT_COUNT)
                     before_answer.release.set()
                     stored = wait_durable_result(oracle, task_id, timeout=120)
                     assert stored["status"] == "completed", stored
@@ -336,51 +380,81 @@ def test_project_root_main_notice_reaches_main_only_and_keeps_the_project_answer
                     assert notice_mark not in str(stored.get("result") or ""), stored
                     answer_rows = wait_until(lambda: _chat_rows(oracle, answer_mark), 60) or []
                     assert answer_rows and {row["chat_id"] for row in answer_rows} == {project_chat}, answer_rows
-                    assert all(row["type"] != "main_notice" for row in answer_rows), answer_rows
                     assert _chat_rows(oracle, notice_mark) == notice_rows, "the final re-delivered the notice"
-                    revision_after_answer = _revision(server, project["id"])
-                    assert revision_after_answer > revision_after_notice
-                    # Positive control on the same poll: the Project's own answer IS Project unread.
+                    # Only the answer is unread in the Project now: the notice was read in Main.
                     page.wait_for_function(
                         "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '1'",
                         timeout=45_000)
-                    away_answer = page.evaluate(_NAV_FACTS, project["id"])
-                    assert away_answer["main_badge"] == "", away_answer
+                    assert page.evaluate(_NAV_FACTS, project["id"])["main_badge"] == ""
                     _open_drawer(page)
                     capture.checkpoint("4-away-after-answer")
 
+                    # ---- he Replies to the notice in Main ----
+                    held_words, settled = _mailbox(server, task_id), oracle.task_result(task_id)
+                    received = len(oracle.events("task_received"))
                     _nav(page, "chat")
-                    main_final = _feed(page, main_feed, task_id, notice_mark, answer_mark)
-                    assert len(main_final["notice_bubbles"]) == 1, main_final
-                    assert main_final["cards"] == 0 and not main_final["answer_anywhere"], main_final
+                    notice_bubble = page.locator(f'{main_feed} .chat-bubble[data-system-type="main_notice"]').filter(
+                        has_text=notice_mark)
+                    notice_bubble.hover()
+                    notice_bubble.locator(".chat-message-reply").click()
+                    page.locator("#chat-input").fill(reply)
+                    page.locator("#chat-send").click()
+                    page.locator(f"{main_feed} .chat-bubble.user").filter(has_text=reply_mark).wait_for(timeout=30_000)
+                    page.locator(main_feed).get_by_text(main_answer_mark, exact=False).first.wait_for(timeout=90_000)
+                    reply_rows = _chat_rows(oracle, reply_mark)
+                    assert [(row["direction"], row["chat_id"]) for row in reply_rows] == [("in", 1)], reply_rows
+                    assert str(oracle.task_result(task_id).get("status") or "") == "completed"  # told, woken: nothing
+                    # Preservation only: Main answers its own turn; nothing starts in the Project, the work is told
+                    # nothing and its settled result stays as it was.
+                    started = [row["task"] for row in oracle.events("task_received")[received:]]
+                    assert {int(row.get("chat_id") or 0) for row in started} <= {1}, started
+                    assert task_id not in {row.get("id") for row in started}, started
+                    assert _mailbox(server, task_id) == held_words
+                    assert oracle.task_result(task_id).get("result") == settled.get("result")
+                    _shot(page, request, "4-main-reply-to-notice")
+
+                    # ---- the Project shows his Reply, not Main's answer to it ----
                     _open_project(page, project)
                     page.locator(project_feed).get_by_text(answer_mark, exact=False).first.wait_for(timeout=30_000)
-                    page.wait_for_selector(
-                        f'{project_feed} .chat-live-card[data-task-id="{task_id}"][data-finished="1"]', timeout=30_000)
+                    page.locator(f"{project_feed} .chat-bubble.user").filter(has_text=reply_mark).wait_for(timeout=30_000)
                     project_final = _feed(page, project_feed, task_id, notice_mark, answer_mark)
-                    assert not project_final["notice_anywhere"], project_final
+                    assert len(project_final["notice_bubbles"]) == 1 and project_final["answer_anywhere"], project_final
+                    assert main_answer_mark not in page.locator(project_feed).inner_text()
+                    # His Reply's quote lands on the notice in the Project itself, the one row both rooms show.
+                    page.locator(f"{project_feed} .chat-bubble.user").filter(has_text=reply_mark).locator(
+                        ".chat-quote-main").click()
+                    page.wait_for_function("""([feed, mark]) => {
+                        const node = document.activeElement;
+                        return Boolean(node?.matches?.('.chat-bubble[data-system-type="main_notice"]')
+                            && node.closest(feed) && node.innerText.includes(mark));
+                    }""", arg=[project_feed, notice_mark], timeout=15_000)
                     page.wait_for_function(
                         "() => (document.querySelector('#nav-projects-count')?.textContent.trim() || '') === ''",
                         timeout=45_000)
+                    _shot(page, request, "5-project-whole-conversation")
                     capture.checkpoint("5-project-final")
 
-                    # ---- reload: durable history keeps both identities apart ----
+                    # ---- reload: one row per message, the same addresses in both rooms ----
                     page.reload(wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
                     page.locator(f'{main_feed} .chat-bubble.assistant[data-system-type="main_notice"]').filter(
                         has_text=notice_mark).wait_for(timeout=30_000)
                     main_reloaded = _feed(page, main_feed, task_id, notice_mark, answer_mark)
-                    (bubble,) = main_reloaded["notice_bubbles"]
-                    assert "assistant" in bubble["classes"].split() and bubble["sender"] == "Ouroboros", bubble
-                    assert bubble["type"] == "main_notice" and bubble["task"] == task_id, bubble
-                    assert main_reloaded["cards"] == 0 and not main_reloaded["answer_anywhere"], main_reloaded
-                    main_history = [row for row in _history(page, 1) if row.get("task_id") == task_id]
-                    assert [(row.get("role"), row.get("system_type")) for row in main_history] == [
-                        ("assistant", "main_notice")], main_history
-                    project_history = [row for row in _history(page, project_chat) if row.get("task_id") == task_id]
-                    assert not [row for row in project_history if notice_mark in str(row.get("text") or "")
-                                or row.get("system_type") == "main_notice"], project_history
-                    assert [row for row in project_history if answer_mark in str(row.get("text") or "")], project_history
+                    assert len(main_reloaded["notice_bubbles"]) == 1 and not main_reloaded["answer_anywhere"], main_reloaded
+                    main_history = _history(page, 1)
+                    project_history = _history(page, project_chat)
+
+                    def address(rows, mark):
+                        return [row.get("row_address") for row in rows if mark in str(row.get("text") or "")]
+                    assert address(main_history, notice_mark) == address(project_history, notice_mark) != []
+                    assert address(main_history, reply_mark) == address(project_history, reply_mark) != []
+                    assert address(project_history, main_answer_mark) == [] != address(main_history, main_answer_mark)
+                    (notice_address,) = address(main_history, notice_mark)
+                    for chat in (1, project_chat):
+                        landed = _around(page, chat, notice_address)
+                        assert landed["anchor"]["state"] == "found", (chat, landed.get("anchor"))
+                        assert address(landed["messages"], notice_mark) == [notice_address], chat
+                    assert _around(page, unrelated, notice_address)["anchor"]["state"] == "moved"
                     nav_reloaded = page.evaluate(_NAV_FACTS, project["id"])
                     assert nav_reloaded["main_badge"] == "" and nav_reloaded["projects_count"] == "", nav_reloaded
                     capture.checkpoint("6-reloaded-main")
@@ -389,15 +463,318 @@ def test_project_root_main_notice_reaches_main_only_and_keeps_the_project_answer
                     page.wait_for_selector(
                         f'{project_feed} .chat-live-card[data-task-id="{task_id}"][data-finished="1"]', timeout=30_000)
                     project_reloaded = _feed(page, project_feed, task_id, notice_mark, answer_mark)
-                    assert not project_reloaded["notice_anywhere"], project_reloaded
+                    assert len(project_reloaded["notice_bubbles"]) == 1, project_reloaded
                     capture.checkpoint("project_reloaded:panel_cover")
                     _panel_cover(page)
+                    _shot(page, request, "6-project-after-reload")
                     capture.checkpoint("7-reloaded-project")
                     assert not strangers, strangers
-                    assert not errors, errors
+                    assert not errors.unexpected(), errors
         finally:
             before_notice.release.set()
             before_answer.release.set()
             server.stop()
             assert server.proc.poll() is not None
             assert not before_notice.timed_out and not before_answer.timed_out
+
+
+_PART_FACTS = """({feed, mark}) => {
+    const root = document.querySelector(feed);
+    const node = [...root.querySelectorAll('.chat-bubble[data-system-type="main_notice"]')]
+        .find((bubble) => bubble.innerText.includes(mark));
+    if (!node) return null;
+    const box = node.getBoundingClientRect(), band = root.getBoundingClientRect();
+    const pre = node.querySelector('.message pre');
+    // What the reader sees of the feed: below the page header drawn over it, above the composer.
+    const header = root.closest('.page')?.querySelector('.chat-page-header');
+    const composer = document.querySelector('#chat-input-area');
+    const seen = [header?.getClientRects().length ? header.getBoundingClientRect().bottom - band.top : 0,
+                  composer?.getClientRects().length ? composer.getBoundingClientRect().top - band.top : root.clientHeight];
+    return {top: box.top - band.top + root.scrollTop, height: box.height, viewport: root.clientHeight, seen,
+            scrollTop: root.scrollTop, clipped: pre ? pre.scrollWidth > pre.clientWidth : null,
+            revisions: JSON.parse(node.dataset.roomRevisions || '{}')};
+}"""
+
+
+def _scroll_to(page, feed, top):
+    page.evaluate("([feed, top]) => { document.querySelector(feed).scrollTop = top; }", [feed, top])
+    page.evaluate("() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+
+@pytest.mark.parametrize("engine,width,height,theme", [("webkit", 1165, 851, "dark"), ("chromium", 1440, 900, "light")],
+                         ids=["webkit-desktop-dark", "chromium-desktop-light"])
+def test_a_long_or_clipped_shared_notice_is_read_only_when_every_part_was_shown(
+    wait_clone, tmp_path, monkeypatch, request, engine, width, height, theme,
+):
+    """A Main notice taller than the viewport is read in the Project too only once every part of it was on
+    screen in Main: its bottom alone records nothing, reading it by parts does; a notice whose code line
+    is wider than its box (a clipped part no position shows) is never recorded. Cursors never move."""
+    from playwright.sync_api import sync_playwright
+
+    from tests.system_e2e.harness import KeylessIsolatedServer
+
+    tag = uuid.uuid4().hex[:12]
+    marker = f"PROJECT_LONG_{tag}"
+    long_mark, clipped_mark, answer_mark = f"LONG_NOTICE_{tag}", f"CLIPPED_NOTICE_{tag}", f"LONG_ANSWER_{tag}"
+    long_notice = "\n\n".join([f"Owner action needed in Settings. [{long_mark}]"] + [
+        f"Paragraph {index:02d}: the Titan series ended and the experiment branch needs your review before "
+        f"anything else is started; this paragraph exists so the notice is taller than the window." for index in range(46)])
+    clipped_notice = f"Run this once in a terminal. [{clipped_mark}]\n\n```\n{'titan --resume ' * 90}\n```"
+    started = ModelGate(lambda body: bool(body.get("tools")) and marker in body_text(body) and not any(
+        str(m.get("role") or "") == "tool" for m in body.get("messages", []) if isinstance(m, dict)), timeout=300)
+
+    def respond(body):
+        if marker not in body_text(body):
+            return {"final": "No scripted work for this actor."}
+        done = sum(str(m.get("role") or "") == "tool" for m in body.get("messages", []) if isinstance(m, dict))
+        if done < 2:
+            return {"tool": "send_user_message", "arguments": {
+                "text": (long_notice, clipped_notice)[done], "reason": "owner-only remedy", "destination": "main"}}
+        return {"final": f"Audit complete. [{answer_mark}]"}
+
+    home = tmp_path / "home"
+    home.mkdir()
+    original_env = KeylessIsolatedServer._env
+    monkeypatch.setattr(KeylessIsolatedServer, "_env", lambda server: {
+        **original_env(server), "HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(home / ".config")})
+    evidence = output_dir(request.config)
+    with ScriptedStubModel([respond] * 12, final_answer=CARD_NAME, gate=started) as stub:
+        server = start_server(wait_clone, tmp_path / "instance", keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
+        oracle = ArtifactOracle(server.data_root)
+        try:
+            project = _api(server.base_url, "POST", "/api/projects", {"name": "Long notice room"})["project"]
+            project_chat = str(project["chat_id"])
+            with sync_playwright() as pw:
+                browser = getattr(pw, engine).launch()
+                page = browser.new_page(viewport={"width": width, "height": height}, color_scheme=theme)
+                errors = PageErrors(page, engine)
+                page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+                main_feed = "#chat-messages"
+                with FailureEvidence(page, browser, evidence, request.node.nodeid, engine) as capture:
+                    page.goto(server.base_url, wait_until="domcontentloaded")
+                    page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
+                    _open_project(page, project)
+                    page.locator(f'[id="pchat-{project["id"]}-input"]').fill(f"{marker} Audit and tell me in Main.")
+                    page.locator(f'[id="pchat-{project["id"]}-send"]').click()
+                    assert started.arrived.wait(120), "the Project turn never reached its first round"
+                    _nav(page, "dashboard")  # away before anything is said
+                    started.release.set()
+                    task = wait_until(lambda: next((row["task"] for row in oracle.events("task_received")
+                        if marker in str(row.get("task", {}).get("text") or "")), None), 60)
+                    assert wait_durable_result(oracle, task["id"], timeout=120)["status"] == "completed"
+                    # Two notices and the answer: unread in the Project, the notices in Main too.
+                    page.wait_for_function(
+                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '3'", timeout=45_000)
+                    capture.checkpoint("1-away-three-unread")
+
+                    _nav(page, "chat")
+                    page.locator(f'{main_feed} .chat-bubble[data-system-type="main_notice"]').filter(
+                        has_text=clipped_mark).wait_for(timeout=30_000)
+                    long_facts = page.evaluate(_PART_FACTS, {"feed": main_feed, "mark": long_mark})
+                    clipped = page.evaluate(_PART_FACTS, {"feed": main_feed, "mark": clipped_mark})
+                    assert long_facts["height"] > 2 * long_facts["viewport"], long_facts  # really taller than the window
+                    assert clipped["clipped"] is True, clipped  # the shipped code block clips its long line
+                    # Only the long notice's bottom part on screen (the clipped notice whole, below it).
+                    _scroll_to(page, main_feed, long_facts["top"] + long_facts["height"] - long_facts["viewport"] // 2)
+                    page.wait_for_timeout(1500)
+                    prefs = _prefs(page)
+                    assert not prefs["read_ahead_revisions"].get(project_chat), prefs  # nothing recorded yet
+                    assert page.evaluate(_NAV_FACTS, project["id"])["projects_count"] == "3"
+                    _shot(page, request, "L1-long-bottom-only-clipped-whole-box")
+                    capture.checkpoint("2-bottom-only")
+
+                    # Reading it by parts, top to bottom, records exactly the long notice: its first line just
+                    # below the header drawn over the feed, then half of what the reader sees per step.
+                    above, below = long_facts["seen"]
+                    assert 0 < above < below <= long_facts["viewport"], long_facts
+                    top = long_facts["top"] - above
+                    while top < long_facts["top"] + long_facts["height"]:
+                        _scroll_to(page, main_feed, top)
+                        top += (below - above) // 2
+                    page.wait_for_function(
+                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '2'", timeout=30_000)
+                    prefs = _prefs(page)
+                    held = prefs["read_ahead_revisions"].get(project_chat) or []
+                    revision = long_facts["revisions"][project_chat]
+                    assert held == [[revision, revision]], (held, long_facts, clipped)
+                    assert clipped["revisions"][project_chat] not in {value for span in held for value in range(span[0], span[1] + 1)}
+                    assert (prefs.get("project_seen_revision") or {}).get(project["id"], 0) < revision  # no cursor moved
+                    _shot(page, request, "L2-long-read-by-parts")
+                    _scroll_to(page, main_feed, clipped["top"] - 40)
+                    page.wait_for_timeout(1500)
+                    assert page.evaluate(_NAV_FACTS, project["id"])["projects_count"] == "2"  # the clipped one stays
+                    _shot(page, request, "L3-clipped-never-read")
+                    capture.checkpoint("3-read-by-parts")
+                    assert not errors.unexpected(), errors
+        finally:
+            started.release.set()
+            server.stop()
+            assert server.proc.poll() is not None
+
+
+_LANDING_FACTS = """({feed, area, first, shared}) => {
+    const root = document.querySelector(feed);
+    const find = (mark) => root && [...root.querySelectorAll('.chat-bubble')].find((node) => node.innerText.includes(mark));
+    const one = find(first), two = find(shared);
+    if (!one || !two) return null;
+    // The band a reader sees of the room: below the panel's bar and the page header, above its composer.
+    const box = root.getBoundingClientRect();
+    const bars = [root.closest('.project-panel')?.querySelector('.project-panel-bar'),
+                  root.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header')]
+        .filter((bar) => bar?.getClientRects().length).map((bar) => bar.getBoundingClientRect().bottom);
+    const composer = document.querySelector(area);
+    const top = Math.max(box.top, ...bars);
+    const bottom = composer?.getClientRects().length ? Math.min(box.bottom, composer.getBoundingClientRect().top) : box.bottom;
+    const a = one.getBoundingClientRect(), b = two.getBoundingClientRect();
+    return {first_top: a.top - top, first_bottom: a.bottom - top, shared_top: b.top - top, band: bottom - top,
+            scroll_top: root.scrollTop, bottom_gap: root.scrollHeight - root.clientHeight - root.scrollTop};
+}"""
+
+
+def _scroll_top(page, feed):
+    return page.evaluate("feed => document.querySelector(feed).scrollTop", feed)
+
+
+@pytest.mark.parametrize("engine,width,height,theme", [
+    ("webkit", 1165, 851, "dark"), ("chromium", 1440, 900, "light"),
+], ids=["webkit-desktop-dark", "chromium-desktop-light"])
+def test_a_shared_notice_read_in_main_leaves_its_projects_own_unread_landing_and_scroll(
+    wait_clone, tmp_path, monkeypatch, request, engine, width, height, theme,
+):
+    """Reading in Main the one message both rooms show reads it in its Project too, and nothing else: the
+    Project's own earlier message stays unread, opening the Project lands on that message (never again on the
+    notice read in Main), and neither room's reading moves the other room's scroll position (owner A, 28.10)."""
+    from playwright.sync_api import sync_playwright
+
+    from tests.system_e2e.harness import KeylessIsolatedServer
+
+    tag = uuid.uuid4().hex[:12]
+    marker = f"PROJECT_LAND_{tag}"
+    first_mark, shared_mark = f"PROJECT_ONLY_{tag}", f"SHARED_NOTICE_{tag}"
+    first = f"First finding, for this Project only. [{first_mark}]"
+    shared = "\n\n".join([f"Owner action needed in Settings. [{shared_mark}]"] + [
+        f"Paragraph {index:02d}: the series ended and the branch needs your review before anything else is "
+        f"started; this paragraph exists so the notice is taller than the window." for index in range(40)])
+
+    def tools(body):
+        return sum(str(m.get("role") or "") == "tool" for m in body.get("messages", []) if isinstance(m, dict))
+
+    started = ModelGate(lambda body: bool(body.get("tools")) and marker in body_text(body) and tools(body) == 0, timeout=300)
+    held = ModelGate(lambda body: bool(body.get("tools")) and marker in body_text(body) and tools(body) == 2, timeout=300)
+
+    def respond(body):
+        if marker not in body_text(body):
+            return {"final": "No scripted work for this actor."}
+        if tools(body) == 0:  # its own room first, then one notice for Main
+            return {"tool": "send_user_message", "arguments": {"text": first, "reason": "a finding for this Project"}}
+        if tools(body) == 1:
+            return {"tool": "send_user_message", "arguments": {
+                "text": shared, "reason": "owner-only remedy", "destination": "main"}}
+        return {"final": f"Audit complete. [LANDING_ANSWER_{tag}]"}
+
+    home = tmp_path / "home"
+    home.mkdir()
+    original_env = KeylessIsolatedServer._env
+    monkeypatch.setattr(KeylessIsolatedServer, "_env", lambda server: {
+        **original_env(server), "HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(home / ".config")})
+    evidence = output_dir(request.config)
+    gates = lambda body: (started(body), held(body))  # noqa: E731
+    with ScriptedStubModel([respond] * 12, final_answer=CARD_NAME, gate=gates) as stub:
+        server = start_server(wait_clone, tmp_path / "instance", keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
+        oracle = ArtifactOracle(server.data_root)
+        try:
+            project = _api(server.base_url, "POST", "/api/projects", {"name": "Landing room"})["project"]
+            project_chat = str(project["chat_id"])
+            with sync_playwright() as pw:
+                browser = getattr(pw, engine).launch()
+                page = browser.new_page(viewport={"width": width, "height": height}, color_scheme=theme)
+                errors = PageErrors(page, engine)
+                page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+                main_feed = "#chat-messages"
+                with FailureEvidence(page, browser, evidence, request.node.nodeid, engine) as capture:
+                    capture.details.update({"theme": theme, "width": width, "height": height})
+                    page.goto(server.base_url, wait_until="domcontentloaded")
+                    page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
+                    project_feed = _open_project(page, project)
+                    project_area = f'[id="pchat-{project["id"]}-input-area"]'
+                    page.locator(f'[id="pchat-{project["id"]}-input"]').fill(f"{marker} Audit and tell me in Main.")
+                    page.locator(f'[id="pchat-{project["id"]}-send"]').click()
+                    assert started.arrived.wait(120), "the Project turn never reached its first round"
+                    _nav(page, "dashboard")  # away before anything is said
+                    started.release.set()
+                    assert held.arrived.wait(120), "the turn never returned from its two messages"
+                    # One durable row each: its own message in its room, the notice written to Main.
+                    own = wait_until(lambda: _chat_rows(oracle, first_mark), 60) or []
+                    assert [(row["direction"], row["chat_id"]) for row in own] == [("out", int(project_chat))], own
+                    notice_rows = wait_until(lambda: _chat_rows(oracle, shared_mark), 60) or []
+                    assert [(row["direction"], row["chat_id"], row["type"]) for row in notice_rows] == [
+                        ("out", 1, "main_notice")], notice_rows
+                    # Its own message and the notice are unread in the Project; the notice is unread in Main.
+                    page.wait_for_function(
+                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '2'", timeout=45_000)
+                    page.wait_for_function(
+                        "() => document.querySelector('[data-nav-page=\"chat\"] .unread-badge')?.textContent.trim() === '1'",
+                        timeout=30_000)
+                    seen_before = (_prefs(page).get("project_seen_revision") or {}).get(project["id"], 0)
+                    capture.checkpoint("1-away-two-unread")
+
+                    # ---- he reads the notice in full in Main, by parts: it is read in the Project too ----
+                    _nav(page, "chat")
+                    page.locator(f'{main_feed} .chat-bubble[data-system-type="main_notice"]').filter(
+                        has_text=shared_mark).wait_for(timeout=30_000)
+                    facts = page.evaluate(_PART_FACTS, {"feed": main_feed, "mark": shared_mark})
+                    assert facts["height"] > facts["viewport"], facts  # taller than the window: read by parts
+                    above, below = facts["seen"]
+                    top = facts["top"] - above
+                    while top < facts["top"] + facts["height"]:
+                        _scroll_to(page, main_feed, top)
+                        top += (below - above) // 2
+                    # The Project's own message stays unread there: one read, of one message.
+                    page.wait_for_function(
+                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '1'", timeout=30_000)
+                    page.wait_for_function(
+                        "() => !document.querySelector('[data-nav-page=\"chat\"] .unread-badge')?.textContent.trim()",
+                        timeout=30_000)
+                    prefs = _prefs(page)
+                    revision = facts["revisions"][project_chat]
+                    assert prefs["read_ahead_revisions"].get(project_chat) == [[revision, revision]], prefs
+                    assert (prefs.get("project_seen_revision") or {}).get(project["id"], 0) == seen_before < revision
+                    main_scroll = _scroll_top(page, main_feed)
+                    _shot(page, request, "R1-main-read-the-shared-notice")
+                    capture.checkpoint("2-read-in-main")
+
+                    # ---- the Project lands on its own unread message, never again on the notice ----
+                    _open_project(page, project)
+                    landed = page.wait_for_function("""(args) => {
+                        const facts = (%s)(args);
+                        return facts && Math.abs(facts.first_top) <= 4 && facts.shared_top > facts.first_bottom - 1
+                            && facts.bottom_gap > 40 ? facts : null;
+                    }""" % _LANDING_FACTS, arg={"feed": project_feed, "area": project_area, "first": first_mark,
+                                                "shared": shared_mark}, timeout=30_000).json_value()
+                    assert _scroll_top(page, main_feed) == main_scroll  # opening and landing the Project left Main still
+                    project_scroll = landed["scroll_top"]
+                    _shot(page, request, "R2-project-landed-on-its-own-unread")
+                    capture.checkpoint("3-project-landed")
+
+                    # ---- each room keeps its own position while the other is read ----
+                    _scroll_to(page, main_feed, 0)
+                    page.wait_for_timeout(800)
+                    assert _scroll_top(page, project_feed) == project_scroll, "reading Main moved the Project"
+                    main_scroll = _scroll_top(page, main_feed)
+                    _scroll_to(page, project_feed, page.evaluate("feed => document.querySelector(feed).scrollHeight",
+                                                                  project_feed))
+                    page.wait_for_function(
+                        "() => (document.querySelector('#nav-projects-count')?.textContent.trim() || '') === ''",
+                        timeout=30_000)
+                    assert _scroll_top(page, main_feed) == main_scroll, "reading the Project moved Main"
+                    assert not (_prefs(page).get("read_ahead_revisions") or {}).get("1")  # Main read the notice itself
+                    _shot(page, request, "R3-each-room-kept-its-own-position")
+                    capture.checkpoint("4-positions-independent")
+                    assert not errors.unexpected(), errors
+        finally:
+            started.release.set()
+            held.release.set()
+            server.stop()
+            assert server.proc.poll() is not None

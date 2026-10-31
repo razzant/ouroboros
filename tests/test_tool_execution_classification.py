@@ -1,3 +1,5 @@
+import pytest
+
 from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
 from ouroboros.tools.tool_result import (
     LegacyTextResultAdapter,
@@ -57,28 +59,38 @@ def test_late_tool_settlement_runs_owner_cleanup_before_lease_close(monkeypatch)
     assert calls == ["cleanup", "lease"]
 
 
-def test_get_tool_timeout_honors_per_call_override(monkeypatch):
-    """T3 (v6.35.0): the OUTER tool-execution timeout must rise for a per-call
-    run_command/run_script timeout_sec, else the static 360s entry cap would cut
-    off a long command before the handler's own subprocess timeout fires."""
+def test_get_tool_timeout_follows_the_handlers_own_child_timeout(monkeypatch):
+    """The OUTER wait of a handler that bounds its own child (run_command, run_script,
+    verify_and_record) is that child's resolved timeout plus the settlement margin, never
+    below the registered window, so the inner timeout fires and settles first (#1376).
+    The rule it replaces raised the wait only for an explicit run_command/run_script
+    override, so the 600 s default child ran under a 360 s wait. The real entries carry
+    dispatch's own alias folding (``timeout`` -> ``timeout_sec``)."""
     from types import SimpleNamespace
 
     import ouroboros.loop_tool_execution as lte
+    import ouroboros.tools.shell_process as shell_process
+    from ouroboros.tools import shell, verify
 
     monkeypatch.setattr(lte, "load_settings", lambda: {})
+    monkeypatch.setattr(shell_process, "load_settings", lambda: {})
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
-    tools = SimpleNamespace(get_timeout=lambda name: 360)
+    tools = SimpleNamespace(get_timeout=lambda name: 360,
+                            _entries={entry.name: entry for entry in [*shell.get_tools(), *verify.get_tools()]})
 
-    from ouroboros.config import get_per_call_timeout_ceiling_sec
+    from ouroboros.config import SETTINGS_DEFAULTS, get_per_call_timeout_ceiling_sec
 
     ceil = get_per_call_timeout_ceiling_sec()
     margin = lte._PER_CALL_TIMEOUT_OUTER_MARGIN_SEC
-    assert lte._get_tool_timeout(tools, "run_command", {}) == 360               # no override -> base
-    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": 900}) == min(max(360, 900), ceil) + margin
-    assert lte._get_tool_timeout(tools, "run_script", {"timeout": 600}) == min(max(360, 600), ceil) + margin  # alias
-    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": 5000}) == min(5000, ceil) + margin  # clamped
-    assert lte._get_tool_timeout(tools, "read_file", {"timeout_sec": 900}) == 360      # non-shell tool ignores it
-    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": "abc"}) == 360  # garbage -> base
+    default = min(int(SETTINGS_DEFAULTS["OUROBOROS_TOOL_TIMEOUT_SEC"]), ceil)
+    assert lte._get_tool_timeout(tools, "run_command", {}) == default + margin  # the default child, not 360
+    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": 900}) == min(900, ceil) + margin
+    assert lte._get_tool_timeout(tools, "run_script", {"timeout": 600}) == min(600, ceil) + margin  # alias
+    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": 5000}) == ceil + margin  # clamped
+    assert lte._get_tool_timeout(tools, "verify_and_record", {"timeout_sec": 900}) == min(900, ceil) + margin
+    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": 5}) == 360  # never below the window
+    assert lte._get_tool_timeout(tools, "read_file", {"timeout_sec": 900}) == 360  # non-shell tool ignores it
+    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": "abc"}) == default + margin  # garbage -> default
 
 
 def test_review_blocked_is_not_treated_as_tool_failure():
@@ -109,7 +121,7 @@ def test_native_review_and_git_codes_preserve_legacy_status_without_text_authori
         "commit_reviewed", review.text, False, review,
     )["status"] == "review_blocked"
     assert _extract_result_metadata(
-        "vcs_status", git.text, False, git,
+        "vcs_read", git.text, False, git,
     )["status"] == "git_error"
 
 
@@ -119,7 +131,7 @@ def test_binding_result_mappings_preserve_legacy_loop_classification():
         # their own outcome bucket instead of the shared generic `error`.
         ("query_code", "⚠️ TOOL_ARG_ERROR (query_code): ValueError: bad root", "error", "TOOL_ARG_ERROR", True, "argument_error"),
         ("apply_patch", "⚠️ TOOL_ERROR: ValueError: bad root", "error", "TOOL_ERROR", True, "error"),
-        ("vcs_status", "⚠️ GIT_ERROR: ValueError: bad root", "ok", "GIT_ERROR", False, "git_error"),
+        ("vcs_read", "⚠️ GIT_ERROR: ValueError: bad root", "ok", "GIT_ERROR", False, "git_error"),
     )
     for tool, text, status, code, is_error, legacy_status in cases:
         typed = LegacyTextResultAdapter.from_text(tool, text)
@@ -418,24 +430,18 @@ def test_shell_regex_autocorrect_nonzero_still_fails():
     assert _extract_result_metadata("run_command", result, True)["status"] == "non_zero_exit"
 
 
-def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, monkeypatch):
-    import pathlib
+@pytest.mark.parametrize("process_exit", [None, -9], ids=["no-process", "signal-exit"])
+def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, monkeypatch, process_exit):
+    import json
     import threading
+    import time
     from types import SimpleNamespace
 
     import ouroboros.loop_tool_execution as loop_tool_execution
     from ouroboros.loop_tool_execution import _execute_with_timeout
+    from ouroboros.tools.process_facts import publish_process_facts
     from ouroboros.tools.tool_result import ToolResult
 
-    source = (pathlib.Path(__file__).resolve().parents[1] / "ouroboros" / "loop_tool_execution.py").read_text(encoding="utf-8")
-
-    assert '"status": result_meta.get("status")' in source
-    # The typed process facts reach the live log through ONE projection shared
-    # with the tools.jsonl row (typed-process-facts lane), so the payload names
-    # every member the merge produced — exit_code and signal included — and a
-    # member the call never published stays absent instead of reading as null.
-    # (the live finished frame of every branch comes from _emit_finished; #1316).
-    assert source.count("**_process_fact_fields(result_meta)") >= 2
     projected = loop_tool_execution._process_fact_fields(
         {"status": "x", "exit_code": -9, "signal": "SIGKILL", "killed_by_host": True}
     )
@@ -457,6 +463,9 @@ def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, mon
         # descheduled between submit and its 1ms wait, which then found the
         # future already done and took the in-time branch.
         late_notice.wait(30)
+        if process_exit is not None:
+            publish_process_facts(returncode=process_exit, started_ts=time.monotonic(), killed_by_host=True)
+            return ToolResult(status="error", code="SHELL_EXIT_ERROR", text="process failed")
         return ToolResult(status="ok", code="OK", text="OK")
 
     # D10 emptied FOREGROUND_MUTATIVE_TOOLS (claude_code_edit was its only
@@ -478,10 +487,21 @@ def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, mon
         task_id="task-1",
     )
 
-    assert result["result"] == "OK"
+    assert result["result"] == ("OK" if process_exit is None else "process failed")
     payloads = [event.get("data") or {} for event in live_events]
     assert any(payload.get("type") == "tool_call_late" for payload in payloads)
     assert any(payload.get("terminal_wait") is True for payload in payloads)
+    [finished] = [row for row in payloads if row.get("type") == "tool_call_finished"]
+    rows = [json.loads(line) for line in (drive_logs / "tools.jsonl").read_text(encoding="utf-8").splitlines()]
+    [settled] = [row for row in rows if row.get("type") == "tool_call"]
+    for row in (finished, settled):
+        assert row["status"] == ("ok" if process_exit is None else "non_zero_exit")
+        if process_exit is None:
+            assert not {"exit_code", "signal", "killed_by_host", "duration_ms"}.intersection(row)
+        else:
+            assert (row["exit_code"], row["signal"], row["killed_by_host"]) == (-9, "SIGKILL", True)
+            assert isinstance(row["duration_ms"], int) and row["duration_ms"] >= 0
+            assert "pre_exec_failure" not in row and "timed_out" not in row
 
 
 # Moved here from tests/test_loop_misc.py: both assert what the SINGLE
@@ -526,10 +546,10 @@ def test_auto_attach_skips_a_result_that_declared_failure(tmp_path, monkeypatch)
     # same body, which is exactly the single-classifier property under test.
     from ouroboros.tools.tool_result import LegacyTextResultAdapter
 
-    attached = []
+    attached, stamps = [], []
     import ouroboros.tools.vision as vision
     monkeypatch.setattr(vision, "attach_local_image_to_context",
-                        lambda ctx, path: attached.append(path) or (True, "ok"))
+                        lambda ctx, path, *, stamp=None, observation=None: stamps.append(stamp) or attached.append(path) or (True, "ok"))
     tools = SimpleNamespace(_ctx=SimpleNamespace(messages=[], drive_root=str(tmp_path)))
     body = _json.dumps({"ok": False, "error": "boom", "auto_attach_image": "/x/shot.png"})
     # The adapter types the self-reported failure; the guard reads that code.
@@ -549,6 +569,7 @@ def test_auto_attach_skips_a_result_that_declared_failure(tmp_path, monkeypatch)
         tools,
     )
     assert attached == ["/x/shot.png"], "a healthy payload must still attach"
+    assert len(stamps) == 1 and stamps[0] is tools._ctx, "an eviction is stamped on the live slot"
 
 
 def test_reviewed_mutator_soft_timeout_keeps_foreground_custody(tmp_path, monkeypatch):

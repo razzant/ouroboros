@@ -6,10 +6,11 @@ room of the one identity, A2A transport excluded.
 """
 import json
 
-from ouroboros.chat_chain import _read_chat_entries
+from ouroboros.chat_chain import iter_rows
+from tests._dialogue import import_all
 
 
-def test_read_chat_entries_includes_project_rows_full_awareness(tmp_path):
+def test_stream_includes_project_rows_full_awareness(tmp_path):
     """Full project awareness (v6.32.0): the one identity's dialogue memory is its WHOLE
     conversation — main AND project threads — because Ouroboros is one awareness/biography
     (BIBLE P1). Only A2A virtual transport is excluded from the stream."""
@@ -28,5 +29,6 @@ def test_read_chat_entries_includes_project_rows_full_awareness(tmp_path):
     ]
     chat_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
-    texts = [e.get("text") for e in _read_chat_entries(chat_path)]
+    import_all(tmp_path)
+    texts = [row.get("text") for _address, row, _pos in iter_rows(tmp_path)]
     assert texts == ["main-1", "project-visible", "main-2"]  # full awareness, A2A excluded

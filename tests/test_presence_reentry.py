@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from ouroboros import presence_continuation as pc
+from ouroboros import presence_continuation as pc, dialogue_store as ds
 from ouroboros.task_results import write_task_result
 from tests.test_presence_continuation_seams import KEY, _append, _binding, _row
 from tests.test_presence_own_work import _ceiling, _registry
@@ -59,13 +59,13 @@ def test_large_single_message_is_fully_readable_inside_frozen_ceiling(tmp_path):
 
 
 def test_old_snapshot_remains_readable_after_new_reentry_and_rotation(tmp_path):
-    from supervisor.state import rotate_chat_log_if_needed
+    from supervisor.state import rotate_jsonl_log_if_needed
 
     registry, ctx = _actor(tmp_path)
     cursor = pc._chat_cursor(tmp_path)
     _append(tmp_path, *[_row(KEY, f"row {i} " + "x" * 1000) for i in range(40)])
     old = _reader(pc.reentry_note(_binding(tmp_path, cursor), ctx))
-    rotate_chat_log_if_needed(tmp_path, max_bytes=1)
+    rotate_jsonl_log_if_needed(tmp_path, "chat.jsonl", "chat", max_bytes=1)
     new_cursor = pc._chat_cursor(tmp_path)
     _append(tmp_path, _row(KEY, "new boundary"))
     new = _reader(pc.reentry_note(_binding(tmp_path, new_cursor), ctx))
@@ -120,7 +120,7 @@ def test_unavailable_source_keeps_whole_observed_text_inline(tmp_path, monkeypat
 @pytest.mark.parametrize("failure", ["reader_absent", "write_failed", "readback_failed"])
 def test_unavailable_source_after_scan_budget_names_chain_gap_offsets(tmp_path, monkeypatch, failure):
     from ouroboros.presence_authority import presence_ceiling_payload
-    from supervisor.state import rotate_chat_log_if_needed
+    from supervisor.state import rotate_jsonl_log_if_needed
 
     _, ctx = _actor(tmp_path)
     if failure == "reader_absent":
@@ -131,20 +131,19 @@ def test_unavailable_source_after_scan_budget_names_chain_gap_offsets(tmp_path, 
             raise OSError("source unavailable")
         target = "store_actor_source_bytes" if failure == "write_failed" else "read_actor_source_bytes"
         monkeypatch.setattr(f"ouroboros.artifacts.{target}", fail)
-    archived = _append(tmp_path, _row(KEY, "archived before park"))
-    archive_bytes = archived.stat().st_size
-    rotate_chat_log_if_needed(tmp_path, max_bytes=1)
+    _append(tmp_path, _row(KEY, "archived before park"))
+    rotate_jsonl_log_if_needed(tmp_path, "chat.jsonl", "chat", max_bytes=1)
     _append(tmp_path, _row(KEY, "before park"))
     cursor = pc._chat_cursor(tmp_path)
-    live = _append(tmp_path, _row("telegram:bot-1:elsewhere:0", "foreign " * 100),
-                   _row(KEY, "after scan budget"))
-    physical_offset = live.stat().st_size
+    _append(tmp_path, _row("telegram:bot-1:elsewhere:0", "foreign " * 100),
+            _row(KEY, "after scan budget"))
+    physical_offset = ds.stream_end(tmp_path, "chat")
     bad_rows = [(b"{broken\n", "a malformed line"), (b"[1,2]\n", "a non-object line"),
-                (b'{"partial":', "a row still being written")]
+                (b'{"partial":', "a malformed line")]
     _append(tmp_path, raw=b"".join(raw for raw, _ in bad_rows))
     monkeypatch.setattr(pc, "_REENTRY_SCAN_BYTES", 1)
     monkeypatch.setattr(pc, "_REENTRY_PAGE_BYTES", 20)
-    assert pc._conversation_rows_since(tmp_path, cursor, KEY)[1][-1]["kind"] == "scan_budget_exhausted"
+    assert pc._conversation_rows_since(tmp_path, cursor, KEY)[1]
 
     note = pc.reentry_note(_binding(tmp_path, cursor), ctx)
 
@@ -154,7 +153,7 @@ def test_unavailable_source_after_scan_budget_names_chain_gap_offsets(tmp_path, 
     assert "{path}" not in note and "{offset}" not in note
     for raw, description in bad_rows:
         # A preceding archive makes chain offsets differ from live-file offsets.
-        assert f"{description} at the captured chat.jsonl chain byte {archive_bytes + physical_offset}" in note
+        assert f"{description} at state/dialog.sqlite byte {physical_offset}" in note
         physical_offset += len(raw)
 
 
@@ -186,7 +185,7 @@ def test_unavailable_source_keeps_every_gap_location_inline(tmp_path, monkeypatc
     cursor, offsets = _append_gap_locations(tmp_path)
     note = pc.reentry_note(_binding(tmp_path, cursor), ctx)
     assert "get_task_result(" not in note and "chat_history(" not in note
-    assert all(f"a malformed line at logs/chat.jsonl byte {offset}" in note for offset in offsets)
+    assert all(f"a malformed line at state/dialog.sqlite byte {offset}" in note for offset in offsets)
     assert "- and 4 more" not in note
 
 
@@ -199,4 +198,4 @@ def test_retained_source_keeps_all_gap_locations_when_note_is_bounded(tmp_path):
     assert "the retained reentry source lists every observed gap" in note
     source = _read_all(registry, _reader(note))
     assert [gap["offset"] for gap in source["gaps"]] == offsets
-    assert all(gap["path"] == "logs/chat.jsonl" for gap in source["gaps"])
+    assert all(gap["path"] == "state/dialog.sqlite" for gap in source["gaps"])

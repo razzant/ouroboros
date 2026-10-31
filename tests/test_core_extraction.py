@@ -87,6 +87,7 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
         "send_video",
         "send_file",
         "send_links",
+        "show_card",
         "search_code",
         "escalate",
         "forward_to_worker",
@@ -145,8 +146,26 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # registered materials and retention after task end. Only ask's validator requires
     # question. The exact hash below pins their union; parameter types/defaults and
     # required keys outside escalate, all other schemas and handler owners stay intact.
+    # Published question lifecycle wording changes only escalate's description and
+    # question_task_id description; the parameters and all other catalog entries remain identical.
+    # Rolled for living messages (plugin-first): the catalog gains show_card after send_links, its
+    # entry living beside its handler in tools/cards.py; every other entry is byte-identical (the
+    # catalog without show_card still hashes to 6d10eac1...). Rolled again after review: show_card's
+    # description says an app cannot fetch or load resources and that loading another page closes
+    # it, and that a press after the task ended arrives as the owner's message replying to the card.
+    # Rolled for the infrastructure-under-load PR: forward_to_worker also writes into a requested
+    # child's mailbox (read when it starts, or kept as unread mail), so its description and `task_id`
+    # description say "running, queued or requested"; nothing else in the catalog changed.
+    # Rolled for the start ledger: show_card's description adds one sentence (on most devices an app
+    # shares the owner's page thread, so heavy computation belongs in a blob: Worker); nothing else changed.
+    # D3 adds the recorded reply_to address to forward_to_worker and escalate.
+    # Target merge retains the contributor tool affordances and target review/mail contracts.
+    # 2026-10-23: escalate gains request_id for private Main questions; its retry
+    # description also explains that a new wait after timeout needs a new key.
+    # Rolled for the decision-quality review fixes: escalate's description names a helper's
+    # proposal as a fork source and makes a set-aside position one of the options; nothing else changed.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "5db47ba14469af3dceea9d20a40257f7eccb4599b047f879e7f691bfdd856cdf"
+        "c624c58e06228b4f0079bcbaafac846c6eb2a59ade38300a2d7fd528895a39fb"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -160,6 +179,7 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
         "send_video": ("ouroboros.tools.core_artifacts", "_send_video"),
         "send_file": ("ouroboros.tools.core_artifacts", "_send_file"),
         "send_links": ("ouroboros.tools.core_artifacts", "_send_links"),
+        "show_card": ("ouroboros.tools.cards", "_show_card"),
         "search_code": ("ouroboros.tools.core", "_code_search"),
         "escalate": ("ouroboros.tools.core_artifacts", "_escalate"),
         "forward_to_worker": ("ouroboros.tools.core", "_forward_to_worker"),

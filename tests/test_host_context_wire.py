@@ -102,13 +102,14 @@ def test_private_host_key_never_erases_real_names_or_nested_native_fields(monkey
 def test_only_private_producer_classification_marks_replaced_host_rows():
     from ouroboros.context_source_view import _obsolete_host_rows
 
-    key = context_budget.HOST_CONTEXT_KIND_KEY
+    key, bound = context_budget.HOST_CONTEXT_KIND_KEY, context_budget.bound_host_row
     rows = [{"role": "user", "name": peer_roster.ROSTER_SNAPSHOT_NAME, "content": "Named actor"},
-            {"role": "user", key: peer_roster.ROSTER_SNAPSHOT_NAME, "content": "Old snapshot"},
-            {"role": "user", key: peer_roster.ROSTER_UPDATE_NAME, "content": "Old update"},
-            {"role": "user", key: peer_roster.ROSTER_SNAPSHOT_NAME, "content": "Current snapshot"},
-            {"role": "user", key: CONTEXT_FACTS_NAME, "content": "Old facts"},
-            {"role": "user", key: CONTEXT_FACTS_NAME, "content": "Current facts"}]
+            bound(peer_roster.ROSTER_SNAPSHOT_NAME, "Old snapshot"),
+            bound(peer_roster.ROSTER_UPDATE_NAME, "Old update"),
+            bound(peer_roster.ROSTER_SNAPSHOT_NAME, "Current snapshot"),
+            bound(CONTEXT_FACTS_NAME, "Old facts"),
+            {"role": "user", key: CONTEXT_FACTS_NAME, "content": "Facts written before the binding"},  # stays whole
+            bound(CONTEXT_FACTS_NAME, "Current facts")]
     before = deepcopy(rows)
     assert _obsolete_host_rows(rows) == {1, 2, 4}
     assert rows == before

@@ -22,7 +22,7 @@ if sys.platform == "win32":
             ("hEvent", ctypes.wintypes.HANDLE),
         ]
 
-    # One complete ABI table for process presence, locks and Job ownership.
+    # One complete ABI table for process presence, locks, Job ownership and console attachment.
     for _api_name, _result_type, _argument_types in (
         ("CreateJobObjectW", ctypes.wintypes.HANDLE, (ctypes.wintypes.LPVOID, ctypes.wintypes.LPCWSTR)),
         ("SetInformationJobObject", ctypes.wintypes.BOOL,
@@ -45,6 +45,8 @@ if sys.platform == "win32":
         ("UnlockFileEx", ctypes.wintypes.BOOL,
          (ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD, ctypes.wintypes.DWORD,
           ctypes.wintypes.DWORD, ctypes.POINTER(_OVERLAPPED))),
+        ("GetConsoleProcessList", ctypes.wintypes.DWORD,
+         (ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.wintypes.DWORD)),
     ):
         _api = getattr(_kernel32, _api_name)
         _api.restype, _api.argtypes = _result_type, _argument_types

@@ -23,7 +23,7 @@ from ouroboros.task_results import validate_task_id
 _NOT_FOUND = frozenset({"predecessor_missing"})
 _UNAVAILABLE = frozenset({"predecessor_record_unreadable", "successor_record_unreadable",
                           "continuation_claim_unwritable", "queue_snapshot_persist_failed",
-                          "continuation_unconfirmed", "task_id_lookup_failed"})
+                          "continuation_unconfirmed", "task_id_lookup_failed", "queue_not_restored"})
 
 
 async def api_task_continue(request: Request) -> JSONResponse:

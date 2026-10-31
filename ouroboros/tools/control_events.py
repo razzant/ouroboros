@@ -27,17 +27,47 @@ log = logging.getLogger(__name__)
 
 
 # Guards parent-side shared ctx state mutated during (possibly parallel)
-# schedule_subagent emission within one tool-call round. Process-local: a parent
-# ctx is never shared across processes, so a threading.Lock is sufficient.
+# schedule_subagent emission within one tool-call round. Restart's send-once
+# section also enters the deferred append below, so this lock must be reentrant.
 
 
-_SCHEDULE_EMIT_LOCK = threading.Lock()
+_SCHEDULE_EMIT_LOCK = threading.RLock()
 
 
 _PROMOTE_CONFIRM_TIMEOUT_SEC = get_promote_confirm_wait_sec()
 
 
 _PROMOTE_CONFIRM_POLL_SEC = 0.05
+
+
+def request_restart_intent(ctx: ToolContext, reason: str, *, evolution: bool = False) -> dict:
+    """Send once per requester attempt; an uncertain ACK never duplicates the request."""
+    import time
+    import uuid
+
+    from ouroboros.queue_observation import load_queue_document, queue_stamp
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    task_id, attempt = str(ctx.task_id or ""), int(getattr(ctx, "task_attempt", None) or 1)
+    with _SCHEDULE_EMIT_LOCK:  # the existing lock for parallel calls sharing one ToolContext
+        request = getattr(ctx, "pending_restart_request", None)
+        if not request or (request["task_id"], request["task_attempt"]) != (task_id, attempt):
+            request = {"type": "restart_request", "phase": "intent", "request_id": uuid.uuid4().hex,
+                       "task_id": task_id, "task_attempt": attempt, "reason": reason,
+                       "evolution_restart": evolution, "ts": utc_now_iso()}
+            ctx.pending_restart_request = request
+            request["transport"] = _emit_control_event(ctx, dict(request))
+    deadline = time.monotonic() + (_PROMOTE_CONFIRM_TIMEOUT_SEC if request["transport"] == "live" else 0)
+    while True:
+        document = load_queue_document(canonical_data_root(ctx))
+        if queue_stamp(document):
+            for key in ("restart_reply", "restart_intent"):
+                receipt = document.get(key) or {}
+                if receipt.get("request_id") == request["request_id"] and receipt.get("status") != "awaiting":
+                    return receipt
+        if time.monotonic() >= deadline:
+            return {"status": "unconfirmed", "request_id": request["request_id"]}
+        time.sleep(_PROMOTE_CONFIRM_POLL_SEC)
 
 
 def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
@@ -180,59 +210,6 @@ def _wait_for_routing_annotation(
     )
 
 
-def _record_promotion_admission_stub(ctx: ToolContext, evt: Dict[str, Any], mode: str) -> None:
-    """Make the EMITTED promote durably readable before the wait can time out.
-
-    An admission the supervisor has not confirmed yet left NOTHING to read, so
-    ``get_task_result`` answered "unknown or not yet registered" - which reads as
-    "your promote never happened" and invites the second promote that mints a
-    duplicate root (#1160). The stub is the negative side only: ``emitted`` is not
-    a scheduled status, positive scheduling authority stays with the supervisor's
-    own receipt, and ``create_only`` initializes ABSENCE alone, so a supervisor
-    that already answered keeps its row byte-for-byte. A Presence promote's stub
-    carries the event's host provenance as the would-be root, exactly as the
-    admission writes it, so its own binding can read the pending reconciliation.
-    """
-    from ouroboros.dialogue_provenance import presence_root_carrier
-    from ouroboros.routing_wait import PROMOTION_ADMISSION_EMITTED
-    from ouroboros.task_results import STATUS_REQUESTED, write_task_result
-
-    task_id = str(evt.get("task_id") or "")
-    carrier = presence_root_carrier(evt, task_contract=evt.get("task_contract"))
-    try:
-        write_task_result(
-            _routing_status_root(ctx), task_id, STATUS_REQUESTED,
-            create_only=True, strict_existing_dict=True,
-            project_id=str(evt.get("project_id") or ""),
-            description=str(evt.get("objective") or ""),
-            promotion_admission={
-                "status": PROMOTION_ADMISSION_EMITTED,
-                "routing_token": str(evt.get("routing_token") or ""),
-                "emitted_at": utc_now_iso(),
-                "transport_mode": mode,
-            },
-            **({"metadata": carrier, "source": "presence_promote",
-                "delegation_role": "root", "root_task_id": task_id} if carrier else {}),
-        )
-    except Exception as exc:
-        # The promote itself proceeds; what is lost is the reconciliation read, so
-        # the failure is loud and durable rather than a DEBUG line (BIBLE P1).
-        log.warning("Failed to record the emitted promote admission for %s", task_id, exc_info=True)
-        try:
-            append_jsonl(
-                _routing_status_root(ctx) / "logs" / "supervisor.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "promote_admission_stub_failed",
-                    "task_id": task_id,
-                    "routing_token": str(evt.get("routing_token") or ""),
-                    "error": f"{type(exc).__name__}: {exc}",
-                },
-            )
-        except Exception:
-            log.debug("Failed to record the admission-stub failure", exc_info=True)
-
-
 def _emit_and_wait_for_routing(
     ctx: ToolContext,
     evt: Dict[str, Any],
@@ -240,6 +217,14 @@ def _emit_and_wait_for_routing(
     """Emit one routing event and return only its durable handler outcome."""
     from ouroboros.tool_custody import record_control_handoff, forget_unemitted_control
 
+    if str(evt.get("type") or "") == "promote_chat_to_task":
+        from ouroboros.promotion_intent import prepare_promotion_intent
+
+        try:
+            prepare_promotion_intent(_routing_status_root(ctx), evt)
+        except Exception as exc:
+            return "intent_persist_failed", {"status": "rejected", "reason": "intent_persist_failed",
+                                             "detail": f"New work was not emitted: {type(exc).__name__}: {exc}"}
     record_control_handoff(evt)
     mode = _emit_control_event(ctx, evt)
     if mode == "serialization_failed":
@@ -252,7 +237,6 @@ def _emit_and_wait_for_routing(
     timeout = _PROMOTE_CONFIRM_TIMEOUT_SEC if mode == "live" else 0.0
     kind = str(evt.get("type") or "")
     if kind == "promote_chat_to_task":
-        _record_promotion_admission_stub(ctx, evt, mode)
         receipt = _wait_for_promotion_admission(
             ctx,
             str(evt.get("task_id") or ""),

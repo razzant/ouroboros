@@ -16,15 +16,18 @@ separate facts on the calling task's result record (``merge_receipts``):
   and observation are never merged into one "reviewed" claim (a named task's
   completion shows neither its kind nor its subject), a delta review never
   covers a whole PR, and only a committed ``base..head`` record can;
-- outcome: GitHub's readback — merged (commit, tree, parents), queued/auto-merge
-  (NOT merged), refused, or unknown — and whether this call's own effect or
-  another actor's merge produced it.
+- outcome: the strongest evidence GitHub's readbacks gave of the one request —
+  merged (commit, tree, parents), queued/auto-merge (NOT merged), refused, or
+  unknown — and whether this call's own effect or another actor's merge produced
+  it. Beside non-merged outcomes, ``observed_after`` keeps the latest successful
+  readback; merged evidence stays terminal. A queue no longer shown by that
+  readback (CLOSED, or auto-merge gone after an unconfirmed request) reads as earlier.
 
 A missing or partial review is LOUD, never a lock: the merge still happens. The
 intent row is written BEFORE ``gh pr merge``; a failed intent write refuses with
 nothing done. After an unknown outcome the next call only reads GitHub back —
 an open PR does not prove the earlier request settled. Queued requests likewise
-remain observation-only. One receipt feeds both the task
+remain observation-only, even once their PR closes. One receipt feeds both the task
 card row and a cleaned block in the PR BODY (unrelated body text preserved,
 publication confirmed by readback); a failed publication after a merge is a
 recorded gap and never repeats the merge. Merges from a shell or the GitHub web
@@ -43,6 +46,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros import review_ledger
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
+from ouroboros.update_qualification import commit_summary, merge_qualification
 
 RECEIPTS_KEY = "merge_receipts"
 _RECEIPTS_CAP = 50
@@ -149,8 +153,12 @@ def _merge_facts(prior: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, A
         old = {"status": "unknown"}  # legacy CLI exit never proved rejection
     strength = {"unknown": 0, "queued": 1, "refused": 1, "merged": 2}
     if strength.get(old.get("status"), -1) > strength.get(new.get("status"), -1):
-        # Coverage and its observed subject travel with the stronger outcome.
-        for key in ("outcome", "observed_after", "coverage"):
+        # The stronger outcome stays. A later successful readback of the same recorded effect is
+        # still the current observation, with the coverage computed for it. MERGED is terminal,
+        # so a later CLOSED is a lagging replica; a claim loser's snapshot predates the effect.
+        whole = (old.get("status") == "merged" or not incoming.get("observed_after")
+                 or incoming.get("effect") != prior.get("effect"))
+        for key in ("outcome", "observed_after", "coverage") if whole else ("outcome",):
             if key in prior:
                 merged[key] = prior[key]
     elif old.get("status") == new.get("status") == "merged":
@@ -311,13 +319,31 @@ def contributor_evidence(body: str, comments: List[Any]) -> str:
 # --- publication -----------------------------------------------------------------------
 
 
+def queued_earlier_note(receipt: Dict[str, Any]) -> str:
+    """The latest readback beside a queued outcome it no longer shows, else ``""``.
+
+    The card, the PR body and the tool share this wording, so an earlier queue
+    state never reads as today's GitHub readback.
+    """
+    observed, effect = receipt.get("observed_after") or {}, receipt.get("effect") or {}
+    state, auto_merge = str(observed.get("state") or "").upper(), bool(observed.get("auto_merge"))
+    if ((receipt.get("outcome") or {}).get("status") != "queued" or not state
+            or _queue_reason(state, auto_merge, bool(effect.get("ok")))):
+        return ""
+    effect_note = "request accepted, outcome unresolved" if effect.get("ok") else "effect unconfirmed"
+    if effect.get("failure") in {"pre_effect", "cli_missing", "target"}:
+        effect_note = "request refused before effect"
+    return f"earlier; PR now {state}, auto-merge {'on' if auto_merge else 'off'}; {effect_note}"
+
+
 def public_block(receipt: Dict[str, Any]) -> str:
     """The cleaned PR-body block: typed facts only — no task ids, paths, accounts or prompts."""
     review, outcome = receipt.get("review") or {}, receipt.get("outcome") or {}
     declared, coverage = review.get("declared") or {}, receipt.get("coverage") or {}
     observed, record = review.get("host_observed") or [], review.get("record") or {}
+    note = queued_earlier_note(receipt)
     lines = [f"<!-- ouroboros:merge-receipt {receipt['receipt_id']} -->", "### Ouroboros merge receipt", "",
-             f"- Outcome: **{outcome.get('status', 'unknown')}**"
+             f"- Outcome: **{outcome.get('status', 'unknown')}**" + (f" {note}" if note else "")
              + (f" — merge commit `{outcome['merge_sha']}`" if outcome.get("merge_sha") else ""),
              f"- Requested: `{receipt['requested']['method']}` of head `{receipt['requested']['expected_head_sha']}`"]
     if outcome.get("merge_tree"):
@@ -350,6 +376,10 @@ def public_block(receipt: Dict[str, Any]) -> str:
               f"- CONTRIBUTING checklist in this PR: {review.get('contributor_evidence', 'absent')}",
               "- A review record is evidence, not approval; merges from a shell or the web UI leave no receipt.",
               "<!-- /ouroboros:merge-receipt -->"]
+    if receipt.get("qualification"):
+        lines.insert(-1, commit_summary(receipt["qualification"]))
+    if receipt.get("commit_receipt") == "no_merge_commit_for_rebase":
+        lines.insert(-1, "- Rebase creates no merge commit; this receipt is retained in the PR and task only.")
     return "\n".join(lines)
 
 
@@ -381,7 +411,8 @@ def card_row_text(receipt: Dict[str, Any]) -> str:
             "" if record.get("state") == "settled" else f" ({record.get('state') or 'unknown'})")
     else:
         source = "; review source: declaration" if review.get("declared") else ""
-    return (f"{loud}PR #{receipt['number']} merge: {outcome.get('status', 'unknown')}"
+    note = queued_earlier_note(receipt)
+    return (f"{loud}PR #{receipt['number']} merge: {outcome.get('status', 'unknown')}" + (f" {note}" if note else "")
             + (f" as {outcome['merge_sha'][:12]}" if outcome.get("merge_sha") else "")
             + f"; review coverage {coverage.get('status', 'unknown')}"
             + (f" ({', '.join(coverage['gaps'])})" if coverage.get("gaps") else "") + source)
@@ -408,6 +439,14 @@ def _observed(pr: Dict[str, Any]) -> Dict[str, Any]:
             "auto_merge": bool(pr.get("autoMergeRequest"))}
 
 
+def _queue_reason(state: str, auto_merge: bool, own_effect_ok: bool) -> str:
+    """Why a readback shows the request queued (``""``: it does not); readback and wording share it."""
+    if state != "OPEN":
+        return ""
+    # Auto-merge, or GitHub accepted the request (e.g. a merge queue); not merged yet.
+    return "auto_merge_pending" if auto_merge else "accepted_still_open" if own_effect_ok else ""
+
+
 def _outcome(pr: Optional[Dict[str, Any]], gh_api: Gh, *, own_effect_ok: bool, effect_definite: bool) -> Dict[str, Any]:
     """GitHub's readback turned into one outcome; queued/auto-merge is never 'merged'."""
     if pr is None:
@@ -429,10 +468,9 @@ def _outcome(pr: Optional[Dict[str, Any]], gh_api: Gh, *, own_effect_ok: bool, e
             except (TypeError, ValueError, AttributeError):
                 out["merge_tree_unavailable"] = True
         return out
-    if state == "OPEN" and pr.get("autoMergeRequest"):
-        return {"status": "queued", "reason": "auto_merge_pending"}
-    if state == "OPEN" and own_effect_ok:  # GitHub accepted the request (e.g. a merge queue); not merged yet
-        return {"status": "queued", "reason": "accepted_still_open"}
+    queued = _queue_reason(state, bool(pr.get("autoMergeRequest")), own_effect_ok)
+    if queued:
+        return {"status": "queued", "reason": queued}
     if state == "OPEN" and effect_definite:
         return {"status": "refused"}
     return {"status": "unknown", "reason": f"pr_state_{state.lower() or 'unread'}_after_unconfirmed_effect"}
@@ -598,7 +636,24 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
                               "returned, or omit it and declare the review instead; nothing was merged"}
     pr = _read_pr(gh, number)
     if pr is None:
-        return {"refused": "pr_unreadable", "detail": "the pull request could not be read; nothing was merged"}
+        # This call's no-effect fact never reads as the end of an earlier request: name each
+        # still-observed receipt for this number by its own recorded URL and real status
+        # (which repository this call meant needs the read that failed).
+        earlier = [r for r in task_receipts(drive_root, task_id)
+                   if r.get("number") == int(number) and _must_observe(r)]
+        if not earlier:
+            return {"refused": "pr_unreadable", "detail": "the pull request could not be read; nothing was merged"}
+        facts = []
+        for r in earlier:
+            status = (r.get("outcome") or {}).get("status") or "unknown"
+            target = (r.get("repo") or {}).get("url") or f"PR #{int(number)}"
+            facts.append(f"a merge of {target} was already confirmed (receipt_id={r['receipt_id']})"
+                         if status == "merged" else
+                         f"the earlier merge request for {target} is still unresolved "
+                         f"(receipt_id={r['receipt_id']}, outcome {status})")
+        return {"refused": "pr_unreadable", "detail": (
+            "the pull request could not be read, so this call sent no new merge request; " + "; ".join(facts)
+            + "; call pr_merge again once GitHub answers to observe it")}
     repo = {"url": str(pr.get("url") or "")}
     mine = [r for r in task_receipts(drive_root, task_id) if r.get("repo") == repo]
     prior = next((r for r in reversed(mine) if _must_observe(r)), None)
@@ -620,6 +675,8 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
                        "contributor_evidence": contributor_evidence(pr.get("body") or "", pr.get("comments") or [])},
             "coverage": review_coverage(declared, host_observed, observed["head_sha"], record),
         }
+        receipt["qualification"] = merge_qualification(receipt["review"], review.get("checks"))
+        receipt["commit_receipt"] = ("no_merge_commit_for_rebase" if method == "rebase" else "requested")
         try:
             claimed = write_receipt(drive_root, task_id, receipt, claim=True)
         except Exception as exc:
@@ -638,8 +695,15 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
         recovered = dict(prior, outcome=outcome, observed_after=observed, state="settled")
         recovered["launch_operation_ids"] = list(dict.fromkeys(
             [*(prior.get("launch_operation_ids") or []), *([operation_id] if operation_id else [])]))
-        return {**_finish(ctx, gh, gh_api, drive_root, task_id, recovered), "readback_only": True}
-    res = gh(["pr", "merge", str(number), f"--{method}", "--match-head-commit", expected], timeout=120)
+        return {**_finish(ctx, gh, gh_api, drive_root, task_id, recovered), "readback_only": True,
+                "prior_status": str((prior.get("outcome") or {}).get("status") or "")}
+    args = ["pr", "merge", str(number), f"--{method}", "--match-head-commit", expected]
+    body = None
+    if method != "rebase":
+        args += ["--body-file", "-"]
+        body = (_BODY_BLOCK_RE.sub("", str(pr.get("body") or "")).rstrip()
+                + "\n\n" + commit_summary(receipt["qualification"]))
+    res = gh(args, timeout=120, input_data=body)
     receipt.update(state="effect_attempted", effect={
         "ok": bool(getattr(res, "ok", False)), "exit_code": getattr(res, "exit_code", None),
         "http_status": getattr(res, "http_status", None), "failure": str(getattr(res, "failure", "") or ""),

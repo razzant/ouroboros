@@ -15,8 +15,10 @@ import json
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, TypedDict, runtime_checkable
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, TypedDict, runtime_checkable
 
+from ouroboros.contracts.live_conversation import CallTool, LiveConfig, SessionFactory
+from ouroboros.contracts.realtime import ProviderCatalog, RealtimeRoute
 from ouroboros.contracts.skill_manifest import VALID_SKILL_PERMISSIONS
 from ouroboros.skill_token import SkillToken
 
@@ -27,7 +29,10 @@ from ouroboros.skill_token import SkillToken
 # refused a NEW PASS at issuance (``extension_new_pass_admission_error``).
 # 2.0 absorbs 1.4's presence capability (reviewed transport skills may submit
 # authenticated non-owner presence events through the Host Service ceiling).
-PLUGIN_API_VERSION = "2.0"
+# 2.1: target memory reader and branch realtime registration (independent additions).
+# 2.2: conversation frames declare their initial ordinary tool schemas.
+# 2.3: additive union of memory reading and realtime/conversation registration.
+PLUGIN_API_VERSION = "2.3"
 # The generation an extension WITHOUT the manifest field binds against —
 # "absent ≡ 1.3 by construction" (owner-ratified §6.1-Δ; deliberately NOT 1.4).
 LEGACY_PLUGIN_API_GENERATION = "1.3"
@@ -38,7 +43,7 @@ FORBIDDEN_SKILL_SETTINGS: frozenset[str] = frozenset({
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_COMPATIBLE_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GIGACHAT_CREDENTIALS", "GIGACHAT_PASSWORD",
     "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "GITHUB_TOKEN",
-    "OUROBOROS_NETWORK_PASSWORD",
+    "OUROBOROS_NETWORK_PASSWORD", "OUROBOROS_CONNECTIONS",
 })
 
 
@@ -55,8 +60,8 @@ class ExecutionMode(enum.Enum):
 
     ``OUT_OF_PROCESS`` is the short-lived, per-call child used for isolated-dep /
     native-marker extensions (``OUROBOROS_EXTENSION_PROCESS_CHILD == "1"``). Such a
-    child cannot host a persistent in-process subscription or asyncio task, so two
-    capabilities are unavailable there; a manifest-declared ``companion_process``
+    child cannot host a persistent in-process subscription, asyncio task or
+    realtime provider. A manifest-declared ``companion_process``
     (host-spawned and supervised) is the supported alternative for long-running
     work and host-event subscription.
     """
@@ -73,23 +78,24 @@ class ExecutionMode(enum.Enum):
 MATRIX_CAPABILITIES: frozenset[str] = frozenset({
     "register_tool", "register_route", "register_ws_handler", "register_ui_tab",
     "register_settings_section", "send_ws_message", "register_companion_process",
-    "register_supervised_task", "subscribe_event", "on_unload",
+    "register_supervised_task", "subscribe_event", "on_unload", "register_realtime_provider", "register_live_conversation",
 })
 
 # Runtime-access/introspection methods always available in every execution mode
 # (the complement of MATRIX_CAPABILITIES over the PluginAPI surface).
 ALWAYS_AVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "log", "get_settings", "get_state_dir", "skill_job_dir",
-    "get_skill_token", "get_runtime_info",
+    "get_skill_token", "get_runtime_info", "read_memory",
 })
 
 # Capabilities a short-lived OUT_OF_PROCESS child cannot use directly: a persistent
-# host-event subscription and an in-process supervised asyncio task have no meaning
-# in a per-call child. Long-running work, host events, and supervised loops belong
-# in a manifest-declared companion_process.
+# host-event subscription, in-process supervised task and realtime provider have
+# no lifetime in a per-call child. Long-running general work and host events can
+# use a companion_process; realtime providers and the live conversation feature are in-process only.
 OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "subscribe_event",
     "register_supervised_task",
+    "register_realtime_provider", "register_live_conversation",
 })
 
 
@@ -198,7 +204,10 @@ def plugin_api_surface_fingerprint() -> str:
 # change without a version bump) refuses negotiation until the version is
 # bumped and the new fingerprint recorded here.
 PLUGIN_API_SURFACE_FINGERPRINTS: Dict[str, str] = {
+    "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
+    "2.2": "46ee2d134ca3c3957adef9366b326b97a84abaae757e8e9d18030a7838329506",
     "2.0": "03fabdf4334e6b2bde217b4cb83a80faaebc773ddce870546dd2108b75de17ca",
+    "2.1": "7e288212fd5bcaaa5de961bde9180ca8669e45c00bbfa8d59ffbccccf9442cdb",
 }
 
 
@@ -330,6 +339,41 @@ class PluginAPI(Protocol):
     """Runtime-checkable ABI exposed to each extension's ``register(api)``."""
 
     # registration
+
+    def register_realtime_provider(
+        self,
+        name: str,
+        *,
+        route: RealtimeRoute,
+        session: SessionFactory,
+        catalog: ProviderCatalog,
+    ) -> None:
+        """Register an in-process realtime voice provider as ``<skill>:<name>``.
+
+        Requires ``realtime_provider``. ``session(selected, options, *, observe)``
+        returns a duplex LiveSession (contracts/live_conversation.py) over the
+        host-selected input; it speaks the provider's wire and reports each
+        response's usage in host axes (``USAGE_AXES``). ``route`` declares the
+        accounting provider, endpoint and model prefix; ``catalog`` the models,
+        voices, honoured call settings, credential setting names and each model's
+        route facts. Selection, fitting, tools, history, spending and Stop remain
+        host-owned.
+        """
+        ...
+
+    def register_live_conversation(self, name: str, handler: Callable[..., Awaitable[Any]],
+                                   *, configure: Callable[[], LiveConfig],
+                                   call_tools: Sequence[CallTool] = (), initial_tools: Sequence[str] = ()) -> None:
+        """Register the Live Conversation feature. Requires live_conversation, in-process.
+
+        ``configure()`` returns the owner's LiveConfig for the next call;
+        ``handler(host)`` runs an admitted call over its LiveHost port.
+        ``call_tools`` exist only inside this feature's calls. ``initial_tools``
+        names ordinary permitted schemas the feature's frame needs from its first send.
+        Residency grants no additional authority. No serializable
+        request grants the port.
+        """
+        ...
 
     def register_tool(
         self,
@@ -483,9 +527,31 @@ class PluginAPI(Protocol):
         """Return a read-only runtime snapshot; additive within schema v1."""
         ...
 
+    def read_memory(self, operation: str, parameters: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """Read this installation's whole memory (2.1) with host authority, never a calling task's view; contract
+        ``ouroboros.memory/1`` (``ouroboros/memory_reader.py``).
+
+        ``catalog`` pages one ``area`` (``rooms``, ``records``, ``story``, ``marks``, ``shelves``, ``shelf``,
+        ``documents``, ``history``, ``relations``) by an opaque ``cursor``; ``document`` reads one ``address``
+        (``record``, ``note``, ``file``, ``entry``) by code-point ``start``/``length`` bound to a ``revision``;
+        ``changes`` returns chronicle records after a ``position``. The host names the data root; no memory
+        source is written, activated or created, though the chronicle's derived index may catch up. Synchronous
+        I/O: call it off the event loop (a sync handler or ``asyncio.to_thread``). A refusal raises ``MemoryReadError``.
+        """
+        ...
+
 
 class ExtensionRegistrationError(Exception):
     """Raised when a registration violates namespace, permission, or schema."""
+
+
+class MemoryReadError(Exception):
+    """A refused ``read_memory`` call: ``code`` is ``invalid_parameter``, ``not_found``, ``revision_mismatch``,
+    ``position_mismatch`` or ``unavailable``; a mismatch names the source's ``current_revision``."""
+
+    def __init__(self, code: str, message: str, *, current_revision: Optional[str] = None) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code, self.message, self.current_revision = code, message, current_revision
 
 
 def normalize_extension_route_methods(methods: Any, *, subject: str) -> tuple[str, ...]:
@@ -513,7 +579,7 @@ def normalize_extension_route_methods(methods: Any, *, subject: str) -> tuple[st
 
 
 __all__ = [
-    "PluginAPI", "ExtensionRegistrationError", "FORBIDDEN_SKILL_SETTINGS",
+    "PluginAPI", "ExtensionRegistrationError", "MemoryReadError", "FORBIDDEN_SKILL_SETTINGS",
     "PLUGIN_API_VERSION", "LEGACY_PLUGIN_API_GENERATION",
     "PLUGIN_API_SURFACE_FINGERPRINTS", "PluginAPINegotiation", "RuntimeInfo",
     "VALID_EXTENSION_PERMISSIONS", "VALID_EXTENSION_ROUTE_METHODS",

@@ -68,7 +68,7 @@ def test_custody_survives_the_worker_that_started_the_run(tmp_path, monkeypatch)
 
 def test_the_invocation_id_is_reused_on_retry_and_fresh_per_intended_start(
         tmp_path, monkeypatch):
-    """Only retry_of reuses an unsettled invocation; replacement waits for settlement."""
+    """Only retry_of reuses an unsettled invocation; deliberate starts get fresh identities."""
     import httpx
 
     import ouroboros.delegate_custody as dc
@@ -123,12 +123,6 @@ def test_the_invocation_id_is_reused_on_retry_and_fresh_per_intended_start(
     assert lost["status"] == "refused" and lost["reason"] == "daemon_unreachable"
     token = lost["pending_invocation_id"]
     assert token == keys[0] and "retry_of" in lost["retry_hint"]
-
-    # 2. A plain identical call is an intended replacement, but the unknown
-    # first POST has not settled. The replacement fence refuses before the wire.
-    blocked = json.loads(delegate._delegate_start(ctx, prompt).text)
-    assert blocked["reason"] == "replacement_requires_settlement"
-    assert len(keys) == 1
 
     # 3. Only the EXPLICIT token replays the invocation -- the STORED body verbatim,
     #    even though the route config drifted between the attempts.
@@ -927,8 +921,10 @@ def test_normalized_session_counters_are_carried_whole_or_not_at_all(tmp_path, r
     """A repaired counter would read exactly like a measured one (BIBLE P1)."""
     row = _settled_session_row(tmp_path, reported)
     assert row.get("input_token_usage") == expected
-    # The legacy axes and the settled cash keep their own meanings either way.
-    assert row["prompt_tokens"] == 300 and row["cached_tokens"] == 130
+    # The input axes are the split, unknown where it is; the harness's counters and the cash stay as reported.
+    assert (row["prompt_tokens"], row["cached_tokens"]) == ((expected or {}).get("total_tokens"),
+                                                          (expected or {}).get("cache_read_tokens"))
+    assert row["harness_tokens"] == {"prompt_tokens": 300, "cached_tokens": 130}
     assert row["cost_usd"] == 0.0 and row["cost_final"] is True
 
 

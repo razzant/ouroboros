@@ -36,6 +36,7 @@ from ouroboros.review_run_isolation import (
     ATTACH_HOME_ENV, ISOLATION_RECORD, REVIEW_RUN_CAP_ENV, isolate_review_data,
 )
 from ouroboros.settings_integrity import SETTINGS_INTEGRITY_ENV
+from ouroboros.test_evidence import diagnostic_directory
 
 # Real loopback ports and real child processes: the serial pass.
 pytestmark = pytest.mark.serial
@@ -341,7 +342,8 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     assert set(_tree_state(control)) - set(_tree_state(host))  # new host-side files
 
     before = _tree_state(host)
-    out = tmp_path / "isolated"
+    # Keep the wrapper's persistent diagnostic drive outside the test's disposable scratch.
+    out = diagnostic_directory(tmp_path / "isolated", "contributor-entrypoint")
     # The invoking shell carries a stale projection of another panel: the panel
     # and its efforts still come from the pinned host settings.
     run = _review(repo, host, out, "--run-cap-usd=4", "--attach-host-engine", inherited=_INHERITED_PANEL)
@@ -401,10 +403,10 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     assert record["settings_sha256"] == hashlib.sha256((host / "settings.json").read_bytes()).hexdigest()
     evidence = json.loads((out / "packet" / "review-evidence.json").read_text(encoding="utf-8"))
     assert evidence["trust"]["installed_body_execution"]["executing_checkout_head"] == base_sha
-    # No record, no reviewer: incomplete evidence, with both facts disclosed.
+    # No record, no reviewer: incomplete evidence, the cause first and the absent receipts beside it.
     outcome = evidence["production_outcome"]
-    assert (outcome["block_reason"], outcome["original_block_reason"]) == (
-        "execution_receipt_mismatch", "review_record_unavailable")
+    assert (evidence["result"], evidence["exit_class"], outcome["block_reason"]) == (
+        "INCOMPLETE", "infrastructure", "review_record_unavailable")
     assert outcome["execution_receipt_mismatches"] == ["missing_actor:pool:s1", "missing_actor:pool:t1"]
     assert evidence["review_record"] == {"record_id": None, "available": False}
     assert evidence["budget"]["run_cap_usd"] == 4.0
@@ -631,9 +633,9 @@ def test_an_isolated_review_without_attach_never_starts_an_engine(owned, tmp_pat
         prepared.append("runtime")
         raise AssertionError("an isolated review must never prepare an engine runtime")
 
-    def gateway_refusals(real=owned.ensure_owned_gateway):
+    def gateway_refusals(*args, real=owned.ensure_owned_gateway, **kwargs):
         try:
-            return real()
+            return real(*args, **kwargs)
         except ClaudexorUnavailable as exc:
             refusals.append(exc.code)
             raise

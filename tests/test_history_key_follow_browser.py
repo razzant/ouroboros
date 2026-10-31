@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from tests.test_chat_history_paging_browser import _open, _open_project, _screenshot, _FRAMES, _write
+from tests.test_chat_history_paging_browser import _append, _open, _open_project, _screenshot, _FRAMES
 from tests.test_history_continuity_browser import _FIRST_VISIBLE, _OFFSET, _bookmark_place
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
@@ -50,7 +50,7 @@ def _read_by_keys(direct_server_with_data, browser_engine, tmp_path, relayout_ms
     root = direct_server_with_data['data_dir']
     project = create_project(root, 'keyboard-room', name='Keyboard reading')
     cid = project['chat_id']
-    _write(root / 'logs/chat.jsonl', [
+    _append(root, 'chat', [
         {'direction': 'in', 'chat_id': cid, 'ts': f'2026-09-01T10:{index:02d}:00Z',
          'client_message_id': f'key-{index}', 'text': f'Keyboard context {index:02d}'} for index in range(60)])
     name = browser_engine if relayout_ms is None else f'{browser_engine}-relayout-{relayout_ms}'

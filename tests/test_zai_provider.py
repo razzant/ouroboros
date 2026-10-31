@@ -268,15 +268,14 @@ class TestSafetyRouting:
         assert safety._any_remote_provider_configured() is False
         monkeypatch.setenv("ZAI_API_KEY", "sk-x")
         assert safety._any_remote_provider_configured() is True
-        assert safety._PROVIDER_KEY_ENV["zai"] == "ZAI_API_KEY"
 
     def test_light_model_reaches_its_provider_key(self, monkeypatch):
         from ouroboros import safety
-        from ouroboros.pricing import infer_api_key_type
 
         _clear_provider_env(monkeypatch)
+        assert safety._light_model_has_reachable_provider("zai::glm-5.3-flash") is False
         monkeypatch.setenv("ZAI_API_KEY", "sk-x")
-        assert safety._PROVIDER_KEY_ENV.get(infer_api_key_type("zai::glm-5.3-flash")) == "ZAI_API_KEY"
+        assert safety._light_model_has_reachable_provider("zai::glm-5.3-flash") is True
 
 
 class TestProbeBilling:

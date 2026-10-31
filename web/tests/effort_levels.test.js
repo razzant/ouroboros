@@ -26,10 +26,17 @@ test('a stored tier outside the owner tiers is shown at the nearest owner tier',
     assert.equal(ownerLevelIndex('bogus'), -1);
 });
 
-test("the tolerant read: unknown values take the key's default, min lowers to rec, max rises to rec", () => {
+test("the tolerant read: unknown tiers take defaults, bounds order independently of primary", () => {
     assert.deepEqual(normalizeEffortRange({}), EFFORT_RANGE_DEFAULT);
     // The owner's install: TASK=high, no MIN/MAX -> Low · High · High.
     assert.deepEqual(normalizeEffortRange({ recommended: 'high' }), { min: 'low', recommended: 'high', max: 'high' });
-    assert.deepEqual(normalizeEffortRange({ min: 'ultra', recommended: 'low', max: 'none' }), { min: 'low', recommended: 'low', max: 'low' });
+    assert.deepEqual(normalizeEffortRange({ min: 'ultra', recommended: 'low', max: 'none' }), { min: 'none', recommended: 'low', max: 'ultra' });
     assert.deepEqual(normalizeEffortRange({ min: 'minimal', recommended: 'extreme', max: 'MAX' }), { min: 'minimal', recommended: 'medium', max: 'max' });
+});
+
+test('primary outside helper bounds survives readback in both directions', () => {
+    for (const recommended of ['none', 'ultra']) {
+        const value = { min: 'medium', recommended, max: 'high' };
+        assert.deepEqual(normalizeEffortRange(value), value);
+    }
 });

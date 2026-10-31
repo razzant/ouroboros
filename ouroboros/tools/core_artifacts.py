@@ -17,6 +17,7 @@ import pathlib
 import uuid
 from typing import Any, Dict, List, Optional
 
+from ouroboros.delegate_reply import REPLY_TO_SCHEMA, validate_reply_target, reply_instruction
 from ouroboros.tools.arg_feedback import argument_refusal
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
@@ -406,13 +407,15 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "are not shared context by themselves. The card carries the explanation needed to "
         "understand this decision and its consequences.\n\n"
         "The source of the fork belongs in that explanation, in ordinary prose: the human's "
-        "words, a document they supplied, your idea, or a reviewer's proposal. Human words "
+        "words, a document they supplied, your idea, or a helper's or reviewer's proposal. Human words "
         "the fork rests on are quoted exactly when available; missing wording is disclosed, "
         "and your paraphrase is identified as your interpretation. Your own proposal is a "
         "distinct option, not an assumed premise of every option.\n\n"
         "Offer 0-6 real alternatives for this decision: none for an open question the human "
         "answers in their own words; with options, mark your recommendation with "
-        "recommended=true. By default, state the assumption you continue under and keep "
+        "recommended=true. A substantive position you or a helper set aside is one of them, "
+        "stated at its strongest with its cost and why you set it aside. "
+        "By default, state the assumption you continue under and keep "
         "working; the card stays answerable and a late answer still arrives. Set "
         "wait_for_answer=true on a live root, including an ordinary conversation, when the "
         "next step is irreversible or costly to redo, or the choice belongs to the human; "
@@ -422,14 +425,18 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "turn; a waited question keeps it alive. How many decisions to raise and when "
         "remains your judgment. Unanswered questions remain available from Main after the "
         "task ends. To explicitly retire a question, use action=close, quiz_id and a "
-        "non-empty reason; question_task_id may identify a recorded Continue or retry predecessor. "
-        "Closing is your decision with an explanation, never the human's approval. "
+        "non-empty reason; question_task_id may identify a recorded Continue or retry predecessor, "
+        "or another task that has already finished. Before you finish, close each of your own "
+        "unanswered questions whose answer would no longer change anything, saying why; leave the "
+        "rest open. Closing is your decision with an explanation, never the human's approval. "
         "Materials may name existing task artifacts needed for the decision."
     ),
     "parameters": {"type": "object", "properties": {
+        "reply_to": REPLY_TO_SCHEMA,
+        "request_id": {"type": "string", "description": "Stable ask retry key, at most 128 characters. Reuse it with identical question fields after uncertain delivery. After its wait ends, use a new request_id to wait again. With a retained Presence source, asks go privately to Main and omitted keys deduplicate identical asks from that work. Other roots mint a new ask when the key is omitted."},
         "action": {"type": "string", "enum": ["ask", "close"], "default": "ask"},
         "quiz_id": {"type": "string", "description": "Existing question to close; used only with action=close."},
-        "question_task_id": {"type": "string", "description": "Question author for action=close; defaults to this task. Only your own or a recorded Continue/retry predecessor's question may be closed."},
+        "question_task_id": {"type": "string", "description": "Question author for action=close; defaults to this task. Your own, a recorded Continue/retry predecessor's, or an already finished task's question may be closed; another live task's may not."},
         "reason": {"type": "string", "description": "Required explanation shown beside an explicitly closed question. Silence or task completion is not approval."},
         "materials": {"type": "array", "items": {"type": "object", "properties": {
             "task_id": {"type": "string", "description": "Artifact's owning task; defaults to this task. Your task, descendants and recorded Continue/retry predecessors are supported."},
@@ -536,13 +543,13 @@ def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: st
     """The host's one-sentence account under a root's owner card: which task asks,
     how its run started, and when the owner last wrote in this chat. Read from
     typed records only (the task record's ``run_origin`` provenance and the chat
-    log tail), never from the question text; an unrecorded fact says unknown."""
+    store), never from the question text; an unrecorded fact says unknown."""
+    from ouroboros import dialogue_store as ds
     from ouroboros.consciousness_authority import CONSCIOUSNESS_INITIATOR
     from ouroboros.deadline_utils import parse_deadline_ts as moment, utc_now
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.followup import FOLLOWUP_SOURCE
-    from ouroboros.utils import iter_jsonl_objects
 
     def shown(when: Any) -> str:
         return when.strftime("%Y-%m-%d %H:%M UTC")
@@ -574,14 +581,26 @@ def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: st
     else:
         started = "origin unknown" + (f" (recorded source: {origin['source']})" if origin.get("source") else "")
     last = None
+    coverage = ""
     try:
-        for entry in iter_jsonl_objects(canonical_root / "logs" / "chat.jsonl", tail_bytes=512_000):
-            if entry.get("direction") == "in" and str(entry.get("chat_id")) == str(chat_id):
-                last = moment(entry.get("ts")) or last
+        before = None
+        while (entry := ds.last_inbound(canonical_root, chat_id, before=before)) is not None:
+            last = moment(entry.row.get("ts"))
+            if last is not None:
+                break
+            before = entry.seq
+        lower = entry.seq if entry else 0
+        ds.require_imported(canonical_root, "chat", lower=lower)
+        if ds.range_coverage(canonical_root, "chat", lower=lower)["gaps"]:  # a later message may be unreadable
+            raise ds.StoreError("Dialogue history has recorded invalid intervals")
+    except ds.StoreMigrating:
+        last, coverage = None, " (history is still importing)"
+    except ds.StoreError as exc:
+        last, coverage = None, f" ({exc})"
     except Exception:
         last = None
     if last is None:
-        seen = "your last message in this chat: unknown"
+        seen = "your last message in this chat: unknown" + coverage
     else:
         minutes = max(0, int((utc_now() - last).total_seconds() // 60))
         seen = f"your last message in this chat: {shown(last)} ({minutes} minutes before this question)"
@@ -601,6 +620,8 @@ def _escalate(
     reason: str = "",
     question_task_id: str = "",
     materials: list | None = None,
+    reply_to: dict | None = None,
+    request_id: str = "",
 ) -> str:
     """One escalation verb for the whole tree (owner decision 31 hierarchy).
 
@@ -634,7 +655,14 @@ def _escalate(
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id:
         return "⚠️ ESCALATE_UNAVAILABLE: escalate requires an active task context."
-    if bool(getattr(ctx, "is_direct_chat", False)) and (
+    from ouroboros.presence_owner_contact import contact_origin, contact_identity
+    # A child still escalates to its parent, never directly to Main.
+    parent_task_id = str(meta.get("parent_task_id") or "").strip()
+    try:
+        origin = contact_origin(ctx, allow_unattributed=True) if not parent_task_id else None
+    except (OSError, ValueError) as exc:
+        return argument_refusal(ctx, "OWNER_CONTACT_UNAVAILABLE", [str(exc)], effect="The quiz was not sent.")
+    if origin is None and bool(getattr(ctx, "is_direct_chat", False)) and (
             not callable(getattr(ctx, "owner_wait_callback", None))):
         # Native conversations with a live continuation owner are addressable
         # through the same decision ingress.
@@ -642,7 +670,9 @@ def _escalate(
                 "ask the question directly in your reply instead of a card.")
     parent_task_id = str(meta.get("parent_task_id") or "").strip()
     delegation_role = str(meta.get("delegation_role") or "").strip()
-    if wait_for_answer and (parent_task_id or not callable(getattr(ctx, "owner_wait_callback", None))):
+    wait_owner = callable(getattr(ctx, "owner_wait_callback", None)) or (
+        origin is not None and callable(getattr(ctx, "review_wait_callback", None)))
+    if wait_for_answer and (parent_task_id or not wait_owner):
         return "⚠️ ESCALATE_UNAVAILABLE: required owner waiting needs a root task with a live continuation owner."
     if wait_for_answer:
         from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
@@ -657,6 +687,7 @@ def _escalate(
 
     canonical_root = pathlib.Path(str(meta.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     try:
+        reply_to = validate_reply_target(ctx, reply_to)
         material_refs = _question_materials(ctx, canonical_root, task_id, materials)
     except (ValueError, OSError) as exc:
         return argument_refusal(ctx, "QUIZ_MATERIAL_INVALID", [str(exc)], effect="The quiz was not sent.")
@@ -670,6 +701,7 @@ def _escalate(
         # live ancestor is the typed terminal (decision 31: the owner-facing
         # card still belongs to the ROOT alone, so an orphaned subtree keeps
         # the assumption path).
+        from ouroboros.install_identity import StoreForeign
         from ouroboros.owner_mailbox import write_task_message
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
 
@@ -722,38 +754,62 @@ def _escalate(
         for material in material_refs:
             lines.append(f"Decision material: task_id={material['task_id']}, name={material['name']} ({material['label']})")
         lines.append(f"I continue meanwhile under the assumption: {payload['assumption']}")
+        reply_task = reply_to["starter_task_id"] if reply_to else task_id
         lines.append(
-            f"Answer with forward_to_worker(task_id={task_id}, message=...), or "
+            f"Answer with forward_to_worker(task_id={reply_task}, message=..., reply_to=<address if supplied>), or "
             "escalate this question yourself (verbatim) if it is above your authority."
         )
         parent_drive = str(data.get("child_drive_root") or data.get("headless_child_drive_root") or data.get("drive_root") or "").strip()
-        written = write_task_message(
-            pathlib.Path(parent_drive) if parent_drive else status_drive_root,
-            "\n".join(lines),
-            task_id=parent_task_id,
-            source_task_id=task_id,
-            provenance="descendant_task",
-        )
+        try:
+            written = write_task_message(
+                pathlib.Path(parent_drive) if parent_drive else status_drive_root,
+                "\n".join(lines),
+                task_id=parent_task_id,
+                source_task_id=task_id,
+                provenance="descendant_task",
+                **({"reply_to": reply_to} if reply_to else {}),
+            )
+        except StoreForeign as exc:
+            return _publish_tool_result(ctx, ToolResult(
+                status="blocked", code="ACCESS_BLOCKED",
+                text=f"⚠️ ESCALATE_UNWRITTEN: {exc.reason}: {exc}",
+                meta={"reason": exc.reason, "path": str(exc.path)},
+            ))
         if not written:
             return f"⚠️ ESCALATE_UNWRITTEN: the escalation to parent {parent_task_id} was not persisted."
         return (f"OK: escalated to parent task {parent_task_id}; continuing under "
                 f"assumption: {payload['assumption']}"
+                + ("\n" + reply_instruction(reply_to) if reply_to else "")
                 + (f" ({ignored_bound.strip().rstrip('.')})" if ignored_bound else ""))
 
     # Root task: the owner gets a typed quiz card.
     from ouroboros.owner_quiz import record_asked
 
-    quiz_id = uuid.uuid4().hex
+    fingerprint = ""
+    if origin is not None or request_id:
+        try:
+            quiz_id, fingerprint = contact_identity(task_id, "quiz", {
+                **payload, "wait_for_answer": wait_for_answer, "materials": material_refs,
+                **({"reply_to": reply_to} if reply_to else {}),
+            }, request_id)
+        except ValueError as exc:
+            return argument_refusal(ctx, "QUIZ_REQUEST_INVALID", [str(exc)], effect="The quiz was not sent.")
+    else:
+        quiz_id = uuid.uuid4().hex
     # The card's own chat, stored with the block: a late answer arriving after
     # this task is gone is delivered there, exactly where the card was shown.
     try:
         card_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
         card_chat_id = 0
+    if origin is not None:
+        from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+        card_chat_id = WEB_UI_CHAT_ID
     host_facts = _quiz_host_facts(ctx, canonical_root, task_id, card_chat_id)
+    question_text = payload["question"]
     asked = record_asked(
         canonical_root, task_id,
-        quiz_id=quiz_id, question=payload["question"],
+        quiz_id=quiz_id, question=question_text,
         options=[row["label"] for row in payload["options"]],
         option_details=[row.get("detail", "") for row in payload["options"]],
         recommended_index=next((i for i, row in enumerate(payload["options"]) if row.get("recommended")), None),
@@ -762,8 +818,16 @@ def _escalate(
         max_wait_minutes=payload.get("max_wait_minutes"),
         host_facts=host_facts,
         materials=material_refs,
+        **({"reply_to": reply_to} if reply_to else {}),
+        presence_contact=origin,
+        request_fingerprint=fingerprint,
     )
     if asked.get("refused"):
+        if asked["refused"] in {"request_id_conflict", "wait_ended"}:
+            problem = ("The previous wait ended; use a new request_id to wait again"
+                       if asked["refused"] == "wait_ended" else "request_id already names different question fields")
+            return argument_refusal(ctx, "QUIZ_REQUEST_CONFLICT", [problem],
+                                    effect="The original question is unchanged; no new question or wait was selected.")
         if asked["refused"] == "owner_questions_unavailable":
             return argument_refusal(ctx, "QUIZ_MEMBERSHIP_UNAVAILABLE",
                 ["The current-question address could not be registered; retry when storage is available."],
@@ -776,18 +840,22 @@ def _escalate(
                 f"stated assumption: {payload['assumption']}")
     from ouroboros.tools.owner_delivery import deliver_owner_event
 
+    if asked.get("state") != "open":
+        return f"OK: quiz {quiz_id} already {asked.get('state')}; no new question or wait was selected."
     mode = deliver_owner_event(ctx, {
         "type": "send_quiz",
-        "chat_id": getattr(ctx, "current_chat_id", None) or 0,
+        "chat_id": card_chat_id,
         "quiz_id": quiz_id,
-        "question": payload["question"],
+        "question": question_text,
         "options": payload["options"],
         "stake": payload["stake"],
         "assumption": payload["assumption"],
         "state": "open",
         "task_id": task_id,
         "host_facts": host_facts,
+        **({"presence_contact": origin} if origin else {}),
         **({"materials": material_refs} if material_refs else {}),
+        **({"reply_to": reply_to} if reply_to else {}),
         **({"wait_for_answer": True} if wait_for_answer else {}),
     })
     delivered = "accepted for delivery" if mode == "live" else "queued for delivery"
@@ -826,7 +894,7 @@ def _close_owner_question(ctx: ToolContext, quiz_id: str, reason: str, question_
     task_id = str(getattr(ctx, "task_id", "") or "")
     meta = getattr(ctx, "task_metadata", {}) or {}
     if not task_id or meta.get("parent_task_id") or meta.get("delegation_role") not in (None, "", "root"):
-        return argument_refusal(ctx, "QUIZ_CLOSE_UNAVAILABLE", ["Only an active root may close its own owner question."], effect="The question remains unchanged.")
+        return argument_refusal(ctx, "QUIZ_CLOSE_UNAVAILABLE", ["Only an active root may close an owner question."], effect="The question remains unchanged.")
     root = pathlib.Path(str(meta.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     source_task = str(question_task_id or task_id)
     outcome = record_closed(root, source_task, quiz_id=quiz_id, reason=reason, actor_task_id=task_id)

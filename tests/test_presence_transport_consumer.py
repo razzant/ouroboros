@@ -27,7 +27,7 @@ from ouroboros import agent_task_pipeline as pipeline, loop
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
 from ouroboros.task_results import write_task_result
-from ouroboros.tools.registry import ToolRegistry
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 from tests.test_presence_forced_delivery import RECORD, _forced, _read
 
@@ -123,7 +123,17 @@ def test_the_installed_transport_gets_the_partial_now_and_the_owed_result_later(
     repo.mkdir()
     captured = {}
 
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {
+        "status": "available", "remaining_usd": 10})
+
     def runner(**kwargs):
+        # This transport test consumes retained forced-final declarations from an old
+        # carrier. New focus completion is covered by the ordinary-finish Host tests.
+        from dataclasses import replace
+        from tests.test_presence_runner import _admission
+        kwargs["admission"] = replace(kwargs["admission"], place=None, inline_max_rounds=10,
+                                     capability_ceiling=_admission().capability_ceiling)
         def factory(**_kwargs):
             agent = _scripted_agent(tmp_path, monkeypatch, turn_forced,
                                     handoff={"status": "scheduled", "task_id": "work-9"})

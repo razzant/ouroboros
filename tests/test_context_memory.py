@@ -168,7 +168,7 @@ def test_installed_skills_section_includes_warnings_verdict(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         "ouroboros.skill_loader.summarize_skills",
-        lambda _root: {
+        lambda _root, _skills=None: {
             "skills": [
                 {
                     "name": "weather",
@@ -198,7 +198,7 @@ def test_installed_skills_section_qualifies_extension_liveness_process(tmp_path,
 
     monkeypatch.setattr(
         "ouroboros.skill_loader.summarize_skills",
-        lambda _root: {
+        lambda _root, _skills=None: {
             "skills": [{
                 "name": "weather_widget",
                 "type": "extension",

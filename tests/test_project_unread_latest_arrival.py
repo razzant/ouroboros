@@ -6,7 +6,7 @@ outbox delivers late keeps its original ``ts``: the event-time tail can leave
 it out of the recent window entirely, or sort it above messages that arrived
 before it. A recent Project read therefore names the physically newest
 standalone message it read (``window.latest_message``) without moving or adding
-a row, and names nothing it cannot vouch for (DESIGN "Project unread dot").
+a row, and names nothing it cannot vouch for (DESIGN "Unread").
 
 Deliveries run the real ``events_chat_delivery`` seam into a real registered
 Project, so every counted row is one the sidebar revision counted; reads run the
@@ -22,8 +22,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import dialogue_import, dialogue_store as ds
 from ouroboros.gateway import history, history_paging
 from ouroboros.projects_registry import create_project, get_project
+from ouroboros.store import StoreError
 from ouroboros.utils import append_jsonl
 from supervisor import events_chat_delivery as delivery
 from supervisor import message_bus
@@ -76,19 +78,23 @@ def room(tmp_path, monkeypatch):
         return json.loads(response.body)
 
     def row_id(text: str) -> str:
-        """The physical identity of the one stored row carrying ``text``."""
-        offset = 0
-        for line in chat_log.read_bytes().splitlines(keepends=True):
-            try:
-                if json.loads(line).get("text") == text:
-                    return f"chat:{offset}"
-            except ValueError:
-                pass
-            offset += len(line)
+        """The stored identity of the one row carrying ``text``."""
+        for stored in ds.newest(tmp_path, "chat", limit=1 << 40):
+            if stored.row.get("text") == text:
+                return stored.history_id
         raise AssertionError(f"no stored row {text!r}")
 
+    def torn() -> None:
+        """A line nobody can read, left in ``logs/chat.jsonl`` by a store-unaware body after the
+        cutover: the next boot's cutover imports what follows it and records the line as a skipped
+        interval at its chain place -- a gap the readers disclose, never a row."""
+        chat_log.parent.mkdir(parents=True, exist_ok=True)
+        with chat_log.open("ab") as stream:
+            stream.write(b'{"direction": "out", "text": "torn\n')
+        dialogue_import.cutover(tmp_path)
+
     return SimpleNamespace(
-        chat_id=chat_id, deliver=deliver, read=read, row_id=row_id, chat_log=chat_log, host=host, root=tmp_path,
+        chat_id=chat_id, deliver=deliver, read=read, row_id=row_id, torn=torn, host=host, root=tmp_path,
         revision=lambda: int(get_project(tmp_path, "racer")["visible_revision"]),
     )
 
@@ -181,8 +187,7 @@ def test_a_childs_terminal_incident_and_a_progress_incident_are_never_the_newest
 
 def test_an_unreadable_row_after_the_newest_readable_one_leaves_its_arrival_unknown(room):
     room.deliver("reply 1", 1)
-    with room.chat_log.open("ab") as stream:
-        stream.write(b'{"direction": "out", "text": "torn\n')
+    room.torn()
     recent = room.read()
     assert "chat_malformed_jsonl" in recent["window"]["truncated_by"]
     assert recent["window"]["latest_message"] is None
@@ -214,71 +219,20 @@ def test_a_projection_that_fails_part_way_leaves_the_arrival_unknown_and_disclos
     assert healed["window"]["latest_message"] == {"history_id": room.row_id("reply 2"), "out_of_order": False}
 
 
-def test_a_live_line_its_writer_has_not_finished_leaves_the_arrival_unknown_until_it_is(room):
-    """The read freezes before the unfinished line, which may be the newest message."""
+def test_an_unreadable_store_answers_the_whole_read_as_unavailable(room, monkeypatch):
+    """One store holds both streams: when it cannot be read nothing is known, the read answers
+    503 with the cursor it was sent (never a page without its newest arrival)."""
     room.deliver("reply 1", 1)
-    clean = room.read()
-    assert "chat_incomplete_live_line" not in clean["window"]["truncated_by"], "a clean end of the chat is no gap"
-    assert clean["window"]["latest_message"] == {"history_id": room.row_id("reply 1"), "out_of_order": False}
 
-    line = json.dumps({"ts": ts(2), "direction": "out", "chat_id": room.chat_id, "text": "reply 2"}).encode() + b"\n"
-    with room.chat_log.open("ab") as stream:
-        stream.write(line[:-6])
-    unfinished = room.read()
-    assert texts(unfinished) == ["reply 1"], "the page holds only complete rows"
-    assert "chat_incomplete_live_line" in unfinished["window"]["truncated_by"]
-    assert unfinished["window"]["latest_message"] is None, "the previous message is not the one that arrived last"
-    frozen = room.chat_log.stat().st_size - len(line[:-6])
-    span = unfinished["coverage"]["spans"]["chat"]
-    assert span["to"] == unfinished["coverage"]["upper"]["chat"] == frozen and span["gaps"] == [], \
-        "History coverage: every byte up to the frozen boundary was delivered; the unfinished line lies after it"
+    def refuse(*_args, **_kwargs):
+        raise StoreError("dialogue store unreadable")
 
-    with room.chat_log.open("ab") as stream:
-        stream.write(line[-6:])
-    finished = room.read()
-    assert "chat_incomplete_live_line" not in finished["window"]["truncated_by"]
-    assert finished["window"]["latest_message"] == {"history_id": room.row_id("reply 2"), "out_of_order": False}
-
-
-def test_a_frozen_page_keeps_the_unfinished_line_it_froze_before_and_never_names_an_arrival(room):
-    """A page replay reads the recent read's frozen boundary: the unfinished line beyond it stays a
-    disclosed gap, and what arrived after it cannot be seen, so the replay names no older reply."""
-    room.deliver("reply 1", 1)
-    line = json.dumps({"ts": ts(2), "direction": "out", "chat_id": room.chat_id, "text": "reply 2"}).encode() + b"\n"
-    with room.chat_log.open("ab") as stream:
-        stream.write(line[:-6])
-    unfinished = room.read()
-    assert unfinished["window"]["latest_message"] is None
-    with room.chat_log.open("ab") as stream:
-        stream.write(line[-6:])
-
-    replayed = room.read(cursor=unfinished["page_cursor"])
-    assert texts(replayed) == ["reply 1"], "the frozen page is unchanged"
-    assert "chat_incomplete_live_line" in replayed["window"]["truncated_by"], "the gap it froze before is kept"
-    assert replayed["coverage"]["spans"]["chat"]["gaps"] == [], "and its span stays clean"
-    assert replayed["window"]["latest_message"] is None, "reply 1 is not the message that arrived last"
-
-    clean = room.read()
-    assert clean["window"]["latest_message"] == {"history_id": room.row_id("reply 2"), "out_of_order": False}
-    room.deliver("reply 3", 3)
-    stale = room.read(cursor=clean["page_cursor"])
-    assert "chat_incomplete_live_line" not in stale["window"]["truncated_by"], "a clean boundary has no gap"
-    assert stale["window"]["latest_message"] is None, "reply 3 arrived beyond the boundary this replay reads"
-
-
-def test_an_unreadable_chat_source_leaves_the_arrival_unknown(room, monkeypatch):
-    room.deliver("reply 1", 1)
-    readable = history_paging.HistorySource
-
-    def refuse_chat(path, source, *frozen):
-        if source == "chat":
-            raise PermissionError("chat.jsonl")
-        return readable(path, source, *frozen)
-
-    monkeypatch.setattr(history_paging, "HistorySource", refuse_chat)
-    window = room.read()["window"]
-    assert "chat_source_unavailable" in window["truncated_by"]
-    assert window["latest_message"] is None
+    monkeypatch.setattr(ds, "probe_rows", refuse)
+    response = asyncio.run(history.make_chat_history_endpoint(room.root)(
+        SimpleNamespace(query_params={"chat_id": str(room.chat_id)})))
+    payload = json.loads(response.body)
+    assert response.status_code == 503 and payload["reason_code"] == "history_source_unavailable"
+    assert payload["messages"] == [] and payload["has_more"] is True and "latest_message" not in payload["window"]
 
 
 def test_main_names_nothing(room):
@@ -322,7 +276,7 @@ def test_one_malformed_registry_row_leaves_only_the_room_it_may_hold_unknown(roo
 @pytest.fixture
 def narrow_recent(monkeypatch):
     """A recent read that stops as soon as its quota is met (a large chat's window)."""
-    monkeypatch.setattr(history_paging, "_TAIL_WINDOW_START_BYTES", 64)
+    monkeypatch.setattr(history_paging, "_RECENT_WINDOW_BYTES", 1)
 
 
 def child_words(room, count: int, minute: int = 20) -> None:
@@ -353,14 +307,13 @@ def test_a_room_whose_chat_holds_no_standalone_message_names_nothing(room, narro
 def test_a_bound_reached_before_the_newest_message_leaves_its_arrival_unknown(room, narrow_recent, monkeypatch):
     room.deliver("root answer", 5)
     child_words(room, 8)
-    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_ROWS", 1)
     assert room.read(n_human="2")["window"]["latest_message"] is None
 
 
 def test_an_unreadable_row_between_the_newest_message_and_the_recent_read_leaves_it_unknown(room, narrow_recent):
     room.deliver("root answer", 5)
-    with room.chat_log.open("ab") as stream:
-        stream.write(b'{"direction": "out", "text": "torn\n')
+    room.torn()
     child_words(room, 6)
     assert room.read(n_human="2")["window"]["latest_message"] is None
 
@@ -369,8 +322,8 @@ def test_a_skill_review_after_a_late_answer_does_not_stand_in_for_it(room):
     """Skill reviews are appended beside the conversation and never count as unread."""
     room.deliver("reply 5", 5)
     room.deliver("late final", 1)
-    append_jsonl(room.chat_log, {"ts": ts(9), "direction": "system", "type": "skill_review", "chat_id": room.chat_id,
-                                 "skill": "weather", "status": "pass", "text": "Skill review: `weather` — status=pass"})
+    ds.append(room.root, "chat", {"ts": ts(9), "direction": "system", "type": "skill_review", "chat_id": room.chat_id,
+                                  "skill": "weather", "status": "pass", "text": "Skill review: `weather` — status=pass"})
     assert room.revision() == 2
     assert room.read()["window"]["latest_message"] == {
         "history_id": room.row_id("late final"), "out_of_order": True}
@@ -382,8 +335,8 @@ def legacy_child_final(room, text: str, minute: int, task_id: str = "kid-old") -
 
     write_task_result(room.root, task_id, "completed", delegation_role="subagent", parent_task_id="root-1",
                       root_task_id="root-1", role="researcher")
-    append_jsonl(room.chat_log, {"ts": ts(minute), "direction": "out", "chat_id": room.chat_id,
-                                 "text": text, "task_id": task_id})
+    ds.append(room.root, "chat", {"ts": ts(minute), "direction": "out", "chat_id": room.chat_id,
+                                  "text": text, "task_id": task_id})
 
 
 def test_a_legacy_child_final_its_task_result_names_is_never_the_newest_message(room):
@@ -402,9 +355,9 @@ def test_a_legacy_child_final_uses_the_progress_lineage_the_client_reads(room, o
     room.deliver("root answer", 5)
     lineage = {"delegation_role": "subagent", "parent_task_id": "root-1",
                "root_task_id": "root-1", "subagent_task_id": "kid-old"}
-    append_jsonl(room.chat_log, {"ts": ts(6), "direction": "out", "chat_id": room.chat_id,
-                                 "text": "legacy child final", "task_id": "kid-old"})
-    append_jsonl(room.root / "logs" / "progress.jsonl", {
+    ds.append(room.root, "chat", {"ts": ts(6), "direction": "out", "chat_id": room.chat_id,
+                                  "text": "legacy child final", "task_id": "kid-old"})
+    ds.append(room.root, "progress", {
         "ts": ts(4), "chat_id": room.chat_id, "task_id": "root-1", "content": "Child scheduled",
         "subagent_event": "scheduled", **lineage})
     if old_result:  # an unstamped file beside the store: the import quarantines it, the store never lists it
@@ -493,11 +446,11 @@ def test_older_pages_carry_a_bounded_search_on_to_the_newest_message(room, narro
     room.deliver("root answer", 5)
     child_words(room, 8)
     message_bus.log_chat("in", room.chat_id, 7, "owner asks", ts=ts(40))
-    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_ROWS", 1)
     recent = room.read(n_human="2")
     answer = room.row_id("root answer")
     assert recent["window"]["latest_message"] is None, "unknown: the bound came before the answer"
-    assert int(answer.split(":")[1]) < recent["window"]["latest_before"] < room.chat_log.stat().st_size, \
+    assert int(answer.split(":")[1]) < recent["window"]["latest_before"] < ds.stream_end(room.root, "chat"), \
         "but searched: nothing newer lies at or after latest_before"
     replay = room.read(cursor=recent["page_cursor"])
     assert replay["window"]["latest_message"] is None and "latest_before" not in replay["window"]
@@ -516,10 +469,9 @@ def test_older_pages_carry_a_bounded_search_on_to_the_newest_message(room, narro
 
 def test_an_unreadable_row_interrupts_the_continued_search(room, narrow_recent, monkeypatch):
     room.deliver("root answer", 5)
-    with room.chat_log.open("ab") as stream:
-        stream.write(b'{"direction": "out", "text": "torn\n')
+    room.torn()
     child_words(room, 8)
-    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_ROWS", 1)
     recent = room.read(n_human="2")
     assert recent["window"]["latest_message"] is None and recent["window"]["latest_before"] > 0
     pages = follow(room, recent["next_cursor"])
@@ -535,12 +487,10 @@ def test_a_continued_search_reaching_the_clean_start_of_the_chat_proves_no_messa
     child's words): the older page that reaches the start of the chat with none says so, positively,
     so the bottom decides. Past an unreadable row nothing is proven."""
     if torn:
-        room.chat_log.parent.mkdir(parents=True, exist_ok=True)
-        with room.chat_log.open("ab") as stream:
-            stream.write(b'{"direction": "out", "text": "torn\n')
+        room.torn()
     child_words(room, 8)
     message_bus.log_chat("in", room.chat_id, 7, "owner asks", ts=ts(40))
-    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_ROWS", 1)
     recent = room.read(n_human="2")
     assert recent["window"]["latest_message"] is None and recent["window"]["latest_before"] > 0
     pages = follow(room, recent["next_cursor"])
@@ -557,7 +507,7 @@ def test_a_search_that_found_the_newest_message_is_not_continued(room, narrow_re
     recent = room.read(n_human="2")
     assert recent["window"]["latest_message"] == {"history_id": room.row_id("root answer"), "out_of_order": True}
     assert "latest_before" not in recent["window"]
-    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_ROWS", 1)
     assert not any("latest_message" in page["window"] for page in follow(room, recent["next_cursor"]))
 
 
@@ -566,7 +516,7 @@ def test_the_arrival_search_keeps_its_own_bound_below_the_page_ceiling(room, nar
     bound and passes the fact on, while the pages themselves read to their quota."""
     room.deliver("root answer", 5)
     child_words(room, 8)
-    monkeypatch.setattr(history_paging, "_ARRIVAL_SEARCH_BYTES", 1)
+    monkeypatch.setattr(history_paging, "_ARRIVAL_SEARCH_ROWS", 1)
     recent = room.read(n_human="2")
     assert recent["window"]["latest_message"] is None and recent["window"]["latest_before"] > 0
     older = room.read(cursor=recent["next_cursor"])

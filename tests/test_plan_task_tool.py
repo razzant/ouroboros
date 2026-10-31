@@ -166,8 +166,6 @@ def test_first_revision_requires_affected_paths_and_schema_errors_write_nothing(
                 {"ask": "everyone"}, {"message": "hello"}, {"reviewer_effort": "turbo", "ask": "council"}, {"nonsense": 1}):
         text, result = _call(ctx, **bad)
         assert "PLAN_ARGS_INVALID" in text and result.code == "TOOL_ARG_ERROR", bad
-    text, result = _call(ctx, ask="council")
-    assert "PLAN_ASK_NEEDS_A_PLAN" in text
     assert sub.calls == [] and _record(harness) == plan_record.empty_record()
 
 
@@ -215,7 +213,7 @@ def test_read_is_free_and_shows_the_state(harness):
     sub = harness.install({})
     ctx = harness.make_ctx()
     text, result = _call(ctx)
-    assert "No plan revision recorded" in text and result.meta["plan_effect"] == "read"
+    assert "No plan revision is recorded" in text and result.meta["plan_effect"] == "read"
     _write(ctx)
     text, result = _call(ctx)
     assert "# Plan — revision 1 of 1" in text and "exactly 5 slides" in text and "Nothing holds your final answer" in text
@@ -330,12 +328,45 @@ def test_a_body_plans_first_ask_includes_every_owner_marked_reviewer_and_says_so
     assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2", "s1", "s3"]
     ask = _record(harness)["asks"][0]
     assert ask["body_first_ask"] is True and ask["host_added"] == ["s1", "s3"]
+    assert ask["panel"]["widened_from"] == ["s2"] and ask["panel"]["strictness"] == "blocking"
     assert "first ask on a body plan" in text and "added s1, s3" in text
     system_prompt = _user_text(sub.calls[0]["request"].slot_messages["s2"][0]["content"])
     assert "## BIBLE.md (constitution" in system_prompt and "## ARCHITECTURE.md" in system_prompt
     # The second ask is the mind's choice.
     text, _ = _call(ctx, ask=["s2"], message="again")
     assert [s.slot_id for s in sub.calls[1]["slots"]] == ["s2"] and _record(harness)["asks"][1]["host_added"] == []
+
+
+def test_advisory_first_body_ask_requires_reason_and_preserves_the_named_panel(harness):
+    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    sub = harness.install({})
+    ctx = harness.make_ctx(active_workspace=False)
+    text, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"])
+    assert "REVIEW_PANEL_REASON_REQUIRED" in text and result.code == "TOOL_ARG_ERROR"
+    assert sub.calls == [] and _record(harness) == plan_record.empty_record()
+    _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"], reason="one area changed")
+    assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2"]
+    ask = _record(harness)["asks"][0]
+    assert ask["host_added"] == [] and ask["panel"]["widened_from"] == []
+    assert ask["reason"] == ask["panel"]["reason"] == "one area changed"
+    from ouroboros.review_ledger import load_record
+    assert load_record(harness.drive, ask["record_id"])["panel"]["reason"] == "one area changed"
+
+
+def test_first_body_ask_adviser_alone_refuses_in_advisory_and_is_free_in_cyber(harness):
+    critic = _slots(("critic", "m/critic"))[0]
+    harness.monkeypatch.setattr("ouroboros.reviewer_slot_config.catalog_review_row", lambda *_: critic)
+    harness.monkeypatch.setattr("ouroboros.reviewer_slot_config._delivery_slot", lambda *_a, **_kw: critic)
+    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    sub = harness.install({"critic": _reply("A concern", objections=[("x", "explain this")])})
+    ctx = harness.make_ctx(active_workspace=False)
+    text, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["critic"], reason="optional critic")
+    assert "REVIEW_PANEL_EMPTY" in text and result.code == "TOOL_ARG_ERROR"
+    assert sub.calls == [] and _record(harness) == plan_record.empty_record()
+    harness.monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    _, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["critic"])
+    assert [s.slot_id for s in sub.calls[0]["slots"]] == ["critic"]
+    assert result.meta["plan_holding"] == 0
 
 
 def test_later_ask_continues_each_participant_with_delta_cross_talk_and_own_objections(harness):
@@ -394,7 +425,7 @@ def test_pending_seats_settle_from_the_custody_hook_and_wake_the_mailbox(harness
     record = _record(harness)
     assert [p["status"] for p in record["asks"][0]["participants"]] == ["pending", "pending", "answered"]
     assert result.meta["plan_pending_asks"] == 1 and "Still working: s1, s2" in text
-    decision = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False, force_plan=False)
+    decision = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False)
     assert decision["status"] == "awaiting" and decision["allow"] is True  # silence never holds
     from ouroboros.review_records import ReviewActorRecord
 
@@ -498,22 +529,25 @@ def test_a_typed_lane_refusal_reaches_the_participant_record_and_an_untyped_fail
     assert rows["s3"]["error"] == "transport died"
 
 
-def test_a_session_participant_reads_the_same_redacted_evidence_inline_never_raw_locators(harness):
-    """A retrieving session seat sees the SAME redacted evidence bytes a packet seat sees and is
-    told not to re-read the raw locators (4e133c8a); a secret in the attached file reaches nobody."""
-    (harness.workspace / "notes.md").write_text(
-        "plan notes\nANTHROPIC_API_KEY=sk-ant-FAKEFIXTURE-not-a-real-key-ABCDEFGHIJKLMNOP\n", encoding="utf-8")
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_session_participant_reads_the_same_exact_evidence_inline_as_a_packet_seat(harness, newline):
+    """A retrieving session seat sees the SAME evidence bytes a packet seat sees, and those are the
+    file's own bytes: a secret-shaped line in an attached file is not rewritten for either, and its
+    line endings are not normalised."""
+    line = "ANTHROPIC_API_KEY=sk-ant-FAKEFIXTURE-not-a-real-key-ABCDEFGHIJKLMNOP"
+    expected = f"plan notes{newline}{line}{newline}"
+    # Bytes, not text mode: text mode would translate newlines on Windows; the fixture fixes them.
+    (harness.workspace / "notes.md").write_bytes(expected.encode("utf-8"))
     harness.state["slots"] = _slots(("api1", "m/a"), ("sess1", "cursor=grok", "session"))
     sub = harness.install({})
     _write(harness.make_ctx(), ask="council", attach=["notes.md"])
     request = sub.calls[0]["request"]
     session = str(request.slot_session_tasks["sess1"])
     assert request.session_root == str(harness.workspace)
-    assert "RETRIEVING REVIEWER" in session and "REDACTED snapshot" in session
-    assert "do NOT re-read the raw evidence locators" in session and "plan notes" in session
+    assert "RETRIEVING REVIEWER" in session and "the same bytes every reviewer sees" in session
+    assert "REDACTED" not in session and expected in session
     packet = _user_text(request.slot_messages["api1"][-1]["content"])
-    assert "plan notes" in packet and "secrets_redacted=true" in packet
-    assert "sk-ant-FAKEFIXTURE" not in session + packet
+    assert expected in packet and "secrets_redacted" not in packet
     assert request.policy["output_contract"].startswith("Return ONE JSON object")
 
 

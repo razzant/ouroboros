@@ -1,5 +1,5 @@
 """Phase 1 golden coverage: honest runtime digest, activity-based timeout model,
-no-blind-retry of orchestrators, and the task-tree coordination ledger."""
+and the task-tree coordination ledger."""
 
 import json
 import time
@@ -126,32 +126,9 @@ def test_explicit_deadline_is_hard_even_while_progressing(tmp_path, monkeypatch)
     assert kwargs["progress_meta"]["toast_once"].startswith("dl1:deadline:")
 
 
-def test_has_live_descendant_detects_orchestrator(tmp_path, monkeypatch):
-    from supervisor import queue as q
-    monkeypatch.setattr(q, "RUNNING", {
-        "root": {"task": {"id": "root"}},
-        "c": {"task": {"id": "c", "parent_task_id": "root"}},
-        "gc": {"task": {"id": "gc", "parent_task_id": "c"}},
-        "other": {"task": {"id": "other"}},
-    })
-    monkeypatch.setattr(q, "PENDING", [])
-    assert q._has_live_descendant("root") is True   # via c and gc
-    assert q._has_live_descendant("c") is True       # via gc
-    assert q._has_live_descendant("gc") is False     # leaf
-    assert q._has_live_descendant("other") is False
-
-    # A parent whose only child is still QUEUED (PENDING, not yet assigned) is still an
-    # orchestrator and must not be blind-retried.
-    monkeypatch.setattr(q, "RUNNING", {"p": {"task": {"id": "p"}}})
-    monkeypatch.setattr(q, "PENDING", [{"id": "pc", "parent_task_id": "p", "root_task_id": "p"}])
-    assert q._has_live_descendant("p") is True
-    assert q._has_live_descendant("nope") is False
-
-
 def test_descendant_detection_survives_missing_intermediate_parent(tmp_path, monkeypatch):
     """A grandchild whose intermediate parent already left RUNNING is still a descendant of
-    the root (via root_task_id), so the root orchestrator is recognised (not blind-retried)
-    and a progressing grandchild keeps it alive."""
+    the root (via root_task_id), so a progressing grandchild keeps it alive."""
     from supervisor import queue as q
     now = time.time()
     monkeypatch.setattr(q, "RUNNING", {
@@ -160,7 +137,7 @@ def test_descendant_detection_survives_missing_intermediate_parent(tmp_path, mon
         "gc": {"task": {"id": "gc", "parent_task_id": "c", "root_task_id": "root"},
                "last_progress_at": now - 1, "started_at": now - 30},
     })
-    assert q._has_live_descendant("root") is True
+    assert q._is_descendant_of(q.RUNNING["gc"]["task"], "root") is True
     assert q._subtree_progressing("root", now, 100.0) is True
     # a stale grandchild does NOT keep the root alive
     q.RUNNING["gc"]["last_progress_at"] = now - 10_000
@@ -175,13 +152,17 @@ def test_capability_and_queue_digest_in_runtime_context(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
     env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path,
                           drive_path=lambda p: tmp_path / p)
+
+    def capabilities(section):
+        return json.loads(section.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])["capabilities"]
+
     section = ctx_mod.build_runtime_section(env, {"id": "t1", "type": "task"})
-    assert '"allow_mutative_subagents": true' in section
+    assert capabilities(section)["allow_mutative_subagents"] is True
     assert "MASTER gate" in section  # the honest note teaching forward reasoning
 
     monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "false")
     section_off = ctx_mod.build_runtime_section(env, {"id": "t1", "type": "task"})
-    assert '"allow_mutative_subagents": false' in section_off
+    assert capabilities(section_off)["allow_mutative_subagents"] is False
 
 
 def test_tree_tools_in_core_and_initial_schemas():
@@ -482,9 +463,10 @@ def test_task_is_readonly_subagent_gate():
 
 def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatch):
     """Variant-A STRICT fail-closed: if the worker is NOT provably dead after kill/join, the reaper
-    does NOTHING downstream — no terminal write, no task_done, no retry, no respawn — and HOLDS the
+    does NOTHING downstream — no terminal write, no task_done, no queued row, no respawn — and HOLDS the
     slot reaping=True so a still-live orphan can never be reused, raced, or have its result clobbered.
-    The task stays RUNNING (custody-reaped on the next generation). Guards the codex/cumulative blocker."""
+    The task stays RUNNING (custody-reaped on the next generation). Guards the codex/cumulative blocker.
+    The job is the shape the timeout producer queues: a hard bound, no retry request."""
     from supervisor import queue as q
     from supervisor import workers as w
     from ouroboros import platform_layer
@@ -520,12 +502,11 @@ def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatc
     q._reap_timed_out_task({
         "worker_id": 5, "proc": slot.proc, "worker": slot, "drive_root": str(tmp_path), "task_id": "wedged1",
         "task": {"id": "wedged1", "type": "task", "chat_id": 7}, "task_type": "task",
-        "terminal_reason": "idle_timeout", "attempt": 1,
-        "owner_chat_id": 7,
-        "will_retry": True, "retry_task_id": "wedged1",
+        "terminal_reason": "deadline", "attempt": 1,
+        "owner_chat_id": 7, "deadline_reached": True, "ceiling_reached": False,
     })
 
-    assert q.PENDING == [], "no colliding retry may be enqueued for an unconfirmed-dead worker"
+    assert q.PENDING == [], "nothing may be enqueued for an unconfirmed-dead worker"
     assert respawns == [], "the slot must NOT be respawned while the orphan may be alive"
     assert slot.reaping is True, "the slot stays reaping (unavailable) so the live orphan is never reused"
     assert not any(e.get("type") == "task_done" for e in emitted), \
@@ -545,5 +526,5 @@ def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatc
     assert kwargs["task_id"] == "wedged1"
     assert kwargs["progress_meta"] == {
         "task_incident": "task_reaper_wedged",
-        "toast_once": "wedged1:task_reaper_wedged:5:idle_timeout",
+        "toast_once": "wedged1:task_reaper_wedged:5:deadline",
     }

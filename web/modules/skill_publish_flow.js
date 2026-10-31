@@ -1,5 +1,6 @@
 import { createTask, skillPublishPreflight } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { publicationDisclosure } from './skill_presentation.js';
 
 export const SKILL_PUBLISH_STATES = Object.freeze([
     'ready',
@@ -13,31 +14,31 @@ const STATE_PRESENTATION = Object.freeze({
     ready: {
         label: 'Ready',
         title: 'Ready to publish',
-        body: 'The selected snapshot passed the publish preflight. Confirm to start an ordinary managed task that may open a public GitHub pull request after repeating the authoritative checks.',
-        confirmLabel: 'Publish to OuroborosHub',
+        body: 'The files passed the check. Ouroboros checks them once more, opens the publication request and posts its link in chat.',
+        confirmLabel: 'Publish',
     },
     warnings: {
         label: 'Warnings',
-        title: 'Publish with warnings',
-        body: 'The preflight found non-blocking warnings. Review the redacted details, then explicitly confirm whether Ouroboros may continue toward a public GitHub pull request.',
+        title: 'Ready, with notes',
+        body: 'The check left notes that don’t block publishing; they are in the details below. Ouroboros checks the files once more, opens the publication request and posts its link in chat.',
         confirmLabel: 'Publish with warnings',
     },
     needs_attention: {
         label: 'Needs attention',
-        title: 'Ask Ouroboros to prepare this publication',
-        body: 'The current bytes cannot be published yet. Confirming starts the ordinary managed task with the redacted facts and normal agent capabilities; a public pull request is authorized only after the strict final gates pass.',
+        title: 'Not ready yet',
+        body: 'Ouroboros can fix it and publish: it starts a task with these facts, and the publication request opens only after the final checks pass.',
         confirmLabel: 'Ask Ouroboros to fix and publish',
     },
     repairable: {
         label: 'Repairable',
-        title: 'Ask Ouroboros to repair the publish path',
-        body: 'The publication preflight reports a repairable scanner problem. Confirming starts the ordinary managed task with the typed failure facts; a public pull request is authorized only after the strict final gates pass.',
+        title: 'Not ready yet',
+        body: 'The secrets check reports a problem Ouroboros can repair. It starts a task with these facts, and the publication request opens only after the final checks pass.',
         confirmLabel: 'Ask Ouroboros to fix and publish',
     },
     hard_block: {
         label: 'Unavailable',
-        title: 'Publishing is unavailable',
-        body: 'The publish task cannot start. Resolve the authority, identity, source, or admission problem shown below, then run Publish again.',
+        title: 'Can’t publish',
+        body: 'Publishing cannot start. The reason is in the details below; fix it, then publish again.',
         confirmLabel: 'OK',
     },
 });
@@ -148,7 +149,7 @@ export function skillPublishDetails(preflight = {}) {
 }
 
 /** Translate one backend-authored state into dialog copy without reclassifying it. */
-export function skillPublishDialogModel(preflight = {}) {
+export function skillPublishDialogModel(preflight = {}, { privateRepository } = {}) {
     const state = text(preflight.state);
     const presentation = STATE_PRESENTATION[state];
     const target = targetFromPreflight(preflight);
@@ -179,7 +180,7 @@ export function skillPublishDialogModel(preflight = {}) {
         canStart,
         dialog: {
             title: `${presentation.title}${titleTarget}`,
-            body: [summary, presentation.body].filter(Boolean).join('\n\n'),
+            body: [summary, presentation.body, canStart ? publicationDisclosure(privateRepository, target.repository) : ''].filter(Boolean).join('\n\n'),
             alert: !canStart,
             confirmLabel: presentation.confirmLabel,
             cancelLabel: 'Cancel',
@@ -189,12 +190,16 @@ export function skillPublishDialogModel(preflight = {}) {
     };
 }
 
-/** Build the exact ordinary managed-task request after explicit confirmation. */
-export function buildSkillPublishTask(preflight = {}, { projectId = '', chatId } = {}) {
+/**
+ * Build the exact ordinary managed-task request after explicit confirmation. The owner's
+ * `destination` ({source_id, mode}) rides in `skill_publish_target`, where the publish tool reads it.
+ */
+export function buildSkillPublishTask(preflight = {}, { projectId = '', chatId, destination = null, privateRepository } = {}) {
     const { skill, repository } = targetFromPreflight(preflight);
     if (!validTaskStart(preflight)) {
         throw new Error('Publish preflight does not authorize a task start.');
     }
+    const disclosure = publicationDisclosure(privateRepository, repository);
     const evidence = {
         state: text(preflight.state),
         publication_ready: preflight.publication_ready === true,
@@ -220,13 +225,13 @@ export function buildSkillPublishTask(preflight = {}, { projectId = '', chatId }
         source: 'web',
         ...(text(projectId) ? { project_id: text(projectId) } : { chat_id: 1 }),
         ...(chatId === undefined ? {} : { chat_id: chatId }),
-        description: `Publish the installed skill "${skill}" to "${repository}" by opening a public GitHub pull request. Success requires a validated pull-request receipt for this exact skill and repository.`,
+        description: `Publish the installed skill "${skill}" to "${repository}" by opening a GitHub pull request. ${disclosure} Success requires a validated pull-request receipt for this exact skill and repository.`,
         type: 'skill_publish',
         expected_output: `Return only the validated GitHub pull-request URL opened in "${repository}" for the canonical skill "${skill}".`,
-        constraints: `Public submission is authorized for the canonical skill "${skill}" and repository "${repository}". If the repository-pinned Betterleaks 1.8.1 runtime is reported missing or corrupt, this task may run only the repository-provided checksum-pinned Betterleaks 1.8.1 installer command: python -m ouroboros.betterleaks_runtime install. No other dependency or runtime change is authorized. No account or authentication change is authorized.`,
-        context: `The owner explicitly confirmed public submission of "${skill}" to "${repository}". Recoverable tool errors are evidence for the next LLM turn, not completion. Use the typed stage, completed external effects, redacted facts, and repair hint as context for the agent's own judgment. Selected-preflight evidence: ${JSON.stringify(evidence)}`,
+        constraints: `Publication is authorized for the canonical skill "${skill}" and repository "${repository}". ${disclosure} If the repository-pinned Betterleaks 1.8.1 runtime is reported missing or corrupt, this task may run only the repository-provided checksum-pinned Betterleaks 1.8.1 installer command: python -m ouroboros.betterleaks_runtime install. No other dependency or runtime change is authorized. No account or authentication change is authorized.`,
+        context: `The owner explicitly confirmed publication of "${skill}" to "${repository}". ${disclosure} Recoverable tool errors are evidence for the next LLM turn, not completion. Use the typed stage, completed external effects, redacted facts, and repair hint as context for the agent's own judgment. Selected-preflight evidence: ${JSON.stringify(evidence)}`,
         metadata: {
-            skill_publish_target: { skill, repository },
+            skill_publish_target: { skill, repository, ...(destination ? { destination } : {}) },
         },
     };
 }
@@ -241,20 +246,22 @@ export async function runSkillPublishFlow(skill, {
     createTaskImpl = createTask,
     projectId = '',
     chatId,
+    destination = null,
+    privateRepository,
 } = {}) {
     const requestedSkill = text(typeof skill === 'string' ? skill : skill?.name);
     if (!requestedSkill) throw new Error('Skill name is required for publication.');
 
     let preflight;
     try {
-        preflight = await preflightImpl(requestedSkill);
+        preflight = await (destination ? preflightImpl(requestedSkill, destination) : preflightImpl(requestedSkill));
     } catch (error) {
         const typed = error?.body || error?.payload;
         if (!typed || typed.state !== 'hard_block') throw error;
         preflight = typed;
     }
 
-    const model = skillPublishDialogModel(preflight);
+    const model = skillPublishDialogModel(preflight, { privateRepository });
     const decision = await dialogImpl(model.dialog);
     if (!model.canStart) {
         return {
@@ -267,7 +274,7 @@ export async function runSkillPublishFlow(skill, {
         return { started: false, reason: 'cancelled', preflight };
     }
 
-    const payload = buildSkillPublishTask(preflight, { projectId, chatId });
+    const payload = buildSkillPublishTask(preflight, { projectId, chatId, destination, privateRepository });
     const task = await createTaskImpl(payload);
     return { started: true, task, payload, preflight };
 }

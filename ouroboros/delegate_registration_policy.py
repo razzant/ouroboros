@@ -49,6 +49,9 @@ def review_owned_source(source: Any) -> bool:
 # it was made from, but nothing it produces is ever integrated into that tree.
 INVESTIGATION_AUTHORITY = "investigation"
 _NO_APPLY_AUTHORITY_SOURCES = frozenset({INVESTIGATION_AUTHORITY, "readonly"})
+INVESTIGATION_NOTE = "Evidence-only investigation: the captured changes are retained as evidence and never applied."
+NO_CHANGES_NOTE = ("No changes: the run's result holds exactly the files its copy started from (files Git ignores "
+                   "are never part of a result), so it closed itself; there is nothing to apply or reject.")
 
 
 def no_write_authority(root: str, *, investigation: bool) -> dict:
@@ -60,6 +63,14 @@ def no_write_authority(root: str, *, investigation: bool) -> dict:
 
 def _fact(record: Any, key: str) -> Any:
     return record.get(key) if isinstance(record, dict) else getattr(record, key, None)
+
+
+def evidence_only(record: Any) -> bool:
+    """The positive evidence-only purpose (#1609): no read of its capture asks for
+    apply/reject. Keyed on the recorded investigation source, not on
+    ``candidate_apply_possible`` being false, which also covers degenerate rows
+    with no source and no capture binding."""
+    return str(_fact(record, "authority_source") or "") == INVESTIGATION_AUTHORITY
 
 
 def candidate_apply_possible(record: Any) -> bool:
@@ -75,6 +86,8 @@ def candidate_apply_possible(record: Any) -> bool:
     an unknown source included, stays possible: a conservative answer, not
     proof of permission.
     """
+    if _fact(record, "execution_mode") == "plan" or _fact(record, "mode") == "plan":
+        return False
     source = str(_fact(record, "authority_source") or "")
     if source in _NO_APPLY_AUTHORITY_SOURCES:
         return False
@@ -88,9 +101,9 @@ def candidate_apply_possible(record: Any) -> bool:
 
 def _recorded_readonly_ask(record: Any) -> bool:
     """The read-only reviewer's own recorded shape: a STARTED row's granted
-    ``access``/``mode``, or a pending row's stored wire request, is readonly Ask
+    ``access``/``mode``, or a pending row's wire shape, is readonly Ask
     with no private execution binding. Absent shape facts prove nothing."""
-    request = _fact(record, "request")
+    request = _fact(record, "request_shape") or _fact(record, "request")
     request = request if isinstance(request, dict) else {}
     return (str(_fact(record, "access") or request.get("access") or "") == "readonly"
             and str(_fact(record, "mode") or request.get("mode") or "") == "ask"
@@ -232,6 +245,7 @@ STARTED_STR_FIELDS: Tuple[Tuple[str, str], ...] = tuple(
         "ledger_root", "idempotency_key", "invocation_id",
         "snapshot_id", "execution_root", "execution_binding_fingerprint", "baseline_sha", "target_root",
         "authority_source", "access", "mode", "isolation",
+        "execution_mode", "effective_access", "thread_id",
         "selected_subagent_id", "config_fingerprint", "work_order_fingerprint",
         "work_order_coverage", "authority_fingerprint",
         # The prior run this start explicitly continues ("" for every ordinary
@@ -242,6 +256,7 @@ STARTED_STR_FIELDS: Tuple[Tuple[str, str], ...] = tuple(
 )
 # None means an old row omitted the choice; '' is a captured default choice. ``row_effort`` is
 # the configured row's pin ('' = Auto) beside ``effort``, the LEAF level the engine ran.
+STARTED_MAPPING_FIELDS = ("authority_ceiling", "promotion")
 STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort")
 # Progress carried forward from a previous row: an idempotent re-start writes a
 # SECOND started row; replacing wholesale would forget a settlement and put a
@@ -249,14 +264,15 @@ STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort")
 STARTED_PROGRESS_FLAGS: Tuple[str, ...] = (
     "ledger_recorded", "settled", "containment_disclosed", "unread_disclosed",
     "output_artifact", "output_complete", "output_sha", "output_consumed", "output_source",
-    "patch_captured", "patch_disposed", "patch_apply_pending", "superseded_by")
+    "patch_captured", "patch_disposed", "patch_disposed_by", "patch_result_lost", "patch_apply_pending",
+    "superseded_by")
 # The closing facts SETTLED wrote (and the fault CONTAINMENT_FAULT recorded): a later
 # STARTED row never carries them, so replacing wholesale would forget a run's cost,
 # its spend disclosure, the engine's model/profile/locators and an unresolved fault,
 # or the owner's recorded terminal-wake acknowledgement.
 STARTED_SETTLEMENT_FACTS: Tuple[str, ...] = (
     "terminal_state", "terminal_reason", "engine_model", "access_profile",
-    "spend_disclosed", "spend_estimated", "cost_usd",
+    "spend_disclosed", "spend_estimated", "cost_usd", "cost_partial",
     "settled_at", "engine_locator", "terminal_ack_attempt")
 # Binding/authority facts are FIRST-WINS (R1-2): a later idempotent STARTED row
 # may be minted by a context that no longer knows the original binding; the
@@ -266,4 +282,5 @@ STARTED_FIRST_WINS_FACTS: Tuple[str, ...] = (
     "capture_id", "snapshot_task_id", "authority_source", "resource_ref", "selected_subagent_id",
     "config_fingerprint", "work_order_fingerprint", "work_order_coverage",
     "authority_fingerprint", "work_order_source_request", "category", "source",
+    "execution_mode", "effective_access", "thread_id", *STARTED_MAPPING_FIELDS,
     *REVIEW_ATTRIBUTION_KEYS)

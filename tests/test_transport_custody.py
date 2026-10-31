@@ -212,6 +212,32 @@ def test_attempt_custody_capture_found_on_explicit_cause():
     assert fields["provider_error_type"] == "overflow"
 
 
+def test_provider_error_type_is_the_providers_own_never_an_exception_class_name():
+    """The durable error row names the provider's own type: a typed vendor code on the error or its cause
+    (Claudexor's vendorCode, also when no capture rides the chain), never the class name a capture
+    substitutes for the classifier; a capture's real provider type still passes (the overflow test above)."""
+    from ouroboros.llm_claudexor import ClaudexorModelError
+    from ouroboros.transport_custody import attempt_custody_event_fields
+
+    busy = ClaudexorModelError({"code": "provider_failed", "message": "Model operation failed",
+                                "context": {"vendorCode": "server_is_overloaded"}})
+    assert attempt_custody_event_fields(busy) == {"provider_error_type": "server_is_overloaded"}
+    try:
+        raise RuntimeError("recovery wrapper") from busy
+    except RuntimeError as exc:
+        assert attempt_custody_event_fields(exc)["provider_error_type"] == "server_is_overloaded"
+
+    class APIStatusError(Exception):
+        pass
+
+    sdk = APIStatusError("no structured body")
+    sdk.physical_attempt_capture = ua.PhysicalAttemptCapture(
+        attempt_id="pa-name", model="m", provider="openrouter", state="released",
+        candidate_measurement_kind="opaque", provider_error_type="APIStatusError")
+    fields = attempt_custody_event_fields(sdk)
+    assert fields["physical_attempt_id"] == "pa-name" and "provider_error_type" not in fields
+
+
 def test_attempt_custody_cause_walk_matches_bare_builtin_transport_errors():
     """Fable lane B F5: a bare builtins ConnectionResetError/TimeoutError cause
     (no httpx wrapper) still yields a transport cause type."""

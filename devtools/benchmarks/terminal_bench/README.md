@@ -371,6 +371,11 @@ into the container, so the declared effort equals the effective one.
 Hard-won facts (verified against harbor 0.18.0 + leaderboard CI source):
 
 - **Every REWARDED trial MUST have a trajectory** (ATIF, schema `ATIF-v1.7`):
+  The converter reads narration and answers from `ouroboros-data/state/dialog.sqlite`
+  in read-only mode, addressed to the run's task/tree when the summary names it.
+  Old JSONL-only trials need an explicit `dialogue_import.run_dialogue_import(data_dir)`
+  in an Ouroboros environment before conversion. Pending, failed or invalid import
+  ranges refuse conversion; an incomplete history is never certified as a trajectory.
   the leaderboard CI check "Rewarded trials have trajectories" reads the
   trial row's `trajectory_path` (the direct `trajectory.json` upload), and
   `/judge` reviews those trajectories. Runs from adapters that emit it live
@@ -607,9 +612,9 @@ lightweight JSON decisions on the expensive measured model.
 `run_tb.py --all-model` pins the review pool (ONE packet review seat on the solve model,
 written as a catalog row of `OUROBOROS_SUBAGENTS`, at low effort) and the Light lane to
 the solve model. This is intentional and must stay:
-a TB run claims a SINGLE-MODEL measurement, so the acceptance-review content —
-which feeds improvement passes back into the answer — must come from the same
-model. Substituting a stronger/different reviewer would smuggle a second
+a TB run claims a SINGLE-MODEL measurement, so the result-review findings —
+which re-enter the measured agent's context before the answer is delivered —
+must come from the same model. Substituting a stronger/different reviewer would smuggle a second
 reasoning model into the scaffold and invalidate the single-model claim; the
 lone low-effort reviewer slot keeps review ON (part of the measured harness)
 without reviewer diversity. `single_reviewer_no_diversity` stays loud in logs

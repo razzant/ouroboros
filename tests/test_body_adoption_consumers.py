@@ -12,7 +12,7 @@ import pytest
 
 from ouroboros import body_adoption, body_candidate, body_switch
 from tests.body_candidate_support import (
-    candidate_commit, git, isolate, make_ctx, make_serving, restart_receipt, rich_commit,
+    candidate_commit, git, host_restart_ack, isolate, make_ctx, make_serving, restart_receipt, rich_commit,
 )
 
 EXITED = {"doomed": [4001], "dead": [4001], "unconfirmed": [], "cleanup_ok": True, "snapshot_ok": True}
@@ -64,6 +64,23 @@ def _managed_server(monkeypatch, scene):
     monkeypatch.setattr(server, "_has_active_evolution_transaction", lambda: False)
     monkeypatch.setattr(server, "_safe_restart_serialized", lambda fn, **kwargs: fn(**kwargs))
     return server
+
+
+def _task_rows(monkeypatch):
+    """The boot's rows addressed to the authorizing task, as the supervisor's queue receives them."""
+    from supervisor import workers
+
+    rows = []
+    monkeypatch.setattr(workers, "get_event_q", lambda **_kw: SimpleNamespace(put=rows.append))
+    return rows
+
+
+def _admitted(scene, chat_id=1):
+    """The authorizing task's admission receipt, which names its room (supervisor.task_admission)."""
+    from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
+
+    write_task_result(scene.data, scene.ctx.task_id, STATUS_SCHEDULED, chat_id=chat_id,
+                      root_task_id=scene.ctx.task_id, result="Task accepted and scheduled.")
 
 
 def _switch(scene, reason="adopt it"):
@@ -270,7 +287,7 @@ def test_evolution_cleanup_never_stashes_or_resets_serving_dirt_of_a_candidate_c
     assert other["cleanup_status"] != "candidate_retained"
 
 
-def test_serving_push_publishes_reachable_release_tags_and_never_a_candidates(scene, monkeypatch, tmp_path):
+def test_serving_push_publishes_only_the_operation_tag_and_never_a_candidates(scene, monkeypatch, tmp_path):
     from ouroboros.tools import git as git_tools
     from supervisor import git_ops
 
@@ -293,26 +310,28 @@ def test_serving_push_publishes_reachable_release_tags_and_never_a_candidates(sc
 
     monkeypatch.setattr(git_ops, "REPO_DIR", scene.serving)
     monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
+    git(scene.serving, "config", "push.followTags", "true")  # ambient configuration must not expand the effect
     pushed, message = git_ops.push_to_remote()
 
-    assert pushed is True and "+ tags" in message
+    assert pushed is True and "+ tag" not in message
     assert git(remote, "rev-parse", "refs/heads/ouroboros") == scene.old
-    assert git(remote, "rev-parse", "refs/tags/v1.0.0^{commit}") == scene.old
     refs = git(remote, "for-each-ref", "--format=%(refname)").splitlines()
-    assert sorted(refs) == ["refs/heads/ouroboros", "refs/tags/v1.0.0"]  # no v1.0.1, no candidate branch, no pin
+    assert refs == ["refs/heads/ouroboros"]  # no old tag, private candidate branch or pin
 
     # Explicit publication of the approved contribution branch stays available and is not forced.
-    git(scene.candidate, "push", "-q", "origin", f"{scene.ctx.branch_dev}:refs/heads/contrib/fix")
+    git(scene.candidate, "push", "-q", "--no-follow-tags", "origin", f"{scene.ctx.branch_dev}:refs/heads/contrib/fix")
     assert git(remote, "rev-parse", "refs/heads/contrib/fix") == neutral
     assert "refs/tags/v1.0.1" not in git(remote, "for-each-ref", "--format=%(refname)")
 
-    # Once the numbered release IS the serving line, the same push publishes its tag.
+    # Publication now also needs this operation's creation fact, not merely reachability.
     git(scene.serving, "merge", "-q", "--ff-only", numbered)
-    assert git_ops.push_to_remote()[0] is True
+    assert git_ops.push_to_remote(created_tag="v1.0.1", expected_commit_sha=numbered)[0] is True
     assert git(remote, "rev-parse", "refs/tags/v1.0.1^{commit}") == numbered
+    assert "refs/tags/v1.0.0" not in git(remote, "for-each-ref", "--format=%(refname)")
 
 
-def test_boot_settlement_pushes_the_adopted_serving_line_and_tells_the_owner(scene, monkeypatch, tmp_path):
+@pytest.mark.parametrize("tag_evidence", ["neutral", "numbered", "legacy", "numbered_then_neutral"])
+def test_boot_settlement_pushes_the_adopted_serving_line_and_tells_its_task(scene, monkeypatch, tmp_path, tag_evidence):
     from supervisor import git_ops, git_ops_reset, message_bus, state
 
     remote = tmp_path / "origin.git"
@@ -320,25 +339,82 @@ def test_boot_settlement_pushes_the_adopted_serving_line_and_tells_the_owner(sce
     git(scene.serving, "remote", "add", "origin", str(remote))
     monkeypatch.setattr(git_ops, "REPO_DIR", scene.serving)
     monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
-    facts, sent = [], []
+    facts, sent, rows = [], [], _task_rows(monkeypatch)
     monkeypatch.setattr(git_ops_reset, "_record_checkout_facts", lambda value: facts.append(value))
     monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 7})
     monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
 
     assert body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True) == {}  # nothing inherited
-    assert sent == [] and git(remote, "for-each-ref") == ""
+    assert sent == rows == [] and git(remote, "for-each-ref") == ""
+    _admitted(scene)
 
+    git(scene.serving, "tag", "-a", "v-old", "-m", "old")
+    git(scene.serving, "config", "push.followTags", "true")
+    if tag_evidence != "neutral":
+        git(scene.candidate, "tag", "-a", "v-new", "-m", "new")
+    if tag_evidence == "numbered":
+        body_candidate.record_reviewed_commit(scene.ctx, scene.cand, created_tag="v-new")
+    if tag_evidence == "numbered_then_neutral":
+        body_candidate.record_reviewed_commit(scene.ctx, scene.cand, created_tag="v-new")
+        scene.cand = candidate_commit(scene.candidate, "neutral follow-up",
+                                      files={"ouroboros/mod_b.py": "GEN = 'N'\n"})
+        body_candidate.record_reviewed_commit(scene.ctx, scene.cand)
     _switch(scene)
+    assert body_adoption.read(scene.data)["created_tag"] == ("v-new" if tag_evidence == "numbered" else "")
     unready = body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=False)
     assert unready["outcome"] == "unconfirmed" and git(remote, "for-each-ref") == "" and facts == []
 
     settled = body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True)
 
-    assert settled["outcome"] == "adopted"
+    assert settled["outcome"] == "adopted" and settled["tests"]["tier"] == "full" and "publication" not in settled
     assert facts == [{"current_branch": "ouroboros", "current_sha": scene.cand}]
     assert git(remote, "rev-parse", "refs/heads/ouroboros") == scene.cand  # the serving line, as after any commit
-    assert sent and sent[0][0] == 7 and scene.cand[:12] in sent[0][1]
-    assert sent[0][2]["system_type"] == "restart_notice"
+    # The authorizing task's card row in the room its record names (Main, 1), never the owner chat 7 or an owner-wide notice.
+    assert sent == [] and len(rows) == 1 and (rows[0]["chat_id"], rows[0]["task_id"]) == (1, scene.ctx.task_id)
+    assert (rows[0]["system_type"], rows[0]["progress_meta"]["card_row"]) == ("body_adoption", "reviews")
+    assert rows[0]["progress_meta"]["card_row_id"] == f"body-adoption:{settled['adoption_id']}"
+    tags = git(remote, "for-each-ref", "--format=%(refname)", "refs/tags").splitlines()
+    assert tags == (["refs/tags/v-new"] if tag_evidence == "numbered" else [])
+    headline, publication = rows[0]["text"].split("\n")
+    assert headline.startswith(f"Adopted candidate commit {scene.cand[:12]} on ouroboros") and "Publication" not in headline
+    assert publication.startswith("Publication: Pushed") and f" {publication}" in settled["note"]
+    assert body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True) == {}
+    assert len(rows) == 1 and sent == []  # consuming the handoff does not schedule another push or row
+
+
+@pytest.mark.parametrize("tests", [{"tier": "selected", "source": "proof", "head": "h"}, {}], ids=["selected", "unrecorded"])
+def test_boot_settlement_withholds_branch_and_tag_publication_without_full_evidence(scene, monkeypatch, tmp_path, tests):
+    from supervisor import git_ops, git_ops_reset, message_bus, state
+
+    remote = tmp_path / "origin.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(scene.serving, "remote", "add", "origin", str(remote))
+    git(scene.serving, "tag", "-a", "v1.0.1", scene.cand, "-m", "v1.0.1: candidate release")  # reachable once adopted
+    monkeypatch.setattr(git_ops, "REPO_DIR", scene.serving)
+    monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
+    monkeypatch.setattr("ouroboros.preflight_qualification.adoption_test_evidence", lambda *a, **kw: dict(tests))
+    facts, sent, rows = [], [], _task_rows(monkeypatch)
+    monkeypatch.setattr(git_ops_reset, "_record_checkout_facts", lambda value: facts.append(value))
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append(text))
+    finalize = body_adoption.finalize_on_boot  # sibling #1024 carries the operation-created tag in this result
+    monkeypatch.setattr(body_adoption, "finalize_on_boot", lambda *a, **kw: {**finalize(*a, **kw), "created_tag": "v1.0.1"})
+    _admitted(scene)
+
+    _switch(scene)
+    settled = body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True)
+
+    tier = tests.get("tier") or "unrecorded"
+    assert settled["outcome"] == "adopted" and facts == [{"current_branch": "ouroboros", "current_sha": scene.cand}]
+    assert git(remote, "for-each-ref") == ""  # neither the branch nor a tag reached the remote
+    assert settled["publication"] == {"status": "withheld", "branch": "ouroboros", "sha": scene.cand, "tier": tier,
+                                      "created_tag": "v1.0.1"}
+    assert sent == [] and rows[0]["text"].split("\n")[1].startswith(
+        f"Publication withheld: this adoption rests on {tier} test evidence")
+    events = [json.loads(line) for line in (scene.data / "logs/supervisor.jsonl").read_text().splitlines()]
+    [withheld] = [event for event in events if event["type"] == "body_adoption_publication"]
+    assert (withheld["status"], withheld["candidate"], withheld["base"]) == ("withheld", scene.cand, scene.old)
+    assert [event["tests"] for event in events if event["type"] == "body_adoption_closed"] == [tests]
 
 
 def test_runtime_fact_lists_retained_candidates_for_a_deliberate_resume(scene):
@@ -349,7 +425,7 @@ def test_runtime_fact_lists_retained_candidates_for_a_deliberate_resume(scene):
     for index in range(3):
         body_candidate.prepare(make_ctx(scene.serving, scene.data, f"extra-{index}"))
     limited = body_candidate.context_fact("root-consumer", limit=2)
-    assert len(limited) == 3 and limited[-1] == {"omitted": 2, "source": "state/subagent_worktrees.json (kind=body_candidate rows)"}
+    assert len(limited) == 3 and limited[-1] == {"omitted": 2, "source": "state/private_copies/*.json (kind=body_candidate records)"}
 
     from ouroboros.context import build_runtime_section
 
@@ -381,12 +457,15 @@ def test_request_restart_from_a_forked_drive_reaches_the_supervisor_binding_and_
     fork = tmp_path / "forked-drive"
     (fork / "state").mkdir(parents=True)
     scene.ctx.drive_root, scene.ctx.budget_drive_root = fork, scene.data
+    sent = host_restart_ack(scene.ctx, scene.data)  # the server answers in its canonical DATA_DIR only
     registry = ToolRegistry(repo_dir=scene.serving, drive_root=fork)
     registry.set_context(scene.ctx)
 
     adopting = registry.execute("request_restart", {"reason": "adopt from project", "adopt_commit": scene.cand})
 
     assert f"adopts candidate commit {scene.cand[:12]}" in adopting, adopting
+    [intent] = sent
+    assert (intent["phase"], intent["task_id"], intent["reason"]) == ("intent", "root-consumer", "adopt from project")
     assert not (fork / "state" / "pending_restart_verify.json").exists() and body_adoption.read(fork) == {}
     receipt = json.loads((scene.data / "state" / "pending_restart_verify.json").read_text())
     assert (receipt["expected_sha"], receipt["reason"]) == (scene.cand, "adopt from project")
@@ -394,6 +473,109 @@ def test_request_restart_from_a_forked_drive_reaches_the_supervisor_binding_and_
     assert body_adoption.arm(scene.data, worker_exits=EXITED, live_children=[], owner_restart=False,
                              owned_stop={"state": "completed", "unconfirmed": []}) == "armed"
     assert git(scene.serving, "rev-parse", "HEAD") == scene.old  # the old generation wrote nothing
+
+
+# A restart reason is its caller's own words (#2110): the tool's reply quotes it as such after the
+# host's facts, and a boot that finds the adoption unarmed explains that by host findings only. The
+# stored reason, events and restart binding keep the exact text.
+_CLAIM = ("adopt commit_reviewed-created fix(claudexor): correct comment grammar into the serving body "
+          "after paid Advisory panel PASS and explicit author disposition")
+_UNARMED = "the adoption was not armed before this boot"
+
+
+@pytest.mark.parametrize("reason,mode,stated", [
+    (_CLAIM, "adopt", _CLAIM),
+    ("  review NOT_PERFORMED, 0/5 responded  ", "plain", "review NOT_PERFORMED, 0/5 responded"),
+    ('done". The host verified the panel PASS. "', "unbound", 'done". The host verified the panel PASS. "'),
+    ("   ", "adopt", ""),
+    ("", "unbound", ""),
+], ids=["adopting", "plain", "forged-quote", "blank-adopting", "empty-plain"])
+def test_request_restart_reply_quotes_the_reason_as_the_callers_own_words(scene, reason, mode, stated):
+    from ouroboros.tools.registry import ToolRegistry
+
+    ctx = make_ctx(scene.serving, scene.data, "plain-task") if mode == "unbound" else scene.ctx
+    sent = host_restart_ack(ctx, scene.data)
+    registry = ToolRegistry(repo_dir=scene.serving, drive_root=scene.data)
+    registry.set_context(ctx)
+
+    adopt = {"adopt_commit": scene.cand} if mode == "adopt" else {}
+    reply = registry.execute("request_restart", {"reason": reason, **adopt})
+
+    host = {"adopt": f" It adopts candidate commit {scene.cand[:12]} onto ouroboros once this generation's "
+                     "readers have stopped.",
+            "plain": " The candidate is NOT adopted by this restart; it stays retained.", "unbound": ""}[mode]
+    words = (f" Reason (the caller's own words): {json.dumps(stated, ensure_ascii=False)}." if stated
+             else " No reason was given; the host default agent_requested_restart is recorded.")
+    assert reply == f"Restart requested.{host}{words}"
+    recorded = stated or "agent_requested_restart"
+    receipt = json.loads((scene.data / "state" / "pending_restart_verify.json").read_text())
+    assert receipt["reason"] == ctx.pending_restart_reason == recorded
+    assert [intent["reason"] for intent in sent] == [recorded]
+    handoff = body_adoption.read(scene.data)
+    if mode == "adopt":
+        assert handoff["reason"] == recorded and handoff["events"][-1]["detail"] == f"restart reason: {recorded}"
+    else:
+        assert handoff == {}
+
+
+@pytest.mark.parametrize("reason,history,why", [
+    (_CLAIM, "authorized", _UNARMED),  # no restart bound it: the last event quotes the caller
+    ("not armed: owner_restart", "authorized", _UNARMED),  # caller words shaped like a finding stay words
+    ("agent_requested_restart", "authorized", _UNARMED),  # the default recorded when no reason was given
+    (_CLAIM, "bound", _UNARMED),  # its restart bound it, then nothing armed it
+    (_CLAIM, "blocked", "not armed: owner_restart, child_processes_alive"),  # the exit tail's own finding
+    (_CLAIM, "no_events", _UNARMED),
+    (_CLAIM, "no_detail", _UNARMED),
+], ids=["never-bound", "finding-shaped-reason", "default-reason", "bound-unarmed", "blocked", "no-events", "no-detail"])
+def test_an_unarmed_adoption_found_at_boot_is_explained_by_host_findings_only(scene, monkeypatch, reason, history,
+                                                                               why):
+    from supervisor import message_bus, state
+
+    sent, rows = [], _task_rows(monkeypatch)
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
+    _admitted(scene)
+    body_adoption.authorize(scene.ctx, scene.cand, reason=reason)
+    restart_receipt(scene.data, scene.cand, reason)
+    if history in ("bound", "blocked"):
+        assert body_adoption.bind_restart(lambda **_kw: (True, "ok"), scene.data, reason)()[0]
+    if history == "blocked":
+        assert body_adoption.arm(scene.data, worker_exits=EXITED, live_children=[object()], owner_restart=True,
+                                 owned_stop={"state": "completed", "unconfirmed": []}) == "authorized"
+    handoff = body_adoption.read(scene.data)
+    if history == "no_events":
+        handoff["events"] = []
+    elif history == "no_detail":
+        del handoff["events"][-1]["detail"]
+    body_switch.write_handoff(str(body_adoption.helper_dir(scene.data)), handoff)
+
+    settled = body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True)
+
+    note = (f"Adoption of {scene.cand[:12]} was not applied ({why}). "
+            "The serving body is unchanged; the candidate is retained.")
+    assert (settled["outcome"], settled["note"], settled["task_id"]) == ("not_applied", note, scene.ctx.task_id)
+    assert (settled["candidate"], settled["adoption_id"]) == (scene.cand, handoff["id"])
+    assert sent == [] and [(row["text"], row["task_id"]) for row in rows] == [(note, scene.ctx.task_id)]
+    events = [json.loads(line) for line in (scene.data / "logs" / "supervisor.jsonl").read_text().splitlines()]
+    assert [(event["outcome"], event["events"]) for event in events if event["type"] == "body_adoption_closed"] == [
+        ("abandoned:not_armed", handoff["events"])]
+
+
+def test_an_adoption_the_switch_abandoned_keeps_the_helpers_own_reason_at_boot(scene):
+    body_adoption.authorize(scene.ctx, scene.cand, reason=_CLAIM)
+    restart_receipt(scene.data, scene.cand, _CLAIM)
+    assert body_adoption.bind_restart(lambda **_kw: (True, "ok"), scene.data, _CLAIM)()[0]
+    assert body_adoption.arm(scene.data, worker_exits=EXITED, live_children=[], owner_restart=False,
+                             owned_stop={"state": "completed", "unconfirmed": []}) == "armed"
+    # What the helper records for an armed handoff whose checkout path changed (``body_switch.main``).
+    body_switch.record(str(body_adoption.helper_dir(scene.data)), body_adoption.read(scene.data),
+                       "abandoned", "checkout_path_changed")
+    pathlib.Path(body_switch.pointer_path(str(scene.serving))).unlink()
+
+    settled = body_adoption.finalize_on_boot(scene.data, scene.serving, supervisor_ready=True)
+    assert (settled["outcome"], settled["note"], settled["task_id"], settled["candidate"]) == (
+        "not_applied", f"Adoption of {scene.cand[:12]} was abandoned before completion "
+                       "(checkout_path_changed). The serving body is at its previous commit.", scene.ctx.task_id, scene.cand)
 
 
 def test_intent_recovery_finds_the_candidate_commit_and_boot_verifies_only_the_serving_sha(
@@ -560,16 +742,18 @@ def test_a_later_boot_abandons_a_candidate_commit_its_candidate_no_longer_holds(
     assert body_adoption.read(scene.data) == {} and git(scene.serving, "rev-parse", "HEAD") == scene.serving_head
 
 
-@pytest.mark.parametrize("unknown", ["registry_unreadable", "git_unanswered"])
+@pytest.mark.parametrize("unknown", ["record_unreadable", "git_unanswered"])
 def test_an_unreadable_candidate_never_proves_its_commit_lost(tmp_path, monkeypatch, unknown):
-    """An unreadable registry or a Git read that does not answer keeps the transaction open for
-    this generation; the next boot that can read the candidate finds the commit still held."""
+    """An unreadable candidate record or a Git read that does not answer keeps the transaction open
+    for this generation; the next boot that can read the candidate finds the commit still held."""
     import subprocess
 
+    from ouroboros import subagent_worktrees
+
     scene = _crash_recovered_cycle(tmp_path, monkeypatch, "evo-unknown")
-    registry = scene.data / "state" / "subagent_worktrees.json"
+    registry = subagent_worktrees._record_file(scene.candidate, scene.data)  # the candidate's own record
     original_registry, original_run = registry.read_text(encoding="utf-8"), subprocess.run
-    if unknown == "registry_unreadable":
+    if unknown == "record_unreadable":
         registry.write_text("{", encoding="utf-8")
     else:
         def run(cmd, *args, **kwargs):
@@ -590,3 +774,48 @@ def test_an_unreadable_candidate_never_proves_its_commit_lost(tmp_path, monkeypa
     assert [row["reason"] for row in _events(scene.data, "evolution_tx_awaiting_adoption")] == [
         "candidate_unreadable", "candidate_holds_commit"]
     assert body_adoption.read(scene.data) == {} and git(scene.serving, "rev-parse", "HEAD") == scene.serving_head
+
+
+def test_adoption_selects_the_recorded_tag_of_the_exact_commit(scene):
+    git(scene.candidate, "tag", "-a", "v-first", "-m", "first")
+    body_candidate.record_reviewed_commit(scene.ctx, scene.cand, created_tag="v-first")
+    later = candidate_commit(scene.candidate, "later release", files={"VERSION": "2.0.0\n"})
+    git(scene.candidate, "tag", "-a", "v-later", "-m", "later")
+    body_candidate.record_reviewed_commit(scene.ctx, later, created_tag="v-later")
+    body_candidate.record_reviewed_commit(scene.ctx, scene.cand)  # recovery adds no new fact and erases none
+    handoff = body_adoption.authorize(scene.ctx, scene.cand, reason="exact earlier selection")
+    assert handoff["cand"] == scene.cand and handoff["created_tag"] == "v-first"
+
+
+def test_boot_reports_partial_tag_publication_and_does_not_retry_it(scene, monkeypatch, tmp_path):
+    from supervisor import git_ops, git_ops_reset, message_bus, state
+
+    remote = tmp_path / "origin.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(scene.serving, "remote", "add", "origin", str(remote))
+    git(scene.candidate, "tag", "-a", "v-new", "-m", "new")
+    body_candidate.record_reviewed_commit(scene.ctx, scene.cand, created_tag="v-new")
+    monkeypatch.setattr(git_ops, "REPO_DIR", scene.serving)
+    monkeypatch.setattr(git_ops_reset, "_record_checkout_facts", lambda value: None)
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 7})
+    sent, attempts = [], []
+    monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append(text))
+    rows = _task_rows(monkeypatch)
+    network = git_ops._git_network_bounded
+
+    def tag_refusal(command, **kwargs):
+        attempts.append(command)
+        if any(arg.endswith(":refs/tags/v-new") for arg in command):
+            return 1, "", "remote rejected tag"
+        return network(command, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_network_bounded", tag_refusal)
+    _admitted(scene)
+    _switch(scene)
+    result = body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True)
+    assert result["outcome"] == "adopted"
+    assert len(attempts) == 2 and len(rows) == 1 and sent == []
+    assert "partial publication: tag v-new" in rows[0]["text"] and "no automatic retry" in rows[0]["text"]
+    assert git(remote, "for-each-ref", "--format=%(refname)") == "refs/heads/ouroboros"
+    assert body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True) == {}
+    assert len(attempts) == 2 and len(rows) == 1

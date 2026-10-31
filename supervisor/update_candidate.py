@@ -52,7 +52,7 @@ def _git_run(
     if extra_env:
         env.update(extra_env)
     rc, out, err = _g._run_git_process_bounded(
-        cmd, timeout=timeout, cwd=cwd or _g.REPO_DIR, env=env, text=True,
+        cmd, timeout=timeout, cwd=cwd or _g.REPO_DIR, env=_g.host_git_env(env), text=True,
     )
     return rc, str(out or "").strip(), str(err or "").strip()
 
@@ -60,6 +60,25 @@ def _git_run(
 def _rev_parse(ref: str) -> str:
     rc, out, _e = _g.git_capture(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"])
     return out if rc == 0 else ""
+
+
+def capture_update_step(cmd: List[str], *, first: bool = False) -> Tuple[int, str, str]:
+    """One physical tree step; retain Git's refusal and its proven effect boundary."""
+    import subprocess
+    from supervisor import update_merge
+    from supervisor.git_ops_reset import _index_lock_refused
+
+    rc, out, error = _g.git_capture(cmd, repair_index=False)
+    if rc:
+        tx = update_merge.active_update_tx()
+        if tx:
+            tx["git_failure"] = {
+                "cmd": " ".join(cmd), "returncode": rc, "stderr": error,
+                "before_tree_effects": bool(first and not tx.get("stash_sha")
+                    and _index_lock_refused(cmd, subprocess.CompletedProcess(cmd, rc, out, error))),
+            }
+            update_merge.write_update_tx(tx)
+    return rc, out, error
 
 
 def _merge_head_sha() -> str:

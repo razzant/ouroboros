@@ -11,10 +11,10 @@
   <meta property="og:title" content="Install Ouroboros">
   <meta property="og:description" content="Desktop downloads, headless CLI setup, source installation, and verified release metadata for Ouroboros.">
   <meta property="og:url" content="https://ouroboros-agent.ai/install/">
-  <meta property="og:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=44a9e298f8">
+  <meta property="og:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=65964f9506">
   <meta property="og:image:alt" content="Ouroboros install and release downloads">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=44a9e298f8">
+  <meta name="twitter:image" content="https://ouroboros-agent.ai/assets/og-preview.png?v=65964f9506">
   <meta name="twitter:image:alt" content="Ouroboros install and release downloads">
   <title>Install Ouroboros</title>
   <link rel="icon" href="/assets/icon_1024.png" type="image/png">
@@ -41,29 +41,30 @@
     <p class="chapter-index">DOWNLOAD / CURRENT RELEASE</p>
     <h1>Download Ouroboros.</h1>
     <p class="text-lede">Choose your platform and download the app. Normal installation does not require cloning the repository, Python, or uv.</p>
+    <p>Desktop downloads bundle CPython 3.10.22 and SQLite 3.53.1. In-app Update replaces the repository and its packages, not that interpreter: install the app again to get this runtime.</p>
 
     <div class="download-grid platform-downloads" aria-label="Ouroboros platform downloads">
       <article>
         <p class="download-platform">macOS 12+ · Apple silicon only</p>
         <h2>macOS</h2>
-        <a data-release-download="macos-arm64" class="btn btn-primary" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/Ouroboros-7.7.0.dmg">Download for macOS (.dmg)</a>
+        <a data-release-download="macos-arm64" class="btn btn-primary" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0.dmg">Download for macOS (.dmg)</a>
         <p>Open the DMG, drag <code>Ouroboros.app</code> to Applications, then launch it from Applications.</p>
       </article>
       <article>
         <p class="download-platform">Windows x64</p>
         <h2>Windows</h2>
-        <a data-release-download="windows-x64" class="btn btn-primary" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/Ouroboros-7.7.0-windows-x64.zip">Download for Windows (.zip)</a>
-        <p>Extract the ZIP, open the <code>Ouroboros</code> folder, and run <code>Ouroboros.exe</code>.</p>
+        <a data-release-download="windows-x64" class="btn btn-primary" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0-windows-x64.zip">Download for Windows (.zip)</a>
+        <p>Extract the ZIP to a permanent folder, open the <code>Ouroboros</code> folder, and run <code>Ouroboros.exe</code>.</p>
       </article>
       <article id="linux">
         <p class="download-platform">Linux x86_64</p>
         <h2>Linux</h2>
         <div class="download-actions">
-          <a data-release-download="linux-deb-amd64" class="btn btn-primary" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/ouroboros_7.7.0_amd64.deb">Debian / Ubuntu / Astra (.deb)</a>
-          <a data-release-download="linux-rpm-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/ouroboros-7.7.0-1.x86_64.rpm">Fedora / RHEL (.rpm)</a>
-          <a data-release-download="linux-rpm-red80-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/ouroboros-7.7.0-1.red80.x86_64.rpm">RED OS 8 (.rpm)</a>
-          <a data-release-download="linux-appimage-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/Ouroboros-7.7.0-linux-x86_64.AppImage">Portable AppImage</a>
-          <a data-release-download="linux-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/Ouroboros-7.7.0-linux-x86_64.tar.gz">tar.gz archive</a>
+          <a data-release-download="linux-deb-amd64" class="btn btn-primary" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/ouroboros_7.9.0_amd64.deb">Debian / Ubuntu / Astra (.deb)</a>
+          <a data-release-download="linux-rpm-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/ouroboros-7.9.0-1.x86_64.rpm">Fedora / RHEL (.rpm)</a>
+          <a data-release-download="linux-rpm-red80-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/ouroboros-7.9.0-1.red80.x86_64.rpm">RED OS 8 (.rpm)</a>
+          <a data-release-download="linux-appimage-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0-linux-x86_64.AppImage">Portable AppImage</a>
+          <a data-release-download="linux-x86_64" class="btn btn-quiet" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0-linux-x86_64.tar.gz">tar.gz archive</a>
         </div>
         <p>Prefer the package for your distribution. Use the AppImage or archive on other distributions; Git must already be installed.</p>
       </article>
@@ -74,9 +75,9 @@
     <section class="install-primary" aria-labelledby="macos-quick-start">
       <h2 id="macos-quick-start">macOS quick start</h2>
       <ol class="install-steps">
-        <li>Click <a data-release-download="macos-arm64" href="https://github.com/razzant/ouroboros/releases/download/v7.7.0/Ouroboros-7.7.0.dmg">Download for macOS (.dmg)</a>.</li>
+        <li>Click <a data-release-download="macos-arm64" href="https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0.dmg">Download for macOS (.dmg)</a>.</li>
         <li>Open the DMG and drag <code>Ouroboros.app</code> onto the <strong>Applications</strong> shortcut.</li>
-        <li>Open Ouroboros from Applications. If Gatekeeper asks, right-click the app and choose <strong>Open</strong>.</li>
+        <li>Open Ouroboros from Applications. If macOS refuses to open it, choose <strong>Open Anyway</strong> in <strong>System Settings → Privacy &amp; Security</strong> (on macOS 14 and earlier, right-clicking the app and choosing <strong>Open</strong> also works).</li>
       </ol>
       <figure class="install-shot">
         <img src="/assets/install-macos.png?v=0b0056c10b" width="1536" height="1024" alt="Ouroboros DMG window with a large arrow from Ouroboros.app to the Applications shortcut and Install CLI.command below">
@@ -85,8 +86,26 @@
 
     <p class="install-requirement"><strong>Model access:</strong> choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides model access, review policy, and budget setup.</p>
 
+    <h2 id="homebrew">Homebrew on macOS</h2>
+    <p>Homebrew can install and update the same notarized app. This repository is its own tap:</p>
+    <pre><code>brew tap razzant/ouroboros https://github.com/razzant/ouroboros.git
+brew install --cask razzant/ouroboros/ouroboros
+# Optional CLI, as Install CLI.command does from the DMG:
+/Applications/Ouroboros.app/Contents/Resources/bin/install-ouroboros-cli</code></pre>
+    <p>What an upgrade replaces and what it keeps, an app already in Applications, custom data roots and uninstalling are covered in the <a href="https://github.com/razzant/ouroboros#homebrew-on-macos">README</a>.</p>
+
     <h2>Optional CLI included with the app</h2>
-    <p>The desktop downloads already contain an optional CLI installer. On macOS, after copying the app to Applications, double-click <code>Install CLI.command</code> in the mounted DMG. On Linux use <code>./Ouroboros/bin/install-ouroboros-cli</code>; on Windows use <code>Ouroboros\bin\install-ouroboros-cli.cmd</code>. The installer creates a user-local <code>ouroboros</code> command without sudo.</p>
+    <p>The desktop downloads already contain an optional CLI installer. On macOS, after copying the app to Applications, double-click <code>Install CLI.command</code> in the mounted DMG; after a Homebrew install, run the last command under <a href="#homebrew">Homebrew on macOS</a>. On Linux use <code>./Ouroboros/bin/install-ouroboros-cli</code>; on Windows use <code>Ouroboros\bin\install-ouroboros-cli.cmd</code>. The installer creates a user-local <code>ouroboros</code> command without sudo.</p>
+
+    <h2 id="reinstall">Reinstall, move or remove</h2>
+    <p><code>~/Ouroboros</code> (data, memory and the code Ouroboros runs) is the installation; the app is a replaceable host. To replace or move the app, quit Ouroboros, put the new copy in place and open it: your data and code stay, and skill packages and sign-in startup follow the new copy at its next start. A new app changes only the bundled Python, SQLite and Node, never the code in <code>~/Ouroboros/repo</code>; in-app Update changes the code. <strong>Settings → About</strong> and the Updates page show both versions, and Ouroboros sees them in its host facts. Quit leaves the Claudexor engine running, by design.</p>
+    <ul>
+      <li><strong>macOS:</strong> drag the new <code>Ouroboros.app</code> onto Applications and choose Replace, then open it from Applications in Finder: Spotlight can take a while to list a new copy while it indexes. Do not run Ouroboros from the disk image.</li>
+      <li><strong>Windows:</strong> keep the extracted folder in one permanent place and run it from there, never from inside the ZIP. To update, quit, remove the old folder and extract the new ZIP to the same place.</li>
+      <li><strong>AppImage:</strong> keep one file at a fixed path and replace it under the same name. <strong>tar.gz:</strong> keep one fixed folder. <strong>deb/rpm:</strong> update with your package manager. <strong>Homebrew:</strong> <code>brew upgrade</code> or <code>brew reinstall</code> (above).</li>
+      <li>After moving the app, run Install CLI again: the <code>ouroboros</code> command points at one copy.</li>
+      <li>Before removing the app, turn off “Start Ouroboros on the host computer when you sign in” and delete the <code>ouroboros</code> command (<code>~/.local/bin/ouroboros</code>, or <code>%LOCALAPPDATA%\Ouroboros\bin\ouroboros.cmd</code> on Windows).</li>
+    </ul>
 
     <h2>Advanced: packaged Linux setup</h2>
     <p>Install the downloaded Debian package with <code>sudo apt install ./ouroboros_*_amd64.deb</code>, or an RPM with <code>sudo dnf install ./ouroboros-*.x86_64.rpm</code>. Native packages install to <code>/opt/ouroboros</code>, put <code>ouroboros</code> on <code>PATH</code>, and add a desktop entry plus an opt-in systemd user unit. They never enable or start that service during installation.</p>

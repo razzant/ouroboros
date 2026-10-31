@@ -766,7 +766,7 @@ test('the direction seam has no opinion on a language whose script the engine do
 
 // The memory translates English source text, so Cyrillic typed into a module's literal would
 // reach every English reader as-is. Comments may quote the owner verbatim and never paint; a
-// glyph table spelled as \u escapes (the matrix rain) is artwork, not words.
+// glyph table spelled as \u escapes is artwork, not words.
 function cyrillicLiterals(source) {
     const hits = [];
     acorn.parse(source, {

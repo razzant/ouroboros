@@ -78,7 +78,7 @@ def wait_for_promotion_admission(
             and str(admission.get("routing_token") or "") == routing_token
         ):
             status = str(admission.get("status") or "")
-            if status in {"scheduled", "rejected", "unconfirmed"}:
+            if status in {"scheduled", "rejected", "unconfirmed", "not_started"}:
                 # The EFFECTIVE destination rides back with the receipt. The
                 # admission handler re-resolves an implicit promote's project
                 # under the claim lock, so the project the caller ASKED for and
@@ -137,7 +137,7 @@ def wait_for_routing_annotation(
     while True:
         receipt = chat_annotation_receipt(root, client_message_id, routing_token)
         status = str(receipt.get("status") or "")
-        if status in {"delivered", "needs_manual_target", "rejected", "unconfirmed"}:
+        if status in {"delivered", "read", "needs_manual_target", "rejected", "unconfirmed"}:
             return receipt
         if time.monotonic() >= deadline:
             return {"status": "unconfirmed", "reason": "confirmation_timeout"}
@@ -170,6 +170,7 @@ def routing_act_fields(root: Path, client_message_id: str, row: Dict[str, Any]) 
         "action": action, "target": target, "target_label": str(row.get("target_label") or ""),
         "status": status, "ts": str(row.get("ts") or settled.get("confirmed_at") or ""),
         "project_id": str(row.get("project_id") or ""),
+        **({"retry_available": True} if settled.get("retry_available") is True else {}),
         **({"reason": reason} if reason and status in {"rejected", "needs_manual_target"} else {}),
         **({"files_not_attached": rejected} if rejected else {}),
     }
@@ -184,6 +185,7 @@ def routing_act_lines(acts: Any) -> list:
 
     def note(act: Dict[str, Any]) -> str:
         return "".join((f" ({act['reason']})" if act.get("reason") else "",
+                        ", explicit retry via start_task available" if act.get("retry_available") else "",
                         f", {act['files_not_attached']} file(s) not attached" if act.get("files_not_attached") else ""))
 
     return [f"- {act.get('action') or '?'} → {where(act)}: {act.get('status') or 'unknown'}{note(act)}, "

@@ -7,6 +7,7 @@ class Classes {
     constructor(node) { this.node = node; this.values = new Set(); }
     set(value) { this.values = new Set(String(value || '').split(/\s+/).filter(Boolean)); }
     add(...values) { values.forEach((value) => this.values.add(value)); }
+    remove(...values) { values.forEach((value) => this.values.delete(value)); }
     contains(value) { return this.values.has(value); }
     toggle(value, force) {
         const enabled = force === undefined ? !this.contains(value) : Boolean(force);
@@ -88,10 +89,17 @@ export class NodeStub {
         this.parentNode.children.splice(index, 0, node);
         node.parentNode = this.parentNode;
     }
+    after(node) {
+        if (!this.parentNode) return;
+        const index = this.parentNode.children.indexOf(this);
+        this.parentNode.children.splice(index + 1, 0, node);
+        node.parentNode = this.parentNode;
+    }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) || ''; }
     removeAttribute(name) { this.attributes.delete(name); }
+    hasAttribute(name) { return this.attributes.has(name); }
     addEventListener(type, fn) {
         if (!this.listeners.has(type)) this.listeners.set(type, new Set());
         this.listeners.get(type).add(fn);
@@ -133,7 +141,7 @@ export class NodeStub {
     load() {}
 }
 
-export function fixture({ insertNode = null } = {}) {
+export function fixture({ insertNode = null, formatMsgTime = () => null } = {}) {
     const tracker = { adds: 0, removes: 0, created: [] };
     const body = new NodeStub('body', tracker);
     const inserted = [];
@@ -156,7 +164,7 @@ export function fixture({ insertNode = null } = {}) {
     const controller = createChatMedia({
         chatSessionId: 'session',
         durableChatMediaUrl: (value) => String(value || ''),
-        formatMsgTime: () => null,
+        formatMsgTime,
         insertMessageNode(node) {
             if (insertNode) insertNode(node);
             else body.appendChild(node);

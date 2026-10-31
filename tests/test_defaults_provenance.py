@@ -31,6 +31,9 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from tests._safety_fixtures import pin_safety_model, settings_install as install_fixture
+install = install_fixture
+
 from ouroboros import config as cfg
 from ouroboros import review_pool_migration as m
 from ouroboros.provider_models import ANTHROPIC_DIRECT_DEFAULTS, OPENAI_DIRECT_DEFAULTS
@@ -41,21 +44,6 @@ SLOTS = ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"
 ANTHROPIC = (ANTHROPIC_DIRECT_DEFAULTS["main"], ANTHROPIC_DIRECT_DEFAULTS["light"], ANTHROPIC_DIRECT_DEFAULTS["fallback"])
 OPENAI = (OPENAI_DIRECT_DEFAULTS["main"], OPENAI_DIRECT_DEFAULTS["light"], OPENAI_DIRECT_DEFAULTS["fallback"])
 SHIPPED = tuple(SETTINGS_DEFAULTS[key] for key in SLOTS)
-
-
-@pytest.fixture
-def install(tmp_path, monkeypatch):
-    """An isolated data root; no provider key, model slot or legacy alias leaks in from the shell."""
-    data = tmp_path / "data"
-    data.mkdir()
-    path = data / "settings.json"
-    monkeypatch.setattr(cfg, "DATA_DIR", data)
-    monkeypatch.setattr(cfg, "SETTINGS_PATH", path)
-    for key in (*cfg.SETTINGS_DEFAULTS, "OUROBOROS_MODEL_FALLBACK"):
-        monkeypatch.delenv(key, raising=False)
-    m._MIGRATIONS_SEEN.clear()
-    yield path
-    m._MIGRATIONS_SEEN.clear()
 
 
 def _write(path, document):
@@ -115,9 +103,16 @@ def test_an_explicit_route_without_access_stays_unavailable_not_rerouted(install
         assert model_has_credentials("google/gemini-3.8-flash") is False
 
 
-def test_spelling_migration_onto_the_exclusive_provider_is_not_a_generation_replacement(install):
-    _write(install, {"ANTHROPIC_API_KEY": "k", "OUROBOROS_MODEL": "anthropic/claude-opus-4.6"})
-    assert _task_start().settings["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
+@pytest.mark.parametrize("dotted, direct", [("4.6", "4-6"), ("5.5", "5-5")])
+def test_spelling_migration_onto_the_exclusive_provider_is_not_a_generation_replacement(install, dotted, direct):
+    from ouroboros.llm import LLMClient
+
+    _write(install, {"ANTHROPIC_API_KEY": "k", "OUROBOROS_MODEL": f"anthropic/claude-opus-{dotted}"})
+    assert _task_start().settings["OUROBOROS_MODEL"] == f"anthropic::claude-opus-{direct}"
+    assert LLMClient()._resolve_remote_target(f"anthropic::claude-opus-{dotted}")["resolved_model"] == (
+        f"claude-opus-{direct}")
+    assert LLMClient()._resolve_remote_target(f"anthropic/claude-opus-{dotted}")["resolved_model"] == (
+        f"anthropic/claude-opus-{dotted}"), "the router keeps its own slug"
 
 
 def test_saved_blank_light_and_fallbacks_keep_their_meaning_end_to_end(install, monkeypatch):
@@ -186,6 +181,8 @@ def test_a_settings_save_that_does_not_edit_a_slot_does_not_author_it(install, m
     assert _slots(_task_start()) == SHIPPED
     shown = apply_runtime_provider_defaults(cfg.load_settings())[0]
     assert tuple(shown[key] for key in SLOTS) == SHIPPED
+    # Keep this defaults test independent of the owner-only inherited-checker ratchet.
+    pin_safety_model()
     response = TestClient(_settings_app(monkeypatch)).post("/api/settings", json={
         "OPENROUTER_API_KEY": "", "ANTHROPIC_API_KEY": "sk-ant-present-key",
         **{key: shown[key] for key in SLOTS}})
@@ -267,6 +264,7 @@ def test_an_unrelated_settings_save_leaves_a_never_configured_catalog_to_the_rea
     checked = []
     monkeypatch.setattr(settings_mod, "_unrecognised_review_models", lambda models: checked.append(models) or [])
     _write(install, {"ANTHROPIC_API_KEY": "sk-ant-present-key"})
+    pin_safety_model()
     client = _settings_client(monkeypatch)
     for changes in ({"TOTAL_BUDGET": "25"},
                     {"OPENAI_API_KEY": "sk-openai-present-key", "ANTHROPIC_API_KEY": "", "OUROBOROS_MODEL": OPENAI[0]}):
@@ -295,11 +293,19 @@ AGENTS_EDITS = {  # the owner's edit of the shown factory catalog in Settings â†
 @pytest.mark.parametrize("origin", [*AGENTS_EDITS, "saved-equal-to-factory", "wizard-finish"])
 def test_an_authored_catalog_stays_the_owners_through_a_main_and_access_change(install, monkeypatch, origin):
     from ouroboros.configured_subagents import canonical_subagents
+    from ouroboros.gateway import onboarding
+    from ouroboros import skill_starter
 
     client = _settings_client(monkeypatch)
     if origin == "wizard-finish":  # Finish saves the catalog the wizard displayed
+        starters, scheduled = [], []
+        # This settings test never launches background work (including a real hub fetch).
+        monkeypatch.setattr(skill_starter, "schedule_starter", lambda *a, **kw: scheduled.append((a, kw)))
+        monkeypatch.setattr(onboarding, "after_onboarding", lambda root, ids: starters.append((root, ids)))
         catalog = client.post("/api/onboarding/subagents/preview", json=WIZARD).json()["available_subagents"]
         response = client.post("/api/onboarding/complete", json={**WIZARD, SUBAGENTS: catalog})
+        assert len(starters) == 1 and starters[0][1] is None
+        assert scheduled == []
     else:
         _write(install, {"ANTHROPIC_API_KEY": "sk-ant-present-key"})
         catalog = json.loads(client.get("/api/settings").json()[SUBAGENTS])
@@ -313,6 +319,7 @@ def test_an_authored_catalog_stays_the_owners_through_a_main_and_access_change(i
     assert response.status_code == 200, response.text
     read = client.get("/api/settings").json()
     assert read["_meta"]["available_subagents"]["automatic"] is False, "saved, so Settings says Saved"
+    pin_safety_model()
     response = client.post("/api/settings", json={
         "OPENAI_API_KEY": "sk-openai-present-key", "ANTHROPIC_API_KEY": "", "OUROBOROS_MODEL": OPENAI[0],
         SUBAGENTS: read[SUBAGENTS]})
@@ -328,6 +335,7 @@ def test_an_operator_catalog_stays_the_environments_through_a_settings_save(inst
         "route": {"kind": "api_model", "target_id": "anthropic::claude-operator"}}]}, indent=1)
     monkeypatch.setenv(SUBAGENTS, operator)
     _write(install, {"ANTHROPIC_API_KEY": "sk-ant-present-key"})
+    pin_safety_model()
     client = _settings_client(monkeypatch)
     response = client.post("/api/settings", json={
         "OPENAI_API_KEY": "sk-openai-present-key", SUBAGENTS: client.get("/api/settings").json()[SUBAGENTS]})
@@ -339,6 +347,7 @@ def test_an_operator_catalog_stays_the_environments_through_a_settings_save(inst
 
 
 SAVED_CHOICES = {"ANTHROPIC_API_KEY": "sk-ant-present-key", "OUROBOROS_MODEL_FALLBACKS": "",
+                 "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
                  "OUROBOROS_MODEL_LIGHT": SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"],
                  "OUROBOROS_RUNTIME_MODE": "pro"}  # the owner's pending next-boot mode
 
@@ -398,7 +407,8 @@ def test_an_incidental_writer_lands_its_key_not_the_reads_proposals(install, mon
     assert stored == {**SAVED_CHOICES, key: value, "OUROBOROS_UI_LANGUAGE": "ru"}, stored
     if writer == "tool-timeout":  # the process takes the field alone: no saved mode reaches the environment
         assert (os.environ["OUROBOROS_TOOL_TIMEOUT_SEC"], os.environ["OUROBOROS_RUNTIME_MODE"]) == ("900", "advanced")
-    owner_settings._owner_update_settings(lambda current: {**current, "OPENROUTER_API_KEY": "sk-or-present-key"})
+    owner_settings._owner_update_settings(lambda current: {**current, "OPENROUTER_API_KEY": "sk-or-present-key"},
+                           allow_safety_lowering=True)
     assert _task_start().settings["OUROBOROS_MODEL"] == SHIPPED[0]
     assert _pool_targets(cfg.load_settings()) == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
 
@@ -433,7 +443,7 @@ def test_environment_credentials_reach_the_factory_catalog_with_or_without_a_doc
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     settings = cfg.load_settings()
     assert _pool_targets(settings) == [OPENAI[0]]
-    assert not install.exists() or json.loads(install.read_text()) == document, "a read writes nothing"
+    assert not install.exists() or json.loads(install.read_text()) == document, "a settings read writes nothing"
 
 
 def test_a_never_configured_install_gets_the_wizards_auto_helpers_beside_unchanged_reviewers(install, monkeypatch):
@@ -553,8 +563,8 @@ def test_the_legacy_openai_compatible_pair_still_routes(monkeypatch):
 
 # --- 1A / A: subscription presets ------------------------------------------------------
 #
-# A partial session refresh: Claude sessions take Opus 5.5, Codex sessions keep gpt-5.6-sol â€” the
-# installed engine's Codex catalog lists no gpt-6.1-sol, and a preset names exact discovery ids only.
+# A partial session refresh: Claude sessions take Opus 5.5, Codex sessions gpt-6.1-sol when discovered,
+# else gpt-5.6-sol (the installed engine's catalog); a preset names exact discovery ids only.
 
 INSTALLED_CODEX = ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini")
 
@@ -627,7 +637,8 @@ def _catalog_fetch(settings, monkeypatch):
 
     sent = []
 
-    async def fetch(_client, provider, _label, api_key, base_url):
+    async def fetch(_client, provider, _label, api_key, base_url, *, record_image_input=False):
+        assert record_image_input is False
         sent.append((provider, api_key, base_url))
         return []
 
@@ -861,7 +872,8 @@ def test_a_saved_blank_light_and_fallbacks_beat_the_processs_earlier_projection(
 
     _write(install, {"OPENROUTER_API_KEY": "sk-or-present-key"})
     assert _slots(_task_start()) == SHIPPED
-    _owner_update_settings(lambda current: {**current, "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""})
+    _owner_update_settings(lambda current: {**current, "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""},
+                           allow_safety_lowering=True)
     stored = json.loads(install.read_text(encoding="utf-8"))
     assert (stored["OUROBOROS_MODEL_LIGHT"], stored["OUROBOROS_MODEL_FALLBACKS"]) == ("", "")
     assert _slots(_task_start()) == (SHIPPED[0], "", "")
@@ -878,7 +890,8 @@ def test_unauthored_slots_follow_an_access_change_after_the_process_projected_th
 
     _write(install, {"ANTHROPIC_API_KEY": "sk-ant-present-key"})
     assert _slots(_task_start()) == ANTHROPIC
-    _owner_update_settings(lambda current: {**current, "OPENROUTER_API_KEY": "sk-or-present-key"})
+    _owner_update_settings(lambda current: {**current, "OPENROUTER_API_KEY": "sk-or-present-key"},
+                           allow_safety_lowering=True)
     assert not set(SLOTS) & set(json.loads(install.read_text(encoding="utf-8")))
     assert _slots(_task_start()) == SHIPPED
     assert _slots(_task_start()) == SHIPPED
@@ -895,7 +908,8 @@ def test_a_projected_factory_catalog_follows_an_access_change_and_an_operator_ca
     _write(install, {"ANTHROPIC_API_KEY": "sk-ant-present-key"})
     assert _pool_targets(_task_start().settings) == [ANTHROPIC[0]]
     assert os.environ.get(SUBAGENTS), "projected (conftest restores the environment)"
-    _owner_update_settings(fields_on_saved_document({"OPENROUTER_API_KEY": "sk-or-present-key"}))
+    _owner_update_settings(fields_on_saved_document({"OPENROUTER_API_KEY": "sk-or-present-key"}),
+                           allow_safety_lowering=True)
     assert _pool_targets(_task_start().settings) == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
     _write(install, {"ANTHROPIC_API_KEY": "sk-ant-present-key", SUBAGENTS: json.dumps({"enabled": True, "items": []})})
     assert _items(_task_start().settings) == [] and _items(_task_start().settings) == []

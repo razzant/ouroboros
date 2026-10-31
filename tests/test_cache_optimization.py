@@ -74,8 +74,10 @@ def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
     assert "## Identity" in stable_text
     assert "## My story" in stable_text
     assert "## Last Deep Self-Review" in stable_text
-    for knowledge in ("## Shared understanding", "## Knowledge base", "## Known error patterns (Pattern Register)"):
+    for knowledge in ("## Shared understanding", "## Knowledge base"):
         assert knowledge in dynamic_text and knowledge not in stable_text, knowledge
+    # The former register is an ordinary note: its body rides in neither block.
+    assert "Pattern Register" not in dynamic_text and "Pattern Register" not in stable_text
     assert "## Scratchpad" not in stable_text
     assert "## Memory Registry" not in stable_text
 

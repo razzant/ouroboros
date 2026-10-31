@@ -64,6 +64,36 @@ def test_physical_lf_lines_do_not_split_unicode_line_separators():
         source.lines(5)
 
 
+def test_line_bounds_are_the_lfs_before_a_byte_and_a_large_note_parses_promptly():
+    """Every range's lines are the LFs before its first and last byte, whatever the line endings, front matter or
+    code points; the LF index is built once per source. The Atlas's 1.5 MB note of 15,000 sections took ~30 s while
+    each of its 45,004 ranges recounted the source from byte 0 (issue #2408)."""
+    import time
+
+    sources = [b"", b"\n", b"a", b"a\nb", b"a\r\nb\r\n", b"a\rb\r", "# Ж 🌱\r\n\r\n[л](п.md) é\n- x\n  - y".encode(),
+               b"---\r\ntitle: t\r\n---\r\n# H\r\n\r\ntext [l](x.md)\r\n```\r\ncode\r\n```", b"---\na: 1\n---",
+               b"Title\n=====\n\n> [q](q.md)\n\n[r]: r.md\n[r]\n"]
+    for raw in sources:
+        source = parse_markdown_source(raw, "n.md")
+        spans = [source.body_span, *filter(None, [source.frontmatter_span]), *source.paragraphs, *source.lists,
+                 *source.list_items, *source.code_blocks, *(link.span for link in source.links),
+                 *(span for heading in source.headings for span in (heading.span, heading.section))]
+        for span in spans:
+            assert (span.start_line, span.end_line) == (raw.count(b"\n", 0, span.start_byte) + 1,
+                                                         raw.count(b"\n", 0, max(span.start_byte, span.end_byte - 1)) + 1)
+        physical = raw.decode().split("\n")
+        for number in range(1, len(physical) + (0 if raw.endswith(b"\n") else 1)):
+            assert source.text_at(source.lines(number, 1)) == physical[number - 1] + ("\n" if number < len(physical) else "")
+    raw = ("---\ntitle: Большая\n---\n# Большая\n\n"
+           + "## Раздел\n\nТекст большой заметки. Synthetic.\n\n" * 15_000).encode()
+    started = time.perf_counter()
+    source = parse_markdown_source(raw, "large.md")
+    assert time.perf_counter() - started < 5  # ~0.4 s; 20-36 s when each range counted from byte 0
+    last = source.headings[-1]
+    assert len(source.headings) == 15_001 and (last.span.start_line, last.section.end_line) == (
+        raw.count(b"\n", 0, last.span.start_byte) + 1, raw.count(b"\n"))
+
+
 def test_legacy_markdown_and_setext_heading_have_no_invented_metadata():
     raw = b"Title\n=====\n\nLegacy text.\n"
     source = parse_markdown_source(raw, "legacy.md")

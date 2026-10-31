@@ -39,8 +39,6 @@ _MOVED_OWNERS = {
     "_release_git_lock": git_plumbing,
     "_sanitize_git_error": git_plumbing,
     "_unstage_binaries": git_plumbing,
-    "_DOC_ONLY_EXTENSIONS": git_review_cycle,
-    "_diff_is_doc_only": git_review_cycle,
     "_finalize_blocked_review": git_review_cycle,
     "_fingerprint_staged_diff": git_review_cycle,
     "_handle_revalidation_failure": git_review_cycle,
@@ -99,8 +97,6 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     assert tuple(entry.name for entry in entries) == (
         "commit_reviewed",
         "vcs_commit_reviewed",
-        "vcs_status",
-        "vcs_diff",
         "vcs_pull_ff",
         "vcs_restore",
         "vcs_revert",
@@ -111,9 +107,13 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
-    # Informed Advisory commit aliases plus explicit local vcs_diff base/head.
+    # Reviewed commit aliases disclose strictness-keyed panels; vcs_read diff keeps base/head;
+    # full_tests distinguishes local adoption from full-only publication consumers;
+    # S3 collection permits omitted commit_message; S5 adds author doctrine; D4 adds wake_on.
+    # Target merge retains the contributor tool affordances and target review/mail contracts.
+    # Mechanical revert names effective mode/task or managed-update authority, without fresh review.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "22f469c65906acb299e21d2f79cbb11e7ee7a3fdbe91ba772b7b08374968f9b6"  # #1741: nonblocking outcomes return before Git; continuation in Advisory or Cyber Pro. FIX6a 1: `reviewers`/`reason` compose the commit panel by review_change's rule (decision 1A); FIX3 T1 before it: `scope` described by the panel's coupling questions
+        "6865d432fa0ac00af83d27322f356e4ef0e6636e7f9c9c3a8783de7845fe206e"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -122,8 +122,6 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
         # The public handler names the call's review record in every outcome (DEVELOPMENT 05).
         "commit_reviewed": ("ouroboros.tools.git", "_commit_reviewed"),
         "vcs_commit_reviewed": ("ouroboros.tools.git", "_commit_reviewed"),
-        "vcs_status": ("ouroboros.tools.git_vcs_ops", "_git_status"),
-        "vcs_diff": ("ouroboros.tools.git_vcs_ops", "_git_diff"),
         "vcs_pull_ff": ("ouroboros.tools.git_vcs_ops", "_pull_from_remote"),
         "vcs_restore": ("ouroboros.tools.git_vcs_ops", "_restore_to_head"),
         "vcs_revert": ("ouroboros.tools.git_vcs_ops", "_revert_commit"),

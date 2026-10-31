@@ -29,9 +29,9 @@ sockets: the scenario manifest (gen/verify in BOTH directions), the stub's branc
 classification (review-organ branch BEFORE the finalization check), the prompt-marker
 literals against the tree's source, the ReplayModel binding/consumption contract, and
 the keyless/egress hardening (roast F21). The ``mock`` lane spawns real isolated
-servers; every scenario test carries BOTH ``integration`` and ``serial`` markers (so
-neither the default local run, nor either CI pytest pass, nor the CI-shape battery
-picks it up) AND the ``OUROBOROS_E2E_DEEP=mock`` env gate. Run it with::
+servers; every scenario carries ``integration`` (excluding both default pytest
+passes) and the ``OUROBOROS_E2E_DEEP=mock`` gate. Scenarios sharing resources also
+carry ``serial``; isolated scenarios may run concurrently. Run it with::
 
     OUROBOROS_E2E_DEEP=mock pytest tests/system_e2e/ -o addopts="" -q
 
@@ -57,7 +57,6 @@ import pytest
 from ouroboros.settings_defaults import SETTINGS_DEFAULTS, settings_env_keys
 from tests.system_e2e.harness import (
     _CREDENTIAL_SHAPE_RE,
-    ACCEPTANCE_KEYS_MARKER,
     KEYLESS_PACKET_ROWS,
     KEYLESS_REVIEW_ROWS,
     LANE_MOCK,
@@ -151,16 +150,18 @@ def test_every_scenario_test_is_declared_in_the_manifest():
         )
 
 
-def test_every_scenario_test_carries_integration_and_serial_markers():
-    """The marker discipline that keeps the suite OUT of the default non-serial run,
-    both CI pytest passes, and the CI-shape battery: every scenario test must carry
-    ``integration`` AND ``serial``. (The ``OUROBOROS_E2E_DEEP`` env gate is the second
-    belt; markers are what the -m expressions see.)"""
+def test_every_scenario_test_carries_integration_marker():
+    """Integration excludes scenarios from BOTH default passes; serial is not a lane.
+
+    Pytest inherits module marks, so check them as well as function decorators.
+    A private-root, port-zero scenario needs no shared-resource serial marker.
+    """
     for qualified, _name, fn in _scenario_tests():
-        marks = {mark.name for mark in getattr(fn, "pytestmark", [])}
-        assert {"integration", "serial"} <= marks, (
-            f"{qualified} must be decorated with @pytest.mark.integration and "
-            f"@pytest.mark.serial (has: {sorted(marks)})"
+        module = sys.modules[fn.__module__]
+        marks = {mark.name for owner in (module, fn)
+                 for mark in getattr(owner, "pytestmark", [])}
+        assert "integration" in marks, (
+            f"{qualified} must carry @pytest.mark.integration (has: {sorted(marks)})"
         )
 
 
@@ -203,14 +204,9 @@ def test_stub_classification_review_branch_beats_finalization():
         {"role": "system", "content": REVIEWER_SLOT_MARKER + "\nSurface: plan_review\n [OWNER_STOP]"},
         {"role": "user", "content": "Subject: ..."},
     ]}
-    acceptance_body = {"messages": [
-        {"role": "system", "content": REVIEWER_SLOT_MARKER + "\n" + ACCEPTANCE_KEYS_MARKER},
-        {"role": "user", "content": "Subject: ..."},
-    ]}
     assert classify_call(two_part_body) == "two_part_review"
     assert classify_call(triad_body) == "triad_review"
     assert classify_call(slot_body) == "reviewer_slot"
-    assert classify_call(acceptance_body) == "acceptance"
     assert classify_call({"messages": [{"role": "user", "content": "[FINALIZE_NOW] wrap up"}]}) == "finalization"
     assert classify_call({"messages": [{"role": "user", "content": "hi"}],
                           "response_format": {"type": "json_object"}}) == "safety"
@@ -732,8 +728,9 @@ def test_s2_commit_reviewed_triad_and_scope_pass_on_doc_only_diff(e2e_clone, tmp
             # never commits the checkout the server imports) — under blocking enforcement
             # only through PASS verdicts from both organs — and is recorded as reviewed
             # there; the serving clone did not move.
-            rows = [row for path in sorted(server.data_root.rglob("state/subagent_worktrees.json"))
-                    for row in json.loads(path.read_text())["worktrees"] if row.get("kind") == "body_candidate"]
+            rows = [row for path in sorted(server.data_root.rglob("state/private_copies/*.json"))
+                    if not path.name.startswith(".")
+                    for row in [json.loads(path.read_text(encoding="utf-8"))] if row.get("kind") == "body_candidate"]
             assert len(rows) == 1 and rows[0]["task_id"] == task_id, rows
             log_output = subprocess.run(
                 ["git", "log", "-n", "5", "--format=%H %s", rows[0]["branch"]],

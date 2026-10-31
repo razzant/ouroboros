@@ -4,6 +4,9 @@ Run through scripts/safe_test.py; every root and file below is synthetic.
 """
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+from tests._dialogue import advance_room_revision
+
 import json
 import threading
 from types import SimpleNamespace
@@ -37,7 +40,7 @@ def test_activity_is_not_a_routing_change(room, activity):
     if activity.endswith("touch"):
         registry.touch_project(room.root, "target" if activity == "own_touch" else "other")
     elif activity == "visible":
-        registry.increment_project_visible_revision(room.root, project_id="target")
+        advance_room_revision(room.root, project_id="target")
     elif activity == "result":
         registry.update_project(room.root, "other", last_task_result_id="finished")
     admitted = room.queue.enqueue_task(task(), project_admission=basis)
@@ -346,11 +349,11 @@ def test_api_unknown_persistence_never_removes_possible_admission(room, monkeypa
 
 
 def test_own_ensure_returns_the_exact_winning_preparation_row(room, tmp_path, monkeypatch):
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
 
     chosen = tmp_path / "own-folder"
     chosen.mkdir()
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=chosen))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=chosen))
     row = registry.ensure_project_workspace(room.root, "target", tmp_path / "repo", return_project=True)
     basis = registry.project_admission_basis("target", row)
     assert row["working_dir"] == str(chosen)
@@ -385,7 +388,7 @@ def test_never_admitted_refusal_is_durable_but_not_a_late_project_completion(roo
     monkeypatch.setattr("supervisor.terminal_delivery.enqueue_terminal_delivery", lambda *a, **kw: queued.append(a) or True)
     assert reconcile_terminal_projections(room.root) == 0
     assert not queued
-    assert not (room.root / "logs" / "chat.jsonl").exists()
+    assert not dialogue_test.log_rows(room.root / "logs" / "chat.jsonl")
     # A failure lacking this POSITIVE producer fact remains ordinary terminal debt.
     write_task_result(room.root, "executed", "failed", project_id="target", chat_id=1,
                       root_task_id="executed", started_at="2026-01-01T00:00:00Z", result="Actual failure")
@@ -557,7 +560,7 @@ def test_registry_writers_preserve_unrelated_raw_rows(room, operation):
         changed = registry.bind_task_to_project(room.root, "bound", "target", origin={"absent": "system"})
         assert changed["project_id"] == "target"
     elif operation.startswith("visible"):
-        changed = registry.increment_project_visible_revision(room.root, **(
+        changed = advance_room_revision(room.root, **(
             {"project_id": "target"} if operation == "visible_id"
             else {"chat_id": registry.project_admission_view(room.root, "target")["project"]["chat_id"]}))
         assert changed["visible_revision"] == 1
@@ -590,7 +593,7 @@ def test_selected_writer_refuses_invalid_authority_without_changing_bytes(room, 
 
 @pytest.mark.parametrize("shape", ["existing_folder", "existing_empty", "new_room"])
 def test_real_promotion_provisions_healthy_room_beside_malformed_neighbor(host, tmp_path, monkeypatch, shape):  # noqa: F811
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
     from supervisor import workers
     from supervisor.events_project_routing import _handle_promote_chat_to_task
 
@@ -600,7 +603,7 @@ def test_real_promotion_provisions_healthy_room_beside_malformed_neighbor(host, 
         registry.create_project(host.root, "target", working_dir=str(folder) if shape == "existing_folder" else "")
     registry.create_project(host.root, "other")
     raw = corrupt_neighbor(host.root, routing_generation="unknown", visible_revision=[1], delete_error={"x": 2})
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
     events = []
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
     outcome = _handle_promote_chat_to_task({
@@ -617,57 +620,12 @@ def test_real_promotion_provisions_healthy_room_beside_malformed_neighbor(host, 
     assert not host.attempts
 
 
-@pytest.mark.parametrize("operation", ["create", "rename", "delete", "folder", "route"])
-def test_named_project_consumers_keep_healthy_neighbor_available(room, tmp_path, monkeypatch, operation):
-    import asyncio
-    from ouroboros.gateway import projects
-    from ouroboros.workspace_admission import room_chat_lens_dir
-    from ouroboros.tools.control_routing import _route_to_project
-    from tests.test_route_to_project import _ctx
-
-    folder = tmp_path / "target-folder"
-    folder.mkdir()
-    registry.update_project(room.root, "target", working_dir=str(folder))
-    raw = corrupt_neighbor(room.root, routing_generation="broken", visible_revision=[1])
-    calls = []
-    monkeypatch.setattr("supervisor.task_lifecycle.start_project_deletion", lambda *a: calls.append(a))
-    monkeypatch.setattr(projects, "_broadcast_projects_changed", lambda *a: None)
-
-    class Request:
-        app = SimpleNamespace(state=SimpleNamespace(drive_root=room.root, repo_dir=tmp_path / "repo"))
-        path_params = {"project_id": "target"}
-
-        async def json(self):
-            return {"id": "fresh-room", "name": "Updated"}
-
-    if operation == "folder":
-        assert room_chat_lens_dir(room.root, "target") == (str(folder), "")
-    elif operation == "route":
-        events = []
-        answer = _route_to_project(_ctx(room.root, events), "target", "Continue", title="Project work", predecessor_task_id="")
-        assert answer.startswith("⚠️ ROUTE_UNCONFIRMED:"), answer
-        assert len(events) == 1 and events[0]["project_id"] == "target"
-    else:
-        handler = {"create": projects.api_projects_create, "rename": projects.api_project_update,
-                   "delete": projects.api_project_delete}[operation]
-        response = asyncio.run(handler(Request()))
-        assert response.status_code == 200, response.body
-        if operation == "delete":
-            assert len(calls) == 1 and calls[0][1] == "target"
-            assert registry.get_reserved_project(room.root, "target", strict=True)["lifecycle"] == "deleting"
-        else:
-            pid = "fresh-room" if operation == "create" else "target"
-            assert registry.get_project(room.root, pid, strict=True)["name"] == "Updated"
-    rows = json.loads(registry._registry_path(room.root).read_text(encoding="utf-8"))["projects"]
-    assert next(row for row in rows if row["id"] == "other") == raw
-
-
-def test_conversion_adopts_origin_room_beside_malformed_neighbor(room, monkeypatch):
+def test_conversion_reuses_own_binding_beside_malformed_neighbor(room, monkeypatch):
     from tests.test_project_lease_ui_conversion import _convert, _origin_ref, _seed_origin_task, _live_queue, _OWNER_TEXT
 
     ref = _origin_ref()
     _seed_origin_task(room.root, "turn", ref)
-    registry.bind_task_to_project(room.root, "origin-root", "target", origin={"ref": ref, "text": _OWNER_TEXT})
+    registry.bind_task_to_project(room.root, "turn", "target", origin={"ref": ref, "text": _OWNER_TEXT})
     raw = corrupt_neighbor(room.root, lifecycle=[], working_dir={"unavailable": True})
     _live_queue(monkeypatch, room.root, {}, [])
     assert registry.project_id_for_origin(room.root, ref, strict=True) == "target"
@@ -701,3 +659,49 @@ def test_named_strict_readers_preserve_refusal_for_relevant_unknown_authority(ro
         with pytest.raises(ValueError):
             read()
         assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("operation", ["create", "rename", "delete", "folder", "start"])
+def test_named_project_consumers_keep_healthy_neighbor_available(room, tmp_path, monkeypatch, operation):
+    import asyncio
+    from ouroboros.gateway import projects
+    from ouroboros.workspace_admission import room_chat_lens_dir
+    from ouroboros.tools.control_routing import _start_task
+
+    folder = tmp_path / "target-folder"
+    folder.mkdir()
+    registry.update_project(room.root, "target", working_dir=str(folder))
+    raw = corrupt_neighbor(room.root, routing_generation="broken", visible_revision=[1])
+    calls = []
+    monkeypatch.setattr("supervisor.task_lifecycle.start_project_deletion", lambda *a: calls.append(a))
+    monkeypatch.setattr(projects, "_broadcast_projects_changed", lambda *a: None)
+
+    class Request:
+        app = SimpleNamespace(state=SimpleNamespace(drive_root=room.root, repo_dir=tmp_path / "repo"))
+        path_params = {"project_id": "target"}
+
+        async def json(self):
+            return {"id": "fresh-room", "name": "Updated"}
+
+    if operation == "folder":
+        assert room_chat_lens_dir(room.root, "target") == (str(folder), "")
+    elif operation == "start":
+        events = []
+        ctx = SimpleNamespace(drive_root=room.root, task_id="caller", project_id="", task_metadata={},
+                              event_queue=None, pending_events=events)
+        answer = _start_task(ctx, "Separate work", title="Project work", project_id="target")
+        assert answer.startswith("Accepted, waiting to start:"), answer
+        assert len(events) == 1 and events[0]["project_id"] == "target"
+    else:
+        handler = {"create": projects.api_projects_create, "rename": projects.api_project_update,
+                   "delete": projects.api_project_delete}[operation]
+        response = asyncio.run(handler(Request()))
+        assert response.status_code == 200, response.body
+        if operation == "delete":
+            assert len(calls) == 1 and calls[0][1] == "target"
+            assert registry.get_reserved_project(room.root, "target", strict=True)["lifecycle"] == "deleting"
+        else:
+            pid = "fresh-room" if operation == "create" else "target"
+            assert registry.get_project(room.root, pid, strict=True)["name"] == "Updated"
+    rows = json.loads(registry._registry_path(room.root).read_text(encoding="utf-8"))["projects"]
+    assert next(row for row in rows if row["id"] == "other") == raw

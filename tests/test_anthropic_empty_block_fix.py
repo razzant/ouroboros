@@ -25,24 +25,29 @@ def _build(n_tools: int, empty_idx: int) -> list:
 
 
 def test_seal_empty_tool_output_keeps_exact_empty_bytes_and_uses_an_earlier_anchor():
-    # keep_active=2, 4 tools -> prefer tool 1, but it is empty, so tool 0 seals.
-    msgs = _build(4, empty_idx=1)
-    seal_task_transcript(msgs, keep_active=2, min_prefix_tokens=0)
-    sealed = [m for m in msgs if m.get("role") == "tool" and isinstance(m.get("content"), list)]
-    assert len(sealed) == 1, "exactly one cache boundary expected"
-    blk = sealed[0]["content"][0]
-    assert blk["cache_control"] == {"type": "ephemeral"}
-    assert blk["text"].strip(), "sealed cache anchor must never be an empty text block"
-    assert blk["text"] == "x" * 50
-    assert next(m for m in msgs if m.get("tool_call_id") == "t1")["content"] == ""
+    # 4 tools, the newest empty -> the one before it carries the boundary.
+    msgs = _build(4, empty_idx=3)
+    seal_task_transcript(msgs, min_prefix_tokens=0)
+    sealed = [m for m in msgs if "cache_control" in m]
+    assert [m.get("tool_call_id") for m in sealed] == ["t2"], "exactly one cache boundary expected"
+    assert sealed[0]["cache_control"] == {"type": "ephemeral"} and sealed[0]["content"] == "x" * 50
+    empty = next(m for m in msgs if m.get("tool_call_id") == "t3")
+    assert empty["content"] == ""
+    # The marker route's copies never mark the empty output; the direct lane pads it unmarked.
+    copied = LLMClient._copy_messages_with_cache_policy(
+        msgs, allow_message_cache_control=True, flatten_tool_content_blocks=False)
+    assert copied[6]["content"] == [{"type": "text", "text": "x" * 50, "cache_control": {"type": "ephemeral"}}]
+    assert copied[8]["content"] == ""
+    _, direct = LLMClient()._build_anthropic_messages(msgs)
+    assert direct[-1]["content"] == [{"type": "tool_result", "tool_use_id": "t3", "content": "(no tool output)"}]
 
 
 def test_seal_nonempty_tool_output_preserved():
     msgs = _build(4, empty_idx=99)  # none empty
-    seal_task_transcript(msgs, keep_active=2, min_prefix_tokens=0)
-    sealed = [m for m in msgs if m.get("role") == "tool" and isinstance(m.get("content"), list)]
-    assert len(sealed) == 1
-    assert sealed[0]["content"][0]["text"] == "x" * 50  # real content untouched
+    seal_task_transcript(msgs, min_prefix_tokens=0)
+    sealed = [m for m in msgs if "cache_control" in m]
+    assert [m.get("tool_call_id") for m in sealed] == ["t3"]
+    assert sealed[0]["content"] == "x" * 50  # real content untouched
 
 
 # ── _sanitize_anthropic_tool_result_content ───────────────────────────

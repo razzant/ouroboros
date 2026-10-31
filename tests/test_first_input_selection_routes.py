@@ -124,13 +124,13 @@ def test_authored_compaction_retains_selected_core_and_exact_tool_source(declare
         reclaim_goal_tokens=1, working_note="Actor's retained evidence and unresolved question.",
         expected_view_revision=revision, keep_unit_ids=(),
     )
-    rebuilt, receipt, usage = cc.compact_tool_history_llm(
+    rebuilt, receipt = cc.compact_tool_history_llm(
         messages, request=request, observed_messages=copy.deepcopy(messages),
         observed_tool_schemas=[], tool_schemas=[],
         fit_candidate=lambda *_: {"accepted": True},
         drive_root=env.drive_root, task_id=task["id"],
     )
-    assert receipt.status == "applied" and usage is None
+    assert receipt.status == "applied"
     assert rebuilt[:2] == messages[:2]
     _assert_declared(rebuilt)
     retained = json.loads(read_actor_source_bytes(env.drive_root, task["id"], receipt.checkpoint_ref))
@@ -189,12 +189,6 @@ def test_physical_retry_seals_each_actual_selected_send(declared_plan, monkeypat
             raise Rejected("temperature unsupported")
         return Response()
 
-    def retry_without_temperature(candidate, _model, _exc):
-        updated = copy.deepcopy(candidate)
-        updated.pop("temperature", None)
-        return updated
-
-    monkeypatch.setattr(client, "_retry_without_optional_sampling", retry_without_temperature)
     monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *_: None)
     payload = {"model": "fixture", "messages": plan.messages_for("max") + _tool_round(),
                "max_tokens": 32, "temperature": 0.7}

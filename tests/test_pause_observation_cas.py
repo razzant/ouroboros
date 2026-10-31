@@ -13,6 +13,7 @@ writer explicitly.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -389,7 +390,8 @@ def test_warm_park_reread_never_rewrites_a_granted_pool_mirror(pool, monkeypatch
 
     requested = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_requested"}]}
     confirmed = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_confirmed"}]}
-    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "owner_pause": {"external_runs": requested}}
+    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "budget_paused_sec": 0.0,
+            "sleep_started_at": time.time(), "owner_pause": {"external_runs": requested}}
     worker_owner_wait.handle_owner_wait({**pool.event, "checkpoint": wait}, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "parked"
     with queue._queue_lock:
@@ -431,7 +433,8 @@ def test_warm_park_reread_drops_only_a_superseded_row(pool, monkeypatch, landed)
     from supervisor import owner_pause_control, queue, worker_owner_wait, workers
 
     requested = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_requested"}]}
-    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "owner_pause": {"external_runs": requested}}
+    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "budget_paused_sec": 0.0,
+            "sleep_started_at": time.time(), "owner_pause": {"external_runs": requested}}
     worker_owner_wait.handle_owner_wait({**pool.event, "checkpoint": wait}, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "parked"
     snapshot = {**pool.meta, "owner_wait": dict(pool.meta["owner_wait"])}

@@ -1,16 +1,19 @@
 import importlib.util
 import pathlib
+import sys
 import struct
+import urllib.request
 
 
 def _load_plugin():
     root = pathlib.Path(__file__).resolve().parents[1]
+    plugin_path = root / "skills" / "unix_computer_use" / "plugin.py"
     spec = importlib.util.spec_from_file_location(
-        "unix_computer_use_plugin",
-        root / "skills" / "unix_computer_use" / "plugin.py",
+        "unix_computer_use_plugin", plugin_path, submodule_search_locations=[str(plugin_path.parent)],
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -120,6 +123,10 @@ def _osworld_impl(tmp_path, captured, canned):
     calls = {"n": 0}
 
     def _fake_exec(conn, command, *, timeout=60):
+        from tests.test_unix_computer_use_safety_contract import guest_key_validation
+        validation = guest_key_validation(command[-1])
+        if validation:
+            return validation
         captured.append(command)
         i = min(calls["n"], len(canned) - 1)
         calls["n"] += 1
@@ -154,7 +161,7 @@ def test_osworld_nonzero_returncode_is_not_ok(tmp_path):
     _mod, impl = _osworld_impl(tmp_path, cap, [fail])
     out = _json_mod.loads(impl.remote_exec(command="false"))
     assert out["ok"] is False and "boom" in out["error"]
-    out2 = _json_mod.loads(impl.click(x=10, y=10))
+    out2 = _json_mod.loads(impl.click(x=10, y=10, raw=True))
     assert out2["ok"] is False
     assert "observed_effect" not in out2
 
@@ -233,7 +240,7 @@ def test_disabled_active_connection_fails_closed(tmp_path, monkeypatch):
     # Local backends must never be invoked for a disabled remote connection.
     monkeypatch.setattr(mod, "_run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("local _run called")))
 
-    for out in (impl.click(x=1, y=1), impl.screenshot(), impl.remote_exec(command="ls")):
+    for out in (impl.click(x=1, y=1, raw=True), impl.screenshot(), impl.remote_exec(command="ls")):
         parsed = _json_mod.loads(out)
         assert parsed["ok"] is False and "disabled" in parsed["error"]
 
@@ -261,14 +268,14 @@ def test_remote_screenshot_cap_and_invalid_png_cleanup(tmp_path, monkeypatch):
 
     # Oversized download -> not ok, nothing kept.
     big = b"\x89PNG\r\n\x1a\n" + b"x" * (mod._MAX_REMOTE_SHOT_BYTES + 10)
-    monkeypatch.setattr(mod.urllib.request, "urlopen", lambda *a, **k: _Resp(big))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp(big))
     out = _json_mod.loads(impl.screenshot())
     assert out["ok"] is False and "cap" in out["error"]
 
     # Garbage (non-PNG) bytes -> not ok, file removed. The fetch path retries a
     # corrupt body a bounded number of times and then fails CLOSED; nothing is
     # published either way, which is the property this test guards.
-    monkeypatch.setattr(mod.urllib.request, "urlopen", lambda *a, **k: _Resp(b"not-a-png-body"))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp(b"not-a-png-body"))
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
     out = _json_mod.loads(impl.screenshot())
     assert out["ok"] is False and "screenshot_corrupt" in out["error"]
@@ -283,7 +290,7 @@ def test_remote_screenshot_cap_and_invalid_png_cleanup(tmp_path, monkeypatch):
     _buf = _io.BytesIO()
     _Image.new("RGB", (8, 8), (1, 2, 3)).save(_buf, format="PNG")
     header_ok_body_dead = _buf.getvalue()[:40] + b"\x00" * 200
-    monkeypatch.setattr(mod.urllib.request, "urlopen",
+    monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **k: _Resp(header_ok_body_dead))
     out = _json_mod.loads(impl.screenshot())
     assert out["ok"] is False and "screenshot_corrupt" in out["error"]
@@ -340,7 +347,7 @@ def test_stale_active_pointer_with_missing_registry_fails_closed(tmp_path):
     name, conn = impl._active_connection()
     assert name == "osw" and conn.get("disabled") is True and conn.get("missing") is True
     assert impl._is_remote() is True  # non-local name → routed to the guarded remote path
-    for out in (impl.click(x=1, y=1), impl.type_text(text="x"), impl.key(keys="a"),
+    for out in (impl.click(x=1, y=1, raw=True), impl.type_text(text="x"), impl.key(keys="a"),
                 impl.scroll(clicks=1), impl.screenshot(), impl.remote_exec(command="ls")):
         parsed = _json_mod.loads(out)
         assert parsed["ok"] is False
@@ -359,7 +366,7 @@ def test_unsupported_enabled_backend_fails_closed(tmp_path):
                     '{"active": "bad", "connections": {"local": {"backend": "local", "enabled": true}, "bad": {"backend": "bogus", "enabled": true}}}', "bad")
 
     assert impl._is_remote() is True
-    for out in (impl.click(x=2, y=2), impl.type_text(text="y"), impl.screenshot(), impl.remote_exec(command="ls")):
+    for out in (impl.click(x=2, y=2, raw=True), impl.type_text(text="y"), impl.screenshot(), impl.remote_exec(command="ls")):
         parsed = _json_mod.loads(out)
         assert parsed["ok"] is False
         assert "unusable" in parsed.get("error", "")

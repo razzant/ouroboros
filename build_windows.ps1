@@ -76,6 +76,19 @@ Write-Host "--- Installing agent dependencies into python-standalone ---"
 Invoke-NativeChecked "Agent dependency installation" {
     uv pip install --python "python-standalone\python.exe" -q -r requirements-runtime.lock
 }
+# The source-launcher handoff cannot import the frozen launcher's private PYZ.
+$DesktopRequirements = Join-Path ([IO.Path]::GetTempPath()) "ouroboros-desktop-requirements-$PID.txt"
+try {
+    Invoke-NativeChecked "Desktop dependency export" {
+        uv export --locked --no-dev --extra desktop `
+            --no-emit-project --no-hashes --no-annotate --output-file $DesktopRequirements
+    }
+    Invoke-NativeChecked "Desktop dependency installation" {
+        uv pip install --python "python-standalone\python.exe" -q -r $DesktopRequirements
+    }
+} finally {
+    Remove-Item -Force -ErrorAction SilentlyContinue $DesktopRequirements
+}
 
 Write-Host "--- Fetching exact Claudexor runtime seed ---"
 Invoke-NativeChecked "Claudexor runtime seed fetch" {
@@ -189,8 +202,9 @@ if ($TooLong) {
 
 Write-Host ""
 Write-Host "=== Creating archive ==="
-# Always the unsigned ZIP; a release tag with a configured certificate signs
-# Ouroboros.exe and repacks it in the separate windows-sign job.
+# Always the unsigned ZIP; a release tag with a configured certificate signs the
+# executables scripts\windows_signing_catalog.json names and repacks it in the
+# separate windows-sign job.
 & "$PSScriptRoot\scripts\pack_windows_archive.ps1" -PayloadRoot "dist\Ouroboros" -Archive "dist\$ArchiveName"
 
 Write-Host ""

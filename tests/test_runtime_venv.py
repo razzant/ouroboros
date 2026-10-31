@@ -129,6 +129,26 @@ def test_a_relative_path_is_refused(tmp_path):
         prepare_runtime_venv("relative/venv", run=Run())
 
 
+def test_venv_creation_uses_the_plain_interpreter_not_the_app_entry(tmp_path, monkeypatch):
+    root = tmp_path / "runtime"
+    plain = "/app/Contents/Frameworks/python-standalone/bin/python3"
+    monkeypatch.setattr(runtime_venv.sys, "executable", "/app/Contents/MacOS/ouroboros-shell")
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["-m", "venv"]:
+            bin_dir, python = runtime_venv._layout(root)
+            bin_dir.mkdir()
+            python.write_text("")
+            (root / "pyvenv.cfg").write_text(f"version = {CURRENT}.0\n")
+        return subprocess.CompletedProcess(cmd, 0, f"{CURRENT} {root}\n", "")
+
+    prepare_runtime_venv(root, run=run, base_python=plain)
+    assert calls[0] == [plain, "-m", "venv", str(root)]
+    assert all(cmd[0] != sys.executable for cmd in calls)
+
+
 @pytest.fixture
 def managed_launcher(monkeypatch, tmp_path):
     import atexit
@@ -184,6 +204,56 @@ def test_the_launcher_runs_body_installs_and_handoff_in_the_runtime_venv(managed
     assert seen["timeout"] == runtime_venv.PREPARATION_DEPS_TIMEOUT_SEC
     assert seen["installed"] is True and seen["ready"] is prepared
     assert launcher.EMBEDDED_PYTHON == prepared.python
+
+
+@pytest.mark.parametrize("entry", ["source", "source-venv", "macos-entry", "frozen-app"])
+def test_launcher_venv_creation_keeps_the_running_python_abi(managed_launcher, monkeypatch, tmp_path, entry):
+    """A downloaded bundled Python is not the interpreter of an ordinary source launch.
+
+    Run the real launcher-to-preparation seam and its marker/validation; only Python
+    subprocesses are simulated, including the mismatching interpreter's actual ABI.
+    """
+    launcher = managed_launcher
+    packaged = entry in {"macos-entry", "frozen-app"}
+    version = "3.10" if packaged else "3.11"
+    bundled = str(tmp_path / "downloaded-python-3.10" / "python")
+    source_python = str(tmp_path / "source-python-3.11" / "python")
+    executable = bundled if packaged else source_python
+    if entry in {"macos-entry", "frozen-app", "source-venv"}:
+        executable = str(tmp_path / entry / "launcher")
+    expected = bundled if packaged else source_python
+    monkeypatch.setattr(launcher.sys, "frozen", entry == "frozen-app", raising=False)
+    monkeypatch.setattr(launcher.sys, "executable", executable)
+    monkeypatch.setattr(launcher.sys, "_base_executable", expected, raising=False)
+    monkeypatch.setattr(launcher.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(launcher, "EMBEDDED_PYTHON", bundled)
+    monkeypatch.setattr(runtime_venv, "_major_minor", lambda: version)
+    root = tmp_path / "body-venv"
+    calls = []
+    created_version = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["-m", "venv"]:
+            created_version.append("3.10" if cmd[0] == bundled else "3.11")
+            bin_dir, python = runtime_venv._layout(root)
+            bin_dir.mkdir()
+            python.write_text("simulated interpreter", encoding="utf-8")
+            (root / "pyvenv.cfg").write_text(f"version = {created_version[0]}.0\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, f"{created_version[0]} {root}\n", "")
+
+    monkeypatch.setattr(launcher, "prepare_runtime_venv",
+                        lambda path, **kw: prepare_runtime_venv(path, run=run, base_python=kw.get("base_python")))
+    monkeypatch.setattr(launcher, "bootstrap_repo", lambda: True)
+    monkeypatch.setattr(launcher, "_install_deps", lambda: True)
+    monkeypatch.setattr(launcher, "_prepare_first_run_settings",
+                        lambda: (_ for _ in ()).throw(ReachedLifecycle()))
+    with pytest.raises(ReachedLifecycle):
+        launcher.main(["--no-ui", "--runtime-venv", str(root)])
+    assert calls[0] == [expected, "-m", "venv", str(root)]
+    assert created_version == [version]
+    assert json.loads((root / MARKER_NAME).read_text(encoding="utf-8"))["python"] == version
+    assert launcher._runtime_venv.ready
 
 
 def test_a_refused_runtime_venv_stops_before_bootstrap(managed_launcher, monkeypatch, tmp_path):

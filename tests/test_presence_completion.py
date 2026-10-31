@@ -12,7 +12,7 @@ import ouroboros.loop as loop
 from ouroboros.outcomes import derive_loop_outcome
 from ouroboros.presence_authority import presence_ceiling_payload
 from ouroboros.presence_runner import build_presence_result_event
-from ouroboros.tools.registry import ToolRegistry
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_presence_runner import _admission
 from tests._store_shared import read_result
 
@@ -110,7 +110,8 @@ def test_stop_records_selected_bytes_without_an_extra_final_generation(turn, mon
         tails.append(1)
         return real_tail(*args, **kwargs)
     monkeypatch.setattr(loop, "_finish_tool_round_budget", tail)
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", lambda **_: pytest.fail("stop bought review"))
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery",
+                        lambda *_a, **_k: pytest.fail("stop bought review"))
     result, usage, trace = run([response, {"content": text}] if reserves_reply else [response])
     assert result == text and len(calls) == (2 if reserves_reply else 1)
     assert len(tails) == int(reserves_reply)
@@ -119,15 +120,25 @@ def test_stop_records_selected_bytes_without_an_extra_final_generation(turn, mon
     assert usage["presence_completion_outcome"] == outcome
 
 
-def test_review_hold_drops_old_outcome_and_uses_replacement(turn, monkeypatch):
-    registry, calls, run = turn
+def _hold_first_delivery(monkeypatch):
+    """Hold the first delivery once at the host's delivery step, then let it pass.
+
+    ``review_result.result_review_at_delivery`` is the delivery-time step whose ``True`` holds the
+    answer for another turn; it records the content it was asked about. The real result review
+    never holds Presence speech: the hold here stands for any delivery hold of a selected finish."""
     reviews = []
 
-    def review(**kwargs):
-        reviews.append(kwargs["content"])
+    def review(_ctx, content, _trace, _hold):
+        reviews.append(content)
         return len(reviews) == 1
 
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", review)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
+    return reviews
+
+
+def test_a_delivery_hold_drops_old_outcome_and_uses_replacement(turn, monkeypatch):
+    registry, calls, run = turn
+    reviews = _hold_first_delivery(monkeypatch)
     text, usage, _trace = run([_call("tool_delivered", "Old answer"), _call("message", "Revised answer")])
     assert len(calls) == 2 and reviews == ["Old answer", "Revised answer"]
     assert registry._ctx._presence_completion["message"] == "Revised answer"
@@ -138,13 +149,7 @@ def test_review_hold_drops_old_outcome_and_uses_replacement(turn, monkeypatch):
 
 def test_new_explicit_finish_after_hold_replaces_old_nonempty_candidate(turn, monkeypatch):
     registry, calls, run = turn
-    reviews = []
-
-    def review(**kwargs):
-        reviews.append(kwargs["content"])
-        return len(reviews) == 1
-
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", review)
+    reviews = _hold_first_delivery(monkeypatch)
     text, usage, trace = run([_call("message", "Old answer"), _call("silent", "")])
     assert len(calls) == 2 and reviews == ["Old answer", ""]
     assert text == "" and usage["presence_completion_outcome"] == "silent"
@@ -175,15 +180,15 @@ def test_owner_followup_invalidates_finish_before_or_during_final_gate(turn, tmp
     if late:
         reviews = []
 
-        def review(**_kw):
+        def review(*_a, **_kw):
             if not reviews:
                 followup()
             reviews.append(1)
             return False
 
-        monkeypatch.setattr(loop, "_run_task_acceptance_review_once", review)
+        monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
     else:
-        from ouroboros.tools.presence import _finish_presence
+        from tests.presence_legacy_helpers import _finish_presence
 
         def finish(ctx, **kwargs):
             result = _finish_presence(ctx, **kwargs)
@@ -200,7 +205,7 @@ def test_owner_followup_invalidates_finish_before_or_during_final_gate(turn, tmp
 
 @pytest.mark.parametrize("reason", ["cancel", "budget"])
 def test_control_or_budget_tail_precedes_pending_finish(turn, tmp_path, monkeypatch, reason):
-    from ouroboros.tools.presence import _finish_presence
+    from tests.presence_legacy_helpers import _finish_presence
     from ouroboros.usage_accounting import BudgetExceeded
 
     registry, calls, run = turn

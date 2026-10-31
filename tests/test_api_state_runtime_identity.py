@@ -139,6 +139,7 @@ def test_api_state_serves_the_honest_identity(tmp_path, monkeypatch, stamped, de
     response = asyncio.run(api_state(request))
     payload = json.loads(response.body)
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"  # #1139: the page's build check reads this sha
     if stamped:
         assert payload["branch"] == "managed-branch"
         assert payload["sha"] == OTHER[:8]
@@ -154,3 +155,18 @@ def test_api_state_serves_the_honest_identity(tmp_path, monkeypatch, stamped, de
     jsonschema.validate(payload["branch"], schema)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(123, schema)
+
+
+def test_api_state_failure_is_not_stored_either(monkeypatch):
+    """#1139: a cached 500 would hide the recovered state as surely as a stale sha."""
+    from ouroboros.gateway import state as gateway_state
+
+    def broken(_request):
+        raise RuntimeError("state snapshot unavailable")
+
+    monkeypatch.setattr(gateway_state, "_state_snapshot", broken)
+    request = Request({"type": "http", "method": "GET", "path": "/api/state", "headers": [], "query_string": b""})
+    response = asyncio.run(gateway_state.api_state(request))
+    assert response.status_code == 500
+    assert json.loads(response.body) == {"error": "state snapshot unavailable"}
+    assert response.headers["cache-control"] == "no-store"

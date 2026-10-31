@@ -137,8 +137,8 @@ def test_native_wait_switch_keeps_reads_and_sends_with_the_new_window_facts(live
     assert [row["state"] for row in ledger(root)].count("settled") == 2
 
 
-def test_plan_and_acceptance_prepare_effective_slot_before_capacity(live_wait, monkeypatch):
-    from ouroboros.review_evidence_sections import acceptance_packet_budget_chars
+def test_plan_review_prepares_the_effective_slot_before_capacity(live_wait, monkeypatch):
+    # The acceptance packet budget, the other caller this test once covered, left with task acceptance.
     from ouroboros.tools.plan_review_runtime import plan_slot_fit
     from ouroboros import reviewer_window
 
@@ -153,11 +153,9 @@ def test_plan_and_acceptance_prepare_effective_slot_before_capacity(live_wait, m
 
     monkeypatch.setattr(reviewer_window, "reviewer_context_window", capacity)
     accepted, _rows = plan_slot_fit([slot], prompt_chars=200)
-    budget = acceptance_packet_budget_chars([slot])
     assert accepted[0].model == "local-review" and accepted[0].use_local
-    assert "critic" in budget.slot_input_caps
-    assert all(model == "local-review" and binding["use_local"] is True
-               and binding["credential_profile_id"] == "" for model, binding in calls)
+    assert calls and all(model == "local-review" and binding["use_local"] is True
+                         and binding["credential_profile_id"] == "" for model, binding in calls)
     assert slot.model == MODEL and slot.session_profile == "account-a"
 
 

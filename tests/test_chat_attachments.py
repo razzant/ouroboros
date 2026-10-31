@@ -21,6 +21,8 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+
+from ouroboros import dialogue_store
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -33,12 +35,10 @@ JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 60
 
 @pytest.fixture(autouse=True)
 def _fresh_pending():
-    from supervisor import message_bus
 
     chat_uploads._PENDING.clear()
     yield
     chat_uploads._PENDING.clear()
-    getattr(message_bus, "_UNDISPATCHED", {}).clear()
 
 
 @pytest.fixture
@@ -468,8 +468,13 @@ def test_a_frame_naming_an_unknown_upload_records_an_honest_unavailable_ref(tmp_
 # --- one canonical row: own bubble, echo and history alike ------------------------
 
 def _history(tmp_path, chat_id=1):
+    from ouroboros.dialogue_import import export_for_older_body
     from ouroboros.gateway.history import make_chat_history_endpoint
 
+    # Transition (unit Q1b migrates the history reader onto the dialogue store): the reader still
+    # reads the chain files, so the rows the store holds are exported to them first -- the exact
+    # bytes an older body reads. Drop this call when the reader reads the store.
+    export_for_older_body(tmp_path)
     (tmp_path / "logs" / "progress.jsonl").touch()
     endpoint = make_chat_history_endpoint(tmp_path)
     query = {"limit": "20", **({"chat_id": str(chat_id)} if chat_id != 1 else {})}
@@ -494,7 +499,7 @@ def test_web_acceptance_records_refs_and_echo_equals_history(files_app, tmp_path
                        task_metadata={"chat_attachment_uploads": ws._chat_attachment_uploads(frame)})
     ws._accept_with_attachments(bridge, text, send_kwargs, frame)
 
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = _rows(tmp_path)
     assert len(rows) == 1 and rows[0]["text"] == text, "canonical text and model input are unchanged"
     assert [ref["name"] for ref in rows[0]["attachments"]] == ["one.png", "two.pdf"]
     assert all(set(ref) == {"upload", "name", "mime", "kind", "size", "sha256", "mtime_ns"} for ref in rows[0]["attachments"])
@@ -549,7 +554,7 @@ def test_transport_inline_photo_is_parked_once_and_still_reaches_vision(tmp_path
                                        user_id=42, client_message_id="host-1", text="кадр", ts="2026-10-05T00:00:00Z")
     (frame,) = frames
     assert frame["type"] == "chat" and frame["image_base64"] == "" and frame["attachments"][0]["kind"] == "image"
-    (row,) = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    (row,) = _rows(tmp_path)
     assert row["attachments"][0]["upload"] == ref["upload"]
     assert _history(tmp_path, 42)[0]["attachments"] == frame["attachments"]
 
@@ -616,8 +621,9 @@ def _send_web(bridge, text, uploads, cmid="cm-1", **extra):
 
 
 def _rows(tmp_path):
-    path = tmp_path / "logs" / "chat.jsonl"
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
+    from tests._dialogue import chat_rows
+
+    return chat_rows(tmp_path)
 
 
 def test_every_attachment_is_recorded_echoed_and_replayed_past_the_text_tail(files_app, tmp_path, monkeypatch):
@@ -855,28 +861,27 @@ def test_replay_shows_an_upload_deleted_or_rewritten_since_as_unavailable(files_
 
 def test_a_failed_web_write_keeps_its_uploads_and_one_retry_hands_a_proven_undispatched_row_over(
         files_app, tmp_path, monkeypatch):
-    """A refused canonical write keeps the attachment originals (a failed append may still
-    have left bytes, so they stay claimed, never deletable); the sender's retry under the
-    same id then lands once. If the row DID land before the failure, this process holds
-    positive proof that it never reached dispatch: history says so (``ingress_undispatched``),
-    and the ONE explicit same-id retry hands that row over — one row, one queue item bound to
-    it; any later retry only rejoins (the same rule as a named skill delivery)."""
+    """A refused canonical write keeps the attachment originals (they stay claimed, never
+    deletable); the sender's retry under the same id then lands once. If the row DID land before
+    the failure, its dispatch is still owed: history says so (``ingress_pending``), and the ONE
+    first same-id retry hands that row over — one row, one queue item bound to it; any later
+    retry only rejoins (the same rule as a named skill delivery)."""
     from supervisor import message_bus
 
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
     photo, second = _upload(files_app, "one.png", PNG), _upload(files_app, "two.png", PNG)
     text = "Посмотри\n\n[Attached file: one.png]"
-    real = message_bus.log_chat
+    real = message_bus.accept_chat
 
     def refuse(*_args, **_kwargs):
         raise RuntimeError("canonical message acceptance could not be persisted")
 
-    monkeypatch.setattr(message_bus, "log_chat", refuse)
+    monkeypatch.setattr(message_bus, "accept_chat", refuse)
     with pytest.raises(RuntimeError):
         _send_web(bridge, text, [photo])
     assert _rows(tmp_path) == [] and bridge._inbox.qsize() == 0 and echoes == []
     assert files_app.request("DELETE", "/api/chat/upload", json={"filename": photo["filename"]}).status_code == 409
-    monkeypatch.setattr(message_bus, "log_chat", real)
+    monkeypatch.setattr(message_bus, "accept_chat", real)
     _send_web(bridge, text, [photo])
     (row,) = _rows(tmp_path)
     assert row["attachments"][0]["upload"] == photo["filename"] and "unavailable" not in row["attachments"][0]
@@ -886,53 +891,50 @@ def test_a_failed_web_write_keeps_its_uploads_and_one_retry_hands_a_proven_undis
         real(*args, **kwargs)
         raise RuntimeError("the append's acknowledgement was lost")
 
-    monkeypatch.setattr(message_bus, "log_chat", land_then_fail)
+    monkeypatch.setattr(message_bus, "accept_chat", land_then_fail)
     with pytest.raises(RuntimeError):
         _send_web(bridge, "Второй", [second], cmid="cm-2")
-    monkeypatch.setattr(message_bus, "log_chat", real)
+    monkeypatch.setattr(message_bus, "accept_chat", real)
     assert bridge._inbox.qsize() == 1 and len(echoes) == 1, "nothing of cm-2 was dispatched or echoed"
     replayed = {row["client_message_id"]: row for row in _history(tmp_path)}
-    assert replayed["cm-2"]["ingress_accepted"] is True and replayed["cm-2"]["ingress_undispatched"] is True
-    assert "ingress_undispatched" not in replayed["cm-1"]
+    assert replayed["cm-2"]["ingress_accepted"] is True and replayed["cm-2"]["ingress_pending"] is True
+    assert "ingress_pending" not in replayed["cm-1"]
     bridge._inbox.get_nowait()
     for _ in range(2):  # Send again, then a duplicated tab's Send again
         _send_web(bridge, "Второй", [second], cmid="cm-2")
     rows = _rows(tmp_path)
     assert [row["client_message_id"] for row in rows] == ["cm-1", "cm-2"], "no duplicate row"
     assert [echo["client_message_id"] for echo in echoes] == ["cm-1", "cm-2", "cm-2"] and echoes[1] == echoes[2]
-    assert echoes[1]["ingress_accepted"] is True and "ingress_undispatched" not in echoes[1]
+    assert echoes[1]["ingress_accepted"] is True and "ingress_pending" not in echoes[1]
     (item,) = [bridge._inbox.get_nowait() for _ in range(bridge._inbox.qsize())]
     assert item["accepted_source_row"] == rows[1], "the one dispatch is the accepted row, not a second message"
     assert message_bus.record_inbound_message(bridge, item, chat_id=1, user_id=1, client_message_id="cm-2",
                                               text=rows[1]["text"], ts="later")["ts"] == rows[1]["ts"]
     assert len(_rows(tmp_path)) == 2, "dequeue validated the witness; it wrote nothing"
-    assert not any(row.get("ingress_undispatched") for row in _history(tmp_path)), "handed over: plain saved"
+    assert not any(row.get("ingress_pending") for row in _history(tmp_path)), "handed over: nothing owed"
     assert (tmp_path / "uploads" / second["filename"]).exists(), "the accepted row's bytes are kept"
 
 
-def test_an_unreadable_chat_archive_refuses_the_frame_instead_of_guessing_it_new(files_app, tmp_path, monkeypatch):
+def test_an_unreadable_dialogue_store_refuses_the_frame_instead_of_guessing_it_new(files_app, tmp_path, monkeypatch):
     """Absent history is a new message; history that cannot be READ is unknown: the frame is
-    refused before any claim, row, queue item or echo, so a redelivery can never log twice.
-    A host process's first lookup folds the whole retained chain (``message_ingress._AcceptedIds``)."""
-    import ouroboros.utils as utils
-    from supervisor import message_ingress
+    refused before any claim, row, queue item or echo, so a redelivery can never log twice."""
+    from ouroboros import dialogue_store, store
 
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
     photo = _upload(files_app, "one.png", PNG)
     text = "Посмотри\n\n[Attached file: one.png]"
-    _send_web(bridge, "первое", [])  # a fresh install has no chat.jsonl: absent, not unreadable
-    real = message_ingress.jsonl_chain_handles
-
-    def unreadable(*_args, **_kwargs):
-        raise utils.JsonlChainUnreadable("archive segment could not be opened")
-
-    message_ingress.reset_accepted_ids()  # the next host process: nothing folded yet
-    monkeypatch.setattr(message_ingress, "jsonl_chain_handles", unreadable)
-    with pytest.raises(OSError):
+    _send_web(bridge, "первое", [])  # a fresh install has no dialogue: absent, not unreadable
+    store.close_connections()  # a WAL commit is in the log until the last close checkpoints it into the file
+    intact = dialogue_store.path(tmp_path).read_bytes()
+    dialogue_store.path(tmp_path).write_bytes(b"not a database at all" * 10)
+    store.close_connections()
+    with pytest.raises(store.StoreError):
         _send_web(bridge, text, [photo], cmid="cm-2")
-    assert len(_rows(tmp_path)) == 1 and bridge._inbox.qsize() == 1 and len(echoes) == 1
+    assert bridge._inbox.qsize() == 1 and len(echoes) == 1
     assert photo["filename"] in chat_uploads._PENDING, "nothing was claimed"
-    monkeypatch.setattr(message_ingress, "jsonl_chain_handles", real)
+    dialogue_store.path(tmp_path).write_bytes(intact)
+    store.close_connections()
+    assert len(_rows(tmp_path)) == 1
     _send_web(bridge, text, [photo], cmid="cm-2")
     _send_web(bridge, text, [photo], cmid="cm-2")  # and a redelivery still rejoins
     assert [row["client_message_id"] for row in _rows(tmp_path)][1:] == ["cm-2"] and bridge._inbox.qsize() == 2
@@ -989,17 +991,16 @@ def test_an_unnamed_inject_keeps_its_copies_once_handoff_began(tmp_path, monkeyp
 
 
 def test_a_named_acceptance_whose_write_raised_reads_lost_until_one_retry_hands_it_over(tmp_path, monkeypatch):
-    """The row landed, then the append raised: the inputs and row stay and the operation reads ``lost``
-    (``acceptance_write_failed``), not ``pending`` forever. That is this process's proof the row never
-    entered dispatch, so the early rejoin does not answer for it: the next same-id retry reaches the
-    named ingress, which hands the row over ONCE (``queued``; the echo shows the row's own refs, the
-    retry's identical copies feed staging); every later retry only rejoins."""
+    """The row landed, then the append raised: the inputs and row stay and the operation reads
+    ``pending`` (its dispatch is owed, never lost). The early rejoin does not answer for it: the next
+    same-id retry reaches the named ingress, which hands the row over ONCE (``queued``; the echo shows
+    the row's own refs, the retry's identical copies feed staging); every later retry only rejoins."""
     from supervisor import message_bus
     from tests.test_chat_inject_attachments import _skill_file
 
     bridge = message_bus.LocalChatBridge()
     client = _skill_client(tmp_path, bridge)
-    real = message_bus.log_chat
+    real = message_bus.accept_chat
 
     def land_then_fail(*args, **kwargs):
         real(*args, **kwargs)
@@ -1007,13 +1008,13 @@ def test_a_named_acceptance_whose_write_raised_reads_lost_until_one_retry_hands_
 
     body = {"text": "scan", "client_message_id": "tg:9",
             "attachments": [{"path": str(_skill_file(tmp_path, "scan.pdf")), "name": "scan.pdf"}]}
-    monkeypatch.setattr(message_bus, "log_chat", land_then_fail)
+    monkeypatch.setattr(message_bus, "accept_chat", land_then_fail)
     assert _inject(client, **body).status_code == 500
-    monkeypatch.setattr(message_bus, "log_chat", real)
+    monkeypatch.setattr(message_bus, "accept_chat", real)
     (row,) = _rows(tmp_path)
     assert (tmp_path / "uploads" / row["attachments"][0]["upload"]).exists(), "the accepted bytes are kept"
     state = client.get("/chat/operations/42:tg:9", headers={"X-Skill-Token": "token"}).json()
-    assert (state["status"], state["reason"]) == ("lost", "acceptance_write_failed") and bridge._inbox.qsize() == 0
+    assert state["status"] == "pending" and "reason" not in state and bridge._inbox.qsize() == 0, "owed, not lost"
     assert _inject(client, **body).json() == {"ok": True, "status": "queued", "operation_ref": "42:tg:9"}
     assert _inject(client, **body).json()["rejoined"] is True
     assert bridge._inbox.qsize() == 1 and len(_rows(tmp_path)) == 1, "one row, one dispatch"
@@ -1028,11 +1029,11 @@ def test_a_named_acceptance_whose_write_raised_reads_lost_until_one_retry_hands_
     assert frames[0]["attachments"] == chat_uploads.attachment_views(row["attachments"]) and len(_rows(tmp_path)) == 1
     assert client.get("/chat/operations/42:tg:9", headers={"X-Skill-Token": "token"}).json()["status"] != "lost"
     # A write that raised WITHOUT landing leaves no row: the retry is a fresh, ordinary acceptance.
-    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("disk")))
+    monkeypatch.setattr(message_bus, "accept_chat", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("disk")))
     assert _inject(client, text="later", client_message_id="tg:10").status_code == 500
-    monkeypatch.setattr(message_bus, "log_chat", real)
+    monkeypatch.setattr(message_bus, "accept_chat", real)
     assert _inject(client, text="later", client_message_id="tg:10").status_code == 202
-    assert bridge._inbox.qsize() == 1 and not message_bus.acceptance_undispatched(42, "tg:10")
+    assert bridge._inbox.qsize() == 1 and dialogue_store.dispatch_state(tmp_path, 42, "tg:10") == "completed"
 
 
 def test_live_echoes_carry_the_rows_placeholder_mark(files_app, tmp_path, monkeypatch):

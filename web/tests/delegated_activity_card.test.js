@@ -42,7 +42,7 @@ function fixture() {
             && !Object.hasOwn(n.dataset, 'delegatedFolded')),
         title: (id) => walkCard(messages, id)?.querySelector('[data-live-title]')?.textContent ?? null,
         activity: (id) => walkCard(messages, id)?.querySelector('[data-live-activity]')?.textContent ?? null,
-        open: (id) => walkCard(messages, id).querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 }),
+        open: (id) => walkCard(messages, id).querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 }),
         emit: (row, seconds = 0) => handlers.get('chat')({ chat_id: 1, role: 'system', is_progress: true,
             ts: `2026-09-27T12:00:${String(seconds).padStart(2, '0')}Z`, ...row }),
         census: (rows) => instance.hydrateStateSnapshot({ active_chat_activities: rows,

@@ -228,7 +228,7 @@ def test_a_telegram_answer_refused_as_closed_says_so_and_settles_the_card(card, 
     else:
         asyncio.run(card.plugin.telegram_quiz.answer_from_reply(
             card.api, client, card.record(), "sqlite", chat_id=42, update_id=8, lang="en", post=post))
-        assert client.sent == [(42, "Question closed.")]
+    assert client.sent == [(42, "Question closed.")]  # a refused answer is a problem, by tap or by text
     assert client.edits == [(42, 555, "Question: Which db?\n1. sqlite\n2. postgres"
                              "\nContinuing meanwhile: sqlite meanwhile"
                              "\nQuestion closed.\nAnswered in the Project instead.", [])]
@@ -300,6 +300,42 @@ def test_card_follows_the_install_language(card, tmp_path, monkeypatch):
     assert edit[2].endswith("\nОтвет: 1. sqlite")
     # A line the memory lacks stays English rather than blank or guessed.
     assert "Question: Which db?" in edit[2]
+
+
+def test_a_translated_receipt_never_pushes_the_answered_edit_past_one_message(card, tmp_path, monkeypatch):
+    """The answered edit appends the recorded answer and the delivery line to the card. When the
+    install's language makes those lines long, a card that would have fit as one message goes out
+    the long way instead (the whole question as plain parts, then the compact keyboard message),
+    so the later edit fits Telegram's limit and no question text is cut. Measured in UTF-16 units
+    with the real renderer, astral characters included."""
+    from ouroboros import i18n_memory as memory
+
+    quiz = card.plugin.telegram_quiz
+    root = tmp_path / "data"
+    card.plugin.telegram_i18n.configure(root)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+    saved = "Ответ сохранён 📨 и ждёт, пока задача продолжит работу; " * 6
+    memory.update_memory(root, "ru", lambda doc: (memory.apply_generated(doc, {
+        "code:tg.quiz.answered_line": {"text": "Ответ, записанный хостом 🗂: {answer}"},
+        "code:tg.quiz.status_saved": {"text": saved.strip()}}, model="test"), doc)[1], create=True)
+
+    def body(question):
+        return quiz.render_quiz_text(question, ["sqlite", "postgres"], "", "sqlite meanwhile", lang="ru",
+                                     option_details=["", ""], recommended_index=None)
+    # The largest question the English-sized reserve still sends as ONE message, astral-heavy.
+    budget = quiz._TELEGRAM_TEXT_LIMIT - quiz._ANSWERED_EDIT_RESERVE - quiz._u16len("\n" + quiz.hint("ru"))
+    filler = budget - quiz._u16len(body(""))
+    question = "🙂" * (filler // 2) + "q" * (filler % 2)
+    assert quiz._u16len(f"{body(question)}\n{quiz.hint('ru')}") + quiz._ANSWERED_EDIT_RESERVE == quiz._TELEGRAM_TEXT_LIMIT
+
+    card.send(question=question)
+    words = "Используй postgres, но с ночными бэкапами 💾"
+    (edit,) = card.apply("answered", comment=words, question_delivery=_owed("awaiting_recipient_read"))
+    assert quiz._u16len(edit[2]) <= quiz._TELEGRAM_TEXT_LIMIT
+    assert edit[2].endswith(f"\nОтвет, записанный хостом 🗂: {words}\n{saved.strip()}")  # the answer is never cut here
+    client = Client.instances[0]  # the card's own sender; the edit came through a later client
+    assert client.sent == [(42, body(question))]  # the whole question, as rendered, before the keyboard message
+    assert [text for _, text, _ in client.panels] == [f"1. sqlite\n2. postgres\n{quiz.hint('ru')}"]
 
 
 def test_the_manifest_declares_every_topic_register_subscribes(tmp_path):
@@ -455,7 +491,8 @@ def test_a_telegram_answer_waits_for_an_in_flight_lifecycle_edit_and_lands_last(
         assert card.record()["state"] == "expired_terminal" and sent == []  # stored; its edit is in flight
         answered = asyncio.ensure_future(answer())
         await asyncio.sleep(0)
-        assert client.toasts or client.sent  # the outcome is told at once, never behind the lock
+        # A tap's toast is told at once, never behind the lock; a text answer's receipt is the card.
+        assert client.toasts if path == "callback" else client.sent == []
         gate.set()
         await asyncio.gather(expiry, answered)
 
@@ -463,4 +500,230 @@ def test_a_telegram_answer_waits_for_an_in_flight_lifecycle_edit_and_lands_last(
     assert [bool(edit[3]) for edit in sent] == [True, False]  # expiry first, then the answer
     assert sent[-1][2].endswith("\nAnswered: 2. postgres")
     assert card.record()["state"] == "answered"
+    assert client.sent == [] and card.api.logs == []
+
+
+_SAVED = "Answer saved · the task reads it when it continues"
+_BASE = "Question: Which db?\n1. sqlite\n2. postgres\nContinuing meanwhile: sqlite meanwhile"
+
+
+def _owed(reason=""):
+    return {"kind": "answer", "state": "owed", **({"reason_code": reason} if reason else {})}
+
+
+_DELIVERED = {"kind": "answer", "state": "delivered"}
+
+
+@pytest.mark.parametrize("winner,shown", [
+    ({"comment": "neither — use duckdb"}, "neither — use duckdb"),
+    ({"answered_index": 1, "comment": "with nightly backups"}, "2. postgres — with nightly backups"),
+], ids=["comment", "option-comment"])
+def test_a_delivery_only_fact_keeps_the_recorded_winner(card, winner, shown):
+    """The read acknowledgement publishes the delivery alone: absence never clears the winner,
+    and a confirmed delivery removes the pending line while the answer stays."""
+    card.send()
+    (edit,) = card.apply("answered", question_delivery=_owed("awaiting_recipient_read"), **winner)
+    assert edit[2] == f"{_BASE}\nAnswered: {shown}\n{_SAVED}"
+    (edit,) = card.apply("answered", question_delivery=_DELIVERED)
+    assert edit[2] == f"{_BASE}\nAnswered: {shown}"
+    record = card.record()
+    assert {key: record.get(key) for key in ("answered_index", "comment")} == {
+        "answered_index": winner.get("answered_index"), "comment": winner.get("comment")}
+
+
+def test_a_stale_owed_fact_never_takes_back_a_confirmed_delivery(card):
+    card.send()
+    card.apply("answered", answered_index=1, question_delivery=_DELIVERED)
+    (edit,) = card.apply("answered", answered_index=1, question_delivery=_owed("awaiting_recipient_read"))
+    assert edit[2] == f"{_BASE}\nAnswered: 2. postgres"
+    assert card.record()["question_delivery"] == _DELIVERED
+
+
+@pytest.mark.parametrize("order", ["full-then-sparse", "sparse-then-full"])
+def test_facts_that_outrun_the_cards_creation_keep_the_winner_and_the_delivery(card, order):
+    """Two answered facts can both arrive before the card is remembered; the retained fact
+    keeps the winner one of them names and the furthest delivery either reports."""
+    full = _fact(answered_index=1, question_delivery=_owed("awaiting_recipient_read"))
+    sparse = _fact(question_delivery=_DELIVERED)
+    for fact in ([full, sparse] if order == "full-then-sparse" else [sparse, full]):
+        asyncio.run(card.plugin._make_quiz_state(card.api)(fact))
+    assert card.record() is None and _all_edits() == []  # retained, nothing to edit yet
+    card.send()
+    assert _all_edits() == [(42, 555, f"{_BASE}\nAnswered: 2. postgres", [])]
+    assert card.record()["answered_index"] == 1
     assert card.api.logs == []
+
+
+def test_host_answer_and_its_read_reach_the_card_through_the_real_producers(card, tmp_path, monkeypatch):
+    """The host's own decision ingress, mailbox read and acknowledgement drive the card: the
+    tap's toast says the answer waits for the task, and the read keeps the recorded winner."""
+    import queue
+    from types import SimpleNamespace
+
+    import supervisor.message_bus as mb
+    from ouroboros.gateway import task_decision as td
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from supervisor.events_runtime_controls import _handle_owner_message_injected
+    from tests.test_question_answer_routing import runtime
+
+    host = tmp_path / "host"
+    host.mkdir()
+    runtime(host, monkeypatch)
+    published = []
+    monkeypatch.setattr(mb, "publish_event", lambda topic, event: published.append((topic, dict(event))))
+    card.send(task_id="asker", quiz_id="q")
+    token = card.plugin.telegram_quiz.mint_token("asker", "q")
+    client = Client("token")
+
+    async def post(_api, path, body):
+        assert path == "/chat/decision"
+        return await td.answer_decision(host, body, source="skill:telegram")
+
+    async def deliver_facts():
+        facts = [event for topic, event in published if topic == "chat.quiz_state"]
+        published.clear()
+        for fact in facts:
+            await card.plugin._make_quiz_state(card.api)(fact)
+        return facts
+
+    asyncio.run(card.plugin.telegram_quiz.answer_from_callback(
+        card.api, client, f"qz:{token}:1", cb_id="cb", update_id=90, lang="en", post=post))
+    asyncio.run(deliver_facts())
+    assert client.toasts == [("cb", f"✅ {_SAVED}.")]
+    expected = f"{_BASE}\nAnswered: 2. postgres"
+    assert client.edits[-1][2] == f"{expected}\n{_SAVED}"
+
+    events = queue.Queue()
+    ctx = SimpleNamespace(task_id="asker", task_metadata={}, drive_root=host, budget_drive_root=host)
+    _drain_incoming_messages([], queue.Queue(), host, "asker", events, set(), owner_ctx=ctx)
+    acks = []
+    while not events.empty():
+        event = events.get_nowait()
+        acks.extend([event] if event.get("quiz_ack") else [])
+    assert acks, "the read is acknowledged"
+    for event in acks:
+        _handle_owner_message_injected(event, SimpleNamespace(DRIVE_ROOT=host, bridge=mb.get_bridge()))
+    facts = asyncio.run(deliver_facts())
+    assert facts and facts[-1]["question_delivery"]["state"] == "delivered"
+    assert facts[-1].get("answered_index") == 1, "the acknowledgement names the recorded winner"
+    edits = [edit for instance in Client.instances for edit in instance.edits]
+    assert edits[-1][2] == expected
+    record = card.plugin.telegram_quiz.quiz_for_token(card.api, token)
+    assert record["question_delivery"]["state"] == "delivered" and record["answered_index"] == 1
+    assert card.api.logs == []
+
+
+_PENDING = "Answer recorded · delivery pending"
+
+
+def _owed_ingress(card, tmp_path, monkeypatch, failure=None):
+    """The host's real decision ingress for one question (``asker``/``q``) whose answer delivery keeps
+    failing: the history write raises, or the task's mailbox refuses the copy. ``answer`` runs one
+    Telegram tap or reply through it and returns the host's ``(status, payload)``."""
+    import supervisor.message_bus as mb
+    from ouroboros.gateway import task_decision as td
+    from ouroboros.owner_quiz import quiz_states
+    from tests.test_question_answer_routing import runtime
+
+    host = tmp_path / "host"
+    host.mkdir()
+    runtime(host, monkeypatch)
+    monkeypatch.setattr(mb, "publish_event", lambda *_a, **_k: None)  # the card hears only its own answer
+    if failure == "history":
+        def unavailable(*_a, **_k):
+            raise OSError("history store unavailable")
+        monkeypatch.setattr(td, "_record_quiz_answer_history", unavailable)
+    elif failure == "mailbox":
+        monkeypatch.setattr("ouroboros.owner_mailbox.write_owner_message", lambda *_a, **_k: False)
+    card.send(task_id="asker", quiz_id="q")
+    quiz, client, replies = card.plugin.telegram_quiz, Client("token"), []
+    token = quiz.mint_token("asker", "q")
+
+    async def post(_api, path, body):
+        assert path == "/chat/decision"
+        replies.append(await td.answer_decision(host, body, source="skill:telegram"))
+        return replies[-1]
+
+    def answer(path, given, update_id):
+        if path == "tap":
+            asyncio.run(quiz.answer_from_callback(card.api, client, f"qz:{token}:{given}", cb_id="cb",
+                                                  update_id=update_id, lang="en", post=post))
+        else:
+            asyncio.run(quiz.answer_from_reply(card.api, client, quiz.quiz_for_token(card.api, token), given,
+                                               chat_id=42, update_id=update_id, lang="en", post=post))
+        return replies[-1]
+
+    def web(**answered):
+        return asyncio.run(td.answer_decision(
+            host, {"request_id": "web-1", "decision_id": "quiz:asker:q", **answered}, source="web"))
+
+    return types.SimpleNamespace(client=client, answer=answer, web=web, block=lambda: quiz_states(host, "asker")["q"])
+
+
+@pytest.mark.parametrize("failure", ["history", "mailbox"])
+@pytest.mark.parametrize("path,earlier,given,shown", [
+    ("tap", {"option_index": 0}, 1, "1. sqlite"),
+    ("tap", {"comment": "Use duckdb"}, 1, "Use duckdb"),
+    ("tap", {"option_index": 0, "comment": "only with nightly backups"}, 0, "1. sqlite — only with nightly backups"),
+    ("reply", {"option_index": 0}, "Use duckdb", "1. sqlite"),
+    ("reply", {"comment": "Use duckdb"}, "Use mysql", "Use duckdb"),
+    ("reply", {"option_index": 1, "comment": "with nightly backups"}, "with nightly backups",
+     "2. postgres — with nightly backups"),
+], ids=["tap-option", "tap-comment", "tap-option-comment", "reply-option", "reply-comment", "reply-option-comment"])
+def test_a_later_answer_refused_behind_the_winners_failed_delivery_is_a_conflict(
+        card, tmp_path, monkeypatch, failure, path, earlier, given, shown):
+    """#2109: before refusing a later answer the host retries the earlier winner's owed delivery, and when
+    that retry fails the later request gets a 503 carrying the EARLIER winner. Through the real ingress it is
+    a conflict: the card keeps the recorded answer and its pending delivery, a tap is also told by its toast,
+    either answer gets the one line naming the winner, and the winner stays recorded."""
+    host = _owed_ingress(card, tmp_path, monkeypatch, failure)
+    assert host.web(**earlier)[0] == 503  # recorded, its delivery owed
+    winner = host.block()
+    status, payload = host.answer(path, given, 91)
+    assert status == 503 and payload["state"] == "answered"  # the winner's retried delivery failed again
+    assert host.client.edits == [(42, 555, f"{_BASE}\nAnswered: {shown}\n{_PENDING}", [])]
+    assert host.client.sent == [(42, f"Not accepted: this question was already answered. Recorded answer: {shown}")]
+    assert host.client.toasts == ([("cb", "This question was already answered.")] if path == "tap" else [])
+    keys = ("request_id", "answered_index", "comment")
+    assert [host.block().get(key) for key in keys] == [winner.get(key) for key in keys]
+
+
+@pytest.mark.parametrize("failure", ["history", "mailbox"])
+@pytest.mark.parametrize("path,earlier,given,shown", [
+    ("tap", {"option_index": 1}, 1, "2. postgres"),
+    ("reply", {"comment": "Use duckdb"}, "Use duckdb", "Use duckdb"),
+    ("tap", None, 1, "2. postgres"),
+    ("reply", None, "Use duckdb", "Use duckdb"),
+], ids=["tap-same-answer", "reply-same-answer", "tap-same-update", "reply-same-update"])
+def test_the_same_answer_behind_a_failed_delivery_stays_accepted(
+        card, tmp_path, monkeypatch, failure, path, earlier, given, shown):
+    """No false changed answer: the same answer given on the web card, or this very update answered again,
+    is the recorded winner, so its 503 stays the receipt of an answer recorded with its delivery pending."""
+    host = _owed_ingress(card, tmp_path, monkeypatch, failure)
+    if earlier is None:
+        assert host.answer(path, given, 91)[0] == 503
+        for told in (host.client.edits, host.client.toasts, host.client.sent):
+            told.clear()
+    else:
+        assert host.web(**earlier)[0] == 503
+    status, payload = host.answer(path, given, 91)
+    assert status == 503 and payload["state"] == "answered"
+    assert host.client.edits == [(42, 555, f"{_BASE}\nAnswered: {shown}\n{_PENDING}", [])]
+    assert (host.client.toasts, host.client.sent) == (([("cb", f"✅ {_PENDING}.")] if path == "tap" else []), [])
+
+
+@pytest.mark.parametrize("path,given", [("tap", 1), ("reply", "Use duckdb")])
+def test_an_answer_the_host_could_not_record_stays_unknown(card, tmp_path, monkeypatch, path, given):
+    """Genuinely unknown stays unknown: the ingress could not record the answer, its 503 names no winner,
+    the card stays open and the owner is asked to send the same answer again."""
+    host = _owed_ingress(card, tmp_path, monkeypatch)
+
+    def unavailable(*_a, **_k):
+        raise OSError("question store unavailable")
+
+    monkeypatch.setattr("ouroboros.owner_quiz.record_answered", unavailable)
+    status, payload = host.answer(path, given, 93)
+    assert status == 503 and payload["state"] == "open" and not {"answered_index", "comment"} & set(payload)
+    line = "The answer was not confirmed (HTTP 503), so it may not be recorded. Send the same answer again later."
+    assert host.client.edits == [] and host.block()["state"] == "open"
+    assert (host.client.toasts, host.client.sent) == ([("cb", line)] if path == "tap" else [], [(42, line)])

@@ -1,27 +1,33 @@
-"""Wedge detection for the supervisor generation.
+"""Boot phases and wedge detection for the server generation.
 
-The two silent-wedge predicates (a stalled supervisor loop, a heartbeat-silent
-in-process chat turn), the owner alert one of them raises, the measurements the
-loop publishes about itself, and the dedicated watchdog thread that evaluates
-both outside the loop it watches.
+The one boot document of the process (``BOOT``: phase, readiness flags, the named boot
+steps the coordinator and the supervisor init run; what ``/api/health`` and ``/api/state``
+answer as ``boot``), the boot coordinator that runs the lifespan's post-serve steps on its
+own thread, and the supervisor generation's wedge detection: the two silent-wedge
+predicates (a stalled supervisor loop, a heartbeat-silent in-process chat turn), the owner
+alert one of them raises, the measurements the loop publishes about itself (its stall facts
+and the ``supervisor_load`` row per busy minute), and the dedicated watchdog thread that
+evaluates both outside the loop it watches.
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
 import posixpath
 import queue
 import re
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.runtime_limits import (
     BUDGET_PROJECTION_RETRY_SEC, SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC,
 )
 from ouroboros.server_process import DATA_DIR, log, _restart_requested
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 # The loop hands the watchdog ONE list: [0] the monotonic stamp the watchdog
 # triggers on, [1] the facts published with that stamp, [2] the loop thread's CPU
@@ -85,9 +91,11 @@ def note_supervisor_ready() -> None:
 
 def run_startup_phase(liveness: list, phase: str, step: Callable[[], Any]) -> Any:
     """Run one startup step under its own visible sub-phase (a stall inside it is
-    journaled with that name), then publish ``startup`` again."""
+    journaled with that name, and the boot document shows it as a step), then publish
+    ``startup`` again."""
     liveness[1], liveness[0] = loop_phase_facts(liveness, phase), time.monotonic()
-    result = step()
+    with BOOT.step(phase):
+        result = step()
     liveness[1], liveness[0] = loop_phase_facts(liveness, "startup"), time.monotonic()
     return result
 
@@ -130,20 +138,21 @@ def loop_phase_facts(liveness: list, phase: str, *, new_tick: bool = False) -> d
     return facts
 
 
-def observe_worker_event_lag(liveness: list, evt: Any) -> None:
-    """Record how far behind the loop is on the worker event it is draining now.
+def observe_worker_event_lag(liveness: list, evt: Any) -> Optional[float]:
+    """Record and return how far behind the loop is on the worker event it is draining now.
 
     The worker stamps ``ts`` in its OWN process when it queues the event, so this
     is a cross-process wall-clock gap — a measurement, never the watchdog's
     monotonic trigger. An event without a parsable worker stamp is skipped: the
-    host's own clock is not evidence about when a worker spoke.
+    host's own clock is not evidence about when a worker spoke (None).
     """
     stamped = parse_deadline_ts(evt.get("ts")) if isinstance(evt, dict) else None
     if stamped is None:
-        return
+        return None
     lag = (utc_now() - stamped).total_seconds()
     if liveness[_LAG] is None or lag > liveness[_LAG]:
         liveness[_LAG] = lag
+    return lag
 
 
 def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: Callable[..., Any]) -> bool:
@@ -159,8 +168,15 @@ def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: C
     stays queued for the next turn, so a producer that keeps the queue non-empty
     can never starve owner-message intake. A dequeued event carrying a
     ``delivery_id`` is released from the bus's outstanding-delivery membership after
-    its handler returned or raised, whichever path it took. Returns True when the
-    pass stopped at its bound (a backlog may remain: the caller skips its idle sleep)."""
+    its handler returned or raised, whichever path it took. A live final answer is
+    stamped as dequeued the moment it is taken (``finalization_timing``), and every
+    event's service time, take to handler return, feeds ``supervisor.loop_load.CONSUMER``
+    by type, with its lag by lane. Returns True
+    when the pass stopped at its bound (a backlog may remain: the caller skips its idle
+    sleep and polls intake without its wait)."""
+    from ouroboros.finalization_timing import stamp_finalization_dequeue
+    from supervisor import loop_load
+    from supervisor.event_observation import event_lane
     from supervisor.events import dispatch_event
 
     deadline = time.monotonic() + SUPERVISOR_EVENT_BATCH_MAX_SEC
@@ -171,15 +187,85 @@ def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: C
         except queue.Empty:
             return False
         drained += 1
+        taken, lag = time.monotonic(), None
         try:
+            stamp_finalization_dequeue(evt)
             if evt.get("type") == "restart_request":
                 on_restart(evt, ctx)
                 continue
-            observe_worker_event_lag(liveness, evt)
+            lag = observe_worker_event_lag(liveness, evt)
             dispatch_event(evt, ctx)
         finally:
+            served = time.monotonic() - taken
             _release_delivery(event_q, evt)
+            kind = str(evt.get("type") or "") if isinstance(evt, dict) else ""
+            loop_load.CONSUMER.note(kind, event_lane(evt), served, lag)
     return True
+
+
+# The supervisor_load row's window: a reporting cadence, never a gate or a deadline.
+SUPERVISOR_LOAD_WINDOW_SEC = 60.0
+_LOAD_FAILURES_SEEN: set = set()
+
+
+def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
+    """The row's further sections: a name and a zero-argument drain of its own window, one line each
+    (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead)."""
+    from ouroboros import dialogue_retry, store_timing
+    from supervisor import queue
+
+    return {
+        "queue_lock": lambda: queue._queue_lock.drain(),
+        "store_locks": store_timing.drain,
+        "dialogue_retry": dialogue_retry.snapshot,
+    }
+
+
+def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
+    """At most one ``supervisor_load`` row per window into ``logs/supervisor.jsonl``.
+
+    The loop thread calls this once per tick at its top level (outside Q and any store
+    transaction); it returns None while the window is open or while the consumer has served
+    no event in it (an idle stretch folds into the next row, whose ``window_sec`` says how
+    long, so an idle install adds no rows), else the row: ``window_sec``;
+    ``handlers`` (event type -> count, total_sec, max_sec of service time, take to handler
+    return); ``lanes`` (control/telemetry -> ``depth`` and ``oldest_age_sec`` of the bus at
+    this moment, None when the bus cannot say, and ``max_lag_sec``, the worst producer-stamp
+    lag the drain saw); ``max_event_lag_sec`` over both lanes; then one key per
+    ``_load_sections`` entry (Q: outermost waits, holds, longest hold's site), a failing
+    source answering ``{"error": <type>}``. The append never waits on the jsonl lock and a
+    failure is logged once per class: diagnostics never cost the loop or a delivery. The boot
+    document keeps the row's ``ts`` and ``max_event_lag_sec`` for the health answers.
+    """
+    from supervisor import loop_load
+    from supervisor.event_observation import lane_observations
+    from supervisor.event_taxonomy import LANES
+
+    now = time.monotonic()
+    if now - loop_load.CONSUMER.started < SUPERVISOR_LOAD_WINDOW_SEC or not loop_load.CONSUMER.served():
+        return None
+    try:
+        window = loop_load.CONSUMER.drain(now)
+        lanes, lag = lane_observations(event_q) or {}, window["lag"]
+        row = {"ts": utc_now_iso(), "type": "supervisor_load", "window_sec": window["window_sec"],
+               "handlers": window["handlers"],
+               "lanes": {lane: {"depth": (lanes.get(lane) or {}).get("depth"),
+                                "oldest_age_sec": (lanes.get(lane) or {}).get("oldest_age_sec"),
+                                "max_lag_sec": lag.get(lane)} for lane in LANES},
+               "max_event_lag_sec": max(lag.values()) if lag else None}
+        for name, drain in _load_sections().items():
+            try:
+                row[name] = drain()
+            except Exception as exc:
+                row[name] = {"error": type(exc).__name__}
+        BOOT.note_supervisor_load({"ts": row["ts"], "max_event_lag_sec": row["max_event_lag_sec"]})
+        append_jsonl(drive_root / "logs" / "supervisor.jsonl", row, lock_timeout_sec=0)
+        return row
+    except Exception as exc:
+        if type(exc).__name__ not in _LOAD_FAILURES_SEEN:
+            _LOAD_FAILURES_SEEN.add(type(exc).__name__)
+            log.warning("supervisor_load row not recorded (%s)", type(exc).__name__, exc_info=True)
+        return None
 
 
 _RELEASE_FAILURES_SEEN: set = set()
@@ -240,7 +326,8 @@ def _published_loop_facts(liveness: list) -> dict:
 def _loop_thread_stack(ident: Optional[int], *, limit: int = _STALL_STACK_FRAMES,
                        facts: Optional[dict] = None) -> list[str]:
     """The loop thread's CURRENT stack, outermost first, at most ``limit`` innermost
-    ``path:line in func`` frames (repository files relative, others absolute). Walk code
+    ``path:line in func`` frames (repository files relative, other files absolute, a pseudo-filename
+    such as ``<string>`` as the interpreter names it). Walk code
     objects instead of traceback.extract_stack: linecache could read a stalled filesystem on
     this watchdog thread; no locals, no message bodies. A cut walk sets
     ``facts["loop_stack_truncated"]`` when ``facts`` is given, so a bounded stack is never
@@ -283,24 +370,138 @@ _ABSOLUTE_PATH = re.compile(r"^([A-Za-z]:)?[/\\]")
 _STACK_ROW = re.compile(r"^(?P<path>.*):(?P<line>\d+) in (?P<func>.*)$")
 
 
+def _runtime_roots() -> tuple[str, ...]:
+    """Where the Python runtime lives: ``sys.prefix`` and ``sys.base_prefix``, each as reported
+    and as resolved, lexically normalized and ending in one ``/``. A relocatable interpreter may
+    report its prefix through ``bin/..`` while loading modules from the normalized path, and
+    Homebrew reports its ``opt`` symlink while loading the standard library from the Cellar it
+    resolves to; the closing ``/`` keeps a sibling ``<prefix>-other`` outside."""
+    roots = set()
+    for prefix in filter(None, (sys.prefix, sys.base_prefix)):
+        spellings = [prefix]
+        with contextlib.suppress(OSError, ValueError):  # unresolvable: compared as reported; the watchdog lives on
+            spellings.append(os.path.realpath(prefix))
+        roots.update(posixpath.normpath(path.replace("\\", "/")).rstrip("/") + "/" for path in spellings)
+    return tuple(roots)
+
+
 def _innermost_repo_frame(stack: list[str]) -> str:
     """``path:function`` of the innermost frame inside the repository - a relative path, else
-    the innermost frame outside the Python runtime ('' when none) - without the line number,
-    so the samples of one stalled function fold into one row. A relocatable interpreter may
-    report its prefix through ``bin/..`` while loading modules from the normalized path, so
-    both sides are compared lexically normalized."""
-    runtime = tuple({posixpath.normpath(prefix.replace("\\", "/"))
-                     for prefix in (sys.prefix, sys.base_prefix) if prefix})
+    the innermost frame outside the Python runtime (``_runtime_roots``; '' when none) - without
+    the line number, so the samples of one stalled function fold into one row. A pseudo-filename
+    (``<frozen importlib._bootstrap>``, ``<string>``) names no file and is neither, so an import-lock
+    wait or exec'd code names its real caller. The path keeps the row's own spelling; only the
+    comparison is normalized."""
+    runtime = _runtime_roots()
     outside = ""
     for row in reversed(stack):
         parsed = _STACK_ROW.match(row)
         path, func = (parsed.group("path"), parsed.group("func")) if parsed else ("", "")
+        if not path or (path.startswith("<") and path.endswith(">") and "/" not in path and "\\" not in path):
+            continue
         key = f"{path}:{func}"
-        if path and not _ABSOLUTE_PATH.match(path):
+        if not _ABSOLUTE_PATH.match(path):
             return key
-        if path and not outside and not posixpath.normpath(path.replace("\\", "/")).startswith(runtime):
+        if not outside and not (posixpath.normpath(path.replace("\\", "/")) + "/").startswith(runtime):
             outside = key
     return outside
+
+
+def _top_frames(samples: dict) -> list:
+    """Up to five innermost repository frames, the most sampled first."""
+    return [{"frame": frame, "samples": count} for frame, count in
+            sorted(samples.items(), key=lambda item: (-item[1], item[0]))[:5]]
+
+
+def _fold_sample(episode: dict, stack: list) -> None:
+    """One stack sample into an open episode: counted by its innermost repository frame, the latest kept."""
+    if stack:
+        episode["last_stack"] = stack
+    key = _innermost_repo_frame(stack) or "(outside the repository)"
+    episode["samples"][key] = episode["samples"].get(key, 0) + 1
+
+
+class _TurnPhaseWatch:
+    """Where a direct turn's own thread stands while its start phase does not advance.
+
+    Each watchdog interval reads every running ``TurnExecution`` (its thread and the start
+    facts it passed, each with the monotonic instant it was stamped). One whose phase has
+    stood a whole interval before its Main call started gets one ``direct_turn_stall``
+    row with that thread's stack, one folded stack sample per interval while the phase
+    stands, and one ``direct_turn_stall_end`` once it advances (``then``: the next phase,
+    ``stood_sec`` up to that phase's own stamp), the turn ends in it (``then: "ended"``, up
+    to its end) or this watchdog stops (``then: "unwatched"``; a next one opens its own).
+    Heartbeat age decides nothing: a turn blocked before its heartbeat starts and one
+    blocked under a live heartbeat are watched alike, and the onset row only reports the
+    heartbeat's age (null before it started). Journal only, as invariant 20 binds the
+    watchdog: no owner message, no checkpoint row, no cancel, no verdict."""
+
+    def __init__(self, interval: float) -> None:
+        self._interval = interval
+        self._open: dict = {}  # execution_id -> the open episode
+
+    def tick(self, now: float, heartbeats: dict) -> None:
+        from supervisor.active_activity import CALL_PHASES, get_direct_activity_registry
+
+        executions = {row.execution_id: row for row in get_direct_activity_registry().executions()}
+        for execution_id in [key for key in self._open if key not in executions]:
+            self._close(execution_id, now)
+        for execution_id, execution in executions.items():
+            index = len(execution.marks) - 1
+            phase, at = execution.marks[index]
+            episode = self._open.get(execution_id)
+            if episode is not None and episode["index"] != index:
+                self._close(execution_id, now)
+                episode = None
+            if phase in CALL_PHASES or now - at < self._interval:
+                continue
+            ident = execution.thread[0]
+            if episode is not None:
+                _fold_sample(episode, _loop_thread_stack(ident))
+                continue
+            flags: dict = {}
+            stack = _loop_thread_stack(ident, facts=flags)
+            beat = heartbeats.get(execution.task_id) if execution.task_id else None
+            self._journal({"type": "direct_turn_stall", **self._ids(execution), "thread": execution.thread[1],
+                           "phase": phase, "stood_sec": round(now - at, 1),
+                           "heartbeat_sec": round(now - beat, 1) if isinstance(beat, (int, float)) else None,
+                           **({"stack_truncated": True} if flags else {}), **({"stack": stack} if stack else {})})
+            episode = self._open[execution_id] = {"execution": execution, "index": index,
+                                                  "samples": {}, "last_stack": []}
+            _fold_sample(episode, stack)
+
+    def close(self, now: float) -> None:
+        """This watchdog stops: every episode it opened ends with its own row."""
+        for execution_id in list(self._open):
+            self._close(execution_id, now)
+
+    def _close(self, execution_id: str, now: float) -> None:
+        episode = self._open.pop(execution_id)
+        execution, index = episode["execution"], episode["index"]
+        marks = list(execution.marks)
+        phase, at = marks[index]
+        if index + 1 < len(marks):
+            then, until = marks[index + 1]
+        elif execution.ended_at is not None:
+            then, until = "ended", execution.ended_at
+        else:
+            then, until = "unwatched", now
+        self._journal({"type": "direct_turn_stall_end", **self._ids(execution), "phase": phase, "then": then,
+                       "stood_sec": round(until - at, 1), "samples": sum(episode["samples"].values()),
+                       "top_frames": _top_frames(episode["samples"]), "last_stack": episode["last_stack"]})
+
+    @staticmethod
+    def _ids(execution) -> dict:
+        return {"execution_id": execution.execution_id, "task_id": execution.task_id,
+                "chat_id": execution.chat_id, "client_message_id": execution.client_message_id}
+
+    @staticmethod
+    def _journal(row: dict) -> None:
+        from supervisor.state import append_jsonl
+        try:
+            append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), **row})
+        except Exception:
+            log.debug("%s log failed", row.get("type"), exc_info=True)
 
 
 def _stall_cpu_over(onset_facts: dict, latest_facts: dict) -> Optional[float]:
@@ -360,7 +561,7 @@ def _start_supervisor_liveness_watchdog(
     liveness: list, stop_event=None, *, loop_thread_ident: Optional[int] = None,
 ) -> None:
     """Dedicated daemon thread (NOT inside the supervisor loop, so it fires even when
-    that loop stalls). It observes two silent-wedge classes and reports them
+    that loop stalls). It observes silent-wedge classes and reports them
     DIFFERENTLY (owner decision 4C). A heartbeat-silent in-process direct-chat turn
     ALERTS the owner, because /restart is a recovery they can perform. A supervisor
     loop stall (new-message intake starvation) is JOURNAL ONLY: the ``log.error``
@@ -374,7 +575,9 @@ def _start_supervisor_liveness_watchdog(
     not only where it began. Onset without an end is a generation that never
     recovered. Nothing reaches the
     owner's chat from that half: a stall they cannot act on is an alarm, not
-    information, and the rows carry the diagnosis anyway. It deliberately does NOT
+    information, and the rows carry the diagnosis anyway. A direct turn whose start
+    phase stops advancing before its first model request is journal only the same way,
+    with its own thread's stack, whatever its heartbeat says (``_TurnPhaseWatch``). It deliberately does NOT
     kill a hung thread; independent native actors keep the chat responsive
     meanwhile. ``loop_thread_ident`` is the thread whose stack a stall row carries;
     it defaults to the CALLER, because the loop thread starts its own watchdog
@@ -394,16 +597,9 @@ def _start_supervisor_liveness_watchdog(
         interval = min(15, max(1, deadline // 3))
         loop_alerted = False
         stall_onset: tuple = ()  # (stalled stamp, phase, onset facts) of the OPEN alerted stall
-        samples: dict = {}  # innermost repository frame -> stack samples while the stall is open
-        last_stack: list = []
+        stall: dict = {"samples": {}, "last_stack": []}  # its stack samples while the stall is open
         wedged_tasks: set[str] = set()
-
-        def sample(stack: list) -> None:
-            nonlocal last_stack
-            if stack:
-                last_stack = stack
-            key = _innermost_repo_frame(stack) or "(outside the repository)"
-            samples[key] = samples.get(key, 0) + 1
+        turn_phases = _TurnPhaseWatch(interval)
         while not _restart_requested.is_set() and not (stop_event is not None and stop_event.is_set()):
             time.sleep(interval)
             # ONE clock: both halves measure an ELAPSED GAP against stamps taken on
@@ -440,10 +636,10 @@ def _start_supervisor_liveness_watchdog(
                         log.debug("loop-stall log failed", exc_info=True)
                     loop_alerted = True
                     stall_onset = (liveness[_STAMP], facts.get("phase"), facts)
-                    samples, last_stack = {}, []
-                    sample(stack)
+                    stall = {"samples": {}, "last_stack": []}
+                    _fold_sample(stall, stack)
                 else:
-                    sample(_loop_thread_stack(watched_ident))  # one bounded sample per interval
+                    _fold_sample(stall, _loop_thread_stack(watched_ident))  # one bounded sample per interval
             else:
                 if loop_alerted:
                     # The loop ticked again: close the episode ONCE, and only one
@@ -468,10 +664,9 @@ def _start_supervisor_liveness_watchdog(
                             "cpu_interval_sec": stalled,
                             # Where the thread SPENT the stall: one stack sample per watchdog
                             # interval, folded by innermost repository frame, plus the last one.
-                            "samples": sum(samples.values()),
-                            "top_frames": [{"frame": frame, "samples": count} for frame, count in
-                                           sorted(samples.items(), key=lambda item: (-item[1], item[0]))[:5]],
-                            "last_stack": last_stack,
+                            "samples": sum(stall["samples"].values()),
+                            "top_frames": _top_frames(stall["samples"]),
+                            "last_stack": stall["last_stack"],
                         })
                     except Exception:
                         log.debug("loop-stall-end log failed", exc_info=True)
@@ -488,5 +683,213 @@ def _start_supervisor_liveness_watchdog(
                 if _chat_turn_wedged(True, turn_ts, now, deadline) and turn_task not in wedged_tasks:
                     _alert_chat_turn_wedge(turn_task, now - turn_ts)
                     wedged_tasks.add(turn_task)
+            # (3) Each direct turn's start phase: where its own thread stands while the phase holds.
+            try:
+                turn_phases.tick(now, dict(turns))
+            except Exception:
+                log.debug("direct-turn phase watch failed", exc_info=True)
+        turn_phases.close(time.monotonic())
 
     threading.Thread(target=_watch, name="supervisor-liveness-watchdog", daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# the boot document and the boot coordinator
+# ---------------------------------------------------------------------------
+
+PHASES = ("starting", "serving", "ready", "failed")
+STEP_STATES = ("running", "done", "failed")
+
+
+class BootDocument:
+    """The process's one boot document, the ``boot`` object of ``/api/health``.
+
+    ``phase``: ``starting`` until the HTTP socket serves (the lifespan reached its yield),
+    ``serving`` while the boot steps and the supervisor init run, ``ready`` once every boot
+    step ended and the supervisor reached readiness, ``failed`` when the generation cannot
+    become ready (the store did not publish, the supervisor init failed, the loop died).
+    ``dialogue_ready``: an owner message is accepted durably (the chat bridge is published).
+    ``tasks_ready``: pooled task starts are admitted (the supervisor's readiness latch, read
+    from the caller at snapshot time so one latch serves the API and this document).
+    ``supervisor_load``: the latest load row's ``ts`` and ``max_event_lag_sec``
+    (None before this generation's first row). ``steps``: every named boot step in the order
+    it started, with its outcome. A failed
+    fail-soft step (an extension that did not load) is reported as such and does not fail the
+    phase; a step that ends the boot calls ``fail``. The document is per generation
+    (``reset`` at every lifespan start) and lives in memory: durable boot facts stay where
+    they are written (``supervisor.jsonl`` rows, the ``job:`` rows of the store).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._since = utc_now_iso()
+            self._serving = False
+            self._steps_done = False
+            self._dialogue_ready = False
+            self._error: Optional[str] = None
+            self._steps: Dict[str, Dict[str, Any]] = {}
+            self._load: Optional[Dict[str, Any]] = None
+
+    def serving(self) -> None:
+        with self._lock:
+            self._serving = True
+
+    def steps_done(self) -> None:
+        with self._lock:
+            self._steps_done = True
+
+    def dialogue_ready(self, value: bool = True) -> None:
+        with self._lock:
+            self._dialogue_ready = bool(value)
+
+    def fail(self, error: str) -> None:
+        """The boot cannot reach readiness; the first cause is kept."""
+        with self._lock:
+            if not self._error:
+                self._error = str(error)
+
+    def note_supervisor_load(self, headline: Dict[str, Any]) -> None:
+        with self._lock:
+            self._load = dict(headline)
+
+    def step_started(self, name: str) -> None:
+        with self._lock:
+            self._steps[name] = {"name": name, "state": "running", "started_at": utc_now_iso(),
+                                 "ended_at": None, "error": None}
+
+    def step_ended(self, name: str, error: Optional[str] = None) -> None:
+        with self._lock:
+            row = self._steps.get(name)
+            if row is None:
+                row = self._steps[name] = {"name": name, "started_at": utc_now_iso()}
+            row.update(state="failed" if error else "done", ended_at=utc_now_iso(), error=error or None)
+
+    @contextlib.contextmanager
+    def step(self, name: str) -> Iterator[None]:
+        """Record one step around a block; an exception marks it failed and propagates."""
+        self.step_started(name)
+        try:
+            yield
+        except BaseException as exc:
+            self.step_ended(name, error=f"{type(exc).__name__}: {exc}")
+            raise
+        else:
+            self.step_ended(name)
+
+    def phase(self, *, supervisor_done: bool = False, supervisor_error: Optional[str] = None) -> str:
+        with self._lock:
+            if self._error or supervisor_error:
+                return "failed"
+            if not self._serving:
+                return "starting"
+            return "ready" if self._steps_done and supervisor_done else "serving"
+
+    def snapshot(self, root: Any = None, *, tasks_ready: bool = False, supervisor_done: bool = False,
+                 supervisor_error: Optional[str] = None, jobs: bool = True) -> Dict[str, Any]:
+        """The ``boot`` object; ``jobs`` are the store's named-job rows (``{}`` while the store
+        is unpublished or absent: a read that never imports and never waits)."""
+        phase = self.phase(supervisor_done=supervisor_done, supervisor_error=supervisor_error)
+        with self._lock:
+            document = {
+                "phase": phase,
+                "since": self._since,
+                "dialogue_ready": self._dialogue_ready,
+                "tasks_ready": bool(tasks_ready),
+                "steps": [dict(row) for row in self._steps.values()],
+                "jobs": {},
+                "supervisor_load": dict(self._load) if self._load is not None else None,
+                "error": self._error or supervisor_error or None,
+            }
+        if jobs and root is not None:
+            document["jobs"] = job_facts(root)
+        return document
+
+
+BOOT = BootDocument()
+
+
+def job_facts(root: Any) -> Dict[str, Dict[str, Any]]:
+    """``{name: {state, done, total}}`` of the store's named jobs for the health document:
+    one indexed read without waiting; an unpublished, absent or busy store reads ``{}``."""
+    from ouroboros import maintenance_jobs, store
+
+    try:
+        with store.acquisition_budget(0.0):
+            rows = maintenance_jobs.jobs(root)
+    except Exception:
+        return {}
+    return {name: {"state": row.get("state"), "done": row.get("done"), "total": row.get("total")}
+            for name, row in rows.items()}
+
+
+def boot_document(root: Any, app_state: Any = None, *, jobs: bool = True) -> Dict[str, Any]:
+    """The ``boot`` object for a gateway answer: this process's document plus the supervisor
+    facts the server attached to the app (its readiness and init-outcome latches, its error)."""
+    ready = getattr(app_state, "supervisor_ready_event", None)
+    done = getattr(app_state, "supervisor_init_done_event", None)
+    error_fn = getattr(app_state, "get_supervisor_error", None)
+    return BOOT.snapshot(
+        root, jobs=jobs,
+        tasks_ready=bool(ready is not None and ready.is_set()),
+        supervisor_done=bool(done is not None and done.is_set()),
+        supervisor_error=error_fn() if callable(error_fn) else None,
+    )
+
+
+def boot_notice(app_state: Any = None) -> str:
+    """Plain words for a chat frame that found no bridge: why the message was not saved."""
+    document = boot_document(None, app_state, jobs=False)
+    if document["phase"] == "failed":
+        return ("⚠️ Startup failed before the chat could accept messages, so this message was not saved. "
+                f"Restart Ouroboros and send it again. ({document['error']})")
+    if document["phase"] == "ready":
+        return "⚠️ The chat is not accepting messages right now; this message was not saved. Send it again in a moment."
+    return ("⚠️ The data store is still being prepared (a migration is running), so this message was not saved. "
+            "Send it again once the chat is ready.")
+
+
+BootStep = Tuple[str, Callable[[], Any]]
+
+
+def run_boot_steps(steps: Sequence[BootStep], *, stop: threading.Event, document: BootDocument = BOOT) -> None:
+    """Run the boot steps in order on the calling thread, each one recorded in the document.
+
+    A step's exception is logged and recorded as that step's failure; the next step still
+    runs (every step is fail-soft, as the lifespan ran them), so one broken extension never
+    hides the supervisor. A stop set between steps ends the walk: the generation is ending
+    and nothing more of it starts. ``steps_done`` is recorded only after the last step."""
+    for name, step in steps:
+        if stop.is_set():
+            log.info("Boot steps stopped before %s: the generation is ending", name)
+            return
+        document.step_started(name)
+        try:
+            step()
+        except Exception as exc:
+            log.error("Boot step %s failed", name, exc_info=True)
+            document.step_ended(name, error=f"{type(exc).__name__}: {exc}")
+        else:
+            document.step_ended(name)
+    document.steps_done()
+
+
+def start_boot_coordinator(steps: Sequence[BootStep], *, stop: threading.Event) -> threading.Thread:
+    """The lifespan's boot coordinator: a daemon thread running ``run_boot_steps`` while the
+    socket already serves; the lifespan owns ``stop`` and sets it at teardown."""
+    thread = threading.Thread(target=run_boot_steps, args=(steps,), kwargs={"stop": stop},
+                              daemon=True, name="boot-coordinator")
+    thread.start()
+    return thread
+
+
+def wait_event(event: threading.Event, *stops: threading.Event, poll_sec: float = 0.1) -> bool:
+    """Wait for ``event``; False as soon as any stop is set, even beside the event."""
+    while True:
+        if any(stop.is_set() for stop in stops):
+            return False
+        if event.wait(poll_sec):
+            return not any(stop.is_set() for stop in stops)

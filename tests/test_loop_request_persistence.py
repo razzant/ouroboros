@@ -72,7 +72,7 @@ def test_review_closure_retains_request_sources_without_duplicate_history(tmp_pa
         SimpleNamespace(fingerprint="original", units=[]), drive_root=child, task_id=task)
     raw = artifacts.read_actor_source_bytes(child, task, ref)
     unit = cc._atomic_units(original)[-1]
-    capsule, _ = cc._capsule_message(cc._SelectedUnit(unit, 0, ""), "summary",
+    capsule, _ = cc._capsule_message(unit, "summary",
                                     [cc._part(unit.unit_id, unit.source_text)], ref, request)
     payload = {"messages": [capsule]}
     if duplicate:

@@ -899,8 +899,11 @@ def test_author_continuation_notes_its_decision_on_the_answered_record(candidate
                                    author_disposition={"disposition": "accepted", "rationale": "Known tradeoff."})
     assert len(calls) == 1 and f"review_record_id: {reference['review_record_id']}" in second
     record = rl.load_record(rl.ledger_root(ctx), reference["review_record_id"])
-    assert record["revision"] == 2 and record["verdict"]["aggregate"] == "FAIL"
+    assert record["revision"] == 3 and record["verdict"]["aggregate"] == "FAIL"
     assert record["author_decision"]["disposition"] == "accepted" and record["author_decision"]["rationale"] == "Known tradeoff."
+    assert record["author_decision"]["landing"]["landed"] is True
+    assert "evidence_at_decision" not in record["author_decision"]
+    assert "review_replaced_by_subagents" not in record["author_decision"]
     assert len(rl.recent_records(rl.ledger_root(ctx), ctx.task_id, 5)) == 1, "author continuation buys no record"
     assert _attempt_rows(ctx)[-1].status == "succeeded" and _attempt_rows(ctx)[-1].review_record_id == reference["review_record_id"]
 
@@ -987,7 +990,7 @@ def test_tests_fact_is_passed_only_for_a_candidate_bound_proof(candidate, monkey
     ctx._preflight_tests_passed = True  # the runner's flag from an EARLIER candidate survives in the process
     ctx._preflight_test_proof = None
     assert facts() == {"policy": "NOT_RUN", "result": "unknown", "reason": "tests_proof_not_for_this_candidate"}
-    monkeypatch.setattr(commit_admission, "preflight_test_proof_matches", lambda ctx, repo: True)
+    monkeypatch.setattr(commit_admission, "preflight_test_proof_matches", lambda ctx, repo, **_: True)
     assert facts() == {"policy": "run", "result": "passed", "proof": "candidate_bound"}
     ctx._preflight_tests_passed = False
     assert facts() == {"policy": "NOT_RUN", "result": "unknown"}
@@ -1127,12 +1130,139 @@ def test_naming_the_record_keeps_a_typed_result_paired_with_its_text(tmp_path):
     assert commit_gate.name_review_record(ctx, named) == named, "a text that already names the record is unchanged"
 
 
-def test_the_public_handler_still_refuses_a_call_without_a_commit_message_at_binding():
-    """The registry binds arguments to the handler's signature before running it: a call
-    without ``commit_message`` stays a typed argument refusal, never a handler crash."""
+def test_the_public_handler_accepts_a_reference_without_a_commit_message():
+    """A paid reference supplies its original message; a new call still requires one."""
     import inspect
 
     handler = next(entry.handler for entry in git.get_tools() if entry.name == "commit_reviewed")
-    with pytest.raises(TypeError):
-        inspect.signature(handler).bind(object())
+    inspect.signature(handler).bind(object(), review_reference={"record_id": "original"})
     inspect.signature(handler).bind(object(), commit_message="m", skip_tests=True)
+
+
+def _pending_panel_record(tmp_path):
+    """A written change record left pending: s1 (retrieving, both parts) answered PASS, the packet seats
+    s2 and s3 still in flight."""
+    raws = [_raw("s1", "openai/gpt-5", parts=BOTH, raw_text="two-part answer"),
+            _raw("s2", "anthropic/claude-x", "pending", operation_state="in_flight", late_result_pending=True),
+            _raw("s3", "google/gemini", "pending", operation_state="in_flight", late_result_pending=True)]
+    record = rl.build_wave_record(_facts(raws, pending=True), surface="change", drive_root=tmp_path)
+    rl.write_record(tmp_path, record)
+    return record.to_dict()
+
+
+def test_a_pending_record_settles_from_its_collected_seats_without_a_reissue(tmp_path):
+    """The seats an author stopped waiting for settle the record themselves (owner 17.10, Q3-2): the answers
+    land on the seats that were open, the verdict is reduced over the assigned seats, the provenance and the
+    already answered seat stay, and the revision rises once."""
+    prior = _pending_panel_record(tmp_path)
+    assert prior["state"] == "pending" and prior["verdict"]["aggregate"] == "NOT_PERFORMED"
+    failing = _raw("s3", "google/gemini", answers={"change": _answer("change", "FAIL", findings=[CRITICAL])})
+    settled = rl.settle_from_collected(tmp_path, prior["record_id"], [_raw("s2", "anthropic/claude-x"), failing])
+    assert settled["state"] == "settled" and settled["revision"] == prior["revision"] + 1
+    assert settled["verdict"]["aggregate"] == "FAIL" and settled["verdict"]["reason"] == "critical_findings"
+    assert [f["seat_id"] for f in settled["verdict"]["critical_findings"]] == ["s3"]
+    assert settled["brief"] == prior["brief"] and settled["fingerprints"] == prior["fingerprints"]
+    assert {row["seat_id"]: row["status"] for row in settled["rows"]} == {"s1": "responded", "s2": "responded",
+                                                                        "s3": "responded"}
+    assert all("raw_text" not in row for row in settled["rows"]), "an answer is a retained source, never inline"
+    assert rl.settle_from_collected(tmp_path, prior["record_id"], [_raw("s2", "x", "error")]) == settled, \
+        "a settled record is never re-settled"
+
+
+def test_a_seat_still_running_keeps_the_record_pending_and_a_lost_one_does_not(tmp_path):
+    """Two-sided: a seat whose answer may still come keeps the record pending; a seat whose custody is lost
+    (outcome unknown, never re-sent) is a failed seat of a settled record."""
+    prior = _pending_panel_record(tmp_path)
+    partial = rl.settle_from_collected(tmp_path, prior["record_id"], [_raw("s2", "anthropic/claude-x")])
+    assert partial["state"] == "pending" and partial["verdict"]["aggregate"] == "NOT_PERFORMED"
+    lost = _raw("s3", "google/gemini", "error", answers=None, raw_text="", operation_state="custody_lost",
+                late_result_pending=True, failure_code="review_custody_lost")
+    settled = rl.settle_from_collected(tmp_path, prior["record_id"], [lost])
+    assert settled["state"] == "settled" and settled["verdict"]["aggregate"] == "PASS", "2 of 3 answered: quorum met"
+    seat = {row["seat_id"]: row for row in settled["rows"]}["s3"]
+    assert seat["operation_state"] == "custody_lost" and seat["failure_code"] == "review_custody_lost"
+    assert not rl.seat_open(seat) and rl.seat_open({"operation_state": "in_flight"})
+    # The settled record names its lost seat as never reached; the pending one awaited it, unlisted.
+    assert partial["panel"].get("not_reached", []) == []
+    assert settled["panel"]["not_reached"] == [{"seat_id": "s3", "cause": "review_custody_lost"}]
+
+
+# --- single-question waves (a result, a skill) and the declared severity policy ---------------
+
+
+def test_a_skill_wave_reduces_on_its_one_question_like_a_result_wave():
+    """A skill seat answers the ``skill`` part alone: NOT_DISPATCHED → pending → QUORUM_FAILED → FAIL → PASS,
+    no coupling step, and its FAIL items are attributed to the ``skill`` part (owner 21.10 1A)."""
+    models = ("openai/gpt-5", "anthropic/claude-x", "google/gemini")
+    rows = [_raw(f"s{i}", m, parts=("skill",), answers={"skill": _answer("skill")}) for i, m in enumerate(models, 1)]
+    passed = rl.build_wave_record(_facts(rows), surface="skill").to_dict()["verdict"]
+    assert passed["aggregate"] == "PASS" and passed["per_question"] == {"skill": "PASS"} and passed["reason"] == "pass"
+    assert passed["quorum"]["parts"] == {"skill": {"required": 2, "assigned": 3, "responded": 3}}
+    assert rl.answer_keys(("skill",)) == ("skill",) and rl.single_question_part(rows) == "skill"
+
+    finding = {"item": "no_repo_mutation", "verdict": "FAIL", "severity": "critical", "reason": "writes the repo"}
+    rows[1]["answers"] = {"skill": _answer("skill", "FAIL", [finding])}
+    critical_found, advisory_found, extra_found = rl.seat_findings(rows, set())
+    assert (len(critical_found), advisory_found, extra_found) == (1, [], [])
+    failed = rl.build_wave_record(_facts(rows, blocked=True, block_reason="critical_findings",
+                                         critical_findings=critical_found), surface="skill").to_dict()
+    assert failed["verdict"]["aggregate"] == "FAIL" and failed["verdict"]["per_row"]["s2"] == "FAIL"
+    [critical] = failed["verdict"]["critical_findings"]
+    assert (critical["seat_id"], critical["part"], critical["item"]) == ("s2", "skill", "no_repo_mutation")
+    assert failed["brief"]["parts"] == ["skill"]
+
+    silent = [_raw(f"s{i}", m, "error", parts=("skill",)) for i, m in enumerate(models, 1)]
+    silent[0] = rows[0]
+    quorum = rl.build_wave_record(_facts(silent, blocked=True, block_reason="review_quorum"), surface="skill").to_dict()["verdict"]
+    assert quorum["aggregate"] == "QUORUM_FAILED" and quorum["per_question"] == {"skill": "unanswered"}, "parity with a change wave: fewer than quorum PASSed is unanswered"
+
+    unanswered = [_raw("s1", "openai/gpt-5", parts=("skill",), answers={"skill": _answer("skill", "", status="unanswered")})]
+    none = rl.reduce_verdict(unanswered)
+    assert (none["aggregate"], none["reason"]) == ("NOT_PERFORMED", "skill_unanswered")
+    assert rl.NOT_PERFORMED_PHRASES["skill_unanswered"]
+
+
+def test_the_severity_policy_decides_critical_findings_and_the_verdict_follows():
+    """``apply_severity_policy``: a named item's rule outranks the seat's word, ``seat`` keeps it, the ``*``
+    default covers the rest, and the answer's verdict and count follow the rewritten findings."""
+    policy = {"hard": "critical", "soft": "advisory", "own": "seat", "*": "advisory"}
+    answer = _answer("skill", "PASS", [
+        {"item": "hard", "severity": "advisory"}, {"item": "soft", "severity": "critical"},
+        {"item": "own", "severity": ""}, {"item": "invented", "severity": "critical"}])
+    applied = rl.apply_severity_policy(answer, policy)
+    assert [f["severity"] for f in applied["findings"]] == ["critical", "advisory", "critical", "advisory"]
+    assert (applied["verdict"], applied["critical"]) == ("FAIL", 2)
+    clean = rl.apply_severity_policy(_answer("skill", "FAIL", [{"item": "soft", "severity": "critical"}]), policy)
+    assert (clean["verdict"], clean["critical"]) == ("PASS", 0)
+    untouched = _answer("skill", "FAIL", [{"item": "hard", "severity": "advisory"}])
+    assert rl.apply_severity_policy(untouched, None) is untouched and rl.apply_severity_policy(untouched, {}) is untouched
+
+
+def test_a_late_settlement_re_applies_the_records_own_severity_policy(tmp_path):
+    """A seat collected after its author left answers under the rule the record was dispatched with (a skill
+    wave's checklist), never under the reviewer's own severity word."""
+    rows = [_raw("s1", "openai/gpt-5", parts=("skill",), answers={"skill": _answer("skill")}),
+            _raw("s2", "anthropic/claude-x", "pending", parts=("skill",), operation_state="in_flight", late_result_pending=True)]
+    record = rl.build_wave_record(_facts(rows), surface="skill", drive_root=tmp_path)
+    record.brief["checklist"]["severity_policy"] = {"no_repo_mutation": "critical", "*": "advisory"}
+    rl.write_record(tmp_path, record)
+    late = {"slot_id": "s2", "status": "responded", "model_id": "anthropic/claude-x", "parts": ["skill"],
+            "answers": {"skill": {"status": "responded", "verdict": "PASS", "critical": 0, "coverage": "n/a",
+                                  "findings": [{"item": "no_repo_mutation", "verdict": "FAIL", "severity": "advisory",
+                                                "reason": "commits to the repo"}]}}}
+    settled = rl.settle_from_collected(tmp_path, record.record_id, [late])
+    assert settled["state"] == "settled" and settled["verdict"]["aggregate"] == "FAIL"
+    [critical] = settled["verdict"]["critical_findings"]
+    assert (critical["seat_id"], critical["severity"]) == ("s2", "critical")
+
+
+def test_the_hot_index_names_a_skill_records_skill(tmp_path):
+    rows = [_raw("s1", "openai/gpt-5", parts=("skill",), answers={"skill": _answer("skill")})]
+    facts = _facts(rows, subject={"root_kind": "skill_payload", "root": "/skills/external/weather", "kind": "skill",
+                                  "base": "", "head": "", "tree_sha": "h" * 64, "diff_sha": "d" * 64, "checkout": ""})
+    record = rl.build_wave_record(facts, surface="skill", drive_root=tmp_path)
+    record.subject["skill"] = "weather"
+    rl.write_record(tmp_path, record)
+    [row] = rl.recent_records(tmp_path, surface="skill")
+    assert row["subject"]["skill"] == "weather" and row["subject"]["kind"] == "skill"
+    assert rl.recent_records(tmp_path, surface="commit_gate") == []

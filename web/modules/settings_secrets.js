@@ -33,7 +33,10 @@ export function bindSecretReveal(input, button, { savedSelector, savedLabel = ()
     status.className = 'settings-secret-status settings-inline-status';
     status.dataset.secretRevealStatus = '1';
     status.setAttribute('role', 'status');
-    row.append(source, preview, status);
+    // The shown value takes the masked input's own place in its row; the input
+    // steps aside untouched, so the draft and its value never change.
+    input.after(preview);
+    row.append(source, status);
     button.setAttribute('aria-controls', preview.id);
     input.dataset.secretReveal = '1';
     let generation = 0;
@@ -44,6 +47,7 @@ export function bindSecretReveal(input, button, { savedSelector, savedLabel = ()
         open = false;
         preview.textContent = '';
         preview.hidden = true;
+        input.hidden = false;
         source.textContent = '';
         source.hidden = true;
         preview.removeAttribute('aria-describedby');
@@ -87,6 +91,7 @@ export function bindSecretReveal(input, button, { savedSelector, savedLabel = ()
             if (!current()) return;
             preview.textContent = disclosed;
             preview.hidden = false;
+            input.hidden = true;
             status.textContent = '';
             status.hidden = true;
             button.setAttribute('aria-expanded', 'true');
@@ -108,4 +113,58 @@ export function bindSecretReveal(input, button, { savedSelector, savedLabel = ()
     reveals.set(input, controller);
     reset();
     return controller;
+}
+
+export function bindSecretInputs(root) {
+    root.querySelectorAll('.secret-toggle, .secret-clear').forEach((button) => {
+        const input = root.querySelector(`#${button.dataset.target}`);
+        if (!input) return;
+        button.setAttribute('aria-controls', input.id);
+        const label = input.labels?.[0];
+        if (label) {
+            label.id ||= `${input.id}-label`;
+            button.setAttribute('aria-describedby', label.id);
+        }
+    });
+    root.querySelectorAll('.secret-input').forEach((input) => {
+        input.addEventListener('input', () => {
+            if (input.value.trim()) delete input.dataset.forceClear;
+        });
+    });
+
+    root.querySelectorAll('.secret-toggle').forEach((button) => {
+        const input = root.querySelector(`#${button.dataset.target}`);
+        if (!input) return;
+        const customRow = input.closest('[data-custom-secret-row]');
+        const keyInput = customRow?.querySelector('[data-custom-secret-key]');
+        bindSecretReveal(input, button, {
+            savedSelector: () => {
+                // A key added in a card is read by its connection and field; a draft has nothing saved.
+                const added = input.closest('[data-connection-row][data-uid]');
+                if (added) return added.dataset.draft === '1' ? null
+                    : { connection: `${added.dataset.kind}@${added.dataset.name}`, field: input.dataset.connectionField };
+                const key = customRow?.dataset.originalKey || input.dataset.secretSetting;
+                return key ? { key } : null;
+            },
+            savedLabel: () => keyInput && keyInput.value.trim().toUpperCase() !== customRow.dataset.originalKey
+                ? `Saved value for ${customRow.dataset.originalKey}` : '',
+            identityInputs: keyInput ? [keyInput] : [],
+        });
+    });
+
+    root.querySelectorAll('.secret-clear').forEach((button) => {
+        button.addEventListener('click', () => {
+            const target = root.querySelector(`#${button.dataset.target}`);
+            if (!target) return;
+            target.value = '';
+            target.type = 'password';
+            target.dataset.forceClear = '1';
+            const toggle = root.querySelector(`.secret-toggle[data-target="${button.dataset.target}"]`);
+            if (toggle) toggle.textContent = 'Show';
+            // Programmatic value changes fire no 'input' event, but a Clear is
+            // an edit like any other: the provider-test verdict-expiry listener
+            // must see it, or a stale OK keeps vouching for a cleared key.
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    });
 }

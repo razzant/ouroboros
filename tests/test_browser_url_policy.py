@@ -127,7 +127,7 @@ def test_owner_settings_post_blocked_in_browser():
     assert _is_owner_settings_self_elevation_post(req("POST", base, '{"OUROBOROS_SUBAGENT_HARNESS":"codex=gpt-5.6:high"}'))
     assert _is_owner_settings_self_elevation_post(req("POST", base, '{"OUROBOROS_SUBAGENT_HARNESS":""}'))
     assert _is_owner_settings_self_elevation_post(req("GET", base, None)) is False
-    assert _is_owner_settings_self_elevation_post(req("POST", base, '{"OPENAI_API_KEY":"x"}')) is False
+    assert _is_owner_settings_self_elevation_post(req("POST", base, '{"TOTAL_BUDGET":"25"}')) is False
     assert _is_owner_settings_self_elevation_post(
         req("POST", "http://127.0.0.1:8765/api/tasks", '{"OUROBOROS_POST_TASK_EVOLUTION":"true"}')) is False
 

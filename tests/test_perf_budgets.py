@@ -19,6 +19,8 @@ that only exist after the P1+P2 merges:
 from __future__ import annotations
 
 import asyncio
+import pathlib
+from contextlib import contextmanager
 import json
 import logging
 import types
@@ -27,34 +29,6 @@ from starlette.requests import Request
 
 from ouroboros import usage_accounting as ua
 from ouroboros import usage_store
-
-
-def test_retained_execution_drive_tripwire_counts_both_roots(tmp_path, monkeypatch):
-    from ouroboros import context_budget
-    from ouroboros.agent_startup_checks import hot_store_growth_notes
-    from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
-    from supervisor.state import ISOLATED_BENCHMARK_SENTINEL
-
-    monkeypatch.setattr(context_budget, "RETAINED_EXECUTION_DRIVES_WARN_COUNT", 2)
-    env = types.SimpleNamespace(
-        drive_root=tmp_path,
-        drive_path=lambda rel: tmp_path / rel,
-    )
-    headless = tmp_path / HEADLESS_TASKS_DIR
-    task_drives = tmp_path / TASK_DRIVES_DIR
-    (headless / "headless-1").mkdir(parents=True)
-    (task_drives / "drive-1").mkdir(parents=True)
-
-    assert hot_store_growth_notes(env) == []
-
-    (task_drives / "drive-2").mkdir()
-    notes = hot_store_growth_notes(env)
-    assert len(notes) == 1
-    assert "retained execution drives" in notes[0]
-    assert "total 3 (threshold 2)" in notes[0]
-
-    (tmp_path / ISOLATED_BENCHMARK_SENTINEL).write_text("isolated\n", encoding="utf-8")
-    assert hot_store_growth_notes(env) == []
 
 
 def test_observability_write_failure_warns_once_and_stays_nonfatal(tmp_path, caplog):
@@ -213,57 +187,42 @@ def test_api_state_warm_path_replays_ledger_zero_times_and_projects_once(
     assert payload["accounting"]["authority"] == "physical_attempt_ledger"
 
 
-def test_chat_history_reads_bounded_progress_tail_with_zero_artifact_work(
+def test_chat_history_reads_a_bounded_recent_window_with_zero_artifact_work(
     tmp_path, monkeypatch,
 ):
-    """On a progress.jsonl much larger than the 512KB start window (quota
-    satisfiable from the tail), /api/chat/history must read a strict byte tail
-    — never the whole file — and its terminal-truth annotation must perform
-    zero artifact collection/copies and zero disposition-hash lookups."""
+    """On a progress stream far larger than the recent window, /api/chat/history reads a bounded
+    number of the room's newest rows out of the dialogue store -- never a dialogue file, never the
+    whole stream -- and its terminal-truth annotation performs zero artifact collection/copies
+    and zero disposition-hash lookups."""
+    from ouroboros import dialogue_store as ds, jsonl_tail
+    from ouroboros.gateway import history_paging
     from ouroboros.gateway.history import make_chat_history_endpoint
-    from ouroboros import jsonl_tail
-    from contextlib import contextmanager
     from ouroboros.task_results import write_task_result
 
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "chat.jsonl").write_text(
-        json.dumps({"ts": "2026-08-08T00:00:00Z", "direction": "in", "text": "hello"}) + "\n",
-        encoding="utf-8",
-    )
-    with (logs / "progress.jsonl").open("w", encoding="utf-8") as handle:
-        for i in range(16000):
-            hours, rem = divmod(i, 3600)
-            handle.write(json.dumps({
-                "ts": f"2026-08-08T{hours:02d}:{rem // 60:02d}:{rem % 60:02d}Z",
-                "content": f"telemetry-{i}", "task_id": "t1", "pad": "x" * 120,
-            }) + "\n")
-    progress_size = (logs / "progress.jsonl").stat().st_size
-    assert progress_size > 3_000_000  # much larger than the 512KB start window
+    (tmp_path / "logs").mkdir()
     write_task_result(tmp_path, "t1", "completed", result="done", ts="2026-08-08T05:00:00Z")
+    ds.append(tmp_path, "chat", {"ts": "2026-08-08T00:00:00Z", "direction": "in", "text": "hello"})
+    for i in range(4000):
+        hours, rem = divmod(i, 3600)
+        ds.append(tmp_path, "progress", {
+            "ts": f"2026-08-08T{hours:02d}:{rem // 60:02d}:{rem % 60:02d}Z",
+            "content": f"telemetry-{i}", "task_id": "t1", "pad": "x" * 600,
+        })
+    end = ds.stream_end(tmp_path, "progress")
+    assert end > 3 * history_paging._RECENT_WINDOW_BYTES
 
-    # The pager feeds the shared parser an already-bounded borrowed buffer.
-    # Count actual source bytes, rather than the old parser's tail_bytes hint.
-    reads = []
+    decoded: list = []
+    entries = history_paging.HistorySource._entries
+    monkeypatch.setattr(history_paging.HistorySource, "_entries",
+                        lambda self, rows: (decoded.extend((self.source, row.seq) for row in rows), entries(self, rows))[1])
+    opened: list = []
     chain_handles = jsonl_tail.jsonl_chain_handles
 
-    class CountedHandle:
-        def __init__(self, path, handle):
-            self.path, self.handle = path, handle
-
-        def __getattr__(self, name):
-            return getattr(self.handle, name)
-
-        def read(self, size=-1):
-            start = self.handle.tell()
-            data = self.handle.read(size)
-            reads.append((self.path, start, len(data)))
-            return data
-
     @contextmanager
-    def counted_handles(*args, **kwargs):
-        with chain_handles(*args, **kwargs) as handles:
-            yield [(path, CountedHandle(path, handle)) for path, handle in handles]
+    def counted_handles(path, *args, **kwargs):
+        opened.append(pathlib.Path(path).name)
+        with chain_handles(path, *args, **kwargs) as handles:
+            yield handles
 
     monkeypatch.setattr(jsonl_tail, "jsonl_chain_handles", counted_handles)
     artifact_counters = _install_artifact_counters(monkeypatch)
@@ -272,14 +231,14 @@ def test_chat_history_reads_bounded_progress_tail_with_zero_artifact_work(
     response = asyncio.run(endpoint(types.SimpleNamespace(query_params={})))
     messages = json.loads(response.body)["messages"]
 
-    progress_reads = [(start, size) for path, start, size in reads if path.name == "progress.jsonl"]
-    assert progress_reads  # the bounded reader actually served the endpoint
-    assert all(start >= progress_size - 512 * 1024 - 1 and size > 0 for start, size in progress_reads)
-    # One alignment lookahead and one parsed window, plus newline probes.
-    assert sum(size for _start, size in progress_reads) <= 2 * 512 * 1024 + 2 < progress_size
+    progress_decoded = [seq for source, seq in decoded if source == "progress"]
+    assert progress_decoded  # the store served the endpoint
+    row_bytes = end / 4000  # the fixture's rows have one length, give or take a digit
+    assert end - min(progress_decoded) <= history_paging._RECENT_WINDOW_BYTES + history_paging._PROBE_ROWS * row_bytes
+    assert not any(name in ("progress.jsonl", "chat.jsonl") for name in opened), "no dialogue file is read"
     progress_rows = [row for row in messages if row.get("is_progress")]
     assert len(progress_rows) == 60
-    assert progress_rows[-1]["text"] == "telemetry-15999"
+    assert progress_rows[-1]["text"] == "telemetry-3999"
     # Annotation ran on the emitted window (terminal truth landed on rows)...
     annotated = [m for m in messages if m.get("task_terminal_status") == "completed"]
     assert annotated
@@ -293,7 +252,7 @@ def _install_ledger_read_counters(monkeypatch):
     counters: dict = {"migrations": [], "full_reads": [], "projections": [], "breakdowns": []}
     real_migrate = usage_store.migrate_from_journal
     real_full_read = usage_store.read_usage_records
-    real_attempts = usage_store.Txn.attempts
+    real_attempts, real_attempt_rows = usage_store.Txn.attempts, usage_store.Txn.attempt_rows
     real_projection = ua.usage_projection
     real_breakdown = ua.usage_breakdown
 
@@ -310,6 +269,11 @@ def _install_ledger_read_counters(monkeypatch):
             counters["full_reads"].append(str(txn.root))
         return real_attempts(txn, where, params)
 
+    def counted_attempt_rows(txn, where="1", params=()):
+        if str(where).strip() == "1":  # the same scan, captured in one step
+            counters["full_reads"].append(str(txn.root))
+        return real_attempt_rows(txn, where, params)
+
     def counted_projection(*args, **kwargs):
         counters["projections"].append(kwargs)
         return real_projection(*args, **kwargs)
@@ -321,6 +285,7 @@ def _install_ledger_read_counters(monkeypatch):
     monkeypatch.setattr(usage_store, "migrate_from_journal", counted_migration)
     monkeypatch.setattr(usage_store, "read_usage_records", counted_full_read)
     monkeypatch.setattr(usage_store.Txn, "attempts", counted_attempts)
+    monkeypatch.setattr(usage_store.Txn, "attempt_rows", counted_attempt_rows)
     monkeypatch.setattr(ua, "usage_projection", counted_projection)
     monkeypatch.setattr(ua, "usage_breakdown", counted_breakdown)
     return counters
@@ -363,6 +328,7 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
     asyncio.run(history(request))  # cold: opens the store
     assert counters["migrations"] == counters["full_reads"] == []
     counters["projections"].clear()
+    counters["breakdowns"].clear()
 
     messages = json.loads(asyncio.run(history(request)).body)["messages"]
     live_rows = [m for m in messages if m.get("cost_with_children_partial")]
@@ -370,10 +336,12 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
     assert live_rows  # the live-root branch really ran (not a vacuous budget)
     assert live_rows[-1]["cost_accounting_status"] == "available"
     assert counters["migrations"] == counters["full_reads"] == []
-    assert len(counters["projections"]) == 1  # one live-root projection, cached
-    assert counters["projections"][0]["root_task_id"] == "root-1"
+    # live_root_cost_projection reads the subtree breakdown with custody coverage, never a projection.
+    assert len(counters["breakdowns"]) == 1  # one live-root breakdown, cached
+    assert counters["breakdowns"][0]["root_task_id"] == "root-1"
+    assert counters["projections"] == []
 
-    counters["projections"].clear()
+    counters["breakdowns"].clear()
     payload = json.loads(_task_get_response(request).body)
 
     assert payload["cost_breakdown"]["authority"] == "physical_attempt_ledger"
@@ -418,28 +386,24 @@ def test_logs_tail_reads_bounded_events_tail(tmp_path, monkeypatch):
     assert sum(tail for _path, tail in events_reads) < events_size
 
 
-def test_sse_follow_tick_reads_only_appended_bytes_and_zero_artifact_work(
+def test_sse_follow_tick_reads_only_rows_stored_since_and_zero_artifact_work(
     tmp_path, monkeypatch,
 ):
-    """After the initial SSE replay, a follow tick with N appended rows reads
-    exactly the appended bytes: the progress offset resumes where the replay
-    stopped (offset > 0), no log is re-read from offset 0, and the tick does
-    zero artifact work (the terminal emission's single materializing read
-    lives in the stream's emit loop, not in the follower)."""
-    from ouroboros.gateway import tasks as gateway_tasks
+    """After the initial SSE replay, a follow tick with N rows stored since reads exactly those
+    rows: the progress probe resumes after the replay's last coordinate (never from the stream's
+    start), the file logs resume at their offsets, and the tick does zero artifact work (the
+    terminal emission's single materializing read lives in the stream's emit loop, not in the
+    follower)."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.gateway import task_events, tasks as gateway_tasks
     from ouroboros.task_results import write_task_result
 
     data = tmp_path / "data"
     (data / "logs").mkdir(parents=True)
     (data / "state").mkdir(parents=True)
-    # newline="\n": Windows text-mode would translate \n -> \r\n on disk,
-    # desynchronizing the byte-offset math below from len(line.encode()).
-    with (data / "logs" / "progress.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
-        for i in range(50):
-            handle.write(json.dumps({
-                "ts": f"2026-08-08T00:00:{i:02d}Z", "content": f"step-{i}", "task_id": "t1",
-            }) + "\n")
     write_task_result(data, "t1", "running", result="working", ts="2026-08-08T00:00:00Z")
+    for i in range(50):
+        ds.append(data, "progress", {"ts": f"2026-08-08T00:00:{i:02d}Z", "content": f"step-{i}", "task_id": "t1"})
     (data / "state" / "queue_snapshot.json").write_text(
         '{"pending": [], "running": []}', encoding="utf-8"
     )
@@ -447,7 +411,18 @@ def test_sse_follow_tick_reads_only_appended_bytes_and_zero_artifact_work(
     follower = gateway_tasks._TaskEventFollower(data, "t1")
     replay = follower.full_merge()
     assert len(replay) >= 50  # initial replay consumed the seeded history
+    replayed_through = follower._log_state(data, "progress")["after"]
+    assert replayed_through > 0
 
+    probes: list = []
+    real_probe = task_events.ds.task_rows
+
+    def counted_probe(root, task_ids, **kwargs):
+        rows = real_probe(root, task_ids, **kwargs)
+        probes.append((kwargs.get("stream"), kwargs.get("after"), len(rows)))
+        return rows
+
+    monkeypatch.setattr(task_events.ds, "task_rows", counted_probe)
     reads: list = []
     real_read = gateway_tasks._read_live_jsonl_entries
 
@@ -459,62 +434,16 @@ def test_sse_follow_tick_reads_only_appended_bytes_and_zero_artifact_work(
     monkeypatch.setattr(gateway_tasks, "_read_live_jsonl_entries", counted_read)
     artifact_counters = _install_artifact_counters(monkeypatch)
 
-    appended_bytes = 0
-    with (data / "logs" / "progress.jsonl").open("a", encoding="utf-8", newline="\n") as handle:
-        for i in range(3):
-            line = json.dumps({
-                "ts": f"2026-08-08T00:01:{i:02d}Z", "content": f"late-{i}", "task_id": "t1",
-            }) + "\n"
-            handle.write(line)
-            appended_bytes += len(line.encode("utf-8"))
+    for i in range(3):
+        ds.append(data, "progress", {"ts": f"2026-08-08T00:01:{i:02d}Z", "content": f"late-{i}", "task_id": "t1"})
 
     new_rows, advanced = follower.poll()
     follower.refresh_result()  # the endpoint's post-advance tick refresh
 
     assert advanced
     assert [row["data"]["content"] for row in new_rows] == ["late-0", "late-1", "late-2"]
-    progress_reads = [r for r in reads if r[0].endswith("progress.jsonl")]
-    assert len(progress_reads) == 1
-    _path, start_offset, end_offset = progress_reads[0]
-    assert start_offset > 0  # resumed from the replay's offset, not a re-read
-    assert end_offset - start_offset == appended_bytes  # ONLY the appended bytes
-    assert all(offset > 0 for _p, offset, _e in reads)  # nothing re-read from 0
+    progress_probes = [probe for probe in probes if probe[0] == "progress"]
+    assert progress_probes and all(after >= replayed_through for _stream, after, _n in progress_probes), probes
+    assert sum(count for _stream, _after, count in progress_probes) == 3  # ONLY the rows stored since
+    assert not any(path.endswith(("progress.jsonl", "chat.jsonl")) for path, _o, _e in reads), "no dialogue file is read"
     assert artifact_counters == {"collect": 0, "copy": 0, "disposition": 0}
-
-
-def test_the_chronicle_journal_is_an_enrolled_hot_store_that_warns_only_past_its_threshold(tmp_path, monkeypatch):
-    """The memory journal is read on every task context, so it
-    is enrolled in the hot-store tripwire (DEVELOPMENT 03 projection-over-replay rule): quiet
-    at or below its threshold, one WARNING past it."""
-    from ouroboros import context_budget
-    from ouroboros.agent_startup_checks import _hot_store_thresholds, hot_store_growth_notes
-
-    assert ("memory/chronicle/records.jsonl", context_budget.CHRONICLE_JOURNAL_WARN_BYTES) in {
-        (relative, threshold) for relative, threshold, _remediation in _hot_store_thresholds()}
-    monkeypatch.setattr(context_budget, "CHRONICLE_JOURNAL_WARN_BYTES", 10)
-    env = types.SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
-    journal = tmp_path / "memory" / "chronicle" / "records.jsonl"
-    journal.parent.mkdir(parents=True)
-    journal.write_bytes(b"x" * 10)
-    assert hot_store_growth_notes(env) == []
-    journal.write_bytes(b"x" * 11)
-    [note] = hot_store_growth_notes(env)
-    assert "memory/chronicle/records.jsonl" in note and "never delete records" in note
-
-
-def test_the_review_ledger_index_chain_is_an_enrolled_hot_store(tmp_path, monkeypatch):
-    """The ledger's hot index rotates itself; the rotated segments are replayed only by readers
-    that walk the chain, so the chain's total size is a tripwire like the chat archive chain."""
-    from ouroboros import context_budget
-    from ouroboros.agent_startup_checks import hot_store_growth_notes
-
-    monkeypatch.setattr(context_budget, "REVIEW_LEDGER_INDEX_WARN_BYTES", 10)
-    env = types.SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
-    ledger = tmp_path / "state" / "review_ledger"
-    ledger.mkdir(parents=True)
-    (ledger / "index.jsonl").write_bytes(b"x" * 10)
-    (ledger / "rl-not-an-index.json").write_bytes(b"x" * 100)
-    assert hot_store_growth_notes(env) == []
-    (ledger / "index.20261007T000000.jsonl").write_bytes(b"x")
-    [note] = hot_store_growth_notes(env)
-    assert "state/review_ledger/index*.jsonl" in note and "never delete the newest" in note

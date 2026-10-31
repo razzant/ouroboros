@@ -162,10 +162,10 @@
  */
 
 /**
- * WS frame: the translation memory of `language` reached `revision` (generated, imported or regenerated).
+ * WS frame: the translation memory of `language` reached `revision` (generated, imported, regenerated or an owner pin).
  * @typedef {Object} UiI18nUpdatedOutbound
  * @property {'ui_i18n_updated'} type
  * @property {string} language
  * @property {number} revision
- * @property {number=} applied  // entries the generator wrote in this batch; absent for import and regenerate
+ * @property {number=} applied  // entries the generator wrote in this batch; absent for import, regenerate and a pin
  */

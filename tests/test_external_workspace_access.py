@@ -23,14 +23,15 @@ from ouroboros.tool_access import (
     resolve_shell_cwd,
     user_files_path_block_reason,
 )
-from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-from ouroboros.presence_capabilities import (
+from ouroboros.presence_authority import presence_ceiling_payload
+from tests.frozen_presence_authority import build_presence_capability_ceiling
+from tests.frozen_presence_capabilities import (
     PresenceProfileResolution,
     PresenceResourceTarget,
     PresenceSelection,
     PresenceToolTarget,
 )
-from ouroboros.presence_runtime import ResolvedPresenceRuntime
+from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._typed_guard_shared import _shell_guard_text
 

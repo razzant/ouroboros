@@ -107,7 +107,7 @@ def test_swarm_host_child_zero_run_is_fanout_and_depth_stays_host_visible(tmp_pa
 
     rollup = build_swarm_efficiency(
         types.SimpleNamespace(drive_root=tmp_path),
-        {"id": "root", "metadata": {"force_plan_source": "swarm"}},
+        {"id": "root", "metadata": {"subagents_mode": "swarm"}},
     )
     assert rollup["subagent_count"] == 1
     assert rollup["intent_source"] == "swarm"

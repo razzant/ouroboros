@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from supervisor import state, state_initialization
+from tests._store_shared import remove_store_tree
 
 
 @pytest.fixture
@@ -303,7 +304,8 @@ def test_an_owner_restart_never_replaces_a_panic_flag_still_owed_its_controls(ro
     monkeypatch.setattr(restart, "_stop_owned_work", lambda ctx: [])
     monkeypatch.setattr(restart, "_request_restart_exit", lambda owner=False: None)
     assert restart._perform_owner_restart(SimpleNamespace(safe_restart=None)) == (True, "")
-    assert flag.read_text() == "panic" and (root / "state" / "owner_restart_no_resume.flag").exists()
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert flag.read_text() == "panic" and active_restart_transaction(root)["door"] == "owner_restart"
     monkeypatch.setattr(worker_chat_lane, "_pool", lambda: SimpleNamespace(DRIVE_ROOT=root, load_state=state.load_state))
     state.save_state(_prior())
     worker_chat_lane.auto_resume_after_restart()  # the owner-restart boot still settles the Panic debt
@@ -476,7 +478,7 @@ def test_only_a_directory_ancestor_proves_the_state_absent(root, monkeypatch, er
     assert state_initialization.supervisor_evidence(root) == ("none", "")
     assert state.init_state().quality == "current" == state.read_state().quality
     assert state_initialization.read_witness(root)[1]["phase"] == "complete"
-    shutil.rmtree(root / "state")
+    remove_store_tree(root / "state")  # the boot above opened its stores
     real_stat = os.stat
     monkeypatch.setattr(os, "stat", lambda path, *a, **k: (_ for _ in ()).throw(PermissionError(
         errno.EACCES, "denied")) if pathlib.Path(path) == root / "state" else real_stat(path, *a, **k))

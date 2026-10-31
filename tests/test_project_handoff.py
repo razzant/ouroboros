@@ -141,8 +141,7 @@ def test_agent_producers_publish_one_main_receipt_and_none_for_project_origins(t
     monkeypatch.setattr(td, "enqueue_terminal_delivery_outcome",
                         lambda root, event, **kw: _ORIGINAL_OUTCOME(root, event, event_queue=queue))
     monkeypatch.setattr(routing, "_emit_routing_receipt", lambda *a, **k: None)
-    monkeypatch.setattr("supervisor.workers.ensure_project_scope",
-                        lambda evt, ctx: {"status": "delivered", "project_id": project["id"]})
+    monkeypatch.setattr("supervisor.workers.DRIVE_ROOT", tmp_path)
     ctx = type("Ctx", (), {"DRIVE_ROOT": tmp_path})()
     for task_id in ("from-main", "from-main", "from-room"):
         routing._handle_ensure_project_scope({"task_id": task_id, "project_id": project["id"]}, ctx)

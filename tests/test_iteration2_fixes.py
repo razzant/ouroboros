@@ -120,6 +120,8 @@ def _ctx(drive_root, active_model="google/gemini-3.5-flash"):
     from ouroboros.tools.registry import ToolContext
 
     ctx = MagicMock(spec=ToolContext)
+    ctx.budget_drive_root = None
+    ctx.task_metadata = {}
     ctx.event_queue = None
     ctx.task_id = "t"
     ctx.current_task_type = "task"
@@ -128,6 +130,14 @@ def _ctx(drive_root, active_model="google/gemini-3.5-flash"):
     ctx.task_model_override = ""
     ctx.messages = []
     return ctx
+
+
+def _remove_drive(tmp):
+    """The tool opened this drive's store; its cached handles go first (Windows refuses to delete an open file)."""
+    from ouroboros import store
+
+    store.close_connections_under(pathlib.Path(tmp))
+    shutil.rmtree(tmp)
 
 
 def _img_under_uploads():
@@ -159,7 +169,7 @@ def test_view_image_injects_native_block_for_vision_model():
             for b in blocks
         ), "expected a native data:image/ block appended to the conversation"
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_blind_model_still_attaches_for_send_time_routing():
@@ -173,7 +183,7 @@ def test_view_image_blind_model_still_attaches_for_send_time_routing():
         assert "local image block" in res.lower()
         assert ctx.messages  # send-time routing will caption or omit for blind routes
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_non_image_fail_closed():
@@ -190,7 +200,7 @@ def test_view_image_non_image_fail_closed():
             res = _view_image(ctx, str(bad))
         assert "⚠️" in res and "supported image" in res.lower()
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_path_outside_roots_rejected():
@@ -207,7 +217,7 @@ def test_view_image_path_outside_roots_rejected():
             res = _view_image(ctx, str(outside))
         assert "⚠️" in res and "workspace" in res.lower()
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_is_not_web_gated():

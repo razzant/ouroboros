@@ -190,7 +190,7 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
     class decides that; the compat renderer invents no cap without a measurement."""
     from ouroboros.loop_tool_execution import _truncate_tool_result
     from ouroboros.tool_capabilities import UNTRUNCATED_REPO_READ_PREFIXES, requested_result_view
-    from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
+    from ouroboros.tool_result_delivery import RECOVER_PAGEABLE, RESULT_VIEW_MARKER
 
     oversized = "x" * 85_000 + "\nLAST LINE"
     for rel in ("docs/architecture/06-agent-core.md", "docs/development/06-rules-by-change-class.md",
@@ -200,7 +200,7 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
         assert _truncate_tool_result(oversized, "read_file", args) == oversized, rel
         view = _truncate_tool_result(oversized, "read_file", args, allowance_chars=6_000)
         assert len(view) < len(oversized) and "LAST LINE" in view and RESULT_VIEW_MARKER in view, rel
-        assert "or page this tool (offset/limit) for the omitted range" in view or "FULL_RESULT_SOURCE_UNAVAILABLE" in view
+        assert RECOVER_PAGEABLE in view or "FULL_RESULT_SOURCE_UNAVAILABLE" in view
     # The book-source class still exists as classification (prompts, both books).
     assert "docs/architecture/" in UNTRUNCATED_REPO_READ_PREFIXES
 

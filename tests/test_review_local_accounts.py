@@ -110,11 +110,12 @@ def test_two_local_folds_keep_earlier_note_index_and_sources_through_cold_captur
     assert actor_notes(_capture(harness.make_ctx())) == notes
     assert _state(harness) == original_state
     env, task = successor(ctx)
+    from ouroboros.main_context_authority import predecessor_notes_message
+
     runtime = _task_authority_projection(env, task)
-    historical = runtime["predecessor_authority"]["historical_review_context"]
-    assert FIRST in historical["authored_account"]["text"] and SECOND in historical["authored_account"]["text"]
-    assert historical["authored_account"]["authorship"] == "predecessor_actor"
-    assert not historical["source_gaps"]
+    assert "historical_review_context" not in json.dumps(runtime), "no history walk in the frozen prefix"
+    note = predecessor_notes_message(task, drive_root=ctx.drive_root)["content"]
+    assert FIRST in note and SECOND in note and note.index(FIRST) < note.index(SECOND)
     assert view.SELECTED_VIEW_FIELD not in load_task_result(ctx.drive_root, task["id"])
 
 
@@ -370,14 +371,19 @@ def test_old_settled_fail_and_linked_open_obligation_survive_another_history_gro
     shown = _index(after)[-1]
     assert "OPEN CRITIC REASON" in str(shown) and "OPEN OBLIGATION STILL NEEDS REPAIR" in str(shown)
     assert any(r["decision_kind"] == "actor_history_group" for r in shown["decision_rows"])
-    prior = next(r for r in shown["rounds"] if r.get("review_record_id") == records[0])
-    assert prior["verdict"]["aggregate"] == "FAIL"
+    prior = next(e for e in shown["addresses"].values() if e["read"].get("arguments", {}).get("ids") == [records[0]])
+    assert "aggregate verdict FAIL" in prior["what"] and "rounds" not in shown
     assert [review_ledger.load_record(drive, rid) for rid in records] == canonical
     assert review_dispute_history(drive_root=drive, repo_root=root, task_id=ctx.task_id)["open_obligations"]
 
 
 def _groups(messages):
     return [row for row in _index(messages)[-1]["decision_rows"] if row["decision_kind"] == "actor_history_group"]
+
+
+def _anchor(messages, group):
+    """The immutable selected-view source a group row's address key resolves to."""
+    return _index(messages)[-1]["addresses"][group["source"]]["source_ref"]
 
 
 def _tail_fold(ctx, messages, note):
@@ -406,7 +412,7 @@ def test_explicit_larger_group_retires_covered_groups_preserves_disjoint_and_exa
     assert len(groups) == 2 and {g["remark"] for g in groups} == {"Account 2", "Merged account"}
     assert not any(g["reason"] in {notes[0]["reason"], notes[1]["reason"]} for g in groups)
     disjoint = next(g for g in groups if g["remark"] == "Account 2")
-    assert disjoint["source"] == {"source_ref": source, "field": "review_notes[2]"}
+    assert _anchor(merged, disjoint) == view._immutable_ref(source)  # the unchanged group keeps its old exact source
     assert read_actor_source_bytes(ctx.drive_root, ctx.task_id, source) == original
     assert _groups(_capture(ctx)) == groups
     saved = view.load_review_history_view(receipt["selected_review_history_view"],
@@ -450,8 +456,8 @@ def test_changed_group_prose_gets_new_source_and_model_cannot_supply_old_anchor(
     revised, receipt, _ = apply_local(ctx, first, SECOND, all_units=True, review_notes=[changed])
     pointer = receipt["selected_review_history_view"]
     group = _groups(revised)[0]
-    assert group["reason"] == changed["reason"] and group["source"]["source_ref"] == pointer["source_ref"]
-    assert group["source"]["source_ref"] != old_source
+    assert group["reason"] == changed["reason"] and _anchor(revised, group) == view._immutable_ref(pointer["source_ref"])
+    assert _anchor(revised, group) != view._immutable_ref(old_source)
     assert _groups(_capture(ctx)) == [group]
     assert read_actor_source_bytes(ctx.drive_root, ctx.task_id, old_source) == old_bytes
     saved = view.load_review_history_view(pointer, lambda ref: read_actor_source_bytes(ctx.drive_root, ctx.task_id, ref))

@@ -202,12 +202,6 @@ def test_retry_rungs_carry_their_own_seals(data_root, monkeypatch):
             raise _Rejected("temperature unsupported")
         return _Response()
 
-    def retry_without_temperature(candidate, model, exc):
-        retry = copy.deepcopy(candidate)
-        retry.pop("temperature", None)
-        return retry
-
-    monkeypatch.setattr(client, "_retry_without_optional_sampling", retry_without_temperature)
     monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *args: None)
     payload = {**_payload(), "temperature": 0.7}
     with ua.usage_scope(_scope(data_root, "task-rungs")):

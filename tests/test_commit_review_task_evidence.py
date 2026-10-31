@@ -490,3 +490,23 @@ def test_real_packet_assembly_omits_optional_excerpt_before_required_material(ev
     assert "docs/ARCHITECTURE.md" in fitted and "docs/DEVELOPMENT.md" in fitted
     assert "OPTIONAL_IMAGE_EXCERPT" not in fitted and "excerpt omitted to fit" in fitted
     assert ctx._commit_review_evidence == evidence
+
+
+def test_selected_visual_source_adds_no_mask_of_its_own(evidence_context):
+    """The selected trace rows reach reviewers as the trace holds them (owner, 2026-10-29);
+    a response stored masked in observability stays as stored — never claimed restored."""
+    ctx = evidence_context
+    keyed = 'OPENAI_API_KEY=sk-' + 'b' * 40 + ' in {"token": "abcd1234"}'
+    model_response(ctx, "before", "Inspect the screenshot")
+    tool_response(ctx, "image", "before", tool="vlm_query", result=keyed,
+                  args={"path": "/tmp/view.png", "prompt": "read token=abcd1234 from the form"})
+    model_response(ctx, "after", "The page shows " + keyed)
+    source = capture_commit_review_evidence(ctx)
+    exact = read_actor_source_bytes(ctx.budget_drive_root, ctx.task_id, source["source_ref"]).decode()
+    [row] = [json.loads(block) for block in exact.split("\n\n")[2:]]
+    assert row["result"] == keyed
+    assert row["args"]["prompt"] == "read token=abcd1234 from the form"
+    # The response comes from its observability record, written under that store's own
+    # redaction: the view carries those stored bytes, neither re-masked nor restored.
+    from ouroboros.observability import redact_projection
+    assert row["following_visible_text"] == redact_projection("The page shows " + keyed).value

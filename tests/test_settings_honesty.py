@@ -126,14 +126,11 @@ def test_failed_mcp_reconfigure_becomes_a_save_warning(monkeypatch, tmp_path):
     report "took effect immediately" without saying so."""
     import types
 
+    from ouroboros import mcp_client
     from ouroboros.gateway import settings as settings_mod
 
-    fake_mcp = types.SimpleNamespace(
-        reconfigure_from_settings=lambda *_a, **_k: (_ for _ in ()).throw(
-            RuntimeError("mcp exploded")),
-        refresh_all_background=lambda *_a, **_k: None,
-    )
-    monkeypatch.setitem(__import__("sys").modules, "ouroboros.mcp_client", fake_mcp)
+    monkeypatch.setattr(mcp_client, "configuration_changed", lambda *_a, **_k:
+                        (_ for _ in ()).throw(RuntimeError("mcp exploded")))
 
     class _Req:
         app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root=str(tmp_path)))
@@ -164,9 +161,9 @@ def test_failed_skills_reload_becomes_a_save_warning(monkeypatch, tmp_path):
     assert "RuntimeError" in joined
 
 
-def test_provider_base_url_keys_apply_on_the_next_task_not_restart(monkeypatch, isolated_settings):
-    """llm.py resolves base URLs per call via configured() (env refreshed at
-    every task start), so a restart was never required for them."""
+def test_provider_base_url_keys_apply_at_once_without_a_restart(monkeypatch, isolated_settings):
+    """The resolver reads base URLs per call from the live route view (``route_choice``),
+    so they need neither a restart nor the next task."""
     from ouroboros.gateway.settings import _RESTART_REQUIRED_KEYS
 
     for key in ("OPENAI_BASE_URL", "OPENAI_COMPATIBLE_BASE_URL",
@@ -176,7 +173,12 @@ def test_provider_base_url_keys_apply_on_the_next_task_not_restart(monkeypatch, 
         assert key not in _RESTART_REQUIRED_KEYS
     data = _save(monkeypatch, isolated_settings, {"OPENAI_BASE_URL": "https://example.test/v1"})
     assert not data.get("restart_required")
-    assert data.get("next_task_changed") is True
+    # A route key is read live by every process: immediate, never "the next task".
+    assert data.get("immediate_changed") is True and not data.get("next_task_changed")
+    assert _save(monkeypatch, isolated_settings, {"OUROBOROS_MODEL": "openai::next-main"}).get("immediate_changed") is True
+    # A window is read when a task's context plan is built: the next task, or the running one's next route change.
+    data = _save(monkeypatch, isolated_settings, {"OUROBOROS_MODEL_CONTEXT_WINDOWS": {"main": 200000}})
+    assert data.get("next_task_changed") is True and not data.get("immediate_changed")
 
 
 def test_consciousness_wake_bounds_apply_without_a_restart(monkeypatch, isolated_settings):

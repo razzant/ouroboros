@@ -1,8 +1,8 @@
-"""How an advisory review status is presented inside the context.
+"""How the review status is presented inside the context.
 
-Split verbatim out of ``tests/test_context.py`` by theme. This module owns the advisory
-review status block the context carries and everything it must and must not claim about
-a run.
+Split verbatim out of ``tests/test_context.py`` by theme. This module owns the review
+status block the context carries and everything it must and must not claim; the retired
+advisory lane's archived rows claim nothing there (``tests/test_advisory_run_archive.py``).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 
 class TestAdvisoryReviewStatusInContext:
-    """Tests that advisory review status appears in LLM context when runs exist."""
+    """Tests that the review status reaches the LLM context, and archived runs never do."""
 
     def _make_env(self, tmp_path):
         class FakeEnv:
@@ -42,33 +42,26 @@ class TestAdvisoryReviewStatusInContext:
         (tmp_path / "memory" / "scratchpad.md").write_text('x' * 300, encoding="utf-8")
         return FakeEnv()
 
-    def test_advisory_status_in_build_llm_messages(self, tmp_path):
-        """format_status_section returns non-empty string when runs exist."""
-        from ouroboros.review_state import (
-            AdvisoryReviewState, AdvisoryRunRecord, save_state, format_status_section
-        )
-        state = AdvisoryReviewState()
-        state.advisory_runs.append(AdvisoryRunRecord(
-            snapshot_hash="abc123",
-            commit_message="test commit",
-            status="fresh",
-            ts="2026-01-01T00:00:00",
-            items=[{"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "ok"}],
-        ))
+    def test_archived_advisory_rows_alone_render_no_review_history(self, tmp_path):
+        """The retired lane's rows are an archive: alone they render as an empty history."""
+        from ouroboros.review_state import AdvisoryReviewState, format_status_section, load_state, save_state
+        state = AdvisoryReviewState(advisory_runs=[{
+            "snapshot_hash": "abc123", "commit_message": "test commit", "status": "fresh",
+            "ts": "2026-01-01T00:00:00",
+            "items": [{"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "ok"}],
+        }])
         save_state(tmp_path, state)
 
-        loaded = __import__("ouroboros.review_state", fromlist=["load_state"]).load_state(tmp_path)
-        section = format_status_section(loaded)
-        assert "Advisory Pre-Review Status" in section
-        assert "FRESH" in section
-        assert "abc123" in section
+        section = format_status_section(load_state(tmp_path))
+        assert section == format_status_section(AdvisoryReviewState())
+        assert "FRESH" not in section and "abc123" not in section
 
     def test_advisory_status_empty_when_no_runs(self, tmp_path):
-        """format_status_section returns 'No advisory runs' when state is empty."""
+        """format_status_section names the empty history when state is empty."""
         from ouroboros.review_state import AdvisoryReviewState, format_status_section
         state = AdvisoryReviewState()
         section = format_status_section(state)
-        assert "No advisory runs" in section
+        assert "No reviewed attempts recorded yet." in section
 
     def test_review_continuity_context_surfaces_live_gate_and_continuation(self, tmp_path):
         from ouroboros.agent_task_pipeline import build_review_context
@@ -76,7 +69,6 @@ class TestAdvisoryReviewStatusInContext:
         from ouroboros.memory import Memory
         from ouroboros.review_state import (
             AdvisoryReviewState,
-            AdvisoryRunRecord,
             CommitAttemptRecord,
             compute_snapshot_hash,
             make_repo_key,
@@ -96,14 +88,16 @@ class TestAdvisoryReviewStatusInContext:
         repo_key = make_repo_key(tmp_path / "repo")
         snapshot_hash = compute_snapshot_hash(tmp_path / "repo")
         state = AdvisoryReviewState()
-        state.advisory_runs.append(AdvisoryRunRecord(
-            snapshot_hash=snapshot_hash,
-            commit_message="test commit",
-            status="stale",
-            ts="2026-04-07T09:59:00+00:00",
-            repo_key=repo_key,
-            bypass_reason="manual audit override",
-        ))
+        state.advisory_runs.append({  # an archived row of the retired lane
+            "snapshot_hash": snapshot_hash, "commit_message": "test commit", "status": "stale",
+            "ts": "2026-04-07T09:59:00+00:00", "repo_key": repo_key, "bypass_reason": "manual audit override",
+        })
+        from ouroboros import review_ledger
+
+        review_ledger.write_record(tmp_path, {  # the preflight look the marker below stales
+            "record_id": review_ledger.new_record_id(), "state": "settled", "surface": "preflight",
+            "ts": "2026-04-07T09:58:00+00:00", "verdict": {"aggregate": "PASS"},
+            "subject": {"root": str(tmp_path / "repo")}, "rows": []})
         state.last_stale_from_edit_ts = "2026-04-07T10:00:00+00:00"
         state.last_stale_reason = "edit_text mutated tracked.py"
         state.last_stale_repo_key = repo_key
@@ -167,7 +161,7 @@ class TestAdvisoryReviewStatusInContext:
         assert "Commit-readiness debt" in dynamic_text
         assert "stale_marker=2026-04-07T10:00:00" in dynamic_text
         for retired in ("Advisory readiness", "repo_commit_ready", "advisory_status=", "snapshot_hash=",
-                        "bypass_reason=", "no advisory run matches"):
+                        "bypass_reason=", "no advisory run matches", "manual audit override"):
             assert retired not in dynamic_text, retired
         assert "### Open review continuations" in dynamic_text
         assert "critical_finding=tests_affected: Fix the failing test before commit" in dynamic_text
@@ -180,7 +174,6 @@ class TestAdvisoryReviewStatusInContext:
         from ouroboros.agent_task_pipeline import build_review_context
         from ouroboros.review_state import (
             AdvisoryReviewState,
-            AdvisoryRunRecord,
             CommitAttemptRecord,
             compute_snapshot_hash,
             make_repo_key,
@@ -198,13 +191,10 @@ class TestAdvisoryReviewStatusInContext:
         repo_a_key = make_repo_key(repo_a)
         repo_b_key = make_repo_key(repo_b)
         state = AdvisoryReviewState()
-        state.advisory_runs.append(AdvisoryRunRecord(
-            snapshot_hash=compute_snapshot_hash(repo_a),
-            commit_message="repo a ready",
-            status="fresh",
-            ts="2026-04-07T10:00:00+00:00",
-            repo_key=repo_a_key,
-        ))
+        state.advisory_runs.append({  # an archived row of the retired lane
+            "snapshot_hash": compute_snapshot_hash(repo_a), "commit_message": "repo a ready",
+            "status": "fresh", "ts": "2026-04-07T10:00:00+00:00", "repo_key": repo_a_key,
+        })
         state.record_attempt(CommitAttemptRecord(
             ts="2026-04-07T10:01:00+00:00",
             commit_message="repo b blocked",

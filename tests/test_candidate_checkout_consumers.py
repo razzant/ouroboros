@@ -205,23 +205,33 @@ def test_alternate_checkout_drift_refuses_restart_before_spawning(consumer, tmp_
 def test_alternate_consumers_retain_unproven_tree_and_cannot_clear_failed_pin(
     consumer, source, tmp_path, launch_probe, failure,
 ):
+    from tests._shared import retire_synthetic_retention
+
     before = candidate.observe_candidate(source)
-    with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED"):
-        with consumer() as checkout:
-            server = start(checkout, tmp_path)
-            launch_probe.fail = failure
-            with pytest.raises(RuntimeError):
-                server.stop()
-            assert server.proc.poll() == 0, "root exit alone must not release the snapshot"
-            assert checkout.unproven == 1
-            with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED"):
-                server.stop()
-            with pytest.raises(candidate.CandidateError, match="CANDIDATE_CUSTODY"):
-                server.start()
-    assert (checkout.path / RETENTION_MARKER).is_file()
-    assert (server.data_root / RETENTION_MARKER).is_file()
-    assert launch_probe.runs[0].reaped and launch_probe.runs[0].closed
-    assert candidate.observe_candidate(source) == before
+    try:
+        with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED"):
+            with consumer() as checkout:
+                server = start(checkout, tmp_path)
+                launch_probe.fail = failure
+                with pytest.raises(RuntimeError):
+                    server.stop()
+                assert server.proc.poll() == 0, "root exit alone must not release the snapshot"
+                assert checkout.unproven == 1
+                with pytest.raises(candidate.CandidateError, match="CANDIDATE_RETAINED"):
+                    server.stop()
+                with pytest.raises(candidate.CandidateError, match="CANDIDATE_CUSTODY"):
+                    server.start()
+        assert (checkout.path / RETENTION_MARKER).is_file()
+        assert (server.data_root / RETENTION_MARKER).is_file()
+        assert launch_probe.runs[0].reaped and launch_probe.runs[0].closed
+        assert candidate.observe_candidate(source) == before
+    finally:
+        # launch_probe spawns no OS process; these are its injected failures' markers.
+        retire_synthetic_retention(checkout.path, "1 process tree(s) started from this checkout were never proven gone")
+        retire_synthetic_retention(server.data_root, "CANDIDATE_RETAINED: " + {
+            "reap_error": "CANDIDATE_RETAINED: process cleanup failed: descendant still alive",
+            "reap_raise": "unreadable process census", "close": "container close failed",
+            "wait": "parent wait failed"}[failure])
 
 
 def test_alternate_readiness_failure_reaps_before_releasing_snapshot(

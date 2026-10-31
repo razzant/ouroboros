@@ -9,6 +9,34 @@ from supervisor import workers
 from supervisor.active_activity import get_direct_activity_registry
 
 
+def _native_chat_thread(monkeypatch, actor, chat_id, phases, *, project_id, text="ordinary conversation"):
+    """Hand off phases/errors, not timing guesses; the runner bounds a stuck test."""
+    from supervisor import worker_chat_lane
+
+    def report_error(_admitted, error):
+        raise error  # The direct lane normally logs this instead of propagating it.
+
+    monkeypatch.setattr(worker_chat_lane, "_report_direct_chat_error", report_error)
+
+    def run():
+        try:
+            workers._run_chat_task(actor, chat_id, text, task_metadata={
+                "project_id": project_id, "origin_suppressed": True})
+        except BaseException as error:
+            phases.put(error)
+        finally:
+            phases.put("returned")
+
+    return threading.Thread(target=run)
+
+
+def _next_native_phase(phases, expected):
+    phase = phases.get()
+    if isinstance(phase, BaseException):
+        raise phase
+    assert phase == expected, (expected, phase)
+
+
 def _lane(monkeypatch, tmp_path):
     from supervisor import message_bus, state
 
@@ -24,7 +52,7 @@ def _lane(monkeypatch, tmp_path):
 
 def test_two_native_turns_are_independently_addressable_and_drainable(monkeypatch, tmp_path):
     from ouroboros import agent as agent_module
-    from ouroboros.owner_mailbox import drain_owner_messages
+    from ouroboros.owner_mailbox import drain_owner_entries
     from ouroboros.server_routing_context import _addressable_root_tasks
     from supervisor.steering import _handle_steer_task
 
@@ -69,12 +97,14 @@ def test_two_native_turns_are_independently_addressable_and_drainable(monkeypatc
         armed = workers.arm_direct_chat_turn(second.task["id"], lambda turn: "control-second")
         assert armed["stop_control_msg_id"] == "control-second"
         assert "stop_control_msg_id" not in workers.direct_chat_turn(first.task["id"])
+        from tests.test_steer_relay import held_quote
         _handle_steer_task({
+            "quotes": held_quote(tmp_path, "Use the blue variant", second.task["chat_id"]),
             "target_task_id": second.task["id"], "chat_id": second.task["chat_id"],
             "message": "Use the blue variant", "client_message_id": "owner-blue",
         }, ctx)
-        assert drain_owner_messages(tmp_path, second.task["id"]) == ["Use the blue variant"]
-        assert drain_owner_messages(tmp_path, first.task["id"]) == []
+        assert [e["text"] for e in drain_owner_entries(tmp_path, second.task["id"])] == ["Use the blue variant"]
+        assert drain_owner_entries(tmp_path, first.task["id"]) == []
         assert second._owner_message_generation == 1
         workers.close_repo_writer_admission("test-update")
         assert set(workers.drain_repo_writers(timeout=0.01)) == ids
@@ -156,19 +186,20 @@ def _mind():
 
     mind = object.__new__(BackgroundConsciousness)
     mind._last_wake_task_id = ""
+    mind._own_wake, mind._in_flight = {}, ""
     return mind
 
 
-def test_consciousness_sees_an_owner_turn_live_until_all_native_work_returns():
+def test_consciousness_ignores_owner_turns_through_native_completion():
     mind = _mind()
     registry = get_direct_activity_registry()
     registry.register("first", 1)
     registry.register("second", 2)
-    assert mind.live_turns() == ("", True)
+    assert mind.live_wake() == ""
     registry.unregister("first")
-    assert mind.live_turns() == ("", True)
+    assert mind.live_wake() == ""
     registry.unregister("second")
-    assert mind.live_turns() == ("", False)
+    assert mind.live_wake() == ""
 
 
 def test_native_post_task_retains_activity_and_delivers_answer_early(monkeypatch, tmp_path):
@@ -184,15 +215,15 @@ def test_native_post_task_retains_activity_and_delivers_answer_early(monkeypatch
     monkeypatch.setattr(workers, "get_event_q", lambda: bus)
     monkeypatch.setattr(workers, "RUNNING", {})
     monkeypatch.setattr(workers, "PENDING", [])
-    entered, release = threading.Event(), threading.Event()
+    phases, release = queue.Queue(), threading.Event()
     synthesis_threads = []
 
     def consolidate(*args, **kwargs):
         synthesis_threads.append(threading.current_thread())
-        entered.set()
-        assert release.wait(10)
+        phases.put("synthesis")
+        release.wait()  # Only the observing test releases this phase, never a timer.
 
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", consolidate)
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", consolidate)  # the first paid late stage
     monkeypatch.setattr(pipeline, "_record_task_facts", lambda *a, **kw: None)
     monkeypatch.setattr(post_task_evolution, "maybe_promote", lambda *a, **kw: None)
     env = SimpleNamespace(repo_dir=tmp_path / "repo", drive_root=tmp_path)
@@ -216,16 +247,13 @@ def test_native_post_task_retains_activity_and_delivers_answer_early(monkeypatch
     # Both ordinary Main and ordinary Project conversation shapes must use
     # the same lifetime; neither has a headless workspace/task marker.
     for project_id in ("", "room"):
-        entered.clear()
         release.clear()
         synthesis_threads.clear()
         actor = Actor()
-        thread = threading.Thread(target=workers._run_chat_task, args=(actor, 1, "ordinary conversation"), kwargs={
-            "task_metadata": {"project_id": project_id, "origin_suppressed": True},
-        })
+        thread = _native_chat_thread(monkeypatch, actor, 1, phases, project_id=project_id)
         try:
             thread.start()
-            assert entered.wait(5)
+            _next_native_phase(phases, "synthesis")
             task_id = actor.task["id"]
             # Use the real callback thread, not a fabricated post-task wait:
             # synthesis belongs to the still-registered direct execution.
@@ -237,7 +265,7 @@ def test_native_post_task_retains_activity_and_delivers_answer_early(monkeypatch
             assert workers.drain_repo_writers(0) == [task_id]
             assert _live_running_task_ids(SimpleNamespace(RUNNING={})) == [task_id]
             assert _has_running_agent_tasks() and _has_started_agent_tasks()
-            assert mind.live_turns() == ("", True)
+            assert mind.live_wake() == ""
             # Production early delivery ran before synthesis. The terminal
             # completion stays buffered until post-task work returns.
             early = bus.get_nowait()
@@ -250,13 +278,15 @@ def test_native_post_task_retains_activity_and_delivers_answer_early(monkeypatch
             for synthesis_thread in synthesis_threads:
                 if synthesis_thread is not thread:
                     synthesis_thread.join(timeout=10)
+        _next_native_phase(phases, "returned")
+        thread.join()
         assert not thread.is_alive()
         assert get_direct_activity_registry().snapshot() == []
         assert not post_task_synthesis_in_flight(tmp_path, task_id)
         assert workers.drain_repo_writers(0) == []
         assert _live_running_task_ids(SimpleNamespace(RUNNING={})) == []
         assert not _has_running_agent_tasks() and not _has_started_agent_tasks()
-        assert mind.live_turns() == ("", False)
+        assert mind.live_wake() == ""
         assert load_task_result(tmp_path, task_id)["root_phase_checkpoint"]["post_task_synthesis"] == "completed"
         # Retained final and early final use the existing delivery identity;
         # the supervisor deduplicates them. task_done reaches the bus last.

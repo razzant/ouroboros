@@ -36,6 +36,7 @@ def test_pause_of_real_tool_formatter_checkpoints_blocked_attempt_before_late_an
     (skill / "SKILL.md").write_text(
         "---\nname: demo\ndescription: inert fixture\nversion: 1.0.0\ntype: instruction\n---\n# Demo\n")
     registry = _registry(tmp_path, monkeypatch, "t-wait", 1)
+    registry._ctx.task_metadata = {"work_kind": "owner"}  # the owner's publication task
     _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     write_task_result(tmp_path, "t-wait", "running", root_task_id="t-wait")
     workers.RUNNING["t-wait"] = {"task": {"id": "t-wait", "type": "task", "chat_id": 0,

@@ -1,4 +1,4 @@
-"""Swarm admission preserves owner input and uses no routing model.
+"""Ordinary owner routing and promotion preserve owner input; legacy Swarm flags are inert.
 
 Queue, reservation, promotion, snapshot, result and annotation writers are real.
 Only model/process/bridge boundaries and isolated roots differ.
@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ from ouroboros.projects_registry import create_project, project_binding_for_task
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.utils import append_jsonl
 from tests._store_shared import unreadable_result
+from tests._socket_seal import block_network_except_socketpair
 from supervisor import git_ops, queue, state, worker_chat_lane as lane, workers
 from supervisor.events import _handle_promote_chat_to_task
 
@@ -128,9 +130,9 @@ def host(tmp_path, monkeypatch, request):
     monkeypatch.setattr(LLMClient, "chat", forbidden_model)
     monkeypatch.setattr(LLMClient, "chat_async", forbidden_model_async)
     monkeypatch.setattr(lane, "_run_chat_task", forbidden_lane)
-    monkeypatch.setattr("ouroboros.server_owner_routing._decision_turn_metadata", forbidden_model)
-    monkeypatch.setattr(socket.socket, "connect", forbidden_model)
-    monkeypatch.setattr(socket.socket, "connect_ex", forbidden_model)
+    monkeypatch.setattr("ouroboros.server_owner_routing._decision_turn_metadata", lambda _ctx, _chat, _id, meta, _roots=None: meta)
+    # Later asyncio/TestClient loops also need their Windows self-pipe, not provider access.
+    block_network_except_socketpair(monkeypatch, forbidden_model)
     ctx = SimpleNamespace(
         DRIVE_ROOT=root, PENDING=pending, RUNNING=running, WORKERS=pool, bridge=bridge,
         enqueue_task=queue.enqueue_task, persist_queue_snapshot=queue.persist_queue_snapshot,
@@ -187,9 +189,9 @@ def promotion_event(case):
     """Existing internal event shape, not a replacement router implementation."""
     return {
         "type": "promote_chat_to_task", "task_id": case.task_id, "routing_token": case.token,
-        "objective": case.incoming["text"] or case.incoming["image_caption"],
+        "objective": case.incoming["text"] or case.incoming["image_caption"] or case.incoming["log_text"],
         "chat_id": case.chat_id, "project_id": case.project_id, "client_message_id": case.client_message_id,
-        "task_constraint": CONSTRAINT, "source_ref": case.ref, "source_text": EXACT_OWNER,
+        "task_constraint": CONSTRAINT, "source_ref": case.ref, "source_text": case.incoming["log_text"],
         "client_surface": SURFACE, "attachment_uploads": case.incoming["task_metadata"]["chat_attachment_uploads"],
         "force_plan": True, "force_plan_source": "swarm", "workspace": "none",
     }
@@ -207,54 +209,33 @@ def capture(host, case, **extra):
 
 @pytest.mark.parametrize("room", ["main", "project"])
 @pytest.mark.parametrize("caption_only", [False, True], ids=["text", "caption"])
-def test_swarm_press_admits_root_without_any_model_call(host, room, caption_only):
+def test_legacy_swarm_flag_uses_ordinary_owner_turn(host, room, caption_only):
     case = incoming_case(host, room, caption_only=caption_only)
-    if room == "project":
-        host.running["existing-project-root"] = {"task": {"id": "existing-project-root", "root_task_id": "existing-project-root",
-            "delegation_role": "root", "type": "task", "project_id": case.project_id, "chat_id": case.chat_id,
-            "text": "An existing task", "drive_root": str(host.root)}}
+    calls = []
+    host.ctx.handle_chat_direct = lambda *args, **kwargs: calls.append((args, kwargs))
     server._route_owner_message(host.bridge, host.ctx, case.incoming)
-    fact = capture(host, case)
-    assert host.attempts == [], "Swarm admission must not enter a model-owning chat lane"
-    assert len(host.pending) == 1
-    task = host.pending[0]
-    assert task["id"] == case.task_id and task["root_task_id"] == case.task_id
-    assert task["chat_id"] == case.chat_id and str(task.get("project_id") or "") == case.project_id
-    assert task["objective"] == EXACT_OWNER
-    assert task["metadata"]["force_plan"] is True and task["metadata"]["force_plan_source"] == "swarm"
-    assert task["origin_message_ref"] == case.ref and task["origin_message_text"] == EXACT_OWNER
-    assert task["metadata"]["client_surface"] == SURFACE
-    assert len(task["attachment_manifest"]) == 1
-    assert Path(task["attachment_manifest"][0]["abs_path"]).read_bytes() == case.source.read_bytes()
-    assert fact["queue_snapshot"]["pending"][0]["task"]["origin_message_ref"] == case.ref
-    assert len(fact["annotations"]) == 1 and fact["annotations"][0]["status"] == "scheduled"
-    assert fact["scheduled_result"]["status"] == "scheduled"
-    assert not host.notices
-    assert not (host.root / "memory/owner_mailbox/existing-project-root.jsonl").exists()
+    assert not host.pending and len(calls) == 1 and not host.notices
+    args, kwargs = calls[0]
+    assert args[:2] == (case.chat_id, EXACT_OWNER)
+    assert kwargs["task_metadata"]["origin_message_ref"] == case.ref
+    assert kwargs["task_metadata"]["chat_attachment_uploads"][0]["path"] == str(case.source)
+    assert kwargs["task_metadata"]["client_surface"] == SURFACE
 
 
 @pytest.mark.parametrize("room", ["main", "project"])
-def test_swarm_press_admits_a_wordless_attachment_message(host, room):
-    # The web gateway no longer invents a caption for an uploaded photo: a send with
-    # attachments and no words reaches routing with neither, under the row's placeholder.
+def test_ordinary_promotion_preserves_a_wordless_attachment_message(host, room):
     case = incoming_case(host, room, wordless=True)
-    server._route_owner_message(host.bridge, host.ctx, case.incoming)
-    fact = capture(host, case)
-    assert host.attempts == [] and not host.notices
-    assert len(host.pending) == 1
+    outcome = _handle_promote_chat_to_task(promotion_event(case), host.ctx)
+    assert outcome["status"] == "scheduled" and len(host.pending) == 1
     task = host.pending[0]
-    assert task["id"] == case.task_id and str(task.get("project_id") or "") == case.project_id
     assert task["objective"] == task["origin_message_text"] == WORDLESS
     assert task["origin_message_ref"] == case.ref
-    assert task["metadata"]["force_plan"] is True and task["metadata"]["force_plan_source"] == "swarm"
-    assert len(task["attachment_manifest"]) == 1
     assert Path(task["attachment_manifest"][0]["abs_path"]).read_bytes() == case.source.read_bytes()
-    assert [row["status"] for row in fact["annotations"]] == ["scheduled"]
-    assert fact["scheduled_result"]["status"] == "scheduled"
+    assert not host.attempts
 
 
 @pytest.mark.parametrize("room", ["main", "project"])
-def test_internal_admission_preserves_scope_origin_attachments_force_plan(host, room):
+def test_internal_admission_preserves_scope_origin_attachments(host, room):
     case = incoming_case(host, room)
     outcome = _handle_promote_chat_to_task(promotion_event(case), host.ctx)
     fact = capture(host, case, outcome=outcome)
@@ -264,7 +245,7 @@ def test_internal_admission_preserves_scope_origin_attachments_force_plan(host, 
     assert task["id"] == case.task_id and task["root_task_id"] == case.task_id
     assert task["chat_id"] == case.chat_id and str(task.get("project_id") or "") == case.project_id
     assert task["origin_message_ref"] == case.ref and task["origin_message_text"] == EXACT_OWNER
-    assert task["metadata"]["force_plan"] is True and task["metadata"]["force_plan_source"] == "swarm"
+    assert "force_plan" not in task.get("metadata", {})
     assert task["metadata"]["client_surface"] == SURFACE
     manifest = task["attachment_manifest"]
     assert len(manifest) == 1 and manifest[0]["status"] == "staged"
@@ -295,7 +276,7 @@ def test_internal_admission_keeps_exact_objective_bytes(host, room):
 @pytest.mark.parametrize("phase", ["pending", "running", "terminal"])
 def test_replayed_client_message_id_admits_nothing_new(host, room, phase):
     case = incoming_case(host, room)
-    server._route_owner_message(host.bridge, host.ctx, case.incoming)
+    _handle_promote_chat_to_task(promotion_event(case), host.ctx)
     assert len(host.pending) == 1
     if phase != "pending":
         task = host.pending.pop()
@@ -304,7 +285,7 @@ def test_replayed_client_message_id_admits_nothing_new(host, room, phase):
         write_task_result(host.root, case.task_id, "running" if phase == "running" else "completed")
     before = capture(host, case)
     before_pending, before_running = copy.deepcopy(host.pending), copy.deepcopy(host.running)
-    server._route_owner_message(host.bridge, host.ctx, case.incoming)
+    _handle_promote_chat_to_task(promotion_event(case), host.ctx)
     assert host.pending == before_pending and host.running == before_running
     assert capture(host, case) == before
     assert len(before["annotations"]) == 1 and before["annotations"][0]["status"] == "scheduled"
@@ -337,24 +318,101 @@ def test_replay_identity_requires_original_durable_token(host, monkeypatch, coll
 
 
 @pytest.mark.parametrize("failure", ["update", "budget", "ledger"])
-def test_existing_admission_refusal_text_and_order(host, failure):
+def test_ordinary_routing_keeps_update_first_and_leaves_money_to_registered_turn(host, failure):
     case = incoming_case(host, "main")
-    budget_calls = []
+    calls = []
     if failure == "update":
         host.monkeypatch.setattr(workers, "repo_writer_admission_closed", lambda: "destructive_test_window")
-
-    def budget(_state, *, strict, **_display_read):
-        budget_calls.append({"strict": strict})
-        if failure == "update":
-            pytest.fail("budget floor ran before the rejecting owner-conversation floor")
-        if failure == "ledger":
-            raise OSError("isolated ledger unavailable")
-        return 0
-
-    host.monkeypatch.setattr(state, "budget_remaining", budget)
+    host.monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: pytest.fail("routing must leave money to the ordinary turn"))
+    host.monkeypatch.setattr(lane, "_run_chat_task", lambda *a, **kw: calls.append((a, kw)))
     server._route_owner_message(host.bridge, host.ctx, case.incoming)
-    fact = capture(host, case, budget_calls=budget_calls)
-    assert [row["text"] for row in host.notices] == [REFUSALS[failure]]
-    assert budget_calls == ([] if failure == "update" else [{"strict": True}])
-    assert not host.pending and not fact["annotations"] and not fact["scheduled_result"]
-    assert not host.attempts
+    assert not host.pending
+    if failure == "update":
+        assert [row["text"] for row in host.notices] == [REFUSALS["update"]] and not calls
+    else:
+        assert len(calls) == 1 and not host.notices
+
+
+def _tcp_fallback_host(monkeypatch, request):
+    """The host fixture over Windows' TCP socketpair, wherever this interpreter carries it."""
+    if not hasattr(socket, "_fallback_socketpair"):
+        pytest.skip("this interpreter exposes no TCP socketpair fallback to exercise")
+    monkeypatch.setattr(socket, "socketpair", socket._fallback_socketpair)
+    return request.getfixturevalue("host")
+
+
+def test_a_new_event_loop_builds_its_self_pipe_under_the_network_seal(monkeypatch, request):
+    host = _tcp_fallback_host(monkeypatch, request)
+    assert asyncio.run(asyncio.sleep(0, result="ran")) == "ran"
+    worker = []
+    portal = threading.Thread(target=lambda: worker.append(asyncio.run(asyncio.sleep(0, result="thread"))))
+    portal.start()
+    portal.join()
+    assert worker == ["thread"] and host.attempts == []
+
+
+def test_only_a_socketpairs_own_loopback_connect_passes_the_network_seal(monkeypatch, request):
+    listener = socket.create_server(("127.0.0.1", 0))
+    request.addfinalizer(listener.close)
+    listener.setblocking(False)
+    port = listener.getsockname()[1]
+    entered, release, pairing, armed = threading.Event(), threading.Event(), [], []
+    real_socketpair = socket.socketpair
+
+    def arrivals():
+        accepted = []
+        while True:
+            try:
+                accepted.append(listener.accept()[0])
+            except BlockingIOError:
+                break
+        for sock in accepted:
+            sock.close()
+        return len(accepted)
+
+    def sealed(address, method="connect"):
+        sock = socket.socket()
+        try:
+            with pytest.raises(ForbiddenModelEntry):
+                getattr(sock, method)(address)
+            with pytest.raises(OSError):
+                sock.getpeername()
+        finally:
+            sock.close()
+
+    def probe(*args, **kwargs):
+        if not armed:  # the host's own loop, prepared before the seal
+            return real_socketpair(*args, **kwargs)
+        if threading.current_thread() is not threading.main_thread():
+            entered.set()
+            assert release.wait(30)
+            return "held"
+        own = socket.socket()
+        own.connect(("127.0.0.1", port))  # the pair's own numeric loopback connect
+        own.close()
+        assert arrivals() == 1
+        for address in (("0.0.0.0", port), ("localhost", port), ("192.0.2.1", port)):
+            sealed(address)
+        sealed(("127.0.0.1", port), "connect_ex")
+        with pytest.raises(ForbiddenModelEntry):
+            LLMClient.chat(None)
+        assert arrivals() == 0
+        return "paired"
+
+    monkeypatch.setattr(socket, "socketpair", probe)
+    host = request.getfixturevalue("host")
+    armed.append(True)
+    assert socket.socketpair() == "paired" and len(host.attempts) == 5
+    pairing_thread = threading.Thread(target=lambda: pairing.append(socket.socketpair()))
+    pairing_thread.start()
+    try:
+        assert entered.wait(30)
+        sealed(("127.0.0.1", port))  # another thread inside the pairing window stays sealed
+    finally:
+        release.set()
+        pairing_thread.join()
+    assert pairing == ["held"]
+    for address in (("127.0.0.1", port), ("192.0.2.1", port)):
+        sealed(address)  # outside any socketpair
+    sealed(("127.0.0.1", port), "connect_ex")
+    assert arrivals() == 0 and len(host.attempts) == 9

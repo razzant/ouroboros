@@ -38,3 +38,9 @@ def test_the_frozen_list_is_what_registers_it(tmp_path: pathlib.Path, monkeypatc
 def test_package_discovery_and_the_frozen_list_agree_on_review_change(tmp_path: pathlib.Path) -> None:
     names = {schema["function"]["name"] for schema in _registry(tmp_path).schemas()}
     assert "review_change" in names
+
+
+def test_a_frozen_build_registers_skill_source_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    names = {schema["function"]["name"] for schema in _registry(tmp_path).schemas()}
+    assert {"skill_sources", "skill_search", "skill_install", "skill_update"} <= names

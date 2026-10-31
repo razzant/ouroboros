@@ -105,7 +105,7 @@ def test_knowledge_and_registry_argument_refusals_leave_files_untouched(tmp_path
 
 
 def test_presence_contract_refusal_and_valid_completion_remain_distinct():
-    from ouroboros.tools.presence import _finish_presence
+    from tests.presence_legacy_helpers import _finish_presence
 
     ctx = SimpleNamespace(task_contract={})
     result = _call(ctx, _finish_presence, "message", "hello")
@@ -657,7 +657,7 @@ def test_the_bootstrap_consumer_reads_the_native_start_result(tmp_path, monkeypa
     from ouroboros.subagent_bootstrap import _pre_start_leaf
 
     def _leaf(result):
-        monkeypatch.setattr(runtime, "delegate_start_entry", lambda *_a, **_k: result)
+        monkeypatch.setattr(runtime, "exact_start", lambda *_a, **_k: result)
         ctx = SimpleNamespace(task_id="t-boot", drive_root=tmp_path,
                               budget_drive_root=str(tmp_path), task_metadata={},
                               _configured_actor_bootstrap={"selected_subagent_id": "s"})
@@ -710,9 +710,13 @@ def test_the_hold_consumer_resumes_on_a_native_leaf_wake(tmp_path, monkeypatch):
 
 def test_the_wake_ack_is_keyed_on_the_published_wake_id(tmp_path, monkeypatch):
     """Hygiene: the acknowledgement belongs to the WAKE the result published, not
-    to every call spelled ``delegate_wait``; outer truncation must still fail it."""
+    to every call spelled ``delegate_wait``; outer truncation must still fail it.
+    This unit exercises the ACK flush; saved-checkpoint ordering is covered by
+    test_configured_session_restore's real save/cold-restore consumer tests.
+    """
     import ouroboros.delegate_supervision as supervision
     from ouroboros.loop_tool_execution import process_tool_results
+    from ouroboros.working_checkpoint import flush_content_acks
 
     ctx = _wait_ctx(tmp_path, "t-ack")
     wait_once, _ = _scripted_wait(['{"status": "succeeded", "run_id": "run-1", "last_seq": 4}'])
@@ -727,13 +731,16 @@ def test_the_wake_ack_is_keyed_on_the_published_wake_id(tmp_path, monkeypatch):
             [], {"tool_calls": []}, emit_progress=lambda _m, *, incident=None: None,
             tools=SimpleNamespace(_ctx=ctx),
         )
-        return supervision.supervision_checkpoint(ctx)
+        # Delivery alone cannot ACK: it waits for the incorporated-save boundary.
+        assert supervision.supervision_checkpoint(ctx)["runs"]["run-1"]["pending_wake"]["wake_id"] == wake_id
+        flush_content_acks(ctx)
+        return supervision.supervision_checkpoint(ctx)["runs"]["run-1"]
 
     # No published wake id: nothing is acknowledged, even on a delegate_wait row.
     assert _run(wake.text, {})["pending_wake"]["wake_id"] == wake_id
     # Truncated delivery with the id present: the ack still fails closed.
     assert _run(wake.text[:40], {"supervision_wake_id": wake_id})["pending_wake"]["wake_id"] == wake_id
-    # The exact delivered transcript text acknowledges exactly this wake.
+    # At the flush boundary, the exact delivered text acknowledges only this wake.
     settled = _run(wake.text, {"supervision_wake_id": wake_id})
     assert settled["pending_wake"] == {}
     assert settled["last_acknowledged_wake"]["wake_id"] == wake_id

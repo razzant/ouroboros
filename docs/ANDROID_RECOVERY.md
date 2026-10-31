@@ -64,11 +64,11 @@ mkdir -p "$backup_dir"
 adb -s "$ANDROID_SERIAL" shell -T su -c 'am force-stop ai.ouroboros.android'
 ```
 
-The script below checks the Panic marker and refuses to copy while a process
-remains chrooted into the installation or a mount beneath it is visible. It does
-not kill processes. Leave room on the phone for an additional uncompressed archive
-and, for the restore check, an extracted copy. The measured archive size above
-includes caches and builds; it is not a universal disk requirement.
+The script refuses to copy while a process remains chrooted in the installation
+or a mount beneath it is visible. It does not kill processes or require the Panic
+file: boot removes it after recording the receipt. Leave room for the archive and
+an extracted restore check. The measured size includes caches and builds; it is
+not a universal disk requirement.
 
 ## Create the archive and export the APK
 
@@ -79,7 +79,6 @@ umask 077
 base=/data/local/ouroboros-phone
 out=/data/local/tmp/ouroboros-recovery-$1
 bb=/data/adb/magisk/busybox
-test "$(cat "$base/rootfs/opt/ouroboros/data/state/panic_stop.flag")" = panic
 for process in /proc/[0-9]*; do
     process_root=$(readlink "$process/root" 2>/dev/null || true)
     if [ "$process_root" = "$base/rootfs" ]; then

@@ -1,7 +1,7 @@
 """Ouroboros — the numeric runtime knobs and their clamps.
 
-Worker count, task liveness windows, per-call ceilings, reviewer and acceptance
-budgets, subagent caps and delegation windows, plus fixed process and transport
+Worker count, task liveness windows, per-call ceilings, reviewer budgets,
+subagent caps and delegation windows, plus fixed process and transport
 bounds. Environment-or-default getters clamp into documented bands, so a typo
 falls back to the shipped value instead of disabling a rail.
 """
@@ -28,6 +28,11 @@ CLAUDEXOR_STOP_EXIT_WAIT_SEC = 5.0
 # Phone-native source compilation exceeds ten minutes; one contained platform
 # preparation may run for an hour, independently of ordinary tool/harness calls.
 EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC = 3600.0
+# Transport bound for one optional ditto process; expiry leaves the original patch intact.
+ARTIFACT_COMPRESSION_TIMEOUT_SEC = 120.0
+# Kill-and-reap bound for one captured local Git read (vcs_read history/identity); it sits
+# inside the default ToolEntry envelope so the reader reports and reaps before the loop abandons.
+GIT_READ_CAPTURE_TIMEOUT_SEC = 300.0
 
 
 EXTENSION_STREAM_CHUNK_BYTES = 64 * 1024
@@ -39,6 +44,10 @@ EXTENSION_CHILD_CLEANUP_GRACE_SEC = 2
 # budget, not two knobs: raise the drain only with the launcher wait (which ships with a release).
 LAUNCHER_STOP_GRACE_SEC = 10.0
 SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC = 3.0
+# A process-ending stop waits at most this long for launches and Resumes already writing their marks to hand
+# over to the still-running pool before it names returns and retires the pool (``pause_admission``). On Quit
+# it follows the supervisor join and precedes the custody write: at most this much more of the launcher wait above.
+STOP_ADMISSION_DRAIN_SEC = 2.0
 # A direct Restart's spawned successor (Windows, POSIX exec fallback) starts while its parent still
 # holds the data root: admission waits the same handoff the old port gets (find_free_port), no longer.
 SERVER_ADMISSION_WAIT_SEC = 10.0
@@ -119,9 +128,10 @@ def get_max_workers() -> int:
 
 
 def get_task_idle_timeout_sec() -> int:
-    """Idle window before a task is eligible for an activity-based stop: it has made
-    no REAL progress (its own last_progress_at) AND has no progressing subtree for
-    this long. The periodic 30s process heartbeat is liveness, NOT progress."""
+    """Silence window: a managed task with no REAL progress (its own last_progress_at)
+    AND no progressing subtree for this long gets dated attention, never a stop (#1376).
+    It also bounds a direct-chat turn's outage and accounting waits. The periodic 30s
+    process heartbeat is liveness, NOT progress."""
     return _clamped_number_setting("OUROBOROS_TASK_IDLE_TIMEOUT_SEC", low=60, cast=int)
 
 
@@ -219,11 +229,6 @@ def get_safety_call_timeout_sec() -> float:
     return _clamped_number_setting("OUROBOROS_SAFETY_CALL_TIMEOUT_SEC", low=5.0, high=600.0)
 
 
-def get_update_letter_timeout_sec() -> float:
-    """Transport ceiling of the update-letter LIGHT one-shot (`update_letter.py`)."""
-    return _clamped_number_setting("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", low=10.0, high=600.0)
-
-
 def get_ui_translation_timeout_sec() -> float:
     """Transport ceiling of ONE translation-generator batch call (`ui_translation.py`)."""
     return _clamped_number_setting("OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC", low=10.0, high=600.0)
@@ -239,16 +244,6 @@ def get_llm_transport_read_timeout_sec() -> float:
 
     The DEAD-SOCKET bound, not a latency target; explicit per-call timeouts win."""
     return _clamped_number_setting("OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC", low=60.0, high=7200.0)
-
-
-def get_acceptance_review_est_sec() -> float:
-    """The configurable acceptance admission floor, clamped to >=200 s by task_pacing."""
-    return _clamped_number_setting("OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC", low=10.0, high=3600.0)
-
-
-def get_acceptance_reserve_pct() -> int:
-    """Default finalization-reserve percentage of the total budget (v6.54.4)."""
-    return _clamped_number_setting("OUROBOROS_ACCEPTANCE_RESERVE_PCT", low=0, high=50, cast=int)
 
 
 def get_plan_task_deadline_min_sec() -> float:
@@ -279,7 +274,8 @@ def get_direct_turn_stop_wait_sec() -> float:
     return _clamped_number_setting("OUROBOROS_DIRECT_TURN_STOP_WAIT_SEC", low=0, high=10, cast=float)
 
 
-# How long a pooled worker waits for ONE answer to an acceptance-fence request; it re-sends
+# How long a pooled worker waits for ONE answer to a root-admission-seal request (the
+# ``acceptance_fence`` event of its historical name); it re-sends
 # the same request once and waits this long again, then the outcome is a typed unknown. Short
 # by design: the idle rail does not count heartbeats as progress, so this wait is never
 # lengthened to ride out a stalled supervisor. Structural, not a settings key.
@@ -451,9 +447,9 @@ def get_search_code_wall_sec() -> float:
 def get_finalization_grace_sec(settings: Optional[dict] = None) -> int:
     """Grace window in seconds: env, else the ``settings`` argument, else the
     shipped default — the ``_clamped_number_setting`` shape. Deliberately NO
-    ``load_settings()`` fallback: a READ must never persist settings, and that
-    call runs the context-mode compatibility migration, which can WRITE a
-    normalized file under read-only observers (``task_pacing._reserve_sec``)."""
+    ``load_settings()`` fallback: the caller's document or the environment
+    answers, so a read-only observer (``task_pacing._reserve_sec``) reads no
+    settings file."""
     raw = runtime_setting("OUROBOROS_FINALIZATION_GRACE_SEC")
     if raw is None and isinstance(settings, dict):
         raw = settings.get("OUROBOROS_FINALIZATION_GRACE_SEC")

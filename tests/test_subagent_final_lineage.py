@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -45,7 +47,7 @@ def test_final_chat_row_persists_only_compact_subagent_identity(tmp_path, monkey
         },
     )
 
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text().strip())
+    row = json.loads(dialogue_test.log_text(tmp_path / "logs" / "chat.jsonl").strip())
     assert row["delegation_role"] == "subagent"
     assert row["subagent_task_id"] == "child-1"
     assert row["parent_task_id"] == "parent-1"

@@ -68,7 +68,7 @@ cp assets/icon_1024.png "$ROOT/usr/share/pixmaps/ouroboros.png"
 # desktop build needs the user's session. Shipping it only provides a stable
 # unit name for explicit user control. The packages contain no maintainer
 # script that enables or starts it during installation.
-install -m 644 packaging/systemd/ouroboros.service \
+install -m 644 packaging/systemd/ouroboros.service.in \
     "$ROOT/usr/lib/systemd/user/ouroboros.service"
 cat > "$ROOT/usr/share/applications/ouroboros.desktop" <<EOF
 [Desktop Entry]

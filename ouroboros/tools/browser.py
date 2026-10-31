@@ -81,8 +81,9 @@ def _runtime_mode_for_browser(ctx: Any) -> str:
     """Read the effective mode for owner-control browser operations."""
     try:
         from ouroboros.config import get_runtime_mode
+        from ouroboros.consciousness_authority import effective_runtime_mode
 
-        return get_runtime_mode()
+        return effective_runtime_mode(get_runtime_mode(), getattr(ctx, "task_metadata", None))
     except Exception:
         return "advanced"
 
@@ -224,9 +225,9 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
             _playwright_browsers_path_managed = True
         elif current_browser_path == "0" or _playwright_browsers_path_managed:
-            data_dir = pathlib.Path(
-                os.environ.get("OUROBOROS_DATA_DIR") or pathlib.Path.home() / "Ouroboros" / "data"
-            )
+            from ouroboros.config import resolve_data_dir
+
+            data_dir = resolve_data_dir()  # the configured data root, APP_ROOT's when only it is set
             target = data_dir / "playwright-browsers"
             if target.exists() and _has_platform_browser(target, engine):
                 target_str = str(target)
@@ -741,6 +742,8 @@ def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
         shot_dir.mkdir(parents=True, exist_ok=True)
         shot_path = shot_dir / f"{ts}.png"
         shot_path.write_bytes(base64.b64decode(b64))
+        from ouroboros.maintenance_retirement import artifact_changed
+        artifact_changed(ctx.drive_root)
         caption = f"[browser screenshot {ts}]"
         from ouroboros.loop import _append_or_merge_user_content
 
@@ -752,7 +755,7 @@ def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
                 "_caption": caption,
                 "_source_path": str(shot_path),
             },
-        ])
+        ], stamp=ctx)  # a batch eviction of sent images names its origin
         return ("The screenshot is in your context as an image; the image-input mode and this route decide "
                 "whether you receive its pixels, a caption or a marker. ")
     except Exception:
@@ -1173,8 +1176,8 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "browse_page",
                 "description": (
-                    "Open a URL in headless browser. Returns page content as text, "
-                    "html, markdown, or screenshot (base64 PNG). "
+                    "Open a URL in this task's own headless Playwright browser (not the owner's signed-in Chrome) "
+                    "and return its content as text, html, markdown, or screenshot (base64 PNG). "
                     "Browser persists across calls within a task. "
                     "For screenshots: use send_photo tool to deliver the image to the user. "
                     "Use viewport to test mobile layouts (e.g. '375x812'). "
@@ -1225,7 +1228,7 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "browser_action",
                 "description": (
-                    "Perform action on current browser page. Actions: "
+                    "Act on the page open in this task's headless browser (from browse_page). Actions: "
                     "click (selector), fill (selector + value), select (selector + value), "
                     "screenshot (base64 PNG), evaluate (JS code in value), "
                     "scroll (value: up/down/top/bottom), wait (selector + state, without navigation)."

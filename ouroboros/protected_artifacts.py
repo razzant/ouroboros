@@ -7,9 +7,9 @@ import posixpath
 from typing import Any, Dict, Iterable, List
 
 from ouroboros.shell_parse import (
+    inline_shell_command,
     is_absolute_path_text,
     shell_argv,
-    shell_command_string,
     slash_normalize_path_text,
     strip_leading_env_assignments,
     unwrap_env_argv,
@@ -98,8 +98,6 @@ _SHELL_COMMAND_OPERATIONS = {
     "gdb": "debug",
     "lldb": "debug",
 }
-_CMD_INLINE_SWITCHES = frozenset({"/c", "/k"})
-_POWERSHELL_INLINE_SWITCHES = frozenset({"-c", "-command", "/c"})
 _POWERSHELL_ENCODED_SWITCHES = frozenset({"-encodedcommand", "-enc", "-e"})
 _GIT_STATIC_INTROSPECTION_SUBCOMMANDS = frozenset({
     "blame",
@@ -113,8 +111,8 @@ _GIT_STATIC_INTROSPECTION_SUBCOMMANDS = frozenset({
 # text diff prints "Binary files differ" for them, never the bytes.
 _GIT_DIFF_CONTENT_FLAGS = frozenset({"--binary", "--ext-diff", "--textconv"})
 # Output-limiting flags under which `git diff` emits only file NAMES / stat
-# counts, never file content — safe regardless of binary-vs-text (the vcs_diff
-# FP shape: `git diff --stat` / `vcs_diff(stat=true|name_only=true)`).
+# counts, never file content — safe regardless of binary-vs-text (the vcs_read diff
+# FP shape: `git diff --stat` / `vcs_read(action=diff, stat=true|name_only=true)`).
 _GIT_DIFF_CONTENT_FREE_FLAGS = frozenset({
     "--stat", "--numstat", "--shortstat", "--dirstat",
     "--name-only", "--name-status", "--summary", "--compact-summary",
@@ -484,18 +482,6 @@ def _glob_pattern_could_match_protected(
     return ""
 
 
-def _inline_shell_command(argv: list[str], shell_name: str) -> str:
-    if shell_name in {"bash", "sh", "zsh"}:
-        return shell_command_string(argv)
-    switches = _CMD_INLINE_SWITCHES if shell_name == "cmd" else _POWERSHELL_INLINE_SWITCHES
-    for idx, arg in enumerate(argv[1:], start=1):
-        if str(arg or "").strip().lower() in switches:
-            return " ".join(str(part) for part in argv[idx + 1:])
-    return ""
-
-
-
-
 def _is_high_risk_interpreter(name: str) -> bool:
     # Versioned spellings classify through the ONE structural family classifier
     # (shell_guards.interpreter_family). The local recognizer this replaces knew
@@ -584,7 +570,7 @@ def _git_diff_can_dump_content(argv: list[str]) -> bool:
     An output-limiting flag (`--stat`/`--name-only`/`--name-status`/…) makes the
     diff emit only file NAMES / stat counts — never content — regardless of
     binary-vs-text, so it cannot leak a protected artifact and the whole-work_dir
-    fallback is skipped (the documented `git diff --stat` / `vcs_diff(stat=true)`
+    fallback is skipped (the documented `git diff --stat` / `vcs_read(action=diff, stat=true)`
     false positive). Everything else — a BARE `git diff` (can dump a modified
     text file's content), a revision argument, a forced content flag
     (--binary/--ext-diff/--textconv), or a PATCH flag (`-p`/`-u`/`-U<n>`/`-W`/
@@ -808,7 +794,7 @@ def shell_block_reason(
     for (raw_argv, reads, writes, shell_syntax), row_cwd in zip(rows, sequential_effective_cwds(rows, work_dir)):
         argv = strip_leading_env_assignments(unwrap_env_argv(raw_argv))
         first = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe") if argv else ""
-        if first in {"cmd", "powershell", "pwsh"} and (inline := _inline_shell_command(argv, first)):
+        if first in {"cmd", "powershell", "pwsh"} and (inline := inline_shell_command(argv, first)):
             argv = shell_argv(inline)  # Retain the existing explicit Windows command-operand view.
         # Redirections are independent operations, including around allowed execution.
         write_targets = [*_writer_target_tokens_single(argv, direct_only=True, parse_redirects=False), *writes]

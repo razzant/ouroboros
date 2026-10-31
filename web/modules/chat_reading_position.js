@@ -2,6 +2,13 @@
  * a frame deadline. Frames only settle geometry after those owners are ready.
  * No fetch, pager, message cache or timer lives here.
  */
+import { DRAG } from './drawer_drag.js';  // a touch's axis is decided by the drawer's own rule
+import { batch } from './layout_batch.js';  // reads the write defers run after it, before the place is restored
+
+// A width that moves again within MOVE_FRAMES frames keeps moving (a drag, a live window resize); one that then
+// holds WIDTH_HELD_FRAMES frames (about 200ms at 60Hz) has stopped: a drag paused that long is laid out once.
+const MOVE_FRAMES = 3, WIDTH_HELD_FRAMES = 12;
+
 export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
@@ -10,22 +17,57 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
     let intent = null;
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
     let approximate = false, dragging = '', claimed = null, scrolls = 0, arriving = null, relayout = false;
-    // WebKit also ends each step of an animated page scroll: the owed scrolls
-    // end only once a frame passes without another, and only this gesture's:
-    // a newer one's may not have begun to arrive. A resize that waited on them
-    // lays out then; its own wait looks again while they still arrive.
+    // The feed's box at a drag's release: the drag's own last scrolls arrive in it, a resize's clamp in another.
+    let releasedBox = '';
+    const feedBox = () => `${feed.clientWidth}x${feed.clientHeight}`;
+    // Where the app's own write (mutate) moved the feed while a drag was released: a scroll there is that write's.
+    let placed = null;
+    // WebKit also ends each step of an animated page scroll, and each batch of a
+    // released drag's last scrolls: the owed scrolls end only once a frame
+    // passes without another, and only this gesture's: a newer one's may not
+    // have begun to arrive. A resize that waited on them lays out then; its own
+    // wait looks again while they still arrive.
     const owedEnd = (wait = false) => {
         const token = generation, seen = scrolls;
         requestAnimationFrame(() => requestAnimationFrame(() => {
-            if (dragging === 'owed' && token === generation && scrolls === seen) dragging = '';
+            if ((dragging === 'owed' || dragging === 'released') && token === generation && scrolls === seen) dragging = '';
             if (!relayout) return;
             if (dragging !== 'owed') { relayout = false; if (alive()) state.reflow(); }
             else if (wait) owedEnd(true);
         }));
     };
+    // While the feed's width keeps moving, its rows off the screen keep their size (style.css: lazy rows under
+    // [data-resizing]) and only those near the screen are laid out again. A width that moves once (a window
+    // jump, a layout switch) is laid out at once, as before. Once a moving width has held, every row is laid out at
+    // the final width and the place is re-applied in that frame. The feed's own box counts, not its content width:
+    // a scrollbar appearing as history fills the feed is no move, and neither is a feed shown again.
+    let rowsWidth = feed.offsetWidth, sinceMove = -1, lazy = false;
+    const countFrames = () => requestAnimationFrame(() => {
+        if (++sinceMove < (lazy ? WIDTH_HELD_FRAMES : MOVE_FRAMES)) { countFrames(); return; }
+        sinceMove = -1;
+        if (!lazy) return;
+        lazy = false;
+        feed.toggleAttribute?.('data-resizing', false);
+        if (alive()) state.reflow();
+        // Whatever measures rows on a resize waits for this (project_answer.js): a row the browser skipped while the
+        // width moved would otherwise be laid out again just to be measured, on every frame of the move.
+        feed.dispatchEvent?.(new Event('ouro:feed-width-settled', { bubbles: true }));
+    });
+    const noteWidth = () => {
+        const now = feed.offsetWidth;
+        if (now && rowsWidth && now !== rowsWidth) {
+            if (sinceMove < 0) countFrames();
+            else if (!lazy) { lazy = true; feed.toggleAttribute?.('data-resizing', true); }
+            sinceMove = 0;
+        }
+        rowsWidth = now;
+    };
     const state = {
         top: 0,
         stick: true,
+        // Whether the owner's own gesture moved the feed last, not the app's navigation (a waiting pill's jump to a
+        // question, ↓, a quote): the phone composer folds only for the owner's own reading (composer_fold.js).
+        ownMove: false,
         get generation() { return generation; },
         // The unread opening still owed (`claim(true)`): its claim's generation, else null.
         get arriving() { return arriving === generation ? arriving : null; },
@@ -37,6 +79,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             width = feed.clientWidth; viewportAnchor = anchors.capture();
         },
         reflow() {
+            noteWidth();
             // The animation a downward gesture still owes scrolls to is the reader's:
             // a resize neither writes under it (a write stops it short) nor ends it,
             // so its own last scroll still decides following. The resize lays out
@@ -55,8 +98,13 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             if (!intent) {
                 // A feed scrollbar drag, and the scrolls it (or a downward
                 // gesture) still owes after its release, follow exactly where
-                // it leaves the feed.
-                if (dragging) state.stick = feed.scrollHeight > feed.clientHeight && state.nearBottom();
+                // it leaves the feed. A resize is no part of a released drag
+                // (reflow), even when its clamped scroll arrives first; nor is
+                // the app's own write (mutate), whose clamp leaves the feed where it put it.
+                if (dragging === 'released' && feedBox() !== releasedBox) dragging = '';
+                if (dragging && !(dragging === 'released' && feed.scrollTop === placed)) {
+                    state.stick = feed.scrollHeight > feed.clientHeight && state.nearBottom();
+                }
                 state.top = feed.scrollTop;
                 state.remember(relayout); // a resize waiting on these scrolls keeps where they end
             }
@@ -68,7 +116,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             if (!alive()) return false;
             if (mutationDepth) return write();
             if (intent || !visible()) {
-                const result = write(); afterWrite();
+                const result = batch(write, afterWrite); afterWrite();
                 if (remoteContent && result && !state.stick) activity();
                 return result;
             }
@@ -77,7 +125,8 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             const height = feed.scrollHeight, top = feed.scrollTop;
             mutationDepth++;
             let result;
-            try { result = write(); afterWrite(); return result; }
+            // The write's deferred reads (layout_batch.js) run once its rows have settled, before the place is restored.
+            try { result = batch(write, afterWrite); afterWrite(); return result; }
             finally {
                 mutationDepth--;
                 if (visible()) {
@@ -87,6 +136,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     } else anchors.restore(anchor);
                     if (remoteContent && result && !follow) activity();
                     state.top = feed.scrollTop; state.stick = follow;
+                    if (dragging === 'released' && state.top !== top) placed = state.top;
                     state.remember();
                     updateButton();
                 }
@@ -102,12 +152,14 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
          * reader's own later gesture supersedes it, even one a bounded box absorbs. */
         claim(arrive = false) {
             state.cancel();
+            state.ownMove = false;
             const token = claimed = generation;
             arriving = arrive ? token : null;
             return () => token === generation;
         },
         bindGestures(navigate) {
             let touchY = null, pressed = null, latched = null, wheelAt = -Infinity, boxScrolled = null, gestures = 0;
+            let touchStart = null, axis = null;  // where the touch began, and its axis once decided
             const doc = feed.ownerDocument;
             // Keys scroll the focused control's scroller or, with nothing focused,
             // the one last pressed; neither sends keydown to the feed itself.
@@ -127,17 +179,35 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             const gesture = event => {
                 if (event.type === 'pointerup' || event.type === 'pointercancel') {
                     // Released, a drag decides by where it is. Engines report its last
-                    // scrolls after the release; they decide until the feed's scrollend.
-                    if (dragging) { state.stick = feed.scrollHeight > feed.clientHeight && state.nearBottom(); dragging = 'released'; }
+                    // scrolls after the release, WebKit in batches that each end in a
+                    // scrollend, or already before it; they decide until they end (owedEnd).
+                    if (dragging) {
+                        state.stick = feed.scrollHeight > feed.clientHeight && state.nearBottom();
+                        dragging = 'released'; releasedBox = feedBox(); placed = null;
+                    }
                     return;
                 }
                 if (event.type === 'pointerdown') {
                     pressed = feed.contains(event.target) ? event.target : null;
-                    if (event.target === feed) { state.cancel(); state.stick = false; }
+                    if (event.target === feed) { state.cancel(); state.stick = false; state.ownMove = true; }
                     dragging = event.target === feed ? 'held' : '';
                     return; // a scrollbar drag owns position, not archive traversal
                 }
-                if (event.type === 'touchstart') { touchY = event.touches?.[0]?.clientY; latched = null; return; }
+                if (event.type === 'touchstart') {
+                    const t = event.touches?.[0];
+                    touchY = t?.clientY; touchStart = { x: t?.clientX ?? 0, y: t?.clientY ?? 0 }; axis = null; latched = null;
+                    return;
+                }
+                if (event.type === 'touchmove' && axis !== 'y') {
+                    // The axis is decided once, as drawer_drag.js decides it: a sideways finger (the drawer, a swipe to
+                    // reply) is not reading, nor is the drift before the axis is decided (it ended following).
+                    const t = event.touches?.[0];
+                    const dx = Math.abs((t?.clientX ?? touchStart?.x ?? 0) - (touchStart?.x ?? 0));
+                    const dy = Math.abs((t?.clientY ?? 0) - (touchStart?.y ?? t?.clientY ?? 0));
+                    if (axis === null && dy >= DRAG.slop && dy >= dx) axis = 'y';
+                    else if (axis === null && dx >= DRAG.slop && dx > DRAG.axisRatio * dy) axis = 'x';
+                    if (axis !== 'y') return;
+                }
                 const origin = event.type === 'keydown' ? keyOrigin(event) : event.target;
                 if (event.type === 'keydown' && (event.defaultPrevented
                         || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')
@@ -170,7 +240,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     absorb();
                     return;
                 }
-                state.cancel(); state.stick = false;
+                state.cancel(); state.stick = false; state.ownMove = true;
                 const token = generation, own = ++gestures, since = event.timeStamp;
                 requestAnimationFrame(() => {
                     if (!alive() || !visible() || token !== generation || own !== gestures) return;
@@ -192,8 +262,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             const noteBoxScroll = event => { if (event.target && event.target !== feed) boxScrolled = { box: event.target, at: event.timeStamp }; };
             feed.addEventListener('scroll', noteBoxScroll, { passive: true, capture: true });
             const settle = () => {
-                if (dragging === 'released') dragging = '';
-                if (dragging === 'owed') owedEnd();
+                if (dragging === 'released' || dragging === 'owed') owedEnd();
             };
             feed.addEventListener('scrollend', settle, { passive: true });
             const pointer = ['pointerdown', 'pointerup', 'pointercancel'];

@@ -30,6 +30,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.config import WORKER_READY_CEILING_SEC, WORKER_READY_MAX_ATTEMPTS, WORKER_READY_WINDOW_SEC
+from ouroboros.process_identity import same_birth
 from ouroboros.review_owner_custody import reconcile_confirmed_dead_review_owners
 from supervisor.state import append_jsonl
 from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
@@ -250,12 +251,17 @@ def _slot_pid(slot: Any) -> int:
         return 0
 
 
-def _births_agree(slot_birth: Any, reported_birth: Any) -> bool:
+def _births_agree(slot: Any, reported: Dict[str, Any]) -> bool:
     """Births are compared only when both sides measured one; otherwise the slot's own pid decides.
 
     The owner's rule (14 Oct): bind readiness to the process birth, falling back to the pid.
+    Kernel births of one validated kind decide first (``process_identity.same_birth``): the
+    parent and the child may spell one ``ps`` birth in different zones or locales.
     """
-    ours, theirs = str(slot_birth or ""), str(reported_birth or "")
+    same = same_birth(getattr(slot, "kernel_birth", ""), reported.get("kernel_birth"))
+    if same is not None:
+        return same
+    ours, theirs = str(getattr(slot, "process_birth", "") or ""), str(reported.get("process_birth") or "")
     return not (ours and theirs) or ours == theirs
 
 
@@ -386,14 +392,16 @@ def _own_ready_row(slot: Any, rows: Any) -> Optional[Dict[str, Any]]:
     """The child's own ``worker_ready`` row among the rows naming its pid, or None.
 
     A row whose measured birth differs from the slot's belongs to another process that held
-    the pid (a stale or reused pid): never this child's. An exact birth wins over a row
-    without one. Without a slot birth the newest row is taken: an earlier holder of a reused
-    pid died, and so wrote its row, before this child received the pid.
+    the pid (a stale or reused pid): never this child's. An equal kernel birth wins over an
+    exact spelling, which wins over a row without one. Without a slot birth the newest row is
+    taken: an earlier holder of a reused pid died, and so wrote its row, before this child
+    received the pid.
     """
-    birth = str(getattr(slot, "process_birth", "") or "")
-    agreeing = [row for row in rows if _births_agree(birth, row.get("process_birth"))]
+    birth, kernel = str(getattr(slot, "process_birth", "") or ""), getattr(slot, "kernel_birth", "")
+    agreeing = [row for row in rows if _births_agree(slot, row)]
+    same = [row for row in agreeing if same_birth(kernel, row.get("kernel_birth")) is True]
     exact = [row for row in agreeing if birth and str(row.get("process_birth") or "") == birth]
-    return (exact or agreeing or [None])[-1]
+    return (same or exact or agreeing or [None])[-1]
 
 
 def _worker_sha_relation(expected_sha: str, observed_sha: str) -> Dict[str, Any]:
@@ -449,7 +457,7 @@ def _open_ready_slot(
                  and slot.booting and not slot.retiring
                  and not getattr(slot, "readiness_exhausted", False)
                  and pid > 0 and row.get("pid") == pid
-                 and _births_agree(slot.process_birth, row.get("process_birth"))
+                 and _births_agree(slot, row)
                  and slot.proc.is_alive())
         if owned:
             # A birth the parent could not measure is adopted from the child, which measured it alive.
@@ -688,10 +696,15 @@ def _record_worker_processes(slots: Optional[Dict[int, Any]] = None) -> None:
                     scope="session",
                 )
                 if was_alive and w.proc.is_alive():
+                    from ouroboros.process_identity import process_kernel_birth
+
                     fingerprint = record["fingerprint"]
+                    kernel = process_kernel_birth(int(w.proc.pid)) or ""
                     with _queue_lock:
                         w.process_birth = (w.process_birth or fingerprint.get("start_time_boot")
                                            or fingerprint.get("start_time") or "")
+                        # beside the legacy birth: kernel evidence for _births_agree and the exit door (worker_health)
+                        w.kernel_birth = getattr(w, "kernel_birth", "") or (kernel if w.proc.is_alive() else "")
     except Exception:
         log.warning("Failed to ledger worker pids; readiness falls back to the child's birth or pid", exc_info=True)
 
@@ -790,7 +803,9 @@ def retire_worker(wid: int, slot: Any) -> bool:
         if _pool()._WORKER_POOL_DISABLED_REASON or _pool().WORKERS.get(wid) is not slot or slot.proc.is_alive():
             return False
         _pool().WORKERS.pop(wid)
+    from supervisor.worker_health import owe_worker_exit
     from supervisor.worker_process import close_worker_stop_channel
+    owe_worker_exit(slot)  # an idle retirement also ends this process's earlier tasks' claims
     close_worker_stop_channel(slot.proc)
     try:
         slot.in_q.close()
@@ -831,9 +846,11 @@ def handle_worker_quiescent(event: dict, ctx: Any) -> None:
         slot = ctx.WORKERS.get(event.get("worker_id"))
         if (slot is not None and slot.busy_task_id is None and worker_ready(slot)
                 and event.get("pid") == _slot_pid(slot)
-                and _births_agree(slot.process_birth, event.get("process_birth"))
+                and _births_agree(slot, event)
                 and event.get("token") == slot.quiescence_token and slot.quiescence_token):
             slot.quiescence_confirmed = True
+            # Best-effort dialogue rows it still holds: counted lost only if this slot is retired.
+            slot.quiescence_retained_rows = max(0, int(event.get("retained_rows") or 0))
 
 
 def retire_quiescent_worker(slot: Any) -> bool:
@@ -895,8 +912,10 @@ def reap_idle_worker(job: dict) -> None:
     with _WORKER_LIFECYCLE_LOCK:
         outcome = _idle_retirement_current(job, slot) and retire_or_replace_worker(slot.wid, slot)
     if outcome:
+        lost = int(getattr(slot, "quiescence_retained_rows", 0) or 0)
         _supervisor_row({"type": "worker_retired", "worker_id": slot.wid, "pid": _slot_pid(slot), "token": job["token"],
-                         "process_birth": slot.process_birth, "replaced": outcome == "replaced"})
+                         "process_birth": slot.process_birth, "replaced": outcome == "replaced",
+                         **({"dialogue_rows_lost": lost} if lost else {})})
 
 
 @_serialized_worker_lifecycle
@@ -994,6 +1013,9 @@ def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1) -> 
     # Close the crashed worker's old queue now that nothing can route to it,
     # otherwise its file descriptors / semaphores leak on every respawn.
     if old is not None:
+        from supervisor.worker_health import owe_worker_exit
+
+        owe_worker_exit(old)  # every replacement door: a confirmed-ended member's claims retire too
         close_worker_stop_channel(old.proc)
     if old is not None and getattr(old, "in_q", None) is not None:
         try:

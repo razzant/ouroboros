@@ -47,6 +47,14 @@ def _loop():
     return loop
 
 
+def _server_web_allowed_by_task(ctx: Any) -> bool:
+    """Whether the task's contract leaves the network to the main loop (native server-side search)."""
+    contract = getattr(ctx, "task_contract", {}) if isinstance(getattr(ctx, "task_contract", {}), dict) else {}
+    resources = contract.get("allowed_resources") if isinstance(contract.get("allowed_resources"), dict) else {}
+    forbidden_names = {"web", "allow_web", "network", "allow_network", "internet", "external_network"}
+    return not any(resources.get(name) is False for name in forbidden_names)
+
+
 def _check_budget_limits(
     ctx: "_RoundLimitContext",
     budget_remaining_usd: Optional[float],
@@ -71,7 +79,7 @@ def _check_budget_limits(
             trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
             tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
             suffix = (
-                _loop()._force_plan_disclosure(tool_ctx, trace, forced_reason="budget_exhausted")
+                _loop()._plan_gate_disclosure(tool_ctx, trace, forced_reason="budget_exhausted")
                 if tool_ctx is not None else ""
             )
             _loop()._record_forced_finalization(
@@ -166,6 +174,9 @@ def _check_budget_limits(
             presence_arm = (getattr(tools_ctx, "_presence_forced_declaration", None),
                             getattr(tools_ctx, "_presence_forced_pending", None))
             priced_prompt = _loop()._prepare_forced_prompt(ctx, forced_prompt, trace)
+            from ouroboros.loop_forced_finalization import _deliver_forced_late_results
+
+            _deliver_forced_late_results(ctx, trace)  # priced with the candidate, never added after
             prospective_messages = [dict(message) for message in ctx.messages]
             _loop()._append_or_merge_user_message(prospective_messages, priced_prompt)
             wrapup_request, send_messages = task_pacing.prepared_wrapup_candidate(
@@ -364,6 +375,9 @@ def _soft_land_exhausted_ceiling(
     priced_prompt = _loop()._prepare_forced_prompt(
         limit_ctx, f"[BUDGET LIMIT] {soft_land_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}", trace,
     )
+    from ouroboros.loop_forced_finalization import _deliver_forced_late_results
+
+    _deliver_forced_late_results(limit_ctx, trace)  # priced with the candidate, never added after
     prospective = [dict(message) for message in limit_ctx.messages]
     _loop()._append_or_merge_user_message(prospective, priced_prompt)
     request, send_messages = task_pacing.prepared_wrapup_candidate(
@@ -471,7 +485,8 @@ def _handle_budget_exceeded(
                 physical_calls = None
     except Exception:
         log.exception("Could not inspect task attempts after budget rail")
-    direct_chat = bool(getattr(ctx.tools._ctx, "is_direct_chat", False))
+    from ouroboros.task_carrier import inline_execution
+    direct_chat = inline_execution(ctx.tools._ctx)
     replay_safe = physical_calls == 0 and not direct_chat
     scope = str(getattr(exc, "limit_scope", "global") or "global")
     resource_limit = {

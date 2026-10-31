@@ -45,7 +45,7 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
 )
 from ouroboros.shell_parse import is_absolute_path_text  # noqa: E402
 from ouroboros.utils import utc_now_iso  # noqa: E402
-from ouroboros.provider_models import provider_for_model, provider_has_credentials  # noqa: E402
+from ouroboros.provider_models import legacy_openai_base, provider_for_model, provider_has_credentials  # noqa: E402
 from ouroboros.reviewer_slot_config import (  # noqa: E402
     ROUTE_KIND_API,
     ROUTE_KIND_SESSION,
@@ -55,7 +55,6 @@ from ouroboros.reviewer_slot_config import (  # noqa: E402
 )
 from ouroboros.usage_accounting import BudgetExceeded  # noqa: E402
 from ouroboros.triad_review import REVIEW_REPORT_CONTRACT  # noqa: E402
-from ouroboros.config import runtime_setting
 
 # The report's own output reserve: what the row's model may spend answering,
 # on the request and on the slot (one number for both deliveries).
@@ -66,9 +65,8 @@ _MEMORY_WHITELIST = [
     "memory/scratchpad.md",
     "memory/registry.md",
     "memory/WORLD.md",
+    "memory/knowledge/overview.md",
     "memory/knowledge/index-full.md",
-    "memory/knowledge/patterns.md",
-    "memory/knowledge/improvement-backlog.md",
 ]
 
 # The role half of the reviewer prompt, shared by both deliveries; the "how to
@@ -80,9 +78,9 @@ Primary directive: The Constitution (BIBLE.md) is your absolute reference.
 Every finding must be checked against it.
 
 What to look for: bugs, crashes, race conditions,
-BIBLE.md violations (P0–P12), contradictions between code and docs,
+violations of the principles in BIBLE.md, contradictions between code and docs,
 security gaps, dead code, missing error handling, architectural issues,
-known error patterns from patterns.md that remain unfixed, and ideas how to improve Ouroboros to work better and better comply with the Bible."""
+failure classes the inlined knowledge describes whose causes remain unrepaired, and ideas how to improve Ouroboros to work better and better comply with the Bible."""
 
 # The repository is inspected with tools; tier-1 governance and memory arrive
 # inline. No second tool read is needed for those exact delivered documents.
@@ -182,7 +180,7 @@ def _api_route_model(row: ConfiguredReviewerSlot) -> Tuple[str, Optional[str]]:
     if row.use_local is True or model_has_credentials(configured):
         return "", configured
     if configured.startswith("openai/"):
-        if provider_has_credentials("openai") and not runtime_setting("OPENAI_BASE_URL"):
+        if provider_has_credentials("openai") and not legacy_openai_base():
             from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
 
             slug = configured.split("/", 1)[1]
@@ -519,7 +517,7 @@ def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
     if not bible.strip():
         raise RuntimeError("BIBLE.md is missing at the repository root — a deep self-review has no constitution to check against")
     # The memory whitelist, inlined byte-exact, and the typed memory fact every
-    # delivery carries: ``{"inlined": n, "total": 7, "dispositions": {rel:
+    # delivery carries: ``{"inlined": n, "total": 6, "dispositions": {rel:
     # inlined | missing | empty | oversized | read_error}}`` — one disposition
     # per whitelisted path (task text, usage fact, provenance header), never a
     # silent skip.
@@ -567,6 +565,7 @@ def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
         # fact the reviewer (and the header) can rely on, never a gap.
         f"Memory dispositions ({memory['total']} whitelisted): "
         + "; ".join(f"{rel} {d}" for rel, d in memory["dispositions"].items()),
+        _body_line(drive_root),
     ]
     if required_sources_ref:
         parts.append("Read the complete required source manifest through its exact source handle and inspect its sources across your working views. Documents already delivered in full above need no second tool read: "
@@ -577,6 +576,16 @@ def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
     return "\n\n".join(part for part in parts if str(part or "").strip()), {
         "memory": memory, "bible_chars": len(bible), "required_sources": sources,
         "governance_manifest": governance.manifest}
+
+
+def _body_line(drive_root: pathlib.Path) -> str:
+    """The body's dated facts in one line, the same ``vitals`` every turn's Runtime section carries
+    (``context_runtime_facts``): the reviewer judges the trend with the numbers, without a tool call."""
+    from ouroboros.context_runtime_facts import vitals_fact, vitals_line
+    from ouroboros.utils import utc_now_iso
+
+    line = vitals_line(vitals_fact(drive_root, observed_at=utc_now_iso()))
+    return f"Body (the Runtime section's vitals, as every turn reads them): {line}" if line else ""
 
 
 def _review_usage_scope(current: Any, request: Any) -> Any:
@@ -678,7 +687,7 @@ def _run_retrieving_review(
         route=ReviewRouteKind.AGENT_SESSION if row.is_session else ReviewRouteKind.API_CHAT,
         session_target=row.session_target, session_profile=row.profile_id,
         session_access=row.access if row.is_session else "",
-        subagent_id=row.subagent_id,
+        subagent_id=row.subagent_id, processing_preference=row.processing_preference,
     )
     from ouroboros.review_checking import wave_checking_source
     from ouroboros.observability import new_call_id

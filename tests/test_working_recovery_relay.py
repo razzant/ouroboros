@@ -1,4 +1,8 @@
-"""A receiver lost before its first save must not erase its inherited cognition."""
+"""A receiver lost before its first save must not erase its inherited cognition.
+
+The receiver comes from the live same-id crash retry, or is a stored pre-upgrade new-ID timeout
+successor (no producer mints one now, #1376); the loss of either retries through the crash rail.
+"""
 from __future__ import annotations
 
 import copy
@@ -9,10 +13,11 @@ import pytest
 from ouroboros import working_checkpoint as wc
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.task_results import load_task_result
-from supervisor import queue, task_reaper, workers
+from supervisor import queue, workers
 from supervisor.events_budget import budget_hold_fact
+from tests._silence_reaper_support import historical_successor
 from tests.test_project_hold_recovery import worker
-from tests.test_restart_saved_work import _ack, _stop_and_boot
+from tests.test_restart_saved_work import _ack, _crash, _stop_and_boot
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_working_recovery_admission import _running
 from tests._store_shared import read_result, seed_result
@@ -20,13 +25,15 @@ from tests._store_shared import read_result, seed_result
 pytestmark = pytest.mark.serial
 
 
-def _first_receiver(host, tmp_path, monkeypatch, new_id, scope):  # noqa: F811 - the imported fixture
+def _first_receiver(host, tmp_path, monkeypatch, scope, origin="crash"):  # noqa: F811 - the imported fixture
     original = _running(host, tmp_path, monkeypatch, scope)
-    workers.RUNNING.clear()
-    target_id = "held-retry" if new_id else "held"
-    result = task_reaper._enqueue_retry(queue, original, task_id="held", retry_task_id=target_id,
-                                       attempt=1, terminal_reason="idle_timeout", recon_fields={})
-    assert result[:2] == (True, 2)
+    if origin == "crash":
+        target_id = "held"
+        _crash(queue, workers, monkeypatch, "held")
+    else:
+        target_id = "held-retry"
+        workers.RUNNING.clear()
+        historical_successor(original, 1, target_id)
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
     [receiver] = sent
@@ -41,18 +48,14 @@ def _first_receiver(host, tmp_path, monkeypatch, new_id, scope):  # noqa: F811 -
 
 
 @pytest.mark.parametrize("scope", ["project", "main"])
-@pytest.mark.parametrize("new_id", [False, True])
-def test_real_idle_retry_carries_original_source_across_two_lost_receivers(
-    host, tmp_path, monkeypatch, scope, new_id,  # noqa: F811
+@pytest.mark.parametrize("origin", ["crash", "stored_new_id"])
+def test_real_crash_retry_carries_original_source_across_two_lost_receivers(
+    host, tmp_path, monkeypatch, scope, origin,  # noqa: F811
 ):
-    receiver, original = _first_receiver(host, tmp_path, monkeypatch, new_id, scope)
+    receiver, original = _first_receiver(host, tmp_path, monkeypatch, scope, origin)
     exact = read_actor_source_bytes(host.root, "held", original["source_ref"])
-    workers.RUNNING.clear()
-    monkeypatch.setattr(workers, "WORKERS", {})
-    target_id = "held-retry-2" if new_id else "held"
-    result = task_reaper._enqueue_retry(queue, receiver, task_id=receiver["id"], retry_task_id=target_id,
-                                       attempt=2, terminal_reason="idle_timeout", recon_fields={})
-    assert result[:2] == (True, 3)
+    target_id = receiver["id"]
+    _crash(queue, workers, monkeypatch, target_id)  # lost before its first save
     [retry] = host.pending
     relay = retry["_working_recovery"]
     assert relay["target_task_id"] == target_id and relay["target_attempt"] == 3
@@ -76,7 +79,7 @@ def test_real_stop_restores_a_dispatched_receiver_without_its_first_checkpoint(
 ):
     from supervisor.restart_retention import prepare_restart_returns
 
-    receiver, original = _first_receiver(host, tmp_path, monkeypatch, False, "project")
+    receiver, original = _first_receiver(host, tmp_path, monkeypatch, "project")
     monkeypatch.setattr(workers, "WORKERS", {})
     if restart:
         assert prepare_restart_returns(host.root, workers.RUNNING, workers.PENDING,
@@ -101,7 +104,7 @@ def test_a_relay_never_guesses_missing_prior_dispatch_or_replaces_a_newer_source
     host, tmp_path, monkeypatch, damage,  # noqa: F811
 ):
 
-    prior, original = _first_receiver(host, tmp_path, monkeypatch, False, "project")
+    prior, original = _first_receiver(host, tmp_path, monkeypatch, "project")
 
     stored = read_result(host.root, "held")
     if damage == "missing_mark":

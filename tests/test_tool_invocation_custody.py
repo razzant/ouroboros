@@ -39,7 +39,7 @@ def test_actual_local_completion_releases_all_control_consumers(tmp_path, monkey
 
     registry, queue, workers = _registry(tmp_path, monkeypatch)
     if case == 'nonrepo_diff':
-        result = registry.execute_result('vcs_diff', {'root': 'active_workspace'})
+        result = registry.execute_result("vcs_read", {"action": "diff", 'root': 'active_workspace'})
         assert result.code == 'GIT_ERROR'
     elif case == 'numeric_argument':
         result = registry.execute_result('query_code', {'op': 'symbols', 'limit': 'invalid'})
@@ -230,6 +230,8 @@ def test_real_owner_restart_retires_exact_worker_invocation(tmp_path, monkeypatc
             assert queue.cancel_task_custody('root', deliver=False) == queue.CANCEL_CANCELLED
         child.join(5)
         assert not child.is_alive() and child.exitcode is not None
+        from ouroboros import custody_owed
+        assert custody_owed.drain() == 0, 'the door owed the retirement; the process that knows it writes it'
         row = load_task_result(tmp_path, 'root')
         assert not row.get('launch_handoffs', {})
         assert row['retired_tool_invocations'][claim_id]['effect_outcome'] == 'unknown'
@@ -311,10 +313,17 @@ def test_death_retires_only_attributed_local_invocation(tmp_path, monkeypatch, e
     independent = {**claim, 'local_owner': {**identity, 'process_birth': 'independent'}}
     write_task_result(tmp_path, job['task_id'], 'running', root_task_id=job['task_id'],
                       launch_handoffs={'matching': claim, 'independent': independent})
+    from ouroboros import custody_owed
     with workers._queue_lock:
         worker_health._retire_dead_model_consumers(job)
+    assert load_task_result(tmp_path, job['task_id']).get('launch_handoffs', {}).get('matching') == claim, \
+        'the queue-locked door only owes; nothing is written under the lock'
+    custody_owed.drain()
     after = load_task_result(tmp_path, job['task_id'])
-    assert ('matching' not in after.get('launch_handoffs', {})) == (evidence == 'exact')
+    # The joined Process proves THAT process ended: every claim it wrote retires, whatever task,
+    # attempt, tree or slot; another pid or birth, a live or unjoined process, a legacy claim stay.
+    assert ('matching' not in after.get('launch_handoffs', {})) == (
+        evidence in {'exact', 'wrong_attempt', 'wrong_root', 'replaced_worker', 'replaced_meta'})
     assert after.get('launch_handoffs', {})['independent'] == independent
     workers.RUNNING.clear()
     from supervisor import queue
@@ -362,7 +371,7 @@ def test_executor_census_reports_unreadable_directory(tmp_path, monkeypatch):
 @pytest.mark.parametrize("known", [False, True])
 def test_effective_retry_read_keeps_predecessor_unknown_effect_history(tmp_path, known):
     from ouroboros.task_results import write_task_result, load_task_result
-    from ouroboros.tool_custody import retire_tool_invocations
+    from ouroboros.tool_custody import retire_process_invocations
     from ouroboros.tools.control_task_results import _get_task_result
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.join_ledger import _child_result_sha256
@@ -370,7 +379,7 @@ def test_effective_retry_read_keeps_predecessor_unknown_effect_history(tmp_path,
     claim = {"tool": "local-effect", "task_id": "old", "root_task_id": "old", "state": "claimed",
              "local_owner": {"pid": 880001, "process_birth": "owned", "task_attempt": 1}}
     write_task_result(tmp_path, "old", "running", root_task_id="old", launch_handoffs={"original-op": claim})
-    retire_tool_invocations(tmp_path, "old", "old", pid=880001, process_birth="owned", task_attempt=1)
+    retire_process_invocations(tmp_path, pid=880001, process_birth="owned")
     write_task_result(tmp_path, "new", "completed", result="Retry result", original_task_id="old",
                       timeout_retry_from="old", root_task_id="old")
     write_task_result(tmp_path, "old", "failed", reason_code="idle_timeout", superseded_by="new",
@@ -380,3 +389,17 @@ def test_effective_retry_read_keeps_predecessor_unknown_effect_history(tmp_path,
     data = load_task_result(tmp_path, "new")
     result = _get_task_result(ctx, "old", **({"known_result_sha256": _child_result_sha256(data)} if known else {}))
     assert "original-op" in result and "external effects remain unknown" in result, result
+
+
+@pytest.mark.parametrize('status, owns', [('read', False), ('delivered', False), ('unconfirmed', True), (None, True)])
+def test_a_read_steer_receipt_discharges_its_message_handoff(tmp_path, status, owns):
+    """A relayed message acknowledged as read settles its handoff; nothing is resent."""
+    from ouroboros.project_dialogue import append_chat_annotation
+    from ouroboros.tool_custody import claim_still_owns_effect
+
+    claim = {'state': 'returned', 'control_receipts': [
+        {'type': 'steer_task', 'task_id': '', 'client_message_id': 'quiz_answer:root:1', 'routing_token': 'relay-1'}]}
+    if status is not None:
+        append_chat_annotation(tmp_path, 'quiz_answer:root:1', action='steer_task', target='child',
+                               status=status, routing_token='relay-1')
+    assert claim_still_owns_effect(tmp_path, claim) is owns

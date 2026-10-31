@@ -56,7 +56,8 @@ def test_update_pill_and_panel_name_local_content_not_commit_counts(direct_serve
                     pill = page.locator("#update-pill")
                     page.wait_for_function("() => document.getElementById('update-pill')?.hidden === false",
                                            timeout=30_000)
-                    assert pill.text_content() == "Update 7.6.0 → 7.6.1"
+                    assert pill.text_content() == "Update available"  # the identity is its title (owner Q6=A)
+                    assert pill.get_attribute("title") == "Update 7.6.0 → 7.6.1"
                     assert ("has-local" in (pill.get_attribute("class") or "").split()) == (name != "absent")
                     if width < 980:
                         page.evaluate("document.getElementById('update-pill').click()")

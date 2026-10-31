@@ -244,9 +244,8 @@ def test_a_bound_start_is_not_unbound_by_switching_its_row_off(tmp_path, monkeyp
             _configured_actor_bootstrap={"snapshot": snapshot, "selected_subagent_id": "primary-builder"})
         return json.loads(runtime.delegate_start_entry(ctx, "", subagent_id=selector).text)["reason"]
 
-    for own in ("primary-builder", "codex=gpt-6-astra/xhigh", "codex=gpt-6-astra/high"):
-        assert _start(own) == "configured_work_order_unavailable", own
-    assert _start("cursor=kimi-k3-high") == "configured_actor_route_mismatch"
+    for selector in ("primary-builder", "codex=gpt-6-astra/xhigh", "codex=gpt-6-astra/high", "cursor=kimi-k3-high"):
+        assert _start(selector) in {"subagent_disabled", "unknown_subagent_id"}, selector
 
 
 def test_the_model_catalog_is_facts_only_and_keyed_by_handle():
@@ -463,16 +462,13 @@ def test_an_actor_first_start_accepts_its_own_handle_and_stored_id_and_refuses_a
         extra = {"retry_of": "inv-1"} if retry else {}
         return json.loads(runtime.delegate_start_entry(ctx, "", subagent_id=selector, **extra).text)["reason"]
 
-    for retry in (False, True):
-        for own in ("primary-builder", "codex=gpt-6-astra/xhigh"):
-            assert _start(own, retry=retry) == "configured_work_order_unavailable", (own, retry)
-        for foreign in ("other", "cursor=kimi-k3-high", "no-such-row"):
-            assert _start(foreign, retry=retry) == "configured_actor_route_mismatch", (foreign, retry)
-
-    # The roster moved on; the episode is still bound to its frozen snapshot.
+    for selected in ("primary-builder", "codex=gpt-6-astra/xhigh", "other", "cursor=kimi-k3-high"):
+        assert _start(selected) == "empty_prompt"  # each live row is eligible; independent work needs a prompt
+        assert _start(selected, retry=True) == "retry_selector_conflict"
+    assert _start("no-such-row") == "unknown_subagent_id"
     monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: _settings(rows[1]))
-    assert _start("codex=gpt-6-astra/xhigh") == "configured_work_order_unavailable"
-    assert _start("cursor=kimi-k3-high") == "configured_actor_route_mismatch"
+    assert _start("codex=gpt-6-astra/xhigh") == "unknown_subagent_id"
+    assert _start("cursor=kimi-k3-high") == "empty_prompt"
 
 
 def test_history_is_named_from_each_records_own_facts_never_from_the_live_roster(tmp_path, monkeypatch):
@@ -500,7 +496,12 @@ def test_history_is_named_from_each_records_own_facts_never_from_the_live_roster
     }), encoding="utf-8")
 
     delegation = _delegation_capability_fact()
-    assert delegation["subagent_last_delegation"]["selected_subagent_id"] == "cursor=grok-4.6/high"
+    assert "subagent_last_delegation" not in delegation
+    assert [row["run_id"] for row in delegation["subagents_last_executions"]] == ["run-2", "run-1"]
+    assert "identity" not in delegation["subagents_last_executions"][0]
+    reader = next(item for item in delegation["readers"] if item["arguments"]["path"].endswith("subagent_last_delegation.json"))
+    saved = json.loads((tmp_path / reader["arguments"]["path"]).read_text(encoding="utf-8"))
+    assert saved["latest_by_subagent"] == {"fast-scout": typed, "fast-scout-2": untyped}
     assert [row["selected_subagent_id"] for row in delegation["subagents_last_executions"]] == [
         "cursor=grok-4.6/high", "google/gemini-3.7-flash",
     ]

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { composeModelSource, createModelRolesEditor, modelContextNote,
+import { composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
     modelSourceGroups, parseModelSource, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { configuredApiProviders, routeChoiceGroups } from '../modules/route_editor_primitives.js';
 
@@ -117,9 +117,10 @@ test('an unloaded editor authors nothing and an API-only save does not create ro
     editor.destroy();
 });
 
-test('context Auto uses the exact advertised maximum, while manual values stay assertions', () => {
-    assert.match(modelContextNote({ context_window: 272000, max_context_window: 872000 }), /872,000.*advertised/);
-    assert.match(modelContextNote({ max_context_window: 872000 }, 1000000), /1,000,000.*set by you/);
+test('context note uses the server projection, never catalogue arithmetic', () => {
+    const text = 'window 400,000 total: set in Settings; server metadata says 272,000';
+    assert.equal(modelContextNote({ window: { text } }), text);
+    assert.match(modelContextNote({ context_window: 272000, max_context_window: 872000 }), /not known/);
     assert.match(modelContextNote(null), /not known/);
 });
 
@@ -148,4 +149,16 @@ test('role disclosures draw a visible open/closed marker on their own line', () 
     // The disclosure owns a full row under the status text instead of sharing its baseline.
     assert.match(block('\\.model-role-notes'), /flex-wrap:\s*wrap/);
     assert.match(block('\\.model-role-notes\\s*>\\s*\\.model-role-details'), /flex-basis:\s*100%/);
+});
+
+test('an empty role names the slot it uses: Main, and the Light model for the Safety Supervisor', () => {
+    assert.equal(inheritTargetOf({ slot: 'vision' }), 'main');
+    assert.equal(inheritTargetOf({ slot: 'light' }), 'main');
+    assert.equal(inheritTargetOf({ slot: 'safety' }), 'light');
+    assert.equal(inheritTargetOf({ slot: 'future', inherits: 'consciousness' }), 'consciousness', 'a contract row may name its own');
+    assert.deepEqual(modelSourceGroups({ current: 'inherit', inheritLabel: 'Uses Light' })[0].options,
+        [{ value: 'inherit', label: 'Uses Light' }]);
+    const source = readFileSync(new URL('../modules/model_roles.js', import.meta.url), 'utf8');
+    assert.match(source, /`Empty uses the \$\{inheritName\(row\)\} model`/);
+    assert.match(source, /`Uses \$\{inheritName\(row\)\}\.`/);
 });

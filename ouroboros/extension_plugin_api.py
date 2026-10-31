@@ -23,13 +23,14 @@ import threading
 import urllib.error
 import urllib.request
 import uuid
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from ouroboros.contracts.plugin_api import (
     ExecutionMode,
     ExtensionRegistrationError,
     FORBIDDEN_SKILL_SETTINGS,
     LEGACY_PLUGIN_API_GENERATION,
+    MemoryReadError,
     RuntimeInfo,
     VALID_EXTENSION_PERMISSIONS,
     available_capabilities,
@@ -56,6 +57,8 @@ from ouroboros.extension_registry_state import (
     _lock,
     _record_companion_name,
     _routes,
+    _realtime_providers,
+    _conversation_features,
     _settings_sections,
     _tools,
     _ui_tabs,
@@ -101,7 +104,7 @@ class ExtensionStaleRecoveryError(ExtensionRegistrationError):
     bundle is created, nothing is staged, ``auth_token.json`` is neither
     created nor rotated, no companion env is materialized, and nothing may be
     disposed by the caller. Infrastructure reads on the way to the fence (the
-    settings lock inside ``load_settings``, a state-dir mkdir via the
+    ``load_settings`` read, a state-dir mkdir via the
     liveness/grant projection) may occur — the same settings/grant read idiom
     used everywhere in the runtime (fix-round-7 scope)."""
 
@@ -218,6 +221,7 @@ class PluginAPIImpl:
         self._env_allow = frozenset(str(k).strip() for k in (config.env_allowlist or []))
         self._env_allow_upper = frozenset(k.upper() for k in self._env_allow)
         self._state_dir = pathlib.Path(config.state_dir)
+        self._loaded_skill = config.loaded_skill
         self._drive_root = pathlib.Path(config.drive_root) if config.drive_root is not None else self._state_dir
         self._subscribe_events = frozenset(str(t).strip() for t in (config.subscribe_events or []) if str(t).strip())
         self._companion_specs = {
@@ -265,7 +269,8 @@ class PluginAPIImpl:
             )
 
     def _require_open_locked(self) -> None:
-        if self._registration_closed or self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+        if (self._registration_closed or self._runtime_closing or self._runtime_closed
+                or self._skill in _unloading):
             raise ExtensionRegistrationError(
                 f"skill {self._skill!r} cannot register after unload has started"
             )
@@ -355,6 +360,52 @@ class PluginAPIImpl:
 
     # --- registration ---
 
+    def register_realtime_provider(self, name: str, *, route: Any, session: Callable[..., Any], catalog: Any) -> None:
+        from ouroboros.contracts.realtime import ProviderCatalog, RealtimeRoute
+
+        _reject_extension_child_side_effect("register_realtime_provider")
+        self._require("realtime_provider")
+        short = _assert_tool_name(name)
+        if not isinstance(route, RealtimeRoute):
+            raise ExtensionRegistrationError("realtime provider route must be a contracts.realtime.RealtimeRoute")
+        if not callable(session):
+            raise ExtensionRegistrationError("session must construct a live provider session")
+        if not isinstance(catalog, ProviderCatalog):
+            raise ExtensionRegistrationError("realtime provider catalog must be a contracts.realtime.ProviderCatalog")
+        key = f"{self._skill}:{short}"
+        with _lock:
+            self._stage_surface_locked(_realtime_providers, self._staged.realtime_providers, key, {
+                "skill": self._skill, "route": route, "session": session, "catalog": catalog,
+                "_credential_api": self,
+            }, "realtime provider")
+
+    def register_live_conversation(self, name: str, handler: Callable[..., Any], *,
+                                   configure: Callable[[], Any], call_tools: Sequence[Any] = (),
+                                   initial_tools: Sequence[str] = ()) -> None:
+        """An in-process conversation feature; ordinary admission grants its host port."""
+        from ouroboros.contracts.live_conversation import CallTool
+
+        _reject_extension_child_side_effect("register_live_conversation")
+        self._require("live_conversation")
+        short = _assert_tool_name(name)
+        if not inspect.iscoroutinefunction(handler) or not callable(configure):
+            raise ExtensionRegistrationError("conversation requires an async handler and configuration reader")
+        tools = tuple(call_tools)
+        if isinstance(initial_tools, str):
+            raise ExtensionRegistrationError("initial_tools must be a sequence of ordinary tool names")
+        initial = tuple(dict.fromkeys(_assert_tool_name(name) for name in initial_tools))
+        for tool in tools:
+            if not isinstance(tool, CallTool) or not inspect.iscoroutinefunction(tool.handler):
+                raise ExtensionRegistrationError("call tools must be contracts.live_conversation.CallTool with async handlers")
+            _assert_tool_name(tool.name)
+        if len({tool.name for tool in tools}) != len(tools):
+            raise ExtensionRegistrationError("call tool names must be unique")
+        with _lock:
+            self._stage_surface_locked(_conversation_features, self._staged.conversation_features,
+                f"{self._skill}:{short}", {"skill": self._skill,
+                "handler": self._wrap_runtime_handler(handler), "configure": configure,
+                "call_tools": tools, "initial_tools": initial}, "conversation feature")
+
     def register_tool(
         self,
         name: str,
@@ -437,12 +488,16 @@ class PluginAPIImpl:
         key = f"{self._skill}:{clean_tab}"
         validated_render = _validate_runtime_ui_render({} if render is None else render)
         span = _widget_span_from_render(validated_render)
+        from ouroboros.extension_widget_assets import capture_widget_sources
+
+        esm = validated_render.get("entry_type") == "module"
+        widget_sources = capture_widget_sources(self._loaded_skill, validated_render) if esm else {}
         # A module widget's reviewed JavaScript (its entry plus every sibling
         # .js/.mjs) is captured here (disk read, outside the lock) so the module
         # endpoint serves the loaded bundle's bytes, not the disk.
         module_sources = (
             read_module_sources(self._skill_dir, str(validated_render.get("entry") or ""))
-            if str(validated_render.get("kind") or "") == "module" else None
+            if str(validated_render.get("kind") or "") == "module" and not esm else None
         )
         with _lock:
             self._stage_surface_locked(_ui_tabs, self._staged.ui_tabs, key, {
@@ -461,6 +516,7 @@ class PluginAPIImpl:
                 # ``_publish_registrations`` is the only place sources become
                 # servable (ABI-9 atomicity).
                 self._staged.module_sources.update(module_sources)
+            self._staged.widget_sources.update(widget_sources)
 
     def register_settings_section(
         self,
@@ -814,6 +870,11 @@ class PluginAPIImpl:
             if import_root is not None or content_hash is not None:
                 bundle.import_root = import_root
             bundle.plugin_api_generation = self._plugin_api_generation
+            if self._loaded_skill is not None:
+                bundle.loaded_skill = self._loaded_skill
+                declaration = self._loaded_skill.manifest.context_snapshot
+                bundle.context_snapshot = ({"path": declaration["path"], "state_dir": str(self._state_dir)}
+                                           if declaration else None)
             digest = uuid.uuid4().hex
             bundle.generation_digest = digest
             self._published_generation = digest
@@ -842,6 +903,11 @@ class PluginAPIImpl:
                     live[key] = value
                     bundle_keys.append(key)
             bundle.module_sources.update(staged.module_sources)
+            bundle.widget_sources.update(staged.widget_sources)
+            if staged.contributions is not None:
+                bundle.contributions = staged.contributions
+                bundle.contribution_problems = staged.contribution_problems
+                bundle.host_sources = staged.host_sources
             bundle.unload_callbacks.extend(staged.unload_callbacks)
             # Recorded on the bundle BEFORE the attach below so a mid-attach
             # failure's unload reaps every effect (unsubscribing a
@@ -923,6 +989,8 @@ class PluginAPIImpl:
         log.log(level_no, "[ext %s] %s %s", self._skill, message, fields or "")
 
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
+        from ouroboros.realtime_credentials import session_settings
+
         with self._api_lock:
             with _lock:
                 if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
@@ -930,7 +998,7 @@ class PluginAPIImpl:
             if "read_settings" not in self._permissions:
                 # Missing permission fails closed without leaking key presence.
                 return {}
-            settings = self._current_settings()
+            settings = session_settings(self, self._current_settings())
             with _lock:
                 if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
                     return {}
@@ -971,6 +1039,16 @@ class PluginAPIImpl:
 
     def get_skill_token(self) -> SkillToken:
         return SkillToken(mint_skill_token(self._state_dir, self._skill, self._skill_dir))
+
+    def read_memory(self, operation: str, parameters: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """``memory_reader.read_memory`` over this host's data root (``drive_root``), never a payload-named path;
+        refused once unload began, like every runtime read here."""
+        with _lock:
+            if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                raise MemoryReadError("unavailable", f"skill {self._skill!r} is unloading")
+        from ouroboros.memory_reader import read_memory  # the memory owners load only when a skill reads
+
+        return read_memory(self._drive_root, operation, parameters)
 
     def get_runtime_info(self) -> RuntimeInfo:
         """Return the PluginAPI runtime-info snapshot without manifest I/O."""

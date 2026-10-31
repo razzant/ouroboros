@@ -131,7 +131,7 @@ def test_pause_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp
     ensure_current_store(root)
     calls = []
     monkeypatch.setattr(owner_pause_control, "request_owner_pause",
-                        lambda task_id, *, request_id: calls.append((task_id, request_id)) or {"ok": True})
+                        lambda task_id, *, request_id, by=None: calls.append((task_id, request_id, by)) or {"ok": True})
     app = Starlette(routes=[Route("/api/tasks/{task_id}/pause", task_pause.api_task_pause, methods=["POST"])])
     app.state.drive_root = root
     with TestClient(app) as client:
@@ -139,13 +139,15 @@ def test_pause_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp
             _migrating_body(client.post("/api/tasks/t1/pause", json={"request_id": "r1"}))
         assert calls == []
         outside = client.post("/api/tasks/t1/pause", json={"request_id": "r1"})
-    assert outside.status_code == 200 and calls == [("t1", "r1")]
+    assert outside.status_code == 200 and calls == [("t1", "r1", None)], "a bare body declares nobody"
 
 
-def test_presence_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp_path):
+def test_presence_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp_path, monkeypatch):
     from ouroboros.gateway.host_service import create_host_service_app
     from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})
     _seed_token(tmp_path, skill="telegram-bot", token="presence-token", permissions=["presence"],
                 manifest_permissions=["presence"])
     binding_id = _seed_presence_behavior(tmp_path)
@@ -233,7 +235,28 @@ def test_boot_imports_off_the_ready_path_and_runs_the_waiting_steps_after_public
     assert store.migrating(root) is False and store.store_ready(root) is True and restarts == []
     assert store_switch.require_published(root)["status"] == "published"
     store_switch.when_ready(root, lambda: steps.append("late"))
+    deadline = time.monotonic() + 10
+    while steps[-1] != "late" and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert steps[-1] == "late"  # after publication a step runs at once
+
+
+@pytest.mark.parametrize("import_here", [True, False])
+def test_steps_registered_after_the_publication_never_run_on_the_registering_thread(tmp_path, import_here):
+    """The lifespan registers its steps and only then starts the boot coordinator that one of them
+    waits on (the extensions): a fast import that already published, or a door without an import,
+    must not run them on the registering thread, which would then never start that coordinator."""
+    root = fixture_root(tmp_path)
+    if import_here:
+        store_switch.start(root, repo_dir=REPO, request_restart=lambda: None)
+        assert store_switch.wait_ready(root, timeout=30)["status"] == "published"  # the import finished first
+    coordinator, ran = threading.Event(), []
+    store_switch.when_ready(root, lambda: ran.append(coordinator.wait(10)))
+    coordinator.set()  # this thread's next work, reached only because the registration returned
+    deadline = time.monotonic() + 10
+    while not ran and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ran == [True]
 
 
 def test_a_failed_boot_import_leaves_the_root_not_ready_and_no_request_re_imports(tmp_path, monkeypatch):
@@ -327,19 +350,19 @@ def _census(**over):
 
 
 @pytest.mark.parametrize("alive", [True, False])
-def test_restart_census_refuses_a_packer_exit_until_confirmed(tmp_path, monkeypatch, alive):
+def test_restart_census_refuses_a_maintenance_exit_until_confirmed(tmp_path, monkeypatch, alive):
     import server
-    from ouroboros import evidence_packer
+    from ouroboros import maintenance
 
     root = tmp_path / "data"
     root.mkdir()
     signals, switches = [], []
     child = SimpleNamespace(poll=lambda: None if alive else 0, kill=lambda: signals.append("kill"))
-    packer = evidence_packer.EvidencePacker()
+    packer = maintenance.MaintenanceChild()
     packer._process = child
-    monkeypatch.setattr(evidence_packer, "packer", packer)
+    monkeypatch.setattr(maintenance, "child", packer)
     monkeypatch.setattr(server, "DATA_DIR", root)
-    monkeypatch.setattr(server, "begin_owned_stop", lambda *_: None)
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
     monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed"})
     monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)
     monkeypatch.setattr("supervisor.workers.last_worker_exit_census", lambda: {"unconfirmed": []})
@@ -361,10 +384,10 @@ def test_restart_census_refuses_a_packer_exit_until_confirmed(tmp_path, monkeypa
         assert outcome["status"] == "switched" and len(switches) == 1
 
 
-def test_packer_census_covers_a_spawn_before_the_child_handle_is_published():
-    from ouroboros.evidence_packer import EvidencePacker
+def test_maintenance_census_covers_a_spawn_before_the_child_handle_is_published():
+    from ouroboros.maintenance import MaintenanceChild
 
-    packer = EvidencePacker()
+    packer = MaintenanceChild()
     alive = [True]
     packer._thread = SimpleNamespace(is_alive=lambda: alive[0])
     packer.stop()
@@ -433,6 +456,27 @@ def test_a_tree_that_already_lost_the_store_exports_at_the_restart_exit_without_
     assert (root / "task_results" / "root1.json").exists() and store_switch.read_switch_intent(root) is None
     receipt = json.loads((root / store_switch.RECEIPT_REL).read_text(encoding="utf-8"))
     assert receipt["intent"]["target_sha"] == old and receipt["intent"]["door"] == "vcs_rollback"
+
+
+def test_a_tree_without_the_dialogue_store_gets_its_rows_back_at_the_restart_exit(tmp_path, monkeypatch):
+    """A manual checkout of a body that reads the facts store but not the dialogue store (every
+    release before it): the restart exit exports the rows only the store holds into the chain
+    files that body reads; the facts store stays where it is and nothing resets a second time."""
+    from ouroboros import dialogue_store
+
+    root = fixture_root(tmp_path)
+    ensure_current_store(root)
+    dialogue_store.append(root, "chat", {"direction": "out", "chat_id": 1, "text": "a reply only the store holds"})
+    monkeypatch.setattr(store_switch, "switch_needs",
+                        lambda *_: {"facts": False, "money": False, "handles": False, "dialogue": True})
+    monkeypatch.setattr(store_switch, "rev_parse", lambda *_: "older-head")
+    monkeypatch.setattr(store_switch, "switching_owner", lambda door: pytest.fail("nothing may reset a second time"))
+    outcome = store_switch.switch_at_restart(root, root, _census())
+    assert outcome["status"] == "switched", outcome
+    assert "a reply only the store holds" in (root / "logs" / "chat.jsonl").read_text(encoding="utf-8")
+    assert store.probe(root)[0] == "present" and store_switch.read_switch_intent(root) is None
+    monkeypatch.setattr(store_switch, "switch_needs", lambda *_: dict.fromkeys(("facts", "money", "handles", "dialogue"), False))
+    assert store_switch.switch_at_restart(root, root, _census()) == {"status": "no_intent"}, "a tree that reads both"
 
 
 @pytest.mark.parametrize("cleanup, blocker", [

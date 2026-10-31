@@ -324,7 +324,7 @@ def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine
             for route in held:
                 route.fulfill(response=route.fetch())
             held.clear()
-            expect(saved.locator('.mcp-server-status')).to_have_text('1 tool discovered', timeout=20_000)
+            expect(saved.locator('.mcp-server-status')).to_have_text(re.compile(r'^1 tool \(listed .+\)$'), timeout=20_000)
             expect(saved.locator('[data-mcp-message]')).to_contain_text('Saved catalog refreshed')
             assert 'echo' in saved.locator('.mcp-tools-disclosure').text_content()
             page.keyboard.insert_text('on3')
@@ -363,7 +363,7 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             card = page.locator('[data-mcp-card]').first
             message, badge = card.locator('[data-mcp-message]'), card.locator('.mcp-server-status')
 
-            def answer(change=None, focused=False):
+            def answer(change=None, focused=False, expected='Saved catalog refreshed'):
                 """Refresh without moving focus, then answer its held status read, changed or not."""
                 with page.expect_request(lambda request: request.url.endswith('/api/mcp/status'), timeout=20_000):
                     button = card.locator('[data-mcp-refresh]')
@@ -377,7 +377,7 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
                             change(entry)
                     route.fulfill(response=response, json=data)
                 held.clear()
-                expect(message).to_contain_text('Saved catalog refreshed', timeout=20_000)
+                expect(message).to_contain_text(expected, timeout=20_000)
 
             def kept():
                 return page.evaluate("""() => {
@@ -390,7 +390,7 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
                 }""")
 
             answer()
-            expect(badge).to_have_text('1 tool discovered')
+            expect(badge).to_have_text(re.compile(r'^1 tool \(listed .+\)$'))
             summary = card.locator('.mcp-tools-disclosure summary')
             summary.focus()
             page.keyboard.press('Enter')
@@ -414,15 +414,46 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
 
             answer(lambda entry: (entry['tools'].append({'name': 'synthetic_lookup', 'description': 'Synthetic.'}),
                                   entry.update(tool_count=2)), focused=True)
-            expect(badge).to_have_text('2 tools discovered')
+            expect(badge).to_have_text(re.compile(r'^2 tools \(listed .+\)$'))
             assert card.locator('.mcp-tools-list li').count() == 2
             assert 'synthetic_lookup' in card.locator('.mcp-tools-list').text_content()
             assert {key: value for key, value in kept().items() if key != 'selected'} == {
                 'same': True, 'open': True, 'focused': True, 'field': True}, 'a changed tool list must patch in place'
 
             answer(lambda entry: entry.update(tools=[], tool_count=0), focused=True)
-            expect(badge).to_have_text('0 tools discovered')
+            expect(badge).to_have_text(re.compile(r'^0 tools \(listed .+\)$'))
             assert card.locator('.mcp-tools-disclosure').count() == 0
+            answer(lambda entry: entry.update(last_error='offline', latest_attempt={
+                'at': '2026-10-21T10:00:00+00:00', 'ok': False, 'error': 'offline', 'partial': False}))
+            expect(badge).to_contain_text('1 tool (listed ')
+            expect(badge).to_contain_text('last attempt 2026-10-21T10:00:00+00:00 failed: offline')
+            badge.scroll_into_view_if_needed()
+            _capture(page, 'mcp-catalog-failed-with-tools')
+            answer(lambda entry: entry.update(tools=[], tool_count=0, listed_at=None, latest_attempt=None,
+                                               last_refreshed='', last_attempted='', last_error=''))
+            expect(badge).to_have_text('Not listed yet')
+            answer(lambda entry: entry.update(tools=[], tool_count=0, listed_at=None, last_error='offline',
+                latest_attempt={'at': '2026-10-21T10:00:00+00:00', 'ok': False, 'error': 'offline', 'partial': False}))
+            expect(badge).to_contain_text('Never listed under the current configuration; last attempt ')
+            badge.scroll_into_view_if_needed()
+            _capture(page, 'mcp-catalog-never-listed')
+            page.set_viewport_size({'width': 390, 'height': 844})
+            badge.scroll_into_view_if_needed()
+            expect(badge).to_be_visible()
+            bounds = badge.bounding_box()
+            assert bounds and bounds['x'] >= 0 and bounds['x'] + bounds['width'] <= 390
+            _capture(page, 'mcp-catalog-never-listed-narrow')
+            page.route('**/api/mcp/refresh', lambda route: route.fulfill(json={
+                'ok': True, 'published': False, 'tool_count': 1, 'publication_error': 'disk full'}))
+            answer(lambda entry: entry.update(publication_error='disk full'), expected='Refresh failed: disk full')
+            expect(badge).to_contain_text('catalog publication failed: disk full')
+            assert 'Saved catalog refreshed' not in message.inner_text()
+            page.unroute('**/api/mcp/refresh')
+            page.route('**/api/mcp/refresh', lambda route: route.fulfill(json={'ok': False, 'error': 'offline'}))
+            answer(lambda entry: entry.update(latest_attempt={'at': '2026-10-21T11:00:00+00:00',
+                'ok': False, 'error': 'offline', 'partial': False}), expected='Refresh failed: offline')
+            expect(badge).to_contain_text('last attempt 2026-10-21T11:00:00+00:00 failed: offline')
+            page.unroute('**/api/mcp/refresh')
             page.unroute('**/api/mcp/status')
         finally:
             browser.close()
@@ -773,7 +804,8 @@ def test_mcp_import_replaces_legacy_ui(direct_server_with_data, loopback, engine
             assert disk["legacy_docs"]["headers"] == {"Authorization": BASIC, "X-Api-Key": CUSTOM}
             assert disk["legacy_docs"]["auth_token"] == "" and disk["legacy_docs"]["enabled"] is True
             assert disk["keep_me"] == {**seed[1], "id": "keep_me", "name": "", "command": "", "args": [],
-                                       "auth_header": "Authorization", "auth_token": "", "allowed_tools": []}
+                                       "auth_header": "Authorization", "auth_token": "", "allowed_tools": [],
+                                       "schemas_at_start": False}  # #2351: Save writes the per-server pin
             assert disk["fresh"]["enabled"] is False and disk["fresh"]["url"].endswith("?k=synthetic-query")
             seen_before = len(http_app.seen)
             cards.nth(0).locator("[data-mcp-refresh]").click()
@@ -885,3 +917,9 @@ def test_retyped_legacy_mask_cannot_replace_saved_token(direct_server_with_data,
                 page.remove_listener('request', handler)
         finally:
             browser.close()
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

@@ -324,15 +324,28 @@ def test_task_metrics_are_persisted_and_forwarded_to_live_logs(tmp_path):
     assert pushed[0]["tool_errors"] == 1
 
 
-def test_llm_usage_serializer_carries_web_search_sources():
-    """The llm_usage serializer must persist web_search_sources (GAIA
-    campaign contract). Moved here from tests/test_devtools_benchmarks.py:
-    after the D08 split the serializer lives with its budget family, and
-    this suite owns the llm_usage event surface."""
-    import pathlib
-    src = (pathlib.Path(__file__).resolve().parent.parent
-           / "supervisor" / "events_budget.py").read_text(encoding="utf-8")
-    assert "web_search_sources" in src
+def test_llm_usage_serializer_carries_web_search_sources(tmp_path):
+    """Provider search citations reach both the durable audit and the live log."""
+    from types import SimpleNamespace
+
+    from supervisor import events
+
+    sources = [
+        {"url": "https://example.test/one", "title": "First", "content": "First excerpt"},
+        {"url": "https://example.test/two", "title": "Second", "content": "Second excerpt"},
+    ]
+    frames = []
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=SimpleNamespace(push_log=frames.append))
+
+    events._handle_llm_usage(
+        {"type": "llm_usage", "task_id": "search-task", "usage": {"web_search_sources": sources}},
+        ctx,
+    )
+
+    written = json.loads((tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8"))
+    assert written["web_search_sources"] == sources
+    assert written["task_id"] == "search-task"
+    assert frames == [written]
 
 
 def test_effort_facts_with_legacy_option_status_survive_logs_without_notices(tmp_path):

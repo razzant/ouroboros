@@ -166,8 +166,8 @@ def scan_occurrences(inventory: ci.CodeInventory, query: str | None, *, mode: st
     legacy, overflowed or changed facts require a fresh parse.
     Inventory call facts and definition ranges also apply only to the bytes the
     inventory hashed: a changed file is disclosed without them; others still scan.
-    A path-only (``not_parsed``) entry is admitted like an indexed one; its
-    Python call fallback parses the current source read here.
+    A path-only (``not_parsed`` or ``name_absent``) entry is admitted like an indexed
+    one; a ``not_parsed`` Python call fallback parses the current source read here.
     A view may select/summarize each file's rows before the selected-result cap.
     """
     scan = EvidenceScan()
@@ -189,7 +189,7 @@ def scan_occurrences(inventory: ci.CodeInventory, query: str | None, *, mode: st
             scan.limits["policy excluded"] += 1
             continue
         reason = search_skip_reason(path)
-        if not reason and file.disposition not in {"indexed", "not_parsed"} and not file.disposition.startswith("structural_unavailable"):
+        if not reason and file.disposition not in {"indexed", "not_parsed", "name_absent"} and not file.disposition.startswith("structural_unavailable"):
             reason = file.disposition
         if reason:
             scan.limits[reason] += 1

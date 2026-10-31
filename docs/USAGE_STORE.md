@@ -1,26 +1,56 @@
 # Usage store: the monetary authority
 
-`state/usage.sqlite` is the one monetary authority (store module
-`ouroboros/usage_store.py`, policy owner `ouroboros/usage_accounting.py`). It
-keeps ONE row per physical attempt and, beside it, every current fact the
-ordinary readers ask, maintained in the transaction that changes it. No
-ordinary path (admission, send, display, status, task start, maintenance
-candidates) aggregates the attempts: each reads summary rows and addressed rows,
-so its cost does not grow with history. The public `usage_accounting` /
-`usage_admission` API (names, shapes, exceptions) is the same as in the
-journal era.
+`state/usage.sqlite` owns money (`usage_store.py`; policy: `usage_accounting.py`).
+Each physical attempt's transaction maintains its row and summaries.
+Ordinary reads use current/addressed facts, never history. Custody owns
+execution coverage, not amounts. The public `usage_accounting` / `usage_admission`
+names, monetary shapes and exceptions retain the journal-era contract; scoped
+coverage is an opt-in projection. Storage rules import no pricing/budget policy:
+changing that policy cannot redefine valid storage, and locking or repair cannot
+change what an attempt costs.
 
 ## 1. Schema
 
-The database runs a rollback journal (`journal_mode=DELETE`) with
-`synchronous=FULL`.
+The shared store core defaults to `journal_mode=PERSIST`, `synchronous=FULL`
+and a 64 MiB idle journal size limit. A retained rollback journal avoids file
+creation/deletion on every commit; DELETE-mode older writers can interleave
+only in turns: on Windows a live PERSIST connection keeps the journal open, so
+a DELETE-mode commit beside it fails (SQLITE_IOERR_DELETE) and the next reader
+rolls it back. Every connection that may write opens through `store.connect`;
+the `query_data` SQL child's read-only reader never commits.
+WAL keeps FULL and requires all three facts: SQLite >= 3.51.3 (or the 3.50
+branch >= 3.50.7 / 3.44 branch >= 3.44.6, which carry the WAL-reset fix: a race
+between two connections, in threads or processes, writing or checkpointing the
+same WAL file at once, sqlite.org/wal.html §11), enforced locks, and a proven
+local filesystem. Darwin/FreeBSD use `statfs` (apfs/hfs/ufs); Linux uses mountinfo
+and known local filesystem types, with every overlay backing directory
+verified; Windows requires `GetDriveTypeW` = DRIVE_FIXED for the containing
+volume. Unknown or remote filesystems keep PERSIST. A working lock probe alone
+does not prove WAL shared-memory support. The gate is a fact about the opening
+runtime, not evidence that a file was damaged.
+
+Lifecycle owners choose the journal (`ouroboros/store_journal.py`): private
+builds publish their chosen header; lifespan boot calls explicit
+`initialize_journal=True` for current facts, money and dialogue before producers.
+`body_sha` and the repair CLI grant no journal authority. Boot checks existing
+child headers through the custody directory walk, without SQL on compatible
+children or creating absent stores; incompatible WAL leaves before lazy access.
+Export, switch and retier leave DELETE (`prepare_handoff`); a new tier is
+published only after conversion under the former protocol.
+Ordinary opens keep the WAL/rollback boundary: local PERSIST on rollback, WAL
+unchanged, incompatible WAL refused typed. `write=False` is still `mode=rw` and
+may write SQLite bookkeeping. Boot promotion is optional: an early lease defers
+it with a warning while rollback keeps serving. Required demotion retries only
+contention within one `wait_sec` budget; exhaustion is retryable `StoreBusy`,
+other failures propagate. Opens keep refusing incompatible WAL until a lifecycle
+owner succeeds; no failure authorizes unsafe WAL continuation.
 
 | table | holds |
 |---|---|
-| `attempts` | one row per attempt id, UPDATEd on every transition; `revision` counts its transitions (the old `expected_seq` role). Typed columns for ids, state, attribution, timestamps (`ts_reserved`, `ts_dispatched`, `ts_final`, `ts_last`), money as canonical decimal text, tokens (NULL = not reported), caps, review/route attribution, local-answer owner; `weight` (1, or the folded attempt count of an imported aggregate); every other field verbatim in `extra`, so a row decodes to exactly what was written. Indexes: root, group, task, the open set (partial: reserved/dispatched/unresolved and abandoned settlements), `(category, ts_last)`, review wave, route. |
+| `attempts` | one row per attempt id, UPDATEd on every transition; `revision` counts its transitions (the old `expected_seq` role). Typed columns for ids, state, attribution, timestamps (`ts_reserved`, `ts_dispatched`, `ts_final`, `ts_last`), money as canonical decimal text, tokens (NULL = not reported), caps, review/route attribution, local-answer owner; `weight` (1, or the folded attempt count of an imported aggregate); every other field verbatim in `extra`, so a row decodes to exactly what was written. Indexes: root, `(root, ts_last)`, group, task, the open set (partial: reserved/dispatched/unresolved and abandoned settlements), `(category, ts_last)`, review wave, route. |
 | `summaries` | `(scope, key)` → the full bucket the readers render: the cash 5-tuple as decimal text, state counts, unknown/priced/open/non-final counters, sessions and windows, processing summary, token sums with presence counts, physical calls, cache TTLs and the cap multiset; `accounted_num` (REAL) orders the costliest tasks and is never read as an amount. |
 | `bindings` | the earliest root/group cap binding (`BindingIndex` semantics: carried, `legacy_live`, `legacy_default`, explicit unlimited `None`). |
-| `dirty_owners` | task and root ids whose stored cost projection may be behind, with the revision that dirtied them. |
+| `dirty_owners` | task/root projection debt, indexed by its dirty revision; one entry per owner, removed with acknowledged debt. |
 | `one_shots` | the identity of single-row kinds (external dispatch, subscription session, legacy rows). |
 | `meta` | `schema_version`, `lock_tier`, the import provenance and the publication marker. |
 
@@ -82,23 +112,75 @@ network-bound runs inside it.
   HTTP-200 body errors included, is retained in private CAS before retry. Failure, administrative
   closure, answer completeness and monetary finality remain independent.
 - One-shot kinds compare identity, not payload: a subscription session's later
-  model or token observation replays the stored row.
+  observation replays the stored row. New partial session receipts retain known
+  cash and `cost_partial`, with no reservation bound; an exact subtotal remains
+  exact while `unknown_unmetered` counts its unpriced remainder once per row.
 - Nonfinite money is refused before anything is written.
 
 ## 4. Reads
 
-Money and displays read the same rows. A display read (`allow_stale`) waits
-only the short display wait, then reports the fact unavailable — never zero.
-`read_usage_records` (every row) serves the explicit audit and the export; a
-test pins its call sites. The consciousness allowance selects its roots and
-window rows through the `(category, ts_last)` and root indexes. Terminal
-maintenance takes recovery candidates from the open-set index and projection
-candidates from `Txn.dirty_owners()`. After an addressed projection succeeds or
-is equal, `ack_dirty_owner(owner_id, revision)` removes only that revision; a
-new receipt, failure, missing result or live ownership keeps the debt. A
-batched task-store query finds missing results before ownership reads. Their
-exact revisions stay, so a result landing after the last receipt (child
-copyback or quarantine restore) is projected later without a new receipt.
+`query_data` money SQL uses guarded direct `mode=ro` reads by default, so a small
+aggregate does not copy the whole ledger. Explicit `snapshot=true` makes a checked
+disposable copy, with no fallback after failure. One `timeout_sec` budget covers
+acquisition (including cold preparation), copy, check and SQL; expiry names its
+phase, while corruption/I/O and unowned interrupts remain failures. The optional
+`remaining_sec` narrows nested admission waits without changing other callers.
+The parent owns scratch and passes the whole request by file. It bounds startup
+separately; after expiry it allows 0.5 s while a source may be held, 2 s after
+release for the typed answer, then reaps noninterruptible work and removes scratch.
+
+Money and displays share rows; `allow_stale` bounds display waits, then reports
+unavailable. `read_usage_records` serves audit/export only;
+`test_bulk_readers_are_called_only_by_the_audit_and_the_export` in
+`tests/test_usage_store.py` pins its call sites. Consciousness selects
+roots by `(category, ts_last)` and window rows by `(root, ts_last)`, never lifetime
+history. Terminal maintenance reads open attempts and `Txn.dirty_owners()`.
+Finality/display consumers opt into `usage_breakdown(include_custody=True)`;
+amount-only admission, wave fit and pacing never read custody. The coverage owner
+`delegate_custody_usage` observes addressed custody before money, then joins each
+run's receipt once in the SAME money read as the amounts. Own/tree/sibling scopes
+and split execution/ledger roots retain their identities. Custody roots share one
+display wait allowance; the subsequent money read has its own allowance. Contention
+reports unavailable at debug level. Pending/live/unrecorded or unreadable custody
+keeps `cost_custody` open; cleanup holds do not. Counts stay ledger-derived; later
+starts are not atomically fenced. Exact partial cash is confirmed, estimated
+partial cash is estimated; both carry an unpriced remainder and no total bound.
+
+Custody changes owe task/root `cost_revision` in the existing `delegated_runs`
+set. No debt means no monetary read/write/emit. Refresh checks ownership at the
+addressed root and acknowledges only the observed revision after an available
+projection was published or already matches; concurrent changes and failed or
+unavailable reads keep debt. An absent optional carrier alone emits nothing.
+Missing/nonterminal owners await their terminal write without repeated projection
+attempts. Fold/import/rebuild derive debt only for still-open monetary custody,
+never a burst over closed history; no new poller or monetary backfill.
+Money-only passes select dirty revisions newer than the saved marker plus present
+owners. A successful/equal projection calls `ack_dirty_owner(owner_id, revision)`;
+newer receipts, failures, missing results and live ownership keep debt. One batched
+presence query precedes ownership reads. Absence retains the exact revision, so
+late copyback or quarantine restore projects without another receipt.
+`review_price.py` prices one review by one reviewer row from the same rows:
+`review_seat_costs` groups the review category's attempts by
+`(review_wave_id, review_slot_id)` through the `(category, ts_last)` index,
+summing every physical attempt of a seat in one wave; the median of a row's
+recent waves on its current model is shown with its count and range, no
+history reads `cost unknown`, and one process keeps the table for half an hour
+so `## Review` never waits on the ledger.
+
+From money to the round and its cause: a task result's `[SUBTASK_OUTCOME]`
+carries its `swarm_receipt`, whose `cost.attempts[]` names every physical
+attempt of the tree by `attempt_id` (one released before dispatch has no
+`accounted_upper_bound_usd`) and whose `supervisor_context_pressure[]` gives
+the task's own attempts their `physical_context.round_id`. The `attempts` row
+(`query_data(op="sql", db="money")`) is the authority: its state, and in
+`extra` the release `reason`, `physical_context.round_id`, the sent request's
+`candidate_manifest_ref` and `physical_failure.evidence_ref`, the complete
+failure source in the observability CAS (`query_data(op="blob", sha256=...)`).
+The worker's `llm_api_error` row names the same attempts
+(`physical_attempt_id`, `ledger_attempt_ids`) with the classification the loop
+acted on; a task with its own drive writes it there and in the installation's
+`logs/events.jsonl`, so it outlives the drive that retention or the owner's
+storage run deletes (`docs/PERSISTENCE.md`), as the attempt row and its blob do.
 
 ## 5. Lock tiers
 
@@ -112,9 +194,42 @@ connections per inode, and every raw read in a process that may hold a store
 (the header probe, the Files panel, the read tools, artifact capture:
 `store.open_for_read`, `iter_file_bytes`, `read_file_bytes`, `copy_file_bytes`)
 borrows one shared descriptor per inode that closes only when no counted
-connection has the file open, as SQLite's unix VFS defers its own closes. The connection, tier,
+connection has the file open, as SQLite's unix VFS defers its own closes. Under
+WAL every open connection also holds locks on the `-shm` index, so these readers
+refuse a WAL index, told on every OS by its name and identity (the regular file
+the volume resolves a SQLite database's name plus `-shm` to), before opening it
+(`store.is_wal_index`, `WalIndexRefused`; the Files panel answers 403); the folder
+copies, captures, delegated snapshots and artifact listings built on them leave
+it out as an excluded member, tracked or not, never read and with no content
+baseline (a copy rebuilds its own from the copied `-wal`, which carries no lock),
+and search skips SQLite's journal and WAL files. The rule assumes this process's
+own databases never end in `-shm`. Under WAL a byte copy of a live store (a
+download, a file or folder copy) can hold an older state (newer commits stay in
+its `-wal`), be torn by a checkpoint running meanwhile, or fail to open when a
+folder copy pairs the file with a `-wal` taken at another moment; an exact copy
+comes from a stopped Ouroboros, whose last close checkpoints the log into the
+file. The connection, tier,
 file-identity and transaction core is `ouroboros/store.py`, shared with the
 current-facts store; `usage_store` keeps the money error vocabulary over it.
+
+Ordinary transactions lease one lazy connection per process, file and thread.
+Durability pragmas run at connection open; acquisition and commit waits retain
+their existing per-operation budgets. Returning a lease leaves no transaction
+open. Thread exit, fork, file replacement, export and a folder's move
+(`close_connections_under`, each process its own) release cached handles;
+the raw descriptor follows the last connection. Fork callers must be outside
+transactions. Export/retire closes all idle handles and leaves DELETE mode
+after checkpointing, before a rename; an active lease refuses handoff with the
+usual busy outcome. Any switch that retains a store while changing to an older
+SQLite runtime must also call `store.prepare_handoff` after quiescing writers.
+This includes switches whose target still contains the store module.
+Private builds checkpoint and close their sole connection before publication:
+a WAL build keeps its header and leaves no log or index under the temporary
+name, a rollback build no journal. A refused switch (`forget_handoffs`) keeps its
+stores in the rollback journal until the next boot chooses again.
+Caller-owned raw connections must also close before rename on every platform.
+At normal interpreter exit the pool closes before Python clears the inode registry
+and its locks; thread exit closes that thread's connections earlier.
 
 - `enforced`: SQLite's own file locks. `usage_store.hold` is the acquisition
   primitive the existing waits slice (`_usage_wait`): sends retry it in short
@@ -141,9 +256,13 @@ cannot be read is `UsageLedgerCorrupt` for every caller and is never replaced.
 
 ## 6. One-time import
 
-The server runs `migrate_from_journal(root)` at lifespan start on every door
-(a providerless install included), before any request, worker or supervisor;
-the supervisor's liveness phase `startup:usage_store` then finds it completed.
+The server runs `migrate_from_journal(root, initialize_journal=True)` at lifespan
+start on every door (a providerless install included), before any request,
+worker or supervisor, which is also where an existing store gets this runtime's
+journal (§1) and missing `(root, ts_last)`/dirty-owner revision indexes once
+(failed builds keep broader scans until the next boot);
+the supervisor's liveness phase `startup:usage_store` then finds it completed and
+keeps the journal as it is.
 A display read (`allow_stale=True`) never imports: while a journal or a
 pre-ledger event chain awaits that job it reports the store unavailable, and with
 neither it creates the empty store. A non-display reader that finds no store (a tool or a test without a
@@ -250,11 +369,18 @@ model, timestamp or arbitrary request ID. Custom endpoints supplied only through
 an embedded client's constructor need a matching caller-supplied target to the
 receipt producer; the source command resolves the configured OpenRouter route.
 
-Received prices, including zero, outrank absent token counters and error shape.
-An explicitly malformed price stays unknown even when a token tariff is
-available; the host-derived `cost_invalid` usage fact survives normalization,
-settlement and loop projection. A valid alternate price wins, including zero.
-Absent/null prices still permit the existing nonfinal token estimate.
+Received prices, zero included, outrank absent token counters and error shape.
+A price is what the reply consumed, whichever wallet paid
+(`_usage_response.consumed_cost_value`, shared by the ledger, the loop lane and
+this receipt): a reply whose own usage says `is_byok` is true ran on the caller's
+provider key, so its `upstream_inference_cost` (the provider-billed share) adds
+to the gateway charge and the row carries `cost_basis` `byok_gateway_plus_upstream`;
+without a valid upstream figure it is unknown, never $0. Every other reply keeps
+its charge (OpenRouter repeats it in that field), and settled history is not
+rewritten. `_usage_response.provider_cost_value` validates incoming cash; malformed prices
+stay unknown despite available tariffs. The host-derived `cost_invalid` fact
+survives settlement, loop and Safety telemetry. Valid alternate evidence wins;
+absent/null prices permit nonfinal token estimates, never image text tariffs.
 Generation 404, 401, 403, 429, mismatched ID and absent/invalid money are distinct
 non-price outcomes. `Retry-After` is retained for an operator's next invocation;
 the command never schedules another lookup. A valid retained price needs no
@@ -274,8 +400,8 @@ facts. A different final price is a conflict, never last-write-wins. Receipt
 retention precedes application; repeating `--apply` recovers an interrupted run.
 Existing dirty-owner maintenance refreshes terminal task/root projections after
 the ledger write, including after restart. Completed review attribution permits
-price recovery; live review operations (including late acceptance after the
-author task ends), live owners and post-task work remain protected. Price
+price recovery; live review operations (including a review wave that settles after
+the author's task ends), live owners and post-task work remain protected. Price
 uncertainty grants no continuation rights. Applying a price to an unresolved attempt closes its monetary row, removing that row's model-handoff blocker; separate live ownership checks and incomplete-response facts remain. Refining an already-settled nonfinal row never expands the open-attempt set.
 
 Standalone command custody uses the selected data root's existing current queue
@@ -313,12 +439,19 @@ operator's separate authorization; installation alone changes no old money.
 
 ## 10. Residuals
 
+- A subscription session's input axes are its harness's normalized split from
+  2026-10-27 (unknown where the split is), the harness's own counters kept in
+  `extra.harness_tokens`; older session rows hold those counters (Claude Code:
+  the uncached rest), so token sums spanning the change mix the two. A sum no
+  row reported stays null in the ledger, task totals, `/status` and Logs; the
+  `/api/cost-breakdown` compatibility token fields, typed as integers, show 0.
+
 - Durability on a name-tier mount is best effort, as it was for the journal:
   the store relies on the mount's own write and rename semantics.
 - Two hosts sharing one data directory are not a supported configuration (the
   name lock is per host).
 - Result-only edits do not dirty money: ordinary receipts maintain projection debt;
   a result-only accounting repair belongs to explicit repair/import.
-- An owner whose result never appears stays in `dirty_owners` and is re-checked
-  by the pass's one batched presence query; absence is never acknowledged, so only
-  a projection (or that explicit repair) retires it.
+- Absent owners keep `dirty_owners` debt. Successful absence rests until arrival,
+  their own money change, repair or restart; a changed ledger epoch reselects all.
+  Only a successful projection or explicit repair retires debt.

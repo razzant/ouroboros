@@ -125,9 +125,11 @@ def test_settings_mutative_subagents_toggle_round_trips():
 
 
 def test_onboarding_compact_access_step_keeps_default_width_two_column():
+    # The rendered contract (columns, readable type, hidden explanatory copy
+    # and visible live feedback) lives in test_onboarding_catalog_browser.py::
+    # test_connection_discovery_feedback_stays_visible_on_compact_screens.
     css = _read("web/onboarding.css")
     assert "@media (max-height: 820px), (max-width: 900px)" in css
-    assert ".field-note,\n  .footer-copy" in css
     assert "@media (max-width: 760px)" in css
 
 
@@ -137,14 +139,14 @@ def test_settings_more_providers_collapse_keeps_inputs_mounted():
     settings.js applyInputValue has no null guard, so a missing input id
     breaks settings load. The wrapper auto-opens when configured."""
     ui = _read("web/modules/settings_ui.js")
-    settings = _read("web/modules/settings.js")
+    connections = _read("web/modules/settings_connections.js")
     css = _read("web/settings.css")
 
     assert 'id="settings-more-providers"' in ui
-    assert ui.count("advanced: true") == 5
+    assert _read("web/modules/settings_provider_cards.js").count("advanced: true") == 5
     assert "PROVIDER_CARDS.filter((card) => !card.advanced)" in ui
     assert "PROVIDER_CARDS.filter((card) => card.advanced)" in ui
-    assert "syncMoreProvidersDisclosure" in settings
+    assert "if (fold && moreProvidersOpen(entries, advanced)) fold.open = true;" in connections
     assert ".settings-more-providers > summary" in css
     # About tab footer stays removed (v6.82 cosmetic pass).
     assert "Joi Lab" not in ui
@@ -170,16 +172,92 @@ def test_skills_and_widgets_use_inner_scroll_regions():
     widgets = _read("web/modules/widgets.js")
     css = _read("web/style.css")
     assert 'class="skills-scroll scroll-fade-y"' in skills
-    assert 'class="widgets-scroll scroll-fade-y"' in widgets
+    # The board's live cards keep crisp edges: no shared scroll fade (DESIGN "Widgets board").
+    assert 'class="widgets-scroll"' in widgets and "scroll-fade" not in widgets
     assert ".skills-scroll" in css and "overflow-y: auto" in css
     assert ".widgets-scroll" in css and "overflow-y: auto" in css
 
 
-def test_sidebar_projects_list_is_a_bounded_scroll_region():
-    """The sidebar's one variable-length collection owns a bounded window with
-    its own scroll, so the navigation column cannot grow with the project count."""
-    rule = _read("web/style.css").split(".nav-projects-list {", 1)[1].split("}", 1)[0]
-    assert "max-height: var(--nav-projects-list-max-height)" in rule and "overflow-y: auto" in rule, rule
+def test_sidebar_is_three_zones_with_the_projects_list_as_the_one_scroller():
+    """The sidebar is a pinned head (Main Chat), the Projects list as the ONE scroller (no inner cap, no outer
+    scroll wrapper), the tools right after it and the foot (the version and the update) on the bottom edge: the
+    Projects zone is as tall as its rows and shrinks to scroll them, so free room lies between the tools and the foot,
+    never between the list and the tools (docs/DESIGN.md "Shell").
+    A too-short window falls back to the whole column scrolling with the head sticky and the foot still on the
+    bottom edge (owner 23.10)."""
+    css = _read("web/style.css")
+    html = _read("web/index.html")
+    zone = css.split("\n.nav-projects {", 1)[1].split("}", 1)[0]
+    assert "flex: 0 1 auto" in zone and "min-height: 0" in zone, zone
+    assert "flex: 1 1 auto" not in zone, "a zone that takes the free height leaves a hole when the list is short"
+    rule = css.split("\n.nav-projects-list {", 1)[1].split("}", 1)[0]  # the base rule, not the short-window fallback
+    assert "flex: 1 1 auto" in rule and "min-height: 0" in rule and "overflow-y: auto" in rule, rule
+    assert "overscroll-behavior: contain" in rule and "max-height" not in rule, rule
+    # Too short for the zones: the column is the one scroller and the list flows (no second scroller).
+    # A finger's 44px rows run out of room sooner, so a touch column falls back at a taller window.
+    fallback = css.split("@media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {", 1)[1].split("}\n}", 1)[0]
+    assert "#primary-sidebar .nav-projects-list { flex: 0 0 auto; overflow-y: visible;" in fallback
+    # There the tools' box steps aside, so the foot sticks to the column's bottom edge through the column's bottom
+    # padding, which the drawer grows by the safe area (test_sidebar_short_window_browser.py measures it).
+    assert "#primary-sidebar .sidebar-foot { display: contents; }" in fallback
+    pinned = fallback.split("#primary-sidebar .sidebar-foot-meta {", 1)[1]
+    for line in ("position: sticky;", "bottom: calc(-1 * var(--sidebar-pad-bottom));",
+                 "margin-bottom: calc(-1 * var(--sidebar-pad-bottom));", "padding-bottom: var(--sidebar-pad-bottom);",
+                 "background: var(--surface-side);"):
+        assert line in pinned, (line, pinned)
+    column = css.split("\n#primary-sidebar {", 1)[1].split("\n}", 1)[0]
+    assert "--sidebar-pad-bottom: var(--space-3);" in column and "padding: 0 var(--space-3) var(--sidebar-pad-bottom);" in column
+    drawer = css.split('\nhtml[data-layout="stack"] #primary-sidebar {', 1)[1].split("\n}", 1)[0]
+    assert "--sidebar-pad-bottom: calc(var(--space-3) + var(--inset-bottom));" in drawer, drawer
+    assert "padding-bottom: var(--sidebar-pad-bottom);" in drawer, drawer
+    assert "--nav-projects-list-max-height" not in css and "--nav-projects-list-max-height" not in _read("web/ui.css")
+    # A fresh document has no outer wrapper. An older desktop page can keep its pre-three-zone .sidebar-scroll; the
+    # one rule naming it takes its box away, so that page's list scrolls again (test_ui_shell_legacy_browser.py).
+    assert "sidebar-scroll" not in html
+    rules = re.sub(r"/\*.*?\*/", "", css, flags=re.S).splitlines()
+    legacy = [line.strip() for line in rules if "sidebar-scroll" in line]
+    assert legacy == ["#primary-sidebar > .sidebar-scroll { display: contents; }"], legacy
+    head = css.split(".sidebar-head {", 1)[1].split("}", 1)[0]
+    assert "position: sticky" in head and "top: 0" in head
+    # The foot (the version and the update) rests on the bottom edge whatever the list does (owner 22.10): the tools'
+    # box takes the free room and its last row is pushed down, so the free room lies between the tools and the foot.
+    foot = css.split("\n.sidebar-foot {", 1)[1].split("}", 1)[0]
+    meta = css.split("\n.sidebar-foot-meta {", 1)[1].split("}", 1)[0]
+    assert "flex: 1 0 auto" in foot and "margin-top: auto" in meta, (foot, meta)
+    assert html.index('class="sidebar-head"') < html.index('id="nav-projects"') < html.index('class="sidebar-foot"')
+    # The zones are filled from the page registry: Main into the head, the tools into the foot (pages.js).
+    pages_js = _read("web/modules/pages.js")
+    assert "id: 'chat', label: 'Main Chat', icon: 'chat', zone: 'head'" in pages_js
+    for page in ("files", "skills", "widgets", "dashboard", "settings"):
+        assert f"id: '{page}'," in pages_js and "zone: 'foot'" in pages_js.split(f"id: '{page}',", 1)[1].split("}", 1)[0]
+    assert "Utilities" not in html and "nav-section-label" not in html
+    # A finger gets 44px rows and +; the version reads at the meta size.
+    assert "#primary-sidebar { --nav-item-h: 44px; --nav-control-h: 44px; }" in css
+    version = css.split("#nav-version {", 1)[1].split("}", 1)[0]
+    assert "font-size: var(--type-meta)" in version and "opacity" not in version
+    # A row's one status mark is the shared one (ui.css "Status marks"), in the row's own ink: no unread dot of its
+    # own, no second painter, and no name ink that changes with unread (new messages are the mark's hue).
+    for retired in (".nav-unread-dot", ".nav-activity-marker", ".nav-project-row.has-unread", ".nav-projects-show-all"):
+        assert retired not in css, retired
+    row = css.split("\n.nav-project-row {\n    min-height", 1)[1].split("}", 1)[0]
+    assert "grid-template-columns: minmax(0, 1fr) 18px;" in row, row
+    assert ".nav-project-row > .nav-mark { grid-column: 2; }" in css
+    # Main's mark lands in the Project rows' column by construction: Main's row ends where theirs does.
+    assert "--nav-kebab-w: var(--nav-control-h);" in css
+    assert "grid-template-columns: minmax(0, 1fr) var(--nav-kebab-w);" in css.split("\n.nav-project-item {", 1)[1].split("}", 1)[0]
+    assert "padding-right: calc(var(--nav-kebab-w) + var(--space-1));" in css.split("\n.nav-row-main {", 1)[1].split("}", 1)[0]
+    # On touch a long press opens a row's menu: the ⋯ keeps no column and no finger, and stays the keyboard's door.
+    touch = css.split("/* Touch: a long press opens the row's menu", 1)[1].split("\n}\n", 1)[0]
+    assert "#primary-sidebar { --nav-kebab-w: 0px; }" in touch
+    assert ".nav-project-item .nav-project-kebab:not(:focus, [aria-expanded=\"true\"]) {" in touch
+    assert "pointer-events: none" in touch
+    assert ".nav-project-item:has(> .nav-project-kebab:is(:focus, [aria-expanded=\"true\"])) {" in touch
+    assert "-webkit-touch-callout: none" in touch and "user-select: none" in touch
+    # The row's ⋯ is the shell's one More glyph.
+    app_js = _read("web/app.js")
+    assert "kebab.innerHTML = SHELL_ICONS.more;" in app_js and "kebab.textContent = '⋯'" not in app_js
+    assert "navProjectsToggle?.classList.toggle('active'" not in _read("web/app.js")
+    assert "openProjectPanel(item.project, { openOnly: true," in app_js
 
 
 # ---------------------------------------------------------------------------
@@ -187,16 +265,17 @@ def test_sidebar_projects_list_is_a_bounded_scroll_region():
 # ---------------------------------------------------------------------------
 
 
-def test_evolution_page_supports_refresh_and_runtime_state():
+def test_evolution_page_reads_runtime_and_history_independently():
     source = _read("web/modules/evolution.js")
 
-    assert 'id="evo-refresh"' in source
-    assert "Runtime Status" in source
-    assert "apiFetch(`/api/evolution-data${suffix}`" in source
-    assert "ws.on('open', () => {" in source
+    # Two reads, neither waiting for the other: the campaign paints from the state, the history from its saved copy.
+    assert "await readStateSnapshot(stateSnapshots, request)" in source and "await readState()" in source
+    assert "apiFetch(`/api/evolution-data${force ? '?force=1' : ''}`, { cache: 'no-store' })" in source
+    assert "Promise.all" not in source
+    assert "loadHistory({ force: !historyError })" in source  # Try again re-measures after a failed refresh
+    assert "ws.on('open', loadAll)" in source
     assert "window.addEventListener('ouro:page-shown'" in source
     assert "document.addEventListener('visibilitychange'" in source
-    assert "renderRuntimeState(runtime, data.generated_at || '');" in source
     assert "evolution_state" in source
     assert "bg_consciousness_state" in source
 
@@ -218,31 +297,37 @@ def test_server_navigation_and_chat_static_contracts():
     assert '"bg_consciousness_state": bg_state,' in state_source
     assert 'request.query_params.get("force")' in control_source
     assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));" in app_source
-    assert "evo-runtime-detail" in evo_source
-    assert "data?.evolution_state?.detail" in chat_source
-    assert "data?.bg_consciousness_state?.detail" in chat_source
-    assert re.search(r'<input[^>]+id="chat-file-input"[^>]+multiple', chat_source)
+    assert "evo-consciousness-detail" in evo_source
+    # A room's bar says consciousness and a running campaign by its chip (DESIGN "Page header"); no More menu repeats them.
+    status_source = _read("web/modules/consciousness_status.js")
+    assert "normalizeConsciousness(data.bg_consciousness_state || {}, { enabled: data.bg_consciousness_enabled })" in status_source
+    assert "const evolving = data.evolution_enabled === true;" in status_source
+    assert "evolution_state" not in chat_source and "bg_consciousness_state" not in chat_source
+    # The composer's markup and send path live in composer.js, mounted by chat.js.
+    composer_source = _read("web/modules/composer.js")
+    assert "${composerMarkup()}" in chat_source
+    assert re.search(r'<input[^>]+id="chat-file-input"[^>]+multiple', composer_source)
     # The composer's staged files live in chat_attachments.js (DESIGN "Chat attachments");
-    # chat.js uploads through it on Send and names the uploads for the model.
+    # composer.js uploads through it on Send and names the uploads for the model.
     attachments_source = _read("web/modules/chat_attachments.js")
-    assert "createComposerAttachments({" in chat_source
-    assert "composerText(text, uploadedAttachments.map(" in chat_source
+    assert "createComposerAttachments({" in composer_source
+    assert "composerText(text, uploadedAttachments.map(" in composer_source
     assert "attachmentTail(names);" in attachments_source  # every message but the exact /restart command
     assert "list.slice(0, ATTACHMENT_PREVIEW_COUNT)" in attachments_source
     assert "for (const item of [...pending])" in attachments_source
     assert "attachBtn.classList.toggle('uploading', flag)" in attachments_source
     assert "input.readOnly = flag;" in attachments_source
-    assert "cleanupUploadedAttachments" in chat_source
-    assert "await cleanupUploadedAttachments(e.uploaded || []);" in chat_source
-    assert "await cleanupUploadedAttachments(uploadedAttachments);" in chat_source
-    assert "ws.send({" in chat_source and "{ queue: false }" in chat_source
-    assert "result?.status !== 'sent'" in chat_source
+    assert "cleanupUploadedAttachments" in composer_source
+    assert "await cleanupUploadedAttachments(e.uploaded || []);" in composer_source
+    assert "await cleanupUploadedAttachments(uploadedAttachments);" in composer_source
+    assert "ws.send(frame, hasAttachments ? { queue: false } : undefined)" in composer_source
+    assert "result?.status !== 'sent'" in composer_source
     assert "data-attachment-remove" in attachments_source
     media_source = _read("web/modules/chat_media.js")
     assert "export async function cleanupUploadedAttachments" in media_source
     assert "method: 'DELETE'" in media_source
     assert "Promise.allSettled" in media_source
-    assert '>Loading…</span>' in chat_source
+    assert '>Loading…</span>' in _read("web/modules/chat_header.js")
     assert "syncHeaderControlState({ accounting: { available: false } });" in chat_source
     assert "budget_text: 'Connecting...'" not in chat_source
     assert "send(msg, options = {})" in _read("web/modules/ws.js")

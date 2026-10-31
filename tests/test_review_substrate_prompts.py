@@ -1,59 +1,17 @@
 """Prompt rendering and the single review execution seam.
 
 Split by theme out of ``tests/test_review_substrate_v2.py``. This module owns
-the rendered prompt: the outcome-tier/independence contract, the byte-level
-pre-seam goldens of the api_chat executor, one render per slot, the typed
-undeliverable-route refusal and the absolute default drive root.
+the rendered prompt: the byte-level pre-seam goldens of the api_chat executor,
+one render per slot, the typed undeliverable-route refusal and the absolute
+default drive root. (The task-acceptance outcome-tier/independence prompt rules
+left with task acceptance.)
 """
 
 import json
 
-from ouroboros.review_execution import _render_prompt
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 
 from tests._review_substrate_shared import FakeLLM
-
-def test_render_prompt_requires_outcome_tier_and_independence():
-    """T1 (v6.35.0): for task acceptance, outcome_tier/completion_coach are part of
-    the REQUIRED JSON keys (not trailing prose models drop), and the reviewer is
-    told to judge evidence independence + environment-vs-deliverable."""
-    req = ReviewRequest(
-        surface="task_acceptance",
-        goal="verify",
-        subject="done",
-        policy={"classify_outcome_tier": True},
-        task_id="t",
-    )
-    prompt = _render_prompt(req, ReviewSlot(slot_id="a", model="m"))
-    keys_line = next(line for line in prompt.splitlines() if line.startswith("Return JSON with keys:"))
-    assert "outcome_tier" in keys_line and "completion_coach" in keys_line
-    assert "EVIDENCE INDEPENDENCE" in prompt
-    assert "ENVIRONMENT vs DELIVERABLE" in prompt
-    assert "ABSENT-PREMISE / INFEASIBLE DISPOSITION" in prompt
-    assert "PREMISE ARGUMENT, not the named artifact" in prompt
-    assert "FULL goal/spec narrative" in prompt
-    assert "affected components/surfaces" in prompt
-    # Evidence fits the criterion's kind, not one grader-mirroring check for everything.
-    assert "evidence each criterion calls for" in prompt
-    assert "inspection of the actual artifact" in prompt and "grounded in cited sources" in prompt
-    assert "A simpler method that keeps the outcome is fulfilment" in prompt
-    assert "demanding person who made this request" in prompt
-    assert "a sufficient result needs no invented improvement" in prompt
-    assert "MIRRORS what the real grader" not in prompt and "grader-mirroring" not in prompt
-    assert "VISIBLE UI EVIDENCE" in prompt
-    assert "real consumer flow" in prompt
-    assert "screenshot file or attachment" in prompt
-    assert "mobile and WebKit are not universal requirements" in prompt
-    assert "unavailable optional engine alone is not degradation" in prompt
-
-    # A non-tier surface keeps the lean key list (no tier keys).
-    plain = _render_prompt(
-        ReviewRequest(surface="scope", goal="g", task_id="t"),
-        ReviewSlot(slot_id="a", model="m"),
-    )
-    plain_keys = next(line for line in plain.splitlines() if line.startswith("Return JSON with keys:"))
-    assert "outcome_tier" not in plain_keys
-    assert "VISIBLE UI EVIDENCE" not in plain
 
 # --- v6.87.11: the single review execution seam (Phase 5.1 / 5.2) -------------
 
@@ -64,24 +22,12 @@ def test_render_prompt_requires_outcome_tier_and_independence():
 #     for request, slot in _seam_prompt_cases():
 #         sha256(json.dumps(_request_messages(request, slot),
 #                           ensure_ascii=False, sort_keys=True).encode())
-# The two task_acceptance digests (indexes 2-3) were re-pinned DELIBERATELY when
-# D-Q5 added the evidence-ref vocabulary line to the acceptance criteria_key —
-# a one-time cache invalidation of the stable governance segment — and re-pinned
-# once more when that same line was corrected to state the real claim-id binding
-# (a claim counts only while `acceptance_support_refs` shows it supported), and a
-# THIRD time when section refs were narrowed to host-attested exhibits (the
-# agent's own reasoning_notes/candidate_answers and task_contract stopped
-# resolving, so the prompt must stop advertising them), and a FOURTH time when
-# receipt refs started enumerating the packet's verification_receipts exhibit
-# rows (only a green pass/observed receipt resolves, so the prompt says so).
-# Re-pinned for goal-directed coaching, independently grounded checks and current
-# applicability of historical RED; this pins delivery, not model judgment.
-# Only the acceptance surface moves: the four non-acceptance digests are unchanged.
+# The task_acceptance case (its own re-pinned digests, once indexes 2-3) left with
+# the acceptance surface (owner 17.10, Q2-A); the four remaining digests are the
+# unchanged pre-seam bytes.
 _PRE_SEAM_PROMPT_DIGESTS = [
     "0261c7c7fe477ad7f8901a28bee1ad23905d40c3c62825d2bc406ecd9ca37f82",
     "9cf4de6f66001c3b4cec7fdd3d8552ecf83fc886004a7020e98a4c28c022c4e3",
-    "ead62c88bbc615c48296b4aebf510548ba7eb63ed2c1e238742b7dc188735c55",
-    "de2f13f4e45527aec32af8aeafd9cd9b225ab8646bcc5696775efdab5873d9c5",
     "fca0f9401e544e371338f20effa6206db783e7098ff4d11ee2a980ebbe81ecb0",
     "fca0f9401e544e371338f20effa6206db783e7098ff4d11ee2a980ebbe81ecb0",
 ]
@@ -98,22 +44,6 @@ def _seam_prompt_cases():
         checklist="- one\n- two",
         policy={"hardness": "hard_gate", "min_successful_slots": 2},
         task_id="task-1",
-    )
-    acceptance = ReviewRequest(
-        surface="task_acceptance",
-        goal="Did the agent finish?",
-        scope="",
-        subject="the answer",
-        evidence={"receipts": [{"tool": "bash", "ok": True}]},
-        evidence_refs=[],
-        checklist="- criteria",
-        policy={
-            "classify_outcome_tier": True,
-            "require_criterion_evidence": True,
-            "hardness": "advisory_visible",
-            "min_successful_slots": 1,
-        },
-        task_id="task-2",
     )
     prebuilt = ReviewRequest(
         surface="scope_review",
@@ -139,7 +69,7 @@ def _seam_prompt_cases():
         ReviewSlot(slot_id="slot_1", model="anthropic/claude-x", effort="high", role_hint="commit reviewer"),
         ReviewSlot(slot_id="slot_2", model="openai/gpt-x", effort="medium", role_hint=""),
     ]
-    for request in (generic, acceptance, prebuilt):
+    for request in (generic, prebuilt):
         for slot in slots:
             yield request, slot
 
@@ -195,7 +125,9 @@ def test_prompt_record_keeps_request_slot_messages_shape(tmp_path):
 
 def test_slot_prompt_is_rendered_once_per_slot(tmp_path, monkeypatch):
     """5.2: the prompt record and both permitted physical sends share ONE lazy
-    rendering — the substrate never re-assembles the pack per attempt."""
+    rendering — the substrate never re-assembles the pack per attempt. The second
+    send is the P3 rail's one same-slot retry of a transport failure (the acceptance
+    format-repair resend that once supplied it left with task acceptance)."""
     import ouroboros.review_execution as rx
 
     calls = {"n": 0}
@@ -208,31 +140,29 @@ def test_slot_prompt_is_rendered_once_per_slot(tmp_path, monkeypatch):
     # Patch the OWNER module: the api_chat executor renders through it.
     monkeypatch.setattr(rx, "_request_messages", _counted)
 
-    class RepairLLM:
+    class RetryLLM:
         def __init__(self):
             self.sends = 0
 
         def chat(self, **kwargs):
             self.sends += 1
             if self.sends == 1:
-                return {"content": "not json at all"}, {}
-            return {"content": json.dumps({
-                "verdict": "PASS", "findings": [], "summary": "ok",
-                "outcome_tier": "solved", "completion_coach": "",
-            })}, {}
+                raise TimeoutError("transient timeout")
+            return {"content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"})}, {}
 
-    llm = RepairLLM()
-    run_review_request(
+    llm = RetryLLM()
+    result = run_review_request(
         ReviewRequest(
-            surface="task_acceptance", goal="g", subject="done",
-            policy={"classify_outcome_tier": True, "min_successful_slots": 1},
-            task_id="lazy-render",
+            surface="multi_model_review", goal="g", subject="diff",
+            policy={"min_successful_slots": 1}, task_id="lazy-render",
+            call_type="multi_model_review",
         ),
         slots=[ReviewSlot(slot_id="s1", model="m")],
         drive_root=tmp_path,
         llm=llm,
     )
-    assert llm.sends == 2        # the repair resend still happens
+    assert llm.sends == 2        # the P3 retry resends once on the same slot
+    assert result.actors[0]["status"] == "ok"
     assert calls["n"] == 1       # rendered once for the record AND both sends
 
 

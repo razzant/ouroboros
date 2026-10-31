@@ -47,8 +47,8 @@ def test_the_real_producers_emit_exactly_the_declared_fields(tmp_path, monkeypat
     route = resolve_web_search_route(settings={"OUROBOROS_WEBSEARCH_BACKEND": "auto", "OPENROUTER_API_KEY": "synthetic",
                                                "OUROBOROS_WEBSEARCH_MODEL": "vendor/future"})
     assert _required(contracts.WebSearchRoute) <= set(route) <= _py_fields(contracts.WebSearchRoute)
-    assert route["legs"] and all(set(leg) == _py_fields(contracts.WebSearchLeg)
-                                 for leg in route["legs"] + route["unavailable"])
+    assert route["legs"] and all(set(leg) == _required(contracts.WebSearchLeg) for leg in route["legs"])
+    assert route["unavailable"] and all(set(leg) == _py_fields(contracts.WebSearchLeg) for leg in route["unavailable"])
     refused = resolve_web_search_route(settings={"OUROBOROS_WEBSEARCH_BACKEND": "openai",
                                                  "OUROBOROS_WEBSEARCH_MODEL": "anthropic::future"})
     assert "error" in refused and set(refused) <= _py_fields(contracts.WebSearchRoute)

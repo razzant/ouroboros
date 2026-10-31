@@ -110,7 +110,10 @@ def _wire(monkeypatch, behaviour="ok", *, timeout=5, drop_call_response=False):
     monkeypatch.setattr(mcp_client, "_transport_factory", _transport(server, drop_call_response=drop_call_response))
     mcp_client.reset_manager_for_tests()
     manager = mcp_client.get_manager()
-    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": timeout, "MCP_SERVERS": [SERVER]})
+    from ouroboros import config
+    settings = {"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": timeout, "MCP_SERVERS": [SERVER]}
+    monkeypatch.setattr(config, "load_settings", lambda: settings)
+    manager.reconfigure(settings)
     assert manager.refresh_server("demo")["ok"]
     assert manager.resolve_tool_name("mcp_demo__effect").status == "callable"
     return calls
@@ -214,3 +217,9 @@ def test_a_return_is_recorded_only_on_the_open_invocation_it_names(tmp_path, mon
     # The direct fallback owns this joined return; a closed call cannot retain
     # a phantom invocation or lend its completion fact to the next call.
     assert not load_task_result(tmp_path, "root").get("launch_handoffs")
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

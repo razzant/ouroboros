@@ -1,13 +1,13 @@
 {
   "name": "ouroboros-web",
-  "version": "7.7.0",
+  "version": "7.9.0",
   "private": true,
   "type": "module",
   "description": "Ouroboros browser UI package boundary",
   "scripts": {
     "lint": "node --check app.js",
     "test": "node --test tests/*.test.js",
-    "lint:undef": "eslint --max-warnings=0 app.js modules tests"
+    "lint:undef": "eslint --max-warnings=0 app.js theme.js modules tests"
   },
   "devDependencies": {
     "eslint": "10.10.0",

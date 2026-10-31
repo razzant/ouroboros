@@ -396,7 +396,7 @@ def test_receipt_identity_and_disclosed_whitespace_flag():
     assert R.receipt_expected_whitespace_normalized({"criterion_id": "c1", "check": "go test"}) is False
     assert R.receipt_expected_whitespace_normalized({}) is False
 
-    # Consumer 1: the acceptance reviewer's verification_summary.
+    # Consumer 1: the result reviewer's verification summary (review_result._verification).
     summary = _accept_verification_summary([{"status": "fail", "check": "pytest tests/x.py"}])
     assert summary["expected_whitespace_normalized"] is True
     assert summary["reconciliation_identity_kinds"] == ["check"]
@@ -746,142 +746,6 @@ def test_v651_verify_guard_inspects_exact_executed_argv():
     assert mapped["cmd"] == _normalize_check('["cat", "data/settings.json"]')  # guard == execution
 
 
-def test_v651_build_task_acceptance_evidence_process_aware():
-    """v6.51.0 idea-2: process-aware acceptance evidence — typed sections, provenance tags,
-    first-class verification_summary (RED surfaced), bounded+redacted trajectory, leak-safe
-    artifacts (protected = manifest-only), and an agent diff demoted (never host)."""
-    import types as _t
-    from ouroboros import outcomes as O
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    dr = Path(tempfile.mkdtemp())
-    # the receipt summary is raw host stdout — a secret in it must be REDACTED (review HIGH-1)
-    O.append_verification_receipt(dr, "acc", {"status": "fail", "check": "pytest", "returncode": 1,
-                                              "summary": "leaked sk-or-v1-SECRETTOKEN0123456789abcdef in output"})
-    art = dr / "task_results" / "artifacts" / "acc"
-    art.mkdir(parents=True, exist_ok=True)
-    (art / "secret_oracle.txt").write_text("HIDDEN GOLD TESTS")
-    (art / "out.txt").write_text("hello world")
-    ctx = _t.SimpleNamespace(
-        task_contract={"requirements": "do X", "interface": "def f()", "expected_output": "42",
-                       "resource_policy": {"protected_artifacts": [{"path": "secret_oracle.txt"}]}},
-        task_metadata={}, drive_root=str(dr), task_id="acc", repo_dir=str(dr),
-    )
-    trace = {"reasoning_notes": ["thinking"], "tool_calls": [
-        {"tool": "run_command", "status": "ok", "result": "x" * 20000},
-        {"tool": "verify_and_record", "status": "ok", "result": "ghp_SECRETGHTOKEN0123456789abcdefABCD"},
-    ]}
-    ev = build_task_acceptance_evidence(ctx, llm_trace=trace, drive_root=dr, task_id="acc",
-                                        agent_evidence={"repo_diff": "agent claims clean", "note": "n",
-                                                        "leaked": "sk-or-v1-AGENTSUPPLIED0123456789abcdefXYZ"})
-    # leak-safety: no secret (receipt summary, tool result, OR agent-supplied) survives serialization
-    import json as _json
-    _blob = _json.dumps(ev, ensure_ascii=False)
-    assert "sk-or-v1-SECRETTOKEN0123456789abcdef" not in _blob   # HIGH-1: verification_summary redacted
-    assert "ghp_SECRETGHTOKEN0123456789abcdefABCD" not in _blob  # tool-trajectory result redacted
-    assert "sk-or-v1-AGENTSUPPLIED0123456789abcdef" not in _blob  # round-4: agent_supplied redacted
-    assert ev["task_contract"]["requirements"] == "do X" and ev["task_contract"]["expected_output"] == "42"
-    assert ev["verification_summary"]["unreconciled_red"] is True
-    assert ev["verification_summary"]["failed_count"] == 1
-    # v6.71.1 evidence-parity: the per-result cap now tracks the actor's own PER-TOOL
-    # window (SSOT tool_capabilities.TOOL_RESULT_LIMITS / DEFAULT_TOOL_RESULT_LIMIT),
-    # so a 20k run_command result (actor window 80k) reaches the reviewer whole
-    # instead of the old hidden 700.
-    from ouroboros.review_evidence import _ACCEPT_RESULT_CAP as _DEFAULT_CAP
-    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS as _LIMITS
-    assert ev["tool_trajectory"] and all(
-        len(c["result"]) <= _LIMITS.get(c["tool"], _DEFAULT_CAP) + 300
-        for c in ev["tool_trajectory"]
-    )  # per-result cap = actor's own window
-    _rc = next(c for c in ev["tool_trajectory"] if c["tool"] == "run_command")
-    assert len(_rc["result"]) > 6000  # the reviewer now sees far more than the old 700/4000
-    p = ev["__provenance__"]
-    assert p["task_contract"] == "host_attested" and p["verification_summary"] == "host_attested"
-    assert p["tool_trajectory"] == "tool_result" and p.get("agent_supplied") == "agent_supplied"
-    assert ev["agent_supplied"]["agent_supplied_repo_diff"] == "agent claims clean"  # demoted
-    assert "repo_diff" not in ev["agent_supplied"]                                    # never host
-    arts = {a["name"]: a for a in ev["artifacts"]}
-    assert "HIDDEN GOLD" not in arts["secret_oracle.txt"].get("preview", "")          # protected = no bytes
-    assert arts["secret_oracle.txt"]["provenance"] == "hidden_or_restricted"
-    assert "hello world" in arts["out.txt"]["preview"]
-
-
-def test_acceptance_evidence_unions_split_root_actor_receipts(tmp_path):
-    from ouroboros.outcomes import append_verification_receipt
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    local = tmp_path / "child"
-    canonical = tmp_path / "canonical"
-    local.mkdir()
-    canonical.mkdir()
-    ctx = _verify_ctx(local, task_id="split-acceptance")
-    ctx.drive_root = local
-    ctx.budget_drive_root = str(canonical)
-    append_verification_receipt(canonical, ctx.task_id, {
-        "status": "declared", "contract_kind": "delegation_zero_run",
-        "zero_run": True, "zero_run_decision": "complete",
-    })
-    append_verification_receipt(local, ctx.task_id, {
-        "status": "pass", "check": "pytest tests/split.py",
-        "criterion_id": "split-check",
-    })
-
-    packet = build_task_acceptance_evidence(
-        ctx, drive_root=local, task_id=ctx.task_id,
-    )
-
-    assert packet["verification_summary"]["count"] == 2
-    assert [row.get("contract_kind") for row in packet["verification_receipts"]] == [
-        "", "delegation_zero_run",
-    ]
-
-
-def test_v651_acceptance_evidence_budget_disclosed():
-    """Verbose evidence is reduced, but immutable owner intent is never truncated."""
-    import types as _t
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    import json as _json
-    from ouroboros.review_evidence import _ACCEPT_TOTAL_BUDGET
-
-    dr = Path(tempfile.mkdtemp())
-    # Pathological immutable intent cannot be made to fit without changing it.
-    ctx = _t.SimpleNamespace(task_contract={"requirements": "Q" * 500_000}, task_metadata={}, repo_dir=str(dr))
-    trace = {"tool_calls": [{"tool": "run_command", "status": "ok", "result": "y" * 3000} for _ in range(400)]}
-    ev = build_task_acceptance_evidence(ctx, llm_trace=trace, drive_root=dr, task_id="b")
-    assert "__budget_note__" in ev and "OMISSION NOTE" in ev["__budget_note__"]
-    assert len(ev["tool_trajectory"]) == 20
-    assert ev["tool_trajectory_omitted_leading"] >= 380
-    serialized = _json.dumps(ev, ensure_ascii=False)
-    assert len(serialized) > _ACCEPT_TOTAL_BUDGET
-    overflow = ev["__immutable_core_overflow__"]
-    assert overflow["budget_chars"] == _ACCEPT_TOTAL_BUDGET
-    assert overflow["packet_chars"] > _ACCEPT_TOTAL_BUDGET
-    assert ev["task_contract"]["requirements"] == "Q" * 500_000
-
-
-def test_v651_protected_artifact_normalized_paths_shape():
-    """v6.51.0 review round-2: protected artifacts in the NORMALIZED resource_policy shape store
-    locations under a `paths` LIST (normalize_resource_policy) — they must be classified
-    hidden_or_restricted (manifest-only), not previewed."""
-    import types as _t
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-
-    dr = Path(tempfile.mkdtemp())
-    art = dr / "task_results" / "artifacts" / "pp"
-    art.mkdir(parents=True, exist_ok=True)
-    (art / "oracle.bin").write_text("GOLD ORACLE CONTENT")
-    ctx = _t.SimpleNamespace(
-        task_contract={"resource_policy": {"protected_artifacts": [
-            {"id": "o", "role": "black_box_reference", "paths": ["oracle.bin"]}]}},
-        task_metadata={}, repo_dir=str(dr),
-    )
-    ev = build_task_acceptance_evidence(ctx, drive_root=dr, task_id="pp")
-    arts = {a["name"]: a for a in ev["artifacts"]}
-    assert arts["oracle.bin"]["provenance"] == "hidden_or_restricted"   # matched via "paths" list
-    assert "GOLD ORACLE" not in arts["oracle.bin"].get("preview", "")   # no bytes leaked
-
-
 def test_v651_orchestrate_timeout_reaps_group_and_container(monkeypatch):
     """v6.51.0 review round-4: a host-timed-out run_pro is killed via platform_layer (cross-
     platform, NOT a raw os.killpg) and the worker's leaked obopro-w{N}-* container is removed."""
@@ -1131,9 +995,7 @@ def test_zero_run_and_fresh_start_share_one_atomic_actor_decision(tmp_path):
         barrier.wait()
         return claimed_start_request(
             drive,
-            claim_target="",
             actor_ctx=ctx,
-            enforce_actor_idle=True,
             run_id="",
             task_id=ctx.task_id,
             idempotency_key="actor-claim-invocation",

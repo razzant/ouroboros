@@ -2,8 +2,9 @@
 // select showed its FIRST option and every text field was empty, so pressing
 // Save posted that blank form over the stored values (the bundled Telegram
 // skill unbound its owner chat id that way). The host now reads the current
-// values from the same route it posts to; these pin the three outcomes of that
-// read against the real renderer.
+// values from the same route it posts to; these pin the outcomes of that read
+// against the real renderer. A route without a GET (404/405) cannot say what is
+// stored (#1552): its form starts locked until the owner chooses Edit anyway.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -11,6 +12,7 @@ import { readExtensionFormValues, renderExtensionSettingsSections } from '../mod
 
 const UNREADABLE_NOTE = 'Current values could not be read; Save is disabled so it does not overwrite them. '
     + 'Use Reload Settings to retry.';
+const UNAVAILABLE_NOTE = 'Current values are unavailable. These are defaults. Sending this form may change saved settings.';
 
 const FORM = {
     type: 'form',
@@ -80,14 +82,41 @@ test('(a) a stored document hydrates the form, and a password never comes back',
     assert.doesNotMatch(html, new RegExp(UNREADABLE_NOTE.slice(0, 30)));
 });
 
-test('(b) a plugin with no GET handler is unchanged: empty form, Save enabled', async () => {
+test('(b) a route with no GET handler reads as UNKNOWN: defaults shown locked, Save withheld until Edit anyway', async () => {
     for (const status of [404, 405]) {
         const { html } = await render(() => jsonResponse({ error: 'nope' }, status));
-        assert.match(html, /<option value="safe" selected>Safe<\/option>/, `status ${status}`);
-        assert.match(html, /name="chat_id"[^>]* value=""/, `status ${status}`);
-        assert.match(html, /type="submit">Save<\/button>/, `status ${status}`);
-        assert.doesNotMatch(html, /data-extension-settings-blocked/, `status ${status}`);
+        assert.match(html, /data-extension-settings-blocked="1"/, `status ${status}`);
+        assert.ok(html.includes(`data-extension-settings-read data-tone="warn">${UNAVAILABLE_NOTE}</div>`), `status ${status}`);
+        assert.ok(html.indexOf(UNAVAILABLE_NOTE) < html.indexOf('name="mode"'), 'the warning comes before the values it qualifies');
+        // The declared defaults are shown, never as the owner's values: every field is locked.
+        assert.match(html, /<select class="ui-control" name="mode"[^>]* disabled>/, `status ${status}`);
+        assert.match(html, /name="chat_id"[^>]* value="" disabled>/, `status ${status}`);
+        assert.match(html, /type="submit" disabled>Save<\/button>/, `status ${status}`);
+        assert.match(html, /type="button" data-extension-settings-edit-anyway>Edit anyway<\/button>/, `status ${status}`);
+        assert.doesNotMatch(html, new RegExp(UNREADABLE_NOTE.slice(0, 30)), `status ${status}`);
     }
+});
+
+test('a successful empty object is a real empty document, and an action with fields is read like a form', async () => {
+    const { html } = await render(() => jsonResponse({}));
+    assert.match(html, /<option value="safe" selected>Safe<\/option>/);
+    assert.match(html, /type="submit">Save<\/button>/);
+    assert.doesNotMatch(html, /data-extension-settings-blocked|data-extension-settings-read|Edit anyway/);
+
+    // `action` with fields is configuration too: no GET handler is the same unknown, not "stateless".
+    const action = await render(() => jsonResponse({}, 405), { component: { ...FORM, type: 'action', submit_label: 'Apply' } });
+    assert.equal(action.calls.length, 1);
+    assert.match(action.html, /type="submit" disabled>Apply<\/button>/);
+    assert.match(action.html, /Edit anyway/);
+});
+
+test('a fieldless action is never read and stays a plain enabled button', async () => {
+    const { html, calls } = await render(() => jsonResponse({}, 405), {
+        component: { type: 'action', id: 'refresh', route: 'refresh', label: 'Refresh status' },
+    });
+    assert.deepEqual(calls, [], 'an action route is a side effect, never probed');
+    assert.match(html, /type="submit">Refresh status<\/button>/);
+    assert.doesNotMatch(html, /data-extension-settings-blocked|data-extension-settings-read|Edit anyway/);
 });
 
 test('(c) an unreadable read disables Save and says why, in the shared warn tone', async () => {
@@ -104,8 +133,9 @@ test('(c) an unreadable read disables Save and says why, in the shared warn tone
         assert.match(html, /type="submit" disabled>Save<\/button>/, label);
         assert.match(html, /data-extension-settings-status data-tone="warn">/, label);
         assert.ok(html.includes(UNREADABLE_NOTE), label);
-        // The form still renders; only Save is withheld.
+        // The form still renders; only Save is withheld, and nothing offers a way around it.
         assert.match(html, /<option value="safe" selected>Safe<\/option>/, label);
+        assert.doesNotMatch(html, /Edit anyway|data-extension-settings-read/, label);
     }
 });
 
@@ -125,11 +155,12 @@ test('a component without a usable route is never read from', async () => {
 
 test('readExtensionFormValues classifies every outcome of the read', async () => {
     const outcomes = [
-        [jsonResponse({ mode: 'fast' }), { values: { mode: 'fast' }, blocked: false }],
-        [jsonResponse({}, 404), { values: {}, blocked: false }],
-        [jsonResponse({}, 405), { values: {}, blocked: false }],
-        [jsonResponse({}, 500), { values: {}, blocked: true }],
-        [jsonResponse(null), { values: {}, blocked: true }],
+        [jsonResponse({ mode: 'fast' }), { values: { mode: 'fast' }, read: 'ok' }],
+        [jsonResponse({}), { values: {}, read: 'ok' }],
+        [jsonResponse({}, 404), { values: {}, read: 'unsupported' }],
+        [jsonResponse({}, 405), { values: {}, read: 'unsupported' }],
+        [jsonResponse({}, 500), { values: {}, read: 'failed' }],
+        [jsonResponse(null), { values: {}, read: 'failed' }],
     ];
     for (const [response, expected] of outcomes) {
         const fetcher = stubFetch(() => response);
@@ -138,5 +169,61 @@ test('readExtensionFormValues classifies every outcome of the read', async () =>
         } finally {
             fetcher.restore();
         }
+    }
+});
+
+/** One rendered form as the handlers see it: its controls, named fields and listeners (no layout). */
+function formDouble(fieldNames) {
+    const control = (extra = {}) => ({
+        disabled: true, dataset: {}, textContent: '', listeners: {},
+        addEventListener(type, fn) { this.listeners[type] = fn; }, ...extra,
+    });
+    const inputs = Object.fromEntries(fieldNames.map((name) => [name, control({ value: `typed ${name}` })]));
+    const parts = {
+        '[data-extension-settings-edit-anyway]': control({ disabled: false }),
+        'button[type="submit"]': control(),
+        '[data-extension-settings-read]': control(),
+        '[data-extension-settings-status]': control(),
+    };
+    const form = control({
+        dataset: { extensionSettingsKey: 'demo:config:settings-form', skill: 'demo', route: 'save', extensionSettingsBlocked: '1' },
+        elements: { namedItem: (name) => inputs[name] || null },
+        querySelector: (selector) => parts[selector] || null,
+    });
+    return { form, inputs, parts };
+}
+
+test('Edit anyway is the owner\'s explicit choice: it unlocks the form, and only then does Save send every field', async () => {
+    const component = { ...FORM, fields: [...FORM.fields, { name: 'fixed', label: 'Fixed', type: 'text', disabled: true }] };
+    const { form, inputs, parts } = formDouble(['mode', 'chat_id', 'token', 'fixed']);
+    const host = { innerHTML: '', querySelectorAll: (selector) => (selector === '[data-extension-settings-form]' ? [form] : []) };
+    const root = { querySelector: (selector) => (selector === '#extension-settings-sections' ? host : null) };
+    const posts = [];
+    const fetcher = stubFetch((url, init) => {
+        if (init?.method === 'POST') { posts.push(JSON.parse(init.body)); return jsonResponse({ message: 'Saved.' }); }
+        return jsonResponse({ error: 'Method Not Allowed' }, 405);   // a POST-only legacy route
+    });
+    try {
+        await renderExtensionSettingsSections(root, sections(component));
+        await form.listeners.submit({ preventDefault() {} });
+        assert.deepEqual(posts, [], 'locked: Save sends nothing before the owner chooses');
+
+        const editAnyway = parts['[data-extension-settings-edit-anyway]'];
+        editAnyway.listeners.click({ currentTarget: editAnyway });
+        assert.deepEqual(Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.disabled])),
+            { mode: false, chat_id: false, token: false, fixed: true }, 'a field the schema disables stays disabled');
+        assert.equal(parts['button[type="submit"]'].disabled, false);
+        assert.equal(editAnyway.disabled, true);
+        assert.equal(form.dataset.extensionSettingsBlocked, undefined);
+        const note = parts['[data-extension-settings-read]'];
+        assert.equal(note.textContent, 'You chose to edit without reading the saved values. Review every field before sending.');
+        assert.equal(note.dataset.tone, 'warn');
+
+        await form.listeners.submit({ preventDefault() {} });
+        assert.deepEqual(posts, [{ mode: 'typed mode', chat_id: 'typed chat_id', token: 'typed token', fixed: 'typed fixed' }],
+            'every displayed field is sent, as an explicit replacement of what nobody could read');
+        assert.equal(parts['[data-extension-settings-status]'].textContent, 'Saved.');
+    } finally {
+        fetcher.restore();
     }
 });

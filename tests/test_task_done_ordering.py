@@ -58,11 +58,11 @@ class TestTaskDoneOrdering:
         usage = {"cost": 0.01, "rounds": 3, "prompt_tokens": 100, "completion_tokens": 50}
         llm_trace = {"tool_calls": [], "reasoning_notes": []}
 
-        # Monkeypatch consolidation to no-op (avoid LLM calls)
+        # Monkeypatch the paid memory stage to no-op (avoid LLM calls)
         import ouroboros.agent_task_pipeline as atp
-        orig_scratchpad_consol = atp._run_scratchpad_consolidation
+        orig_fallback_draft = atp._run_memory_fallback_draft
         orig_post_task = atp._run_post_task_processing_async
-        atp._run_scratchpad_consolidation = lambda *a, **kw: None
+        atp._run_memory_fallback_draft = lambda *a, **kw: None
         atp._run_post_task_processing_async = lambda *a, **kw: None
 
         try:
@@ -77,7 +77,7 @@ class TestTaskDoneOrdering:
                 ctx=ctx,
             )
         finally:
-            atp._run_scratchpad_consolidation = orig_scratchpad_consol
+            atp._run_memory_fallback_draft = orig_fallback_draft
             atp._run_post_task_processing_async = orig_post_task
 
         # Check events.jsonl: should have task_eval but NOT task_done
@@ -109,9 +109,9 @@ class TestTaskDoneOrdering:
         llm_trace = {"tool_calls": [], "reasoning_notes": []}
 
         import ouroboros.agent_task_pipeline as atp
-        orig_scratchpad_consol = atp._run_scratchpad_consolidation
+        orig_fallback_draft = atp._run_memory_fallback_draft
         orig_post_task = atp._run_post_task_processing_async
-        atp._run_scratchpad_consolidation = lambda *a, **kw: None
+        atp._run_memory_fallback_draft = lambda *a, **kw: None
         atp._run_post_task_processing_async = lambda *a, **kw: None
 
         try:
@@ -126,7 +126,7 @@ class TestTaskDoneOrdering:
                 ctx=ctx,
             )
         finally:
-            atp._run_scratchpad_consolidation = orig_scratchpad_consol
+            atp._run_memory_fallback_draft = orig_fallback_draft
             atp._run_post_task_processing_async = orig_post_task
 
         event_types = [e["type"] for e in pending_events]

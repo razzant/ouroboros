@@ -32,8 +32,8 @@ def _pool_rows(preset):
 
 # Verbatim from the live Claudexor daemon (GET /v2/harnesses/<id>/models,
 # 2026-08-09). Trimmed only of ids no seat can name; the Claude generation the
-# refreshed policy names (claude-opus-5-5) is added beside the old one. Codex keeps
-# gpt-5.6-sol: the installed engine's Codex catalog lists no gpt-6.1-sol.
+# refreshed policy names (claude-opus-5-5) is added beside the old one. This historical
+# Codex fixture lacks gpt-6.1-sol; the current/preferred branch is exercised separately.
 LIVE_MODELS = {
     "claude": (
         "sonnet", "opus", "haiku", "fable", "best", "claude-opus-5-5",
@@ -221,6 +221,26 @@ def test_unresolvable_model_refuses_typed_and_emits_nothing():
     # Nothing partial: no subagent value, no settings keys at all.
     assert preset.available_subagents == ""
     assert preset.settings_keys() == {}
+
+
+def test_codex_takes_6_1_sol_when_discovered_else_5_6_sol_with_the_reason_said():
+    """Codex prefers gpt-6.1-sol; only live discovery without it takes gpt-5.6-sol, and the receipt
+    and the preview's diagnostics say which and why. Neither discovered is a typed refusal."""
+    def codex(*extra):
+        return compile_install_preset([HarnessDiscovery("codex", (*LIVE_MODELS["codex"], *extra))])
+
+    newest = codex("gpt-6.1-sol")
+    assert {row["model"] for rows in newest.receipt["surfaces"].values() for row in rows} == {"gpt-6.1-sol"}
+    assert not any(note["code"] == "model_preference_successor" for note in newest.diagnostics)
+    older = codex()
+    [note] = [note for note in older.diagnostics if note["code"] == "model_preference_successor"]
+    assert (note["preference"], note["chosen_preference"], note["model"]) == ("gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-sol")
+    assert note in older.receipt["diagnostics"]
+    assert note["message"] == "codex discovery has no 'gpt-6.1-sol'; this seat uses the next preference, 'gpt-5.6-sol'."
+    assert all(row["reason"] == note["message"] for rows in older.receipt["surfaces"].values() for row in rows)
+    refused = compile_install_preset([HarnessDiscovery("codex", ("gpt-5.6", "gpt-5.5"))])
+    assert refused.refusal.code == "model_not_in_discovery"
+    assert refused.refusal.candidates == ("gpt-6.1-sol", "gpt-5.6-sol")
 
 
 def test_cursor_without_grok_refuses_instead_of_using_a_costlier_model():

@@ -23,6 +23,7 @@ transition of an exact reviewed candidate commit into the serving checkout.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -103,8 +104,8 @@ def _git(cwd: Any, *args: str, check: bool = True) -> subprocess.CompletedProces
     return _wt._git(pathlib.Path(cwd), *args, check=check)
 
 
-def _rows(data_dir: Optional[Any] = None, *, strict: bool = False, op: str = "") -> List[Dict[str, Any]]:
-    return [row for row in _wt._load_registry(data_dir, strict=strict, op=op) if row.get("kind") == KIND]
+def _rows(data_dir: Optional[Any] = None, *, op: str = "", strict: bool = False) -> List[Dict[str, Any]]:
+    return [row for row in _wt._records(data_dir, op=op, strict=strict) if row.get("kind") == KIND]
 
 
 def list_candidates(data_dir: Optional[Any] = None) -> List[Dict[str, Any]]:
@@ -112,12 +113,10 @@ def list_candidates(data_dir: Optional[Any] = None) -> List[Dict[str, Any]]:
     return _rows(data_dir)
 
 
-def find(owner: str, data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
-    owner = str(owner or "").strip()
-    for row in _rows(data_dir) if owner else []:
-        if row.get("task_id") == owner:
-            return row
-    return None
+def find(owner: str, data_dir: Optional[Any] = None, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+    owner = str(owner or "").strip()  # ``strict``: an unreadable copy record raises
+    return next((row for row in (_rows(data_dir, strict=strict) if owner else [])
+                 if row.get("task_id") == owner and not row.get("retiring")), None)
 
 
 def context_fact(owner: str = "", data_dir: Optional[Any] = None, *, limit: int = 8) -> List[Dict[str, Any]]:
@@ -125,8 +124,10 @@ def context_fact(owner: str = "", data_dir: Optional[Any] = None, *, limit: int 
 
     The mind sees what exists and who owns it, so continuing one is a deliberate
     ``prepare_self_change(resume=...)`` and never an inference from a room or a date.
+    A candidate the GC is retiring is left out: no resume would accept it.
     """
-    rows = sorted(list_candidates(data_dir), key=lambda row: float(row.get("created_at") or 0), reverse=True)
+    rows = sorted((row for row in list_candidates(data_dir) if not row.get("retiring")),
+                  key=lambda row: float(row.get("created_at") or 0), reverse=True)
     shown: List[Dict[str, Any]] = [{
         "id": row.get("candidate_id"), "owner_task": row.get("task_id"), "branch": row.get("branch"),
         "path": row.get("path"), "base": str(row.get("base_sha") or "")[:12],
@@ -134,14 +135,15 @@ def context_fact(owner: str = "", data_dir: Optional[Any] = None, *, limit: int 
         "yours": bool(owner) and row.get("task_id") == owner,
     } for row in rows[:limit]]
     if len(rows) > limit:
-        shown.append({"omitted": len(rows) - limit, "source": "state/subagent_worktrees.json (kind=body_candidate rows)"})
+        shown.append({"omitted": len(rows) - limit, "source": "state/private_copies/*.json (kind=body_candidate records)"})
     return shown
 
 
 def _select(selector: str, data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     selector = str(selector or "").strip()
     for row in _rows(data_dir) if selector else []:
-        if selector in (row.get("candidate_id"), row.get("task_id"), row.get("path"), row.get("branch")):
+        if not row.get("retiring") and selector in (
+                row.get("candidate_id"), row.get("task_id"), row.get("path"), row.get("branch")):
             return row
     return None
 
@@ -167,7 +169,7 @@ def _provision(serving: pathlib.Path, owner: str, data_dir: Optional[Any]) -> Di
     root, data_root = _wt._resolve_root(), _wt._data_dir(data_dir)
     safe = _wt._safe_name(owner)
     candidate_id = f"body_{safe}"
-    wt_path = (root / candidate_id).resolve()
+    wt_path = _wt.copy_path(root, candidate_id).resolve()
     _wt._assert_root_isolated(wt_path, serving, data_root)
     base_sha = _git(serving, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
     serving_branch = _git(serving, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
@@ -181,12 +183,11 @@ def _provision(serving: pathlib.Path, owner: str, data_dir: Optional[Any]) -> Di
         "reviewed_commits": [],
     }
     root.mkdir(parents=True, exist_ok=True)
-    with _wt._ops_lock(root, op="provision_body_candidate", task_id=owner, target=str(serving)):
-        entries = _wt._load_registry(data_dir, strict=True, op="provision_body_candidate")
-        if any(e.get("path") == str(wt_path) for e in entries) or wt_path.exists():
+    with _wt._record_lock(wt_path, data_dir, op="provision_body_candidate", task_id=owner):
+        if _wt._record_at(wt_path, data_dir, op="provision_body_candidate") is not None or wt_path.exists():
             raise CandidateRefused(
                 "CANDIDATE_PATH_OCCUPIED",
-                f"{wt_path} already holds work that is not registered to this task; it was left untouched.")
+                f"{wt_path} already holds work that is not recorded for this task; it was left untouched.")
         # A branch left by an earlier candidate of this owner may carry unique
         # commits: never move it, take the next free name instead.
         suffix = 1
@@ -194,8 +195,8 @@ def _provision(serving: pathlib.Path, owner: str, data_dir: Optional[Any]) -> Di
             suffix += 1
             branch = f"{BRANCH_PREFIX}{safe}-{suffix}"
         row["branch"] = branch
-        _wt._save_registry(entries + [row], data_dir)
-        _wt._git_quiet(serving, "worktree", "prune")
+        _wt._put_record(row, data_dir)  # the record before the admin dir
+        _wt._forget_checkout(serving, wt_path)  # a crashed earlier attempt's registration of this path
         _git(serving, "worktree", "add", "--no-checkout", "-b", branch, str(wt_path), base_sha)
     row = _populate(row, data_dir)
     _event(data_dir, "body_candidate_prepared", candidate_id=candidate_id, owner=owner,
@@ -217,16 +218,20 @@ def _populate(row: Dict[str, Any], data_dir: Optional[Any] = None) -> Dict[str, 
 
 
 def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> Dict[str, Any]:
-    """Registry read-modify-write of one candidate row under the ops lock."""
-    root = _wt._resolve_root()
-    with _wt._ops_lock(root, op="update_body_candidate", task_id=str(row.get("task_id") or "")):
-        entries = _wt._load_registry(data_dir, strict=True, op="update_body_candidate")
-        for entry in entries:
-            if entry.get("kind") == KIND and entry.get("path") == row.get("path"):
-                change(entry)
-                _wt._save_registry(entries, data_dir)
-                return dict(entry)
-    raise CandidateRefused("CANDIDATE_MISSING", "the candidate's registry row is gone; nothing was changed.")
+    """Read-modify-write of one candidate record under that record's lock."""
+    def apply(entry: Dict[str, Any]) -> Dict[str, Any]:
+        if entry.get("kind") != KIND:
+            raise CandidateRefused("CANDIDATE_MISSING", "the candidate's record is gone; nothing was changed.")
+        if entry.get("retiring"):
+            raise CandidateRefused("CANDIDATE_MISSING", "the candidate is being retired; nothing was changed.")
+        change(entry)
+        return entry
+
+    updated = _wt._update_record(str(row.get("path") or ""), apply, data_dir, op="update_body_candidate",
+                                 task_id=str(row.get("task_id") or ""))
+    if updated is None:
+        raise CandidateRefused("CANDIDATE_MISSING", "the candidate's record is gone; nothing was changed.")
+    return dict(updated)
 
 
 def _recorded_terminal(task_id: str, results_root: Any) -> bool:
@@ -315,10 +320,13 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
         return [-1]
 
 
-def _continuation_predecessor(ctx: Any) -> str:
-    contract = getattr(ctx, "task_contract", None)
+def continuation_predecessor(carrier: Any) -> str:
+    """The host-validated predecessor whose candidate ``prepare`` inherits: the contract's
+    source, or a queued row's admitted pointer before its worker projects it there."""
+    row = carrier if isinstance(carrier, dict) else {}
+    contract = row.get("task_contract") if row else getattr(carrier, "task_contract", None)
     authority = contract.get("predecessor_authority") if isinstance(contract, dict) else None
-    source = authority.get("source") if isinstance(authority, dict) else None
+    source = authority.get("source") if isinstance(authority, dict) else row.get("predecessor_authority_source")
     return str(source.get("task_id") or "").strip() if isinstance(source, dict) else ""
 
 
@@ -326,7 +334,7 @@ def _transfer(ctx: Any, row: Dict[str, Any], owner: str, *, via: str) -> Dict[st
     """Hand a retained candidate to this lineage once its previous owner has ended."""
     previous = str(row.get("task_id") or "")
     if previous == owner:
-        return row
+        return _update_row(row, lambda entry: None)  # recheck retirement even for an explicit self-resume
     if not _owner_is_terminal(ctx, previous):
         raise CandidateRefused(
             "CANDIDATE_OWNER_LIVE",
@@ -460,12 +468,12 @@ def prepare(ctx: Any, *, resume: str = "") -> Dict[str, Any]:
 
 def _forget_missing(row: Dict[str, Any]) -> None:
     """Drop the row of a checkout that is gone; its branch keeps whatever it committed."""
-    root = _wt._resolve_root()
-    with _wt._ops_lock(root, op="forget_body_candidate", task_id=str(row.get("task_id") or "")):
-        entries = [e for e in _wt._load_registry(None, strict=True, op="forget_body_candidate")
-                   if not (e.get("kind") == KIND and e.get("path") == row.get("path"))]
-        _wt._save_registry(entries, None)
-        _wt._git_quiet(pathlib.Path(str(row.get("git_dir") or row.get("repo_dir") or ".")), "worktree", "prune")
+    path = str(row.get("path") or "")
+    with _wt._record_lock(path, None, op="forget_body_candidate", task_id=str(row.get("task_id") or "")):
+        current = _wt._record_at(path, None, op="forget_body_candidate")
+        if current is not None and current.get("kind") == KIND:
+            _wt._drop_record(path, None)
+        _wt._forget_checkout(pathlib.Path(str(row.get("git_dir") or row.get("repo_dir") or ".")), pathlib.Path(path))
     _event(None, "body_candidate_checkout_missing", candidate_id=row.get("candidate_id"), branch=row.get("branch"))
 
 
@@ -492,10 +500,15 @@ def _prepare_locked(ctx: Any, resume: str) -> Dict[str, Any]:
         row = _transfer(ctx, row, owner, via="explicit_resume")
     else:
         row = find(owner)
-        predecessor = _continuation_predecessor(ctx)
+        predecessor = continuation_predecessor(ctx)
         if row is None and predecessor and (inherited := find(predecessor)) is not None \
                 and pathlib.Path(str(inherited.get("path") or "")).is_dir():
-            row = _transfer(ctx, inherited, owner, via="continuation")
+            try:
+                row = _transfer(ctx, inherited, owner, via="continuation")
+            except CandidateRefused as exc:
+                if exc.code != "CANDIDATE_MISSING":
+                    raise
+                # GC won the decision lock after find: continue in a fresh checkout.
         lost_branch = ""
         if row is not None and not pathlib.Path(str(row.get("path") or "")).is_dir():
             # Nothing on disk to lose: start again; the old branch keeps its commits.
@@ -592,9 +605,20 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
         return None
     try:
         from ouroboros.settings_integrity import runtime_environ
-        from ouroboros.test_environment import isolated_environment
+        from ouroboros.test_environment import SCRATCH_MARKER, declare_scratch, isolated_environment
 
-        return isolated_environment(candidate.with_name(candidate.name + ".env"), candidate,
+        env_root = candidate.with_name(candidate.name + ".env")
+        try:
+            env_root.mkdir(parents=True)
+        except FileExistsError:
+            # A new process invalidates a prior quiescent observation. An older,
+            # undeclared environment keeps its unknown provenance.
+            if (env_root / SCRATCH_MARKER).is_file() and not (env_root / SCRATCH_MARKER).is_symlink():
+                (env_root / SCRATCH_MARKER).touch()
+        else:
+            declare_scratch(env_root, "body-process", owner=json.dumps({
+                "task_id": str((bound or {}).get("task_id") or getattr(ctx, "task_id", "") or ""), "copy": str(candidate)}))
+        return isolated_environment(env_root, candidate,
                                     source=runtime_environ() if source is None else source)
     except Exception as exc:
         log.warning("candidate process environment unavailable", exc_info=True)
@@ -620,17 +644,55 @@ def executor_environment(ctx: Any, cwd: Any, *, executor, map_path) -> Optional[
             f"the executor must map both the body copy and its sibling .env directory: {exc}") from exc
 
 
-def record_reviewed_commit(ctx: Any, commit_sha: str, *, row: Optional[Dict[str, Any]] = None) -> None:
+def record_reviewed_commit(ctx: Any, commit_sha: str, *, row: Optional[Dict[str, Any]] = None, created_tag: str = "") -> None:
     """The commit gate created ``commit_sha`` on this candidate under the configured enforcement
-    (``row``: the candidate whose interrupted gate an evolution intent proves)."""
+    (``row``: the candidate whose interrupted gate an evolution intent proves). The author's
+    test widening stays with that commit, so a later run of the same unadopted delta keeps it."""
     bound = row or descriptor(ctx)
     if not bound or not commit_sha:
         return
+    request = getattr(ctx, "_commit_test_request", None)
+
+    def record(entry: Dict[str, Any]) -> None:
+        entry["reviewed_commits"] = [
+            *[sha for sha in entry.get("reviewed_commits") or [] if sha != commit_sha], str(commit_sha)]
+        if isinstance(request, dict):  # an explicit default is known; recovery without a context is not
+            entry["test_requests"] = {**(entry.get("test_requests") or {}), str(commit_sha):
+                                      {**request, "extra_tests": list(request.get("extra_tests") or ())}}
+        if created_tag:
+            entry["reviewed_release_tags"] = {
+                **(entry.get("reviewed_release_tags") or {}), str(commit_sha): str(created_tag)}
+
     try:
-        _update_row(bound, lambda entry: entry.__setitem__("reviewed_commits", [
-            *[sha for sha in entry.get("reviewed_commits") or [] if sha != commit_sha], str(commit_sha)]))
+        _update_row(bound, record)
     except Exception:
         log.warning("reviewed candidate commit %s was not recorded on its row", commit_sha[:12], exc_info=True)
+
+
+def interval_widening(row: Dict[str, Any], base: str, head: str = "HEAD") -> Dict[str, Any]:
+    """Combine first-parent ``base..head`` widening still owed before adoption."""
+    recorded, reviewed = row.get("test_requests") or {}, set(row.get("reviewed_commits") or ())
+    listed = _git(row["path"], "rev-list", "--first-parent", f"{base}..{head}").stdout.split()
+    requests = [recorded.get(sha) for sha in reversed(listed) if sha in reviewed]
+    if any(not isinstance(request, dict) for request in requests):
+        return {"extra_tests": [], "full_tests": True, "test_reason": "prior reviewed test scope is unknown"}
+    reasons = (str(request.get("test_reason") or "").strip() for request in requests)
+    return {"extra_tests": sorted({str(p) for request in requests for p in request.get("extra_tests") or ()}),
+            "full_tests": any(request.get("full_tests") is True for request in requests),
+            "test_reason": "; ".join(dict.fromkeys(reason for reason in reasons if reason))}
+
+
+def qualification_request(ctx: Any, request: Dict[str, Any]) -> Dict[str, Any]:
+    """Select against the adoption base; adoption independently re-checks any unreadable earlier widening."""
+    from ouroboros.test_selection import inherit_widening
+
+    base, earlier = adoption_base(ctx), {}
+    try:
+        row = find(owner_id(ctx))
+        earlier = interval_widening(row, base) if row and base else {}
+    except Exception:
+        log.warning("earlier authored test widening unreadable for this candidate", exc_info=True)
+    return {**inherit_widening(pathlib.Path(ctx.repo_dir), request, earlier), **({"base": base} if base else {})}
 
 
 def intent_capture(task_id: str, serving_capture):
@@ -659,12 +721,16 @@ def holds_commit(task_id: str, commit_sha: str, data_dir: Optional[Any] = None) 
     """Whether ``task_id``'s own candidate still holds ``commit_sha`` on its branch (what adoption needs).
 
     ``False`` only on evidence: no candidate of that task, no checkout, or Git
-    answering that the commit is gone or off the branch. An unreadable registry or
+    answering that the commit is gone or off the branch. An unreadable record or
     an unanswered Git is ``None``: unknown never proves the reviewed commit lost.
     """
     try:
-        row = next((entry for entry in _rows(data_dir, strict=True, op="read_body_candidate_commit")
+        row = next((entry for entry in _rows(data_dir, op="read_body_candidate_commit")
                     if task_id and entry.get("task_id") == task_id), None)
+        if row is None and task_id:  # a listing skips an unreadable record; this task's own one raises
+            name = f"body_{_wt._safe_name(task_id)}"  # under either name the copy may have been born with
+            for path in (_wt._resolve_root() / name, _wt.copy_path(_wt._resolve_root(), name)):
+                _wt._record_at(path, data_dir, op="read_body_candidate_commit")
     except Exception:
         return None
     if row is None or not commit_sha or not row.get("path") or not pathlib.Path(str(row["path"])).is_dir():
@@ -678,6 +744,17 @@ def holds_commit(task_id: str, commit_sha: str, data_dir: Optional[Any] = None) 
         return True
     except Exception:
         return None
+
+
+def adoption_base(ctx: Any) -> str:
+    """Where the bound candidate forks from the serving HEAD (``""`` if unresolved): the selection
+    base of its post-commit tests, so a proof covers the whole delta an adoption switches."""
+    try:
+        serving = _git(serving_repo_dir_for(ctx), "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+        return _git(ctx.repo_dir, "merge-base", serving, "HEAD").stdout.strip()
+    except Exception:
+        log.warning("candidate adoption base unresolved; its run selects against the last commit only", exc_info=True)
+        return ""
 
 
 def publication_note(ctx: Any) -> str:
@@ -701,34 +778,44 @@ def unreviewed_commits(row: Dict[str, Any], candidate_sha: str) -> List[str]:
 def unique_work(row: Dict[str, Any]) -> Dict[str, Any]:
     """What only this candidate holds: dirty/untracked/ignored files and unadopted commits.
 
-    Env/cache/junk paths (the patch-capture static rules) are reproducible
-    scratch. A failed read is reported as unique: unknown never means empty.
+    Env/cache/junk paths (the patch-capture static rules) are not part of a capture; they are
+    listed as ``excluded``, since those rules decide transport and no producer declared them
+    disposable. A failed read is reported as unique: unknown never means empty.
     """
     from ouroboros.workspace_patch_rules import _patch_exclude_reason
 
     path = pathlib.Path(str(row.get("path") or ""))
     try:
-        env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
-        status = _wt._git_env(path, "status", "--porcelain", "-z", "--untracked-files=all", env=env).stdout
-        ignored = _wt._git_env(path, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", env=env).stdout
-        tracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
-                   if chunk and not chunk.startswith(b"??")]
-        loose = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
-                 if chunk.startswith(b"??")]
-        loose += [chunk.decode("utf-8", "surrogateescape") for chunk in ignored.split(b"\0") if chunk]
+        raw = checkout_work(path)
         # The static rules name env/cache DIRECTORIES and runtime junk tails; a plain file that
         # merely carries such a directory's name ("env", "venv") is the author's own and unique.
-        loose = [rel for rel in loose
+        files = [*raw["untracked"], *raw["ignored"]]
+        loose = [rel for rel in files
                  if not _patch_exclude_reason(rel) or ("/" not in rel and not (path / rel).is_dir()
                                                        and _patch_exclude_reason(rel).startswith("top-level"))]
-        tip = _git(path, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
         serving = pathlib.Path(str(row["repo_dir"]))
         # Only the serving checkout establishes adoption. Another candidate or a
         # temporary child's branch can retain this tip without ever having adopted it.
-        ahead = _git(serving, "rev-list", "--count", tip, "--not", "HEAD").stdout.strip()
-        return {"readable": True, "tracked": tracked, "loose": loose, "tip": tip, "unadopted_commits": int(ahead or 0)}
+        ahead = _git(serving, "rev-list", "--count", raw["tip"], "--not", "HEAD").stdout.strip()
+        return {"readable": True, "tracked": raw["tracked"], "loose": loose, "tip": raw["tip"],
+                "unadopted_commits": int(ahead or 0), "excluded": sorted(set(files) - set(loose))}
     except Exception as exc:
         return {"readable": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def checkout_work(path: pathlib.Path) -> Dict[str, Any]:
+    """A checkout's raw state beyond its HEAD, no path judged by its name: changed tracked paths,
+    untracked and ignored files, and its tip. A failed read raises."""
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    status = _wt._git_env(path, "status", "--porcelain", "-z", "--untracked-files=all", env=env).stdout
+    ignored = _wt._git_env(path, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", env=env).stdout
+    tracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
+               if chunk and not chunk.startswith(b"??")]
+    untracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
+                 if chunk.startswith(b"??")]
+    return {"tracked": tracked, "untracked": untracked,
+            "ignored": [chunk.decode("utf-8", "surrogateescape") for chunk in ignored.split(b"\0") if chunk],
+            "tip": _git(path, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()}
 
 
 def has_unique_work(work: Dict[str, Any]) -> bool:
@@ -766,9 +853,11 @@ def _work_signature(row: Dict[str, Any], work: Dict[str, Any]) -> str:
 def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
     """Capture the candidate's whole unique state on a private pin; ``""`` unless COMPLETE.
 
-    A temporary index stages tracked changes plus every unique loose file,
-    ignored ones included. The capture counts only when each loose path became
-    a blob entry and the whole staged tree still equals the files on disk;
+    A temporary index refreshes the tracked and staged paths, then adds every unique loose file by
+    its exact name, ignored ones included. The ``excluded`` paths are never staged, nor written as
+    objects: they reach a capture only as the owner's accepted loss (``retention_verdict``'s
+    ``discard_excluded``), and would carry whole caches into Git. The capture counts only when each
+    loose path became a blob entry and the whole staged tree still equals the files on disk;
     anything Git cannot hold (a nested repository, an unreadable file) leaves it
     incomplete, and the caller then keeps the original directory.
     """
@@ -785,12 +874,12 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
         if real_index.strip(b"\0"):
             _wt._git_env(path, "update-index", "-z", "--index-info", env=env, input_bytes=real_index)
         staged_tree = _wt._git_env(path, "write-tree", env=env).stdout.decode().strip()
-        _wt._git_env(path, "add", "-A", "--", ".", env=env)
+        _wt._git_env(path, "add", "-u", "--", ".", env=env)  # modified, deleted and staged paths; no untracked one
         loose = [str(rel) for rel in work.get("loose") or []]
-        if loose:
+        if loose:  # each by its exact name: a pattern ("*") would sweep in the excluded paths too
             spec = b"\0".join(rel.encode("utf-8", "surrogateescape") for rel in loose) + b"\0"
-            _wt._git_env(path, "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul", env=env,
-                         input_bytes=spec)
+            _wt._git_env(path, "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul",
+                         env={**env, "GIT_LITERAL_PATHSPECS": "1"}, input_bytes=spec)
             staged = _wt._git_env(path, "ls-files", "-s", "-z", env=env).stdout
             blobs = {chunk.partition(b"\t")[2].decode("utf-8", "surrogateescape")
                      for chunk in staged.split(b"\0") if chunk and not chunk.startswith(b"160000")}
@@ -823,12 +912,15 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
             pass
 
 
-def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None) -> Dict[str, Any]:
+def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None,
+                      discard_excluded: bool = False) -> Dict[str, Any]:
     """Whether the worktree GC may delete this candidate's checkout, and with what kept.
 
     ``{"remove": bool, "keep_branch": bool, "reason": str, "pin": str}``. Age alone
     never removes unique work: it is first captured COMPLETELY on a private pin,
-    and an incomplete capture retains the original directory.
+    and an incomplete capture retains the original directory. ``discard_excluded`` is the
+    owner's explicit discard alone (``copy_capture_proof.discard_unsaved_copy``): the paths
+    the capture leaves out are the accepted loss, everything else is still captured first.
     """
     path = pathlib.Path(str(row.get("path") or ""))
     if not path.is_dir():
@@ -836,14 +928,17 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
         return {"remove": True, "keep_branch": True, "reason": "checkout_missing", "pin": ""}
     if not expired:
         return {"remove": False, "keep_branch": True, "reason": "within_retention", "pin": ""}
-    if _retained_scratch(row):
-        return {"remove": False, "keep_branch": True, "reason": "retained_process_environment", "pin": ""}
     if not _recorded_terminal(str(row.get("task_id") or ""), data_dir):
         # Its owner may still be working, or its record is unreadable: unknown is not ended.
         return {"remove": False, "keep_branch": True, "reason": "owner_not_terminal", "pin": ""}
     if live_lineage_processes(data_dir, str(row.get("task_id") or "")):
         return {"remove": False, "keep_branch": True, "reason": "owner_processes_live", "pin": ""}
+    if _retained_scratch(row, classify=True, data_dir=data_dir):
+        return {"remove": False, "keep_branch": True, "reason": "retained_process_environment", "pin": ""}
     work = unique_work(row)
+    if work.get("excluded") and not discard_excluded:
+        # No evidence these are temporary or saved, and a pin would copy whole caches into Git.
+        return {"remove": False, "keep_branch": True, "reason": "unproven_excluded_inputs", "pin": ""}
     if not has_unique_work(work):
         return {"remove": True, "keep_branch": False, "reason": "no_unique_work", "pin": "", "work": work,
                 "owner": _owner_stamp(row)}
@@ -885,7 +980,7 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     seen = verdict.get("work") or {}
     now = unique_work(row)
     if not (bool(now.get("readable")) and all(now.get(key) == seen.get(key)
-                                                for key in ("tip", "tracked", "loose"))):
+                                                for key in ("tip", "tracked", "loose", "excluded"))):
         return False
     if verdict.get("reason") == "preserved_on_pin":
         if not verdict.get("signature") or _work_signature(row, now) != verdict["signature"]:
@@ -893,18 +988,34 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     return True
 
 
-def _retained_scratch(row: Dict[str, Any]) -> bool:
-    """Unconfirmed nested preflight readers retain both their env and source checkout."""
-    from ouroboros.test_environment import retention_markers
+def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=None, record_witness: bool = True) -> bool:
+    """Keep a candidate's one quiescent scratch observation on its existing row
+    (``record_witness=False``: the same answer for a reader that must write nothing)."""
+    from ouroboros.test_environment import scratch_retention
 
     path = pathlib.Path(str(row.get("path") or ""))
     env_root = path.with_name(path.name + ".env")
-    return env_root.exists() and bool(retention_markers(env_root))
+    previous = row.get("scratch_retention")
+    previous = previous if isinstance(previous, dict) else {}
+    owner = _owner_stamp(row)
+    observed = scratch_retention(env_root, previous=previous.get("observation")
+                                 if previous.get("owner") == owner else None, classify=classify)
+    record = {"owner": owner, "observation": observed}
+    if record_witness and classify and row.get("kind") == KIND and record != previous:
+        # The walk is outside the lock. Publish only against its exact preview,
+        # including retirement/ownership; update that preview for GC's same-row check.
+        with _wt._record_lock(path, data_dir, op="record_scratch_retention"):
+            if _wt._record_at(path, data_dir, op="record_scratch_retention") != row:
+                return True
+            _wt._put_record({**row, "scratch_retention": record}, data_dir)
+            row["scratch_retention"] = record
+    return observed["retained"]
 
 
 def discard_scratch(row: Dict[str, Any]) -> None:
-    """Delete reproducible scratch only when no nested teardown retained it."""
+    """Delete declared disposable scratch only when no nested teardown retained it."""
     path = pathlib.Path(str(row.get("path") or ""))
     env_root = path.with_name(path.name + ".env")
-    if path.name and _wt._deletable(env_root, _wt._resolve_root()) and env_root.exists() and not _retained_scratch(row):
+    if path.name and _wt._deletable(env_root, _wt._resolve_root()) and env_root.exists() and not _retained_scratch(
+            row, classify=row.get("kind") != KIND):
         _wt._force_rmtree(env_root)

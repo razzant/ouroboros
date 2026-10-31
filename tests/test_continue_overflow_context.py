@@ -1,4 +1,4 @@
-"""A real Continue envelope survives Main's provider-refusal address recovery.
+"""A real Continue brief survives Main's provider-refusal address recovery.
 
 Admission, startup, first-request construction, file delivery and the recovery
 loop are real. Only the model transport is a fixture; no provider is called.
@@ -15,20 +15,18 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_continue_successor_context import FIELD, _mutation_evidence
-from tests.test_doc_context import _make_env_and_memory
+from tests.test_doc_context import _make_env_and_memory, foreign_tree
 from tests.test_main_authored_context import call
 from tests.test_owner_continue import NONCE, _interrupted
 
 
 def _run_refusal(registry, messages, task, monkeypatch):
-    from ouroboros import context_compaction, loop, usage_accounting as ua
+    from ouroboros import loop, usage_accounting as ua
     from ouroboros.llm_attempt import _attempt_request, _physical_candidate
     from ouroboros.model_send_seal import persist_physical_candidate
 
     inputs = []
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a: False)
-    monkeypatch.setattr(context_compaction, "_call_summarizer",
-                        lambda *_a, **_kw: pytest.fail("Unseen output must not buy a helper summary"))
     monkeypatch.setattr("ouroboros.loop_llm_call._sleep_within_deadline", lambda *_a, **_kw: True)
 
     class Provider:
@@ -71,11 +69,12 @@ def _run_refusal(registry, messages, task, monkeypatch):
 
 @pytest.mark.parametrize("flag", [True, False, None])
 @pytest.mark.parametrize("mode", ["max", "low"])
-def test_continue_envelope_survives_overflow_relocation(tmp_path, monkeypatch, flag, mode):
+def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag, mode):
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.context import build_llm_messages
     from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.main_context_authority import project_main_task_authority
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.registry import ToolRegistry
     from supervisor.continuation_admission import admit_continuation
@@ -89,8 +88,7 @@ def test_continue_envelope_survives_overflow_relocation(tmp_path, monkeypatch, f
     monkeypatch.setattr("ouroboros.context.resolve_context_fit_route", lambda *_a, **_kw: (
         {"model": "openai/test-model", "provider": "openai"},
         SimpleNamespace(route_fp="fixture", status="asserted", stale=False, window_tokens=1_000_000)))
-    workspace = tmp_path / "working-copy"
-    workspace.mkdir()
+    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
     _interrupted(env.drive_root, workspace_root=str(workspace), workspace_mode="external",
         task_contract={"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {})},
         mutation_evidence=_mutation_evidence())
@@ -106,9 +104,14 @@ def test_continue_envelope_survives_overflow_relocation(tmp_path, monkeypatch, f
 
     inputs = _run_refusal(registry, messages, task, monkeypatch)
 
+    # The successor inherits the predecessor's brief and its reader, never the contract body (THESIS I-7, C5).
+    brief = project_main_task_authority(task)["predecessor_authority"]
+    assert brief["source"]["arguments"] == {"task_id": "pred-1", "include_authority": True}
+    assert brief["omitted_fields"]["task_contract"] > 0
+    assert before["task_contract"]["context"] == "PREDECESSOR-CONTRACT-SENTINEL"
     for index, request in enumerate(inputs):
         system = json.dumps([m for m in request["messages"] if m["role"] == "system"])
-        assert "PREDECESSOR-CONTRACT-SENTINEL" in system and "predecessor_authority" in system
+        assert "PREDECESSOR-CONTRACT-SENTINEL" not in system and "predecessor_authority" in system
         # Low projects books as navigation, and a confirmed Max overflow retries in task-local
         # Low; the stored inclusion choice survives that rendering policy. User content may be blocks.
         assert sum(block.get("text", "").startswith("## DEVELOPMENT.md\n")
@@ -123,14 +126,16 @@ def test_continue_envelope_survives_overflow_relocation(tmp_path, monkeypatch, f
     assert "owner pressed" not in task["text"].lower() and "already in your context" in task["text"]
     assert len({request["model"] for request in inputs}) == 1
     assert inputs[1]["reasoning_effort"] == inputs[2]["reasoning_effort"]
-    assert any(m.get("tool_call_id") == "read-evidence" for m in inputs[1]["messages"])
-    # Source views take only confirmed-exposed bodies: Max recovers through task-local Low
-    # with the never-answered read in place; Low has no lower mode, so its late rescue relocates it.
-    assert any(m.get("tool_call_id") == "read-evidence" for m in inputs[2]["messages"]) is (mode == "max")
+    refused_read = next(m for m in inputs[1]["messages"] if m.get("tool_call_id") == "read-evidence")
+    # Books (Max) or retained host sections (Low) pay before the just-chosen read.
+    assert refused_read in inputs[2]["messages"]
+    assert not [m for m in registry._ctx.messages if _capsule_metadata(m)[1]]
     if mode == "low":
-        record = next(m for m in registry._ctx.messages if _capsule_metadata(m)[1])
-        capsule = _capsule_metadata(record)[1]
-        assert capsule["retention"] == "source_view"
-        checkpoint = json.loads(read_actor_source_bytes(env.drive_root, task["id"], capsule["checkpoint_ref"]))
-        assert checkpoint["messages"] == inputs[1]["messages"], "the refused request stays exactly retrievable"
+        receipts = registry._ctx.context_fit_plan.low_projection.memory_facts["host_sections_addressed"]
+        assert receipts
+        refused_system = "\n\n".join(block["text"] for m in inputs[1]["messages"]
+                                     if m["role"] == "system" for block in m["content"])
+        for receipt in receipts:
+            whole = read_actor_source_bytes(env.drive_root, task["id"], receipt["source_ref"]).decode()
+            assert whole in refused_system
     assert load_task_result(env.drive_root, "pred-1") == before, "recovery never rewrites predecessor authority"

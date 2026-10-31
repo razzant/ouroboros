@@ -1,0 +1,5 @@
+{
+  "engine_tree": "94eaa9ef8cb232b3d3a4b31628c9e1a9c1b5c666",
+  "sha256": "4fe2103a7bb9bd72f0efdb452ed14ca3aa5713c8a534fb4496da66c0b1587921",
+  "body_utf8": "{\"id\":\"job-1e8bc42df99b\",\"state\":\"running\",\"createdAt\":\"2026-10-21T06:10:41.871Z\",\"startedAt\":\"2026-10-21T06:10:41.891Z\",\"finishedAt\":null,\"dispatch\":{\"state\":\"started\",\"startedAt\":\"2026-10-21T06:10:41.910Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"absent\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":null,\"problem\":null}"
+}

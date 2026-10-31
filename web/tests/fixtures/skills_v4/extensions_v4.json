@@ -1,0 +1,532 @@
+{
+  "live": {
+    "ui_tabs": [
+      {
+        "skill": "weather",
+        "key": "weather:main"
+      }
+    ]
+  },
+  "skills": [
+    {
+      "name": "telegram",
+      "type": "extension",
+      "version": "1.3.0",
+      "description": "Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.",
+      "enabled": true,
+      "source": "native",
+      "permissions": [
+        "net",
+        "inject_chat"
+      ],
+      "installed_at": "2026-10-17T10:00:00Z",
+      "content_hash": "a0a2d9971bb3a91bce1b101b260046cfb006439566897d7c570db04c882e7fd8",
+      "removal": "uninstall",
+      "payload_root": "skills/native/telegram",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true,
+        "requested_keys": [
+          "TELEGRAM_BOT_TOKEN"
+        ],
+        "granted_keys": [
+          "TELEGRAM_BOT_TOKEN"
+        ]
+      },
+      "category": [
+        "messaging"
+      ],
+      "install": {
+        "source": {
+          "id": "builtin",
+          "kind": "builtin",
+          "name": "Built in"
+        },
+        "official": true,
+        "release": {
+          "version": "1.3.0",
+          "digest": "a0a2d9971bb3a91bce1b101b260046cfb006439566897d7c570db04c882e7fd8"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "owner",
+        "update_available": null,
+        "withdrawn": null,
+        "left_source": false,
+        "installed_at": "2026-10-17T10:00:00Z"
+      }
+    },
+    {
+      "name": "weather",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "Wide polished weather widget — current conditions, compact forecast, astronomy, and resilient wttr.in cache (no API key).",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/weather",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "city"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": true,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94"
+        },
+        "withdrawn": null,
+        "left_source": false
+      }
+    },
+    {
+      "name": "whoop-health",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "Сбор данных со смарт-браслета WHOOP через официальный API v2.",
+      "enabled": false,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "tool",
+        "widget"
+      ],
+      "installed_at": "2026-10-17T14:58:00Z",
+      "content_hash": "f61d8564d92fada803e0b87c59310fd0176708c6d3c3f08335eb9b7793e979c1",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/whoop-health",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": false,
+        "blocking_reason": "review_pending",
+        "review_enforcement": "blocking",
+        "summary": "Review is pending or did not produce an executable verdict.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": false,
+      "skill_review": {
+        "current": {
+          "lifecycle_status": "running",
+          "content_hash": "h-wh",
+          "started_at": "2026-10-17T14:58:00Z"
+        },
+        "history": []
+      },
+      "grants": {
+        "all_granted": false,
+        "requested_keys": [
+          "WHOOP_CLIENT_ID",
+          "WHOOP_CLIENT_SECRET"
+        ],
+        "missing_keys": [
+          "WHOOP_CLIENT_ID",
+          "WHOOP_CLIENT_SECRET"
+        ]
+      },
+      "owner_attestable": true,
+      "category": [
+        "health"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros-community",
+          "kind": "hub",
+          "name": "Ouroboros Community",
+          "part": "community"
+        },
+        "official": false,
+        "release": {
+          "version": "0.3.1",
+          "digest": "f61d8564d92fada803e0b87c59310fd0176708c6d3c3f08335eb9b7793e979c1"
+        },
+        "basis": "review",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "owner",
+        "update_available": null,
+        "withdrawn": null,
+        "left_source": false,
+        "installed_at": "2026-10-17T14:58:00Z"
+      }
+    },
+    {
+      "name": "anime_studio",
+      "type": "extension",
+      "version": "3.3.0",
+      "description": "AI-powered 2D anime generator with VLM-verified assets.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget"
+      ],
+      "installed_at": "2026-07-31T10:00:00Z",
+      "content_hash": "900498e17d9517eb2c17752a9b06176180c3cb43275ccebc277067d54f58aa9b",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/anime_studio",
+      "review_status": "clean",
+      "review_stale": true,
+      "review_gate": {
+        "status": "clean",
+        "stale": true,
+        "executable_review": true,
+        "blocking_reason": "owner_edit",
+        "review_enforcement": "blocking",
+        "summary": "The owner, or Ouroboros on the owner's instruction, edited these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "media"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros-community",
+          "kind": "hub",
+          "name": "Ouroboros Community",
+          "part": "community"
+        },
+        "official": false,
+        "release": {
+          "version": "2.12.0",
+          "digest": "170180cf16984a419957c76de5fbe8b1bed8f49851d351075f00398c53edfc35"
+        },
+        "basis": "review",
+        "base_known": true,
+        "modified": true,
+        "turn_on_when_ready": true,
+        "installed_by": "owner",
+        "update_available": {
+          "version": "3.2.0",
+          "digest": "4098a7289551707d16ae1fc5ffd165ca1aef4a40c908b4e819a1b6df2664aac5"
+        },
+        "withdrawn": null,
+        "left_source": false,
+        "installed_at": "2026-07-31T10:00:00Z"
+      }
+    },
+    {
+      "name": "claudexor_quotas",
+      "type": "extension",
+      "version": "0.9.0",
+      "description": "Claudexor quota widget and read-only quota_summary tool.",
+      "enabled": false,
+      "source": "ouroboroshub",
+      "permissions": [
+        "widget",
+        "tool"
+      ],
+      "installed_at": "2026-10-01T10:00:00Z",
+      "content_hash": "e44311da2d8984fac5d435409a825731b49d44259b9af08c457375281d10472f",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/claudexor_quotas",
+      "review_status": "pending",
+      "review_stale": true,
+      "review_gate": {
+        "status": "pending",
+        "stale": true,
+        "executable_review": false,
+        "blocking_reason": "review_pending",
+        "review_enforcement": "blocking",
+        "summary": "Review is pending or did not produce an executable verdict.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": false,
+      "grants": {
+        "all_granted": true
+      },
+      "owner_attestable": true,
+      "category": [
+        "ouroboros"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": false,
+        "release": {
+          "version": "0.9.0",
+          "digest": "0ee33cb8ff4540424c0ef4ded57e6839b0d8f35f03c6cc50004dc288457ae8eb"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": true,
+        "turn_on_when_ready": true,
+        "installed_by": "owner",
+        "update_available": null,
+        "withdrawn": null,
+        "left_source": false,
+        "installed_at": "2026-10-01T10:00:00Z"
+      }
+    },
+    {
+      "name": "minecraft-widget",
+      "type": "extension",
+      "version": "0.1.0",
+      "description": "Full-featured 3D voxel sandbox game widget.",
+      "enabled": false,
+      "source": "external",
+      "is_self_authored": true,
+      "permissions": [
+        "widget"
+      ],
+      "installed_at": "2026-08-29T10:00:00Z",
+      "content_hash": "63fb1496c85d2a8b4d2fee776d64ee45e0aa47428fa37b94212ad2bf2bc5e22a",
+      "removal": "delete",
+      "payload_root": "skills/external/minecraft-widget",
+      "review_status": "blockers",
+      "review_stale": false,
+      "review_gate": {
+        "status": "blockers",
+        "stale": false,
+        "executable_review": false,
+        "blocking_reason": "blocker_findings_under_blocking_enforcement",
+        "review_enforcement": "blocking",
+        "summary": "Review is blocked: blocker findings must be fixed or review enforcement must be advisory.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": false,
+      "grants": {
+        "all_granted": true
+      },
+      "owner_attestable": true,
+      "review_findings": [
+        {
+          "item": "widget_safety",
+          "verdict": "FAIL",
+          "severity": "critical",
+          "reason": "widget.js::set permits a new removal when modified already has 4096 keys."
+        },
+        {
+          "item": "docs",
+          "verdict": "FAIL",
+          "severity": "advisory",
+          "reason": "README is missing."
+        }
+      ],
+      "install": null,
+      "category": []
+    },
+    {
+      "name": "zoom_meeting",
+      "type": "extension",
+      "version": "0.1.0",
+      "description": "Joins Zoom meetings by voice through the Zoom Meeting SDK on a Linux server, as one Presence call.",
+      "enabled": false,
+      "source": "external",
+      "permissions": [
+        "presence"
+      ],
+      "installed_at": "2026-10-16T19:00:00Z",
+      "content_hash": "ab3fac677e90711080d283326903af666898fb0227488251fec531d14c9b5e79",
+      "removal": "delete",
+      "payload_root": "skills/external/zoom_meeting",
+      "review_status": "clean",
+      "review_stale": false,
+      "review_gate": {
+        "status": "clean",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "ready",
+        "review_enforcement": "blocking",
+        "summary": "Review is executable: verdict clean.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "grants": {
+        "all_granted": false,
+        "requested_permissions": [
+          "presence"
+        ],
+        "missing_permissions": [
+          "presence"
+        ]
+      },
+      "install": null,
+      "category": []
+    },
+    {
+      "name": "old_tool",
+      "type": "script",
+      "version": "0.2.0",
+      "description": "A tool its author withdrew.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net"
+      ],
+      "installed_at": "2026-09-01T10:00:00Z",
+      "content_hash": "9379211e691539e6fd5850bc92b58800e7938a8024e4209a8908bc7eb67dd354",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/old_tool",
+      "review_status": "clean",
+      "review_stale": false,
+      "review_gate": {
+        "status": "clean",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "ready",
+        "review_enforcement": "blocking",
+        "summary": "Review is executable: verdict clean.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "grants": {
+        "all_granted": true
+      },
+      "install": {
+        "source": {
+          "id": "ouroboros-community",
+          "kind": "hub",
+          "name": "Ouroboros Community",
+          "part": "community"
+        },
+        "official": false,
+        "release": {
+          "version": "0.2.0",
+          "digest": "9379211e691539e6fd5850bc92b58800e7938a8024e4209a8908bc7eb67dd354"
+        },
+        "basis": "review",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "owner",
+        "update_available": null,
+        "withdrawn": {
+          "reason": "Sends data to an unnamed server.",
+          "at": "2026-10-16"
+        },
+        "left_source": false,
+        "installed_at": "2026-09-01T10:00:00Z"
+      },
+      "category": []
+    },
+    {
+      "name": "gone_tool",
+      "type": "instruction",
+      "version": "1.0.0",
+      "description": "Left its source.",
+      "enabled": false,
+      "source": "ouroboroshub",
+      "permissions": [],
+      "installed_at": "2026-09-01T10:00:00Z",
+      "content_hash": "2a32810ba4c181cf569fb43f6e8e2556e7997df96384344195b8a0fce4f33f84",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/gone_tool",
+      "review_status": "clean",
+      "review_stale": false,
+      "review_gate": {
+        "status": "clean",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "ready",
+        "review_enforcement": "blocking",
+        "summary": "Review is executable: verdict clean.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "grants": {
+        "all_granted": true
+      },
+      "install": {
+        "source": {
+          "id": "ouroboros-community",
+          "kind": "hub",
+          "name": "Ouroboros Community",
+          "part": "community"
+        },
+        "official": false,
+        "release": {
+          "version": "1.0.0",
+          "digest": "2a32810ba4c181cf569fb43f6e8e2556e7997df96384344195b8a0fce4f33f84"
+        },
+        "basis": "review",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": false,
+        "installed_by": "owner",
+        "update_available": null,
+        "withdrawn": null,
+        "left_source": true,
+        "installed_at": "2026-09-01T10:00:00Z"
+      },
+      "category": []
+    }
+  ]
+}

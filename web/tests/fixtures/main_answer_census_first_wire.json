@@ -1,0 +1,214 @@
+{
+ "provenance": {
+  "producer": "tests/test_main_answer_census_first_browser.py (real isolated server, Chromium)",
+  "base": "7d33a77ad (tree of ffbbc0a1a)",
+  "note": "Bodies the page met, from one real isolated server run; keys selected (record fields the client reads), values unedited. Each run of the producer writes its complete bodies as <engine>-<shape>-wire.json in its evidence directory (OUROBOROS_BROWSER_EVIDENCE_OUT, else the safe_test evidence root); the sources name that run's two files. A rerun writes the same files with its own ids and times.",
+  "sources": {
+   "activity": {
+    "file": "chromium-activity-wire.json",
+    "sha256": "4ada425759914bdb3855a28b163f5ef671c6064effacdf182a99c39733370173"
+   },
+   "silent": {
+    "file": "chromium-silent-wire.json",
+    "sha256": "8fedb7ff4beb24a03f650f1e066eb5725e178728eb774aad306093dcd3162452"
+   }
+  }
+ },
+ "task_id": "2613f5fd",
+ "quiz_id": "143dfcc261f64f728dffda9632d98478",
+ "pointer": {
+  "role": "system",
+  "system_type": "project_question_pointer",
+  "task_id": "2613f5fd",
+  "quiz_id": "143dfcc261f64f728dffda9632d98478",
+  "quiz_state": "open",
+  "project_id": "evidence-review",
+  "project_name": "Evidence review",
+  "project_chat_id": 211264063,
+  "chat_id": 1,
+  "ts": "2026-10-26T15:13:49.799208+00:00",
+  "text": "Waiting for your answer in Evidence review",
+  "is_progress": false,
+  "markdown": false,
+  "question": "Which evidence should the report use?",
+  "options": [
+   "Primary sources",
+   "Both sources"
+  ],
+  "option_details": [
+   "Use the complete original measurements.",
+   "Include the independent replication too."
+  ],
+  "stake": "The answer determines the report's evidence.",
+  "owner_wait_state": "waiting",
+  "wait_for_answer": true,
+  "question_delivery": {
+   "kind": "publication",
+   "state": "delivered"
+  }
+ },
+ "post": {
+  "request": {
+   "request_id": "dd2813fc-2432-4a99-ba01-0a15cedf1ad9",
+   "decision_id": "quiz:2613f5fd:143dfcc261f64f728dffda9632d98478",
+   "option_index": 1,
+   "comment": "Use the replication data as well."
+  },
+  "status": 200,
+  "reply": {
+   "ok": true,
+   "decision_id": "quiz:2613f5fd:143dfcc261f64f728dffda9632d98478",
+   "state": "answered",
+   "duplicate": false,
+   "answered_index": 1,
+   "comment": "Use the replication data as well.",
+   "question_delivery": {
+    "kind": "answer",
+    "state": "owed",
+    "reason_code": "awaiting_recipient_read"
+   }
+  }
+ },
+ "frames": [
+  {
+   "type": "quiz_state",
+   "quiz_id": "143dfcc261f64f728dffda9632d98478",
+   "task_id": "2613f5fd",
+   "state": "answered",
+   "ts": "2026-10-26T15:13:55.674438+00:00",
+   "question_delivery": {
+    "kind": "answer",
+    "state": "owed",
+    "reason_code": "awaiting_recipient_read"
+   },
+   "answered_index": 1,
+   "comment": "Use the replication data as well."
+  },
+  {
+   "type": "quiz_state",
+   "quiz_id": "143dfcc261f64f728dffda9632d98478",
+   "task_id": "2613f5fd",
+   "state": "answered",
+   "ts": "2026-10-26T15:13:57.602317+00:00",
+   "question_delivery": {
+    "kind": "answer",
+    "state": "delivered"
+   }
+  }
+ ],
+ "detail_after": {
+  "task_id": "2613f5fd",
+  "status": "running",
+  "owner_wait": {
+   "wait_id": "95061b3c82d14cabaa9c95fa4d1faee1",
+   "quiz_id": "143dfcc261f64f728dffda9632d98478",
+   "state": "resumed",
+   "resume_reason": "answer"
+  },
+  "owner_quiz": {
+   "143dfcc261f64f728dffda9632d98478": {
+    "quiz_id": "143dfcc261f64f728dffda9632d98478",
+    "question": "Which evidence should the report use?",
+    "options": [
+     "Primary sources",
+     "Both sources"
+    ],
+    "option_details": [
+     "Use the complete original measurements.",
+     "Include the independent replication too."
+    ],
+    "stake": "The answer determines the report's evidence.",
+    "assumption": "",
+    "state": "answered",
+    "asked_at": "2026-10-26T15:13:49.799208+00:00",
+    "wait_for_answer": true,
+    "answered_at": "2026-10-26T15:13:55.499951+00:00",
+    "answered_index": 1,
+    "comment": "Use the replication data as well.",
+    "discharged_at": "2026-10-26T15:13:57.048161+00:00",
+    "delivery": {
+     "kind": "answer",
+     "state": "delivered"
+    }
+   }
+  },
+  "question_rooms": {
+   "143dfcc261f64f728dffda9632d98478": {
+    "state": "known",
+    "chat_id": 211264063,
+    "project_id": "evidence-review"
+   }
+  }
+ },
+ "owed_block": {
+  "quiz_id": "143dfcc261f64f728dffda9632d98478",
+  "question": "Which evidence should the report use?",
+  "options": [
+   "Primary sources",
+   "Both sources"
+  ],
+  "option_details": [
+   "Use the complete original measurements.",
+   "Include the independent replication too."
+  ],
+  "stake": "The answer determines the report's evidence.",
+  "assumption": "",
+  "state": "answered",
+  "asked_at": "2026-10-26T15:13:49.799208+00:00",
+  "wait_for_answer": true,
+  "answered_at": "2026-10-26T15:13:55.499951+00:00",
+  "answered_index": 1,
+  "comment": "Use the replication data as well.",
+  "delivery": {
+   "kind": "answer",
+   "state": "owed"
+  }
+ },
+ "census_activity": {
+  "current_questions": [],
+  "current_questions_complete": true,
+  "current_questions_gaps": [],
+  "required_questions": [
+   {
+    "role": "system",
+    "system_type": "project_question_pointer",
+    "task_id": "2613f5fd",
+    "quiz_id": "143dfcc261f64f728dffda9632d98478",
+    "quiz_state": "answered",
+    "project_id": "evidence-review",
+    "project_name": "Evidence review",
+    "project_chat_id": 211264063,
+    "chat_id": 1,
+    "ts": "2026-10-26T15:13:49.799208+00:00",
+    "text": "You answered in Evidence review",
+    "is_progress": false,
+    "markdown": false,
+    "question": "Which evidence should the report use?",
+    "options": [
+     "Primary sources",
+     "Both sources"
+    ],
+    "option_details": [
+     "Use the complete original measurements.",
+     "Include the independent replication too."
+    ],
+    "stake": "The answer determines the report's evidence.",
+    "owner_wait_state": "resumed",
+    "owner_wait_resume_reason": "answer",
+    "wait_for_answer": true,
+    "answered_index": 1,
+    "comment": "Use the replication data as well.",
+    "question_delivery": {
+     "kind": "answer",
+     "state": "delivered"
+    }
+   }
+  ]
+ },
+ "census_silent": {
+  "current_questions": [],
+  "current_questions_complete": true,
+  "current_questions_gaps": [],
+  "required_questions": []
+ }
+}

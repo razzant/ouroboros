@@ -424,7 +424,8 @@ def test_integration_skip_context_and_summary_preserve_original_classification(
                               node=SimpleNamespace(nodeid=evidence.nodeid))
     expected_exception = pytest.skip.Exception if outcome == "skipped" else httpx.HTTPStatusError
     with pytest.raises(expected_exception) as caught:
-        test_provider_integration.test_full_registry_provider_contract(CANARY, full_registry_canary_tools(), request)
+        test_provider_integration.test_full_registry_provider_contract(CANARY, full_registry_canary_tools(), request,
+                                                                   monkeypatch)
     if outcome == "failed":
         assert caught.value is error
     record = json.loads(next(evidence.directory.glob("provider-*.json")).read_text(encoding="utf-8"))
@@ -461,7 +462,8 @@ def test_actual_integration_success_remains_compact_and_unclassified(evidence, m
     monkeypatch.setattr(test_provider_integration, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex=NONCE)))
     request = SimpleNamespace(config=SimpleNamespace(option=SimpleNamespace(ci_evidence_dir=str(evidence.directory))),
                               node=SimpleNamespace(nodeid=evidence.nodeid))
-    test_provider_integration.test_full_registry_provider_contract(CANARY, full_registry_canary_tools(), request)
+    test_provider_integration.test_full_registry_provider_contract(CANARY, full_registry_canary_tools(), request,
+                                                                   monkeypatch)
     record = json.loads(next(evidence.directory.glob("provider-*.json")).read_text(encoding="utf-8"))
     assert client.sends == 1 and record["outcome"] == "passed"
     assert record["error"] is None and "classification" not in record

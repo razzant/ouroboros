@@ -147,7 +147,7 @@ def test_capability_evidence_is_route_aware_not_model_aware(monkeypatch, tmp_pat
     # process memo that outlives the record and can never re-source it.
     def fake_metadata(_provider, _model, base_url, allow_fetch, **_kw):
         fetched.append(str(base_url or ""))
-        return 200_000
+        return 200_000, ce.utc_now_iso()
 
     monkeypatch.setattr(ce, "_provider_metadata_window", fake_metadata)
 

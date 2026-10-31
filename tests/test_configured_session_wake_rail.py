@@ -129,11 +129,8 @@ def test_meaningful_wake_carries_live_tree_planning_facts_and_replays_exactly(
     from ouroboros import usage_accounting
     from ouroboros.contracts.task_contract import build_task_contract
     from ouroboros.deadline_utils import utc_now
-    from ouroboros.review_substrate import review_binding_hash
-    from ouroboros.task_results import claim_task_acceptance_review_cycle
     from ouroboros.utils import utc_now_iso
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "3")
     contract = build_task_contract({
         "delegation_budget": {
             "intent_note": "Prefer one strong critic and preserve time to synthesize.",
@@ -165,18 +162,6 @@ def test_meaningful_wake_carries_live_tree_planning_facts_and_replays_exactly(
             }},
         ],
     })
-    components = {
-        "candidate_hash": "2" * 64,
-        "evidence_revision": "3" * 64,
-        "fence_hash": "4" * 64,
-    }
-    binding = {**components, "binding_hash": review_binding_hash(**components)}
-    assert claim_task_acceptance_review_cycle(
-        tmp_path,
-        "root",
-        binding,
-        claimed_by_task_id="root",
-    )["status"] == "claimed"
     monkeypatch.setattr(usage_accounting, "usage_breakdown", lambda *_a, **_k: {
         "settled_usd": 1.25,
         "accounted_usd": 1.75,
@@ -212,8 +197,8 @@ def test_meaningful_wake_carries_live_tree_planning_facts_and_replays_exactly(
     assert facts["settled_spend"]["settled_usd"] == 1.25
     assert facts["active_descendants"]["count"] == 2
     assert facts["active_descendants"]["vendor_internal"] == "opaque_not_counted"
-    assert facts["review_capacity"]["claimed_cycles"] == 1
-    assert facts["review_capacity"]["remaining_cycles"] == 2
+    # The acceptance-cycle capacity left with the task-acceptance machine.
+    assert "review_capacity" not in facts
 
     replay = supervised_wait(
         ctx,

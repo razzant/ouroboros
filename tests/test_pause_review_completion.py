@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -62,6 +63,24 @@ def paused_env(env, monkeypatch):  # noqa: F811 - the imported fixture
     monkeypatch.setenv("TOTAL_BUDGET", "1000")
     monkeypatch.setattr(review_pause, "DETACH_POLL_SEC", 0.05)
     return env
+
+
+@pytest.fixture
+def pause_refusal(monkeypatch):
+    """Observe the drain's real refusal decision, before return-evidence I/O."""
+    from ouroboros import review_custody
+
+    observed = threading.Event()
+    original = review_custody.author_detaches
+
+    def observe(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if result:
+            observed.set()
+        return result
+
+    monkeypatch.setattr(review_custody, "author_detaches", observe)
+    return observed
 
 
 def _author(f, model, request, outcome):
@@ -119,9 +138,39 @@ def test_a_launched_reviewer_finishes_its_episode_while_the_synchronous_author_d
     assert [label for label, _ in model.rounds] == ["first", "follow-up"], "no second purchase"
 
 
+def test_a_departed_author_leaves_at_once_and_its_launched_reviewer_still_finishes(paused_env):
+    """A Presence completion never waits for its result review: its departed author takes a PENDING row at
+    once (no owner pause and no addressed mail behind it), and the launched reviewer finishes its episode."""
+    f, model, outcome = paused_env, EpisodeModel(), {}
+
+    def run():
+        with _parent(f), review_pause.receptive_author(review_pause.departed_binding(f.ctx)):
+            outcome["result"] = review_operation_run(f, model, _request(drain=False))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert model.first_sent.wait(10)
+        until(lambda: "result" in outcome)  # back while the reviewer still holds its first round
+        actor = outcome["result"].actors[0]
+        # The author may leave before its reviewer's first launch: that preparation still sends.
+        assert actor["operation_state"] in {"pending_dispatch", "in_flight"} and actor["late_result_pending"]
+        assert actor["usage"].get("author_left_for") == review_pause.DEPARTED_EVENT
+        assert not actor["usage"].get("owner_pause_detached")
+        assert [row["reason"] for row in f.ctx._review_detached_operations] == [review_pause.DEPARTED_EVENT]
+        [detached] = review_pause.live_detached_operations(TASK)
+    finally:
+        model.release_first.set()
+        thread.join(10)
+    until(lambda: review_pause.review_operation_state(detached["owner_id"]) == "closed")
+    assert [label for label, _at in model.rounds] == ["first", "follow-up"], "the reviewer finished its own check"
+    assert review_pause.departed_binding(SimpleNamespace(drive_root=None, task_id=TASK)) is None, \
+        "an author without a drive and task is never departed: it keeps the synchronous wait"
+
+
 @pytest.mark.parametrize("preparation_boundary", ["model_preparation", "before_episode_binding"])
 def test_a_reviewer_that_had_not_launched_when_the_pause_landed_never_starts(
-        paused_env, monkeypatch, preparation_boundary):
+        paused_env, monkeypatch, preparation_boundary, pause_refusal):
     from contextlib import contextmanager
 
     gate = threading.Event()
@@ -142,7 +191,8 @@ def test_a_reviewer_that_had_not_launched_when_the_pause_landed_never_starts(
     try:
         assert model.preparing.wait(10)
         owner_pause.install_fence(f.root, TASK, request_id="pause")
-        until(lambda: "returned_at" in outcome, timeout=1.5)
+        assert pause_refusal.wait(1.5), "the drain did not observe Pause promptly"
+        until(lambda: "returned_at" in outcome)
         actor = outcome["result"].actors[0]
         assert actor["operation_state"] == "pending_dispatch" and actor["late_result_pending"]
         assert actor["usage"]["owner_pause_preparing"] is True
@@ -167,7 +217,7 @@ def test_a_reviewer_that_had_not_launched_when_the_pause_landed_never_starts(
     assert all(row["state"] == "released" for row in attempt_rows_in_start_order(f.root))
 
 
-def test_pause_detaches_a_mixed_panel_and_resume_cannot_launch_its_unsent_preparation(paused_env):
+def test_pause_detaches_a_mixed_panel_and_resume_cannot_launch_its_unsent_preparation(paused_env, pause_refusal):
     from dataclasses import replace
     from ouroboros.review_substrate import run_review_request
 
@@ -191,7 +241,9 @@ def test_pause_detaches_a_mixed_panel_and_resume_cannot_launch_its_unsent_prepar
     try:
         assert armed.first_sent.wait(10) and preparing.preparing.wait(10)
         owner_pause.install_fence(f.root, TASK, request_id="mixed")
-        until(lambda: "result" in outcome, timeout=1.5)
+        # Bound the drain's refusal decision separately from persisted return evidence.
+        assert pause_refusal.wait(1.5), "the drain did not observe Pause promptly"
+        until(lambda: "result" in outcome)
         rows = {row["slot_id"]: row for row in outcome["result"].actors}
         assert rows["armed"]["operation_state"] == "in_flight"
         assert rows["preparing"]["operation_state"] == "pending_dispatch"
@@ -228,7 +280,7 @@ def test_a_new_panel_under_an_accepted_pause_is_refused_before_any_send(paused_e
 
 
 @pytest.mark.parametrize("capture_state", ["settled", "unresolved"])
-def test_preparation_refusal_preserves_independent_positive_or_unknown_capture(paused_env, capture_state):
+def test_preparation_refusal_preserves_independent_positive_or_unknown_capture(paused_env, capture_state, pause_refusal):
     from types import SimpleNamespace
     from ouroboros.review_custody import _ACTIVE
 
@@ -249,7 +301,8 @@ def test_preparation_refusal_preserves_independent_positive_or_unknown_capture(p
     try:
         assert preparing.wait(10)
         owner_pause.install_fence(f.root, TASK, request_id="before-capture-delivery")
-        until(lambda: "result" in outcome, timeout=1.5)
+        assert pause_refusal.wait(1.5), "the drain did not observe Pause promptly"
+        until(lambda: "result" in outcome)
         row = outcome["result"].actors[0]
         entry = next(entry for entry in _ACTIVE.values() if entry.operation_id == row["operation_id"])
         assert entry.pause_before_launch
@@ -456,10 +509,10 @@ def direct_commit(paused_env, monkeypatch):
     monkeypatch.setattr(git, "_auto_tag_on_version_bump", lambda *_a, **_kw: effects.append(("tag",)) or "")
     monkeypatch.setattr(git, "_managed_post_commit_tests_gate", lambda *_a, **_kw: None)
     monkeypatch.setattr(git, "_post_commit_result", lambda *_a, **_kw: effects.append(("post-commit-tests",)))
-    monkeypatch.setattr(git, "_auto_push", lambda *_a: effects.append(("push",)) or "")
+    monkeypatch.setattr(git, "_auto_push", lambda *_a, **_kw: effects.append(("push",)) or "")
     monkeypatch.setattr(git, "_publish_reviewed_commit", lambda _ctx, _msg, _sha, tag, _warning, _paths, push: "committed" + tag + push)
     monkeypatch.setattr(git, "record_bound_commit_success", lambda *_a: None)
-    monkeypatch.setattr("ouroboros.body_candidate.record_reviewed_commit", lambda *_a: None)
+    monkeypatch.setattr("ouroboros.body_candidate.record_reviewed_commit", lambda *_a, **_kw: None)
     monkeypatch.setattr(config, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr("ouroboros.tools.review_admission.admit_commit_gate_wave", lambda *_a: None)
     # The one commit wave: a retrieving seat asked both parts of the one brief (contract B).

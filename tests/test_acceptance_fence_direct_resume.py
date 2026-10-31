@@ -1,10 +1,12 @@
 """#1183: a direct turn's exact Pause continues on a pooled worker with its own fence.
 
-The direct actor applies its acceptance fence in-process, so the row names no pooled
-owner. Its exact park binds that row; only the consumed Resume of THAT pause on the
-current pooled attempt rebinds it. Acceptance entry, owner/budget Pause, direct-lane park,
-Resume grant, assignment, loop consumption, pooled event/ack and the delivery seal are
-real; model, process and paid transports are synthetic.
+The direct actor applies its admission fence (stored under the acceptance fence's names)
+in-process, so the row names no pooled owner. A fence still open across a Pause is a
+pre-fold state — the retired acceptance gate held it open while a child ran — that a paused
+continuation still carries: its exact park binds that row; only the consumed Resume of THAT
+pause on the current pooled attempt rebinds it. The fence begin, owner/budget Pause,
+direct-lane park, Resume grant, assignment, loop consumption, pooled event/ack and the seal
+at an author stop are real; model, process and paid transports are synthetic.
 """
 import copy
 import os
@@ -29,7 +31,7 @@ def _bind(ctx, actor):
 
 
 def _direct_paused(tmp_path, monkeypatch, *, park="inline", rail="budget", change=""):
-    """A live child keeps the real direct acceptance gate open; the root then pauses exactly."""
+    """A direct turn's fence is open (as a pre-fold acceptance gate left it); the root then pauses exactly."""
     from ouroboros import budget_pause, loop
     from ouroboros.task_results import write_task_result
     from supervisor import message_bus, worker_chat_lane
@@ -39,23 +41,14 @@ def _direct_paused(tmp_path, monkeypatch, *, park="inline", rail="budget", chang
     monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
     direct = _pooled_agent(tmp_path, None, TASK)
-    direct.fence_transition = queue.transition_acceptance_fence  # what workers._get_chat_agent injects
+    direct._fence_in_process = lambda: True  # a direct turn runs in the queue's process
     ctx, limit = _loop_ctx(tmp_path, TASK, direct=True)
     _bind(ctx, direct)
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    ctx.task_contract = {"expected_output": "A completed deliverable"}
     write_task_result(tmp_path, TASK, "running", root_task_id=TASK, _is_direct_chat=True)
-    write_task_result(tmp_path, "child", "running", parent_task_id=TASK, root_task_id=TASK)
-    workers.PENDING.append({"id": "child", "root_task_id": TASK, "parent_task_id": TASK})
-    # Required reviews what the host observed this turn produce (#1731); the
-    # expected_output above is a declaration, not production.
-    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "deliverable.md"},
-                             "is_error": False, "status": "ok"}]}
-    assert loop._run_task_acceptance_review_once(
-        tools=SimpleNamespace(_ctx=ctx), content="Complete deliverable", task_id=TASK, task_type="task",
-        llm_trace=trace, drive_root=tmp_path, messages=limit.messages, emit_progress=lambda *_a: None)
-    assert trace["review_decision"]["eligibility"] == "waiting_for_quiescence"
+    trace = {"tool_calls": []}
+    # The fence's own begin (the one the seal at an author stop takes) opens the row the
+    # retired acceptance gate kept open across the pause.
+    assert loop._begin_task_acceptance_fence(ctx, TASK)[0]
     row = queue.ACCEPTANCE_FENCES[TASK]
     assert "pooled_owner" not in row
     row["owner_message_generation"] = 3
@@ -66,8 +59,6 @@ def _direct_paused(tmp_path, monkeypatch, *, park="inline", rail="budget", chang
     elif change == "pooled_owner":  # a row some pooled attempt began is not this direct turn's
         row["pooled_owner"] = {"task_attempt": 1, "pid": 4242}
     prior = copy.deepcopy(row)
-    write_task_result(tmp_path, "child", "completed", parent_task_id=TASK, root_task_id=TASK)
-    workers.PENDING.clear()
     _fast_hold(monkeypatch, budget_pause)
     _quiet_external(monkeypatch, budget_pause)
     registry = SimpleNamespace(unregister=lambda _id: None)

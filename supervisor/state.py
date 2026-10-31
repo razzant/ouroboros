@@ -19,6 +19,7 @@ from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclus
 from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso, write_bytes_atomic  # noqa: F401 -- assert_test_data_path re-exported: the guard moved to the utils leaf so append_jsonl shares it; state.assert_test_data_path callers keep working
 
 log = logging.getLogger(__name__)
+_ROTATION_ERROR_AT: dict[pathlib.Path, float] = {}
 
 # ABI 7.0 (Q8=B): the durable ``state.json`` snapshot names its schema on
 # every write. Stamp-on-write ONLY — readers do not require the stamp (no
@@ -80,7 +81,7 @@ def _read_json_file(path: pathlib.Path) -> Tuple[str, Optional[Dict[str, Any]], 
     ENOTDIR — a file where ``state/`` belongs is not absence, on Windows too),
     ``invalid`` for bytes that are not a non-empty JSON object. No ``exists()``
     pre-check: it can fail the same way."""
-    from supervisor.state_initialization import confirm_absent
+    from ouroboros.installation_stop import confirm_absent
 
     try:
         try:
@@ -589,6 +590,11 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
         read = read_state()
         return StateRead("unavailable" if read.quality in CURRENT_QUALITIES else read.quality,
                          read.source, read.values, CONTROL_KEYS, str(exc))
+    # The completed witness is this boot's work-root basis: the admission pin read the facts
+    # before recovery or adoption, and every worker and child inherits this one (#1239).
+    from ouroboros.launch_roots import pin_basis
+
+    pin_basis(DRIVE_ROOT, evidence=witness.supervisor_evidence)
     diagnostic.start(st)
     return read_state()
 
@@ -789,23 +795,31 @@ def check_openrouter_ground_truth(api_key: Optional[str] = None) -> Optional[Dic
             return None
         from ouroboros.net_transport import trust_ssl_context
 
-        req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/auth/key",
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
+        req = urllib.request.Request("https://openrouter.ai/api/v1/auth/key",
+                                     headers={"Authorization": f"Bearer {api_key}"})
         # A provider call: it verifies against the owner's trust bundle like every other one.
         with urllib.request.urlopen(req, timeout=10, context=trust_ssl_context()) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        # OpenRouter usage is dollars, not cents.
-        usage_total = data.get("data", {}).get("usage", 0)
-        usage_daily = data.get("data", {}).get("usage_daily", 0)
-        return {
-            "total_usd": float(usage_total),
-            "daily_usd": float(usage_daily),
-        }
+            key = json.loads(resp.read().decode("utf-8")).get("data", {})
+        # Dollars, not cents. Like the ledger, the key's consumption includes its BYOK share.
+        return {"total_usd": float(key.get("usage", 0)) + float(key.get("byok_usage") or 0),
+                "daily_usd": float(key.get("usage_daily", 0)) + float(key.get("byok_usage_daily") or 0)}
     except Exception:
         log.warning("Failed to fetch OpenRouter ground truth", exc_info=True)
         return None
+
+
+def _other_openrouter_connection_enabled() -> bool:
+    """Whether an enabled OpenRouter connection besides the queried built-in key shares the
+    ledger's ``openrouter`` bucket: the key's usage is then no like-for-like comparison."""
+    try:
+        from ouroboros.config import runtime_settings
+
+        rows = runtime_settings().get("OUROBOROS_CONNECTIONS") or []
+        return any(isinstance(row, dict) and row.get("kind") == "openrouter" and row.get("name") != "default"
+                   and row.get("enabled", True) is not False
+                   for row in (json.loads(rows) if isinstance(rows, str) else rows))
+    except Exception:
+        return False
 
 
 # Only diagnostic baseline/publication identity: ordinary spend may advance
@@ -856,6 +870,7 @@ class _OpenRouterDiagnostic:
             ground_truth = check_openrouter_ground_truth(api_key)
             if ground_truth is None or not self.current():
                 return
+            shared = _other_openrouter_connection_enabled()  # a settings read, never under STATE_LOCK
             with _state_lock("OpenRouter diagnostic"):
                 if not self.current():
                     return
@@ -863,7 +878,7 @@ class _OpenRouterDiagnostic:
                 if (not self.current() or key_fp != _openrouter_key_fingerprint()
                         or any(st.get(key) != snapshot.get(key) for key in _OPENROUTER_DIAGNOSTIC_BASIS)):
                     return
-                _apply_openrouter_ground_truth(st, snapshot, key_fp, ground_truth)
+                _apply_openrouter_ground_truth(st, snapshot, key_fp, ground_truth, shared=shared)
                 if self.current():
                     _save_state_unlocked(st)
         except Exception:
@@ -876,7 +891,7 @@ _OPENROUTER_DIAGNOSTIC = _OpenRouterDiagnostic()
 
 
 def _apply_openrouter_ground_truth(st: Dict[str, Any], snapshot: Dict[str, Any],
-                                  key_fp: str, ground_truth: Dict[str, float]) -> None:
+                                  key_fp: str, ground_truth: Dict[str, float], *, shared: bool = False) -> None:
     """Publish one applicable observation under STATE_LOCK; money stays ledger-owned."""
     st["openrouter_total_usd"] = ground_truth["total_usd"]
     st["openrouter_checked_ledger_settled_usd"] = snapshot.get("openrouter_ledger_settled_usd")
@@ -902,13 +917,14 @@ def _apply_openrouter_ground_truth(st: Dict[str, Any], snapshot: Dict[str, Any],
         st["budget_drift_alert"] = False
     elif (
         key_changed
+        or shared
         or session_total_snap is None
         or session_or_settled_snap is None
         or or_ledger_settled is None
     ):
-        # Rebaseline (key swapped mid-session, or pre-upgrade state
-        # lacks the OpenRouter-only snapshot) and skip this cycle:
-        # the old baseline describes a different key/metric.
+        # Rebaseline (key swapped mid-session, another enabled OpenRouter connection
+        # spends into the same bucket, or pre-upgrade state lacks the OpenRouter-only
+        # snapshot) and skip the percentage: the old baseline describes another key/metric.
         st["session_total_snapshot"] = ground_truth["total_usd"]
         st["session_openrouter_settled_snapshot"] = or_ledger_settled
         st["session_openrouter_key_fp"] = key_fp
@@ -927,26 +943,16 @@ def _apply_openrouter_ground_truth(st: Dict[str, Any], snapshot: Dict[str, Any],
                 all_provider_delta = float(snapshot.get("spent_usd") or 0.0) - float(
                     st.get("session_spent_snapshot") or 0.0
                 )
-                append_jsonl(
-                    DRIVE_ROOT / "logs" / "events.jsonl",
-                    {
-                        "ts": utc_now_iso(),
-                        # "type" is the events.jsonl schema key every
-                        # other event uses; type-keyed aggregations
-                        # lost this row when it was written as "event".
-                        "type": "budget_drift_warning",
-                        "drift_pct": round(drift_pct, 2),
-                        "our_delta": round(our_delta, 4),
-                        "or_delta": round(or_delta, 4),
-                        "abs_diff": round(abs_diff, 4),
-                        "all_provider_delta": round(all_provider_delta, 4),
-                        "spent_calls": snapshot["spent_calls"],
-                        "note": (
-                            "OpenRouter-only ledger delta vs /auth/key usage delta. "
-                            "High drift usually means a shared OR key or missing ledger rows."
-                        ),
-                    }
-                )
+                append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
+                    # "type" is the events.jsonl schema key every other event uses;
+                    # type-keyed aggregations lost this row when it was written as "event".
+                    "ts": utc_now_iso(), "type": "budget_drift_warning",
+                    "drift_pct": round(drift_pct, 2), "our_delta": round(our_delta, 4),
+                    "or_delta": round(or_delta, 4), "abs_diff": round(abs_diff, 4),
+                    "all_provider_delta": round(all_provider_delta, 4), "spent_calls": snapshot["spent_calls"],
+                    "note": ("OpenRouter-only ledger delta vs /auth/key usage delta. "
+                             "High drift usually means a shared OR key or missing ledger rows."),
+                })
             else:
                 st["budget_drift_alert"] = False
         else:
@@ -1146,9 +1152,8 @@ def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
             breakdown[str(model)] = {
                 "cost": float(bucket.get("accounted_usd") or 0.0),
                 "calls": int(bucket.get("physical_calls") or 0),
-                "prompt_tokens": int(bucket.get("prompt_tokens") or 0),
-                "completion_tokens": int(bucket.get("completion_tokens") or 0),
-                "cached_tokens": int(bucket.get("cached_tokens") or 0),
+                # None: no row of this model reported the counter, never a zero.
+                **{name: bucket.get(name) for name in ("prompt_tokens", "completion_tokens", "cached_tokens")},
             }
     except Exception:
         log.error("Failed to calculate ledger model breakdown", exc_info=True)
@@ -1176,7 +1181,7 @@ def per_task_cost_summary(max_tasks: int = 10, tail_bytes: int = 512_000) -> Lis
 
 def reconstruct_task_cost(
     task_id: str, *, fields: bool = False, drive_root: Optional[pathlib.Path] = None,
-    breakdown: Optional[Dict[str, Any]] = None,
+    breakdown: Optional[Dict[str, Any]] = None, custody_root=None,
 ) -> Any:
     """Reconstruct cost; an indexed breakdown belongs to this drive after legacy import."""
     want = str(task_id or "")
@@ -1200,7 +1205,7 @@ def reconstruct_task_cost(
 
             authority_root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
             if breakdown is None:
-                bucket = usage_breakdown(authority_root, task_id=want)
+                bucket = usage_breakdown(authority_root, task_id=want, custody_root=custody_root, include_custody=True)
             else:
                 from ouroboros._usage_rows import _breakdown_bucket, _with_integrity
 
@@ -1215,8 +1220,8 @@ def reconstruct_task_cost(
                     else None
                 ),
                 "total_rounds": int(bucket.get("physical_calls") or 0),
-                "prompt_tokens": int(bucket.get("prompt_tokens") or 0),
-                "completion_tokens": int(bucket.get("completion_tokens") or 0),
+                # None: no row of the task reported the counter (a session without its input split), never 0.
+                **{name: None if bucket.get(name) is None else int(bucket[name]) for name in ("prompt_tokens", "completion_tokens")},
                 "cost_final": bool(bucket.get("cost_final")),
                 "reserved_usd": float(bucket.get("reserved_usd") or 0.0),
                 "unresolved_upper_bound_usd": float(
@@ -1228,6 +1233,7 @@ def reconstruct_task_cost(
                 "ledger_integrity_degraded": bool(bucket.get("integrity_degraded")),
                 # #498: the same bucket's own explanation of its own amount.
                 "cost_presentation": build_cost_presentation(bucket, scope=COST_SCOPE_OWN),
+                **({"cost_custody": bucket["cost_custody"]} if "cost_custody" in bucket else {}),
             }
         except Exception:
             log.error("Failed to reconstruct ledger task cost for %s", task_id, exc_info=True)
@@ -1255,8 +1261,13 @@ def reconstruct_task_cost(
         raise UsageAccountingError(f"task cost authority unavailable for {task_id}")
     return (
         float(projection["accounted_upper_bound_usd"]), int(projection["total_rounds"]),
-        int(projection["prompt_tokens"]), int(projection["completion_tokens"]),
+        int(projection["prompt_tokens"] or 0), int(projection["completion_tokens"] or 0),
     )
+
+
+def _token_text(value: Any, form: str = "{}", unknown: str = "unknown") -> str:
+    """A ledger token sum, or ``unknown`` when no row reported the counter (never a zero)."""
+    return unknown if value is None else form.format(int(value))
 
 
 def status_text(workers_dict: Dict[int, Any], pending_list: list,
@@ -1320,9 +1331,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
             else float("inf")
         )
         spent_calls = int(ledger_breakdown.get("physical_calls") or 0)
-        prompt_tokens = int(ledger_breakdown.get("prompt_tokens") or 0)
-        completion_tokens = int(ledger_breakdown.get("completion_tokens") or 0)
-        cached_tokens = int(ledger_breakdown.get("cached_tokens") or 0)
+        prompt_tokens, completion_tokens, cached_tokens = (
+            _token_text(ledger_breakdown.get(name)) for name in ("prompt_tokens", "completion_tokens", "cached_tokens"))
     except Exception:
         log.exception("Budget ledger unavailable while building status")
         accounting_available = False
@@ -1391,9 +1401,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
             if stats["cost"] > 0 or stats["calls"] > 0:
                 cost = stats["cost"]
                 calls = int(stats["calls"])
-                pt = int(stats["prompt_tokens"])
-                ct = int(stats["completion_tokens"])
-                lines.append(f"  {model_name}: ${cost:.2f} ({calls} calls, {pt:,}p/{ct:,}c tok)")
+                pt, ct = (_token_text(stats[name], "{:,}", "?") for name in ("prompt_tokens", "completion_tokens"))
+                lines.append(f"  {model_name}: ${cost:.2f} ({calls} calls, {pt}p/{ct}c tok)")
 
     lines.append(
         "evolution: "
@@ -1411,7 +1420,8 @@ def rotate_jsonl_log_if_needed(
     max_bytes: int = 800_000,
 ) -> None:
     """Rotate ``logs/<name>`` to ``archive/<archive_prefix>_<ts>.jsonl`` when it
-    exceeds ``max_bytes``.
+    reaches ``max_bytes``. Escaped OSError is deferred with throttled diagnosis;
+    lock-helper warnings remain separate. Other exceptions propagate.
 
     Rotation is an atomic ``os.replace`` rename performed under the SAME sidecar
     lock that ``append_jsonl`` writers take — the old copy+truncate destroyed any
@@ -1426,44 +1436,51 @@ def rotate_jsonl_log_if_needed(
     service logs only) and none may be added — readers backfill from these
     segments, so pruning them would silently erase visible history (BIBLE P1).
     """
-    if (drive_root / ISOLATED_BENCHMARK_SENTINEL).exists():
-        return
     path = drive_root / "logs" / name
-    if not path.exists():
-        return
-    if path.stat().st_size < max_bytes:
-        return
-    from ouroboros.utils import jsonl_append_lock_path
-
-    lock_path = jsonl_append_lock_path(path)
-    lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0, owner_aware_stale=True)
-    if lock_fd is None:
-        log.warning("%s rotation skipped: append lock busy", name)
-        return
     try:
-        if not path.exists() or path.stat().st_size < max_bytes:
+        if (drive_root / ISOLATED_BENCHMARK_SENTINEL).exists():
             return
-        # The archive's name is its rotation time, taken UNDER the append lock: every
-        # row already in the file was appended before this stamp, so a reader that
-        # bounds its archive scan by a time it recorded earlier (the terminal
-        # projection's readiness mint) can stop at the first older segment.
-        ts = utc_now_iso().replace("-", "").replace(":", "").split(".")[0]
-        archive_path = drive_root / "archive" / f"{archive_prefix}_{ts}.jsonl"
-        # Second-resolution names can collide when a fast writer forces two rotations
-        # within one second; os.replace onto an existing archive would destroy it. The
-        # "_<n>" suffix sorts lexicographically AFTER "<ts>.jsonl" ("_" > "."), so
-        # name-ordered readers keep the true chronological chain.
-        suffix = 0
-        while archive_path.exists():
-            suffix += 1
-            archive_path = drive_root / "archive" / f"{archive_prefix}_{ts}_{suffix}.jsonl"
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(path, archive_path)
-        path.touch()
-    finally:
-        release_exclusive_file_lock(lock_path, lock_fd)
+        if not path.exists():
+            return
+        if path.stat().st_size < max_bytes:
+            return
+        from ouroboros.utils import jsonl_append_lock_path
 
-
-def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000) -> None:
-    """Compatibility wrapper: chat.jsonl rotation via the generalized rotator."""
-    rotate_jsonl_log_if_needed(drive_root, "chat.jsonl", "chat", max_bytes)
+        lock_path = jsonl_append_lock_path(path)
+        lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0, owner_aware_stale=True)
+        if lock_fd is None:
+            log.warning("%s rotation skipped: append lock busy", name)
+            return
+        try:
+            if not path.exists() or path.stat().st_size < max_bytes:
+                return
+            # The archive's name is its rotation time, taken UNDER the append lock: every
+            # row already in the file was appended before this stamp, so a reader that
+            # bounds its archive scan by a time it recorded earlier (the terminal
+            # projection's readiness mint) can stop at the first older segment.
+            ts = utc_now_iso().replace("-", "").replace(":", "").split(".")[0]
+            archive_path = drive_root / "archive" / f"{archive_prefix}_{ts}.jsonl"
+            # Second-resolution names can collide when a fast writer forces two rotations
+            # within one second; os.replace onto an existing archive would destroy it. The
+            # "_<n>" suffix sorts lexicographically AFTER "<ts>.jsonl" ("_" > "."), so
+            # name-ordered readers keep the true chronological chain.
+            suffix = 0
+            while archive_path.exists():
+                suffix += 1
+                archive_path = drive_root / "archive" / f"{archive_prefix}_{ts}_{suffix}.jsonl"
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(path, archive_path)
+            path.touch()
+        finally:
+            release_exclusive_file_lock(lock_path, lock_fd)
+    except OSError:
+        # Optional maintenance must not prevent event intake or task assignment.
+        # Rename may have succeeded before touch failed: history is then in the
+        # archive and the next append recreates live. Never claim it is unchanged.
+        now = time.monotonic()
+        last_error = _ROTATION_ERROR_AT.get(path)
+        if last_error is None or now - last_error >= 30.0:
+            _ROTATION_ERROR_AT[path] = now
+            log.error("Optional JSONL rotation failed for %s", path, exc_info=True)
+    else:
+        _ROTATION_ERROR_AT.pop(path, None)

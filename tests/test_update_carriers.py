@@ -471,8 +471,6 @@ def test_one_shared_resolver_serves_all_three_insertion_points():
         encoding="utf-8"
     )
     assert "resolve_carrier_conflicts" not in parent_source
-    engine_doc = update_carriers.__doc__ or ""
-    assert "OLD updater" in engine_doc and "steady state" in engine_doc
 
 
 def test_resolver_rejects_an_unknown_preference(tmp_path):

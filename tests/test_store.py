@@ -16,8 +16,16 @@ import pytest
 from ouroboros import platform_layer, store, task_store, usage_store
 from ouroboros.store import StoreBusy, StoreLost, StoreMigrating, StoreRetired
 from ouroboros.utils import machine_json
+from tests._store_shared import release_store_handles
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def release_connections():
+    store.close_connections()
+    yield
+    store.close_connections()
 
 
 def publish(root: pathlib.Path, *documents: dict, tier: str = store.TIER_ENFORCED,
@@ -103,6 +111,7 @@ def test_a_missing_store_is_migrating_while_imported_and_lost_beside_its_stamp(t
     with store.open_store(tmp_path, write=True) as txn:  # first touch: the import ran, the store is published
         assert txn.load("t1")["status"] == "completed"
     assert store.probe(tmp_path)[0] == "present" and store.store_ready(tmp_path) is True
+    release_store_handles(store.store_path(tmp_path))  # this test's own reads keep it open (Windows)
     store.store_path(tmp_path).unlink()
     assert store.generation_stamped(tmp_path)  # the import stamped the generation: a missing store is now LOST
     with pytest.raises(StoreLost):
@@ -269,26 +278,29 @@ def test_every_public_write_refuses_in_the_window_and_outside_published_while_se
         assert txn.load("t1") is None and set(txn.custody_rows()) == {"r1"}
 
 
-def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path):
+@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path, monkeypatch, mode):
     """The seam commits ``phase=retired`` into the store, clears the stamp and renames it aside.
-    A writer that opened the file earlier reads that phase inside its own transaction (before
-    the rename on Windows, which requires its handle closed; after the rename on POSIX); a writer
+    A writer that opened the file earlier reads that phase inside its own transaction before
+    closing for the rename (required by the journal handoff on every platform); a writer
     that opens by path now (``update_task``, a reader) is told ``StoreRetired`` by the sibling,
     never «not published yet»."""
     from ouroboros.startup_migrations import stamp
 
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     path = publish(tmp_path, document("t1"))
     retired = path.with_name(path.name + ".exported-test")
     with contextlib.closing(store.connect(path, store.TIER_ENFORCED)) as straggler:  # opened before the seam ran
-        with store.open_store(tmp_path, write=True) as txn:
-            txn.set_meta("phase", store.RETIRED)
-        stamp(tmp_path, **{store.GENERATION_KEY: None})
-        if os.name != "nt":
-            os.replace(path, retired)
+        # Commit the phase before quiescing the old writer; open_store would also
+        # attempt the handoff while that writer still holds its WAL connection.
+        with contextlib.closing(store.connect(path, store.TIER_ENFORCED)) as retiring:
+            with store.transaction(retiring, write=True):
+                store.Txn(retiring).set_meta("phase", store.RETIRED)
         with store.transaction(straggler, write=True):
             assert store.Txn(straggler).phase() == store.RETIRED
-    if os.name == "nt":
-        os.replace(path, retired)
+    store.prepare_handoff(path, store.TIER_ENFORCED)
+    stamp(tmp_path, **{store.GENERATION_KEY: None})
+    os.replace(path, retired)
     with pytest.raises(StoreRetired):
         store.update_task(tmp_path, "t1", lambda current: {**current, "note": "late"})
     with pytest.raises(StoreRetired):
@@ -449,7 +461,8 @@ def test_encode_document_matches_the_result_writer_bytes(tmp_path):
 _ABOVE_3_24 = re.compile(
     r"\bSTRICT\b|->>?|\bRETURNING\b|\bGENERATED\s+ALWAYS\b|\bjsonb?\(|\bjson_[a-z]+\(|\bIIF\(|\bVACUUM\s+INTO\b"
     r"|\bRENAME\s+COLUMN\b|\bDROP\s+COLUMN\b|\bOVER\s*\(|\bFILTER\s*\(|\bNULLS\s+(FIRST|LAST)\b", re.IGNORECASE)
-STORE_MODULES = ("ouroboros/store.py", "ouroboros/store_import.py", "ouroboros/store_switch.py")
+STORE_MODULES = ("ouroboros/store.py", "ouroboros/store_import.py", "ouroboros/store_switch.py",
+                 "ouroboros/store_task_cards.py")
 
 
 def _string_literals(source: str):
@@ -485,13 +498,15 @@ def test_nothing_above_sqlite_3_24_in_the_store_modules():
     assert sqlite3.sqlite_version_info >= (3, 24, 0)
 
 
-def test_the_schema_builds_on_this_engine(tmp_path):
+@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+def test_the_schema_builds_on_this_engine(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     path = publish(tmp_path, document("t1"))
-    with sqlite3.connect(path) as conn:
+    with contextlib.closing(sqlite3.connect(path)) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert tables == {"tasks", "task_bodies", "obligations", "task_handoffs", "custody_runs",
+        assert tables == {"tasks", "task_bodies", "task_cards", "obligations", "task_handoffs", "custody_runs",
                           "custody_outbox", "meta"}
-        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == ("wal" if mode == "WAL" else "delete")
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # the version lives in meta
 
 
@@ -529,7 +544,7 @@ def test_readers_decode_bodies_after_the_read_transaction_closed(tmp_path, monke
 def _outside_the_lock(root, monkeypatch, probes):
     """Every mutator input is prepared with NO write transaction open: each prepared input first
     takes and releases the store's write lock itself, which ``StoreBusy``-fails under a mutator."""
-    from ouroboros import swarm_rollup, task_custody
+    from ouroboros import task_custody
 
     def guard(name, real):
         def probe(*args, **kwargs):
@@ -539,25 +554,22 @@ def _outside_the_lock(root, monkeypatch, probes):
             return real(*args, **kwargs)
         return probe
 
-    for module, name in ((task_custody, "capture_unread_mail"), (task_custody, "capture_owner_mail"),
-                         (swarm_rollup, "initial_swarm_rollup")):
+    for module, name in ((task_custody, "capture_unread_mail"), (task_custody, "capture_owner_mail")):
         monkeypatch.setattr(module, name, guard(name, getattr(module, name)))
 
 
 def test_mutator_inputs_are_prepared_before_begin_and_reprepared_outside_when_the_row_moved(tmp_path, monkeypatch):
-    """S3 fix 13 (Grok MINOR, Astra M11): the mailbox captures and the swarm rollup run before
-    ``BEGIN``; a mutator that finds its input missing (a projector turning the row terminal, a
-    first row) rolls back empty and the whole write repeats with the input prepared outside the
-    lock."""
+    """Mailbox captures run before BEGIN; a projector turning a row terminal
+    rolls back empty and repeats with that input prepared outside the lock."""
     from ouroboros import store_import, task_results
 
     store_import.ensure_current_store(tmp_path)
     probes: list = []
     _outside_the_lock(tmp_path, monkeypatch, probes)
-    # A first row that is not create-only: the rollup is prepared on the second round, outside.
+    # A first row needs no history input: its producer-owned fan-out starts empty.
     task_results.write_task_result(tmp_path, "t1", "running")
-    assert probes == ["initial_swarm_rollup"]
-    assert task_results.load_task_result(tmp_path, "t1")["swarm_fanout_rollup"]["through"] == 0
+    assert probes == []
+    assert task_results.load_task_result(tmp_path, "t1")["swarm_fanout_rollup"]["fanout_count"] == 0
     # The projector turns a non-terminal write terminal: the captures are prepared outside, once.
     probes.clear()
     stored = task_results.write_task_result(tmp_path, "t1", "running",
@@ -575,6 +587,8 @@ def _read_store_file_in_this_process(kind, root, path):
     if kind == "header":
         state, tier = store.probe(root)
         assert state == "present" and tier is not None
+    elif kind == "wal_flag":  # the first read of every store's hand-off at a door
+        assert store.wal_file(path) in {True, False}
     elif kind == "preview":
         assert files._read_prefix(path, 4096).startswith(b"SQLite format 3")
     elif kind == "agent_read":
@@ -590,7 +604,7 @@ def _read_store_file_in_this_process(kind, root, path):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("kind", ["header", "preview", "agent_read", "copy", "stream", "artifact"])
+@pytest.mark.parametrize("kind", ["header", "wal_flag", "preview", "agent_read", "copy", "stream", "artifact"])
 def test_reading_a_store_file_keeps_the_write_lock_another_thread_holds(tmp_path, kind):
     """Closing any descriptor of the store file releases every POSIX lock this process holds on
     it (sqlite.org howtocorrupt 2.2). ``probe`` read the header on every ``open_store``, and the
@@ -656,6 +670,7 @@ def test_a_kept_reader_reads_like_a_file_and_continues_short_reads(tmp_path, mon
 
     store_import.ensure_current_store(tmp_path)
     path = store.store_path(tmp_path)
+    store.close_connections(path)
     data = path.read_bytes()
     with store.open_for_read(path) as reader:
         assert reader.read() == data and reader.tell() == len(data)
@@ -671,12 +686,14 @@ def test_a_kept_reader_reads_like_a_file_and_continues_short_reads(tmp_path, mon
 @pytest.mark.skipif(os.name == "nt", reason="Windows keeps no shared descriptors")
 def test_store_descriptors_live_only_as_long_as_their_connections(tmp_path):
     """One descriptor per touched store file for the process lifetime ran a live server to 2,682
-    open descriptors in four hours (issue #1759); the registry closes it with the last use."""
+    open descriptors in four hours (issue #1759); explicit pool disposal releases every
+    connection and its raw descriptor, without relying on garbage collection."""
     from ouroboros import store_import
 
     roots = [tmp_path / f"drive{n}" for n in range(40)]
     for root in roots:
         store_import.ensure_current_store(root)
+    store.close_connections()
     before = len(os.listdir("/dev/fd"))
     for root in roots:
         with store.open_store(root, write=True):
@@ -684,6 +701,7 @@ def test_store_descriptors_live_only_as_long_as_their_connections(tmp_path):
             assert store.held_descriptor(store.store_path(root)) is not None  # shared while in use
         with store.open_store(root, write=False):
             pass
+        store.close_connections(store.store_path(root))
     assert len(os.listdir("/dev/fd")) <= before  # nothing kept once the transactions ended
     assert not getattr(store, "_INODES", None)
 
@@ -718,7 +736,10 @@ def test_a_reader_opened_before_a_transaction_keeps_its_lock_when_it_closes(tmp_
         reader.close()  # returning the borrow while the transaction holds the lock
         assert other_process() == "blocked"
         assert store.held_descriptor(path) is not None  # its close waits for the connection
-    assert other_process() == "acquired" and store.held_descriptor(path) is None
+    assert other_process() == "acquired"  # an idle cached connection holds no transaction
+    assert store.held_descriptor(path) is not None
+    store.close_connections(path)
+    assert store.held_descriptor(path) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows keeps no shared descriptors")
@@ -729,6 +750,7 @@ def test_the_registry_survives_a_failed_close_a_finalizer_and_a_closed_reader(tm
 
     store_import.ensure_current_store(tmp_path)
     path = store.store_path(tmp_path)
+    store.close_connections(path)
     conn = store.connect(path, store.TIER_ENFORCED)
     key = (os.stat(path).st_dev, os.stat(path).st_ino)
     failures = []

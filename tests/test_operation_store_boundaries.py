@@ -150,7 +150,9 @@ def test_late_refused_handoff_cannot_recreate_claim(tmp_path, monkeypatch, route
 
 
 @pytest.mark.parametrize("reason", ["permission_denied", "contention"])
-def test_unavailable_settle_preserves_result_and_unresolved_custody(tmp_path, monkeypatch, reason):
+def test_unavailable_settle_preserves_result_and_owes_the_return(tmp_path, monkeypatch, reason):
+    from ouroboros import custody_owed
+
     registry, _, _ = _registry(tmp_path, monkeypatch)
     patch = task_store.patch_handoff
     writes = []
@@ -172,6 +174,11 @@ def test_unavailable_settle_preserves_result_and_unresolved_custody(tmp_path, mo
     assert len(set(writes)) == 1
     if reason != "contention":
         assert len(writes) == 1
+    # The returned call is owed, never forgotten: the same write lands once the store accepts it.
+    assert custody_owed.pending() == 1 and custody_owed.drain() == 1
+    monkeypatch.setattr(task_store, "patch_handoff", patch)
+    assert custody_owed.drain() == 0 and claims(tmp_path) == {}, "no rerun of the tool, no second claim"
+    assert calls == [True]
 
 
 def test_ambiguous_completion_is_idempotent_and_preserves_other_duties(tmp_path, monkeypatch):
@@ -233,12 +240,13 @@ def test_delayed_real_mcp_runner_cannot_open_transport_after_callers_return(tmp_
     monkeypatch.setattr(asyncio, "run", delayed)
     monkeypatch.setattr(threading.Thread, "join", joined)
     monkeypatch.setattr(mcp_client, "_transport_factory", transport)
-    monkeypatch.setattr(mcp_client, "_run_async", lambda factory, **_kw: actual_wrapper(factory, join_timeout=0))
+    monkeypatch.setattr(mcp_client, "_run_async", lambda factory, **kw: actual_wrapper(factory, **{**kw, "join_timeout": 0}))
     try:
         async def invoke():
             return registry.execute_result("mcp_demo__effect", {})
         result = actual_run(invoke())
-        assert result.status in {"error", "timeout"}
+        assert (result.status, result.code) == ("timeout", "MCP_TIMEOUT")
+        assert result.meta["mcp_call_not_sent"] is False, "unknown when the caller stopped waiting"
         assert len(claims(tmp_path)) == 1  # real runner has not yet unwound
     finally:
         release.set()
@@ -247,9 +255,9 @@ def test_delayed_real_mcp_runner_cannot_open_transport_after_callers_return(tmp_
             assert not thread.is_alive()
         mcp_client.reset_manager_for_tests()
     assert not calls and not transports
-    # Unknown was never rewritten as no-send; only the runner's positive unwind
-    # can later refine this original exact duty (not currently collected here).
-    assert len(claims(tmp_path)) == 1
+    # Only the runner's own positive unwind (preparation refused by closure, nothing
+    # sent) discharges the exact duty and ends the local call it held.
+    assert not claims(tmp_path)
 
 
 @pytest.mark.parametrize("bound", [False, True])

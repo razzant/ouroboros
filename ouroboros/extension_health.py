@@ -1,7 +1,7 @@
 """Durable per-extension health vector for live->broken regression detection.
 
-A small immune-system instrument (BIBLE P1 "discrepancy between expected and actual
-state — immediate alert"; P3 health invariants): if an extension that was live at a
+A small immune-system instrument (BIBLE P1 material state discrepancies;
+P3 health invariants): if an extension that was live at a
 prior code version stops loading after a self-modification + restart, record the
 regression and surface it to the owner/agent. This is warning-only — it never
 disables a skill and never mutates git. The record lives next to the other per-skill

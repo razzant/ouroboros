@@ -13,6 +13,7 @@ import pathlib
 
 from ouroboros.context import build_recent_sections
 from ouroboros.memory import Memory
+from tests._dialogue import import_all
 
 
 def _write(path: pathlib.Path, rows) -> None:
@@ -115,25 +116,28 @@ def test_unreadable_archive_directory_is_a_disclosed_gap(tmp_path, monkeypatch):
 
 
 def test_coverage_line_never_says_all_under_a_bounded_window(tmp_path):
-    from ouroboros.jsonl_tail import TAIL_WINDOW_START_BYTES, coverage_line
+    from ouroboros.jsonl_tail import coverage_line
 
     padded = [{"ts": "t", "task_id": "task-b", "text": "x" * 4000} for _ in range(400)]  # > 512 KB
-    padded += [{"ts": "t", "task_id": "task-a", "text": f"a-{i}"} for i in range(50)]
+    padded += [{"ts": "t", "task_id": "task-a", "text": f"a-{i}"} for i in range(51)]
     _write(tmp_path / "logs" / "progress.jsonl", padded)
+    import_all(tmp_path)
     rows, coverage = Memory(drive_root=tmp_path).read_task_recent("progress.jsonl", "task-a", 50)
-    assert len(rows) == 50 and coverage["live_window"] == TAIL_WINDOW_START_BYTES
+    assert len(rows) == 50 and coverage["older_available"]
     line = coverage_line(coverage)
     assert "all " not in line and "newest 50 matching rows in the window" in line
-    assert "live tail 512 KB of" in line and "of logs/progress.jsonl" in line
+    assert "SQL coordinates" in line and "of state/dialog.sqlite (progress)" in line
+    assert "older matching rows available" in line
     assert coverage_line({"task_id": "t", "shown": 0, "matched": 0, "gaps": ["read_failed"]}).endswith(
         "window: unread; gaps: read_failed")
 
 
-def test_reader_never_parses_the_whole_live_file_when_the_tail_suffices(tmp_path, monkeypatch):
+def test_dialogue_reader_never_reopens_imported_files_for_a_task_tail(tmp_path, monkeypatch):
     from ouroboros import jsonl_tail
 
     rows = [{"ts": "t", "task_id": "task-a", "text": "x" * 2000} for _ in range(1500)]  # ~3 MB
     _write(tmp_path / "logs" / "progress.jsonl", rows)
+    import_all(tmp_path)
     windows = []
     original = jsonl_tail.iter_jsonl_objects
 
@@ -143,8 +147,23 @@ def test_reader_never_parses_the_whole_live_file_when_the_tail_suffices(tmp_path
 
     monkeypatch.setattr(jsonl_tail, "iter_jsonl_objects", spy)
     shown, coverage = Memory(drive_root=tmp_path).read_task_recent("progress.jsonl", "task-a", 50)
-    assert len(shown) == 50 and windows == [jsonl_tail.TAIL_WINDOW_START_BYTES]
-    assert coverage["live_window"] == jsonl_tail.TAIL_WINDOW_START_BYTES < coverage["live_size"]
+    assert len(shown) == 50 and windows == []
+    assert coverage["older_available"] and coverage["live_window"] < coverage["live_size"]
+
+
+def test_invalid_import_never_claims_all_matching_rows(tmp_path):
+    from ouroboros.jsonl_tail import coverage_line
+
+    _write(tmp_path / "logs/progress.jsonl", [{"task_id": "task-a", "text": "readable"}])
+    with (tmp_path / "logs/progress.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("{invalid\n")
+    import_all(tmp_path)
+    rows, coverage = Memory(drive_root=tmp_path).read_task_recent("progress.jsonl", "task-a", 50)
+    assert rows == [{"task_id": "task-a", "text": "readable"}]
+    assert "recorded invalid intervals" in coverage_line(coverage)
+    assert "all 1 matching rows" not in coverage_line(coverage)
+    clean = {**coverage, "gaps": []}
+    assert "all 1 matching rows" in coverage_line(clean)
 
 
 def test_malformed_only_log_still_discloses_its_gap(tmp_path):
@@ -159,11 +178,15 @@ def test_malformed_only_log_still_discloses_its_gap(tmp_path):
                 if s.startswith("## Recent tools")]
 
 
-def test_supervisor_section_carries_its_coverage_line(tmp_path):
+def test_the_boot_row_is_the_runtime_vitals_not_a_supervisor_section(tmp_path):
+    """The ``## Supervisor`` section (one boot line behind a 200-row read) is gone; the same row
+    reaches the mind inside the Runtime section's ``vitals`` (``context_runtime_facts.vitals_fact``)."""
+    from ouroboros.context_runtime_facts import vitals_fact
+
     _write(tmp_path / "logs" / "supervisor.jsonl", [{"ts": "2026-09-22T00:00:00Z", "type": "boot", "branch": "ouroboros", "sha": "abcdef123456"}])
-    section = _section(build_recent_sections(Memory(drive_root=tmp_path), env=None), "## Supervisor")
-    assert section.splitlines()[0].startswith("## Supervisor (all tasks: all 1 matching rows; window: whole live file of logs/supervisor.jsonl")
-    assert "boot: 2026-09-22T00:00:00Z branch=ouroboros sha=abcdef123456" in section
+    assert not [s for s in build_recent_sections(Memory(drive_root=tmp_path), env=None) if s.startswith("## Supervisor")]
+    assert vitals_fact(tmp_path, observed_at="2026-09-23T10:00:00+00:00")["boot"] == "09-22 00:00 ouroboros@abcdef123456"
+    assert vitals_fact(tmp_path, observed_at="2026-09-22T10:00:00+00:00")["boot"] == "00:00 ouroboros@abcdef123456"
 
 
 def test_bounded_window_with_no_matching_rows_is_still_disclosed(tmp_path):
@@ -304,7 +327,7 @@ def test_child_reads_its_own_drive_beside_working_sources(tmp_path):
     assert "host-side rows such as waits stay in the canonical log" in events.splitlines()[0]
     progress = dynamic[dynamic.index("## Recent progress"):].split("\n## ", 1)[0]
     assert "child-step" in progress and "parent-step" not in progress
-    assert "of canonical logs/progress.jsonl" in progress.splitlines()[0]
+    assert "of canonical state/dialog.sqlite (progress)" in progress.splitlines()[0]
     # The Working sources block precedes the child's own windows.
     assert dynamic.index("## Working sources") < dynamic.index("## Recent progress")
 

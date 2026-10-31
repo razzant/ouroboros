@@ -145,6 +145,7 @@ _TABLES = re.compile(r"\bFROM\s+(tasks|task_bodies|obligations|custody_runs|hand
 
 def captured_statements(monkeypatch, call) -> list:
     """``(sql, params)`` of every read over the store's tables that ``call`` made."""
+    store.close_connections()  # install the recorder before opening the persistent connection
     real = sqlite3.connect
 
     def recording(*args, factory=sqlite3.Connection, **kwargs):  # over the store's own connection class
@@ -186,7 +187,6 @@ def runtime_reads(root):
         ("read_document", lambda: task_store.read_document(root, "t5")),
         ("signature", lambda: task_store.signature(root, "t5")),
         ("owner-held members", lambda: obligations.members(root, "custody_open")),
-        ("review collection candidates", lambda: list(task_store.review_collection_candidates(root))),
     ]
 
 
@@ -205,8 +205,9 @@ def test_the_runtime_reads_are_answered_from_an_index_never_the_table(populated,
 def test_the_captured_plan_guard_catches_a_broken_where_and_a_dropped_index(populated, monkeypatch, tmp_path):
     """The control: the lineage statement the runtime really issues, with its WHERE made
     unindexable, and unchanged over a copy of the store whose lineage indexes are dropped."""
-    [(sql, params)] = [row for row in captured_statements(
-        monkeypatch, lambda: task_store.select_lineage(populated, "t5", "t0")) if "task_bodies" in row[0]]
+    [(sql, params)] = [row for row in captured_statements(  # the statement that carries the lineage WHERE
+        monkeypatch, lambda: task_store.select_lineage(populated, "t5", "t0"))
+        if "task_bodies" in row[0] and "parent_task_id" in row[0]]
     assert "parent_task_id" in sql and not _scans(_plan(populated, sql, params))
     assert _scans(_plan(populated, sql.replace("parent_task_id=?", "parent_task_id||''=?"), params))
     copy = tmp_path / "copy"

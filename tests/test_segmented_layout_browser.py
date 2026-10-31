@@ -1,6 +1,6 @@
 """Every Settings segmented control on the real page: equal columns derived from its choices.
 
-The one renderer (`page_header.renderSegmentedField`) feeds 12 groups. On a real
+The one renderer (`page_header.renderSegmentedField`) feeds 13 groups. On a real
 server in Chromium and WebKit, at a desktop and a phone width: up to four choices fill
 their row (the effort scales left Behavior with the effort range: the composer's one
 control edits it now); the five one-glyph cycle values stay one row; a narrow card
@@ -25,7 +25,7 @@ GROUPS = {
     "s-allow-mutative-subagents": 3, "s-review-enforcement": 2,
     "s-task-review-mode": 3, "s-review-max-cycles": 5, "s-image-input-mode": 4, "s-context-mode": 3,
     "s-prompt-cache-ttl": 3, "s-safety-mode": 3, "s-update-channel": 3, "s-runtime-mode": 4,
-    "s-post-task-evolution-mode": 3, "s-consciousness-autonomy": 3,
+    "s-post-task-evolution-mode": 3, "s-consciousness-autonomy": 3, "s-consciousness-safety-mode": 3,
 }
 COMPACT = {"s-review-max-cycles"}
 

@@ -91,7 +91,7 @@ class PanicIngress:
     def invalidate_owner(self) -> None:
         self._owner = [False, None]
 
-    def request(self, text: str, *, source="web", user_id=0, chat_id=0) -> bool:
+    def request(self, text: str, *, source="web", user_id=0, chat_id=0, evidence=None) -> bool:
         if self._stop is None or not str(text).strip().lower().startswith("/panic"):
             return False
         pair = self._owner[1]
@@ -101,6 +101,15 @@ class PanicIngress:
         # Claim termination before the callback is scheduled: the restart
         # watcher must leave Panic time to persist its stop even if it runs first.
         _restart_stop_requested = True
+        try:
+            from ouroboros.config import resolve_data_dir
+            from ouroboros.panic_source import record_source
+            record_source(resolve_data_dir(), **(evidence or {
+                "ingress": "chat_command" if source == "web" else "host_service",
+                "owner_surface": "unknown", "skill_name": source.removeprefix("skill:") if source != "web" else None}))
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Panic source recording unavailable")
         import threading
 
         # Do not wait for the supervisor, the chat ingress lock, a fresh state
@@ -111,6 +120,23 @@ class PanicIngress:
             # Acceptance is irrevocable: the restart watcher already yields to us.
             self._stop()
         return True
+
+
+def request_panic(bridge, text: str, *, startup_owner_command=None, evidence=None,
+                  source="web", user_id=0, chat_id=0) -> bool:
+    """Accept an emergency through its owner, never ordinary command admission.
+
+    Only authenticated web ingress may use the startup callback. External
+    senders need the bridge's positively bound owner pair even during startup.
+    """
+    panic = getattr(bridge, "panic", None)
+    identity = {"source": source, "user_id": user_id, "chat_id": chat_id}
+    if panic is not None and panic.request(text, evidence=evidence, **identity):
+        return True
+    if source != "web" or not callable(startup_owner_command):
+        return False
+    action = startup_owner_command(text, send_kwargs={"broadcast": False})
+    return action is not None and PanicIngress(action).request(text, evidence=evidence)
 
 
 def restart_current_process(
@@ -182,7 +208,7 @@ def restart_current_process(
     else:
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         if _restart_stop_requested:
-            return  # the watcher parks in exit_after_restart; Panic keeps its thread and writes
+            return  # the watcher parks in exit_after_shutdown; Panic keeps its thread and writes
         try:
             os.execvpe(sys.executable, argv, env)
             return  # exec does not return; only a test double of it reaches this line
@@ -230,7 +256,7 @@ def restart_current_process(
 
 @contextlib.contextmanager
 def _windows_restart_handoff(env: dict, log: Any):
-    """Let a Windows successor observe this generation's exit (42, or Panic's 99).
+    """Let a Windows successor observe this generation's exit (handoff 0/42, Panic 99).
 
     It inherits a handle to this process. The platform context owns the parent and stdio handles
     until Popen has inherited them, retaining absent streams as absent.
@@ -266,11 +292,13 @@ def stop_restart_successor() -> list[dict]:
     return [request_process_tree_kill(proc) for proc in list(_restart_successors)]
 
 
-def exit_after_restart(exit_code: int) -> None:
-    """Finish the watcher unless Panic owns termination, including its writes.
+def exit_after_shutdown(exit_code: int) -> None:
+    """Exit after lifecycle cleanup, unless Panic owns termination and its writes.
 
-    Only the watcher parks: main already joins it, so neither can exit before
-    Panic's flag/control writes and exit. Panic never waits for this thread.
+    The executable and restart watcher must not enter Python's executor joins:
+    interrupted capture stays owed to the next generation. An accepted Panic
+    parks the caller until its own flag/control writes and exit finish; Panic
+    never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
     """
     if _restart_stop_requested:
         import threading
@@ -278,6 +306,10 @@ def exit_after_restart(exit_code: int) -> None:
         threading.Event().wait()
     else:
         os._exit(exit_code)
+
+
+# Compatibility for existing restart callers.
+exit_after_restart = exit_after_shutdown
 
 
 def execute_panic_stop(
@@ -340,9 +372,15 @@ def execute_panic_stop(
         from ouroboros.startup_historical_audit import audit
 
         attempt("startup-audit", audit.stop, native=True)
-        from ouroboros.evidence_packer import packer
+        from ouroboros.maintenance import child as maintenance_child
 
-        attempt("evidence-packer", packer.stop, native=True)
+        attempt("maintenance", maintenance_child.stop, native=True)
+        from ouroboros.storage import count as storage_count
+
+        attempt("storage-count", storage_count.stop, native=True)
+        from ouroboros.storage_free import free as storage_free
+
+        attempt("storage-free", storage_free.stop, native=True)
         import multiprocessing
 
         from ouroboros.claudexor_daemon import get_owned_daemon
@@ -351,6 +389,7 @@ def execute_panic_stop(
         from ouroboros.tools.services import kill_all_services
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
         from ouroboros.workspace_executor import kill_all_foreground
+        from supervisor import workers  # noqa: F401 — initialize the facade before its lifecycle leaf in a cold launcher
         from supervisor.worker_pool_lifecycle import kill_worker_tree
 
         # Singleton creation can wait on a startup lock; only already-owned handles
@@ -363,6 +402,14 @@ def execute_panic_stop(
             attempt("daemon", lambda: daemon.panic_stop(request_only=True))
         elif requests.get("daemon") is None:
             requests["daemon"] = {"requested": False, "error": "no captured daemon identity"}
+            # Early tray Panic can precede this process's daemon manager. The
+            # retained installation daemon still has measured ledger custody;
+            # request its stop now, not only after asynchronous CLI settlement.
+            from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
+            from ouroboros.process_custody import stop_ledgered_processes
+
+            attempt("retained-daemon", lambda: stop_ledgered_processes(
+                data_dir, {CUSTODY_PURPOSE}, timeout_sec=0))
         attempt("commands", lambda: kill_all_tracked_subprocesses(request_only=True))
         attempt("executors", lambda: kill_all_foreground(data_dir, request_only=True))
         attempt("services", lambda: kill_all_services(data_dir, request_only=True))
@@ -447,7 +494,8 @@ def _bounded(fn, timeout_sec: float) -> bool:
 def _write_panic_flag(data_dir: pathlib.Path) -> None:
     panic_flag = data_dir / "state" / "panic_stop.flag"
     panic_flag.parent.mkdir(parents=True, exist_ok=True)
-    panic_flag.write_text("panic", encoding="utf-8")
+    from ouroboros.utils import write_text_atomic
+    write_text_atomic(panic_flag, "panic")
 
 
 def _persist_panic_controls(data_dir: pathlib.Path) -> None:

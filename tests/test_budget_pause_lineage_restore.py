@@ -720,11 +720,11 @@ def test_an_old_self_rooted_locator_whose_resume_was_consumed_raises_no_latch(tm
     _restart_from(queue, workers, monkeypatch, json.dumps(old))
     root = _pending(workers, ROOT)
     facts = {"installed": installed, "latch": queue.BUDGET_ROOT_FENCES.get(ROOT),
-             "hold": (root.get("_budget_pause_hold") or {}).get("reason"),
+             "refusal": (root["_budget_pause"].get("refusal") or {}).get("reason"),
              "marker_root": root["_budget_pause"]["root_task_id"]}
     _record("old_self_rooted_locator", facts)
     assert facts["latch"] is None and installed == [], facts
-    assert facts["marker_root"] == ROOT and str(facts["hold"]).startswith("restore_refused:"), facts
+    assert facts["marker_root"] == ROOT and str(facts["refusal"]).startswith("restore_refused:"), facts
 
 
 @pytest.mark.parametrize("history", ["child_saved_before_park", "root_grant_unused", "child_grant_after_release"])

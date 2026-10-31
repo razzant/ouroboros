@@ -360,86 +360,23 @@ def test_run_llm_loop_keeps_task_model_override_across_tool_rounds(tmp_path, mon
     assert seen_models == ["subagent-light", "subagent-light"]
     assert seen_use_local == [True, True]
 
-def test_run_llm_loop_enforces_swarm_force_plan_before_final(tmp_path, monkeypatch):
+@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+def test_run_llm_loop_swarm_without_a_plan_finishes_normally(tmp_path, monkeypatch, enforcement):
     from ouroboros.tools.registry import ToolRegistry
 
-    messages = [{"role": "user", "content": "ship"}]
-    calls = {"count": 0}
-    seen_second_request = {}
-
-    class FakeLLM:
-        def default_model(self):
-            return "test-model"
-
-    def fake_call_llm_with_retry(_llm, request_messages, *_args, **_kwargs):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return {"role": "assistant", "content": "premature final"}, 0.0
-        if calls["count"] == 2:
-            seen_second_request["messages"] = [dict(item) for item in request_messages]
-            return {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": "call-plan",
-                    "type": "function",
-                    "function": {"name": "plan_task", "arguments": "{}"},
-                }],
-            }, 0.0
-        assert calls["count"] == 3, "the observed plan result needs only one completion selection"
-        return finish("done after plan"), 0.0
-
-    real_handle_tool_calls = loop_mod.handle_tool_calls
-
-    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress,
-                               *, fit_candidate=None, tool_schemas=None):
-        if tool_calls[0]["function"]["name"] != "plan_task":
-            return real_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress,
-                                          fit_candidate=fit_candidate, tool_schemas=tool_schemas)
-        from ouroboros import plan_record
-        from ouroboros.task_results import STATUS_RUNNING, write_task_result
-
-        # The plan was written and asked: one participant answered (the obligation is met).
-        write_task_result(tmp_path, "task1", STATUS_RUNNING, result="running")
-        plan_record.append_revision(tmp_path, "task1", plan_record.compose_revision(
-            None, goal="g", plan="p", done_when=["ship"], affected_paths=[]), body=False)
-        plan_record.append_ask(tmp_path, "task1", {"ask_id": "a1", "ts": "t", "revision": 1, "message": "", "participants": [
-            {"seat_id": "s1", "model": "m", "owner_marked": True, "dispatched": True, "status": "answered",
-             "reply": {"prose": "fine", "objections": [], "withdrawn": []}}]})
-        trace["tool_calls"].append({
-            "tool": tool_calls[0]["function"]["name"],
-            "args": {},
-            "result": "Ask a1 on revision 1: sent to s1 (m).",
-            "is_error": False,
-        })
-        request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "Ask a1 on revision 1: sent to s1 (m)."})
-        return 0
-
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "swarm"}
-    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
-    monkeypatch.setattr(loop_mod, "handle_tool_calls", fake_handle_tool_calls)
+    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "swarm", "subagents_mode": "swarm"}
+    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: enforcement)
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", lambda *_a, **_k: (finish("done without a plan"), 0.0))
+    result, usage, trace = run_llm_loop(
+        messages=[{"role": "user", "content": "ship"}], tools=registry,
+        llm=SimpleNamespace(default_model=lambda: "test-model"), drive_logs=tmp_path,
+        emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="task1", drive_root=tmp_path)
+    assert result == "done without a plan"
+    assert not usage.get("terminal_host_notice")
+    assert not any("PLAN_REVIEW_HOLD" in note for note in trace["reasoning_notes"])
 
-    result, _usage, trace = run_llm_loop(
-        messages=messages,
-        tools=registry,
-        llm=FakeLLM(),
-        drive_logs=tmp_path,
-        emit_progress=lambda _text, **_meta: None,
-        incoming_messages=queue.Queue(),
-        task_id="task1",
-        drive_root=tmp_path,
-    )
-
-    assert result == "done after plan"
-    assert calls["count"] == 3
-    assert sum(row.get("role") == "assistant" and row.get("content") == "premature final"
-               for row in seen_second_request["messages"]) == 1
-    assert any("[PLAN_REVIEW_HOLD]" in str(item.get("content") or "") and "planning obligation" in str(item.get("content") or "")
-               for item in seen_second_request["messages"])
-    assert trace["tool_calls"][0]["tool"] == "plan_task"
-
-def test_force_plan_decision_does_not_treat_trace_marker_as_authority(tmp_path, monkeypatch):
+def test_plan_gate_decision_does_not_treat_trace_marker_as_authority(tmp_path, monkeypatch):
     ctx = SimpleNamespace(
         task_metadata={"force_plan": True},
         task_id="root1",
@@ -448,7 +385,7 @@ def test_force_plan_decision_does_not_treat_trace_marker_as_authority(tmp_path, 
     )
     monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
 
-    decision = loop_mod._force_plan_decision(ctx, {
+    decision = loop_mod._plan_gate_decision(ctx, {
         "tool_calls": [{
             "tool": "plan_task",
             "is_error": False,
@@ -457,10 +394,10 @@ def test_force_plan_decision_does_not_treat_trace_marker_as_authority(tmp_path, 
         }],
     })
 
-    assert decision["allow"] is False
-    assert decision["status"] == "force_plan_unmet" and decision["force_plan_met"] is False
+    assert decision["allow"] is True
+    assert decision["status"] == "not_required"
 
-def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_path, monkeypatch):
+def test_run_llm_loop_unroutable_plan_has_no_swarm_obligation(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
     messages = [{"role": "user", "content": "ship"}]
@@ -473,8 +410,6 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_
     def fake_call_llm_with_retry(_llm, _request_messages, *_args, **_kwargs):
         calls["count"] += 1
         if calls["count"] == 1:
-            return {"role": "assistant", "content": "premature final"}, 0.0
-        if calls["count"] == 2:
             return {
                 "role": "assistant",
                 "content": None,
@@ -484,7 +419,7 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_
                     "function": {"name": "plan_task", "arguments": "{}"},
                 }],
             }, 0.0
-        assert calls["count"] == 3, "the advisory plan gap is already observed"
+        assert calls["count"] == 2, "the advisory plan gap is already observed"
         return finish("done despite unavailable plan"), 0.0
 
     real_handle_tool_calls = loop_mod.handle_tool_calls
@@ -527,8 +462,8 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_
     )
 
     assert result.startswith("done despite unavailable plan")
-    assert "advisory enforcement" in usage["terminal_host_notice"]
-    assert calls["count"] == 3
+    assert "planning obligation" not in usage.get("terminal_host_notice", "")
+    assert calls["count"] == 2
     assert usage.get("reason_code") != "swarm_force_plan_not_called"
     assert trace["tool_calls"][0]["tool"] == "plan_task"
 

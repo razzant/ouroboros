@@ -239,6 +239,7 @@ class LocalModelManager:
                     "stdout": subprocess.PIPE,
                     "stderr": subprocess.STDOUT,
                     "stdin": subprocess.DEVNULL,
+                    **subprocess_new_group_kwargs(),  # stopping the install signals its tree, never this server (#2353)
                 }),
             )
             self._install_proc = proc

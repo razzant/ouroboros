@@ -2,8 +2,8 @@
 
 ``advanced`` is allowed to evolve the application layer, but must not casually
 rewrite the core contracts, safety files, or release/managed-repo invariants.
-``pro`` may touch those paths, but commits still flow through the normal
-review gate.
+``pro`` may touch those paths; ordinary commits still flow through the normal
+review gate. Mechanical recovery retains the BIBLE P9 review exception.
 """
 
 from __future__ import annotations

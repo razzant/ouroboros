@@ -95,8 +95,9 @@ def _response(message, finish="tool_calls"):
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("carrier", ["reasoning_content", "reasoning_details", "both"])
-def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client, asynchronous, stream, carrier):
+@pytest.mark.parametrize("model", ["minimax::MiniMax-M3.1", "minimax::MiniMax-M3.1-Flash"])
+@pytest.mark.parametrize("carrier", ["reasoning_content", "reasoning_details", "both", "absent"])
+def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client, asynchronous, stream, model, carrier):
     reasoning = {}
     if carrier in {"reasoning_content", "both"}:
         reasoning["reasoning_content"] = "\n Check the weather.  "
@@ -116,7 +117,7 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
     final = _response({"role": "assistant", "content": "Sunny.", **reasoning}, "stop")
     client, sent = make_client([first, final], asynchronous=asynchronous, expected_replay=reasoning)
     history = [{"role": "user", "content": "Weather?"}]
-    msg, usage = _call(client, history, stream=stream, asynchronous=asynchronous)
+    msg, usage = _call(client, history, stream=stream, asynchronous=asynchronous, model=model)
     assert {key: msg.get(key) for key in reasoning} == reasoning
     assert msg["content"] == "" and msg["tool_calls"] == [CALL]
     assert usage["provider"] == "minimax"
@@ -126,15 +127,19 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
         assert usage["stream_receipt"]["manifest_ref"]
     history.extend([msg, {"role": "tool", "tool_call_id": CALL["id"], "content": "Sunny"}])
     canonical = copy.deepcopy(history)
-    result, _ = _call(client, history, asynchronous=asynchronous)
+    result, _ = _call(client, history, asynchronous=asynchronous, model=model)
     assert result["content"] == "Sunny."
     assert _visible_round_text(result["content"]) == "Sunny."
     assert history == canonical
     assert len(sent) == 2
     assert all(payload["reasoning_split"] is True for payload in sent)
+    assert all(payload["model"] == model.split("::", 1)[1] for payload in sent)
     replay = sent[1]["messages"][1]
     assert {key: replay.get(key) for key in reasoning} == reasoning
+    for key in {"reasoning_content", "reasoning_details"} - reasoning.keys():
+        assert not msg.get(key) and not replay.get(key)
     assert replay["tool_calls"] == [CALL]
+    assert sent[1]["messages"][2] == history[2]
     assert "response_id" not in replay
     assert [(row["state"], row["revision"]) for row in rows(isolated)] == [("settled", 3)] * 2
 

@@ -20,7 +20,6 @@ from ouroboros.triad_review import (
     empty_array_is_verified_clean,
     extract_fenced_json,
     extract_json_array,
-    object_verdict_payload,
     two_part_payload,
 )
 
@@ -28,10 +27,9 @@ log = logging.getLogger("review_execution")
 
 _UNEXTRACTABLE = "UNEXTRACTABLE"
 
-# The OBJECT variant of the extraction ask (task acceptance): the whole verdict
-# object of the contract, never its findings list alone — a findings-only
-# canonical form loses verdict/outcome_tier/criteria_used/dialogue_status and
-# the coordinator then demotes a completed review to malformed.
+# The OBJECT variant of the extraction ask (a change-review seat's two-part
+# answer): the whole answer object of the contract, never a findings list alone
+# — a findings-only canonical form loses the coupling block the wave reads.
 _SESSION_EXTRACT_OBJECT_PROMPT = (
     "The text below is the final answer of a delegated review session.\n"
     "Canonicalize its verdict. Reply with EXACTLY ONE of:\n"
@@ -100,10 +98,8 @@ def _strictly_parseable(
     ``empty_array_is_verified_clean`` predicate stays untouched — its strictness
     is the reason extraction exists, not a defect extraction papers over.
 
-    ``shape`` gates the predicate: for an OBJECT contract (task acceptance) the
-    whole text must BE the verdict object — a bare ``[]`` is not a clean object
-    verdict, and letting the array predicate answer for it would route an
-    acceptance answer into the array ladder with no verdict/tier/dialogue keys.
+    ``shape`` gates the predicate: a two-part contract accepts its one answer
+    object or the bare change array; every other contract the findings array.
 
     The WHOLE answer must BE the payload. This used to SCAN with
     ``extract_json_array``, so any JSON array of objects appearing anywhere in a
@@ -117,11 +113,6 @@ def _strictly_parseable(
     extraction is for.
     """
     body = str(text or "")
-    if shape == "object":
-        try:
-            return object_verdict_payload(json.loads(body.strip())) is not None
-        except (TypeError, ValueError):
-            return False
     if shape == "two_part":
         # The two-part object, or the bare change array (recorded by the gate as
         # a seat that left the coupling block out — still a readable answer).
@@ -146,9 +137,6 @@ def _canonical_payload_text(
 ) -> Optional[str]:
     """Canonical text of a structured payload for ``shape``, or None when it
     does not carry the contract's shape."""
-    if shape == "object":
-        verdict = object_verdict_payload(payload)
-        return None if verdict is None else json.dumps(verdict, ensure_ascii=False)
     if shape == "two_part":
         answer = two_part_payload(payload)
         return None if answer is None else json.dumps(answer, ensure_ascii=False)
@@ -177,7 +165,7 @@ def canonicalize_session_verdict(
     extraction_incomplete | unparsed``.
 
     ``shape`` (``triad_review.review_output_shape``) is the contract's FORM:
-    ``array`` (findings list), ``object`` (the whole acceptance verdict object,
+    ``array`` (findings list), ``two_part`` (a change-review seat's one answer object,
     kept whole on every branch — never reduced to its findings), ``report``
     (a free-form product that is passed through verbatim; nothing here may
     turn a diagnosis into a findings array) or ``plan_reply`` (the planning
@@ -249,7 +237,7 @@ def _extract_verdict_via_light_model(
         # Observation-only while the owning task pauses (#1196): the raw
         # answer is kept verbatim; no Light call canonicalizes it on the way out.
         return None, {"model": model, "reason_code": "budget_pausing_no_extraction", "dispatch": "not_dispatched"}
-    template = _SESSION_EXTRACT_OBJECT_PROMPT if shape in ("object", "two_part") else _SESSION_EXTRACT_PROMPT
+    template = _SESSION_EXTRACT_OBJECT_PROMPT if shape == "two_part" else _SESSION_EXTRACT_PROMPT
     prompt = template.format(
         contract=contract or default_output_contract(shape),
         raw_text=raw_text,  # WHOLE — the caller already bounded the one send
@@ -298,7 +286,7 @@ def _extract_verdict_via_light_model(
     usage["model"] = model
     if not body or _UNEXTRACTABLE in body.upper()[:80]:
         return None, usage
-    if shape in ("object", "two_part"):
+    if shape == "two_part":
         try:
             payload: Any = json.loads(body)
         except (TypeError, ValueError):

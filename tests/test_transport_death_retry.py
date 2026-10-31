@@ -29,6 +29,7 @@ from ouroboros.loop_llm_call import (
 )
 from ouroboros.tools.registry import ToolRegistry
 from tests._usage_store_testing import ledger_rows
+from tests._shared import saved_settings
 
 MESSAGES = [{"role": "user", "content": "hi"}]
 OK_RESPONSE = ({"role": "assistant", "content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1})
@@ -503,7 +504,7 @@ def _presence_turn(kwargs):
 def test_presence_unknown_wait_exhaustion_never_forces_another_generation(tmp_path, monkeypatch, no_sleep):
     """A spent interactive wait keeps the original unknown attempt and dispatches no summary."""
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     monkeypatch.setattr(loop_transport, "get_task_idle_timeout_sec", lambda: 0)
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_k: pytest.fail("spent wait"))
@@ -517,6 +518,7 @@ def test_presence_unknown_wait_exhaustion_never_forces_another_generation(tmp_pa
 
 
 def test_primary_round_dispatch_recovers_after_two_deaths(tmp_path, monkeypatch, no_sleep):
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", _no_chain)
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *a, **kw: {"kind": "upstream_http", "status_code": 200})
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *a: False)
@@ -630,6 +632,7 @@ def test_round_dispatcher_leaves_unknown_recovery_to_the_shared_round(tmp_path, 
         context_fit_plan=None, active_context_mode="max", drive_root=tmp_path,
         active_effort="low", max_retries=3, drive_logs=tmp_path, task_id="t-cand", round_idx=1,
         event_queue=None, accumulated_usage={}, task_type="presence", active_use_local=False,
+        physical_send_claim=None,
     )
     msg, _cost = loop_mod._dispatch_round_model(ctx, None, attempt_cap=attempt_cap)
     assert msg is None and llm.calls == 1 and no_sleep == []
@@ -825,6 +828,7 @@ def test_stop_path_without_a_record_stops_instead_of_crashing(tmp_path):
 
 def test_native_subagent_child_primary_dispatch_opts_in(tmp_path, monkeypatch, no_sleep):
     """A native API child uses the same paced unknown recovery as every turn."""
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", _no_chain)
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *a, **kw: {"kind": "upstream_http", "status_code": 200})
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *a: False)
@@ -940,6 +944,7 @@ def test_proxy_tunnel_failure_keeps_the_base_unknown_terminal(data_root, tmp_pat
     assert provider_no_call_source(usage, False) == ("provider_outcome_unknown_no_resend", False)
 
     # The ordinary loop can recover this unknown; an exhausted wait still sends nothing.
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", _no_chain)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
@@ -1040,7 +1045,8 @@ def test_rejected_stream_settles_and_walks_the_fallback_chain_without_a_wait_epi
     assert TRANSPORT_DEATHS_KEY not in usage and usage.get("reason_code") is None
     for transcript in (messages, kwargs["tools"]._ctx.messages):
         assert not any("[SYSTEM NOTICE]" in str(m.get("content") or "") for m in transcript)
-    assert any("⚡ Fallback: test-model → other/model" in note and "provider_error" in note for note in notes)
+    # The host's own verdict on the stream is no provider sentence: the class alone is named.
+    assert "⚡ Fallback: test-model → other/model. Trying the next model after a provider error." in notes
 
 
 def test_code_less_stream_error_without_usage_keeps_the_upper_bound_and_still_walks_the_chain(

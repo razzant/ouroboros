@@ -1,0 +1,435 @@
+{
+  "items": [
+    {
+      "id": "builtin/telegram",
+      "source_id": "builtin",
+      "source_name": "Built in",
+      "name": "telegram",
+      "description": "Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.",
+      "category": [
+        "messaging"
+      ],
+      "version": "1.3.0",
+      "digest": "a0a2d9971bb3a91bce1b101b260046cfb006439566897d7c570db04c882e7fd8",
+      "official": true,
+      "recommended": true,
+      "owner": "",
+      "signals": null,
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [
+        "TELEGRAM_BOT_TOKEN"
+      ],
+      "permissions": [
+        "net",
+        "inject_chat"
+      ],
+      "installed": {
+        "state": "installed",
+        "version": "1.3.0",
+        "digest": "a0a2d9971bb3a91bce1b101b260046cfb006439566897d7c570db04c882e7fd8",
+        "modified": null,
+        "update_available": false
+      },
+      "trust": "trusted"
+    },
+    {
+      "id": "ouroboros/weather",
+      "source_id": "ouroboros",
+      "source_name": "Ouroboros",
+      "name": "weather",
+      "description": "Wide polished weather widget — current conditions, compact forecast, astronomy, and resilient wttr.in cache (no API key).",
+      "category": [
+        "city"
+      ],
+      "version": "0.3.2",
+      "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+      "official": true,
+      "recommended": false,
+      "owner": "razzant",
+      "updated_at": "2026-10-15T09:12:00+00:00",
+      "signals": {
+        "votes": 25,
+        "comments": 3,
+        "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/1",
+        "author_repo_stars": null
+      },
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [],
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed": {
+        "state": "installed",
+        "version": "0.3.1",
+        "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+        "modified": null,
+        "update_available": true
+      },
+      "trust": "trusted",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "id": "ouroboros/duckduckgo",
+      "source_id": "ouroboros",
+      "source_name": "Ouroboros",
+      "name": "duckduckgo",
+      "description": "Web search via DuckDuckGo — free, no API key required. Returns titles, URLs, and snippets.",
+      "category": [
+        "search"
+      ],
+      "version": "1.0.0",
+      "digest": "391ca5a10da62f9bb0de4284b6fb79ce3d9ab31fa61b5f16b9980c6385023ebf",
+      "official": true,
+      "recommended": true,
+      "owner": "razzant",
+      "updated_at": "2026-09-28T16:40:00+00:00",
+      "signals": {
+        "votes": 35,
+        "comments": 1,
+        "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/2",
+        "author_repo_stars": null
+      },
+      "withdrawn": null,
+      "type": "script",
+      "needs_keys": [],
+      "permissions": [
+        "net",
+        "tool"
+      ],
+      "installed": null,
+      "trust": "trusted",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "id": "ouroboros/pdf_tools",
+      "source_id": "ouroboros",
+      "source_name": "Ouroboros",
+      "name": "pdf_tools",
+      "description": "Read PDF documents page by page and build new PDF files from text or structured answers with Unicode-capable fonts.",
+      "category": [
+        "documents"
+      ],
+      "version": "0.4.0",
+      "digest": "5f20d2086428a9d7543ef8bbe4936495f6b0825c0a8c9b6c437c4a13280ba667",
+      "official": true,
+      "recommended": true,
+      "owner": "kazzand",
+      "updated_at": "2026-10-04T11:05:00+00:00",
+      "signals": {
+        "votes": 26,
+        "comments": 0,
+        "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/3",
+        "author_repo_stars": null
+      },
+      "withdrawn": null,
+      "type": "script",
+      "needs_keys": [],
+      "permissions": [
+        "tool",
+        "fs"
+      ],
+      "install_specs": [
+        {
+          "kind": "pip",
+          "packages": [
+            "pypdf"
+          ]
+        }
+      ],
+      "installed": null,
+      "trust": "trusted",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "id": "ouroboros/slack-bridge",
+      "source_id": "ouroboros",
+      "source_name": "Ouroboros",
+      "name": "slack-bridge",
+      "description": "Bidirectional Slack presence transport for Ouroboros using Socket Mode, durable delivery queues, threaded replies, proactive text messages, and inbound file staging.",
+      "category": [
+        "messaging"
+      ],
+      "version": "1.0.0",
+      "digest": "85c22afc57de7223dfa272eab9468a985c18713cb848f98e812752cb13d5cde9",
+      "official": true,
+      "recommended": false,
+      "owner": "ouroboros-agent",
+      "updated_at": "2026-10-16T18:20:00+00:00",
+      "signals": {
+        "votes": 13,
+        "comments": 2,
+        "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/4",
+        "author_repo_stars": null
+      },
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [
+        "SLACK_BOT_TOKEN",
+        "SLACK_APP_TOKEN"
+      ],
+      "permissions": [
+        "net",
+        "presence"
+      ],
+      "installed": null,
+      "trust": "trusted",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "id": "ouroboros-community/whoop-health",
+      "source_id": "ouroboros-community",
+      "source_name": "Ouroboros Community",
+      "name": "whoop-health",
+      "description": "Сбор данных со смарт-браслета WHOOP через официальный API v2: сон, recovery, strain, тренировки, HRV, пульс покоя, SpO2.",
+      "category": [
+        "health"
+      ],
+      "version": "0.3.1",
+      "digest": "f61d8564d92fada803e0b87c59310fd0176708c6d3c3f08335eb9b7793e979c1",
+      "official": false,
+      "recommended": false,
+      "owner": "kuznetsoffandrey",
+      "updated_at": "2026-10-11T08:30:00+00:00",
+      "signals": {
+        "votes": 20,
+        "comments": 4,
+        "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/5",
+        "author_repo_stars": null
+      },
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [
+        "WHOOP_CLIENT_ID",
+        "WHOOP_CLIENT_SECRET"
+      ],
+      "permissions": [
+        "net",
+        "tool",
+        "widget"
+      ],
+      "installed": null,
+      "trust": "review",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "id": "ouroboros-community/scholion",
+      "source_id": "ouroboros-community",
+      "source_name": "Ouroboros Community",
+      "name": "scholion",
+      "description": "Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 35 tools; answers carry provenance and say what the data cannot support. Not a medical device.",
+      "category": [
+        "health"
+      ],
+      "version": "0.6.9",
+      "digest": "1fb0f1d624e3ef7e50b2b819b61708b669dfa436724d0b7098ca1613a36a0e92",
+      "official": false,
+      "recommended": false,
+      "owner": "l1nkberry",
+      "updated_at": "2026-10-07T14:00:00+00:00",
+      "repo_url": "https://github.com/razzant/OuroborosHub",
+      "author_repo": "https://github.com/CrossRead/scholion",
+      "signals": {
+        "votes": 16,
+        "comments": 4,
+        "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/6",
+        "author_repo_stars": 4
+      },
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [],
+      "permissions": [
+        "tool",
+        "fs",
+        "net",
+        "subprocess",
+        "widget",
+        "route"
+      ],
+      "installed": null,
+      "trust": "review"
+    },
+    {
+      "id": "ouroboros-community/happy_farm",
+      "source_id": "ouroboros-community",
+      "source_name": "Ouroboros Community",
+      "name": "happy_farm",
+      "description": "A small farming game widget.",
+      "category": [
+        "games"
+      ],
+      "version": "0.1.0",
+      "digest": "c53418c7c31c0742b995b5b87bc2777cf14ffda4ea9462857b63bde85e1a0a41",
+      "official": false,
+      "recommended": false,
+      "owner": "kazzand",
+      "signals": {
+        "votes": 0,
+        "comments": 0,
+        "discussion_url": "",
+        "author_repo_stars": null
+      },
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [],
+      "permissions": [
+        "widget"
+      ],
+      "installed": null,
+      "trust": "review",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "id": "ouroboros-community/old_tool",
+      "source_id": "ouroboros-community",
+      "source_name": "Ouroboros Community",
+      "name": "old_tool",
+      "description": "A tool its author withdrew.",
+      "category": [
+        "computer"
+      ],
+      "version": "0.2.0",
+      "digest": "9379211e691539e6fd5850bc92b58800e7938a8024e4209a8908bc7eb67dd354",
+      "official": false,
+      "recommended": false,
+      "owner": "someone",
+      "signals": null,
+      "withdrawn": {
+        "reason": "Sends data to an unnamed server.",
+        "at": "2026-10-16"
+      },
+      "type": "script",
+      "needs_keys": [],
+      "permissions": [
+        "net"
+      ],
+      "installed": null,
+      "trust": "review",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "id": "my-folder/chess-3d",
+      "source_id": "my-folder",
+      "source_name": "My skills",
+      "name": "chess-3d",
+      "description": "Futuristic 3D Chess widget with full FIDE rules, onboard AI engine, and state persistence.",
+      "category": [],
+      "version": "0.1.0",
+      "digest": "f48386ce971a3e0de62701ba6cabf0fa73fb253a8468276c1e29e8a06e74af22",
+      "official": false,
+      "recommended": false,
+      "owner": "",
+      "signals": null,
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [],
+      "permissions": [
+        "widget"
+      ],
+      "installed": null,
+      "trust": "review"
+    }
+  ],
+  "categories": [
+    {
+      "id": "messaging",
+      "label": "Messaging"
+    },
+    {
+      "id": "documents",
+      "label": "Documents"
+    },
+    {
+      "id": "search",
+      "label": "Search & research"
+    },
+    {
+      "id": "media",
+      "label": "Images, video & music"
+    },
+    {
+      "id": "planning",
+      "label": "Planning"
+    },
+    {
+      "id": "ouroboros",
+      "label": "About Ouroboros"
+    },
+    {
+      "id": "health",
+      "label": "Health"
+    },
+    {
+      "id": "city",
+      "label": "City & services"
+    },
+    {
+      "id": "writing",
+      "label": "Writing & review"
+    },
+    {
+      "id": "business",
+      "label": "Business & finance"
+    },
+    {
+      "id": "computer",
+      "label": "Computer control"
+    },
+    {
+      "id": "games",
+      "label": "Games"
+    }
+  ],
+  "sources": [
+    {
+      "id": "builtin",
+      "name": "Built in",
+      "kind": "builtin",
+      "trust": "trusted",
+      "confirmed": true,
+      "state": "ready"
+    },
+    {
+      "id": "ouroboros",
+      "name": "Ouroboros",
+      "kind": "hub",
+      "trust": "trusted",
+      "confirmed": false,
+      "state": "ready",
+      "last_read_at": "2026-10-17T14:58:00Z"
+    },
+    {
+      "id": "ouroboros-community",
+      "name": "Ouroboros Community",
+      "kind": "hub",
+      "trust": "review",
+      "confirmed": false,
+      "state": "ready",
+      "last_read_at": "2026-10-17T13:00:00Z",
+      "error": "GitHub didn't answer (timed out after 60 s)"
+    },
+    {
+      "id": "clawhub",
+      "name": "ClawHub",
+      "kind": "registry",
+      "trust": "review",
+      "confirmed": true,
+      "state": "search"
+    },
+    {
+      "id": "my-folder",
+      "name": "My skills",
+      "kind": "local",
+      "trust": "review",
+      "confirmed": true,
+      "state": "ready",
+      "last_read_at": "2026-10-17T15:00:00Z"
+    }
+  ],
+  "starter": {
+    "state": "upgrade"
+  }
+}

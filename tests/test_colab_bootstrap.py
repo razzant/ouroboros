@@ -119,6 +119,22 @@ def test_build_colab_settings_normalizes_explicit_update_channel():
     assert development["OUROBOROS_UPDATE_CHANNEL"] == "development"
     assert invalid["OUROBOROS_UPDATE_CHANNEL"] == "stable"
 
+def test_quickstart_waits_on_the_server_only_while_its_process_lives():
+    """The boot wait has no clock: the notebook hands it the server process's liveness, so a server
+    that exits before it answers ends the wait with that exit instead of retrying forever."""
+    import ast
+
+    source = pathlib.Path(__file__).resolve().parents[1].joinpath("notebooks", "colab_quickstart.py").read_text(encoding="utf-8")
+    [call] = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)
+              and getattr(node.func, "id", "") == "ensure_native_telegram_live"]
+    alive = {keyword.arg: keyword.value for keyword in call.keywords}["alive"]
+    scope = {}
+    predicate = eval(compile(ast.Expression(alive), "colab_quickstart.py", "eval"), scope)  # noqa: S307 -- the repo's own source
+    for returncode, lives in ((None, True), (0, False), (1, False)):
+        scope["server"] = type("Process", (), {"poll": staticmethod(lambda code=returncode: code)})
+        assert predicate() is lives, (returncode, lives)
+
+
 def test_quickstart_uses_clone_or_update_repo_helper():
     source = pathlib.Path(__file__).resolve().parents[1].joinpath("notebooks", "colab_quickstart.py").read_text(encoding="utf-8")
     assert "clone_or_update_repo" in source
@@ -680,3 +696,55 @@ def test_ensure_native_telegram_stops_on_enable_error():
         return 200, {}
     status = ensure_native_telegram_live(settings={"TELEGRAM_BOT_TOKEN": "x"}, request=fake_request, timeout=5)
     assert status["ok"] is False and "enable failed" in status["error"]
+
+
+def test_ensure_native_telegram_waits_for_the_dialogue_not_for_a_clock(monkeypatch):
+    """The wait follows the server's own phases: a serving core whose dialogue is not open yet is
+    waited for (however long), the first dialogue_ready answer proceeds, and each phase is printed
+    once. An older core without ``boot`` counts at its first 200."""
+    from ouroboros.colab_bootstrap import ensure_native_telegram_live, wait_for_dialogue
+
+    monkeypatch.setattr("ouroboros.colab_bootstrap.time.sleep", lambda _seconds: None)
+    health_calls, printed = [], []
+    phases = iter([(503, {})] * 3 + [(200, {"boot": {"phase": "serving", "dialogue_ready": False, "tasks_ready": False}})] * 200
+                  + [(200, {"boot": {"phase": "serving", "dialogue_ready": True, "tasks_ready": False}})])
+
+    def fake_request(method, path, body=None, timeout=None):
+        if path == "/api/health":
+            health_calls.append(path)
+            return next(phases)
+        if path == "/api/extensions":
+            return 200, _native_telegram_index()
+        return 200, {}
+
+    status = ensure_native_telegram_live(settings={"TELEGRAM_BOT_TOKEN": "x"}, request=fake_request)
+    assert status["ok"] is True and status["steps"][0] == "ready"
+    assert len(health_calls) == 204, "every not-ready answer was waited through; nothing timed out"
+
+    phases = iter([(200, {"boot": {"phase": "serving", "dialogue_ready": False, "tasks_ready": False}})] * 2
+                  + [(200, {"boot": {"phase": "serving", "dialogue_ready": True, "tasks_ready": False}})])
+    assert wait_for_dialogue(fake_request, report=printed.append)["ok"] is True
+    assert printed == ["Ouroboros boot: serving (dialogue_ready=False, tasks_ready=False)",
+                       "Ouroboros boot: serving (dialogue_ready=True, tasks_ready=False)"], "each phase once"
+    assert wait_for_dialogue(lambda *a, **k: (200, {}))["ok"] is True, "an older core: its first answer is readiness"
+    providerless = lambda *a, **k: (200, {"boot": {"phase": "ready", "dialogue_ready": False, "tasks_ready": True}})  # noqa: E731
+    printed.clear()
+    assert wait_for_dialogue(providerless, report=printed.append)["ok"] is True, "a providerless boot ends at ready"
+    assert printed[-1].startswith("Ouroboros is ready, but its chat is not accepting messages yet")
+
+
+def test_ensure_native_telegram_ends_on_a_failed_boot_or_a_dead_server(monkeypatch):
+    from ouroboros.colab_bootstrap import ensure_native_telegram_live, wait_for_dialogue
+
+    monkeypatch.setattr("ouroboros.colab_bootstrap.time.sleep", lambda _seconds: None)
+    failed = lambda *a, **k: (200, {"boot": {"phase": "failed", "dialogue_ready": False, "tasks_ready": False,  # noqa: E731
+                                              "error": "current-facts store not published: failed"}})
+    status = ensure_native_telegram_live(settings={"TELEGRAM_BOT_TOKEN": "x"}, request=failed)
+    assert status["ok"] is False and "store not published" in status["error"]
+
+    lives = iter([True, True, False])
+    status = ensure_native_telegram_live(settings={"TELEGRAM_BOT_TOKEN": "x"}, request=lambda *a, **k: (503, {}),
+                                         alive=lambda: next(lives))
+    assert status["ok"] is False and "exited" in status["error"]
+    assert wait_for_dialogue(lambda *a, **k: (503, {}), timeout=0.0)["error"] == "server did not become ready", \
+        "a caller's own bound still ends the wait"

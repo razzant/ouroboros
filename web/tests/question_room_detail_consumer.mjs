@@ -1,10 +1,10 @@
 // stdin is the unmodified production GET /api/tasks response from the Python consumer test.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fixture, NodeStub, turn } from './chat_decision_fixture.js';
+import { fixture, turn } from './chat_decision_fixture.js';
 const { detail, project, refuse, unknown } = JSON.parse(readFileSync(0, 'utf8'));
 let reads = 0, current = unknown || detail;
-const fx = fixture({ isMain: true, rawDetail: true, currentQuestionHost: new NodeStub(), fetchDetail: async () => { reads++; return current; } });
+const fx = fixture({ isMain: true, rawDetail: true, fetchDetail: async () => { reads++; return current; } });
 const tid = detail.task_id;
 try {
     const card = fx.decision.buildQuizCard({ ...detail.owner_quiz.q, task_id: tid });

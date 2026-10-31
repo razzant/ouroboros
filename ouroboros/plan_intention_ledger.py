@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 from ouroboros.tools.plan_review_runtime import slot_is_session, slot_retrieves
 from ouroboros.utils import utc_now_iso
+from ouroboros.reviewer_slot_config import review_cost_facts
 
 if TYPE_CHECKING:  # the ask's own types; the adapter reads their fields and imports nothing from the tool at runtime
     from ouroboros.tools.plan_ask import Participant, PreparedAsk
@@ -50,6 +51,7 @@ def _ledger_seat(participant: Participant, facts: Mapping[str, Any]) -> Dict[str
         "status": status, "operation_state": str(facts.get("operation_state") or ("settled" if status == "responded" else status)),
         "answers": {}, "parts_answered": [], "coverage": "not_asked", "capability_delta": list(facts.get("capability_delta") or []),
         "receipts": _seat_receipts(facts), "usd": facts.get("cost"),
+        **review_cost_facts(facts.get("cost"), route=requested["route"], model=requested["model"]),
         "critical_count": 0, "raw_text": "", "brief_sha": "", "source_refs": [],
         "intention": {"objections": [o.get("id") for o in (facts.get("reply") or {}).get("objections") or []],
                       "withdrawn": [w.get("id") for w in (facts.get("reply") or {}).get("withdrawn") or []],
@@ -86,13 +88,17 @@ def _intention_verdict(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def write_intention_record(ctx: Any, prepared: PreparedAsk, facts_by_seat: Mapping[str, Mapping[str, Any]], *,
-                           record_id: str, state_root: pathlib.Path, task_id: str, revision: Mapping[str, Any]) -> Dict[str, Any]:
+                           record_id: str, state_root: pathlib.Path, task_id: str,
+                           revision: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """One review-ledger record per ask (``surface=intention``): seats, routes, the retained
-    delivery of each seat, costs and custody. Returns ``{seat_id: delivery_ref}``."""
+    delivery of each seat, costs and custody. Returns ``{seat_id: delivery_ref}``. A reading of
+    the request before any plan (``revision=None``) records ``plan_revision: None``."""
     from ouroboros import review_ledger as ledger
     from ouroboros.config import get_review_enforcement, get_runtime_mode
+    from ouroboros.plan_record import ask_subject
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
+    revision = revision or {}
     rows, delivery_refs = [], {}
     for participant in prepared.participants:
         sid = participant.seat_id
@@ -105,10 +111,8 @@ def write_intention_record(ctx: Any, prepared: PreparedAsk, facts_by_seat: Mappi
             seat["source_refs"].append(ref)
             delivery_refs[sid] = ref
         rows.append(seat)
-    pending = any(str(r.get("status") or "") == "pending" for r in rows)
-    panel = ledger.panel_facts(rows, composition="full_pool" if all(p.owner_marked and not p.host_added for p in prepared.participants)
-                               else "composed", reason=f"named by the author in plan_task(ask=…) for ask {prepared.ask_id}",
-                               chosen_by="author")
+    pending = ledger.counted_pending(rows)
+    panel = {**ledger.panel_facts(rows), **prepared.panel, "not_reached": ledger.panel_not_reached(rows)}
     record = ledger.ReviewLedgerRecord(
         record_id=record_id, state=ledger.STATE_PENDING if pending else ledger.STATE_SETTLED, ts=utc_now_iso(), task_id=task_id,
         root_task_id=str((getattr(ctx, "task_metadata", {}) or {}).get("root_task_id") or task_id),
@@ -117,7 +121,7 @@ def write_intention_record(ctx: Any, prepared: PreparedAsk, facts_by_seat: Mappi
                  "root": str(prepared.active_root), "kind": INTENTION_SURFACE, "base": "", "head": "", "tree_sha": "", "diff_sha": "",
                  "checkout": "", "candidate_branch": "", "governance_root": str(prepared.system_root),
                  "plan_revision": revision.get("n"), "plan_ask": prepared.ask_id, "body": prepared.body},
-        brief={"goal": str(revision.get("goal") or ""), "scope": f"plan revision {revision.get('n')}", "parts": [],
+        brief={"goal": str(revision.get("goal") or ""), "scope": ask_subject(revision.get("n"), plan=True), "parts": [],
                "author_questions": [prepared.message] if prepared.message else [],
                "checklist": {"layer": "body" if prepared.body else "core", "body_fact": "true" if prepared.body else "false",
                              "how": "plan_is_body", "checklist_hash": "", "rules_source": {"path": "docs/CHECKLISTS.md", "sha": ""}},
@@ -153,6 +157,7 @@ def settle_ledger_seat(state_root: pathlib.Path, task_id: str, record_id: str, s
                       "not_dispatched": "not_dispatched"}.get(str(facts.get("status") or "pending"), "pending")
             seat.update(status=status, operation_state=str(facts.get("operation_state") or seat.get("operation_state") or ""),
                         usd=facts.get("cost", seat.get("usd")))
+            seat.update(review_cost_facts(seat.get("usd"), route=seat["requested"]["route"], model=seat["requested"]["model"]))
             session = str(seat.get("requested", {}).get("route") or "") == "agent_session"
             observed = (str(facts.get("resolved_model") or "") if session else str(facts.get("model") or "")) if status in ("responded", "error") else ""
             if observed:
@@ -176,7 +181,8 @@ def settle_ledger_seat(state_root: pathlib.Path, task_id: str, record_id: str, s
                                             "status": "observability", "ref": facts[role]}]
         payload["rows"] = rows
         payload["verdict"] = {**dict(payload.get("verdict") or {}), **_intention_verdict(rows)}
-        payload["state"] = ledger.STATE_PENDING if any(r.get("status") == "pending" for r in rows) else ledger.STATE_SETTLED
+        payload["state"] = ledger.STATE_PENDING if ledger.counted_pending(rows) else ledger.STATE_SETTLED
+        payload["panel"]["not_reached"] = ledger.panel_not_reached(rows)
         known = [float(r["usd"]) for r in rows if isinstance(r.get("usd"), (int, float))]
         payload["cost"] = {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}
         return payload

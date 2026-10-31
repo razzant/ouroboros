@@ -1,4 +1,6 @@
 """Engineering brief: admitted membership, explicit owner close, immutable publication."""
+
+from tests import _dialogue as dialogue_test
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -111,9 +113,35 @@ def test_owner_close_delivers_typed_noanswer_and_retry_preserves_winner(runtime)
     assert status == 409 and answer["closed_actor"] == "owner"
     assert answer["closed_reason"] == first["closed_reason"]
     assert runtime.bridge._inbox.empty()
-    rows = [json.loads(line) for line in (runtime.root / "logs/chat.jsonl").read_text().splitlines()]
+    rows = dialogue_test.log_rows(runtime.root / "logs/chat.jsonl")
     assert len([row for row in rows if row.get("type") == "quiz_closed"]) == 1
     assert not [row for row in rows if row.get("type") == "quiz_answer"]
+
+
+@pytest.mark.parametrize("words", ["omitted", ""])
+def test_owner_close_over_http_needs_no_words_and_refuses_an_invalid_reason(tmp_path, monkeypatch, words):
+    """``POST /api/decisions``: one tap closes. The owner's words stay optional text of at most
+    2000 characters; their absence records the standard sentence, anything else is refused."""
+    from tests.test_quiz_answer import _decision_app, _post
+    from tests.test_quiz_late_answer import _late_bridge
+
+    write_task_result(tmp_path, "task", "running", chat_id=1)
+    for qid in ("tapped", "typed"):
+        owner_quiz.record_asked(tmp_path, "task", quiz_id=qid, question="Proceed?", options=["Yes", "No"], chat_id=1)
+    _late_bridge(tmp_path, monkeypatch)  # a real bridge; both cards' Main publication is witnessed
+    app = _decision_app(tmp_path, monkeypatch)
+    tap = {"request_id": "tap", "decision_id": "quiz:task:tapped", "action": "close"}
+    for invalid in (7, ["Withdrawn"], "x" * 2001):
+        reply = _post(app, {**tap, "reason": invalid})
+        assert reply.status_code == 400 and reply.json()["reason_code"] == "close_reason_invalid", reply.text
+    assert owner_quiz.quiz_states(tmp_path, "task")["tapped"]["state"] == "open"
+    reply = _post(app, tap if words == "omitted" else {**tap, "reason": words})
+    assert reply.status_code == 200 and reply.json()["state"] == "closed", reply.text
+    assert reply.json()["closed_reason"] == owner_quiz.OWNER_CLOSE_REASON == "Closed by the owner without an answer."
+    assert owner_quiz.quiz_states(tmp_path, "task")["tapped"]["closed_reason"] == owner_quiz.OWNER_CLOSE_REASON
+    longest = "x" * 2000
+    reply = _post(app, {"request_id": "typed", "decision_id": "quiz:task:typed", "action": "close", "reason": longest})
+    assert reply.status_code == 200 and reply.json()["closed_reason"] == longest, reply.text
 
 
 def test_owner_closure_mailbox_failure_recovers_automatically(runtime, monkeypatch):
@@ -204,7 +232,7 @@ def test_closure_has_distinct_dialogue_provenance_and_terminal_mail_custody(runt
 
     prepare(runtime)
     assert close(runtime)[0] == 200
-    row = next(json.loads(line) for line in (runtime.root / "logs/chat.jsonl").read_text().splitlines()
+    row = next(json.loads(line) for line in dialogue_test.log_text(runtime.root / "logs/chat.jsonl").splitlines()
                if json.loads(line).get("type") == "quiz_closed")
     assert row_author(row)["kind"] == "human"
     rendered = render_row_text(row)

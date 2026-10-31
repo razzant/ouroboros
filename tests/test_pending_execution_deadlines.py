@@ -94,7 +94,7 @@ def _resource_hold(host, clock, monkeypatch, kind, *, deadline=True):  # noqa: F
                 held, _, _ = hold_root_resume_descendants(
                     queue, "root", fence, {"grant_id": "root-grant", "generation": 1})
                 assert held == ["pending"]
-                assert task["_budget_pause_hold"]["cause"] == ""
+                assert "cause" not in task["_budget_pause_hold"]
     assert task["admitted_dispatch"] == "none"
     return task
 
@@ -578,17 +578,19 @@ def test_a_restored_row_keeps_its_budget_and_carry_until_resume_and_assignment(h
     assert execution_elapsed_seconds(running, clock.now[0]) == 2
 
 
-def test_a_timeout_retry_never_regrants_spent_execution(host, clock, monkeypatch):  # noqa: F811
-    from supervisor import task_reaper
+def test_a_carried_handoff_never_regrants_spent_execution(host, clock, monkeypatch):  # noqa: F811
+    """A successor carries its ended attempt's execution through the one stamp the crash
+    requeue and planned successors use; dispatch never regrants it, and the ceiling it
+    reaches queues a terminal-only job."""
+    from ouroboros.model_wait import stamp_execution_handoff
 
     task = add_task(host, clock, deadline=False, execution_timeout_sec=500)
     host.pending.clear()
     write_task_result(host.root, "pending", "running", result="Some work was performed")
     meta = {"task": task, "attempt": 1, "started_at": clock.now[0] - 200}
-    requeued, attempt, _, _ = task_reaper._enqueue_retry(
-        queue, task, task_id="pending", retry_task_id="retry", attempt=1,
-        terminal_reason="idle_timeout", recon_fields={}, clock_meta=meta)
-    assert requeued and attempt == 2
+    successor = {**task, "_attempt": 2}
+    stamp_execution_handoff(successor, meta)
+    assert not queue.enqueue_task(successor, front=True).get("_admission_blocked")
     assert host.pending[0]["_execution_handoff_sec"] == 200 and host.pending[0]["execution_timeout_sec"] == 500
     sent = []
     workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
@@ -600,14 +602,14 @@ def test_a_timeout_retry_never_regrants_spent_execution(host, clock, monkeypatch
     workers.assign_tasks()
     assert len(sent) == 1
     clock.now[0] += 299
-    host.running["retry"]["last_progress_at"] = clock.now[0]
+    host.running["pending"]["last_progress_at"] = clock.now[0]
     queue.enforce_task_timeouts()
     assert reaps.empty()
     clock.now[0] += 1
     queue.enforce_task_timeouts()
     job = reaps.get_nowait()
     assert job["runtime_sec"] == 500 and job["terminal_reason"] == "absolute_ceiling"
-    assert not job["will_retry"] and not host.pending and not host.attempts
+    assert not {"will_retry", "retry_task_id"} & set(job) and not host.pending and not host.attempts
 
 
 def test_pending_deadline_salvage_reads_history_outside_the_supervisor_queue_lock(host, clock, monkeypatch):  # noqa: F811

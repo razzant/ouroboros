@@ -59,8 +59,10 @@ def test_consumption_fold_requires_current_authority_and_runs_once(host, monkeyp
             row['source_ref']['sha256'] = '0' * 64
         budget_pause.set_budget_pause(host.root, 'held', row)
     before = copy.deepcopy(meta)
-    assert fold_consumed_resume(meta, host.root, event) is (change == 'none')
-    if change == 'none':
+    # This addressed row's nested root copy is metadata, not Resume admission.
+    folds = change in {'none', 'foreign_root'}
+    assert fold_consumed_resume(meta, host.root, event) is folds
+    if folds:
         assert execution_elapsed_seconds(meta, clock[0]) == pytest.approx(90)
         assert 'sleep_parked_at' not in meta
         folded = copy.deepcopy(meta)
@@ -91,7 +93,7 @@ def test_assignment_tick_already_folds_lost_consumption(host, monkeypatch, clock
     assert execution_elapsed_seconds(workers.RUNNING['held'], clock[0]) == pytest.approx(90)
 
 
-def test_consumed_worker_death_takes_terminal_custody_before_crash_retry(host, monkeypatch, clock):  # noqa: F811
+def test_consumed_worker_death_obeys_the_ordinary_crash_retry_limit(host, monkeypatch, clock):  # noqa: F811
     from supervisor import worker_health
     from ouroboros.task_results import load_task_result
     from tests.test_worker_crash_retry import _make_worker
@@ -116,5 +118,18 @@ def test_consumed_worker_death_takes_terminal_custody_before_crash_retry(host, m
                         lambda *_a, **_k: {'terminal_source_present': False})
     worker_health.recover_confirmed_dead_worker(job)
     result = load_task_result(host.root, 'held')
-    assert result['status'] == 'failed' and result['reason_code'] == 'worker_crash_budget_pausing'
+    assert result['status'] == 'failed' and result['reason_code'] == 'worker_crash_retry_exhausted'
     assert not host.pending
+
+
+@pytest.mark.parametrize("resume", [None, {"authority": "explicit_resume", "grant_id": "consumed"}])
+def test_inapplicable_resume_clock_does_not_read_storage(tmp_path, monkeypatch, resume):
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("an ordinary or already-folded clock needs no durable observation")
+
+    monkeypatch.setattr(budget_pause, "budget_pause_row", unexpected_read)
+    meta = {"task": {"id": "ordinary"}, "budget_paused_sec": 12.0}
+    if resume is not None:
+        meta["task"]["_budget_pause_resume"] = resume
+    before = copy.deepcopy(meta)
+    assert not fold_consumed_resume(meta, tmp_path) and meta == before

@@ -6,18 +6,19 @@ One intention, one record, three kinds of fact the mind writes through ``plan_ta
 * a REVISION — goal, ``done_when`` (the acceptance claim grammar: id / claim /
   support), ``affected_paths`` and the plan prose; omitted fields carry over,
   identical content creates no revision; the body flag is computed at write;
-* an ASK — the revision it carried, the mind's message, the attachments, the
-  participants it was dispatched to (each with the recorded fact whether it was an
-  owner-marked reviewer OF THAT ASK) and the review-ledger record that retains the
-  exact texts;
+* an ASK — the revision it carried (``None``: a reading of the request before any
+  plan), the mind's message, the attachments, the participants it was dispatched to
+  (each with the recorded fact whether it was an owner-marked reviewer OF THAT ASK)
+  and the review-ledger record that retains the exact texts;
 * a REPLY — one participant's parsed ``{prose, objections, withdrawn}``, or its
   typed absence (pending, failed, not dispatched, unparseable).
 
 Everything else is derived here and never stored: the open objections (a fold over
-EACH SEAT'S OWN replies — an objection stands until the same seat lists it under
-``withdrawn``; omission keeps it and flags ``not_adjudicated``; an unparseable reply
-changes nothing), who last saw which revision, the gate projection
-(``gate_projection``), the acceptance view (``acceptance_view``) and the review
+EACH SEAT'S OWN replies to stored revisions — an objection stands until the same seat
+lists it under ``withdrawn``; omission keeps it and flags ``not_adjudicated``; an
+unparseable reply changes nothing; a reading's reply is advice and moves no objection),
+who last saw which revision, the gate projection
+(``gate_projection``), the claims view (``acceptance_view``) and the review
 history the context views read (``record_history``). There is no cycle counter, no
 quorum, no aggregate and no fingerprint routing for plans.
 
@@ -50,7 +51,7 @@ PLAN_RECORD_VERSION = 3
 _PLAN_RECORD_MAX_BYTES = 1_000_000
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 PARTICIPANT_STATUSES = frozenset({"pending", "answered", "unparseable", "failed", "not_dispatched"})
-GATE_STATUSES = frozenset({"not_required", "force_plan_unmet", "held", "objections_open", "awaiting", "clear",
+GATE_STATUSES = frozenset({"not_required", "held", "objections_open", "awaiting", "clear",
                            "rail_degraded", "unreadable"})
 LEGACY_ASK_ID = "legacy"
 _DONE_WHEN_KEYS = ("id", "claim", "support", "surface")
@@ -120,6 +121,15 @@ def revision_by_number(record: Mapping[str, Any], n: Any) -> Optional[Dict[str, 
     return next((r for r in record.get("revisions") or [] if r.get("n") == n), None)
 
 
+READING_SUBJECT = "the reading of the request"
+
+
+def ask_subject(revision: Any, *, plan: bool = False) -> str:
+    """What an ask was about, as every reader names it: ``revision N`` (``plan revision N``),
+    or the reading of the request an ask before any plan carries (``revision: None``)."""
+    return READING_SUBJECT if revision is None else f"{'plan ' if plan else ''}revision {revision}"
+
+
 def revision_delta(previous: Optional[Mapping[str, Any]], current: Mapping[str, Any]) -> Dict[str, Any]:
     """What changed between two revisions: field flags, ``done_when`` by id (added /
     removed / reworded with both texts) and a unified diff of the plan prose."""
@@ -166,7 +176,11 @@ def validate_record(value: Any) -> Dict[str, Any]:
         if not isinstance(ask, dict) or not _ID_RE.fullmatch(str(ask.get("ask_id") or "")) or ask["ask_id"] in seen:
             raise PlanRecordInvalid("PLAN_RECORD_INVALID: ask ids must be unique")
         seen.add(ask["ask_id"])
-        if revision_by_number(value, ask.get("revision")) is None:
+        # ``revision: None`` is a reading of the request before any plan; anything else must be
+        # the number of a stored revision (a bool is not one, though ``True == 1``).
+        if "revision" not in ask or (ask["revision"] is not None and (
+                isinstance(ask["revision"], bool) or not isinstance(ask["revision"], int)
+                or revision_by_number(value, ask["revision"]) is None)):
             raise PlanRecordInvalid("PLAN_RECORD_INVALID: an ask names a revision the record does not hold")
         if not isinstance(ask.get("participants"), list):
             raise PlanRecordInvalid("PLAN_RECORD_INVALID: ask participants must be a list")
@@ -250,7 +264,10 @@ def parse_reply(text: str) -> tuple[Optional[Dict[str, Any]], str]:
 # ------------------------------------------------------------------ folds
 
 def _reply_rows(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Every participant row that carries a reply, in ask order, legacy first."""
+    """Every participant row that carries a reply to a stored revision, in ask order, legacy
+    first. A reading of the request (an ask before any plan, ``revision: None``) is not among
+    them, whenever it settles: its reply is advice that raises, restates and withdraws no
+    standing objection, and its replies, history and panel rows keep showing it."""
     rows: List[Dict[str, Any]] = []
     for objection in (legacy or {}).get("open_objections") or []:
         rows.append({"ask_id": LEGACY_ASK_ID, "revision": 0, "seat_id": str(objection.get("seat_id") or ""),
@@ -258,6 +275,8 @@ def _reply_rows(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] =
                      "reply": {"objections": [{"id": str(objection.get("id") or ""), "text": str(objection.get("text") or "")}],
                                "withdrawn": []}, "legacy": True})
     for ask in record.get("asks") or []:
+        if ask.get("revision") is None:
+            continue
         for participant in ask.get("participants") or []:
             if participant.get("status") == "answered" and isinstance(participant.get("reply"), dict):
                 rows.append({"ask_id": ask.get("ask_id"), "revision": ask.get("revision"),
@@ -337,15 +356,15 @@ def participant_views(record: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def pending_asks(record: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """Asks with at least one participant still pending (dispatched, no settled answer)."""
+    """Asks with a counted participant pending; advisers retain their own custody only."""
     return [ask for ask in record.get("asks") or []
-            if any(p.get("status") == "pending" for p in ask.get("participants") or [])]
+            if any(p.get("owner_marked") and p.get("status") == "pending" for p in ask.get("participants") or [])]
 
 
 def asks_dispatched(record: Mapping[str, Any]) -> int:
-    """How many asks reached at least one reviewer (the force_plan fact)."""
+    """Asks that reached a participant counted by that ask."""
     return sum(1 for ask in record.get("asks") or []
-               if any(p.get("dispatched") for p in ask.get("participants") or []))
+               if any(p.get("dispatched") and p.get("owner_marked") for p in ask.get("participants") or []))
 
 
 def engaged(record: Mapping[str, Any]) -> bool:
@@ -372,23 +391,18 @@ def unknown_outcome_asks(record: Mapping[str, Any]) -> List[str]:
 # ------------------------------------------------------------------ gate
 
 def gate_projection(record: Mapping[str, Any], *, enforcement: str, cyber_pro: bool, hurry: bool,
-                    force_plan: bool, hard_rail: str = "", legacy: Optional[Mapping[str, Any]] = None,
+                    hard_rail: str = "", legacy: Optional[Mapping[str, Any]] = None,
                     unreadable: bool = False) -> Dict[str, Any]:
     """The ONE finalization decision over the plan record (pure).
 
     ``held`` ⟺ Blocking, not Cyber Pro, no owner hurry, and some open objection was
     raised by an owner-marked reviewer of the ask it answered — for any task. Silence,
-    pending asks, refusals and mind-added critics never hold. A Swarm ``force_plan``
-    stays unmet until one ask reached at least one reviewer: under Blocking that holds
-    the final answer while the mind never asked; an ask that no route could take (a
-    recorded attempt) counts as attempted — disclosed, not held, outages never hold.
-    Advisory, the owner's hurry and Cyber Pro disclose an unmet obligation once a plan
-    exists (a task that wrote no plan at all is still held to write one). An unreadable
-    record is engaged, never absent.
+    pending asks, refusals and mind-added critics never hold. An unreadable record
+    is engaged, never absent.
     """
     policy = "blocking" if str(enforcement or "").lower() == "blocking" else "advisory"
     legacy_engaged = bool((legacy or {}).get("engaged"))
-    if not force_plan and not unreadable and not engaged(record) and not legacy_engaged:
+    if not unreadable and not engaged(record) and not legacy_engaged:
         return {"required": False, "allow": True, "status": "not_required", "enforcement": policy,
                 "open_objections": [], "holding": [], "pending_asks": [], "revision": 0}
     objections = open_objections(record, legacy)
@@ -397,13 +411,12 @@ def gate_projection(record: Mapping[str, Any], *, enforcement: str, cyber_pro: b
     dispatched = asks_dispatched(record) + int((legacy or {}).get("asks_dispatched") or 0)
     latest = latest_revision(record)
     decision: Dict[str, Any] = {
-        "required": True, "self_opened": not force_plan, "enforcement": policy,
+        "required": True, "enforcement": policy,
         "open_objections": [{k: o.get(k) for k in ("seat_id", "id", "text", "holds", "not_adjudicated", "ask_id",
                                                      "revision", "owner_marked", "legacy")} for o in objections],
         "holding": [f"{o['seat_id']}:{o['id']}" for o in holding],
         "pending_asks": pending, "asks_dispatched": dispatched, "asks_unroutable": unroutable_asks(record),
         "unknown_outcome": unknown_outcome_asks(record),
-        "force_plan_met": not force_plan or dispatched > 0,
         "revision": int(latest.get("n") or 0) if latest else 0,
         "unreadable": bool(unreadable), "reason": str(hard_rail or ""),
         "source": "legacy_v2" if (legacy_engaged and not engaged(record)) else "plan_record",
@@ -419,13 +432,6 @@ def gate_projection(record: Mapping[str, Any], *, enforcement: str, cyber_pro: b
         status, allow = ("objections_open" if objections else "awaiting" if pending else "clear"), True
     elif unreadable:
         status, allow = "unreadable", False  # a gate that cannot read its authority is engaged, not absent
-    elif force_plan and dispatched == 0:
-        # Blocking holds while the mind never asked; an ask that positively reached nobody (a recorded
-        # attempt, or every seat refused before dispatch) is disclosed, not held — outages never hold. Advisory and the owner's hurry
-        # never hold a plan that exists; a task that wrote no plan at all is still held to write
-        # one (the Swarm admitted it on that condition).
-        tried = engaged(record) or legacy_engaged
-        status, allow = "force_plan_unmet", tried and (unroutable_asks(record) > 0 or policy != "blocking" or hurry)
     elif holding and policy == "blocking" and not hurry:
         status, allow = "held", False
     elif objections:
@@ -438,13 +444,14 @@ def gate_projection(record: Mapping[str, Any], *, enforcement: str, cyber_pro: b
     return decision
 
 
-# ------------------------------------------------------------------ acceptance
+# ------------------------------------------------------------------ claims view
 
 def acceptance_view(record: Mapping[str, Any], ingress_claims: List[Dict[str, Any]], *,
                     legacy: Optional[Mapping[str, Any]] = None) -> tuple[List[Dict[str, str]], str, Dict[str, Any]]:
-    """``(claims, source, exhibit)`` for task acceptance: ingress claims win; otherwise
-    the LATEST revision's ``done_when`` binds, open objections or not (legacy selected
-    claims when the task only has a v1/v2 record). The exhibit carries the ACTUAL text
+    """``(claims, source, exhibit)`` — the claims a task's result is held to (result
+    review, plan facts): ingress claims win; otherwise the LATEST revision's
+    ``done_when`` binds, open objections or not (legacy selected claims when the task
+    only has a v1/v2 record). The exhibit carries the ACTUAL text
     of every revision's ``done_when``, which revisions the council saw, and the
     objections open now — and, when ingress wins, the adopted promises stay visible."""
     from ouroboros.contracts.task_contract import normalize_acceptance_claims
@@ -551,7 +558,7 @@ def legacy_facts(root: Any, task_id: str) -> tuple[Dict[str, Any], Dict[str, str
     ``error`` is ``{}`` or names the read that failed (``source`` = ``plan_review_state`` or
     ``author_plan``, plus the message); the projection is then built without that piece. Each
     caller chooses its policy in one line: the gate holds as unreadable, the tool's read says
-    so, the acceptance binder refuses to bind without the bar, the task detail names it."""
+    so, the claims binder refuses to bind without the bar, the task detail names it."""
     from ouroboros.task_results import load_plan_review_state
 
     try:
@@ -684,6 +691,23 @@ def load_plan_record(root: Any, task_id: str) -> Dict[str, Any]:
     return validate_record(document.get(PLAN_RECORD_KEY))
 
 
+def read_reply_source(root: Any, task_id: str, ask_id: str, seat_id: str, *,
+                      role: str, part: str, sha256: str) -> bytes:
+    """Exact physical task/ask/seat reply; retry aliases never redirect a saved selection."""
+    from ouroboros.review_ledger import ReviewSourceChanged, read_source
+
+    record = load_plan_record(root, task_id)
+    sources = [p.get("reply_ref") for ask in record["asks"] if ask["ask_id"] == ask_id
+               for p in ask["participants"] if p["seat_id"] == seat_id]
+    if role != "response" or part or len(sources) != 1 or not isinstance(sources[0], dict):
+        raise ReviewSourceChanged("The selected saved plan reply is unavailable.")
+    source = sources[0]
+    ref = source.get("ref", source)
+    if not isinstance(ref, dict) or ref.get("sha256") != sha256 or source.get("status", "retained") != "retained":
+        raise ReviewSourceChanged("The selected saved plan reply changed or is unavailable.")
+    return read_source(root, task_id, source)
+
+
 def _size(record: Mapping[str, Any]) -> int:
     return len(json.dumps(record, ensure_ascii=False, default=str).encode("utf-8"))
 
@@ -781,12 +805,23 @@ def next_ask_id(record: Mapping[str, Any]) -> str:
 def append_attempt(root: Any, task_id: str, attempt: Mapping[str, Any]) -> Dict[str, Any]:
     """Record one ask that could reach nobody (typed, $0): the mind asked and every named
     route was unavailable, so no participant was called. Not an ask — it dispatches nobody,
-    raises no objection and holds nothing; the Swarm obligation reads it as attempted."""
+    raises no objection and holds nothing; the record shows it as asked, with no route."""
     def _append(record: Dict[str, Any]) -> Dict[str, Any]:
         record["attempts"] = [*record.get("attempts", []), {"ts": utc_now_iso(), **copy.deepcopy(dict(attempt))}]
         return record
 
     return _update_plan_record(root, task_id, _append)
+
+
+def _ask_panel_outcomes(ask: Dict[str, Any]) -> None:
+    from ouroboros.review_ledger import panel_not_reached
+    from ouroboros.reviewer_slot_config import review_cost_facts
+
+    rows = ask.get("participants") or []
+    for row in rows:
+        row.update(review_cost_facts(row.get("cost"), route=str(row.get("route") or ""), model=str(row.get("model") or "")))
+    if "panel" in ask:
+        ask["panel"]["not_reached"] = panel_not_reached(rows)
 
 
 def append_ask(root: Any, task_id: str, ask: Mapping[str, Any]) -> Dict[str, Any]:
@@ -795,6 +830,7 @@ def append_ask(root: Any, task_id: str, ask: Mapping[str, Any]) -> Dict[str, Any
         if any(str(a.get("ask_id") or "") == str(ask.get("ask_id") or "") for a in record.get("asks", [])):
             raise PlanRecordInvalid(f"PLAN_RECORD_INVALID: ask {ask.get('ask_id')!r} is already recorded")
         record["asks"] = [*record.get("asks", []), copy.deepcopy(dict(ask))]
+        _ask_panel_outcomes(record["asks"][-1])
         return record
 
     return _update_plan_record(root, task_id, _append)
@@ -814,10 +850,66 @@ def update_participant(root: Any, task_id: str, *, ask_id: str, seat_id: str, fa
                     if facts.get("status") == "pending" and str(participant.get("status") or "pending") != "pending":
                         return record
                     participant.update(copy.deepcopy(dict(facts)))
+                    _ask_panel_outcomes(ask)
                     return record
         raise PlanRecordInvalid(f"PLAN_RECORD_INVALID: no participant {seat_id!r} in ask {ask_id!r}")
 
     return _update_plan_record(root, task_id, _merge)
+
+
+def claim_ask_completion(root: Any, task_id: str, ask_id: str, custody: Mapping[str, str]) -> Optional[Dict[str, Any]]:
+    """Claim this ask's one completion frame under the record lock, using ask-time standing.
+
+    An adviser-only consultation still announces its own completion. A council with
+    counted participants announces when those finish, retaining every adviser's row.
+    """
+    claimed = False
+    def claim(record: Dict[str, Any]) -> Dict[str, Any]:
+        nonlocal claimed
+        claimed = False
+        ask = next((a for a in record.get("asks", []) if a.get("ask_id") == ask_id), {})
+        participants = ask.get("participants") or []
+        counted = [p for p in participants if p.get("owner_marked")] or participants
+        if counted and not ask.get("completion_announced") and not any(
+                p.get("status") == "pending" and not custody.get(str(p.get("seat_id") or "")) for p in counted):
+            ask["completion_announced"] = claimed = True
+        return record
+    record = _update_plan_record(root, task_id, claim)
+    return record if claimed else None
+
+
+def release_ask_completion(root: Any, task_id: str, ask_id: str) -> None:
+    """Release an undelivered frame's claim under the record lock for the next callback."""
+    def release(record: Dict[str, Any]) -> Dict[str, Any]:
+        for ask in record.get("asks", []):
+            if ask.get("ask_id") == ask_id:
+                ask.pop("completion_announced", None)
+                break
+        return record
+    _update_plan_record(root, task_id, release)
+
+
+def collection_pending(value: Any) -> bool:
+    """Body-only candidate selection, not a plan verdict or a packing obligation.
+    Unknown record/participant shapes stay selectable. No sources or liveness are
+    read here: the collector validates the record and checks its task's end."""
+    if value is None or value == {}:
+        return False
+    if not isinstance(value, dict) or value.get("schema_version") != PLAN_RECORD_VERSION:
+        return True
+    asks = value.get("asks")
+    if not isinstance(asks, list):
+        return True
+    for ask in asks:
+        if not isinstance(ask, dict) or not isinstance(ask.get("participants"), list):
+            return True
+        for participant in ask["participants"]:
+            if not isinstance(participant, dict):
+                return True
+            status = participant.get("status")
+            if not isinstance(status, str) or status not in PARTICIPANT_STATUSES:
+                return True
+    return any(pending_participants(value))
 
 
 def pending_participants(record: Mapping[str, Any]) -> Iterable[tuple[Dict[str, Any], Dict[str, Any]]]:

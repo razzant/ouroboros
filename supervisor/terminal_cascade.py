@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
+_GAP_NAMES = 10  # damaged rows a membership gap names before it counts the rest
 
 
 def _td():
@@ -51,9 +52,25 @@ def deliver_cascade_summary(
     event each attempt).
     """
     try:
+        from ouroboros.cancel_intents import STOP_POLICY_FINALIZE, active_intent, stop_policy
         from ouroboros.observability import preserved_salvage_path
+        from ouroboros.owner_stop_receipt import capture_receipt, has_wrap_up_receipt, resolve_receipt_target
         from ouroboros.task_results import load_task_result
         from ouroboros.task_status import SETTLED_STATUSES
+
+        try:
+            intent = active_intent(pathlib.Path(drive_root), task_id) or {}
+        except Exception:
+            intent = {}
+        stop = (task_id, str(intent.get("request_id") or ""))
+        physical_task_id, _pred_ids, retry_root_ids = resolve_receipt_target(
+            pathlib.Path(drive_root), task_id, stop=stop,
+        )
+        wrap_up = (
+            stop_policy(intent) == STOP_POLICY_FINALIZE
+            or bool(intent.get("hardened_at"))
+            or has_wrap_up_receipt(pathlib.Path(drive_root), physical_task_id, stop=stop)
+        )
 
         def _durable_child_outcome(tid: str, sweep_outcome: str) -> str:
             # GR4-4: each child's line reports its CURRENT durable status at
@@ -84,13 +101,17 @@ def deliver_cascade_summary(
         merged: Dict[str, str] = {
             str(tid): str(outcome) for tid, outcome in outcomes.items()
         }
+        membership_gap = ""
         try:
+            gaps: list = []
             for tid, status in _cascade_descendant_rows(
-                pathlib.Path(drive_root), task_id,
+                pathlib.Path(drive_root), task_id, strict=wrap_up, gaps=gaps,
             ).items():
                 if tid and tid not in merged:
                     merged[tid] = status
+            membership_gap = "; ".join(gaps)  # a named damaged row keeps the known children, honestly partial
         except Exception:
+            membership_gap = "descendant_enumeration_unavailable"
             log.debug(
                 "cascade digest durable-tree enumeration failed for %s",
                 task_id, exc_info=True,
@@ -99,11 +120,32 @@ def deliver_cascade_summary(
             {"task_id": tid, "outcome": _durable_child_outcome(tid, outcome),
              "salvaged": bool(preserved_salvage_path(pathlib.Path(drive_root), tid))}
             for tid, outcome in sorted(merged.items())
-            if tid != task_id
+            if tid not in retry_root_ids
         ]
-        root_result = load_task_result(pathlib.Path(drive_root), task_id) or {}
+        root_result = (
+            load_task_result(pathlib.Path(drive_root), physical_task_id)
+            or load_task_result(pathlib.Path(drive_root), task_id)
+            or {}
+        )
+        # Expiry/crash may precede the final control. The same receipt (one row
+        # identity per intent) still accompanies this fallback, without another
+        # model turn; a failed capture never holds the tree's one summary.
+        if wrap_up:
+            try:
+                capture_receipt(pathlib.Path(drive_root), physical_task_id, merged, gap=membership_gap,
+                                stop=stop)
+            except Exception:
+                log.warning("Wrap up receipt capture failed for %s", task_id, exc_info=True)
+            root_result = (
+                load_task_result(pathlib.Path(drive_root), physical_task_id)
+                or load_task_result(pathlib.Path(drive_root), task_id)
+                or root_result
+            )
         root_status = str(root_result.get("status") or "")
-        salvage_path = preserved_salvage_path(pathlib.Path(drive_root), task_id)
+        salvage_path = (
+            preserved_salvage_path(pathlib.Path(drive_root), physical_task_id)
+            or preserved_salvage_path(pathlib.Path(drive_root), task_id)
+        )
         salvage_text = ""
         if root_status == "completed":
             # Completion-wins root: its own completed result is the answer.
@@ -113,6 +155,8 @@ def deliver_cascade_summary(
                 salvage_text = pathlib.Path(salvage_path).read_text(encoding="utf-8")
             except Exception:
                 salvage_text = ""
+        # A partial digest census rides the summary's own receipt and words; Wrap up's row already names it.
+        summary_gap = "" if wrap_up else membership_gap
         delivery_id = ""
         try:
             from ouroboros.cancel_intents import active_intent
@@ -130,6 +174,7 @@ def deliver_cascade_summary(
             salvaged_text=salvage_text,
             preserved_path=salvage_path,
             children=children,
+            membership_gap=summary_gap,
             settled_status=root_status,
             delivery_id=delivery_id,
         )
@@ -146,6 +191,7 @@ def deliver_cascade_summary(
             salvaged_text=salvage_text,
             preserved_path=salvage_path,
             children=children,
+            membership_gap=summary_gap,
             # GR2-12: the typed root status decides the completed-vs-salvage
             # framing; the prose in ``outcome`` is presentation only.
             settled_status=root_status,
@@ -157,7 +203,8 @@ def deliver_cascade_summary(
         return False
 
 
-def _cascade_descendant_rows(drive_root: pathlib.Path, task_id: str) -> Dict[str, str]:
+def _cascade_descendant_rows(drive_root: pathlib.Path, task_id: str, *, strict: bool = False,
+                             gaps: Optional[List[str]] = None) -> Dict[str, str]:
     """``{descendant_id: status}`` for every task whose ancestry reaches ``task_id``.
 
     GR6-2: the digest's membership walk. Rows come from the durable task
@@ -167,19 +214,14 @@ def _cascade_descendant_rows(drive_root: pathlib.Path, task_id: str) -> Dict[str
     plus a depth-bounded parent-chain walk over the collected rows — the same
     reachability shape the cascade sweep and ``_has_live_ancestor_in_set``
     use. Deliberately NOT filtered to subagents: a non-subagent descendant
-    torn down by the cascade belongs in the tree's one summary too.
+    torn down by the cascade belongs in the tree's one summary too. A damaged
+    row the census could not place, or a descendant whose own record it could
+    not read (still listed), keeps every known row and is named in ``gaps``
+    (the receipt's membership gap); so is a queue-only fallback after the
+    store itself failed, which ``strict`` raises instead.
     """
     target = str(task_id or "").strip()
-    rows: Dict[str, Dict[str, Any]] = {}
-    try:
-        from ouroboros.task_results import list_task_results
-
-        for item in list_task_results(pathlib.Path(drive_root)):
-            tid = str(item.get("task_id") or item.get("id") or "")
-            if tid:
-                rows[tid] = item
-    except Exception:
-        log.debug("cascade digest durable-row scan failed for %s", target, exc_info=True)
+    queued = []
     try:
         from ouroboros.utils import read_json_dict
 
@@ -192,10 +234,29 @@ def _cascade_descendant_rows(drive_root: pathlib.Path, task_id: str) -> Dict[str
                     continue
                 task = item.get("task") if isinstance(item.get("task"), dict) else item
                 tid = str(item.get("id") or task.get("id") or "")
-                if tid and tid not in rows:
-                    rows[tid] = {**task, "status": status}
+                if tid:
+                    queued.append({**task, "task_id": tid, "status": status})
     except Exception:
+        if strict:
+            raise
         log.debug("cascade digest snapshot scan failed for %s", target, exc_info=True)
+
+    try:
+        from ouroboros.task_store import tree_facts
+
+        census = tree_facts(drive_root, target, descendants=True, queue_rows=queued)
+        rows, unresolved = census.members, census.unresolved
+    except Exception:
+        if strict:
+            raise
+        log.debug("cascade digest durable-row selection failed for %s", target, exc_info=True)
+        rows, unresolved = {row["task_id"]: row for row in reversed(queued)}, None
+    if gaps is not None and unresolved is None:
+        gaps.append("descendant_enumeration_unavailable")
+    elif gaps is not None and set(unresolved) - {target}:  # the target's own record is no descendant's
+        named = [f"{tid} ({fact['reason']})" for tid, fact in sorted(unresolved.items()) if tid != target]
+        gaps.append("unresolved_task_rows: " + ", ".join(named[:_GAP_NAMES])
+                    + (f" and {len(named) - _GAP_NAMES} more" if len(named) > _GAP_NAMES else ""))
 
     def _reaches_target(tid: str) -> bool:
         row = rows.get(tid) or {}
@@ -221,13 +282,13 @@ def _cascade_root_outcome(root_status: str) -> str:
     """How the tree's ONE message describes its root — from the ROOT'S OWN status.
 
     A cascade over a root that had already ``failed`` (or was killed on a budget
-    hard stop) used to describe it as "cancelled", which is the summary telling
+    hard stop) used to describe it as "stopped", which is the summary telling
     the owner a different story than the task card. Only a root this cascade
-    actually cancelled is called cancelled.
+    actually cancelled is called stopped.
     """
     status = str(root_status or "").strip().lower()
     if status == "completed":
-        return "completed before the cancellation (result preserved)"
+        return "completed before the stop (result preserved)"
     if status and status != "cancelled":
-        return f"already settled as {status} before the cancellation (result preserved)"
-    return "cancelled"
+        return f"already settled as {status} before the stop (result preserved)"
+    return "stopped"

@@ -103,9 +103,24 @@ class _BootSampler(threading.Thread):
             self.stop.wait(0.05)
 
 
+def _serving_session(data_dir: pathlib.Path) -> str:
+    """The serving generation's custody session: the one its own workers were recorded under at boot."""
+    from ouroboros.process_custody import ledger_path
+
+    rows = []
+    for line in ledger_path(data_dir).read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    workers = [row for row in rows if str(row.get("purpose") or "").startswith("worker:")]
+    assert workers, "the restarted server recorded no worker in custody"
+    return str(workers[-1]["session_id"])
+
+
 @pytest.mark.ui_browser
 def test_real_server_serves_readiness_and_requests_while_history_runs_elsewhere(
-    direct_server_with_data,
+    direct_server_with_data, monkeypatch,
 ):
     url = direct_server_with_data["url"]
     data_dir: pathlib.Path = direct_server_with_data["data_dir"]
@@ -151,6 +166,11 @@ def test_real_server_serves_readiness_and_requests_while_history_runs_elsewhere(
     try:
         direct_server_with_data["start_server"]()   # returns only once readiness is served
         assert not _audit_records(data_dir, before_bytes), "boot must not launch a historical audit"
+        # History runs elsewhere, in the serving generation's custody as the server's own children run: a child
+        # of a foreign session is an orphan to the server's first sweep after readiness (server.py:812).
+        from ouroboros import process_custody
+
+        monkeypatch.setattr(process_custody, "_SESSION_ID", _serving_session(data_dir))
         explicit.start(data_dir, pathlib.Path(__file__).resolve().parents[1])
         deadline = time.monotonic() + 120
         terminal = None

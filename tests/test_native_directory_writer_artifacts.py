@@ -4,7 +4,6 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -14,6 +13,7 @@ from ouroboros.headless import copy_child_task_result, finalize_task_artifacts, 
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_status import load_effective_task_result
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._store_shared import remove_store_tree
 
 
 def _registry(tmp_path, monkeypatch, *, git=False, system_target=False):
@@ -50,7 +50,7 @@ def _finish(ctx, task, parent):
     copied = retry_child_task_refs(parent, ctx.drive_root, ctx.task_id)
     assert copied and copied["child_ref_promotion"]["status"] == "complete"
     finalize_task_artifacts(parent, task)
-    shutil.rmtree(ctx.drive_root)
+    remove_store_tree(ctx.drive_root)
     return load_effective_task_result(parent, ctx.task_id)
 
 

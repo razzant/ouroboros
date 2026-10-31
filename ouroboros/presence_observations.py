@@ -88,10 +88,11 @@ def record_transport_queue(root: Path, task_id: str, binding_id: str, snapshot: 
     stored = load_task_result(root, task_id, strict=True) or {}
     presence = (stored.get("metadata") or {}).get("presence") or {}
     event = presence.get("event") or {}
-    if presence.get("binding_id") != binding_id or not event.get("conversation_key"):
+    if (binding_id and binding_id not in {presence.get("binding_id"), presence.get("place_id")}) or not event.get("conversation_key"):
         from ouroboros.presence_runner import PresenceTurnError
 
         raise PresenceTurnError("presence_work_not_found", "work_ref")
+    binding_id = presence.get("binding_id")
     value = validate_transport_queue(snapshot, event["conversation_key"], event.get("source_event_id", ""))
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ref = store_actor_source_bytes(root, task_id, category="context_checkpoints",

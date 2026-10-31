@@ -10,7 +10,9 @@ same rows its core-only projection does. ``factory_review_rows`` mints the
 shipped API default panel into catalog rows for the migration and the wizard.
 
 No settings or transport are read here. Exact discovery misses are typed
-refusals with no partial output. Rows are unpinned by default so Claudexor owns
+refusals with no partial output; a policy's explicit ordered successor (Codex:
+gpt-6.1-sol, then gpt-5.6-sol) answers only from discovery, said in the receipt
+and diagnostics. Rows are unpinned by default so Claudexor owns
 compatible account rotation; Cursor and Agy keep effort in both their compound
 model slug and the explicit row field.
 """
@@ -39,6 +41,7 @@ from ouroboros.configured_subagents import (
     serialize_configured_subagents,
 )
 from ouroboros.provider_models import (
+    image_input_from_modalities,
     model_has_credentials_in_settings,
 )
 from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL, RouteSpec
@@ -70,12 +73,13 @@ _EFFORT_IN_MODEL_ID = frozenset({HARNESS_CURSOR, HARNESS_AGY})
 # from the seat for a harness that spells effort inside the id. The FIRST
 # candidate present in live discovery wins; when none is present the seat
 # refuses. This is an alias table for ONE model family, never a fallback to a
-# different model or to the harness default.
+# different model or to the harness default (a policy's explicit ``then`` is).
 _MODEL_ALIASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
     HARNESS_CLAUDE: {
         "opus-5.5": ("claude-opus-5-5",),
     },
     HARNESS_CODEX: {
+        "gpt-6.1-sol": ("gpt-6.1-sol",),
         "gpt-5.6-sol": ("gpt-5.6-sol",),
     },
     HARNESS_CURSOR: {
@@ -111,6 +115,7 @@ class PresetSeat:
     harness: str
     preference: str
     effort: str
+    then: Tuple[str, ...] = ()  # the policy's ordered successors when discovery lacks ``preference``
 
 
 @dataclass(frozen=True)
@@ -167,15 +172,16 @@ class SubscriptionInstallPreset:
         return values
 
 
-def _seat(surface: str, position: int, harness: str, preference: str, effort: str) -> PresetSeat:
+def _seat(surface: str, position: int, harness: str, spec: "SurfacePolicy") -> PresetSeat:
     return PresetSeat(surface=surface, position=position, harness=harness,
-                      preference=preference, effort=effort)
+                      preference=spec.preference, effort=spec.effort, then=spec.then)
 
 
 @dataclass(frozen=True)
 class SurfacePolicy:
     preference: str
     effort: str
+    then: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -187,8 +193,12 @@ class ReviewerHarnessPolicy:
     scope: SurfacePolicy
 
 
-def _surface(preference: str, effort: str) -> SurfacePolicy:
-    return SurfacePolicy(preference=preference, effort=effort)
+def _surface(preference: str, effort: str, then: Tuple[str, ...] = ()) -> SurfacePolicy:
+    return SurfacePolicy(preference=preference, effort=effort, then=then)
+
+
+# Codex prefers 6.1 Sol and takes 5.6 Sol only when live discovery lacks it (owner 2026-10-18).
+_CODEX_SOL = _surface("gpt-6.1-sol", "medium", ("gpt-5.6-sol",))
 
 
 _REVIEWER_POLICIES: Dict[str, ReviewerHarnessPolicy] = {
@@ -197,8 +207,8 @@ _REVIEWER_POLICIES: Dict[str, ReviewerHarnessPolicy] = {
         scope=_surface("opus-5.5", "medium"),
     ),
     HARNESS_CODEX: ReviewerHarnessPolicy(
-        triad=_surface("gpt-5.6-sol", "medium"),
-        scope=_surface("gpt-5.6-sol", "medium"),
+        triad=_CODEX_SOL,
+        scope=_CODEX_SOL,
     ),
     HARNESS_CURSOR: ReviewerHarnessPolicy(
         triad=_surface("grok-4.6", "medium"),
@@ -208,7 +218,7 @@ _REVIEWER_POLICIES: Dict[str, ReviewerHarnessPolicy] = {
 
 _TASK_POLICIES: Dict[str, SurfacePolicy] = {
     HARNESS_CLAUDE: _surface("opus-5.5", "medium"),
-    HARNESS_CODEX: _surface("gpt-5.6-sol", "medium"),
+    HARNESS_CODEX: _CODEX_SOL,
     HARNESS_CURSOR: _surface("grok-4.6", "high"),
     HARNESS_AGY: _surface("gemini-3.8-flash", "high"),
 }
@@ -224,8 +234,7 @@ def _first_connected(order: Sequence[str], connected: set[str]) -> str:
 
 
 def _policy_seat(surface: str, position: int, harness: str) -> PresetSeat:
-    spec = getattr(_REVIEWER_POLICIES[harness], surface)
-    return _seat(surface, position, harness, spec.preference, spec.effort)
+    return _seat(surface, position, harness, getattr(_REVIEWER_POLICIES[harness], surface))
 
 
 def _compile_policy_seats(connected: Sequence[str]) -> Dict[str, Tuple[PresetSeat, ...]]:
@@ -250,33 +259,34 @@ def _compile_policy_seats(connected: Sequence[str]) -> Dict[str, Tuple[PresetSea
 
 def _compile_task_seats(connected: Sequence[str]) -> Tuple[PresetSeat, ...]:
     return tuple(
-        _seat(SURFACE_SUBAGENT, position, harness,
-              _TASK_POLICIES[harness].preference, _TASK_POLICIES[harness].effort)
+        _seat(SURFACE_SUBAGENT, position, harness, _TASK_POLICIES[harness])
         for position, harness in enumerate(connected, start=1)
     )
 
 
-def _candidate_ids(seat: PresetSeat) -> Tuple[str, ...]:
-    aliases = _MODEL_ALIASES.get(seat.harness, {}).get(seat.preference, ())
+def _candidate_ids(seat: PresetSeat, preference: str = "") -> Tuple[str, ...]:
+    aliases = _MODEL_ALIASES.get(seat.harness, {}).get(preference or seat.preference, ())
     return tuple(spelling.format(effort=seat.effort) for spelling in aliases)
 
 
 def _resolve_seat(seat: PresetSeat,
-                  discovery: Mapping[str, HarnessDiscovery]) -> Tuple[str, Optional[PresetRefusal]]:
-    """The EXACT discovery id for a seat, or a typed refusal naming it."""
-    candidates = _candidate_ids(seat)
+                  discovery: Mapping[str, HarnessDiscovery]) -> Tuple[str, str, Optional[PresetRefusal]]:
+    """The EXACT discovery id for a seat and the preference it answers (the policy's first,
+    else its first ``then`` successor live discovery has), or a typed refusal naming them."""
     found = discovery.get(seat.harness)
     available = set(found.model_ids) if found else set()
-    for candidate in candidates:
-        if candidate in available:
-            return candidate, None
+    for preference in (seat.preference, *seat.then):
+        for candidate in _candidate_ids(seat, preference):
+            if candidate in available:
+                return candidate, preference, None
+    candidates = tuple(c for preference in (seat.preference, *seat.then) for c in _candidate_ids(seat, preference))
     if not candidates:
-        return "", PresetRefusal(
+        return "", "", PresetRefusal(
             code="unknown_model_preference", seat=seat, candidates=(),
             message=(f"No alias is registered for {seat.preference!r} on the "
                      f"{seat.harness} harness — the {seat.surface} seat cannot be resolved."),
         )
-    return "", PresetRefusal(
+    return "", "", PresetRefusal(
         code="model_not_in_discovery", seat=seat, candidates=candidates,
         message=(f"The {seat.harness} harness does not expose "
                  f"{seat.preference!r} (tried {', '.join(candidates)}), so the "
@@ -291,8 +301,8 @@ def _session_target(harness: str, model_id: str) -> str:
     return f"{harness}={model_id}"
 
 
-def _resolved_row(seat: PresetSeat, model_id: str) -> Dict[str, Any]:
-    return {
+def _resolved_row(seat: PresetSeat, model_id: str, chosen: str = "") -> Dict[str, Any]:
+    row = {
         "surface": seat.surface,
         "position": seat.position,
         "harness": seat.harness,
@@ -302,6 +312,21 @@ def _resolved_row(seat: PresetSeat, model_id: str) -> Dict[str, Any]:
         "effort_in_model_id": seat.harness in _EFFORT_IN_MODEL_ID,
         "target_id": _session_target(seat.harness, model_id),
     }
+    if chosen and chosen != seat.preference:
+        row["chosen_preference"] = chosen
+        row["reason"] = (f"{seat.harness} discovery has no {seat.preference!r}; "
+                         f"this seat uses the next preference, {model_id!r}.")
+    return row
+
+
+def _preference_notes(*surfaces: Sequence[Mapping[str, Any]]) -> Tuple[Dict[str, Any], ...]:
+    """One diagnostic per harness that answered with a successor preference (receipt and preview)."""
+    notes: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in (row for rows in surfaces for row in rows if row.get("reason")):
+        notes.setdefault((str(row["harness"]), str(row["model"])), {
+            "code": "model_preference_successor", "harness": row["harness"], "preference": row["preference"],
+            "chosen_preference": row["chosen_preference"], "model": row["model"], "message": row["reason"]})
+    return tuple(notes.values())
 
 
 def _resolve_surface(seats: Sequence[PresetSeat],
@@ -309,10 +334,10 @@ def _resolve_surface(seats: Sequence[PresetSeat],
                      ) -> Tuple[List[Dict[str, Any]], Optional[PresetRefusal]]:
     rows: List[Dict[str, Any]] = []
     for seat in seats:
-        model_id, refusal = _resolve_seat(seat, discovery)
+        model_id, chosen, refusal = _resolve_seat(seat, discovery)
         if refusal is not None:
             return [], refusal
-        rows.append(_resolved_row(seat, model_id))
+        rows.append(_resolved_row(seat, model_id, chosen))
     return rows, None
 
 
@@ -697,7 +722,10 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
     """Suggest a complete zero-key setup from exact raw-route catalog evidence.
 
     Existing usable/custom choices win. The model's backend default supplies
-    the proposal, not an invented model family or a CLI alias table.
+    the proposal, not an invented model family or a CLI alias table. Vision is
+    a row whose input modalities state image input, else blank: Auto, which
+    still tries an unknown route when an image needs one (``vision_routing``).
+    Safety stays blank to inherit Light's full binding unless explicitly pinned.
     """
     from ouroboros.model_slots import MODEL_ROLE_SETTINGS
     from ouroboros.settings_defaults import RETIRED_SETTING_KEYS, SETTINGS_DEFAULTS
@@ -709,8 +737,8 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
     default = next((row for row in model_catalog if row.get("is_default") and row.get("value")), None)
     if default is None:
         return {}
-    vision = next((row for row in model_catalog if "image" in (row.get("input_modalities") or [])
-                   and row.get("value")), default)
+    vision = next((str(row["value"]) for row in model_catalog if row.get("value")
+                   and image_input_from_modalities(row.get("input_modalities")) is True), "")
     proposed = {}
     for role, key in MODEL_ROLE_SETTINGS.items():
         if role == "websearch":
@@ -720,7 +748,7 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
         current = str(settings.get(key) or "")
         if current and current != str(SETTINGS_DEFAULTS.get(key) or ""):
             continue
-        proposed[key] = "" if role == "fallback" else str((vision if role == "vision" else default)["value"])
+        proposed[key] = {"fallback": "", "vision": vision, "safety": ""}.get(role, str(default["value"]))
     return proposed
 
 
@@ -804,6 +832,7 @@ def compile_install_preset(
         if invalid is not None:
             return SubscriptionInstallPreset(connected=connected, refusal=invalid)
 
+    diagnostics = tuple(diagnostics) + _preference_notes(task_rows, *resolved.values())
     serialized_available = serialize_configured_subagents(available)
     receipt = {
         "version": SUBSCRIPTION_PRESET_VERSION,

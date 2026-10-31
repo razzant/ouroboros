@@ -111,12 +111,11 @@ def test_a_native_participants_reply_object_is_read_whole_without_extraction(har
     assert facts['status'] == 'answered' and facts['reply']['prose'] == 'Looks sound to me.'
 
 
-def test_an_ask_delivers_the_full_dialogue_and_acceptance_keeps_its_directive_ledger(harness):  # noqa: F811
-    """The complete planning dialogue (no display cap) reaches a packet participant, secrets
-    redacted and a relayed peer named by its provenance; acceptance keeps its own ledger of
-    the owner's directives."""
+def test_an_ask_delivers_the_full_dialogue_to_a_packet_participant(harness):  # noqa: F811
+    """The complete planning dialogue (no display cap) reaches a packet participant as the room
+    wrote it and a relayed peer named by its provenance (the acceptance packet's own ledger of
+    the owner's directives left with the task-acceptance machine)."""
     from ouroboros.owner_mailbox import write_task_message
-    from ouroboros.review_evidence import build_task_acceptance_evidence
 
     ctx = harness.make_ctx()
     ctx.current_chat_id = 1
@@ -133,8 +132,5 @@ def test_an_ask_delivers_the_full_dialogue_and_acceptance_keeps_its_directive_le
                      if m.get("role") == "user")
     assert "## OWNER REQUIREMENTS AND DECISIONS" not in packet
     assert "Option A is faster but less flexible. " + "detail " * 6000 in packet
-    assert "sk-abcdefghijklmnopqrstuvwxyz1234" not in packet
+    assert "Build the deck; key sk-abcdefghijklmnopqrstuvwxyz1234" in packet
     assert "from task sibling-7, relayed by ancestor parent-9" in packet
-    rows = build_task_acceptance_evidence(ctx, llm_trace={"tool_calls": []}, drive_root=harness.drive,
-                                          task_id=ctx.task_id)["owner_requirements_and_decisions"]
-    assert rows[0]["content"] == "Build the deck"

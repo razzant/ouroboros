@@ -163,16 +163,16 @@ def _effective_helper_models(
     """Resolve EVERY model that materially assists a measured run, with its role.
 
     With ``task_review_mode=required`` the host forces a multi-model
-    task-acceptance review whose feedback re-enters the measured agent's
-    context, so the acceptance triad / light / web-search models genuinely
+    result review whose findings re-enter the measured agent's
+    context, so the review pool / light / web-search models genuinely
     assist the run. Scope review and the advisory pre-review are commit-time
     gates that never fire inside a task and are NOT declared. Declaring only
     the measured model in metadata.yaml would misrepresent the submission.
     Values mirror what the container EXECUTES: the review pool is the marked
     rows of the roster the container adapter forwards (operator env first, else
     the host settings file; ``container_subagents_setting``). Inside a
-    Terminal-Bench task nothing commits: the pool reaches the run through task
-    acceptance, which runs every seat on its own delivery (owner R2,
+    Terminal-Bench task nothing commits: the pool reaches the run through the
+    result review, which runs every seat on its own delivery (owner R2,
     2026-09-01) — an api seat executes in the container and is declared by
     model id; an agent-session seat structurally cannot (the image has no
     harness CLI/daemon and the forwarded-env allowlist carries no harness
@@ -954,7 +954,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--review-slots",
         type=int,
         default=1,
-        help="number of in-task acceptance reviewers for --all-model (default 1; 3 identical = monoculture, no diversity)",
+        help="number of in-task result reviewers for --all-model (default 1; 3 identical = monoculture, no diversity)",
     )
     parser.add_argument(
         "--review-effort",

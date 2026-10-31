@@ -4,8 +4,8 @@ records — pure functions only (no I/O, no ToolContext).
 ``resolve_constitutional`` decides whether declared paths change Ouroboros's own
 body, with the locator normalisation ``ouroboros.tools.plan_evidence`` shares; the
 planning organ's body predicate (``plan_ask.plan_is_body``) composes it. ``spec_hash``
-and ``spec_delta`` read the specs of earlier-schema (v1/v2) plan-review records for
-the read-only views and the reflection; nothing writes a spec any more.
+reads the specs of earlier-schema (v1/v2) plan-review records for the read-only
+views; nothing writes a spec any more.
 
 Design principle (BIBLE P5, owner-approved 2026-08-15): the HOST checks ONE
 structural path fact and never interprets the domain — a plan for a code change, a
@@ -24,9 +24,6 @@ from typing import Any, Iterable, Mapping, Optional
 from ouroboros.tool_access import path_is_relative_to
 
 
-_SPEC_STRING_LISTS = (
-    "in_scope", "non_goals", "invariants", "affected_paths", "affected_resources", "evidence",
-)
 _URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 _FILE_SCHEME = "file://"
 _TASK_LOCATOR_PREFIX = "task:"
@@ -43,91 +40,6 @@ def _canonical_hash(payload: Any) -> str:
 def spec_hash(spec: Mapping[str, Any]) -> str:
     """sha256 over canonical JSON (sorted keys, compact separators): stable under key order/whitespace."""
     return _canonical_hash(dict(spec))
-
-
-def _by_id(items: Any) -> dict[str, dict]:
-    return {
-        str(item["id"]): dict(item)
-        for item in (items or []) if isinstance(item, Mapping) and item.get("id")
-    }
-
-
-def _text_by_id(spec: Mapping[str, Any]) -> dict[str, str]:
-    """id → identifying text for every id-bearing element (invariants positional)."""
-    out = {f"invariant_{i}": t for i, t in enumerate(spec.get("invariants") or [], start=1)}
-    for key, text_key in (("acceptance_claims", "claim"), ("decisions", "choice"), ("deferred", "what")):
-        for item in spec.get(key) or []:
-            if isinstance(item, Mapping) and item.get("id"):
-                out[str(item["id"])] = str(item.get(text_key) or "")
-    return out
-
-
-def _renumbered(prev: Mapping[str, Any], spec: Mapping[str, Any]) -> list[dict]:
-    """Same identifying text under a DIFFERENT id between cycles → ``[{from, to, text}]``.
-    Ids are positional/minted, so an agent dropping or reordering one element shifts the
-    later ones; the reviewer must re-target ``breaks`` against the CURRENT ids (B-02)."""
-    before, after = _text_by_id(prev), _text_by_id(spec)
-    after_by_text: dict[str, list[str]] = {}
-    for fid, text in after.items():
-        after_by_text.setdefault(text, []).append(fid)
-    out: list[dict] = []
-    for old_id, text in before.items():
-        if not text or after.get(old_id) == text:
-            continue
-        for new_id in after_by_text.get(text, []):
-            if new_id != old_id and before.get(new_id) != text:
-                out.append({"from": old_id, "to": new_id, "text": text})
-                break
-    return out
-
-
-def spec_delta(prev_spec: Mapping[str, Any] | None, spec: Mapping[str, Any]) -> dict:
-    """What changed between two normalized specs (wave ≥2 packets).
-
-    Id-bearing collections (acceptance_claims, decisions, deferred) diff by id
-    (added / removed / changed content); plain string lists diff by text; the
-    goal is a changed flag; ``renumbered`` lists elements whose text moved to a
-    different id (positional ids shift when an earlier element is dropped or
-    reordered); ``declared_keys_changed`` reports a spec whose set of declared keys
-    itself moved (a spec stored before ``affected_paths`` existed declares no such
-    key at all). ``prev_spec=None`` means everything is added.
-    """
-    prev = dict(prev_spec or {})
-    ids: dict[str, list[str]] = {"added": [], "removed": [], "changed": []}
-    for key in ("acceptance_claims", "decisions", "deferred"):
-        before, after = _by_id(prev.get(key)), _by_id(spec.get(key))
-        ids["added"].extend(sorted(set(after) - set(before)))
-        ids["removed"].extend(sorted(set(before) - set(after)))
-        ids["changed"].extend(sorted(k for k in set(before) & set(after) if before[k] != after[k]))
-    lists: dict[str, dict[str, list[str]]] = {}
-    for key in _SPEC_STRING_LISTS:
-        before_l, after_l = list(prev.get(key) or []), list(spec.get(key) or [])
-        lists[key] = {
-            "added": [t for t in after_l if t not in before_l],
-            "removed": [t for t in before_l if t not in after_l],
-        }
-    goal_changed = str(prev.get("goal") or "") != str(spec.get("goal") or "")
-    # A key that appears or disappears between two normalized specs is a change even when both
-    # sides read as empty: `affected_paths` ABSENT (stored before the field existed) and
-    # `affected_paths: []` ("this work changes no files") are different claims, and the spec
-    # hash already says so — the delta the reviewer reads must not say they are the same.
-    declared_keys_changed = prev_spec is not None and (
-        {key for key in prev if key != "normalization_omissions"}
-        != {key for key in spec if key != "normalization_omissions"}
-    )
-    changed = goal_changed or declared_keys_changed or any(ids.values()) or any(
-        entry["added"] or entry["removed"] for entry in lists.values()
-    )
-    return {
-        "changed": changed,
-        "goal_changed": goal_changed,
-        "declared_keys_changed": declared_keys_changed,
-        "ids": ids,
-        "lists": lists,
-        "renumbered": _renumbered(prev, spec),
-        "prev_hash": spec_hash(prev) if prev_spec is not None else "",
-        "hash": spec_hash(spec),
-    }
 
 
 # ------------------------------------------------------------------ constitutional

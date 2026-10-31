@@ -408,7 +408,7 @@ def test_gr4_6_toggle_evolution_clears_owner_stop_before_the_campaign_mint(
     monkeypatch.setattr(el, "evolution_block_reason", lambda: "")
     monkeypatch.setattr(
         el, "start_evolution_campaign",
-        lambda objective, source="": seen.append(
+        lambda objective, source="", **kwargs: seen.append(
             bool(state.load_state().get("evolution_owner_stopped"))
         ) or {"status": "active"},
     )

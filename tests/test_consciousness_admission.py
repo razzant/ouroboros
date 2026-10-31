@@ -112,7 +112,7 @@ def test_subagents_and_owner_work_pass_the_door_untouched(door, monkeypatch):
     assert "_admission_blocked" not in queue.enqueue_task(child)
     assert child["metadata"]["initiator"] == "consciousness"  # the label rides; the door ignores children
     owner = {"id": "o1", "type": "task", "text": "owner work", "chat_id": 1, "delegation_role": "root",
-             "metadata": {"client_message_id": "cm-1"}}
+             "metadata": {"client_message_id": "cm-1", "work_kind": "owner"}}
     assert "_admission_blocked" not in queue.enqueue_task(owner)
     assert [t["id"] for t in pending] == ["kid", "o1"]
     assert queue.live_consciousness_root_count() == 0

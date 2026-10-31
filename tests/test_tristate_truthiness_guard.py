@@ -34,10 +34,12 @@ SCAN_FILES = ("server.py",)
 
 # Readers whose None means "unknown", not "no". A successor reader joins this set
 # in the commit that introduces it: ``image_input_from_row`` is the one catalog-row
-# parser and ``_image_input_verdict`` the policy's fail-soft read (``vision_routing``).
+# parser, ``image_input_from_modalities`` (``provider_models``) the modality-list
+# parser it shares and ``_image_input_verdict`` the policy's fail-soft read (``vision_routing``).
 # ``route_image_input`` returns an evidence record whose ``verdict`` attribute is out
 # of this lint's reach (see the module docstring).
-TRISTATE_READERS = frozenset({"supports_vision", "image_input_from_row", "_image_input_verdict"})
+TRISTATE_READERS = frozenset({"supports_vision", "image_input_from_row", "image_input_from_modalities",
+                              "_image_input_verdict"})
 
 # (repo-relative path, line number) -> why this site may treat unknown as no.
 ALLOWED: dict[tuple[str, int], str] = {}

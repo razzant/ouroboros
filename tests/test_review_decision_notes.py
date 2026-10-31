@@ -198,19 +198,18 @@ def test_structured_critic_answer_shrinks_known_mirrors_but_keeps_typed_ids(stag
     assert any(LONG in review_ledger.read_source(ctx.drive_root, TASK, seat['response']['source']).decode('utf-8')
                for seat in history['rounds'][0]['reviewers'] if seat.get('response'))
     shown = _index(after)[-1]
-    for key in ('aggregate', 'per_row', 'per_question', 'quorum', 'reason'):
-        if key in history['rounds'][0]['verdict']:
-            assert shown['rounds'][0]['verdict'][key] == history['rounds'][0]['verdict'][key]
-    for old, new in zip(history['rounds'][0]['reviewers'], shown['rounds'][0]['reviewers']):
-        assert old['seat_id'] == new['seat_id'] and old['status'] == new['status']
+    # The record's exact answers and verdict mirrors are behind its one address; each seat's part keeps its
+    # typed identity and recorded statuses in its decision row beside the actor's note.
+    (entry,) = [e for e in shown['addresses'].values() if e['read'].get('tool') == 'query_data']
+    assert entry['read']['arguments']['ids'] == [rid] and 'rounds' not in shown
+    assert f"aggregate verdict {history['rounds'][0]['verdict']['aggregate']}" in entry['what']
+    for old in history['rounds'][0]['reviewers']:
         for part, answer in old['answers'].items():
-            for key in ('status', 'verdict', 'critical', 'coverage'):
-                assert new['answers'][part][key] == answer[key]
-            for field in ('items', 'findings', 'discarded'):
-                for item, projected in zip(answer.get(field, []), new['answers'][part].get(field, [])):
-                    for key in ('item', 'verdict', 'severity', 'obligation_id', 'slot_id'):
-                        if key in item:
-                            assert projected[key] == item[key]
+            (row,) = [r for r in shown['decision_rows'] if r.get('decision_kind') == 'review_part'
+                      and r.get('seat_id') == old['seat_id'] and r.get('part') == part]
+            assert row['status'] == {'recorded_verdict': answer['verdict'], 'response_status': answer['status']}
+            assert row['authored_view']['authorship'] == 'actor' and LONG not in json.dumps(row)
+            assert shown['addresses'][row['source']]['what'].startswith(f"answer of seat {old['seat_id']}")
     record_context_view(ctx, after, [])
     inspected = json.loads(_compact_context(ctx, inspect=True))
     assert all(e['representation'] == 'actor_review_note' for e in inspected['review_decisions']['entries'])
@@ -269,13 +268,19 @@ def test_closure_carried_findings_and_unknown_extension_are_accounted_for(harnes
     assert any(e['decision_kind'] == 'plan_closure' for e in view.review_note_options(ctx)['entries'])
     after, receipt, _ = _apply(ctx, _capture(ctx), review_notes=notes)
     assert receipt['status'] == 'applied' and LONG not in str(after)
-    assert wave['closure_notes'][0] not in str(after) and 'KEEP_UNKNOWN_EXTENSION_EXACT' in str(after)
+    assert wave['closure_notes'][0] not in str(after)
     assert any(p['path'][-1] == 'future_review_extension' for p in receipt['review_notes']['preserved_fields'])
     assert _state(harness) == canonical
+    # The unknown extension and the carried findings travel by the wave's one address, which resolves exactly.
+    shown = _index(after)[-1]
+    assert 'KEEP_UNKNOWN_EXTENSION_EXACT' not in str(shown) and 'rounds' not in shown
+    identity = {k: wave['wave_artifact'][k] for k in ('kind', 'root', 'path', 'size', 'sha256')}
+    entry = next(e for e in shown['addresses'].values() if e.get('source_ref') == identity)
+    assert entry['what'].startswith('plan review wave') and entry['read']['arguments']['path'] == identity['path']
+    source = json.loads(read_actor_source_bytes(ctx.drive_root, ctx.task_id, entry['source_ref']))
+    assert source['reviewer_outputs'][0]['future_review_extension'] == {'reason': 'KEEP_UNKNOWN_EXTENSION_EXACT'}
     old = history['rounds'][-1]['reviewers'][0]['carried_findings'][0]
-    new = _index(after)[-1]['rounds'][-1]['reviewers'][0]['carried_findings'][0]
-    assert all(new[k] == old[k] for k in ('finding_id', 'class', 'breaks'))
-    source = json.loads(read_actor_source_bytes(ctx.drive_root, ctx.task_id, wave['wave_artifact']))
+    assert all(source['actors'][0]['carried_findings'][0][k] == old[k] for k in ('finding_id', 'class', 'breaks'))
     assert source['closure_notes'] == wave['closure_notes']
 
 

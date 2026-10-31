@@ -55,6 +55,13 @@ _RESTART_BINDING = "OUROBOROS_PLANNED_RESTART_BINDING_HANDLE"
 _FAIL_AT = os.environ.get("OUROBOROS_BODY_SWITCH_FAIL_AT", "")
 
 
+def installation_panic(root):
+    # Both the serving helper and its captured copy use this stdlib-only reader.
+    import runpy
+    reader = runpy.run_path(os.path.join(os.path.dirname(__file__), "installation_stop.py"))
+    return reader["installation_panic"](root)
+
+
 class _Stuck(Exception):
     """The transition cannot continue without the owner; the tree is left as found."""
 
@@ -355,7 +362,7 @@ def _armed_refusal(root, handoff):
         return "branch_changed:%s" % (_branch(root) or "detached")
     if _git(root, "cat-file", "-e", "%s^{commit}" % handoff["cand"], check=False)[0] != 0:
         return "candidate_missing"
-    if os.path.exists(os.path.join(handoff.get("data_dir") or "", "state", "panic_stop.flag")):
+    if installation_panic(handoff.get("data_dir") or ""):
         return "panic_stop"
     dirt = _dirty(root, [row["path"] for row in handoff["switch"]])
     return ("switch_set_dirty:%s" % dirt.splitlines()[0]) if dirt else ""

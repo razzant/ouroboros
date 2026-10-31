@@ -1,5 +1,7 @@
 """Model answer identity and host disclosures through the real terminal consumers."""
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 from collections import deque
 import hashlib
@@ -11,6 +13,7 @@ import pytest
 
 from ouroboros import agent_task_pipeline as pipeline, loop
 from ouroboros.task_results import load_task_result, write_task_result
+from ouroboros.test_evidence import diagnostic_directory
 from tests._delivery_candidate_shared import write_child, write_confirmed_disposition_fixture
 from tests.test_delivery_forced_finalization import _bind_host_pass, _forced_test_context
 from tests.test_ui_smoke_playwright import direct_server_with_data as _direct_server_with_data
@@ -30,25 +33,20 @@ ADVISORY_PLAN_DECISION = {
 }
 
 
-@pytest.mark.parametrize("change", ["generation", "superseded", "replaced_panel"])
+@pytest.mark.parametrize("change", ["generation", "released"])
 def test_equal_evidence_fields_cannot_revive_changed_owner_authority(tmp_path, monkeypatch, change):
     _loop, tools, ctx, trace = _forced_test_context(tmp_path)
     old = loop._replace_delivery_candidate(tools, ctx, trace, ANSWER, control="candidate")
-    prior = _bind_host_pass(loop, tools, trace, old)
+    _bind_host_pass(loop, tools, trace, old)
     before = old.evidence_revision, old.evidence_fingerprint
     if change == "generation":
         tools._ctx._task_acceptance_owner_generation = 1
         tools._ctx.owner_message_admission_agent = SimpleNamespace(_owner_message_generation=2)
-    elif change == "superseded":
+    else:
         # The release notification follows real ingress; it is no longer a
         # declaration that the task's meaning changed by itself.
         tools._ctx._owner_directives = [{"content": "Use the newly supplied source."}]
-        loop._supersede_task_acceptance_for_owner_followup(tools._ctx, trace)
-    else:
-        prior["superseded_by_revision"] = True
-        trace["review_runs"].append({**prior, "superseded_by_revision": False,
-                                   "panel_id": "new-panel", "binding_hash": "new-binding", "aggregate_signal": "FAIL"})
-        trace["review_decision"].update(panel_id="new-panel", binding_hash="new-binding")
+        loop._release_for_owner_followup(tools._ctx, trace)
     assert loop._current_delivery_candidate(ctx, trace) is None
     assert (old.evidence_revision, old.evidence_fingerprint) == before
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_kw: (None, 0.0))
@@ -59,7 +57,6 @@ def test_equal_evidence_fields_cannot_revive_changed_owner_authority(tmp_path, m
     assert text == ANSWER and current is not old
     assert current.acceptance_binding["authoritative"] is False
     assert current.acceptance_binding["stale_evidence"] is True
-    assert prior["superseded_by_revision"] is True
     assert "STALE-EVIDENCE NOTICE" in usage["terminal_host_notice"]
 
 
@@ -69,7 +66,7 @@ def test_normal_finalization_without_a_candidate_keeps_raw_answer(tmp_path, monk
     assert loop._live_delivery_candidate(ctx) is None
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_kw: False)
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_a, **_kw: NOTICE)
+    monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_a, **_kw: NOTICE)
     text, usage, _trace = loop._no_tool_final_answer(answer, ctx, trace, tools, queue.Queue(), set(), lambda _t: None)
     assert text == answer and usage["terminal_host_notice"] == NOTICE
     assert NOTICE not in text
@@ -87,7 +84,7 @@ def test_simultaneous_plan_and_deferred_limitations_stay_one_notice_beside_a_cle
     in the notice text; a commit that also carries the plan fact in typed state
     must do so ADDITIVELY and leave this slot alone.
 
-    The disclosure is injected through ``_force_plan_disclosure`` exactly as the
+    The disclosure is injected through ``_plan_gate_disclosure`` exactly as the
     neighbouring tests do, so what is pinned here is the COMPOSITION and the
     typed outcome, never the predicate that decides whether a review is open.
     """
@@ -104,8 +101,8 @@ def test_simultaneous_plan_and_deferred_limitations_stay_one_notice_beside_a_cle
     loop_mod, registry, ctx, trace = _forced_test_context(tmp_path)
     monkeypatch.setattr(loop_mod, "_compute_subagent_handoff", lambda *_a, **_k: None)
     monkeypatch.setattr(loop_mod, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr(loop_mod, "_force_plan_disclosure", lambda *_a, **_k: plan_suffix)
-    monkeypatch.setattr(loop_mod, "_run_task_acceptance_review_once", lambda **_kw: False)
+    monkeypatch.setattr(loop_mod, "_plan_gate_disclosure", lambda *_a, **_k: plan_suffix)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_kw: False)
 
     result = loop_mod._no_tool_final_answer(
         ANSWER, ctx, trace, registry, queue.Queue(), set(), lambda _text: None,
@@ -143,70 +140,29 @@ def test_simultaneous_plan_and_deferred_limitations_stay_one_notice_beside_a_cle
 
 
 @pytest.mark.parametrize("verdict", ["FAIL", "PASS"])
-def test_host_notice_does_not_replace_or_supersede_an_unchanged_answer(tmp_path, monkeypatch, verdict):
-    import ouroboros.review_substrate as rs
+def test_a_delivery_warning_keeps_the_bound_result_reviews_assessment(tmp_path, monkeypatch, verdict):
+    """#533: a delivery warning (a degraded candidate beside its host notice) is a fact of its
+    own; it never erases the assessment of the result review bound to the delivered answer, in
+    the loop outcome, the stored task result and the terminal event alike."""
     from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.outcomes import derive_loop_outcome, normalize_outcome_axes, public_task_result
+    from ouroboros.tools.review_result import _bind_review_run
 
     _loop, tools, ctx, trace = _forced_test_context(tmp_path)
     tools._ctx.task_contract = build_task_contract({"id": "parent1", "expected_output": "A report"})
     write_task_result(tmp_path, "parent1", "running", task_contract=tools._ctx.task_contract)
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
-    monkeypatch.setattr(rs, "triad_delivery_slots", lambda **_kw: [object()])
-    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_kw: False)
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_a, **_kw: NOTICE)
-    subjects = []
-
-    def review(request, **_kwargs):
-        subjects.append(request.subject)
-        return rs.ReviewRunResult(
-            request={"surface": "task_acceptance", "policy": {"min_successful_slots": 1}},
-            actors=[{"slot_id": "s0", "signal": verdict, "parsed": {
-                "verdict": verdict, "outcome_tier": "solved" if verdict == "PASS" else "best_effort",
-                "criteria_used": [{"criterion": "report", "status": "supported", "evidence_refs": ["artifact:1"]}],
-            }}], parsed_findings=[], aggregate_signal=verdict,
-        )
-
-    monkeypatch.setattr(rs, "run_review_request", review)
-    # Auto reviews the author's typed nomination, never the declared expected_output (#1731).
-    from tests.test_loop_acceptance_gate import _nominate_acceptance
-
-    _nominate_acceptance(trace, task_id="parent1", subject=ANSWER)
-
-    def finalize():
-        result = loop._no_tool_final_answer(ANSWER, ctx, trace, tools, queue.Queue(), set(), lambda _t: None)
-        if result is not None:
-            assert result[0] == ANSWER
-            assert result[1]["terminal_host_notice"] == NOTICE
-        return result
-
-    first = finalize()
-    # A real FAIL still requests its ordinary improvement; a clean PASS also reaches
-    # the author once before delivery (G1 #1737/D12: review before decision).
-    assert first is None
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-
-    expose_acceptance_feedback(trace, ctx.messages, "parent1")  # the next Main request carried it
-    candidate = tools._ctx._delivery_candidate
-    assert finalize() is not None  # An unchanged answer reuses the verdict; its notice cannot demand a rewrite.
-    binding = dict(candidate.acceptance_binding)
-    assert finalize() is not None
-    assert subjects == [ANSWER]
-    assert tools._ctx._delivery_candidate is candidate
-    assert candidate.content_sha256 == hashlib.sha256(ANSWER.encode()).hexdigest()
-    assert candidate.revision == 1 and candidate.acceptance_binding == binding
-    assert not trace["review_runs"][0].get("superseded_by_revision")
-    assert trace["acceptance_decision"]["status"] == ("accepted" if verdict == "PASS" else "finalized_unaccepted")
-
-    # #533: transport/finalization warning must not erase the bound assessment.
-    from ouroboros.outcomes import derive_loop_outcome, normalize_outcome_axes, public_task_result
-    from ouroboros.task_results import load_task_result
+    loop._replace_delivery_candidate(tools, ctx, trace, ANSWER, control="candidate")
+    # The result review the delivery step bound to this answer (review_result.result_review_at_delivery).
+    findings = [{"severity": "critical", "item": "report", "reason": "the totals do not add up"}]
+    _bind_review_run(trace, {"record_id": "result-record-1", "verdict": {
+        "aggregate": verdict, "critical_findings": findings if verdict == "FAIL" else []}}, "b" * 64, "advisory")
 
     trace["delivery_candidate"].update(degraded=True, degraded_reason="advisory_plan_review_open")
     usage = {"terminal_host_notice": NOTICE}
     axes = derive_loop_outcome(ANSWER, usage, trace)["outcome_axes"]
     expected = "pass" if verdict == "PASS" else "fail"
     assert axes["objective"]["status"] == expected
-    assert axes["objective"]["source"] == "task_acceptance_review"
+    assert axes["objective"]["source"] == "result_review"
     assert axes["execution"]["status"] == "degraded"
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
     task = {"id": "parent1", "type": "task", "chat_id": 1, "text": "Produce a report",
@@ -214,20 +170,13 @@ def test_host_notice_does_not_replace_or_supersede_an_unchanged_answer(tmp_path,
     pipeline._store_task_result(env, task, ANSWER, usage, trace)
     stored = load_task_result(tmp_path, "parent1")
     assert stored["outcome_axes"]["objective"]["status"] == expected
-    assert normalize_outcome_axes(public_task_result(stored))["objective"]["source"] == "task_acceptance_review"
+    assert normalize_outcome_axes(public_task_result(stored))["objective"]["source"] == "result_review"
     pending = []
     pipeline.emit_task_results(env, None, None, pending, task, ANSWER, usage, trace,
                               start_time=0.0, drive_logs=tmp_path / "logs")
     terminal = next(row for row in pending if row["type"] == "task_done")
     assert terminal["outcome_axes"]["objective"]["status"] == expected
     assert load_task_result(tmp_path, "parent1")["outcome_axes"]["execution"]["status"] == "degraded"
-
-    # Real input changes still supersede the binding even when answer bytes match.
-    tools._ctx._owner_directives = [{"text": "Use the newly supplied source."}]
-    changed = loop._replace_delivery_candidate(tools, ctx, trace, ANSWER, control="candidate")
-    assert changed is not candidate and changed.revision > candidate.revision
-    assert changed.acceptance_binding["authoritative"] is False
-    assert trace["review_runs"][0]["superseded_by_revision"] is True
 
 
 def _emit_terminal(tmp_path, monkeypatch, *, direct=False, project=False, child=False, notice=NOTICE, answer=ANSWER):
@@ -458,7 +407,6 @@ def test_a_host_notice_never_becomes_a_second_chat_row(tmp_path, monkeypatch, di
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat: None)
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_kw: None)
     monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, append_jsonl=append_jsonl,
@@ -512,14 +460,13 @@ def test_the_notice_field_survives_every_machine_reader_without_a_chat_row(tmp_p
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat: None)
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_kw: None)
     monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     delivery._handle_send_message(event, SimpleNamespace(
         DRIVE_ROOT=tmp_path, RUNNING={}, append_jsonl=append_jsonl, send_with_budget=message_bus.send_with_budget))
     chats = [row for row in frames if row.get("type") == "chat"]
     assert [(row["role"], row["content"]) for row in chats] == [("assistant", ANSWER)]
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert [row["text"] for row in rows if not row.get("type")] == [ANSWER]
 
 
@@ -590,7 +537,6 @@ def test_open_custody_is_its_own_card_row_live_and_on_history_replay(tmp_path, m
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat: None)
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_kw: None)
     monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     owed_while_sending = []
@@ -744,7 +690,7 @@ def test_browser_renders_the_model_answer_without_a_host_bubble(direct_server_wi
             answer.wait_for(state="visible", timeout=15000)
             assert "Plan review remained open" not in answer.inner_text()
             assert page.locator(".chat-bubble.system").count() == 0
-            page.screenshot(path=str(data.parent / "terminal-host-notice.png"), full_page=True)
+            page.screenshot(path=str(diagnostic_directory(data.parent, "terminal-host-notice") / "terminal-host-notice.png"), full_page=True)
             page.reload(wait_until="domcontentloaded")
             answer.wait_for(state="visible", timeout=15000)
             assert answer.count() == 1 and page.locator(".chat-bubble.system").count() == 0

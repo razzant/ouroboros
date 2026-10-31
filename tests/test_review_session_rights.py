@@ -72,7 +72,7 @@ def test_a_writable_seat_runs_in_its_own_copy_and_leaves_evidence(repo, tmp_path
     facts = run_delegated_review_session(prompt="review", root=str(repo), custody_drive=drive,
                                          invocation=_invocation(access="full", checking_source=source))
     body = FakeGateway.instances[-1].start_requests[0]
-    area = review_checking.seat_dir(drive, "task-1", "op-1") / "area"
+    area = review_checking.seat_dir(drive, "task-1", "op-1") / "area.noindex"
     assert body["mode"] == "agent" and body["access"] == "full" and body["scope"]["root"] == str(repo)
     assert body["execution"] == {"isolation": "live", "delegated": True, "workspaceRoot": str(area)}
     assert "CHECKING COPY" in body["instructions"] and source["tree"] in body["instructions"]
@@ -80,8 +80,7 @@ def test_a_writable_seat_runs_in_its_own_copy_and_leaves_evidence(repo, tmp_path
     row = custody.invocation_record(drive, FakeGateway.instances[-1].start_keys[0])
     assert row["authority_source"] == "investigation" and row["execution_root"] == str(area)
     assert facts["requested_access"] == "full" and facts["checking_evidence"]["status"] == "retained"
-    assert not area.exists()  # complete capture follows the settled success receipt
-    assert facts["checking_evidence"]["refresh_safe"] is True
+    assert not area.exists()  # the copy goes once its receipt is written
     assert pathlib.Path(facts["checking_evidence"]["evidence_dir"], "summary.json").is_file()
     assert (repo / "f.txt").read_text() == "A staged\nB unstaged\n" and _git(repo, "write-tree") == source["tree"]
 
@@ -212,7 +211,7 @@ def test_common_review_consumer_preserves_seat_access_and_evidence(
     assert actor["usage"]["requested_access"] == access
     if access == "full":
         evidence = actor["usage"]["checking_evidence"]
-        assert evidence["status"] == "retained" and evidence["refresh_safe"]
+        assert evidence["status"] == "retained"
         assert pathlib.Path(evidence["evidence_dir"], "summary.json").is_file()
         assert not pathlib.Path(body["execution"]["workspaceRoot"]).exists()
     else:

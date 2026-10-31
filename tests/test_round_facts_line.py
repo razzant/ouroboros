@@ -182,51 +182,6 @@ def test_a_continue_successor_sees_its_whole_work_group_headroom(tmp_path, monke
     assert note.checkpoint["budget_axis"] == "whole_work_allowance"
 
 
-@pytest.mark.parametrize("anchor", ["start", "wait", "legacy"])
-@pytest.mark.parametrize("compaction", [
-    {"cost": 0.75}, {"cost": 0.75, "cost_estimated": True}, {"cost_final": False},
-], ids=["priced", "estimated", "unpriced"])
-def test_compaction_usage_reaches_the_next_nanny_fact_without_another_response(
-    tmp_path, monkeypatch, anchor, compaction,
-):
-    """Deferred/overflow compaction folds money before the next facts row, not a response.
-
-    Exercise that production fold and the real facts consumer. No provider call,
-    new round or delegation request is needed to make already-recorded cost visible.
-    """
-    from ouroboros import loop_round_limits
-    from ouroboros.nanny_pacing import note_nanny_delegate_activity
-
-    monkeypatch.setattr(task_pacing, "shared_wallet_observation", lambda: {"status": "no_global_limit"})
-    monkeypatch.setattr(loop, "_loop_tree_accounting", lambda **_kw: None)
-    monkeypatch.setattr(loop_round_limits, "estimate_cost_optional", lambda *_a, **_k: None)
-    context = _facts_ctx(tmp_path, monkeypatch, _nanny_route_dispatched=True)
-    usage = context.accumulated_usage
-    usage["cost"] = 1.5
-    tool_ctx = context.tools._ctx
-    tool_ctx._accumulated_usage = usage
-    verb = "delegate_start" if anchor == "start" else "delegate_wait"
-    note_nanny_delegate_activity(tool_ctx, 2, usage, [{"function": {"name": verb}}])
-    if anchor == "legacy":
-        tool_ctx._nanny_delegate_baseline = {}
-    before = dict(tool_ctx._nanny_delegate_baseline)
-    progress = dict(tool_ctx._nanny_metered_progress)
-    loop_round_limits._account_compaction_usage(usage, compaction, None, "task")
-    assert append_context_facts(context)
-    line = context.messages[-1]["content"]
-    total = 1.5 + compaction.get("cost", 0)
-    assert f"own recorded cost ${total:.2f}" in line
-    if anchor == "legacy":
-        assert "historical cost anchor unavailable" in line
-    else:
-        delta = total - (1.5 if anchor == "start" else 0)
-        assert f"own recorded cost ${delta:.2f}" in line.split("nanny:", 1)[1]
-        if compaction.get("cost_estimated") or compaction.get("cost_final") is False:
-            assert "subtotal, not final" in line.split("nanny:", 1)[1]
-    assert tool_ctx._nanny_delegate_baseline == before
-    assert tool_ctx._nanny_metered_progress == progress
-
-
 @pytest.mark.parametrize("later_calls", [0, 1, 2])
 def test_answer_fact_distinguishes_a_saved_line_from_its_current_currency(later_calls):
     from ouroboros.loop_messages import _final_answer_fact
@@ -262,3 +217,41 @@ def test_changed_route_reprepare_refreshes_money_without_rereading_unchanged_fac
     assert len(reads) == 2
     assert not append_context_facts(context)
     assert len(reads) == 2
+
+
+def test_an_owner_turn_names_its_own_wait_so_far_and_a_wake_has_none(monkeypatch):
+    """The round line reads the turn's own execution from the process-local registry: accepted at T,
+    this request N s later so far with the slowest phase; after the first observed dispatch, when it
+    went out and on which basis. A wake (nobody awaits it) carries no such segment."""
+    from collections import deque
+
+    from supervisor import active_activity
+    from supervisor.active_activity import get_direct_activity_registry
+
+    monkeypatch.setattr(active_activity, "_DIRECT_TURNS", deque(maxlen=100))
+    monkeypatch.setattr("supervisor.state.append_jsonl", lambda path, row, *a, **k: True)
+    registry = get_direct_activity_registry()
+    registry.clear()
+    accepted = _iso(T - 20)
+    try:
+        owner = registry.register("owner-turn", 1, reply_expected=True, origin_message_ref={
+            "chat_id": 1, "client_message_id": "m-1", "ts": accepted, "text_sha256": "0" * 64})
+        owner.execution.entered_at = T  # the handler's thread began twenty seconds after acceptance
+        owner.execution.advance("started")
+        fact = round_clock_fact(SimpleNamespace(task_id="owner-turn", task_metadata={}), now=T + 600)
+        segment = fact.split("no execution limit; ", 1)[1]
+        assert segment.startswith(f"my human's message accepted at {accepted}; this request ")
+        assert " s later; slowest phase so far " in segment and "went out" not in segment
+        assert float(segment.split("this request ")[1].split(" s later")[0]) >= 20.0
+        owner.execution.observe("main_llm_call_state", {"llm_call_id": "c", "phase": "started"})
+        owner.execution.observe("main_llm_call_state", {"llm_call_id": "c", "phase": "observed",
+                                                        "model_activity": {"phase": "dispatching"}})
+        fact = round_clock_fact(SimpleNamespace(task_id="owner-turn", task_metadata={}), now=T + 600)
+        assert "; my first request went out " in fact and " s later (observed_send); slowest phase so far " in fact
+
+        registry.register("wake", 1, reply_expected=False)
+        fact = round_clock_fact(SimpleNamespace(task_id="wake", task_metadata={}), now=T + 600)
+        assert "my human" not in fact and "went out" not in fact and fact.endswith("no execution limit")
+        assert "my human" not in round_clock_fact(SimpleNamespace(task_id="pooled", task_metadata={}), now=T)
+    finally:
+        registry.clear()

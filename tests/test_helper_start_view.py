@@ -1,4 +1,4 @@
-"""What a delegated child, its sibling and a forked child start with.
+"""What a delegated child, its sibling, a forked child and a declared child start with.
 
 Children are scheduled by the real ``schedule_subagent`` and their first request is built
 by ``context.build_llm_messages``, as their worker builds it. Two children of different
@@ -6,8 +6,9 @@ trees read one story: block B is the same bytes for both, and for Main: its stor
 Two siblings of one parent read one room page and one block of the owner's words; a
 child of another tree reads its own. Before the chronicle can be read a child still
 starts, with a visible gap and no model call. A forked child's own drive holds only its
-process: its story and its room page come from the canonical data root. Every rule is
-checked in both directions.
+process: its story and its room page come from the canonical data root. A declared child
+reads the same block of words and nothing of memory; one scheduled before its schedule
+recorded the words keeps its parent's selection. Every rule is checked in both directions.
 """
 from __future__ import annotations
 
@@ -208,38 +209,54 @@ def test_a_forked_child_reads_its_story_and_room_page_canonically_not_from_its_o
     assert _files(fork / "memory" / "chronicle") == before  # the fork's own memory is untouched
 
 
-# --- a declared child starts from its parent's selection; the words change nothing there -------------
+# --- a declared child starts with the owner's words and nothing of memory -----------------------------
 
-def test_a_declared_child_starts_from_its_parents_selection_and_the_carried_words_change_nothing(tmp_path, monkeypatch):
+def test_a_declared_child_starts_with_the_owner_words_and_nothing_of_shared_memory(tmp_path, monkeypatch):
     import copy
     import json
 
     from ouroboros.context import build_llm_messages
+    from ouroboros.subagent_work_order import DECLARED_WORDS_FACT
 
     env, memory, _rooms = world(tmp_path)
     monkeypatch.setattr("ouroboros.context.utc_now_iso", lambda: "2026-10-04T06:00:00+00:00")
     root = _root(env, memory, "bound", 1, ASKED)
     declared = _schedule(root, "Count shelf one", input_sources="declared", context="Shelf one holds forty boxes")
-    assert declared["metadata"]["governing_owner_words"]  # the words ride with every child
+    assert declared["metadata"]["governing_owner_words"] and declared["metadata"][DECLARED_WORDS_FACT] is True
     own = pathlib.Path(declared["drive_root"])
+    words_item = "the owner's words that caused this work"
 
     def start(task):
         child_env = Env(repo_dir=env.repo_dir, drive_root=own, budget_drive_root=memory.drive_root)
-        return build_llm_messages(env=child_env, memory=Memory(drive_root=own, repo_dir=env.repo_dir),
-                                  task={"type": "task", "text": "hi", **task})
+        messages, cap = build_llm_messages(env=child_env, memory=Memory(drive_root=own, repo_dir=env.repo_dir),
+                                           task={"type": "task", "text": "hi", **task})
+        changing = messages[0]["content"][-1]["text"]  # block C: the receipt, the words, then the dated facts
+        receipt = json.loads(section(changing, "## Input source selection").split("\n\n", 1)[1])
+        return messages, cap, changing, receipt
 
-    messages, cap = start(declared)
+    messages, cap, changing, receipt = start(declared)
     text = json.dumps(messages, ensure_ascii=False)
-    assert "Shelf one holds forty boxes" in text and "Input source selection" in text
-    assert "memory_view" not in cap and "## My story" not in text and "Words of my human" not in text
-    assert "alpha inventory" not in text  # the parent did not select the owner's words
-    receipt = json.loads(section(messages[0]["content"][-1]["text"], "## Input source selection").split("\n\n", 1)[1])
-    assert any(item.startswith("the owner's words that caused this work") for item in receipt["omitted_automatic"])
+    assert "Shelf one holds forty boxes" in text and "Count shelf one" in text
+    assert "\n  Count the alpha inventory\n  and name what is missing" in section(changing, WORDS)
+    assert changing.index("## Input source selection") < changing.index(WORDS) < changing.index("## Runtime context")
+    assert any(item.startswith(words_item) for item in receipt["included"])
+    assert not any(item.startswith(words_item) for item in receipt["omitted_automatic"])
+    # Nothing else of memory: no view, story, room page, marks, conversation or working-sources line.
+    assert "memory_view" not in cap
+    absent = ("## My story", "## This room", "## Marks I keep in view", "## Working sources", "Main talk.", "Alpha began.")
+    assert not [marker for marker in absent if marker in text]
     assert not (memory.drive_root / "memory" / "chronicle").exists()  # no capture, no activation
-    bare = copy.deepcopy(declared)
+    # The other side: scheduled before the fact, the child keeps its parent's selection; the words ride unread.
+    older = copy.deepcopy(declared)
+    older["metadata"].pop(DECLARED_WORDS_FACT)
+    older_messages, _cap, older_changing, older_receipt = start(older)
+    assert "Words of my human" not in older_changing and "alpha inventory" not in json.dumps(older_messages)
+    assert any(item.startswith(words_item) for item in older_receipt["omitted_automatic"])
+    bare = copy.deepcopy(older)
     bare["metadata"].pop("governing_owner_words")
-    assert start(bare)[0] == messages  # the carried field is not an input of a declared start
-    # A shared sibling of the same parent starts with the words and its view.
+    assert start(bare)[0] == older_messages  # the carried field is not an input of an older declared start
+    # A shared sibling of the same parent reads the same block of words, byte for byte, beside its memory.
     shared_child = _schedule(root, "Count shelf two")
-    _a, _b, c, shared_cap = _start(env, shared_child)
-    assert "alpha inventory" in section(c, WORDS) and shared_cap["memory_view"]["role"] == "child"
+    _a, b, c, shared_cap = _start(env, shared_child)
+    assert section(c, WORDS) == section(changing, WORDS) and shared_cap["memory_view"]["role"] == "child"
+    assert "## My story" in b and "  Alpha began." in b and "## Working sources" in c

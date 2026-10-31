@@ -12,6 +12,20 @@ export class ClassList {
     sync() { this.node._className = [...this.names].join(' '); }
     from(value) { this.names = new Set(String(value || '').split(/\s+/).filter(Boolean)); this.sync(); }
 }
+// A text node: a task chip keeps its words in one beside its status mark (task_phase_chip.paintTaskPhase).
+export class TextStub {
+    constructor(data = '') { this.nodeType = 3; this.data = String(data); this.children = []; this.dataset = {}; }
+    get textContent() { return this.data; }
+    set textContent(value) { this.data = String(value ?? ''); }
+    get classList() { return { contains: () => false }; }
+    contains(node) { return node === this; }
+    querySelector() { return null; }
+    querySelectorAll() { return []; }
+    matches() { return false; }
+    getAttribute() { return null; }
+    hasAttribute() { return false; }
+    remove() { this.parentNode?.removeChild?.(this); }
+}
 export class ElementStub {
     constructor(tag = 'div', doc = null) {
         this.tagName = tag.toUpperCase();
@@ -48,14 +62,20 @@ export class ElementStub {
         this._innerHTML = this._textContent
             .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     }
-    get textContent() { return this._textContent; }
+    get textContent() { return this._textContent + this.children.filter((child) => child.nodeType === 3).map((child) => child.data).join(''); }
     set innerHTML(value) {
         this._innerHTML = String(value || '');
         if (!this.ownerDocument) return;
         this.children = [];
-        for (const match of this._innerHTML.matchAll(/<([a-z0-9-]+)([^>]*)>/gi)) {
-            const node = new ElementStub(match[1], this.ownerDocument);
-            const attrs = match[2];
+        const stack = [this];
+        for (const match of this._innerHTML.matchAll(/<(\/?)([a-z0-9-]+)([^>]*)>/gi)) {
+            if (match[1]) {
+                const index = stack.findLastIndex((node) => node.tagName === match[2].toUpperCase());
+                if (index > 0) stack.length = index;
+                continue;
+            }
+            const node = new ElementStub(match[2], this.ownerDocument);
+            const attrs = match[3];
             const idMatch = attrs.match(/\sid="([^"]+)"/i);
             if (idMatch) node.id = idMatch[1];
             const classMatch = match[0].match(/\sclass="([^"]*)"/i);
@@ -64,11 +84,13 @@ export class ElementStub {
                 const key = data[1].replace(/-([a-z])/g, (_all, char) => char.toUpperCase());
                 node.dataset[key] = data[2] ?? '';
             }
-            node.parentNode = this;
-            node.parentElement = this;
-            node.isConnected = this.isConnected;
-            this.children.push(node);
+            stack.at(-1).appendChild(node);
             if (node.id) this.ownerDocument.byId.set(node.id, node);
+            // Card templates stay flat in this stub. A media figure needs its
+            // real descendants: its actions are bound to that item, not the bubble.
+            if ((stack.length > 1 || node.tagName === 'FIGURE') && !/\/\s*$/.test(attrs)
+                && !['AREA', 'BASE', 'BR', 'COL', 'EMBED', 'HR', 'IMG', 'INPUT', 'LINK', 'META',
+                    'PARAM', 'SOURCE', 'TRACK', 'WBR'].includes(node.tagName)) stack.push(node);
         }
     }
     get innerHTML() { return this._innerHTML; }
@@ -80,12 +102,15 @@ export class ElementStub {
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) || ''; }
     removeAttribute(name) { this.attributes.delete(name); }
+    hasAttribute(name) { return this.attributes.has(name); }
     appendChild(node) { return this.insertBefore(node, null); }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
     prepend(...nodes) { const before = this.children[0] || null; nodes.forEach((node) => this.insertBefore(node, before)); }
     before(node) { return this.parentNode?.insertBefore(node, this); }
+    after(node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertAdjacentElement(_position, node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertBefore(node, before) {
+        if (node === before) return node;  // as in a DOM: a node put before itself stays where it is
         if (node?.isDocumentFragment) {
             for (const child of [...node.children]) this.insertBefore(child, before);
             return node;
@@ -107,48 +132,44 @@ export class ElementStub {
         node.parentElement = null;
     }
     remove() { this.parentNode?.removeChild?.(this); this.isConnected = false; }
-    get firstElementChild() { return this.children[0] || null; }
-    get lastElementChild() { return this.children.at(-1) || null; }
+    get previousElementSibling() { return this.#sibling(-1); }
+    get nextElementSibling() { return this.#sibling(1); }
+    #sibling(step) {
+        const list = (this.parentNode?.children || []).filter((child) => child.nodeType !== 3);
+        const index = list.indexOf(this);
+        return index < 0 ? null : list[index + step] || null;
+    }
+    get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
+    get lastElementChild() { return this.children.findLast((child) => child.nodeType !== 3) || null; }
+    get firstChild() { return this.children[0] || null; }
+    get lastChild() { return this.children.at(-1) || null; }
     replaceChild(next, current) { this.insertBefore(next, current); this.removeChild(current); return current; }
     replaceChildren(...nodes) { this.children = []; nodes.forEach((node) => this.appendChild(node)); }
     contains(node) {
         if (node === this) return true;
         return this.children.some((child) => child.contains(node));
     }
-    querySelector(selector) {
-        const id = selector.match(/^\[id="([^"]+)"\]$/)?.[1] || selector.match(/^#([\w-]+)$/)?.[1];
-        if (id) {
-            for (const child of this.children) {
-                if (child.id === id) return child;
-                const nested = child.querySelector(selector);
-                if (nested) return nested;
-            }
-            return null;
-        }
-        const data = selector.match(/^\[data-([a-z0-9-]+)\]$/i)?.[1];
-        if (data) {
-            const key = data.replace(/-([a-z])/g, (_all, char) => char.toUpperCase());
-            return this.children.find((child) => Object.hasOwn(child.dataset, key)) || null;
-        }
-        if (selector === '.typing-bubble') return this.children.find((child) => child.classList.contains('typing-bubble')) || null;
-        if (selector.startsWith('.')) {
-            const className = selector.slice(1).split(/[ :>\[]/)[0];
-            return this.children.find((child) => child.classList.contains(className)) || null;
-        }
-        return null;
-    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
     querySelectorAll(selector) {
-        if (selector === '[id]') return this.children.filter((child) => child.id);
-        const data = selector.match(/^\[data-([a-z0-9-]+)\]$/i)?.[1];
-        if (data) {
-            const key = data.replace(/-([a-z])/g, (_all, char) => char.toUpperCase());
-            return this.children.filter((child) => Object.hasOwn(child.dataset, key));
-        }
-        if (selector.startsWith('.')) {
-            const classes = selector.slice(1).split(/[ :>\[]/)[0].split('.');
-            return this.children.filter((child) => classes.every((name) => child.classList.contains(name)));
-        }
-        return [];
+        // Document order, including a figure's descendants. Attribute filters
+        // matter too: clearing pending receipts must not clear settled ones.
+        const descendants = this.children.filter((child) => child.nodeType !== 3)
+            .flatMap((child) => [child, ...child.querySelectorAll('*')]);
+        if (selector === '*') return descendants;
+        if (selector === '[id]') return descendants.filter((child) => child.id);
+        const id = selector.match(/^\[id="([^"]+)"\]$/)?.[1] || selector.match(/^#([\w-]+)$/)?.[1];
+        if (id) return descendants.filter((child) => child.id === id);
+        const data = selector.match(/\[data-([a-z0-9-]+)(?:="([^"]*)")?\]/i);
+        const classes = selector.startsWith('.') ? selector.slice(1).split(/[ :>\[]/)[0].split('.') : [];
+        const tag = /^[a-z][a-z0-9-]*$/i.test(selector) ? selector.toUpperCase() : '';
+        return descendants.filter((child) => {
+            if (classes.some((name) => !child.classList.contains(name))) return false;
+            if (data) {
+                const key = data[1].replace(/-([a-z])/g, (_all, char) => char.toUpperCase());
+                if (!Object.hasOwn(child.dataset, key) || (data[2] !== undefined && child.dataset[key] !== data[2])) return false;
+            }
+            return classes.length > 0 || Boolean(data) || (tag && child.tagName === tag);
+        });
     }
     matches(selector) { return selector.split(',').some((part) => part.trim().startsWith('.')
         && this.classList.contains(part.trim().slice(1))); }
@@ -168,10 +189,21 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         sessionStorage: globalThis.sessionStorage, fetch: globalThis.fetch,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
+        getComputedStyle: globalThis.getComputedStyle,
     };
     const document = {
         byId: new Map(), hidden: false, activeElement: null,
         createElement(tag) { return new ElementStub(tag, document); },
+        createTextNode(data) { return new TextStub(data); },
+        createTreeWalker(root) {
+            const texts = [];
+            const collect = node => { for (const child of node.children || []) {
+                if (child.nodeType === 3) texts.push(child); else collect(child);
+            } };
+            collect(root);
+            let index = 0;
+            return { nextNode: () => texts[index++] || null };
+        },
         createDocumentFragment() {
             const fragment = new ElementStub('#document-fragment', document);
             fragment.isDocumentFragment = true;
@@ -180,10 +212,17 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         getElementById(id) { return document.byId.get(id) || null; },
         addEventListener() {}, removeEventListener() {},
     };
+    // A mounted chat has a body (room visibility/toasts) and a document root
+    // (language changes). The overlay walks text nodes, not the HTML strings.
+    document.documentElement = new ElementStub('html', document);
+    document.documentElement.isConnected = true;
+    document.body = new ElementStub('body', document);
+    document.documentElement.appendChild(document.body);
     const mount = new ElementStub('div', document);
-    mount.isConnected = true;
+    document.body.appendChild(mount);
     document.byId.set('content', mount);
     const storage = new Map();
+    globalThis.getComputedStyle = () => ({ lineHeight: '24px', height: '168px', getPropertyValue: () => '7' });
     globalThis.document = document;
     globalThis.window = {
         document, location: { href: 'http://local/' }, history: { replaceState() {} },

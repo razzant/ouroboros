@@ -23,11 +23,11 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.onboarding import api_onboarding_complete
+from ouroboros.gateway.safety_settings import api_owner_safety_rules, api_owner_safety_model, api_owner_safety_mode
 from ouroboros.gateway.settings import (
     api_owner_auto_grant,
     api_owner_context_mode,
     api_owner_runtime_mode,
-    api_owner_safety_mode,
     api_settings_post,
 )
 
@@ -52,6 +52,8 @@ WRITERS = [
     ("/api/owner/auto-grant", api_owner_auto_grant, {"enabled": True}),
     ("/api/owner/context-mode", api_owner_context_mode, {"mode": "low"}),
     ("/api/owner/safety-mode", api_owner_safety_mode, {"mode": "full"}),
+    ("/api/owner/safety-rules", api_owner_safety_rules, {"rules": "test"}),
+    ("/api/owner/safety-model", api_owner_safety_model, {"settings": {"OUROBOROS_MODEL_SAFETY": "chosen"}}),
     ("/api/settings", api_settings_post, {"OUROBOROS_MAX_ROUNDS": "12"}),
     # Onboarding completion runs its persist through the same seam (audit
     # point 3); a valid wizard payload, no subscription declared, so the

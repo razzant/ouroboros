@@ -80,9 +80,10 @@ function reviewCard(skillReview) {
 }
 
 const REASON_ROW = '(?:<div class="skills-review-reason"( title="[^"]*")?>Reason: ([^<]*)</div>)?';
+// The current run reads as one meta line in Details (no bold title, no hover title on a long reason).
 
 function currentOutcome(html) {
-    const match = html.match(new RegExp(`<div class="skills-review-current"><strong>[^<]*</strong> · ([^<]*)</div>${REASON_ROW}`));
+    const match = html.match(new RegExp(`<div class="skills-review-current">Skill review round [^<]*? · ([^<]*)</div>${REASON_ROW}`));
     assert.ok(match, 'current review line is rendered');
     return { line: match[1], reason: match[3] ?? null, title: match[2] ?? null };
 }
@@ -213,8 +214,10 @@ test('a recorded reason is escaped and bounded after the outcome it explains', (
     assert.equal(current.line, UNAVAILABLE_FAILED);
     assert.ok(current.reason.length <= 420, `visible reason is bounded (${current.reason.length})`);
     assert.match(current.reason, /^ModuleNotFoundError: x+…\[truncated\]$/);
-    assert.equal(current.title, ` title="${giant}"`);
+    assert.equal(current.title, null, 'nothing depends on a hover title; the full reason is a disclosure');
     assert.ok(html.includes(`<summary>Full reason</summary><div>${giant}</div>`), 'complete reason is also touch/keyboard accessible');
-    assert.ok(html.indexOf(UNAVAILABLE_FAILED) < html.indexOf('ModuleNotFoundError'));
+    // The tray names the cause too ("The review didn’t finish: …"); inside Details the outcome leads its reason.
+    const record = html.slice(html.indexOf('skills-review-block'));
+    assert.ok(record.indexOf(UNAVAILABLE_FAILED) < record.indexOf('ModuleNotFoundError'));
     assert.match(historyOutcomes(html)[0].reason, /…\[truncated\]$/);
 });

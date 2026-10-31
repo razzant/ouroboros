@@ -522,7 +522,9 @@ def _project(run, data_project):
     page.keyboard.press("Shift+Enter")
     page.keyboard.type("Draft line three")
     _assert_fits(run.geometry(panel_field, "project-typed"), mode, "project-typed", rows=3)
-    nav.evaluate("el => el.click()")  # close: the instance is destroyed, its draft kept
+    # Close (a pressed row only opens, #1998): the instance is destroyed, its draft kept.
+    close = page.locator("#project-panel-close")
+    close.evaluate("el => el.click()")
     page.wait_for_function("() => !document.querySelector('#project-panel textarea.chat-input')")
     page.wait_for_function("() => document.getElementById('project-panel').hidden")
     nav.evaluate("el => el.click()")
@@ -534,7 +536,7 @@ def _project(run, data_project):
     # A destroyed instance writes nothing afterwards.
     panel_field.evaluate("el => { window.__closedField = el; }")
     panel_field.evaluate(_WATCH_WRITES)
-    nav.evaluate("el => el.click()")
+    close.evaluate("el => el.click()")
     page.wait_for_function("() => !window.__closedField.isConnected")
     page.set_viewport_size({"width": 900, "height": 800})
     run.settle()

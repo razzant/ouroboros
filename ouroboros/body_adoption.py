@@ -22,6 +22,10 @@ exact commit on ``request_restart``; this module carries that one transition.
   actually ready and that verified, before its own imports, that it was loading
   exactly that commit (``body_switch._attest_loaded``), with native-host proof
   where one applies. A later read of HEAD is not that proof.
+* ``settle_on_boot`` gives every outcome to the task that authorized it: its task
+  result keeps ``body_adoptions`` and its card gets the row in the task's own room
+  (a room it cannot name gets none); only a handoff that names no task stays an
+  owner-wide runtime notice.
 """
 
 from __future__ import annotations
@@ -46,6 +50,9 @@ _HOOK_FILE = "ouroboros/__init__.py"
 _REQUIRED_FILES = ("server.py", _HOOK_FILE, "ouroboros/body_switch.py")
 _DEPENDENCY_FILES = ("requirements-runtime.lock", "requirements.txt")
 _PENDING = ("authorized", "armed", "switching", "switched", "stuck")
+_NOT_ARMED = "not armed: "  # the exit tail's own record of the stop owners' blockers
+ADOPTIONS_KEY = "body_adoptions"  # the authorizing task's settled adoptions, every one, on its task result
+_INTERVAL_KEPT = 64  # an adopted range names its newest commits; Git keeps the whole range
 
 
 class AdoptionRefused(Exception):
@@ -127,11 +134,11 @@ def authorize(ctx: Any, commit: str, *, reason: str) -> Dict[str, Any]:
 
     mode = effective_runtime_mode(get_runtime_mode(), getattr(ctx, "task_metadata", None))
     return authorize_row(canonical_data_root(ctx), row, commit, reason=reason, runtime_mode=mode,
-                         task_id=str(getattr(ctx, "task_id", "") or ""))
+                         task_id=str(getattr(ctx, "task_id", "") or ""), ctx=ctx)
 
 
 def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, reason: str,
-                  runtime_mode: str = "advanced", task_id: str = "") -> Dict[str, Any]:
+                  runtime_mode: str = "advanced", task_id: str = "", ctx: Any = None) -> Dict[str, Any]:
     """The checks and the durable handoff; shared by the tool and the evolution supervisor path."""
     from ouroboros import body_candidate
 
@@ -192,6 +199,19 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
     if current.get("phase") in _PENDING and current.get("phase") != "authorized":
         raise AdoptionRefused(
             "ADOPTION_PENDING", f"adoption {current.get('id')} is {current.get('phase')}; it must settle first.")
+    from ouroboros.preflight_qualification import adoption_test_evidence
+
+    # Existing green evidence of exactly this commit; adoption never runs the battery itself. A
+    # selected run may qualify only a reviewed delta (Cyber Pro's unreviewed commits keep full).
+    try:  # an unreadable declared widening leaves full evidence only
+        local = None if unreviewed else {"onto": old, "paths": paths,
+                                         "widening": body_candidate.interval_widening(row, old, cand)}
+    except (OSError, subprocess.SubprocessError):
+        local = None
+    try:
+        qualification = adoption_test_evidence(data_dir, candidate, cand, ctx=ctx, local=local)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        raise AdoptionRefused("ADOPTION_TESTS_REQUIRED", str(exc)) from exc
     directory = helper_dir(data_dir)
     if directory.exists():
         _archive(data_dir, current, f"replaced:{current.get('phase')}" if current else "stale_helper")
@@ -201,11 +221,15 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
         "data_dir": str(pathlib.Path(data_dir).resolve()), "branch": branch, "old": old, "cand": cand,
         "candidate_id": row.get("candidate_id"), "candidate_branch": row.get("branch"),
         "candidate_path": str(candidate), "task_id": task_id, "reason": str(reason or ""),
+        "created_tag": str((row.get("reviewed_release_tags") or {}).get(cand) or ""),
         "switch": rows, "deps_command": _dependency_command(serving, rows), "authorized_at": utc_now_iso(),
         "unreviewed_commits": unreviewed, "attempts": 0, "events": [],
+        "tests": qualification,
     }
     # The helper is captured from the body that is running, never from the candidate.
     shutil.copyfile(pathlib.Path(body_switch.__file__), directory / "switch.py")
+    from ouroboros import installation_stop
+    shutil.copyfile(pathlib.Path(installation_stop.__file__), directory / "installation_stop.py")
     _git(serving, "update-ref", f"{PIN_PREFIX}{handoff['id']}", cand)
     body_switch.record(str(directory), handoff, "authorized", f"restart reason: {reason}")
     _log(data_dir, "body_adoption_authorized", handoff, branch=branch, paths=len(rows))
@@ -263,7 +287,8 @@ def _archive(data_dir: Any, handoff: Dict[str, Any], outcome: str) -> None:
             _git(repo, "update-ref", "-d", f"{PIN_PREFIX}{handoff['id']}", check=False)
     if handoff:
         _log(data_dir, "body_adoption_closed", handoff, outcome=outcome, phase=handoff.get("phase"),
-             events=handoff.get("events"), interpreter_state=handoff.get("interpreter_state"))
+             events=handoff.get("events"), interpreter_state=handoff.get("interpreter_state"),
+             tests=handoff.get("tests"))
     if handoff and not pointer_gone:
         # The hook still finds the pointer: it must read a CLOSED record, never a missing helper
         # (which stops every boot).
@@ -335,12 +360,12 @@ def arm(data_dir: Any, *, worker_exits: Any, live_children: Any, owned_stop: Any
             ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
             ("child_processes_alive", bool(live_children)),
             ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
-            ("panic_stop", (pathlib.Path(data_dir) / "state" / "panic_stop.flag").exists()),
+            ("panic_stop", body_switch.installation_panic(data_dir)),
         ) if blocked]
         directory = str(helper_dir(data_dir))
         if blockers:
             handoff["restart_bound"] = False
-            body_switch.record(directory, handoff, "authorized", "not armed: " + ", ".join(blockers))
+            body_switch.record(directory, handoff, "authorized", _NOT_ARMED + ", ".join(blockers))
             _log(data_dir, "body_adoption_not_armed", handoff, blockers=blockers)
             return "authorized"
         handoff["readers_evidence"] = {"worker_exits": census, "owned_stop": {
@@ -401,9 +426,39 @@ def _loaded_generation(handoff: Dict[str, Any]) -> Dict[str, Any]:
     return fact if isinstance(fact, dict) and fact.get("adoption_id") == handoff.get("id") else {}
 
 
+def _card_row(handoff: Dict[str, Any]) -> Dict[str, Any]:
+    """The last wait row this handoff kept for its task's card (``_waiting``); ``{}`` before any."""
+    row = handoff.get("card_row")
+    return row if isinstance(row, dict) and type(row.get("revision")) is int else {}
+
+
+def _settled(handoff: Dict[str, Any], outcome: str, note: str, **facts: Any) -> Dict[str, Any]:
+    """One settled outcome in words, with the identity of the handoff it settles: the task that
+    authorized it (``""`` for a handoff that names none), the candidate commit and the serving one.
+
+    ``card_row_revision`` orders the outcome's row on that task's card. A settled end follows the
+    last wait its handoff kept (``_waiting``), so no task-result write, made or lost, decides it."""
+    kept = _card_row(handoff).get("revision", 0)
+    return {"outcome": outcome, "note": note, "adoption_id": handoff.get("id"),
+            "task_id": str(handoff.get("task_id") or ""), "candidate": str(handoff.get("cand") or ""),
+            "previous": handoff.get("old"), "branch": str(handoff.get("branch") or ""),
+            "card_row_revision": kept if outcome == "unconfirmed" else kept + 1, **facts}
+
+
+def _waiting(data_dir: Any, handoff: Dict[str, Any], note: str) -> Dict[str, Any]:
+    """An unconfirmed boot; the handoff stays for the next one. Words the card row does not already say
+    take the next revision, kept on the handoff before anything is sent, so every later row orders
+    after it. A handoff that cannot keep it fails this settlement, which then sends nothing."""
+    row = _card_row(handoff)
+    if row.get("note") != note:
+        handoff["card_row"] = {"revision": row.get("revision", 0) + 1, "note": note}
+        body_switch.write_handoff(str(helper_dir(data_dir)), handoff)
+    return _settled(handoff, "unconfirmed", note)
+
+
 def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
                      native_smoke=None) -> Dict[str, Any]:
-    """Settle the handoff this generation inherited; returns ``{"outcome", "note"}`` (``{}`` if none).
+    """Settle the handoff this generation inherited; returns ``_settled`` facts (``{}`` if none).
 
     ``adopted`` needs THIS generation ready on exactly the candidate commit and,
     where a native host is selected, its readback. A boot that is not ready
@@ -415,52 +470,125 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
         return {}
     cand = str(handoff.get("cand") or "")[:12]
     if phase == "authorized":  # found at boot: the generation that authorized it is gone
-        last = (handoff.get("events") or [{}])[-1].get("detail") or "the restart that carried it did not arm it"
+        # Only the exit tail's blockers explain it; the other events quote the caller's reason or mark the binding.
+        last = str((handoff.get("events") or [{}])[-1].get("detail") or "")
+        why = last if last.startswith(_NOT_ARMED) else "the adoption was not armed before this boot"
         _archive(data_dir, handoff, "abandoned:not_armed")
-        return {"outcome": "not_applied", "note": f"Adoption of {cand} was not applied ({last}). "
-                                                  "The serving body is unchanged; the candidate is retained."}
+        return _settled(handoff, "not_applied", f"Adoption of {cand} was not applied ({why}). "
+                                                "The serving body is unchanged; the candidate is retained.")
     if phase == "abandoned":
         last = (handoff.get("events") or [{}])[-1].get("detail") or "unknown"
         interpreter = (" Installed dependencies may already have changed; the boot re-synced them for the "
                        "serving tree." if handoff.get("interpreter_state") else "")
         _archive(data_dir, handoff, f"abandoned:{last}")
-        return {"outcome": "not_applied", "note": f"Adoption of {cand} was abandoned before completion ({last}). "
-                                                  f"The serving body is at its previous commit.{interpreter}"}
+        return _settled(handoff, "not_applied", f"Adoption of {cand} was abandoned before completion ({last}). "
+                                                f"The serving body is at its previous commit.{interpreter}")
     if phase != "switched":
         return {}
     head = _git(repo_dir, "rev-parse", "HEAD", check=False).stdout.strip()
     if head != handoff.get("cand"):
         _archive(data_dir, handoff, f"superseded:head={head[:12]}")
-        return {"outcome": "superseded", "note": f"Adoption of {cand} landed, then the checkout moved to {head[:12]}."}
+        return _settled(handoff, "superseded", f"Adoption of {cand} landed, then the checkout moved to {head[:12]}.")
     loaded = _loaded_generation(handoff)
     if loaded.get("sha") != handoff.get("cand"):
         # HEAD on disk says the candidate; nothing proves this process imported it.
         _log(data_dir, "body_adoption_unconfirmed", handoff, reason="loaded_tree_unattested", loaded=loaded)
-        return {"outcome": "unconfirmed",
-                "note": f"The checkout is at {cand}, but this process did not verify that tree before its "
-                        "imports; the adoption stays unconfirmed until a start that does."}
+        return _waiting(data_dir, handoff, f"The checkout is at {cand}, but this process did not verify that "
+                                           "tree before its imports; the adoption stays unconfirmed until a "
+                                           "start that does.")
     if not supervisor_ready:
         _log(data_dir, "body_adoption_unconfirmed", handoff, reason="supervisor_not_ready")
-        return {"outcome": "unconfirmed", "note": ""}
+        return _settled(handoff, "unconfirmed", "")
     smoke = (native_smoke or (lambda: {"ok": True, "skipped": "no_native_check"}))()
     if not smoke.get("ok"):
         _log(data_dir, "body_adoption_unconfirmed", handoff, reason="native_host", smoke=smoke)
-        return {"outcome": "unconfirmed",
-                "note": f"Body {cand} is running, but the native host did not confirm its artifact; "
-                        "the adoption stays unconfirmed."}
+        return _waiting(data_dir, handoff, f"Body {cand} is running, but the native host did not confirm its "
+                                           "artifact; the adoption stays unconfirmed.")
     body_switch.record(str(helper_dir(data_dir)), handoff, "adopted", f"ready on {head[:12]} (pid {os.getpid()})")
     _archive(data_dir, handoff, "adopted")
     kept = sorted({*(loaded.get("later_edits") or []), *(handoff.get("later_edit_kept") or [])})
-    return {"outcome": "adopted", "sha": head,
-            "note": f"Adopted candidate commit {cand} on {handoff.get('branch')}; previous commit "
-                    f"{str(handoff.get('old') or '')[:12]}."
-                    + (f" Later local edits were kept at: {', '.join(kept)}." if kept else "")}
+    return _settled(handoff, "adopted", f"Adopted candidate commit {cand} on {handoff.get('branch')}; previous commit "
+                                        f"{str(handoff.get('old') or '')[:12]}."
+                                        + (f" Later local edits were kept at: {', '.join(kept)}." if kept else ""),
+                    sha=head, tests=dict(handoff.get("tests") or {}), created_tag=str(handoff.get("created_tag") or ""))
+
+
+def _adopted_commits(repo_dir: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    """What an adoption brought in, newest first: ``previous..candidate``, bounded; complete says no commit was cut,
+    and a cut range counts the rest (``commits_omitted``) that Git's range ``previous_sha..commit_sha`` still holds."""
+    if result.get("outcome") != "adopted" or not result.get("previous"):
+        return {}
+    span = f"{result['previous']}..{result['candidate']}"
+    listed = _git(repo_dir, "rev-list", f"--max-count={_INTERVAL_KEPT + 1}", span, check=False)
+    shas = listed.stdout.split() if listed.returncode == 0 else []
+    fact = {"commits": shas[:_INTERVAL_KEPT], "commits_complete": listed.returncode == 0 and len(shas) <= _INTERVAL_KEPT}
+    counted = _git(repo_dir, "rev-list", "--count", span, check=False) if len(shas) > _INTERVAL_KEPT else None
+    if counted is not None and counted.returncode == 0 and counted.stdout.strip().isdigit():
+        fact["commits_omitted"] = int(counted.stdout) - _INTERVAL_KEPT
+    return fact
+
+
+def _publish_on_task(data_dir: Any, repo_dir: Any, result: Dict[str, Any], text: str) -> None:
+    """The settled outcome as its authorizing task's fact (DESIGN "Chat authorship and System rows").
+
+    It is kept on the task result (``body_adoptions``, one row per adoption at the revision of its card
+    row, ``_settled``) for the task's Reviews to read, and sent through the terminal outbox as a row of the
+    task's card in the task's own room; a page without that card shows the row alone, and no owner-wide
+    notice repeats it. A result that could not keep the fact leaves the Reviews without it: the row says
+    the outcome, and nothing later restores what was not written.
+    """
+    from ouroboros.task_results import load_task_result, require_writable_task_result_schema, stamp_task_result_schema
+    from ouroboros.task_store import patch_document
+    from supervisor.terminal_delivery import enqueue_terminal_delivery_outcome, lineage_chat_id
+
+    task_id, adoption_id = result["task_id"], str(result.get("adoption_id") or "")
+    revision = int(result.get("card_row_revision") or 1)
+    fact = {"adoption_id": adoption_id, "outcome": result["outcome"], "commit_sha": result["candidate"],
+            "previous_sha": str(result.get("previous") or ""), "branch": result["branch"], "note": text,
+            "settled_at": utc_now_iso(), "revision": revision, **_adopted_commits(repo_dir, result)}
+
+    def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        require_writable_task_result_schema(current)
+        if not current.get("status"):  # never mint a partial row the result store would refuse
+            raise ValueError(f"task {task_id} has no result record to hold its adoption")
+        rows = [dict(row) for row in current.get(ADOPTIONS_KEY) or [] if isinstance(row, dict)]
+        if any(row.get("adoption_id") == adoption_id and int(row.get("revision") or 0) >= revision for row in rows):
+            return None  # this row, or a later one of the same adoption, is already the task's fact
+        rows = [row for row in rows if row.get("adoption_id") != adoption_id] + [fact]
+        return stamp_task_result_schema({**current, ADOPTIONS_KEY: rows})
+
+    try:
+        patch_document(data_dir, task_id, _mutate)
+    except Exception:  # the row still reaches the task's card; its Reviews then cannot name the adoption
+        log.warning("Body adoption %s could not be recorded on task %s", adoption_id, task_id, exc_info=True)
+    row_id = f"body-adoption:{adoption_id}"
+    try:
+        task = load_task_result(data_dir, task_id) or {}
+    except Exception:
+        task = {}
+    # Its own room: its Project's chat, else the chat its record names, the hidden partition (0) included.
+    # A record that names none (absent, unreadable) has no room here, and Main is never one by default.
+    named = task.get("chat_id")
+    chat_id = lineage_chat_id(data_dir, task, task_id) or (named if type(named) is int else None)
+    if chat_id is None:
+        log.warning("Body adoption %s has no chat for task %s; its row was not sent", adoption_id, task_id)
+        return
+    sent = enqueue_terminal_delivery_outcome(data_dir, {
+        "type": "send_message", "chat_id": chat_id, "task_id": task_id, "text": text, "is_progress": True,
+        "role": "system", "system_type": "body_adoption", "ts": utc_now_iso(),
+        "delivery_id": f"{row_id}:{revision}",
+        "progress_meta": {"card_row": "reviews", "card_row_id": row_id, "card_row_revision": revision,
+                          "narration": False}})
+    if sent == "unavailable":
+        log.warning("Body adoption %s row for task %s was not queued; an owed copy replays if registered",
+                    adoption_id, task_id)
 
 
 def settle_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool) -> Dict[str, Any]:
     """Boot's one call: settle the inherited handoff, then the follow-ups an adopted commit is owed.
 
-    The follow-ups are each best-effort: the handoff is already settled when they run.
+    The follow-ups are each best-effort: the handoff is already settled when they run. The
+    serving push follows only an adoption that full evidence qualified.
     """
     try:
         from supervisor.update_merge import external_host_restart_smoke
@@ -470,6 +598,11 @@ def settle_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool) -> D
     except Exception:
         log.warning("Body adoption could not be settled at boot; the handoff is left as found", exc_info=True)
         return {}
+    lines = [str(result.get("note") or "")]  # the card row: the outcome, then the publication on its own line
+
+    def published(sentence: str) -> None:
+        lines.append(sentence)
+        result["note"] += f" {sentence}"
 
     def record_and_push() -> None:
         from supervisor.git_ops import push_to_remote
@@ -477,17 +610,34 @@ def settle_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool) -> D
 
         branch = _git(repo_dir, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
         _record_checkout_facts({"current_branch": branch, "current_sha": result["sha"]})
-        # Adopted, the commit IS the serving line: the same push every local commit gets (an
-        # optional `origin` is the owner's persistence choice; a failure is the usual skip).
-        pushed, push_msg = push_to_remote(branch or None)
+        tier = str(result["tests"].get("tier") or "")
+        if tier != "full":
+            # This boot's automatic push needs full evidence; ordinary later pushes are separate.
+            # Neither the branch nor a tag is pushed and nothing schedules it later: the intent stays
+            # on record, withheld rather than failed or done.
+            result["publication"] = {"status": "withheld", "branch": branch, "sha": result["sha"],
+                                     "tier": tier or "unrecorded",
+                                     **({"created_tag": result["created_tag"]} if result.get("created_tag") else {})}
+            published(f"Publication withheld: this adoption rests on {tier or 'unrecorded'} test evidence "
+                      "and the automatic post-adoption push needs a full run, so nothing was pushed.")
+            _log(data_dir, "body_adoption_publication",
+                 {"id": result["adoption_id"], "cand": result["sha"], "old": result["previous"]}, **result["publication"])
+            return
+        # The consumed handoff carries only this commit's operation-created tag.
+        pushed, push_msg = push_to_remote(branch or None, created_tag=str(result.get("created_tag") or ""),
+                                         expected_commit_sha=result["sha"])
+        published(f"Publication: {push_msg}.")
         log.info("Serving push after body adoption: %s (%s)", "ok" if pushed else "skipped", push_msg)
 
     def notify() -> None:
+        if result.get("task_id"):  # the authorizing task's own fact: a row of its card, no owner-wide bubble
+            _publish_on_task(data_dir, repo_dir, result, "\n".join(lines))
+            return
         from supervisor.message_bus import send_with_budget
         from supervisor.state import load_state
 
         owner_chat = int((load_state() or {}).get("owner_chat_id") or 0)
-        if owner_chat:
+        if owner_chat:  # a handoff that names no task stays a runtime fact
             send_with_budget(owner_chat, f"🧬 Body adoption: {result['note']}", role="system",
                              system_type="restart_notice")
 

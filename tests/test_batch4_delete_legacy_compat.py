@@ -2,9 +2,9 @@
 
 1A: a deleted schedule that continues a task stops firing at once, stays visibly
 ``delete_pending`` while that task can still need its row (Stop/Restart release,
-``scheduled_start`` binding), and disappears once the task settles; Restore never
+``scheduled_start`` binding), and is removed after retention once the task settles; Restore never
 withdraws the delete implicitly. Generic Restore is an explicit cancellation;
-exact hold release keeps the intent. Independent schedules keep published Delete.
+exact hold release keeps the intent. Independent schedules retain the same occurrence obligations.
 
 2A: rows the published version wrote carry no relationship. An owner-door row is
 independent; a model follow-up keeps its previous launch and own-root expense
@@ -16,16 +16,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import usage_accounting as ua
+from ouroboros import owner_pause, usage_accounting as ua
+from ouroboros.store import StoreError
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.followup import _handle_schedule_followup, _manage_schedules
 from ouroboros.usage_admission import task_billing_fields
 from supervisor import queue, queue_schedules as schedules
+from supervisor.schedule_occurrence import prepare_receipts
 from supervisor.worker_assignment import _claim_worker_launch
 from tests.test_g1_followup_policy import (  # noqa: F401
     world, register, row, restore, stop, ORIGIN, BINDING, DEADLINE, _assignment_world,
 )
-from tests._store_shared import delete_result
+from tests._store_shared import delete_result, unreadable_result
 
 pytestmark = pytest.mark.serial
 PAST = '2000-01-01T00:00:00+00:00'
@@ -33,6 +35,12 @@ PAST = '2000-01-01T00:00:00+00:00'
 
 def _worker(sent):
     return SimpleNamespace(in_q=SimpleNamespace(put=lambda task: sent.append(copy.deepcopy(task))))
+
+
+@pytest.fixture(autouse=True)
+def settlement_retention(monkeypatch):
+    # These cases exercise settlement; retention has its own two-sided tests.
+    monkeypatch.setattr("ouroboros.retention.get_gc_retention_days", lambda: 0)
 
 
 def _delete(root, sid):
@@ -77,17 +85,19 @@ def test_deleted_related_cron_stops_firing_and_waits_visibly_until_its_task_sett
     workers.RUNNING[task['id']] = {'task': task, 'worker_id': 0}
     write_task_result(root, task['id'], 'running', result='working', metadata=task['metadata'])
     outcome = _delete(root, sid)
-    assert outcome['ok'] and outcome['status'] == 'delete_deferred', outcome
-    assert 'not settled' in outcome['detail']
+    assert outcome['ok'] and outcome['status'] == 'withdrawn', outcome
+    assert 'retention window' in outcome['detail']
     # Visible after reload on every consumer, never folded into history.
     activity, tool = _views(root, sid)
     for view in (activity, tool):
         assert view['status'] == 'delete_pending' and view['delete_pending'] is True
-        assert view['retained'] is False
+        assert view['retained'] is True
     assert _manage_schedules(ctx, action='list').count('delete_pending') >= 1
-    from ouroboros.context import _scheduled_tasks_digest
-    digest = _scheduled_tasks_digest(SimpleNamespace(drive_path=lambda rel: root / rel))
-    assert [entry['id'] for entry in digest['delete_pending']] == [sid]
+    from supervisor.schedule_view import digest
+    from datetime import datetime, timezone
+    view = digest(schedules.load_schedule_store(root)["tasks"], datetime.now(timezone.utc))
+    assert [entry["id"] for entry in view["standing"]] == [sid]
+    assert view["standing"][0]["status"] == "delete_pending"
     # Fresh firings stop at once, however often the tick runs.
     for _ in range(2):
         data = schedules.load_schedule_store(root)
@@ -104,7 +114,7 @@ def test_deleted_related_cron_stops_firing_and_waits_visibly_until_its_task_sett
     assert restored['ok'] and restored['changed'] and restored['status'] == 'updated'
     assert row(root, sid)['enabled'] is True and not row(root, sid).get('delete_requested_at')
     assert row(root, sid)['last_task_id'] == task['id'] and len(sent) == 1
-    assert _delete(root, sid)['status'] == 'delete_deferred'
+    assert _delete(root, sid)['status'] == 'withdrawn'
     # The task settles and leaves the queue: the row goes by itself.
     write_task_result(root, task['id'], 'completed', result='done', metadata=task['metadata'])
     workers.RUNNING.pop(task['id'])
@@ -120,8 +130,8 @@ def test_deleted_related_row_still_binds_its_admitted_task_through_a_resumed_han
     queue.check_scheduled_tasks()
     [task] = pending
     outcome = _delete(root, sid)
-    assert outcome['status'] == 'delete_deferred' and 'accepted run is still owed' in outcome['detail']
-    assert 'its task settles' in outcome['detail']
+    assert outcome['status'] == 'withdrawn'
+    assert 'retention window once its work has settled' in outcome['detail']
     assert _claim_worker_launch(queue, task, _worker(sent)) and len(sent) == 1
     pending.clear()
     queue.check_scheduled_tasks()  # the occurrence settles (possible dispatch)
@@ -143,7 +153,7 @@ def test_exact_hold_release_on_a_pending_delete_keeps_the_delete_and_lets_the_ta
     [task] = pending
     stop(root)
     assert not _claim_worker_launch(queue, task, _worker(sent)) and not sent
-    assert _delete(root, sid)['status'] == 'delete_deferred'
+    assert _delete(root, sid)['status'] == 'withdrawn'
     queue.check_scheduled_tasks()
     held = row(root, sid)['followup_hold']['hold_id']
     activity, _tool = _views(root, sid)
@@ -159,28 +169,45 @@ def test_exact_hold_release_on_a_pending_delete_keeps_the_delete_and_lets_the_ta
     assert row(root, sid)['last_task_id'] == task['id'] and pending == [task]
 
 
-@pytest.mark.parametrize('result', ['collected', 'unreadable'])
-def test_a_pending_delete_is_not_kept_forever_by_collected_history(world, monkeypatch, result):  # noqa: F811 - pytest fixture
+@pytest.mark.parametrize('history', ['settled', 'lost', 'unreadable'])
+def test_a_pending_delete_goes_once_settlement_is_proven_and_unknown_keeps_it(world, monkeypatch, history):  # noqa: F811 - pytest fixture
     world, workers, sent = _assignment_world(world, monkeypatch)
     _, root, pending = world
     sid = register(world)['id']
     queue.check_scheduled_tasks()
     [task] = pending
-    assert _claim_worker_launch(queue, task, _worker(sent))
+    assert _claim_worker_launch(queue, task, _worker(sent)) and len(sent) == 1
     pending.clear()
     queue.check_scheduled_tasks()
-    assert _delete(root, sid)['status'] == 'delete_deferred'
-    path = root / 'task_results' / (task['id'] + '.json')
-    if result == 'collected':
-        delete_result(root, task['id'])  # retention removed settled history; no queue holds the task
+    assert _delete(root, sid)['status'] == 'withdrawn'
+    if history == 'lost':
+        # A fence read (also performed by launch), not an arbitrary body read,
+        # establishes observed authority. Its later loss is not settlement.
+        owner_pause.read_fence(root, task['id'])
+        delete_result(root, task['id'])
     else:
-        path.write_text('{torn')  # unknown stays unknown
+        write_task_result(root, task['id'], 'completed', result='done', metadata=task['metadata'])
+    if history == 'unreadable':
+        switch = unreadable_result(monkeypatch, task['id'], root=root)  # unknown stays unknown
     queue.check_scheduled_tasks()
     kept = {r['id'] for r in schedules.load_schedule_store(root)['tasks']}
-    assert (sid in kept) is (result == 'unreadable')
+    assert (sid in kept) is (history != 'settled')
+    if history == 'settled':
+        # Pruning the control row keeps the task's own history.
+        assert load_task_result(root, task['id'])['status'] == 'completed'
+        return
+    error = prepare_receipts([row(root, sid)], drive_root=root).errors[task['id']]
+    if history == 'lost':
+        assert isinstance(error, ValueError) and str(error) == 'owner_pause_authority_missing'
+        return
+    assert isinstance(error, StoreError) and 'simulated unreadable row' in str(error)
+    switch['on'] = False  # access recovers: the same completed history now settles the row
+    queue.check_scheduled_tasks()
+    assert sid not in {r['id'] for r in schedules.load_schedule_store(root)['tasks']}
+    assert load_task_result(root, task['id'])['status'] == 'completed' and len(sent) == 1
 
 
-def test_positively_unstarted_continuation_claim_is_deleted_at_once_from_a_worker(world, monkeypatch):  # noqa: F811 - pytest fixture
+def test_positively_unstarted_continuation_claim_is_withdrawn_from_a_worker(world, monkeypatch):  # noqa: F811 - pytest fixture
     _, root, _ = world
     sid = register(world)['id']
     data = schedules.load_schedule_store(root)
@@ -188,8 +215,8 @@ def test_positively_unstarted_continuation_claim_is_deleted_at_once_from_a_worke
     schedules._write_scheduled_tasks(data, root)
     monkeypatch.setenv('OUROBOROS_IN_WORKER', '1')  # no fresh queue snapshot: queue unknown
     outcome = _delete(root, sid)
-    assert outcome['status'] == 'deleted' and outcome['running_or_queued'] is None
-    assert sid not in {r['id'] for r in schedules.load_schedule_store(root)['tasks']}
+    assert outcome['status'] == 'withdrawn' and outcome['running_or_queued'] is None
+    assert row(root, sid)['delete_requested_at']
 
 
 def test_independent_owner_delete_keeps_its_published_lifecycle(world, monkeypatch):  # noqa: F811 - pytest fixture
@@ -203,7 +230,7 @@ def test_independent_owner_delete_keeps_its_published_lifecycle(world, monkeypat
     queue.check_scheduled_tasks()
     [task] = pending
     outcome = _delete(root, 'owner')
-    assert outcome['status'] == 'delete_deferred' and outcome['detail'].endswith('once that run starts')
+    assert outcome['status'] == 'withdrawn'
     assert _claim_worker_launch(queue, task, _worker(sent))
     pending.clear()
     queue.check_scheduled_tasks()

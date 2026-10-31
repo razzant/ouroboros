@@ -20,7 +20,7 @@ from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_k
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.skill_catalogue import LIST_SKILLS_SCHEMA as _LIST_SCHEMA
 from ouroboros.skill_catalogue import list_skills_payload
-from ouroboros.skill_dependencies import skill_deps_not_ready as _skill_deps_not_ready
+from ouroboros.skill_dependencies import skill_deps_not_ready as _skill_deps_not_ready, unusable_python_env
 from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     compute_content_hash,
@@ -47,6 +47,7 @@ from ouroboros.tools.shell import (
     _kill_process_group,
     _subprocess_lock,
 )
+from ouroboros.tools.shell_process import tracked_start
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -214,8 +215,9 @@ def _run_skill_subprocess(
     confirmed = external_handoff("skill_process")
     proc = None
     try:
-        with operation_start():
+        with tracked_start() as publish, operation_start():
             proc = Popen(cmd, **popen_kwargs)  # noqa: S603 — cmd is a vetted list, not shell
+            publish(proc)
     except OSError as exc:
         if proc is None:
             confirmed()
@@ -228,10 +230,8 @@ def _run_skill_subprocess(
         raise
     except BaseException:
         if proc is None:
-            confirmed()  # the final gate refused before Popen returned
+            confirmed()  # the final gate or a closed admission refused before Popen returned
         raise
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
     try:
         if target is not None:
             record_task_group(*target, proc.pid)
@@ -614,6 +614,83 @@ def _skill_review_refusal(ctx: ToolContext, code: str, text: str) -> str:
     return _publish_tool_result(ctx, ToolResult(status=TOOL_CODE_SPECS[code].status, code=code, text=text))
 
 
+def _record_open(drive_root: pathlib.Path, record_id: str) -> bool:
+    """Whether the ledger record a reference names is still pending (open seats); an unknown id is not open."""
+    from ouroboros import review_ledger as ledger
+
+    if not record_id:
+        return False
+    try:
+        record = ledger.load_record(drive_root, record_id)
+    except ValueError:
+        return False
+    return bool(record) and str(record.get("state") or "") != "settled"
+
+
+def _earlier_feedback(drive_root: pathlib.Path, skill_name: str, review_state: Any, content_hash: str,
+                      review_reference: Any) -> tuple[bool, Dict[str, Any], str]:
+    """``(has feedback, basis, refusal)`` of an author finish. Earlier reviewer feedback is a substantive
+    verdict in ``review.json`` (legacy or projected) or a settled skill record of this skill with findings.
+    Without it the author needs the exact ``review_reference`` a terminal review returned: the lifecycle
+    job that finished without a verdict (its projected record carries the partial feedback, if any; a seat
+    still open there keeps the review running), or a settled ledger record of these bytes that formed no
+    verdict (quorum failed, nothing dispatched, not performed), named by ``record_id`` or ``job_id``."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_custody import _row_is_pending
+    from ouroboros.skill_review_runner import _read_review_job, review_job_state_path
+    from ouroboros.tools.review_skill import settled_skill_records, skill_record_rows
+
+    basis = {"surface": "skill", "basis": "reviewed", "content_hash": review_state.reviewed_content_hash or review_state.content_hash}
+    prior = (review_state.status != "pending" and review_state.review_profile != "owner_attested"
+             and bool(review_state.findings or review_state.raw_actor_records or review_state.raw_result))
+    if prior or settled_skill_records(drive_root, skill_name, limit=1):
+        return True, basis, ""
+    refusal = ("SKILL_REVIEW_ERROR: author finish needs prior reviewer feedback or the exact review_reference "
+               "returned by a terminal review that formed no verdict (quorum failed, nothing dispatched) or gave "
+               "partial feedback. A review still running is not unavailable.")
+    supplied = review_reference if isinstance(review_reference, dict) else {}
+    reference = str(supplied.get("record_id") or supplied.get("job_id") or "")
+    supplied_hash = str(supplied.get("content_hash") or "")
+    if not reference or not supplied_hash:
+        return False, basis, refusal
+    job = _read_review_job(review_job_state_path(drive_root, skill_name))
+    if (reference in (str(job.get("job_id") or ""), str(job.get("record_id") or "")) and job.get("finished_at")
+            and job.get("skill") == skill_name and str(job.get("content_hash") or "") == supplied_hash
+            and job.get("status") in {"completed", "succeeded", "failed", "interrupted", "cancelled", "timeout"}
+            and job.get("review_status") in {"pending", "failed", "interrupted", "cancelled", "timeout"}):
+        # The job ended, the wave may not have: a record still open (its author left; a seat still answers)
+        # is a review running, which the ledger knows and which is never "unavailable" (opus R1-2).
+        if _record_open(drive_root, str(supplied.get("record_id") or job.get("record_id") or "")):
+            return False, basis, refusal
+        actors = ([actor for actor in (review_state.raw_actor_records or []) if isinstance(actor, dict)]
+                  if review_state.content_hash == supplied_hash else [])
+        feedback = [item for actor in actors for item in (actor.get("parsed_items") or [])
+                    if isinstance(item, dict) and item.get("verdict") in {"PASS", "FAIL"}]
+        if not feedback and any(_row_is_pending(actor) for actor in actors):
+            return False, basis, refusal
+        found = {"surface": "skill", "basis": "partial_feedback" if feedback else "unavailable",
+                 **{key: job[key] for key in ("job_id", "content_hash", "status", "review_status", "finished_at")}}
+        if feedback:
+            found["feedback"] = feedback
+        return True, found, ""
+    for row in skill_record_rows(drive_root, skill_name, limit=50):
+        try:
+            record = ledger.load_record(drive_root, str(row.get("record_id") or "")) or {}
+        except ValueError:
+            continue
+        job_id = str(((record.get("brief") or {}).get("skill") or {}).get("job_id") or "")
+        if reference not in (str(record.get("record_id") or ""), job_id):
+            continue
+        aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
+        if (record.get("state") != "settled" or aggregate in ("PASS", "FAIL")
+                or str((record.get("subject") or {}).get("tree_sha") or "") != supplied_hash):
+            continue
+        return True, {"surface": "skill", "basis": "unavailable", "record_id": str(record.get("record_id") or ""),
+                      "job_id": job_id, "content_hash": supplied_hash, "status": "completed",
+                      "review_status": "pending", "finished_at": str(record.get("ts") or "")}, ""
+    return False, basis, refusal
+
+
 def _author_finish_existing_skill_review(
     ctx: ToolContext,
     binding: ResolvedResourceBinding,
@@ -625,9 +702,10 @@ def _author_finish_existing_skill_review(
 ) -> Optional[Dict[str, Any]]:
     """Record author finish in Advisory or Cyber without buying a new panel.
 
-    Advisory needs feedback or a returned terminal unavailable reference plus
-    current preflight; Cyber may continue with either missing or failed. Critic
-    stay intact; only the author record binds the newly accepted bytes.
+    Advisory needs earlier feedback (a verdict in review.json or a settled skill record with findings) or
+    a returned terminal reference of a review that formed no verdict, plus a passing current preflight;
+    Cyber may continue with either missing or failed. Critic facts stay intact; only the author record
+    binds the newly accepted bytes.
     """
     from ouroboros.config import get_review_enforcement
     from ouroboros.review_records import build_author_disposition
@@ -649,35 +727,9 @@ def _author_finish_existing_skill_review(
     )
     drive_root = binding.state_drive_root
     review_state = load_review_state(drive_root, skill_name, skill_type=loaded.manifest.type, skill_dir=loaded.skill_dir)
-    prior_feedback = (review_state.status != "pending" and review_state.review_profile != "owner_attested"
-                      and bool(review_state.findings or review_state.raw_actor_records or review_state.raw_result))
-    basis = {"surface": "skill", "basis": "reviewed", "content_hash": review_state.reviewed_content_hash or review_state.content_hash}
-    if not prior_feedback and not cyber:
-        from ouroboros.review_custody import _row_is_pending
-        from ouroboros.skill_review_history import load_history
-        from ouroboros.skill_review_runner import _read_review_job, review_job_state_path
-
-        job = _read_review_job(review_job_state_path(drive_root, skill_name))
-        history = load_history(drive_root, skill_name, limit=1)
-        actors = (history[-1].get("raw_actor_records") or []) if history and history[-1].get("job_id") == job.get("job_id") else []
-        reserved = {operation for chunk in (job.get("review_wave") or {}).get("chunks", [])
-                    for operation in (chunk.get("operations") or {}).values()}
-        reported = {actor.get("operation_id") for actor in actors if isinstance(actor, dict)}
-        feedback = [item for actor in actors if isinstance(actor, dict)
-                    for item in (actor.get("parsed_items") or [])
-                    if isinstance(item, dict) and item.get("verdict") in {"PASS", "FAIL"}]
-        supplied = review_reference if isinstance(review_reference, dict) else {}
-        if (not job.get("job_id") or not job.get("content_hash") or not job.get("finished_at")
-                or (not feedback and (reserved - reported or any(_row_is_pending(actor) for actor in actors if isinstance(actor, dict))))
-                or job.get("skill") != skill_name
-                or job.get("status") not in {"completed", "succeeded", "failed", "interrupted", "cancelled", "timeout"}
-                or job.get("review_status") not in {"pending", "failed", "interrupted", "cancelled", "timeout"}
-                or supplied.get("job_id") != job["job_id"] or supplied.get("content_hash") != job["content_hash"]):
-            return {"error": _skill_review_refusal(ctx, "TOOL_ARG_ERROR", "SKILL_REVIEW_ERROR: author finish needs prior reviewer feedback or the exact review_reference returned by a terminal review with feedback or disclosed unavailability. Running or unresolved physical reviewers are not unavailable.")}
-        basis = {"surface": "skill", "basis": "partial_feedback" if feedback else "unavailable", **{key: job[key] for key in
-                 ("job_id", "content_hash", "status", "review_status", "finished_at")}}
-        if feedback:
-            basis["feedback"] = feedback
+    feedback, basis, refusal = _earlier_feedback(drive_root, skill_name, review_state, current_hash, review_reference)
+    if not feedback and not cyber:
+        return {"error": _skill_review_refusal(ctx, "TOOL_ARG_ERROR", refusal)}
     try:
         author_record = build_author_disposition(
             disposition=disposition,
@@ -690,8 +742,7 @@ def _author_finish_existing_skill_review(
         return {"error": _skill_review_refusal(ctx, "TOOL_ARG_ERROR", f"SKILL_REVIEW_ERROR: {exc}")}
     previous_hash = str(review_state.reviewed_content_hash or review_state.content_hash or "")
     preflight_facts = None
-    # Current preflight is independent evidence; Cyber may continue with its
-    # failure, while ordinary Advisory still requires it to pass.
+    # Current preflight is independent evidence; Cyber may continue with its failure, Advisory may not.
     preflight = _run_deterministic_preflight(
         ctx, drive_root, loaded, current_hash, persist=False, binding=binding,
     )
@@ -710,12 +761,13 @@ def _author_finish_existing_skill_review(
     author_record["review_reference"] = basis
     review_state.author_disposition = author_record
     save_review_state(drive_root, skill_name, review_state)
+    from ouroboros.skill_dependencies import ensure_skill_dependencies
     from ouroboros.skill_loader import auto_grant_if_enabled
-    from ouroboros.skill_review_runner import _reconcile_deps_after_pass_review, _reconcile_extension_payload
+    from ouroboros.skill_review_runner import _reconcile_extension_payload
 
     loaded.review = review_state
     auto_grant_if_enabled(drive_root, loaded)
-    deps_status, deps_error = _reconcile_deps_after_pass_review(drive_root, skill_name, binding=binding)
+    deps_status, deps_error = ensure_skill_dependencies(drive_root, loaded)
     extension = (_reconcile_extension_payload(ctx, skill_name, drive_root=drive_root,
                                              repo_path=None, binding=binding)
                  if loaded.manifest.is_extension() else {})
@@ -730,11 +782,27 @@ def _author_finish_existing_skill_review(
         "advisory_result": dict(review_state.advisory_result or {}),
         "author_disposition": author_record,
         "reviewed_content_hash": previous_hash,
+        "record_id": review_state.record_id,
         "deps_status": deps_status, "deps_error": deps_error, "extension": extension,
         "review_stale": review_state.is_stale_for(current_hash),
         "review_gate": review_state.gate_for(current_hash),
         **({"author_preflight": preflight_facts} if preflight_facts is not None else {}),
     }
+
+
+def _review_attempt_index(drive_root: pathlib.Path, skill_name: str, content_hash: str) -> int:
+    """How many reviews this exact snapshot has had (the rendered block's attempt ordinal): the skill's
+    ledger records at this hash plus the rows an earlier version appended."""
+    from ouroboros.skill_review_history import load_history
+    from ouroboros.tools.review_skill import skill_record_rows
+
+    if not content_hash:
+        return 1
+    rows = skill_record_rows(drive_root, skill_name, limit=200)
+    legacy = load_history(drive_root, skill_name, limit=0)
+    count = sum(1 for row in rows if str((row.get("subject") or {}).get("tree_sha") or "") == content_hash)
+    count += sum(1 for row in legacy if str(row.get("content_hash") or "") == content_hash)
+    return max(1, count)
 
 
 def _handle_review_skill(
@@ -744,6 +812,7 @@ def _handle_review_skill(
     author_disposition: str = "",
     author_rationale: str = "",
     review_reference: Optional[Dict[str, Any]] = None,
+    reviewers: Optional[List[str]] = None, reason: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
     **_kwargs: Any,
 ) -> str:
@@ -760,77 +829,60 @@ def _handle_review_skill(
     err = _skill_tool_preflight(ctx, binding)
     if err:
         return err
-    from ouroboros.skill_review import (
-        _count_attempts_for_content,
-        _load_accepted_rebuttals,
-        render_skill_review_block,
-    )
+    from ouroboros.skill_review import render_skill_review_block
     author_value = str(author_disposition or "").strip().lower()
     author_reason = " ".join(str(author_rationale or "").split()).strip()
     if author_value or author_reason:
         if author_value not in {"accepted", "rejected", "partial", "deferred"} or not author_reason:
             return _skill_review_refusal(ctx, "TOOL_ARG_ERROR", "⚠️ SKILL_REVIEW_ERROR: explicit author finish requires a valid disposition and rationale.")
-        finished = _author_finish_existing_skill_review(
-            ctx, binding, skill_name, disposition=author_value, rationale=author_reason, review_reference=review_reference,
-        )
+        from ouroboros.skill_source_install import run_in_lane
+        # Re-load and qualify the binding AFTER waiting for the lane, before any author-state write.
+        finished = run_in_lane(binding.state_drive_root, "review", skill_name, lambda: _author_finish_existing_skill_review(
+            ctx, binding, skill_name, disposition=author_value, rationale=author_reason, review_reference=review_reference))
         if finished is None:
             return _skill_review_refusal(ctx, "LEGACY_UNAVAILABLE", "⚠️ SKILL_REVIEW_ERROR: author finish could not bind the selected skill revision.")
         if finished.get("error"):
             return str(finished["error"])
-        attempt_idx = _count_attempts_for_content(
-            binding.state_drive_root, skill_name, str(finished.get("content_hash") or ""),
-        ) or 1
-        accepted_rebuttals = _load_accepted_rebuttals(binding.state_drive_root, skill_name)
         markdown = render_skill_review_block(
-            finished, attempt_idx=attempt_idx, accepted_rebuttals=accepted_rebuttals,
-        )
+            finished, attempt_idx=_review_attempt_index(binding.state_drive_root, skill_name, str(finished.get("content_hash") or "")))
         return markdown + (
             f"\n\nReviewer hash: {finished['reviewed_content_hash']}; author hash: {finished['content_hash']}."
             f"\n{finished['review_gate']['summary']} Dependencies: {finished['deps_status']} {finished['deps_error']}"
             "\nAuthor finish recorded for the current hash; raw reviewer findings and "
             "the prior reviewer signal remain unchanged. No reviewer PASS was fabricated."
         )
+    from ouroboros import review_pause
     from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 
     def _review_with_optional_rebuttal(review_ctx: ToolContext, review_name: str):
-        if str(review_rebuttal or "").strip():
-            return _review_skill_impl(
-                review_ctx,
-                review_name,
-                review_rebuttal=review_rebuttal,
-                _resolved_binding=binding,
-            )
-        return _review_skill_impl(
-            review_ctx, review_name, _resolved_binding=binding,
-        )
+        return _review_skill_impl(review_ctx, review_name, review_rebuttal=str(review_rebuttal or ""), _resolved_binding=binding)
 
-    payload = run_skill_review_lifecycle_blocking(
-        ctx,
-        skill_name,
-        source="tool",
-        review_impl=_review_with_optional_rebuttal,
-        _resolved_binding=binding,
-    )
+    # The tool's interactive author may leave the wave on an addressed message (owner, 13.10: it waits but
+    # hears): the reviewers continue, the lifecycle settles later, and the same call collects at $0.
+    ctx._left_review_wait = None
+    with review_pause.receptive_author(review_pause.receptive_binding(ctx)):
+        payload = run_skill_review_lifecycle_blocking(
+            ctx,
+            skill_name,
+            source="tool", reviewers=reviewers, reason=reason,
+            review_impl=_review_with_optional_rebuttal,
+            _resolved_binding=binding,
+        )
     drive_root = binding.state_drive_root
     content_hash = str(payload.get("content_hash") or "")
-    attempt_idx = _count_attempts_for_content(drive_root, skill_name, content_hash) if content_hash else 1
-    if attempt_idx <= 0:
-        attempt_idx = 1
-    accepted_rebuttals = _load_accepted_rebuttals(drive_root, skill_name)
-    markdown = render_skill_review_block(
-        payload,
-        attempt_idx=attempt_idx,
-        accepted_rebuttals=accepted_rebuttals,
-    )
-    # The rendered block above already contains every finding (items x reviewers,
-    # full reasons, fix suggestions, convergence, rebuttals) — that is what the
-    # agent needs. The previously appended raw JSON payload repeated the same
-    # review 3-4 more times (findings + raw_actor_records + raw_result +
-    # advisory_result) in the agent's reasoning context, feeding context overflow
-    # on multi-round skill work. Forensic raw records remain on disk in
-    # state/skills/<name>/review.json (Skills page + on-demand reads).
+    markdown = render_skill_review_block(payload, attempt_idx=_review_attempt_index(drive_root, skill_name, content_hash))
+    # The rendered block above already contains every finding (items x reviewers, full reasons, fix
+    # suggestions) — that is what the agent needs; forensic records stay on disk in review.json and the
+    # review ledger (Skills page + on-demand reads).
+    if payload.get("pending"):
+        markdown += ("\n\nThe review is still running: an addressed message reached you, or a seat is still answering. "
+                     "Read what reached you; the same skill_review call collects this review at $0 (no second dispatch), "
+                     "and a [Review settled] notice follows the whole wave.")
     if payload.get("job_id") and payload.get("content_hash"):
-        markdown += "\n\nReview reference: " + json.dumps({"job_id": payload["job_id"], "content_hash": payload["content_hash"]}, sort_keys=True)
+        reference = {"job_id": payload["job_id"], "content_hash": payload["content_hash"]}
+        if payload.get("record_id"):
+            reference["record_id"] = payload["record_id"]
+        markdown += "\n\nReview reference: " + json.dumps(reference, sort_keys=True)
     if refusal_code := payload.get("dispatch_refusal_code"):
         return _skill_review_refusal(ctx, refusal_code, markdown)
     return markdown
@@ -838,18 +890,21 @@ def _handle_review_skill(
 
 def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     deps_status, reason = _skill_deps_not_ready(drive_root, loaded)
-    if not reason:
-        return ""
+    if not reason:  # ready, yet never another interpreter without its packages; a failed check runs nothing
+        python = str(getattr(loaded.manifest, "runtime", "") or "").strip().lower() in {"python", "python3"}
+        unusable = python and unusable_python_env(drive_root, loaded)
+        return (f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} declares Python packages, but their environment does not "
+                f"run on this host's Python ({unusable}); toggle_skill enabled=true re-points or reinstalls it.") if unusable else ""
     return (
         f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} isolated "
         f"dependencies are not ready (status={deps_status!r}). "
-        "Reconcile the declared dependencies through skill_review before executing."
+        "toggle_skill enabled=true installs them (no review is needed for packages); then execute."
     )
 
 
 
 def _non_executable_review_message(prefix: str, skill_name: str, status: str, *, stale: bool = False,
-                                   gate: Dict[str, Any] | None = None) -> str:
+                                   gate: Dict[str, Any] | None = None, strict_review: bool = False) -> str:
     gate = gate or skill_review_gate(status, stale=stale)
     normalized_status = normalize_skill_review_status(status)
     if gate["blocking_reason"] == "blocker_findings_under_blocking_enforcement":
@@ -862,7 +917,8 @@ def _non_executable_review_message(prefix: str, skill_name: str, status: str, *,
     stale_note = f", stale={stale}" if stale else ""
     return (
         f"⚠️ {prefix}: skill {skill_name!r} review status is {normalized_status!r}{stale_note}, "
-        f"not executable ({gate['blocking_reason']}). Execution needs {executable_review_requirement(gate)}. "
+        f"not executable ({gate['blocking_reason']}). "
+        f"Execution needs {executable_review_requirement(gate, strict_review=strict_review)}. "
         f"{gate['summary']}"
     )
 
@@ -983,14 +1039,15 @@ def _handle_skill_exec(
         )
     stale = loaded.review.is_stale_for(current_hash)
     gate = loaded.review.gate_for(current_hash)
+    strict_review = bool((getattr(loaded.review, "acceptance", None) or {}).get("strict_review"))
     if stale and not gate["executable_review"]:
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} was edited since "
-            f"the last review. Execution needs {executable_review_requirement(gate)}."
+            f"the last review. Execution needs {executable_review_requirement(gate, strict_review=strict_review)}."
         )
     if not gate["executable_review"]:
         return _non_executable_review_message("SKILL_EXEC_BLOCKED", skill_name, loaded.review.status, stale=stale,
-                                              gate=gate)
+                                              gate=gate, strict_review=strict_review)
     deps_block = _skill_deps_exec_block(drive_root, loaded)
     if deps_block:
         return deps_block
@@ -1287,16 +1344,18 @@ def _handle_skill_owner_action(
 _REVIEW_SCHEMA = {
     "name": "skill_review",
     "description": (
-        "Run skill review by the review panel on one external skill package "
+        "Run skill review by the review panel (paid; an unchanged snapshot replays free) on one external skill package "
         "using the review pool configuration and scored against the "
         "Skill Review Checklist section in docs/CHECKLISTS.md. Persists the "
         "verdict to data/state/skills/<name>/review.json with a content "
         "hash so a later edit invalidates the review automatically. "
-        "Max Review Cycles semantics: an identical snapshot never buys a new "
-        "panel — a recorded substantive verdict REPLAYS free, keyed by (review "
-        "group, content hash, panel-contract fingerprint), so only changed "
-        "content, a changed panel contract, or a NEW rebuttal dispatches "
-        "reviewers again. The shared OUROBOROS_REVIEW_MAX_CYCLES ceiling "
+        "Max Review Cycles semantics: an identical request never buys a new "
+        "panel — the settled review record of the same subject REPLAYS free, "
+        "keyed by the shared reuse identity (the subject's bytes and rules, the "
+        "assigned seats, enforcement, the answer contract and the round: "
+        "rebuttal, goal, scope), so only changed content, a changed panel or "
+        "contract, or a NEW rebuttal dispatches reviewers again. The shared "
+        "OUROBOROS_REVIEW_MAX_CYCLES ceiling "
         "bounds PAID panel dispatches per ceiling key (root task for "
         "task-driven reviews; the current content snapshot for the manual "
         "lane); on exhaustion the review is refused free with a typed "
@@ -1312,6 +1371,8 @@ _REVIEW_SCHEMA = {
                 "type": "string",
                 "description": "Skill name (directory name in OUROBOROS_SKILLS_REPO_PATH).",
             },
+            "reviewers": {"type": "array", "items": {"type": "string"}, "description": "Enabled row ids/handles; omitted means the whole pool. Blocking widens to all ticked reviewers; Advisory requires at least one ticked reviewer and a reason when narrowed. Unticked advisers are heard, not counted. Cyber Pro composes freely."},
+            "reason": {"type": "string", "description": "Why these reviewers; required for a narrowed Advisory panel, including a re-review after blockers."},
             "review_rebuttal": {
                 "type": "string",
                 "description": (
@@ -1331,9 +1392,9 @@ _REVIEW_SCHEMA = {
                 "description": "Optional Advisory author finish for the current content hash. Keeps original critic evidence; changed or unavailable-review cases require current deterministic preflight. For terminal partial-feedback or unavailable outcomes, pass the returned review_reference.",
             },
             "review_reference": {
-                "type": "object", "properties": {"job_id": {"type": "string"}, "content_hash": {"type": "string"}},
-                "required": ["job_id", "content_hash"],
-                "description": "For a partial-feedback or unavailable outcome: exact reference returned by that skill review. An in-flight critic without feedback is not unavailable.",
+                "type": "object", "properties": {"job_id": {"type": "string"}, "record_id": {"type": "string"}, "content_hash": {"type": "string"}},
+                "required": ["content_hash"],
+                "description": "For a review that formed no verdict (quorum failed, nothing dispatched): the exact reference returned by that skill review (its job_id or record_id with the content_hash). A review still running is not unavailable.",
             },
             "author_rationale": {
                 "type": "string",
@@ -1347,7 +1408,7 @@ _REVIEW_SCHEMA = {
 _EXEC_SCHEMA = {
     "name": "skill_exec",
     "description": (
-        "Execute a script from an external skill package. The skill must be "
+        "Run one manifest-declared script of a type=script skill. The skill must be "
         "enabled and its review_gate must permit the current bytes: outside "
         "Cyber Pro, a current executable reviewer verdict or a qualified "
         "Advisory author acceptance of these exact bytes (the reviewer status "
@@ -1356,8 +1417,8 @@ _EXEC_SCHEMA = {
         "dependencies still apply. Only type=script "
         "skills execute via this substrate — type=instruction skills are "
         "catalogued + reviewable but have no executable payload by "
-        "design; type=extension skills run IN-PROCESS via the Phase 4 "
-        "extension_loader (calling skill_exec on an extension returns "
+        "design; type=extension skills expose their own tools, routes and "
+        "handlers instead (calling skill_exec on an extension returns "
         "SKILL_EXEC_EXTENSION pointing at that surface). The ``script`` "
         "argument must match a "
         "``name`` entry in the manifest's ``scripts:`` array (SKILL.md "
@@ -1365,8 +1426,8 @@ _EXEC_SCHEMA = {
         "Runtime allowlist: python/python3/bash/node/deno/ruby/go. The subprocess "
         "runs with cwd=skill_dir, a scrubbed env (env_from_settings "
         "keys only), panic-kill tracking, and a timeout from the "
-        "manifest (capped at 300s). v5.1.2 Frame A: OUROBOROS_RUNTIME_MODE "
-        "no longer gates execution — light, advanced, and pro all let "
+        "manifest (capped at 300s). OUROBOROS_RUNTIME_MODE does not gate "
+        "execution — light, advanced, and pro all let "
         "reviewed + enabled skills run. Light still blocks repo "
         "self-modification and the runtime_mode elevation ratchet."
     ),
@@ -1403,7 +1464,8 @@ _TOGGLE_SCHEMA = {
         "skill's review_gate to permit the current bytes (outside Cyber Pro: "
         "a current executable reviewer verdict or a qualified Advisory author "
         "acceptance of these exact bytes), any requested key or "
-        "host-permission grants, and ready isolated dependencies. "
+        "host-permission grants; enabling installs or refreshes the declared isolated dependencies "
+        "itself (a review is never needed for packages) and repairs an enabled skill whose packages broke. "
         "For selected-skill development, interpret the real owner request: "
         "Repair and run authorizes enabling and leaving the repaired skill running. "
         "The host resolves that task's original owner message when owner_source is omitted; "
@@ -1488,7 +1550,7 @@ def get_tools() -> List[ToolEntry]:
             schema=_TOGGLE_SCHEMA,
             handler=_handle_toggle_skill,
             is_code_tool=False,
-            timeout_sec=15,
+            timeout_sec=_SKILL_REVIEW_TOOL_TIMEOUT_SEC,
         ),
         ToolEntry(
             name="skill_owner_action", schema=_OWNER_ACTION_SCHEMA,

@@ -41,6 +41,20 @@ def _patch_opener(body, *, status=200, headers=None):
     return mock.patch.object(clawhub_mod, "_active_opener", return_value=fake)
 
 
+@pytest.mark.parametrize("record,expected", [
+    ({"ownerHandle": " alice ", "updatedAt": 1789594554485},
+     {"owner": "alice", "updated_at": "2026-09-16T21:35:54.485000+00:00"}),
+    ({"publisher": {"handle": "bob"}}, {"owner": "bob"}),
+    ({"skill": {"slug": "demo"}, "owner": {"handle": "carol"}}, {"owner": "carol"}),
+    ({"updatedAt": "yesterday"}, {"owner": ""}),
+    ({"updatedAt": True}, {"owner": ""}),
+    ({"updatedAt": 1e300}, {"owner": ""}),
+])
+def test_adapter_owns_catalog_author_and_update_facts(record, expected):
+    summary = clawhub_mod._summary_from_record({"slug": "demo", **record})
+    assert summary.catalog_facts() == expected
+
+
 # ---------------------------------------------------------------------------
 # Registry host allowlist
 # ---------------------------------------------------------------------------

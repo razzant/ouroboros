@@ -5,9 +5,9 @@
 task forever — nothing ever unlinked them. This startup sweep, run beside
 the existing custody sweep, removes only what is PROVEN dead and old:
 
-- a recovery row whose own ``status`` is terminal (``vetoed``/``adopted``)
-  past GC retention; live/resumable rows (``reserved``/``pre_adopted``) are
-  never touched, whatever their age;
+- a terminal recovery row past GC retention; adopted pending rows keep their
+  wait sources until run binding or task settlement. Reserved/pre-adopted rows
+  are never touched, whatever their age;
 - a restart transaction not referenced by any surviving recovery row, past
   GC retention (``active.json`` never; and if ANY recovery row was
   unreadable, the transaction pass is skipped — references are unknowable);
@@ -57,7 +57,7 @@ def sweep_settled_delegate_state(
 ) -> Dict[str, Any]:
     """Remove terminal+aged delegate state files; report what moved and why not."""
     from ouroboros.delegate_custody import custody_log_unreadable
-    from ouroboros.retention import age_cutoff, get_gc_retention_days
+    from ouroboros.retention import age_cutoff, get_gc_retention_days, keep_until
     from ouroboros.utils import read_json_dict
 
     report: Dict[str, Any] = {"removed": [], "errors": [], "skipped": ""}
@@ -71,7 +71,10 @@ def sweep_settled_delegate_state(
 
     def _aged(path: pathlib.Path) -> bool:
         try:
-            return path.stat().st_mtime < cutoff
+            stamp = path.stat().st_mtime
+            if stamp >= cutoff:
+                keep_until(report, stamp, retention_days)
+            return stamp < cutoff
         except OSError:
             return False
 
@@ -93,7 +96,10 @@ def sweep_settled_delegate_state(
                                      "error": "unreadable_row"})
             references_unknowable = True
             continue
-        if str(row.get("status") or "") in _TERMINAL_RECOVERY_STATUSES and _aged(path):
+        pending_wait = any(holder.get("status") in {"adopted", "deferred", "reserved", "pre_adopted"}
+                           and holder.get("pending_invocation_id") and not holder.get("run_id")
+                           for holder in row.get("holders", [row])) and not _task_settled(root, path.stem)
+        if str(row.get("status") or "") in _TERMINAL_RECOVERY_STATUSES and not pending_wait and _aged(path):
             _remove(path, "delegate_recovery")
             continue
         transaction_id = str(row.get("restart_transaction_id") or "")

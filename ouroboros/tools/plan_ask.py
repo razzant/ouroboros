@@ -1,18 +1,20 @@
 """The paid act of ``plan_task``: one ask to the council over the plan record.
 
 Composition (DESIGN §3): the default council is the review pool, which already
-falls back to Main for a valid empty pool; a body plan's FIRST ask (outside Cyber
-Pro) includes every owner-marked reviewer and says so when the mind named fewer;
+falls back to Main for a valid empty pool; Blocking widens a body plan's first ask
+to every marked reviewer, while Advisory requires a counted seat and a reason to narrow;
 a mind-named enabled catalog row outside the pool is a participant whose
 objections are answered but never hold; children the mind schedules are not
 catalog rows and cannot be named. Each participant receives its own host-built
 delivery (``plan_packet``; what it is told is selected by ``plan_delivery``): the
-stable part, the owner's verbatim words and room snapshot, the plan whole or as the
-delta since the revision it last answered about, everything said in the council
-since the ask it last answered in plus the peer replies to earlier asks that settled
-after its last delivery, its own open objections, the mind's message, the attachments. Continuation is per
-participant: a packet seat continues its own exact transcript, a session seat its
-own thread; a changed roster elsewhere resets nobody.
+stable part, the objective with its author, the owner's verbatim words and room
+snapshot, the plan whole or as the delta since the revision it last answered about
+(before any revision no plan: a reading of the request, whose replies move no
+objection), everything said in the council since the ask it last answered in plus the
+peer replies to earlier asks that settled after its last delivery, its own open
+objections, the mind's message, the attachments. Continuation is per participant: a
+packet seat continues its own exact transcript, a session seat its own thread; a
+changed roster elsewhere resets nobody.
 
 Dispatch goes through the existing review substrate (``run_plan_review_slots``)
 with release at the dispatch barrier; replies settle into the plan record from the
@@ -23,7 +25,7 @@ last settlement wakes the task mailbox. A seat whose process died before settlin
 recovered later from its retained operation (``collect_pending``), never resent. Every
 refusal before the dispatch writes nothing and engages no gate, except an ask that NO
 named route could take: it leaves a typed attempt fact (nobody called, nothing held) so
-a Swarm obligation reads "asked, but no route" instead of "never asked".
+the record reads "asked, but no route" instead of "never asked".
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ import copy
 import json
 import logging
 import pathlib
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from typing import Any, Dict, List, Mapping, Optional
 
 from ouroboros import plan_record
@@ -148,55 +150,46 @@ def _pool_slots(reviewer_effort: str) -> List[Any]:
                              "Fix the Reviewer rows on the Agents tab in Settings. Nothing was written.") from exc
 
 
-def resolve_participants(ask: Any, *, first_body_ask: bool, reviewer_effort: str = "") -> List[Participant]:
-    """``"council"`` → the pool (Main when it is empty). A list → the named rows: pool rows
-    by seat id or catalog handle (owner-marked), any other enabled catalog row as a
-    mind-added participant (never holds). A body plan's first ask adds the pool rows the
-    mind did not name (``host_added``). An unknown name is a typed refusal."""
-    from ouroboros import reviewer_slot_config as slots_config
-    from ouroboros.settings_integrity import live_effort_range
+def resolve_participants(ask: Any, *, first_body_ask: bool, reviewer_effort: str = "",
+                         reason: str = "") -> tuple[List[Participant], Dict[str, Any]]:
+    """Use the shared composer; only Blocking tops up the first own-body ask."""
+    from ouroboros.reviewer_slot_config import PanelCompositionError, compose_review_panel
 
-    pool = _pool_slots(reviewer_effort)
-    by_id = {str(s.slot_id): s for s in pool}
-    by_id.update({str(getattr(s, "subagent_id", "") or ""): s for s in pool if getattr(s, "subagent_id", "")})
-    if ask == "council":
-        return [Participant(slot, owner_marked=True) for slot in pool]
-    named: Dict[str, Participant] = {}
-    for raw in ask:
-        name = str(raw or "").strip()
-        if name in by_id:
-            slot = by_id[name]
-            named.setdefault(str(slot.slot_id), Participant(slot, owner_marked=True))
-            continue
+    try:
+        panel = compose_review_panel(() if ask == "council" else ask, reason,
+            surface="plan_first" if first_body_ask else "plan", pool=_pool_slots(reviewer_effort),
+            reviewer_effort=reviewer_effort)
+    except PanelCompositionError as exc:
+        detail = str(exc).replace("REVIEWER_UNKNOWN:", "PARTICIPANT_UNKNOWN:", 1)
+        raise PlanAskRefused("TOOL_ARG_ERROR", f"ERROR: PLAN_{detail} Nothing was written.") from exc
+    requested = set(panel.facts["reviewers_requested"])
+    widened = bool(panel.facts["widened_from"])
+    # Resolve handles before deciding which counted participants the host added.
+    from ouroboros.reviewer_slot_config import catalog_review_row
+    for name in tuple(requested):
         try:
-            row = slots_config.catalog_review_row(None, name)
-        except ValueError as exc:
-            raise PlanAskRefused("TOOL_ARG_ERROR",
-                                 f"ERROR: PLAN_PARTICIPANT_UNKNOWN: {name!r} is neither a review-pool seat nor an enabled "
-                                 f"catalog row ({exc}). Participants are catalog rows: the pool seats "
-                                 f"{sorted(str(s.slot_id) for s in pool)} or an enabled row by its id/handle; a helper you "
-                                 "scheduled yourself is never a participant. Nothing was written.") from exc
-        if str(row.subagent_id or "") in by_id:
-            slot = by_id[str(row.subagent_id)]
-            named.setdefault(str(slot.slot_id), Participant(slot, owner_marked=True))
-            continue
-        slot = slots_config._delivery_slot(
-            row, role_hint="plan reviewer", default_effort=str(reviewer_effort or ""), rng=live_effort_range(),
-            timeout_sec=PLAN_REVIEW_SLOT_TIMEOUT_SEC, max_tokens=PLAN_REVIEW_MAX_TOKENS, default_temperature=0.2)
-        named.setdefault(str(slot.slot_id), Participant(slot, owner_marked=False))
-    if first_body_ask:
-        for slot in pool:
-            if str(slot.slot_id) not in named:
-                named[str(slot.slot_id)] = Participant(slot, owner_marked=True, host_added=True)
-    return list(named.values())
+            requested.add(catalog_review_row(None, name).slot_id)
+        except ValueError:
+            pass  # Main and test-provided pool seats already use their stored id.
+    seats = sorted(panel.seats, key=lambda seat: seat.slot.slot_id not in requested) if widened else panel.seats
+    return ([Participant(replace(seat.slot, role_hint="plan reviewer", timeout_sec=PLAN_REVIEW_SLOT_TIMEOUT_SEC,
+                                max_tokens=PLAN_REVIEW_MAX_TOKENS, default_temperature=0.2), owner_marked=not seat.additional,
+                         host_added=widened and not seat.additional and seat.slot.slot_id not in requested)
+             for seat in seats], panel.facts)
 
 
-def first_body_ask(record: Mapping[str, Any], revision: Mapping[str, Any]) -> bool:
-    """The first ask after the plan became a body plan: this revision is body and no
-    earlier ask was about a body revision."""
-    if not revision.get("body"):
+def first_body_ask(record: Mapping[str, Any], revision: Optional[Mapping[str, Any]], *, body: bool = False) -> bool:
+    """The first ask about a body intention, counted apart for readings and revisions: the
+    first ask about a body revision, and the first reading of declared body work (``revision=None``
+    with the task's own ``body`` fact). A reading never spends the revision's first ask; a later
+    reading names its participants like any later ask."""
+    if not (revision.get("body") if revision is not None else body):
         return False
     for ask in record.get("asks") or []:
+        if revision is None:  # an earlier first reading of the body spent the reading's own floor
+            if ask.get("revision") is None and ask.get("body_first_ask"):
+                return False
+            continue
         earlier = plan_record.revision_by_number(record, ask.get("revision"))
         if earlier is not None and earlier.get("body"):
             return False
@@ -259,9 +252,7 @@ def _task_objective(ctx: Any) -> str:
     objective = str(contract.get("objective") or contract.get("description") or "")
     context = str(contract.get("context") or "").strip()
     if context:
-        from ouroboros.observability import redact_projection
-
-        objective += f"\n\nContract context: {redact_projection(context).value}"
+        objective += f"\n\nContract context: {context}"
     return objective
 
 
@@ -301,18 +292,20 @@ def _prior_transcript(state_root: pathlib.Path, task_id: str, participant_row: M
     return [*messages, {"role": "assistant", "content": answer}]
 
 
-def participant_content(ctx: Any, record: Mapping[str, Any], revision: Mapping[str, Any], participant: Participant, *,
+def participant_content(ctx: Any, record: Mapping[str, Any], revision: Optional[Mapping[str, Any]], participant: Participant, *,
                         message: str, manifest: Mapping[str, Any], dialogue_section: str,
-                        legacy: Optional[Mapping[str, Any]] = None, state_root: Any = None, task_id: str = "") -> str:
+                        legacy: Optional[Mapping[str, Any]] = None, state_root: Any = None, task_id: str = "",
+                        objective_author: str = "", snapshot_section: str = "") -> str:
     """One participant's user content: whole plan the first time, the delta since the revision
-    it last answered about afterwards; the council since its last answer; its own open objections
-    (an imported legacy one included: its raiser must see what holds the task); message; attachments."""
+    it last answered about afterwards (none before any revision: a reading of the request); the
+    council since its last answer; its own open objections (an imported legacy one included: its
+    raiser must see what holds the task); message; attachments."""
     seat_id = participant.seat_id
     last_ask, _row = plan_delivery.last_answer_row(record, seat_id)
     first_time = last_ask is None
     hydrate = state_root is not None and bool(task_id)
     delta = None
-    if not first_time:
+    if not first_time and revision is not None:
         seen = plan_record.revision_by_number(record, last_ask.get("revision"))
         if seen is not None and hydrate:
             seen = plan_delivery.delivered_revision(state_root, task_id, seen)
@@ -330,7 +323,8 @@ def participant_content(ctx: Any, record: Mapping[str, Any], revision: Mapping[s
     return plan_packet.build_participant_content(
         objective=_task_objective(ctx), owner_words=str(manifest.get("owner_words") or ""),
         dialogue_section=dialogue_section, revision=revision, delta=delta, cross_talk=cross_talk,
-        own_objections=own, message=message, evidence_section=plan_packet.render_evidence(manifest), first_time=first_time)
+        own_objections=own, message=message, evidence_section=plan_packet.render_evidence(manifest), first_time=first_time,
+        objective_author=objective_author, snapshot_section=snapshot_section)
 
 
 # ------------------------------------------------------------------ prepare
@@ -358,22 +352,26 @@ class PreparedAsk:
     enforcement: str
     system_root: pathlib.Path
     active_root: pathlib.Path
+    panel: Dict[str, Any] = field(default_factory=dict)
 
 
-def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Mapping[str, Any], ask: Any, message: str,
+def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mapping[str, Any]], ask: Any, message: str,
                 attach: List[str], reviewer_effort: str, state_root: pathlib.Path, task_id: str,
-                legacy: Optional[Mapping[str, Any]] = None) -> PreparedAsk:
+                legacy: Optional[Mapping[str, Any]] = None, reason: str = "") -> PreparedAsk:
     """Everything that can refuse, before anything is written: participants, the deadline rail, each
-    participant's delivery, fit and lane health, the budget admission (``legacy``: the imported v2 state)."""
+    participant's delivery, fit and lane health, the budget admission (``legacy``: the imported v2 state).
+    ``revision=None`` is a reading of the request before any plan: no paths are declared, so its body
+    fact is the task's own declaration (``plan_is_body`` with no paths)."""
     from ouroboros.config import get_review_enforcement
+    from ouroboros.owner_words import objective_author_text
     from ouroboros.tools.plan_dialogue import attach_own_dialogue, dialogue_slot_inputs, render_dialogue, session_input_limits
-    from ouroboros.tools.review_helpers import review_enforcement_blocks, review_wave_binding_fence, review_wave_budget_gate
+    from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
 
     system_root, active_root = planning_roots(ctx)
-    body = bool(revision.get("body"))
-    cyber_pro = not review_enforcement_blocks("blocking")
-    body_first = first_body_ask(record, revision) and not cyber_pro
-    participants = resolve_participants(ask, first_body_ask=body_first, reviewer_effort=reviewer_effort)
+    body = (bool(revision.get("body")) if revision is not None
+            else plan_is_body(ctx, [], system_root=system_root, active_root=active_root)[0])
+    body_first = first_body_ask(record, revision, body=body)
+    participants, panel = resolve_participants(ask, first_body_ask=body_first, reviewer_effort=reviewer_effort, reason=reason)
     if not participants:
         raise PlanAskRefused("CAPABILITY_UNAVAILABLE", "ERROR: PLAN_ASK_EMPTY: no participant could be named. Nothing was written.")
     deadline = plan_deadline_skip(ctx)
@@ -389,17 +387,19 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Mapping[str, A
         participant.slot = by_seat.get(participant.seat_id, participant.slot)
     manifest = attachment_manifest(ctx, attach, state_root=state_root, task_id=task_id, system_root=system_root, active_root=active_root)
     manifest = attach_own_dialogue(ctx, state_root, manifest, f"plan-ask-{task_id}-{ask_id}", persist=True)
-    dialogue_section = render_dialogue(manifest)
+    dialogue_section, snapshot_section = render_dialogue(manifest)  # rows before the plan, capture facts after
     try:
         system_prompt = stable_prompt(ctx, body=body, system_root=system_root, enforcement=enforcement, by_retrieval=False)
         session_prompt = stable_prompt(ctx, body=body, system_root=system_root, enforcement=enforcement, by_retrieval=True)
     except plan_packet.PlanPacketError as exc:
         raise PlanAskRefused("TOOL_ERROR", f"ERROR: PLAN_ASK_PACK_INCOMPLETE: {exc}. Nothing was written.") from exc
     contents, session_tasks, slot_messages, session_threads, continued = {}, {}, {}, {}, {}
+    author = objective_author_text(ctx)  # one typed fact per task: byte-stable across its asks (the cached prefix)
     for participant in participants:
         sid = participant.seat_id
         contents[sid] = participant_content(ctx, record, revision, participant, message=message, manifest=manifest,
-                                            dialogue_section=dialogue_section, legacy=legacy, state_root=state_root, task_id=task_id)
+                                            dialogue_section=dialogue_section, legacy=legacy, state_root=state_root, task_id=task_id,
+                                            objective_author=author, snapshot_section=snapshot_section)
         session_tasks[sid] = _session_task_text(session_prompt, contents[sid], str(active_root))
         _ask, prior = plan_delivery.last_answer_row(record, sid)
         if prior is None:
@@ -461,7 +461,7 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Mapping[str, A
         system_prompt=system_prompt, session_prompt=session_prompt, contents=contents, session_tasks=session_tasks,
         delivery=merged, session_threads=session_threads, continued=continued, manifest=manifest, message=message,
         attach=list(attach or []), reviewer_effort=str(reviewer_effort or ""), body=body, body_first_ask=body_first,
-        enforcement=enforcement, system_root=system_root, active_root=active_root)
+        enforcement=enforcement, system_root=system_root, active_root=active_root, panel=panel)
 
 
 # ------------------------------------------------------------------ dispatch
@@ -547,11 +547,14 @@ def _progress(ctx: Any, text: str) -> None:
         log.debug("plan progress line failed", exc_info=True)
 
 
-def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Mapping[str, Any], state_root: pathlib.Path, task_id: str) -> Dict[str, Any]:
-    """Record the ask, send it, record the dispatch barrier. Returns the plan record."""
+def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[str, Any]], state_root: pathlib.Path,
+                 task_id: str) -> Dict[str, Any]:
+    """Record the ask, send it, record the dispatch barrier. Returns the plan record. ``revision=None``
+    is a reading of the request: the ask row and its ledger record name no revision."""
     from ouroboros import review_ledger as ledger
     from ouroboros.tools.plan_review_runtime import plan_reviewer_config_fingerprint
 
+    number = (revision or {}).get("n")
     record_id = ledger.new_record_id()
     base_facts = {str(s.slot_id): {"status": "pending"} for s in prepared.callable}
     for sid, why in prepared.not_sendable.items():
@@ -569,18 +572,19 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Mapping[str, Any]
             "delivery_ref": delivery_refs.get(sid), **base_facts[sid],
         })
     record = plan_record.append_ask(state_root, task_id, {
-        "ask_id": prepared.ask_id, "ts": utc_now_iso(), "revision": revision.get("n"), "message": prepared.message,
+        "ask_id": prepared.ask_id, "ts": utc_now_iso(), "revision": number, "message": prepared.message,
         "attach": list(prepared.attach), "attached": [{k: a.get(k) for k in ("locator", "sha256", "bytes")} for a in prepared.manifest.get("attached") or []],
         "omissions": list(prepared.manifest.get("omissions") or []), "reviewer_effort": prepared.reviewer_effort,
-        "body_first_ask": bool(prepared.body_first_ask), **_dialogue_carrier(prepared.manifest),
+        "body_first_ask": bool(prepared.body_first_ask), "panel": prepared.panel, "reason": prepared.panel.get("reason", ""),
+        **_dialogue_carrier(prepared.manifest),
         "host_added": [p.seat_id for p in prepared.participants if p.host_added],
         "participants": participants, "record_id": record_id, "retry_key": prepared.retry_key,
     })
     _reference(ctx, task_id, record, state_root)
     sent = [str(s.slot_id) for s in prepared.callable]
-    _progress(ctx, f"📐 Plan: ask {prepared.ask_id} on revision {revision.get('n')} — sending to {len(sent)} participant"
+    _progress(ctx, f"📐 Plan: ask {prepared.ask_id} on {plan_record.ask_subject(number)} — sending to {len(sent)} participant"
                    f"{'' if len(sent) == 1 else 's'}" + (f", {len(prepared.not_sendable)} not sent" if prepared.not_sendable else "")
-                   + (", body plan" if prepared.body else "") + "…")
+                   + ((", body plan" if revision is not None else ", Ouroboros's own body") if prepared.body else "") + "…")
     first = str(prepared.callable[0].slot_id)
     try:
         rows = run_plan_coroutine(run_plan_review_slots(
@@ -591,7 +595,7 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Mapping[str, Any]
             session_threads=prepared.session_threads, retry_key=prepared.retry_key, release_at_dispatch=True,
             reconciliation_identity={"subject_hash": prepared.retry_key, "roster_hash": plan_reviewer_config_fingerprint(prepared.callable),
                                      "epoch": prepared.retry_key, "health_epoch": [], "plan_ask_id": prepared.ask_id,
-                                     "plan_revision": revision.get("n")}))
+                                     "plan_revision": number}))
     except Exception as exc:
         log.error("plan ask %s dispatch failed: %s", prepared.ask_id, exc, exc_info=True)
         # The substrate already held every sent seat: an exception after the hand-off is UNKNOWN —
@@ -672,6 +676,8 @@ def record_reply(ctx: Any, *, state_root: pathlib.Path, task_id: str, ask_id: st
     facts = reply_facts_from_row(row)
     if facts.get("status") == "pending" and participant.get("status") != "pending":
         return record  # a settled seat is never re-opened by a late pending echo
+    if facts.get("status") == "pending" and all(participant.get(key) == value for key, value in facts.items()):
+        return record  # unchanged custody loss is an observation, not another task write
     record = plan_record.update_participant(state_root, task_id, ask_id=ask_id, seat_id=seat_id, facts=facts)
     if facts.get("status") != "pending" and ask.get("record_id"):
         reply_ref = settle_ledger_seat(state_root, task_id, str(ask["record_id"]), seat_id, facts, raw_text=str(row.get("text") or ""))
@@ -698,7 +704,8 @@ def _keep_late_reply_in_view(state_root: pathlib.Path, task_id: str, ask: Mappin
         return
     who, seat = str(facts.get("model") or participant.get("model") or "a participant"), str(participant.get("seat_id") or "")
     reply = facts.get("reply") or {}
-    lines = [f"Plan council reply from {who} (seat {seat}) to ask {ask.get('ask_id')} on plan revision {ask.get('revision')}, "
+    lines = [f"Plan council reply from {who} (seat {seat}) to ask {ask.get('ask_id')} on "
+             f"{plan_record.ask_subject(ask.get('revision'), plan=True)}, "
              "recorded after its task ended: advice for whoever continues this work, not a verdict; it holds nothing."]
     if facts.get("status") != "answered":
         lines.append("Its reply could not be read as the reply object; the full text is in its retained source.")
@@ -715,7 +722,7 @@ def _keep_late_reply_in_view(state_root: pathlib.Path, task_id: str, ask: Mappin
 def settle_released_reply(usage_ctx: Any, *, request: Any, task_id: str, actor: Any, settled_wave: Dict[str, str],
                           roster_size: int = 0, slot: Any = None, settled_actors: Optional[Mapping[str, Any]] = None) -> None:
     """The custody hook for a plan seat released at the dispatch barrier: settle it into
-    the record, and when the whole ask has settled wake the task mailbox. The hook that
+    the record, and when its counted participants finish wake the task mailbox once. The hook that
     composes the frame first absorbs, from custody's own copies (``settled_actors``), every
     seat whose record write has not landed — a sibling's hook still running, or a write lost
     to a store failure — at $0, never a send; what it still cannot record the frame names as
@@ -750,10 +757,9 @@ def settle_released_reply(usage_ctx: Any, *, request: Any, task_id: str, actor: 
             record_reviewer_slot_executions("plan_review", [actor], {seat_id: slot}, keep_on=usage_ctx)
         except Exception:
             log.debug("plan ask %s: last-execution row for %s not recorded", ask_id, seat_id, exc_info=True)
-    if not settled_wave:
-        return
     participants: List[Mapping[str, Any]] = []
     objections: List[Mapping[str, Any]] = []
+    completed = None
     try:
         record = plan_record.load_plan_record(state_root, task_id)
         ask, _ = _ask_and_participant(record, ask_id, "")
@@ -769,18 +775,30 @@ def settle_released_reply(usage_ctx: Any, *, request: Any, task_id: str, actor: 
                     record = settled
             except Exception:
                 log.warning("plan ask %s: custody's copy of %s could not be recorded", ask_id, sid, exc_info=True)
-        ask, _ = _ask_and_participant(record, ask_id, "")
+        completed = plan_record.claim_ask_completion(state_root, task_id, ask_id, settled_wave)
+        if completed is None:
+            return
+        ask, _ = _ask_and_participant(completed, ask_id, "")
         participants = (ask or {}).get("participants") or []
-        objections = plan_record.open_objections(record)
+        objections = plan_record.open_objections(completed)
     except Exception:
         log.warning("plan ask %s: the record could not be read for the settled frame", ask_id, exc_info=True)
+        if not settled_wave or not all(settled_wave.values()):
+            return  # without the recorded standing, only physical completion is known
     from ouroboros.owner_mailbox import write_task_message
 
+    delivered = False
     try:
-        write_task_message(pathlib.Path(str(usage_ctx.drive_root)), plan_packet.settled_frame(ask_id, participants, objections, custody=settled_wave),
-                           task_id, source_task_id=task_id, provenance="system")
+        delivered = write_task_message(pathlib.Path(str(usage_ctx.drive_root)), plan_packet.settled_frame(ask_id, participants, objections, custody=settled_wave),
+                                       task_id, source_task_id=task_id, provenance="system", msg_id=f"plan-complete:{task_id}:{ask_id}")
     except Exception:
         log.warning("plan ask %s settled-wave frame failed for %s", ask_id, task_id, exc_info=True)
+    finally:
+        if not delivered and completed is not None:
+            try:
+                plan_record.release_ask_completion(state_root, task_id, ask_id)
+            except Exception:
+                log.warning("plan ask %s: undelivered completion claim could not be released", ask_id, exc_info=True)
 
 
 def collect_pending(ctx: Any, record: Mapping[str, Any], *, state_root: pathlib.Path, task_id: str) -> Dict[str, Any]:

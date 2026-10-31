@@ -17,11 +17,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from supervisor import event_observation
 from supervisor.event_observation import (
     EventQueueManager,
     ObservedEventQueue,
     delivery_outstanding,
     event_lane,
+    lane_observations,
     pending_idle_observations,
 )
 from supervisor.event_taxonomy import CONTROL_LANE, TELEMETRY_LANE
@@ -47,6 +49,9 @@ def test_a_send_behind_five_thousand_telemetry_frames_is_the_first_event_served_
             endpoint.put(_telemetry(n))
         endpoint.put(_send(5000, delivery_id="final:answer-task:0123456789abcdef"))
         assert endpoint.qsize() == 5001
+        lanes = lane_observations(endpoint)  # the proxy exposes the lane facts too
+        assert lanes[CONTROL_LANE]["depth"] == 1 and lanes[TELEMETRY_LANE]["depth"] == 5000
+        assert lanes[TELEMETRY_LANE]["oldest_age_sec"] >= lanes[CONTROL_LANE]["oldest_age_sec"] >= 0
         first = endpoint.get_nowait()
         assert first["type"] == "send_message" and first["n"] == 5000
         assert endpoint.qsize() == 5000
@@ -59,6 +64,35 @@ def test_a_send_behind_five_thousand_telemetry_frames_is_the_first_event_served_
         assert delivery_outstanding(endpoint, "final:answer-task:0123456789abcdef") is False
         # Telemetry keeps its own FIFO behind the control lane.
         assert [endpoint.get_nowait()["n"] for _ in range(3)] == [0, 1, 2]
+
+
+def test_lane_facts_show_a_telemetry_backlog_waiting_behind_control(monkeypatch):
+    """Per lane, the depth and the oldest envelope's age at the moment of the read: a
+    telemetry backlog queued first keeps aging while control is served ahead of it."""
+    clock = [100.0]
+    monkeypatch.setattr(event_observation, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    bus = ObservedEventQueue()
+    empty = {"depth": 0, "oldest_age_sec": None}
+    assert bus.lane_facts() == {CONTROL_LANE: empty, TELEMETRY_LANE: empty}
+    for n in range(3):
+        bus.put(_telemetry(n))
+    clock[0] = 130.0
+    bus.put(_send(1))
+    bus.put(_send(2))
+    clock[0] = 160.0
+    assert bus.lane_facts() == {CONTROL_LANE: {"depth": 2, "oldest_age_sec": 30.0},
+                                TELEMETRY_LANE: {"depth": 3, "oldest_age_sec": 60.0}}
+    assert [bus.get_nowait()["n"] for _ in range(2)] == [1, 2]
+    clock[0] = 190.0
+    assert bus.lane_facts() == {CONTROL_LANE: empty, TELEMETRY_LANE: {"depth": 3, "oldest_age_sec": 90.0}}
+    bus.get_nowait()
+    assert bus.lane_facts()[TELEMETRY_LANE] == {"depth": 2, "oldest_age_sec": 90.0}
+    assert lane_observations(bus) == bus.lane_facts()
+
+
+@pytest.mark.parametrize("endpoint", [None, stdqueue.Queue(), SimpleNamespace(lane_facts=lambda: "busy")])
+def test_unobservable_lanes_are_unknown_not_empty(endpoint):
+    assert lane_observations(endpoint) is None
 
 
 def test_fifo_inside_each_lane_and_control_first_across_them():
@@ -140,22 +174,14 @@ def test_an_unobservable_membership_is_unknown_not_absent(endpoint):
     assert delivery_outstanding(ObservedEventQueue(), "final:x:0123456789abcdef") is False
 
 
-def test_a_contended_schedule_deferral_lands_in_the_control_lane_ahead_of_older_telemetry():
-    """ADM-1: ``workspace_preparation.defer_schedule_event`` re-puts a contended
-    ``schedule_subagent`` on the same transport; with the lanes that put is served
-    before every telemetry frame that was queued earlier, so a contention bounce
-    no longer costs a lap of the telemetry backlog. One transport, no second
-    deferral mechanism."""
-    from supervisor.workspace_preparation import defer_schedule_event
+def test_a_contended_schedule_admission_is_never_re_put_on_the_bus():
+    """Producers keep one put and the consumer never re-puts (the bus docstring): a contended
+    schedule_subagent is retried by its claim at the head of the preparation generation's own
+    lane, so the bus holds no second copy and no deferral owner exists beside the lane."""
+    from supervisor import workspace_preparation
 
+    assert not hasattr(workspace_preparation, "defer_schedule_event")
     bus = ObservedEventQueue()
-    for n in range(100):
-        bus.put(_telemetry(n))
-    event = {"type": "schedule_subagent", "task_id": "child", "parent_task_id": "root",
-             "root_task_id": "root", "chat_id": 1, "delegation_role": "subagent"}
-    assert defer_schedule_event(SimpleNamespace(event_queue=bus), event) is True
-    assert bus.qsize() == 101
-    served = bus.get_nowait()
-    assert served["type"] == "schedule_subagent" and served["task_id"] == "child"
-    assert "child" not in pending_idle_observations(bus) and "root" not in pending_idle_observations(bus)
-    assert bus.get_nowait()["n"] == 0
+    bus.put({"type": "schedule_subagent", "task_id": "child", "parent_task_id": "root",
+             "root_task_id": "root", "chat_id": 1, "delegation_role": "subagent"})
+    assert bus.get_nowait()["task_id"] == "child" and bus.qsize() == 0

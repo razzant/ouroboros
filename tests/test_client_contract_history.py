@@ -184,3 +184,48 @@ def test_paging_with_next_cursor_reaches_older_rows_without_repeating_them(chat)
     assert not seen & {row["history_id"] for row in older["messages"]}
     _status, again = _read(chat.root, cursor=older["page_cursor"])
     assert [row["history_id"] for row in again["messages"]] == [row["history_id"] for row in older["messages"]]
+
+
+def test_a_shared_row_and_a_reply_to_it_stay_inside_both_published_twins(chat):
+    """A Project's notice written to Main and the owner's direct Reply to it, made by the real producers: their live
+    frames and their history rows in both rooms stay inside the published contract, with the facts a shared row adds
+    (``room_revisions``, ``also_rooms``, the Reply reference's ``target_home``) declared and typed on both twins."""
+    import pathlib
+
+    from ouroboros.gateway.reference_contracts import ChatReplyReference
+    from ouroboros.projects_registry import create_project
+    from ouroboros.task_results import write_task_result
+    from tests.test_gateway_parity import _js_typedef_fields
+
+    nova = int(create_project(chat.root, "nova", name="Nova")["chat_id"])
+    write_task_result(chat.root, "nova-root", "running", chat_id=nova, title="nova-root")
+    message_bus.send_with_budget(1, "Owner action needed in Settings.", task_id="nova-root", system_type="main_notice")
+    notice = next(frame for frame in chat.frames if frame.get("system_type") == "main_notice")
+    chat.bridge.handle_web_message("Why only here?", client_message_id="cm-reply", chat_id=1,
+                                   task_metadata={"reply_to": notice["row_address"]}, dispatch=lambda *a, **k: None)
+    echo = next(frame for frame in chat.frames if frame.get("client_message_id") == "cm-reply" and frame["role"] == "user")
+    frame_keys, reference_keys = set(typing.get_type_hints(ChatOutbound)), set(typing.get_type_hints(ChatReplyReference))
+    for frame in (notice, echo):
+        assert frame.get("also_rooms") == [nova], frame
+        assert not validate_ingress(frame, ChatOutbound), validate_ingress(frame, ChatOutbound)
+    assert {"also_rooms", "room_revisions", "reply_to"} <= frame_keys
+    assert set(notice["room_revisions"]) == {"1", str(nova)}
+    assert echo["reply_to"]["target_home"] == "work" and set(echo["reply_to"]) <= reference_keys
+    addresses = {notice["row_address"], echo["row_address"]}
+    for room in (1, nova):
+        status, body = _read(chat.root, chat_id=str(room))
+        assert status == 200 and not validate_ingress(body, ChatHistoryResponse)
+        rows = [row for row in body["messages"] if row.get("row_address") in addresses]
+        assert len(rows) == 2, (room, body["messages"])
+        for row in rows:
+            assert not validate_ingress(row, ChatHistoryMessage), (row, validate_ingress(row, ChatHistoryMessage))
+            assert not set(row) - ROW_KEYS, f"history row keys the contract does not publish: {sorted(set(row) - ROW_KEYS)}"
+        shared = next(row for row in rows if row.get("system_type") == "main_notice")
+        reply = next(row for row in rows if row["role"] == "user")
+        assert set(shared["room_revisions"]) == {"1", str(nova)}
+        assert reply["reply_to"]["target_home"] == "work" and set(reply["reply_to"]) <= reference_keys
+    # The reference is typed, not only present: a value outside the published one is refused.
+    assert validate_ingress({**reply, "reply_to": {**reply["reply_to"], "target_home": "elsewhere"}}, ChatHistoryMessage)
+    twins = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "client_contract_types.js").read_text(
+        encoding="utf-8")
+    assert _js_typedef_fields(twins, "ChatReplyReference") == reference_keys

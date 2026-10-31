@@ -1,60 +1,71 @@
-"""Update letter: Ouroboros's own short note about what a pending official update brings.
+"""Update description: Ouroboros's own account of what a pending official update brings.
 
-The letter is written by the LIGHT model slot with the ordinary task context (identity,
-memory, recent dialogue, governance — ``context.build_llm_messages`` with a synthetic task
-routed at the light model), fed every commit reachable from the official target but not
-from the running base, including merged branches, plus the README "Version History" rows
-ADDED along the target's first-parent line. Rows are recovered from the commit diffs rather than read from any
-README snapshot, because the history table is capped (rows roll off inside one range) and
-untagged releases have no tag to look up.
+No host code writes the prose and no check calls a model. A fetching check (boot, or the
+Updates panel's check) records facts only: the range it found (``checked_key``), that range's
+exact qualification, and the range material — every commit reachable from the official
+target but not from the running base, including merged branches, plus the README "Version
+History" rows ADDED along the target's first-parent line. Rows are recovered from the commit
+diffs rather than read from any README snapshot, because the history table is capped (rows
+roll off inside one range) and untagged releases have no tag to look up. Subjects in the
+reverse range describe local-only history separately, not incoming changes or proof of
+preserved code. The material lives beside the record (``state/update_material.json``, one
+current range), so the record every round and status read parses stays small.
 
-Floor (host code): exact versions and SHAs, the material and its disclosed bounds, an output
-budget, physical-attempt accounting, no silent model substitution, and a letter that is never
-deleted after the update lands. Ceiling (the mind): the SHAPE of the paragraph as well as its
-language, register, and what matters to this human — the request asks for one short paragraph
-that only says what the material says, and the host does not police the answer. Deliberate
-(reviewed three times): a host shape gate would either edit a cognitive artifact (BIBLE P1) or
-throw away a useful letter over its formatting, and ``UPDATE_LETTER_MAX_TOKENS`` already bounds
-the size. The panel renders whatever comes back through the same sanitizing markdown pipeline
-the chat uses.
+The prose is written by the main mind as ordinary work: on the owner's request from the
+Updates panel (one ordinary Main task, ``request_description``) or on its own initiative,
+reading the material with ``query_data(kind='update_material')`` and unclear changes with
+``vcs_read``, and saved through the ``record_update_description`` tool (``save_description``).
+Floor (host code): exact SHAs, the ranges a description may name, one revision every writer
+compares, host-derived authorship, and a description that is never deleted after its update
+lands. Ceiling (the mind): the shape, length and language of the text and what matters to
+this human. The panel renders it through the same sanitizing markdown pipeline the chat uses.
 
-Storage is one file, ``data/state/update_letter.json``, with one writer —
-``refresh_after_check``, which runs synchronously inside a FETCHING update check (boot and
-the Updates panel's "Check for updates" button) — and one reader shape, ``project_letter``,
-shared by the Updates panel payload and the agent's Runtime context
-(``official_update_projection``). Exact ranges and recorded ancestry keep Git off hot
-reads. The panel uses the captured server-generation baseline; task context retains its
-own checkout origin. Separate ancestry witnesses prevent a merge landed on disk from
-claiming that the still-running server adopted it. Successful unchanged ranges are reused.
+Storage is one record, ``data/state/update_letter.json``: the saved description with its own
+range, the last check's facts and the latest owner request. Every write holds one
+cross-process lock (``state/update_letter.lock``); Git, GitHub and model work stay outside it
+and are compared on write. One reader shape, ``project_letter``, serves the Updates panel
+payload, the Apply preflight and the agent's Runtime context (``official_update_projection``).
+Exact ranges and recorded ancestry keep Git off hot reads. The panel uses the captured
+server-generation baseline; task context retains its own checkout origin. Separate ancestry
+witnesses prevent a merge landed on disk from claiming that the still-running server adopted it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import logging
 import os
 import pathlib
 import re
 import threading
-import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.update_channels import normalize_update_channel
 from ouroboros.utils import atomic_write_json, read_json_dict, truncate_within_limit, utc_now_iso
-from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
 
 RECORD_REL = pathlib.Path("state") / "update_letter.json"
-SYSTEM_TASK_ID = "system:update_letter"
-USAGE_CATEGORY = "update_letter"
-# Output budget of the LIGHT one-shot (the letter is one short paragraph; docs/ARCHITECTURE.md §7).
-UPDATE_LETTER_MAX_TOKENS = 1024
+MATERIAL_REL = pathlib.Path("state") / "update_material.json"
+LOCK_REL = pathlib.Path("state") / "update_letter.lock"
 # Per-commit body bound inside the material (a disclosed cut, never a silent slice).
 COMMIT_BODY_MAX_CHARS = 10000
 # EVERY commit subject in the range reaches the author; only the bodies and the older
 # release-row texts are bounded, because a long range must not become an invisible one.
 DEFAULT_MAX_BODIES = 200
 DEFAULT_MAX_ROWS = 60
+# Local history accumulates updater merges independently of the incoming release.
+LOCAL_SUBJECT_PREVIEW = 20
+# A record writer holds the lock only to read, compare and write JSON, so a wait this long
+# means a stuck holder, which the owner-aware lock evicts once its process is gone.
+RECORD_LOCK_WAIT_SEC = 10.0
+# The Runtime context's pointer while an update is on offer: where the range is, and the one writer.
+DESCRIPTION_SOURCES = ("query_data(op='json', kind='update_material', select='text', max_bytes=<letter.material"
+                       ".text_bytes>); vcs_read(root='system_repo'); save with record_update_description")
+_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_KEY_FIELDS = ("base_sha", "target_sha", "update_channel", "target_ref")
 
 def _row_re() -> "re.Pattern":
     """An added README history row, recognised with the repository's ONE version grammar.
@@ -74,11 +85,12 @@ def _row_re() -> "re.Pattern":
 # in silence. Counting those would tell the author a release was withheld when none was.
 _ROW_CANDIDATE_RE = re.compile(r"^\+\|\s*\d")
 _UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
-_REFRESH_LOCK = threading.Lock()
-# Bumped by every letter write under the lock, so a refresh that waited for the lock can
-# tell "the writer just produced my key" (share it) from "an older record" (write anew).
-_WRITE_SEQ = 0
-_LAST_WRITTEN: Tuple[Dict[str, str], str, Optional[Dict[str, Any]]] = ({}, "", None)
+# One fetching check at a time in this process: a second one waits and then records its own
+# facts, so two checks never read GitHub for the same range at once.
+_CHECK_FLIGHT = threading.Lock()
+# Owner requests come only through this server process; one at a time, so two presses can
+# never admit two author tasks for one recorded request.
+_REQUEST_FLIGHT = threading.Lock()
 
 GitCapture = Callable[[List[str]], Tuple[int, str, str]]
 
@@ -87,8 +99,12 @@ class MaterialUnavailable(RuntimeError):
     """The range could not be read at all (git failed), which is NOT an empty range.
 
     Collapsing the two would record "this update has nothing to say" over a repository
-    the host could not read — a silent, durable falsehood in the letter's own state file.
+    the host could not read — a silent, durable falsehood in the record.
     """
+
+
+class RecordBusy(RuntimeError):
+    """The record lock stayed held past ``RECORD_LOCK_WAIT_SEC``: nothing was written."""
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +138,24 @@ def _split_row(line: str) -> Optional[Tuple[str, str, str]]:
     return cells[0], cells[1], cells[2].replace("\\|", "|")
 
 
+def _commit_subjects(capture: GitCapture, spec: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Whole subject inventory of one exact range; malformed records stay counted."""
+    rc, out, err = capture(["git", "log", "--format=%H%x1f%aI%x1f%s%x1e", spec])
+    if rc != 0:
+        raise MaterialUnavailable(f"git log {spec} failed (rc={rc}): {str(err)[:200]}")
+    commits, omitted = [], 0
+    for chunk in out.split("\x1e") if out.strip() else []:
+        if not chunk.strip():
+            continue
+        parts = chunk.strip("\n").split("\x1f", 2)
+        if len(parts) != 3:
+            omitted += 1
+            continue
+        commits.append({"sha": parts[0].strip(), "date": parts[1].strip(),
+                        "subject": parts[2].strip(), "body": ""})
+    return commits, omitted
+
+
 def collect_range_material(
     base_sha: str,
     target_sha: str,
@@ -143,11 +177,12 @@ def collect_range_material(
     newest-first with first-wins per version; the newest ``max_rows`` keep their text and
     older rows stay as version and date (``rows_summarized``), malformed ones are counted
     in ``omitted_rows`` with the commits that carried them in ``omitted_row_commits``, so an
-    omission always names where to read it. ``versions`` are the VERSION files at both ends. Divergence
-    counts stay on the status dict that triggered the letter — nothing is collected that
-    neither the model nor the record reads. An empty range yields empty lists.
+    omission always names where to read it. ``versions`` are the VERSION files at both ends.
+    ``local_commits`` keeps target..base separately. The request shows a counted newest-subject
+    preview with that exact Git range, not proof of unique code or a preservation promise.
     """
     capture = git or _default_git()
+    from ouroboros.update_qualification import commit_qualification
     spec = f"{base_sha}..{target_sha}"
     material: Dict[str, Any] = {
         "base_sha": base_sha, "target_sha": target_sha,
@@ -157,35 +192,32 @@ def collect_range_material(
     # Two reads on purpose: the subject line of EVERY commit (small, unbounded by design) and
     # the bodies of only the newest ``max_bodies`` — git never hands this process the bodies
     # of a whole long history just so most of them can be dropped again.
-    rc, out, err = capture([
-        "git", "log", "--format=%H%x1f%aI%x1f%s%x1e", spec,
-    ])
+    commits, material["omitted_commit_chunks"] = _commit_subjects(capture, spec)
+    # Match the post-merge workflow's integration line, including squash commits.
+    rc, out, err = capture(["git", "rev-list", "--first-parent", spec])
     if rc != 0:
-        raise MaterialUnavailable(f"git log {spec} failed (rc={rc}): {str(err)[:200]}")
-    commits: List[Dict[str, Any]] = []
-    for chunk in out.split("\x1e") if out.strip() else []:
-        chunk = chunk.strip("\n")
-        if not chunk.strip():
-            continue
-        parts = chunk.split("\x1f", 2)
-        if len(parts) < 3:
-            material["omitted_commit_chunks"] += 1
-            continue
-        commits.append({"sha": parts[0].strip(), "date": parts[1].strip(), "subject": parts[2].strip(), "body": ""})
+        raise MaterialUnavailable(f"git rev-list --first-parent {spec} failed (rc={rc}): {str(err)[:200]}")
+    by_sha = {c["sha"]: c for c in commits}
+    material["first_parent_commits"] = [by_sha[sha] for sha in out.split() if sha in by_sha]
+    material["local_commits"], material["omitted_local_chunks"] = _commit_subjects(
+        capture, f"{target_sha}..{base_sha}")
+    bodies: Dict[str, str] = {}
     if commits and max_bodies > 0:
         rc, out, err = capture([
             "git", "log", "-n", str(int(max_bodies)), "--format=%H%x1f%b%x1e", spec,
         ])
         if rc != 0:
             raise MaterialUnavailable(f"git log bodies {spec} failed (rc={rc}): {str(err)[:200]}")
-        bodies: Dict[str, str] = {}
         for chunk in out.split("\x1e") if out.strip() else []:
             parts = chunk.strip("\n").split("\x1f", 1)
             if len(parts) == 2 and parts[0].strip():
                 bodies[parts[0].strip()] = parts[1].strip()
         for commit in commits[:max_bodies]:
             body = bodies.get(commit["sha"], "")
+            commit["qualification"] = commit_qualification(body)
             commit["body"] = truncate_within_limit(body, COMMIT_BODY_MAX_CHARS) if body else ""
+    for commit in commits:
+        commit["body_read"] = commit["sha"] in bodies
     material["bodies_omitted"] = max(0, len(commits) - max_bodies)
     material["commits"] = commits
 
@@ -242,7 +274,7 @@ def _version_at(capture: GitCapture, sha: str) -> str:
 
 
 def material_text(material: Dict[str, Any]) -> str:
-    """Render the material as compact evidence text for the prompt (releases first)."""
+    """Render the material as compact evidence text for its reader (releases first)."""
     lines: List[str] = []
     releases = material.get("releases") or []
     # The disclosures live OUTSIDE the `releases` branch: a range whose every candidate row
@@ -285,303 +317,68 @@ def material_text(material: Dict[str, Any]) -> str:
                 f"- [the bodies of the {material['bodies_omitted']} oldest commit(s) were not read; "
                 "their subjects are all listed above]"
             )
+    local = material.get("local_commits") or []
+    if local or material.get("omitted_local_chunks"):
+        lines.append("\nExisting local history absent from the official target (target..base; not incoming changes):")
+        lines.extend(f"- {c['sha']} {c['date']} {c['subject']}" for c in local[:LOCAL_SUBJECT_PREVIEW])
+        if len(local) > LOCAL_SUBJECT_PREVIEW:
+            lines.append(f"[{len(local) - LOCAL_SUBJECT_PREVIEW} older local subjects omitted from this preview; "
+                         f"read the full range with git log {material['target_sha']}..{material['base_sha']}]")
+        lines.append("These subjects include local updater merges; they do not prove unique code or preservation after apply.")
+        if material.get("omitted_local_chunks"):
+            lines.append(f"[{material['omitted_local_chunks']} local records unreadable; inspect "
+                         f"{material['target_sha']}..{material['base_sha']}]")
     if not lines:
         lines.append("(no commits in this range)")
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Generation: one LIGHT call with the ordinary context
-# ---------------------------------------------------------------------------
-
-def _request_text(status: Dict[str, Any], material: Dict[str, Any], target_version: str) -> str:
-    import json
-
-    from ouroboros import get_version
-
-    facts = {
-        "running": {"version": get_version(), "sha": _key_from_status(status)["base_sha"]},
-        "official_target": {"version": target_version, "sha": _key_from_status(status)["target_sha"]},
-        "update_channel": str(status.get("update_channel") or ""),
-        "checkout": {"sha": str(status.get("current_sha") or ""),
-                     "commits_behind": status.get("behind"), "commits_ahead": status.get("ahead"),
-                     "local_changes": status.get("local_changes") or "unknown"},
-        "checked_at": str(status.get("checked_at") or ""),
-    }
-    return (
-        "[UPDATE LETTER REQUEST]\n"
-        "An official update of my body is available. Facts (host-attested):\n"
-        + json.dumps(facts, ensure_ascii=False, indent=2)
-        + "\n\nMaterial — what changed between the running version and the target:\n"
-        + material_text(material)
-        + "\n\n(The official_update block in my Runtime context describes the state before "
-        "this check; the facts above supersede it.)"
-        + "\n\nWrite my human ONE short paragraph — no headings, no lists, no more than about "
-        "120 words — about what this update brings, as myself and in the language my human and I "
-        "use together. Summarize the whole range, prioritizing meaningful user-visible and operational changes, "
-        "not just the latest or merge commit. Use only what the material says; "
-        "if the material does not say something, I do not invent it. This paragraph is shown on "
-        "the Updates page and becomes part of my own context; the commit history stays readable "
-        "for detail. Reply with the paragraph only.\n"
-        "[/UPDATE LETTER REQUEST]"
-    )
+# Where the rest of the range is, in the reader's own tools: the material is a view.
+READ_RECIPE = """How to read further (the installation's own repository holds {base}..{target}):
+- One commit with its patch: vcs_read(root="system_repo", action="show", ref="<sha>"); add path="<file>" to narrow it.
+- The whole range as one tree diff: vcs_read(root="system_repo", action="diff", base="{base}", head="{target}", stat=true), then path="<file>" for one file.
+- What one merged branch brought: vcs_read(root="system_repo", action="diff", base="<merge sha>^1", head="<merge sha>", stat=true).
+- Plain Git in that repository: git log --format='%H %s%n%n%b' {base}..{target}"""
+# Named only where the record's qualification is this very range's (a check replaces it).
+CHECK_FACTS = ("Check facts for this exact range (receipts, post-merge runs; missing evidence is not a pass): "
+               "query_data(op=\"json\", kind=\"update_letter\", select=\"qualification\").")
 
 
-def _fit_plan(env: Any, memory: Any, task: Dict[str, Any]) -> Any:
-    """The ordinary task context, projected for Max and Low from one captured core.
+def material_path(drive_root: Optional[pathlib.Path] = None) -> pathlib.Path:
+    from ouroboros.config import DATA_DIR
 
-    The owner's mode is what gets SENT. DEVELOPMENT "Context mode": predicted pressure
-    never swaps in Low documents — only an actual provider overflow may use the task-local
-    Low projection, once, on the same route (``write_letter`` does exactly that).
-    """
-    from ouroboros.context import build_context_fit_plan
-
-    return build_context_fit_plan(env, memory, task)
+    return pathlib.Path(drive_root or DATA_DIR) / MATERIAL_REL
 
 
-# Provider stop markers that mean "the output budget ran out mid-answer" (the same names
-# loop_llm_call recognises). A letter cut there is a partial cognitive artifact, never ready.
-_OUTPUT_LIMIT_STOPS = frozenset({"length", "max_tokens"})
+def _material_document(key: Dict[str, str], material: Dict[str, Any]) -> Dict[str, Any]:
+    """The one current range's material as its reader receives it: the counts and
+    disclosures as fields, the commits and rows as one text with its read recipe.
+    ``text_bytes`` is the reader's own count of ``select='text'`` (``query_data``), so it is
+    exactly the ``max_bytes`` that returns the text whole."""
+    from ouroboros.tools.query_data import selected_bytes
+
+    commits = material.get("commits") or []
+    text = (material_text(material) + "\n\n" + READ_RECIPE.format(base=key["base_sha"], target=key["target_sha"])
+            + "\n- " + CHECK_FACTS)
+    return {"schema": 1, "key": dict(key), "collected_at": utc_now_iso(), "text_bytes": selected_bytes(text),
+            "versions": dict(material.get("versions") or {}), "commits": len(commits),
+            "bodies_read": sum(1 for c in commits if c.get("body_read")), "body_max_chars": COMMIT_BODY_MAX_CHARS,
+            **{name: len(material.get(name) or []) for name in ("first_parent_commits", "releases", "local_commits")},
+            "bodies_omitted": int(material.get("bodies_omitted") or 0), "text": text}
 
 
-def _letter_timeout_sec() -> float:
-    """Transport ceiling of the letter one-shot: the clamped getter lives in
-    ``ouroboros/runtime_limits.py`` (re-exported by ``ouroboros.config``), its default in
-    ``ouroboros/settings_defaults.py`` — never a consumer magic number."""
-    from ouroboros.config import get_update_letter_timeout_sec
-
-    return get_update_letter_timeout_sec()
-
-
-def _chat(client: Any, *, drive_root: pathlib.Path, **kwargs: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    from ouroboros.llm_observability import chat_observed
-
-    return chat_observed(client, drive_root=drive_root, task_id=SYSTEM_TASK_ID, call_type=USAGE_CATEGORY, **kwargs)
-
-
-def _safe_text(text: str) -> str:
-    """Secret-free, bounded text for the record (the same sanitizer every log line uses)."""
-    from ouroboros.utils import sanitize_tool_result_for_log
-
-    return sanitize_tool_result_for_log(str(text or ""))[:300]
-
-
-def _ledger_ids(carrier: Any) -> List[str]:
-    """The attempt ids the transport accounted — on the usage of a served call, on the
-    exception of a failed one (usage_accounting attaches them) — so a letter that failed
-    still points at what it cost."""
-    raw = carrier.get("ledger_attempt_ids") if isinstance(carrier, dict) else getattr(carrier, "ledger_attempt_ids", None)
-    return [str(value) for value in (raw or []) if value]
-
-
-def _body_error_kind(body_err: Any) -> str:
-    """OpenRouter serves 429/5xx/context overflows INSIDE an HTTP 200; llm.py keeps that
-    verdict in usage["provider_error"], not in an exception. Classified with the shared
-    overflow vocabulary the Main classifier uses — a structured overflow code, or an
-    overflow-shaped message (a generic 400 "prompt is too long") that is neither a
-    rate limit nor an output/body-size rejection — is an overflow; anything else is a
-    provider failure. Never "the model returned no text"."""
-    if not isinstance(body_err, dict):
-        return ""
-    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, context_overflow_message
-
-    codes = (str(body_err.get(key) or "").strip().lower() for key in ("code", "type"))
-    if any(code in CONTEXT_OVERFLOW_CODES for code in codes):
-        return "context_overflow"
-    # The transport's structured verdict is the ONLY transient guard: llm.py types a body
-    # error rate_limit (code 429) or provider_transient (5xx, or rate-limit / overload
-    # wording) before it reaches here, so it wins over the message shape — "context window
-    # shard unavailable" is an outage. A text guard here would re-read "429" inside a
-    # token count ("prompt is too long: 429000 tokens") as a rate limit.
-    if str(body_err.get("kind") or "") in ("rate_limit", "provider_transient"):
-        return "provider_unavailable"
-    return "context_overflow" if context_overflow_message(body_err.get("message")) else "provider_unavailable"
-
-
-def _classify(exc: Exception) -> Tuple[str, str]:
-    from ouroboros.usage_accounting import BudgetExceeded
-
-    safe = _safe_text(f"{type(exc).__name__}: {exc}")
-    if isinstance(exc, MaterialUnavailable):
-        return "material_unavailable", safe
-    if isinstance(exc, BudgetExceeded):
-        return "budget_exhausted", safe
-    if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
-        return "timeout", safe
+def _stored_material(drive_root: Optional[pathlib.Path]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """``(document, sha256 of its bytes)`` of the stored material, ``(None, "")`` when absent."""
     try:
-        from ouroboros.loop_llm_call import classify_llm_exception
-
-        kind = str(classify_llm_exception(exc, safe).kind or "")
-    except Exception:
-        kind = ""
-    if kind == "context_overflow":
-        return "context_overflow", safe
-    return "provider_unavailable", safe
-
-
-def _new_record(key: Dict[str, str], target_version: str) -> Dict[str, Any]:
-    """The record every write starts from: failed until something better is proven."""
-    from ouroboros import get_version
-
-    return {
-        "schema": 1, "key": key, "checked_head_sha": key["base_sha"], "state": "failed",
-        "text": "", "author_version": get_version(), "target_version": target_version,
-        "model": "", "written_at": utc_now_iso(), "attempt_id": "", "attempt_ids": [],
-        "error_kind": "", "error_text": "", "last_good": None,
-    }
-
-
-def _light_uses_local(model: str) -> bool:
-    """Whether this LIGHT one-shot travels the LOCAL route.
-
-    The explicit slot flag, OR the same routing authority every review dispatch consults:
-    a local-only install leaves the Light slot empty, inherits the local Main route, and
-    would otherwise be asked for remote credentials it has no reason to hold — refusing a
-    letter that install can perfectly well write.
-    """
-    from ouroboros.provider_models import review_model_uses_local
-
-    if str(runtime_setting("USE_LOCAL_LIGHT", "") or "").strip().lower() in ("true", "1", "yes", "on"):
-        return True
-    return review_model_uses_local(model)
-
-
-def write_letter(
-    status: Dict[str, Any],
-    material: Dict[str, Any],
-    *,
-    drive_root: Optional[pathlib.Path] = None,
-    llm_client: Any = None,
-) -> Dict[str, Any]:
-    """One accounted LIGHT-slot call; returns the letter record (``ready`` or ``failed``)."""
-    from ouroboros.config import DATA_DIR, REPO_DIR, get_light_model
-
-    data_root = pathlib.Path(drive_root or DATA_DIR)
-    repo_root = pathlib.Path(REPO_DIR)
-    key = _key_from_status(status)
-    target_version = str((material.get("versions") or {}).get("target") or "")
-    record = _new_record(key, target_version)
-    attempt_ids: List[str] = []
-    model = get_light_model()
-    use_local = _light_uses_local(model)
-    record["model"] = model
-    if not use_local:
-        from ouroboros.provider_models import model_has_credentials
-
-        if not model_has_credentials(model):
-            record.update(error_kind="no_credentials",
-                          error_text=f"no credentials for the light model slot ({model})")
-            return record
-    try:
-        from ouroboros import model_concurrency
-        from ouroboros.agent import Env
-        from ouroboros.llm import LLMClient
-        from ouroboros.memory import Memory
-        from ouroboros.settings_setup_contract import resolve_total_budget_usd
-        from ouroboros.usage_accounting import UsageScope, usage_scope
-
-        env = Env(repo_dir=repo_root, drive_root=data_root)
-        memory = Memory(drive_root=data_root, repo_dir=repo_root)
-        task = {
-            "id": SYSTEM_TASK_ID, "type": "update_letter", "source": USAGE_CATEGORY,
-            "model": model, "use_local_model": use_local, "metadata": {},
-            "text": _request_text(status, material, target_version),
-        }
-        plan = _fit_plan(env, memory, task)
-        messages = plan.messages_for(plan.initial_mode)
-        # The global money limit comes from its ONE resolver (an absent key is the product
-        # default, a non-positive value is the owner's "no limit"), exactly as the naming
-        # one-shot reads it — every reader that invented its own fallback disagreed.
-        scope = UsageScope(
-            drive_root=data_root, task_id=SYSTEM_TASK_ID, root_task_id=SYSTEM_TASK_ID,
-            category=USAGE_CATEGORY, source=USAGE_CATEGORY,
-            non_task_operation=True,
-            global_limit_usd=resolve_total_budget_usd(),
-        )
-        client = llm_client or LLMClient()
-        # ONE absolute ceiling for the whole one-shot. The slot wait spends the same budget
-        # the provider call does, so the call gets what is LEFT — otherwise a busy slot could
-        # hand the transport a second full window and double the ceiling behind the owner's
-        # "Checking…" button.
-        deadline_ts = time.time() + _letter_timeout_sec()
-        with model_concurrency.model_call_slot(model, use_local, deadline_ts=deadline_ts):
-            remaining = deadline_ts - time.time()
-            if remaining <= 0:
-                record.update(error_kind="timeout",
-                              error_text="the update-letter ceiling was spent waiting for a model slot")
-                return record
-            call = dict(drive_root=data_root, model=model, tools=None, reasoning_effort="low",
-                        model_role="light",
-                        max_tokens=UPDATE_LETTER_MAX_TOKENS, use_local=use_local)
-            low_retries = 0
-
-            def retry_low() -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
-                # An ACTUAL provider overflow — raised, or served as an HTTP-200 body error —
-                # earns ONE same-route retry on the task-local Low projection, inside the same
-                # ceiling, every attempt accounted. Never a second, never a predicted one.
-                nonlocal low_retries
-                left = deadline_ts - time.time()
-                if low_retries or plan.initial_mode == "low" or left <= 0:
-                    return None
-                low_retries += 1
-                return _chat(client, messages=plan.messages_for("low"), timeout=left, **call)
-
-            with usage_scope(scope):
-                try:
-                    msg, usage = _chat(client, messages=messages, timeout=remaining, **call)
-                except Exception as exc:  # noqa: BLE001 — classified below, re-raised unless overflow
-                    if _classify(exc)[0] != "context_overflow":
-                        raise
-                    attempt_ids.extend(_ledger_ids(exc))
-                    retried = retry_low()
-                    if retried is None:
-                        raise
-                    msg, usage = retried
-                attempt_ids.extend(_ledger_ids(usage))
-                body_kind = _body_error_kind((usage or {}).get("provider_error"))
-                if body_kind == "context_overflow":
-                    retried = retry_low()
-                    if retried is not None:
-                        msg, usage = retried
-                        attempt_ids.extend(_ledger_ids(usage))
-                        body_kind = _body_error_kind((usage or {}).get("provider_error"))
-        record["attempt_ids"] = list(dict.fromkeys(attempt_ids))
-        record["attempt_id"] = record["attempt_ids"][-1] if attempt_ids else ""
-        if body_kind:
-            # The provider's own verdict on the served call, named as itself.
-            body = (usage or {}).get("provider_error") or {}
-            record.update(error_kind=body_kind, error_text=_safe_text(
-                f"provider body error (code={body.get('code')}): {body.get('message')}"))
-            return record
-        text = str((msg or {}).get("content") or "").strip()
-        if not text:
-            record.update(error_kind="empty_response", error_text="the model returned no text")
-            return record
-        # The stop marker travels in the message for some providers and in
-        # usage["response_finish_reason"] for OpenAI-compatible ones (llm.py stores it there).
-        stop = str(
-            (msg or {}).get("finish_reason") or (msg or {}).get("stop_reason")
-            or (usage or {}).get("response_finish_reason") or ""
-        ).strip().lower()
-        if stop in _OUTPUT_LIMIT_STOPS:
-            # Cut mid-answer by the output budget: storing it as ready would present a
-            # partial cognitive artifact as the letter (BIBLE P1). Typed, last good kept.
-            record.update(error_kind="output_truncated",
-                          error_text=f"the model hit the {UPDATE_LETTER_MAX_TOKENS}-token output budget ({stop})")
-            return record
-        record.update(state="ready", text=text, written_at=utc_now_iso())
-        return record
-    except Exception as exc:  # noqa: BLE001 — every failure becomes a typed, secret-free record
-        kind, safe = _classify(exc)
-        log.debug("update letter generation failed (%s)", kind, exc_info=True)
-        record.update(error_kind=kind, error_text=safe)
-        record["attempt_ids"] = list(dict.fromkeys([*attempt_ids, *_ledger_ids(exc)]))
-        record["attempt_id"] = record["attempt_ids"][-1] if record["attempt_ids"] else ""
-        return record
+        raw = material_path(drive_root).read_bytes()
+        document = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None, ""
+    return (document, hashlib.sha256(raw).hexdigest()) if isinstance(document, dict) else (None, "")
 
 
 # ---------------------------------------------------------------------------
-# Storage and the one refresh seam
+# Storage: one record, one cross-process lock
 # ---------------------------------------------------------------------------
 
 def record_path(drive_root: Optional[pathlib.Path] = None) -> pathlib.Path:
@@ -595,6 +392,27 @@ def read_record(drive_root: Optional[pathlib.Path] = None) -> Optional[Dict[str,
     return record if record and isinstance(record.get("key"), dict) else None
 
 
+@contextlib.contextmanager
+def _record_lock(drive_root: Optional[pathlib.Path]) -> Iterator[None]:
+    """The one writer lock of the record, shared by the server's check and request paths and
+    a worker's tool write. Holders only read, compare and write JSON."""
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    path = record_path(drive_root).parent / LOCK_REL.name
+    fd = acquire_exclusive_file_lock(path, timeout_sec=RECORD_LOCK_WAIT_SEC, owner_aware_stale=True)
+    if fd is None:
+        raise RecordBusy("the update description record stayed locked")
+    try:
+        yield
+    finally:
+        release_exclusive_file_lock(path, fd)
+
+
+def _revision(record: Optional[Dict[str, Any]]) -> int:
+    value = (record or {}).get("revision")
+    return value if type(value) is int and value >= 0 else 0
+
+
 def runtime_status(status: Dict[str, Any]) -> Dict[str, Any]:
     """Add the startup source baseline without changing checkout/apply pins.
 
@@ -602,8 +420,9 @@ def runtime_status(status: Dict[str, Any]) -> Dict[str, Any]:
     This reader never fetches or reconstructs that cache's authority.
     """
     from ouroboros.server_process import server_source_baseline
+    from ouroboros.update_generation_facts import projection
 
-    return {**status, "running_sha": server_source_baseline()}
+    return {**status, "running_sha": server_source_baseline(), "after_update": projection()}
 
 
 def _key_from_status(status: Dict[str, Any]) -> Dict[str, str]:
@@ -615,114 +434,153 @@ def _key_from_status(status: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _range_key(candidate: Any) -> Optional[Dict[str, str]]:
+    """A key naming a real, non-empty range, else ``None``."""
+    if not isinstance(candidate, dict):
+        return None
+    key = {field: str(candidate.get(field) or "") for field in _KEY_FIELDS}
+    return key if key["base_sha"] and key["target_sha"] and key["base_sha"] != key["target_sha"] else None
+
+
+def _same_range(key: Optional[Dict[str, Any]], base_sha: str, target_sha: str) -> bool:
+    return bool(key) and (key.get("base_sha"), key.get("target_sha")) == (base_sha, target_sha)
+
+
+# ---------------------------------------------------------------------------
+# The fetching check: facts only, never prose
+# ---------------------------------------------------------------------------
+
 def refresh_after_check(
     status: Dict[str, Any],
     *,
     drive_root: Optional[pathlib.Path] = None,
-    llm_client: Any = None,
+    git: Optional[GitCapture] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Refresh on a successful fetch, reusing a successful identical source range.
+    """Record what a successful fetching check learned; the description is left as it is.
 
-    The source is the server generation's captured baseline, independently of the
-    checkout used to apply an update. No new range leaves the stored letter intact.
-    Concurrent checks share the in-flight write, failed attempts keep the last good
-    text, and the existing check remains the only writer (no background paid retry).
+    The source is the server generation's captured baseline, independently of the checkout
+    used to apply an update. Git and GitHub are read before the record lock and the facts
+    are written onto whatever the record holds then, so a description saved meanwhile
+    stays. A failed or passive check changes nothing.
     """
     try:
-        current = read_record(drive_root)
         if status.get("check_ok") is not True:
-            return current
-        key = _key_from_status(status)
-        checkout_sha = str(status.get("current_sha") or "")
-        no_update = (not key["target_sha"] or key["base_sha"] == key["target_sha"]
-                     or (not status.get("available") and key["base_sha"] == checkout_sha))
-        seen = _WRITE_SEQ
-        # EVERY record write goes through this lock, the letterless mark included: a
-        # no-update check that read the record before a letter landed would otherwise
-        # write its stale copy back over it.
-        if not _REFRESH_LOCK.acquire(timeout=_letter_timeout_sec()):
+            return read_record(drive_root)
+        from ouroboros.update_channels import get_managed_update_fetch_timeout_sec
+
+        if not _CHECK_FLIGHT.acquire(timeout=float(get_managed_update_fetch_timeout_sec())):
             return read_record(drive_root)
         try:
-            # The writer that held the lock may have produced this very letter: share it
-            # (one physical attempt for concurrent checks of the same key).
-            if _WRITE_SEQ > seen and _LAST_WRITTEN[:2] == (key, _root_id(drive_root)):
-                return _mark_checked(_LAST_WRITTEN[2], key, drive_root, checkout_sha=checkout_sha)
-            current = read_record(drive_root)
-            if not key["base_sha"]:
-                record = _new_record(key, "")
-                record.update(error_kind="runtime_source_unavailable",
-                              error_text="The running server's source baseline is unavailable; no description was requested.")
-                if current:
-                    record["last_good"] = shown_letter(current)[0] if shown_letter(current)[1] else None
-                record = _mark_checked(record, key, drive_root, checkout_sha=checkout_sha)
-                _note_written(key, drive_root, record)
-                return record
-            if no_update:
-                return _mark_checked(current, key, drive_root, checkout_sha=checkout_sha)
-            shown, text, _last_good = shown_letter(current) if current else ({}, "", None)
-            if shown.get("state") == "ready" and text and shown.get("key") == key:
-                return _mark_checked(current, key, drive_root, checkout_sha=checkout_sha)
-            try:
-                material = collect_range_material(key["base_sha"], key["target_sha"])
-            except MaterialUnavailable as exc:
-                # The range could not be READ. That is a typed failure with the previous
-                # good letter kept, never "this update has nothing to say".
-                kind, safe = _classify(exc)
-                record = _new_record(key, "")
-                record.update(error_kind=kind, error_text=safe)
-                material = None
-            else:
-                if not material.get("commits") and not material.get("releases"):
-                    return _mark_checked(current, key, drive_root, checkout_sha=checkout_sha)
-                record = write_letter(status, material, drive_root=drive_root, llm_client=llm_client)
-            if record.get("state") != "ready" and current:
-                # D-KEEP for the supersede case too: a good letter is never lost to a
-                # failed rewrite, whatever range the failed attempt was for.
-                previous_good = current if current.get("state") == "ready" else current.get("last_good")
-                record["last_good"] = previous_good or None
-            record = _mark_checked(record, key, drive_root, checkout_sha=checkout_sha)
-            _note_written(key, drive_root, record)
-            return record
+            return _record_check(status, drive_root, git or _default_git())
         finally:
-            _REFRESH_LOCK.release()
+            _CHECK_FLIGHT.release()
     except Exception:
-        log.debug("update letter refresh failed", exc_info=True)
+        log.debug("update description check facts were not recorded", exc_info=True)
         return read_record(drive_root)
 
 
-def _root_id(drive_root: Optional[pathlib.Path]) -> str:
-    return str(record_path(drive_root).parent.parent)
+def _record_check(status: Dict[str, Any], drive_root: Optional[pathlib.Path], git: GitCapture) -> Dict[str, Any]:
+    key = _key_from_status(status)
+    checkout_sha = str(status.get("current_sha") or "")
+    running_sha = str(status.get("running_sha", key["base_sha"]) or "")
+    before = read_record(drive_root) or {}
+    no_update = (not key["target_sha"] or key["base_sha"] == key["target_sha"]
+                 or (not status.get("available") and key["base_sha"] == checkout_sha))
+    facts: Dict[str, Any] = {}
+    material: Optional[Dict[str, Any]] = None
+    if not key["base_sha"]:
+        facts["material_error"] = {"kind": "runtime_source_unavailable", "key": key, "at": utc_now_iso(),
+                                   "text": "The running server's source baseline is unavailable; no range was read."}
+    elif not no_update:
+        stored, _digest = _stored_material(drive_root)
+        recorded = _same_range(before.get("qualification"), key["base_sha"], key["target_sha"])
+        try:
+            if not (recorded and stored and _same_range(stored.get("key"), key["base_sha"], key["target_sha"])):
+                material = collect_range_material(key["base_sha"], key["target_sha"], git=git)
+        except MaterialUnavailable as exc:
+            facts["material_error"] = {"kind": "material_unavailable", "key": key, "at": utc_now_iso(),
+                                       "text": _safe_text(f"{type(exc).__name__}: {exc}")}
+        # The runs of a range already recorded refresh without its material; a new range needs it.
+        if recorded or material is not None:
+            facts["qualification"] = _check_qualification(before, key, material, str(status.get("official_repo_url") or ""))
+    shown_key = shown_letter(before)[0].get("key") if before else None
+    shown_target = str((shown_key or {}).get("target_sha") or "") if before.get("state") != "none" else ""
+    facts["ancestry"] = {
+        "target_sha": shown_target,
+        "in_running": _target_in_head(shown_target, running_sha, git),
+        "in_head": _target_in_head(shown_target, checkout_sha, git) if checkout_sha != running_sha else None,
+    }
+    target_version = _version_at(git, key["target_sha"] or key["base_sha"])
+    from ouroboros.update_qualification import post_merge_reds
 
-
-def _note_written(key: Dict[str, str], drive_root: Optional[pathlib.Path], record: Dict[str, Any]) -> None:
-    """The share is per range key AND per data root: one process, two roots, one key must
-    not hand the second root the first root's record."""
-    global _WRITE_SEQ, _LAST_WRITTEN
-    _LAST_WRITTEN = (dict(key), _root_id(drive_root), record)
-    _WRITE_SEQ += 1
-
-
-def _mark_checked(current: Optional[Dict[str, Any]], key: Dict[str, str],
-                  drive_root: Optional[pathlib.Path], *, git: Optional[GitCapture] = None,
-                  checkout_sha: Optional[str] = None) -> Dict[str, Any]:
-    """Record the checked HEAD without touching any letter. A letterless record (``state: none``)
-    follows the check it describes — its key and the official target's VERSION — so the Runtime
-    fact can name the version an up-to-date install is current with."""
-    record = dict(current) if current else {"schema": 1, "state": "none", "text": "", "last_good": None}
-    if record.get("state") == "none":
-        record["key"] = key
-        record["target_version"] = _version_at(git or _default_git(), key["target_sha"] or key["base_sha"])
-    record["checked_running_sha"] = key["base_sha"]
-    record["target_in_running"] = _shown_target_in_head(record, key["base_sha"], git=git)
-    record["checked_head_sha"] = key["base_sha"] if checkout_sha is None else checkout_sha
-    record["target_in_head"] = (record["target_in_running"] if record["checked_head_sha"] == key["base_sha"]
-                                else _shown_target_in_head(record, record["checked_head_sha"], git=git))
-    atomic_write_json(record_path(drive_root), record)
+    facts["post_merge_reds"] = post_merge_reds(str(status.get("official_repo_url") or ""))
+    with _record_lock(drive_root):
+        current = read_record(drive_root)
+        record = _with_check_facts(current, key, facts, running_sha=running_sha, checkout_sha=checkout_sha,
+                                   target_version=target_version)
+        if material is not None and (material.get("commits") or material.get("releases")):
+            document = _material_document(key, material)
+            atomic_write_json(material_path(drive_root), document)
+            # What the record says about the material beside it: its range, size and when it was read.
+            record["material"] = {name: document[name] for name in ("key", "collected_at", "text_bytes", "commits",
+                                                                    "bodies_read", "bodies_omitted")}
+        atomic_write_json(record_path(drive_root), record)
     return record
 
 
-def _shown_target_in_head(record: Dict[str, Any], head_sha: str, *, git: Optional[GitCapture] = None) -> bool:
-    """Whether the SHOWN letter's target is already inside ``head_sha`` without being it.
+def _check_qualification(before: Dict[str, Any], key: Dict[str, str], material: Optional[Dict[str, Any]],
+                         repo_url: str) -> Optional[Dict[str, Any]]:
+    """The exact-range evidence: refreshed in place for a range already recorded, built from
+    new material otherwise. It never touches the description: a changed run is a new fact
+    about the same range, not a reason to rewrite what the range does."""
+    from ouroboros.update_qualification import range_qualification, refresh_qualification
+
+    previous = before.get("qualification")
+    if isinstance(previous, dict) and _same_range(previous, key["base_sha"], key["target_sha"]):
+        return refresh_qualification(previous, repo_url, previous=previous)[0]
+    if material is None:
+        return previous if isinstance(previous, dict) else None
+    return range_qualification(material, repo_url)
+
+
+def _with_check_facts(current: Optional[Dict[str, Any]], key: Dict[str, str], facts: Dict[str, Any], *,
+                      running_sha: str, checkout_sha: str, target_version: str) -> Dict[str, Any]:
+    """Pure: the record with one check's facts. The description fields are never touched."""
+    record = dict(current) if current else {"schema": 1, "state": "none", "text": "", "last_good": None}
+    record["checked_key"] = dict(key)
+    record["checked_target_version"] = target_version
+    if record.get("state") == "none":
+        # A letterless record follows the check it describes, so the Runtime fact can name
+        # the version an up-to-date install is current with.
+        record["key"] = dict(key)
+        record["target_version"] = target_version
+    if facts.get("qualification") is not None:
+        record["qualification"] = facts["qualification"]
+    from ouroboros.update_qualification import kept_reds
+
+    # A failed read keeps the observation the record holds under the lock, never "none open".
+    record["post_merge_reds"] = kept_reds(facts.get("post_merge_reds"), record.get("post_merge_reds"))
+    if facts.get("material_error"):
+        record["material_error"] = facts["material_error"]
+    else:
+        record.pop("material_error", None)
+    # The ancestry witnesses describe the description shown when the check read Git; a
+    # description saved since names another target, and its facts wait for the next check.
+    ancestry = facts.get("ancestry") or {}
+    shown_target = str((shown_letter(record)[0].get("key") or {}).get("target_sha") or "")
+    computed_for = str(ancestry.get("target_sha") or "")
+    valid = record.get("state") != "none" and computed_for == shown_target
+    record["checked_running_sha"] = running_sha
+    record["target_in_running"] = bool(valid and ancestry.get("in_running"))
+    record["checked_head_sha"] = checkout_sha
+    in_head = ancestry.get("in_running") if ancestry.get("in_head") is None else ancestry.get("in_head")
+    record["target_in_head"] = bool(valid and in_head)
+    record["target_in_for"] = computed_for
+    return record
+
+
+def _target_in_head(target: str, head_sha: str, git: GitCapture) -> bool:
+    """Whether ``target`` is already inside ``head_sha`` without being it.
 
     Answered here, at the check, because the check runs where git is — the Updates panel and
     the Runtime context then read this ONE recorded fact instead of each proving it their own
@@ -730,31 +588,293 @@ def _shown_target_in_head(record: Dict[str, Any], head_sha: str, *, git: Optiona
     install applies an official target as a merge commit (``supervisor/update_merge.py``), so
     the target is never HEAD itself; ancestry is the proof.
     """
-    if record.get("state") == "none":
-        return False
-    target = str((shown_letter(record)[0].get("key") or {}).get("target_sha") or "")
     head = str(head_sha or "")
     if not target or not head or target == head:
         return False
     try:
-        return (git or _default_git())(["git", "merge-base", "--is-ancestor", target, head])[0] == 0
+        return git(["git", "merge-base", "--is-ancestor", target, head])[0] == 0
     except Exception:  # noqa: BLE001 — an unprovable ancestry is simply not proof
         log.debug("target-in-head ancestry check failed", exc_info=True)
         return False
 
 
+def _safe_text(text: str) -> str:
+    """Secret-free, bounded text for the record (the same sanitizer every log line uses)."""
+    from ouroboros.utils import sanitize_tool_result_for_log
+
+    return sanitize_tool_result_for_log(str(text or ""))[:300]
+
+
 # ---------------------------------------------------------------------------
-# The one projection shared by the panel payload and the Runtime context
+# The description writer (the record_update_description tool) and owner requests
+# ---------------------------------------------------------------------------
+
+def legal_ranges(record: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """The ranges a description may name: the one the last check offered, the shown
+    description's own (a rephrase, an applied update's included), and the one the owner's
+    latest request named. Anything else would label text with a range nobody offered."""
+    record = record or {}
+    provenance, text, _last_good = shown_letter(record)
+    request = record.get("request") if isinstance(record.get("request"), dict) else {}
+    keys: List[Dict[str, str]] = []
+    for key in map(_range_key, (record.get("checked_key"), provenance.get("key") if text else None, request.get("key"))):
+        if key and not any(_same_range(known, key["base_sha"], key["target_sha"]) for known in keys):
+            keys.append(key)
+    return keys
+
+
+def save_description(text: str, base_sha: str, target_sha: str, expected_revision: int, *, author: Dict[str, Any],
+                     drive_root: Optional[pathlib.Path] = None, git: Optional[GitCapture] = None) -> Dict[str, Any]:
+    """Save one description for one exact range; returns a typed outcome, never raises for a
+    refusal. ``author`` is host-derived (``task_id``, ``model``). The writer is the owner's
+    recorded request when its task is that request's own work — the requested task, a host
+    retry of it or a recorded Continue (``_acts_for``) — and the request keeps that it saved
+    (``request_saved``) when a later description replaces this one.
+
+    ``revision_conflict``: someone saved since the caller read ``expected_revision`` — the
+    newer text stays. ``range_not_offered``: the range is none of ``legal_ranges``.
+    ``saved`` carries the replaced description whole, so the writer's own durable tool
+    record keeps it.
+    """
+    from ouroboros import get_version
+
+    body = str(text or "").strip()
+    if not body:
+        raise ValueError("text is empty")
+    if not (_SHA_RE.fullmatch(str(base_sha or "")) and _SHA_RE.fullmatch(str(target_sha or ""))):
+        raise ValueError("base_sha and target_sha must be full lowercase commit SHAs")
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("expected_revision must be a non-negative integer")
+    target_version = _version_at(git or _default_git(), target_sha)
+    stored, digest = _stored_material(drive_root)
+    source = ({"material_sha256": digest, "material_collected_at": str(stored.get("collected_at") or "")}
+              if stored and _same_range(stored.get("key"), base_sha, target_sha) else {})
+    task_id, model = str(author.get("task_id") or ""), str(author.get("model") or "")
+    # Task results are read before the lock, like Git; the request is compared on write.
+    asked = _request_task_id(read_record(drive_root))
+    acts_for = asked if _acts_for(drive_root, asked, task_id) else ""
+    with _record_lock(drive_root):
+        current = read_record(drive_root) or {}
+        revision = _revision(current)
+        shown, shown_text, _last_good = shown_letter(current) if current else ({}, "", None)
+        if expected_revision != revision:
+            return {"outcome": "revision_conflict", "revision": revision,
+                    "saved": _public_description(shown, shown_text)}
+        key = next((k for k in legal_ranges(current) if _same_range(k, base_sha, target_sha)), None)
+        if key is None:
+            return {"outcome": "range_not_offered", "revision": revision, "legal_ranges": legal_ranges(current)}
+        asked = _request_task_id(current)
+        requested = bool(asked) and asked in (task_id, acts_for)
+        record = {**current, "schema": 1, "key": key, "state": "ready", "text": body, "revision": revision + 1,
+                  "author_version": get_version(), "target_version": target_version, "model": model,
+                  "author": {"task_id": task_id, "model": model, "requested": requested},
+                  "written_at": utc_now_iso(), "source": source, "error_kind": "", "error_text": "",
+                  "attempt_id": "", "attempt_ids": [], "last_good": None,
+                  **({"request_saved": asked} if requested else {})}
+        atomic_write_json(record_path(drive_root), record)
+    return {"outcome": "saved", "revision": record["revision"], "key": key, "written_at": record["written_at"],
+            "replaced": _public_description(shown, shown_text)}
+
+
+def _public_description(provenance: Dict[str, Any], text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+    return {"text": text, "key": dict(provenance.get("key") or {}), "written_at": str(provenance.get("written_at") or ""),
+            "revision": _revision(provenance), "author": provenance.get("author") or {},
+            "author_version": str(provenance.get("author_version") or "")}
+
+
+def request_description(mode: str, base_sha: str, target_sha: str, *, admit: Callable[[str, str, Dict[str, Any]], str],
+                        drive_root: Optional[pathlib.Path] = None) -> Dict[str, Any]:
+    """Admit ONE ordinary Main task that writes (or rewrites) the description of an offered
+    range, then record it as the owner's latest request.
+
+    ``admit(task_id, text, metadata)`` is the producer's own admission (the gateway passes the
+    queue's receipt-bearing enqueue) and returns ``""`` or the refusal reason. The task id is
+    minted here, never derived from content. A request whose task has not ended refuses a
+    second one; nothing repeats on its own after a stop, a failure or an unknown end.
+    """
+    import uuid
+
+    if mode not in ("write", "rewrite"):
+        raise ValueError("mode must be write or rewrite")
+    with _REQUEST_FLIGHT:
+        current = read_record(drive_root) or {}
+        provenance, text, _last_good = shown_letter(current) if current else ({}, "", None)
+        offered = [_range_key(current.get("checked_key")), _range_key(provenance.get("key")) if text else None]
+        key = next((k for k in offered if k and _same_range(k, base_sha, target_sha)), None)
+        if key is None:
+            return {"outcome": "range_not_offered", "legal_ranges": [k for k in offered if k]}
+        prior = _request_view(current, drive_root, with_status=True)
+        if prior and prior["status"] in _LIVE_TASK_STATUSES:
+            return {"outcome": "in_flight", "task_id": prior.get("current_task_id", prior["task_id"]), "status": prior["status"]}
+        task_id = uuid.uuid4().hex[:8]
+        request = {"task_id": task_id, "mode": mode, "key": key, "requested_at": utc_now_iso(),
+                   "revision_at_request": _revision(current)}
+        # Recorded before admission, so the task's own save already finds itself requested;
+        # a refused admission puts the previous request back.
+        _swap_request(drive_root, request, expected=current.get("request"))
+        refusal = admit(task_id, author_request_text(current, request), {"update_description": dict(request)})
+        if refusal:
+            _swap_request(drive_root, current.get("request"), expected=request)
+            return {"outcome": "refused", "reason": refusal}
+    return {"outcome": "queued", "task_id": task_id, "key": key}
+
+
+def _swap_request(drive_root: Optional[pathlib.Path], request: Any, *, expected: Any) -> None:
+    """Replace the recorded request only while it is still ``expected``. Request writers are
+    serialized by ``_REQUEST_FLIGHT``; the lock keeps a concurrent description write whole."""
+    with _record_lock(drive_root):
+        latest = read_record(drive_root)
+        if latest is not None and latest.get("request") == expected:
+            latest.pop("request", None)
+            atomic_write_json(record_path(drive_root), {**latest, **({"request": request} if request else {})})
+
+
+# Task statuses during which a request holds the door: its task may still save. Every other
+# answer — an end, a missing or an unreadable result — lets the owner ask again explicitly;
+# the revision every writer compares keeps a late author from erasing a newer description.
+_LIVE_TASK_STATUSES = frozenset({"requested", "scheduled", "running", "interrupted", "cancel_requested"})
+
+
+def _request_task_id(record: Optional[Dict[str, Any]]) -> str:
+    request = (record or {}).get("request")
+    return str(request.get("task_id") or "") if isinstance(request, dict) else ""
+
+
+def _acts_for(drive_root: Optional[pathlib.Path], task_id: str, actor_task_id: str) -> bool:
+    """Whether ``actor_task_id`` is ``task_id``'s own work, by the existing owner of that question
+    (the task itself, its host retry attempts, recorded Continue claims). Unreadable lineage is no."""
+    from ouroboros.owner_quiz import question_task_owned_by
+
+    try:
+        return bool(task_id and actor_task_id) and question_task_owned_by(
+            record_path(drive_root).parent.parent, task_id, actor_task_id)
+    except Exception:  # noqa: BLE001 — authorship that cannot be proven is not claimed
+        log.debug("update description request lineage unreadable", exc_info=True)
+        return False
+
+
+def _request_view(record: Optional[Dict[str, Any]], drive_root: Optional[pathlib.Path], *,
+                  with_status: bool) -> Optional[Dict[str, Any]]:
+    """Read the request's current work through the existing retry and admitted-Continue owners.
+    Keep its original handle and physical history; ``current_task_id`` names whose status and
+    terminal event the panel follows. Hot readers ask without status."""
+    task_id = _request_task_id(record)
+    if not task_id:
+        return None
+    request = record["request"]
+    view = {"task_id": task_id, "mode": str(request.get("mode") or ""), "key": dict(request.get("key") or {}),
+            "requested_at": str(request.get("requested_at") or "")}
+    if with_status:
+        from ouroboros.question_answers import admitted_successor
+        from ouroboros.task_results import load_task_result
+        from ouroboros.task_status import effective_task_result
+
+        root = record_path(drive_root).parent.parent
+        try:
+            current, seen = task_id, set()
+            while current not in seen:
+                seen.add(current)
+                stored = load_task_result(root, current, strict=True)
+                effective = effective_task_result(root, stored, materialize_artifacts=False) if isinstance(stored, dict) else {}
+                current = str(effective.get("task_id") or current)
+                successor = admitted_successor(root, current)
+                if not successor:
+                    break
+                current = successor
+            else:
+                raise ValueError("cyclic description task continuation")
+            view["current_task_id"] = current
+            view["status"] = str(effective.get("status") or "unknown") if effective else "missing"
+        except Exception:  # noqa: BLE001 — an unreadable result is an unknown status, never an end
+            view["status"] = "unknown"
+        view["saved"] = str(record.get("request_saved") or "") == task_id
+    return view
+
+
+def author_request_text(record: Dict[str, Any], request: Dict[str, Any]) -> str:
+    """The owner's request as the ordinary task text: facts, sources, the one writer. The
+    shape of the description is the mind's own; nothing here sets a length or a template."""
+    key = request["key"]
+    base, target = key["base_sha"], key["target_sha"]
+    shown, text, _last_good = shown_letter(record) if record else ({}, "", None)
+    shown_key = shown.get("key") or {}
+    target_version = _target_version(record, target) if record else ""
+    saved = ("" if not text else "A description of this range is already saved (query_data(op=\"json\", kind=\"update_letter\", "
+             "select=\"text\")); my human asked for a new one, so read the range again rather than restating it. "
+             if _same_range(shown_key, base, target) else f"The saved description covers another range "
+             f"({shown_key.get('base_sha', '')}..{shown_key.get('target_sha', '')}); it stays until this one is saved. ")
+    return (
+        "[UPDATE DESCRIPTION REQUEST]\n"
+        f"My human asked me in Dashboard → Updates to {'rewrite' if request['mode'] == 'rewrite' else 'write'} "
+        f"the description of the official update {base}..{target} "
+        f"(channel {key.get('update_channel') or 'unknown'}, ref {key.get('target_ref') or 'unknown'}"
+        + (f", target version {target_version}" if target_version else "") + "). "
+        + saved + "\n\n" + _request_sources(record, key) + "\n\n"
+        "Write it for my human: what changes for them and for me once this update is applied, in the language we use "
+        "together, as long and as structured as the change needs. Say honestly what was not verified where it matters; "
+        "promise nothing about how applying will go. Save it with record_update_description("
+        f"base_sha=\"{base}\", target_sha=\"{target}\", expected_revision={request['revision_at_request']}, text=...), "
+        "or text_file={\"root\": ..., \"path\": ...} in place of text for a Markdown file you wrote "
+        "— enable it with enable_tools if it is not loaded. If it refuses because a newer description was saved, read "
+        "that one and decide. Then finish with a short note.\n"
+        "[/UPDATE DESCRIPTION REQUEST]"
+    )
+
+
+def _request_sources(record: Dict[str, Any], key: Dict[str, str]) -> str:
+    """Where the requested range is. The record holds ONE range's material and check facts,
+    which a later check replaces: each is named only when it is this range's, otherwise the
+    request says whose they are and gives this range's own repository recipe."""
+    from ouroboros.query_data_sql import MAX_BYTES
+
+    base, target = key["base_sha"], key["target_sha"]
+    pointer = record.get("material") if isinstance(record.get("material"), dict) else {}
+    facts = record.get("qualification") if isinstance(record.get("qualification"), dict) else {}
+    if _same_range(pointer.get("key"), base, target):
+        size = pointer.get("text_bytes")  # the reader's own count of the text (``_material_document``)
+        budget = min(size, MAX_BYTES) if type(size) is int and size > 0 else MAX_BYTES
+        sources = (f"Sources: query_data(op=\"json\", kind=\"update_material\", select=\"text\", max_bytes={budget}) "
+                   "holds every commit of this range with the bodies it could read, the first-parent integrations, "
+                   "README release rows, local history that is not part of the target, and how to read further. When a "
+                   "message does not say what changed, read the change itself with vcs_read(root=\"system_repo\", ...).")
+    else:
+        stored = _range_text(pointer.get("key"))
+        sources = ((f"The stored update material covers {stored}, not this range" if stored else
+                    "No update material is stored") + "; read this range in the repository.\n"
+                   + READ_RECIPE.format(base=base, target=target))
+    if _same_range(facts, base, target):
+        return f"{sources}\n{CHECK_FACTS}"
+    stored = _range_text(facts)
+    return f"{sources}\nNo check facts for this range are recorded{f' (the recorded ones cover {stored})' if stored else ''}."
+
+
+def _range_text(key: Any) -> str:
+    return f"{key.get('base_sha')}..{key.get('target_sha')}" if _range_key(key) else ""
+
+
+def _target_version(record: Dict[str, Any], sha: str) -> str:
+    """The version the record already knows for target ``sha``; '' rather than a Git read."""
+    if ((record.get("checked_key") or {}).get("target_sha")) == sha:
+        return str(record.get("checked_target_version") or "")
+    provenance = shown_letter(record)[0] if record else {}
+    return str(provenance.get("target_version") or "") if (provenance.get("key") or {}).get("target_sha") == sha else ""
+
+
+# ---------------------------------------------------------------------------
+# The one projection shared by the panel payload, preflight and the Runtime context
 # ---------------------------------------------------------------------------
 
 def shown_letter(record: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Optional[Dict[str, Any]]]:
-    """``(provenance, text, last_good)`` — the letter a reader will actually SEE.
+    """``(provenance, text, last_good)`` — the description a reader will actually SEE.
 
-    A failed rewrite keeps the previous good letter, which may be about an OLDER target
-    than the range that failed. Relation, key, versions and every ancestry question must
-    therefore be asked about this provenance and never about the outer record: asking the
-    outer one presents a kept letter as the letter for the update currently on offer, and
-    hides an already-applied one behind the range that failed.
+    A record written before descriptions became the mind's own work may hold a failed
+    rewrite that kept the previous good letter, which may be about an OLDER target than the
+    range that failed. Relation, key, versions and every ancestry question must therefore be
+    asked about this provenance and never about the outer record: asking the outer one
+    presents a kept letter as the letter for the update currently on offer, and hides an
+    already-applied one behind the range that failed.
     """
     last_good = record.get("last_good") if isinstance(record.get("last_good"), dict) else None
     text = str(record.get("text") or "")
@@ -768,24 +888,35 @@ def project_letter(
     *,
     head_sha: str,
     latest_sha: str,
+    request: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Relate the stored letter to the live HEAD and official target.
+    """Relate the stored description to the live HEAD and official target.
 
     ``applied`` is SHA equality, or the fact the last check recorded about this very HEAD:
     a divergent install applies an official target as a merge commit
     (``supervisor/update_merge.py``), so HEAD never equals the target it consumed, and the
     check — which runs where git is — proves the ancestry once (``target_in_head``) for
     both readers. Nothing here infers it from ``latest_sha``, which a passive read leaves
-    empty exactly when the cached target has been consumed.
+    empty exactly when the cached target has been consumed. ``description_current`` compares
+    ranges only: a new post-merge run is a fact about the same range, never a stale text.
+    A record without a description projects only while it carries something to act on (an
+    offered range or a request); ``request`` is the caller's ``_request_view``.
     """
-    if not record or record.get("state") == "none":
+    if not record:
         return None
     provenance, text, last_good = shown_letter(record)
+    if record.get("state") in ("none", None, ""):
+        if not _range_key(record.get("checked_key")) and not request:
+            return None
+        provenance, text = {}, ""
     key = provenance.get("key") if isinstance(provenance.get("key"), dict) else {}
     base, target = str(key.get("base_sha") or ""), str(key.get("target_sha") or "")
     head, latest = str(head_sha or ""), str(latest_sha or "")
-    consumed = bool(record.get("target_in_head")) and head and head == str(record.get("checked_head_sha") or "")
-    if head and head == target:
+    consumed = (bool(record.get("target_in_head")) and head and head == str(record.get("checked_head_sha") or "")
+                and record.get("target_in_for", target) == target)
+    if not text:
+        relation = ""
+    elif head and head == target:
         relation = "applied"
     elif consumed and target:
         relation = "applied"
@@ -795,21 +926,30 @@ def project_letter(
         relation = "superseded"
     else:
         relation = "other"
+    failed = record.get("state") == "failed"
+    material_error = record.get("material_error") if isinstance(record.get("material_error"), dict) else {}
+    error_kind = str(record.get("error_kind") or material_error.get("kind") or "")
     return {
-        "state": "ready" if record.get("state") == "ready" else "failed",
+        "state": "failed" if failed else ("ready" if text else "none"),
         "relation": relation,
         "text": text,
         "author_version": str(provenance.get("author_version") or ""),
         "target_version": str(provenance.get("target_version") or ""),
         "written_at": str(provenance.get("written_at") or ""),
-        "error_kind": str(record.get("error_kind") or ""),
-        "error_text": str(record.get("error_text") or ""),
+        "error_kind": error_kind,
+        "error_text": str(record.get("error_text") or material_error.get("text") or ""),
         "key": dict(key),
         "has_last_good": bool(last_good and last_good.get("text")),
-        "description_current": bool(provenance.get("state") == "ready" and text
-                                    and base and head == base and latest == target),
-        "failed_at": str(record.get("written_at") or "") if record.get("state") == "failed" else "",
-        "latest_failed_key": dict(record.get("key") or {}) if record.get("state") == "failed" else None,
+        "description_current": bool(text and base and head == base and latest == target),
+        "failed_at": str(record.get("written_at") or "") if failed else str(material_error.get("at") or ""),
+        "latest_failed_key": (dict(record.get("key") or {}) if failed
+                              else dict(material_error.get("key") or {}) if material_error else None),
+        "qualification": record.get("qualification") or provenance.get("qualification"),
+        "revision": _revision(record),
+        "author": dict(provenance.get("author") or {}),
+        "checked_key": _range_key(record.get("checked_key")),
+        "material": record.get("material") if isinstance(record.get("material"), dict) else None,
+        "request": request,
     }
 
 
@@ -821,7 +961,8 @@ def project_letter_for_panel(
     """Project against the server baseline; task context retains its own checkout origin.
 
     Both use the same reader; separate recorded ancestry facts prevent checkout
-    movement from claiming server adoption. No git runs on either read path.
+    movement from claiming server adoption. No git runs on either read path; the panel
+    alone reads the request's task status (one result file).
     """
     record = read_record(drive_root)
     if record and "running_sha" in status:
@@ -831,6 +972,7 @@ def project_letter_for_panel(
         record,
         head_sha=_key_from_status(status)["base_sha"],
         latest_sha=_key_from_status(status)["target_sha"],
+        request=_request_view(record, drive_root, with_status=True),
     )
 
 
@@ -842,6 +984,8 @@ def official_update_projection(
 ) -> Dict[str, Any]:
     """The typed fact for the Runtime context: O(1), no git, never raises.
 
+    The retained update's before/after samples are the Runtime section's ``vitals.last_update``
+    (``context_runtime_facts``); the panel reads them through ``runtime_status``.
     ``status`` is honest about freshness. It follows the CHECK, not the letter:
     ``update_available``/``up_to_date`` while the last check still describes this HEAD (the
     availability is the cache's, so an available update may carry a failed letter or none at
@@ -855,6 +999,7 @@ def official_update_projection(
     try:
         from ouroboros import get_version
         from ouroboros.config import DATA_DIR
+        from ouroboros.update_qualification import runtime_letter  # the full record: query_data kind update_letter
 
         head = str(head_sha or "")
         if not head or head == "unknown":
@@ -878,13 +1023,16 @@ def official_update_projection(
                 "status": "unchecked", "status_as_of": "",
                 "running": {"version": get_version(), "sha": head},
                 "update_channel": active_channel, "target": None, "behind": None, "ahead": None,
-                "local_changes": "unknown", "letter": project_letter(record, head_sha=head, latest_sha=""),
+                "local_changes": "unknown", "letter": runtime_letter(project_letter(
+                    record, head_sha=head, latest_sha="", request=_request_view(record, drive_root, with_status=False))),
+                "post_merge_reds": (record or {}).get("post_merge_reds"),
             }
         latest = str(cache.get("latest_sha") or "")
         checked_head = str((record or {}).get("checked_head_sha") or "")
         shown = shown_letter(record)[0] if record else {}
         record_key = shown.get("key") if isinstance(shown.get("key"), dict) else {}
-        letter = project_letter(record, head_sha=head, latest_sha=latest)
+        letter = runtime_letter(project_letter(record, head_sha=head, latest_sha=latest,
+                                               request=_request_view(record, drive_root, with_status=False)))
         if not cache:
             status = "unchecked"
         elif head and head == checked_head:
@@ -898,8 +1046,10 @@ def official_update_projection(
             # Key AND version from the SAME provenance: reading the version off the outer
             # record would pair the newer failed range's version with the kept letter's sha.
             same_target = str(record_key.get("target_sha") or "") == latest
+            checked_target = str(((record or {}).get("checked_key") or {}).get("target_sha") or "") == latest
             target = {
-                "version": str(shown.get("target_version") or "") if same_target else "",
+                "version": (str(shown.get("target_version") or "") if same_target
+                            else str((record or {}).get("checked_target_version") or "") if checked_target else ""),
                 "sha": latest,
             }
         return {
@@ -914,6 +1064,9 @@ def official_update_projection(
             "local_changes": str(cache.get("local_changes") or "unknown")
             if head == str(cache.get("checked_head_sha") or "") else "unknown",
             "letter": letter,
+            "post_merge_reds": (record or {}).get("post_merge_reds"),
+            # Where the range and the one writer are, for a mind that decides to describe it.
+            **({"description_sources": DESCRIPTION_SOURCES} if status == "update_available" else {}),
         }
     except Exception as exc:  # noqa: BLE001 — a fact that raises would take the whole context with it
         log.debug("official_update projection failed", exc_info=True)

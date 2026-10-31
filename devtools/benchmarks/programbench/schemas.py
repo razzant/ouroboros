@@ -30,7 +30,8 @@ def programbench_budget_profile() -> dict[str, Any]:
         # reproduces the run behavior exactly; the deadline/reserve rails still
         # stop the loop earlier when time runs out.
         "improvement_policy": "fixed",
-        # ProgramBench allows up to six acceptance/improvement passes.
+        # Historical: up to six acceptance/improvement passes. The result review reads no
+        # task-local pass count (the run pins OUROBOROS_REVIEW_MAX_CYCLES=unlimited): inert.
         "max_improvement_passes": 6,
         # 0-100 percentage of the total budget kept for finalization
         # (15% of 6h ≈ the last ~54 minutes).

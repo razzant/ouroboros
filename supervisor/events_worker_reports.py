@@ -2,8 +2,8 @@
 
 Heartbeats and dispatch resolution keep the liveness rails honest, metrics and
 forwarded log lines reach the owner's panel, the acceptance fence is
-acknowledged back to the worker, and a bounded external-wait lease spares the
-idle rail alone.
+acknowledged back to the worker, a bounded external-wait lease spares the
+idle rail alone, and a translation-memory write reaches the open windows.
 """
 
 from __future__ import annotations
@@ -155,6 +155,23 @@ def _handle_task_focus_updated(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.persist_queue_snapshot(reason="task_focus_updated")
 
 
+def _handle_ui_i18n_updated(evt: Dict[str, Any], ctx: Any) -> None:
+    """A turn wrote the translation memory (``pin_ui_translation``); this process holds the
+    windows, so it tells them to read the memory again. The file is the truth: the frame
+    carries only which revision now exists."""
+    language, revision = evt.get("language"), evt.get("revision")
+    if not isinstance(language, str) or not language.strip() or type(revision) is not int or revision < 0:
+        return
+    ctx.bridge.broadcast({"type": "ui_i18n_updated", "language": language.strip(), "revision": revision})
+
+
+def _handle_update_progress_changed(evt: Dict[str, Any], ctx: Any) -> None:
+    """A turn saved the update description (``record_update_description``); this process
+    holds the windows, so it asks them to read the update status again. The record is the
+    truth: the frame carries nothing else."""
+    ctx.bridge.broadcast({"type": "update_progress_changed"})
+
+
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
     payload = {
         "ts": str(evt.get("ts") or utc_now_iso()),
@@ -167,7 +184,7 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
         "outcome_axes": normalize_outcome_axes(evt),
         "reason_code": str(evt.get("reason_code") or ""),
     }
-    for key in ("routing_tool_calls", "completion_tool_calls"):
+    for key in ("routing_tool_calls", "completion_tool_calls", "rounds"):
         if key in evt:
             payload[key] = None if evt[key] is None else int(evt[key])
     if "tool_call_counts" in evt:

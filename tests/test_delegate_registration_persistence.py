@@ -144,7 +144,7 @@ def test_pending_recovery_retains_the_marker(tmp_path):
     assert gateway.removals == ["prj-user"]
 
 
-def test_replacement_refusal_names_retry_of_and_live_run(tmp_path):
+def test_pending_start_does_not_block_an_independent_invocation(tmp_path):
     """#364 remainder: the typed refusal must name the live identity and the
     retry_of escape hatch in its human-readable detail."""
     from ouroboros.delegate_start_claims import claimed_start_request
@@ -157,15 +157,11 @@ def test_replacement_refusal_names_retry_of_and_live_run(tmp_path):
         "max_seconds": 60,
     })
     ok, refusal = claimed_start_request(
-        tmp_path, claim_target="", payload_busy=lambda *_a: "",
-        enforce_actor_idle=True,
-        task_id="t-b", invocation_id="inv-2", route="r",
+        tmp_path, task_id="t-b", invocation_id="inv-2", route="r",
         request={"model": "m"}, idempotency_key="inv-2",
     )
-    assert ok is False
-    assert refusal["reason"] == "replacement_requires_settlement"
-    assert "retry_of" in refusal["detail"]
-    assert "inv-busy" in refusal["detail"]
+    assert ok and not refusal
+    assert {row["invocation_id"] for row in custody.pending_invocations(tmp_path)} == {"inv-busy", "inv-2"}
 
 
 def test_orphan_refusal_keeps_persistent_registration(tmp_path):

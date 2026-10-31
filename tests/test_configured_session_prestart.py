@@ -397,9 +397,9 @@ def test_precustody_refusals_leave_a_durable_start_blocked_row(tmp_path):
     assert reasons == ["configured_actor_resource_mismatch"]
 
     out = runtime.delegate_start_entry(ctx, "do work", subagent_id="someone-else")
-    assert "configured_actor_route_mismatch" in out.text
+    assert "unknown_subagent_id" in out.text
     reasons = [row["reason"] for row in _rows(tmp_path)]
-    assert reasons[-1] == "configured_actor_route_mismatch"
+    assert reasons[-1] == "unknown_subagent_id"
 
     out = runtime.delegate_start_entry(ctx, "do work")
     assert "configured_work_order_unavailable" in out.text
@@ -442,7 +442,8 @@ def test_a_budget_continuation_never_pre_starts_the_leaf_again_and_hydrates_cust
     assert starts == []  # no second physical invocation
     assert receipt["status"] == "configured_session_budget_continuation"
     assert receipt["continuation"] == {
-        "delegated_runs_started": 1, "physical_start": "not_repeated", "custody_read": "ok"}
+        "delegated_runs_started": 1, "physical_start": "not_repeated", "custody_read": "ok",
+        "liveness": "unobserved", "runs": [], "pending_invocations": []}
     bootstrap = ctx._configured_actor_bootstrap
     assert bootstrap["physical_started"] is True and bootstrap["exact_start_pending"] is False
     assert ctx._nanny_physical_activity_seed is True  # nanny economics see the adopted run

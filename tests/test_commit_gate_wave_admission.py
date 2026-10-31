@@ -602,19 +602,11 @@ def test_seats_reserve_against_exactly_the_fence_the_wave_was_admitted_with(gate
     bound fence, so the seats must reserve against THAT fence — not against a
     setting hot-reloaded mid-turn that the reviewer threads would re-read from
     the environment once the executor transitions dropped the usage scope.
-    An explicit owner amendment raises root AND group from $8 to $50.
-    The environment stays $8; every seat retains the amended authority rather
-    than mistaking an in-memory root fence for a group-cap amendment."""
+    The scope binds the root at $50 while the environment stays $8: every seat
+    keeps the bound $50 root fence beside the durable $8 group cap its first
+    row recorded (no owner amendment raises a group cap any more; its only
+    writer went with the task-acceptance machine)."""
     _seed_settled(gate, fence=8.0, cost=4.0)
-    from ouroboros.task_results import write_task_result
-
-    write_task_result(gate, ROOT, "running", root_task_id=ROOT,
-                      acceptance_root_cap_amendments=[{
-                          "accounting_root_task_id": ROOT, "new_cap_usd": 50.0,
-                          "source_identity": "fixture-owner-amendment",
-                          "source_ref": {"kind": "fixture_owner_decision"},
-                          "recorded_at": "2026-10-07T00:00:00+00:00",
-                      }])
     llm = LedgerLLM()
     ctx, (review_err, coupling, _reason, _adv) = _run(
         gate, tmp_path, monkeypatch, llm, fence=50.0, env_fence=8.0)
@@ -625,8 +617,7 @@ def test_seats_reserve_against_exactly_the_fence_the_wave_was_admitted_with(gate
     seats = [row for row in _ledger(gate) if row["source"] != "main"]
     assert sorted(row["model"] for row in seats) == sorted([COUPLING_MODEL, *PACKET_MODELS])
     assert {row["root_limit_usd"] for row in seats} == {50.0}
-    assert {row["billing_group_limit_usd"] for row in seats} == {50.0}
-    assert {row["billing_group_limit_source"] for row in seats} == {"owner_amendment"}
+    assert {row["billing_group_limit_usd"] for row in seats} == {8.0}
     assert not [e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient"]
     assert not [r for r in ctx._last_triad_raw_results if r.get("status") != "ok"] or all(
         "BudgetExceeded" not in str(r.get("error") or "") for r in ctx._last_triad_raw_results)

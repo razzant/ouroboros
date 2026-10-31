@@ -291,7 +291,7 @@ def test_stage_per_file_cap_is_inclusive():
 @pytest.mark.serial
 def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
     from ouroboros.skill_loader import load_skill
-    from ouroboros.skill_review_packs import _build_skill_file_packs
+    from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
 
     presentation = _zip_with([
         ("[Content_Types].xml", b"<Types/>"),
@@ -314,9 +314,7 @@ def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
             assert (staged.staging_dir / name).read_bytes() == payload
         loaded = load_skill(staged.staging_dir, tmp_path / "data")
         assert loaded is not None and not loaded.load_error
-        packs = "\n".join(_build_skill_file_packs(
-            staged.staging_dir, expected_content_hash=loaded.content_hash,
-        ))
+        packs = payload_pack(frozen_payload_files(staged.staging_dir))
         for name, payload in files:
             assert name in packs
             if name.endswith((".pdf", ".pptx", ".dat")):

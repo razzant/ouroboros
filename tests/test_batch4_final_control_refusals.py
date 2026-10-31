@@ -71,7 +71,8 @@ def test_repeated_resume_of_selected_fenced_root_is_typed_and_preserves_one_disp
     assert first["ok"] and first["selection"] == "budget_hold_released"
     assert budget_pause_fact(root) is None
     selected = copy.deepcopy(root)
-    assert queue.resume_budget_paused_task("root") == {"ok": False, "error": "task_not_budget_paused"}
+    second = queue.resume_budget_paused_task("root")
+    assert second["ok"] is False and second["error"] == "task_not_budget_paused"
     assert root == selected and queue.BUDGET_ROOT_FENCES["root"] == fence
     sent = []
     _idle_worker(workers, sent)

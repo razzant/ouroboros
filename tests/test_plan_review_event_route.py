@@ -72,6 +72,7 @@ def _held_worker(slots, results, release, entered):
         return ReviewActorRecord(
             slot_id=slot.slot_id, model=slot.model,
             status=row.get("status", "ok"), raw_text=row.get("raw_text", CLEAN),
+            parse_status="valid",  # fixture replaces the producer after its plan-reply parse
             error=row.get("error", ""), operation_id=operation_id,
             operation_state=row.get("operation_state", "settled"),
         )

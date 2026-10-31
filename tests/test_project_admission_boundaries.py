@@ -179,17 +179,21 @@ def test_failed_head_proof_keeps_custody_without_starving_other_work(host, tmp_p
 
 @pytest.mark.parametrize("bad_id", [7, " target ", None, "", "missing"])
 @pytest.mark.parametrize("restoring", [False, True])
-def test_origin_only_membership_cannot_normalize_corrupt_binding(room, bad_id, restoring):  # noqa: F811
+@pytest.mark.parametrize("exact", [False, True])
+def test_only_exact_membership_checks_corrupt_binding(room, bad_id, restoring, exact):  # noqa: F811
     ref = {"chat_id": 1, "client_message_id": "source", "text_sha256": "a" * 64}
     registry.create_project(room.root, "7")
     binding = {"source_ref": ref}
     if bad_id != "missing":
         binding["project_id"] = bad_id
-    registry._save_bindings(room.root, {"bindings": {"origin-sibling": binding}})
+    registry._save_bindings(room.root, {"bindings": {"fresh-sibling" if exact else "origin-sibling": binding}})
     rejected = room.queue.enqueue_task(task("fresh-sibling", project_id="", origin_message_ref=ref),
                                       restoring_snapshot=restoring)
-    assert rejected.get("_admission_blocked") == "project_routing_fence_lookup_failed"
-    assert not room.pending
+    if exact:
+        assert rejected.get("_admission_blocked") == "project_routing_fence_lookup_failed"
+        assert not room.pending
+    else:
+        assert not rejected.get("_admission_blocked") and rejected["project_id"] == ""
     expected = "7" if bad_id == 7 else "target" if bad_id == " target " else ""
     assert registry.project_id_for_origin(room.root, ref) == expected  # tolerant display is unchanged
 
@@ -203,14 +207,10 @@ def test_unrelated_corrupt_origin_does_not_block_healthy_membership(room, same_o
     if bad_id != "missing":
         malformed["project_id"] = bad_id
     registry._save_bindings(room.root, {"bindings": {
-        "origin-sibling": {"project_id": "target", "source_ref": ref}, "corrupt": malformed}})
+        "fresh-sibling": {"project_id": "target", "source_ref": ref}, "corrupt": malformed}})
     result = room.queue.enqueue_task(task("fresh-sibling", project_id="", origin_message_ref=ref))
-    if same_origin:
-        assert result.get("_admission_blocked") == "project_routing_fence_lookup_failed"
-        assert not room.pending
-    else:
-        assert not result.get("_admission_blocked")
-        assert room.pending[0]["project_id"] == "target"
+    assert not result.get("_admission_blocked")
+    assert room.pending[0]["project_id"] == "target"
 
 
 def test_known_registry_outage_skips_binding_reads_but_recovery_checks_them(host, tmp_path, monkeypatch):  # noqa: F811
@@ -228,7 +228,7 @@ def test_known_registry_outage_skips_binding_reads_but_recovery_checks_them(host
     monkeypatch.setattr(registry, "project_binding_for_task", observed)
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
-    assert not reads
+    assert set(reads) <= {"main"}  # Only the healthy candidate checks for a committed placement.
     assert [row["id"] for row in sent] == ["main"]
     assert all(row["_project_admission_restore_hold"] for row in host.pending)
     path.write_bytes(committed)
@@ -262,14 +262,18 @@ def test_global_snapshot_failure_blocks_every_candidate_without_dropping_rows(ho
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_origin_only_membership_cannot_turn_closed_room_into_unregistered_work(room, missing):  # noqa: F811
+@pytest.mark.parametrize("exact", [False, True])
+def test_only_exact_membership_inherits_closed_room_refusal(room, missing, exact):  # noqa: F811
     ref = {"chat_id": 1, "client_message_id": "source", "text_sha256": "a" * 64}
     registry._save_bindings(room.root, {"bindings": {
-        "origin-sibling": {"project_id": "target", "source_ref": ref}}})
+        "fresh-sibling" if exact else "origin-sibling": {"project_id": "target", "source_ref": ref}}})
     if missing:
         registry._save(room.root, {"projects": []})
     else:
         registry.begin_project_deletion(room.root, "target")
     result = room.queue.enqueue_task(task("fresh-sibling", project_id="", origin_message_ref=ref))
-    assert result.get("_admission_blocked") in {"project_routing_fence", "project_routing_fence_changed"}
-    assert not room.pending
+    if exact:
+        assert result.get("_admission_blocked") in {"project_routing_fence", "project_routing_fence_changed"}
+        assert not room.pending
+    else:
+        assert not result.get("_admission_blocked") and result["project_id"] == ""

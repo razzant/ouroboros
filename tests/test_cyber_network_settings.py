@@ -23,6 +23,8 @@ def access(request, isolated_settings, monkeypatch):  # noqa: F811
 
 
 def _post(monkeypatch, path, initial, payload, *, bound_host):
+    # An install that already carries the consciousness level: loading it runs no one-time copy.
+    initial.setdefault("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "full")
     path.write_text(json.dumps(initial))
     config.apply_settings_to_env(config.load_settings())
     app = _settings_app(monkeypatch, path)

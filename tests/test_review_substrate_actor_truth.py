@@ -2,8 +2,8 @@
 
 Split by theme out of ``tests/test_review_substrate_v2.py``. This module owns
 the actor truth: transport, parse and semantics reported separately, the
-bounded compact projection with redaction before truncation, mixed-panel
-participation counts and the stable review binding.
+bounded compact projection with redaction before truncation and mixed-panel
+participation counts. (The host-panel review binding left with task acceptance.)
 """
 
 import json
@@ -151,9 +151,8 @@ class _MixedPassPassFailLLM:
                 "verdict": "PASS",
                 "outcome_tier": "solved",
                 "completion_coach": "Ship the candidate.",
-                # Production panels always required criteria evidence (the knob was
-                # constant-true and is deleted): a contributing solved PASS carries
-                # supported criteria with refs.
+                # Inert since the fold: the acceptance criteria-evidence check that read
+                # these supported criteria left with task acceptance.
                 "criteria_used": [{
                     "criterion": "candidate is verified", "status": "supported",
                     "evidence_refs": ["verification_summary"],
@@ -165,18 +164,19 @@ class _MixedPassPassFailLLM:
 
 
 def test_mixed_panel_counts_valid_participation_independently_of_veto(tmp_path):
+    # The clean-acceptance predicate and the tier-classification policy left with task
+    # acceptance; the worst contributing tier still names the panel (``panel_reason``).
     from ouroboros.review_substrate import (
         aggregate_outcome_tier,
         compact_review_projection,
-        task_acceptance_is_clean,
     )
 
     result = run_review_request(
         ReviewRequest(
-            surface="task_acceptance",
+            surface="result",
             goal="g",
             subject="candidate",
-            policy={"classify_outcome_tier": True, "min_successful_slots": 2},
+            policy={"min_successful_slots": 2},
             task_id="mixed-panel",
         ),
         slots=[ReviewSlot(f"s{i}", f"m-{i}") for i in range(3)],
@@ -186,7 +186,6 @@ def test_mixed_panel_counts_valid_participation_independently_of_veto(tmp_path):
 
     assert result.aggregate_signal == "FAIL"
     assert aggregate_outcome_tier(result) == "blocked_with_evidence"
-    assert task_acceptance_is_clean(result) is False
     actors = {actor["slot_id"]: actor for actor in result.actors}
     assert all(actor["quorum_contribution"] is True for actor in actors.values())
     assert actors["s0"]["enforcement_impact"] == "supports_pass"
@@ -212,6 +211,7 @@ class _ArrayReviewTruthLLM:
             "content": json.dumps([{
                 "verdict": "FAIL",
                 "item": "missing_visual_evidence",
+                "severity": "critical",
                 "evidence": "No inspected screenshot is attached.",
                 "recommendation": "Inspect the captured consumer flow.",
             }]),
@@ -242,25 +242,3 @@ def test_review_actor_truth_preserves_array_coverage_and_physical_route(tmp_path
     assert actor["reason"] == "No inspected screenshot is attached."
     assert actor["provider"] == "openrouter"
     assert actor["model"] == "anthropic/claude-fable-5"
-
-def test_review_binding_is_stable_and_tracks_each_exact_input():
-    from ouroboros.review_substrate import build_review_binding
-
-    base = build_review_binding(
-        candidate="answer", evidence={"claims": ["verified"]}, fence_token_or_state="fence-1",
-    )
-    assert base == build_review_binding(
-        candidate="answer", evidence={"claims": ["verified"]}, fence_token_or_state="fence-1",
-    )
-    assert base["candidate_hash"] != build_review_binding(
-        candidate="changed", evidence={"claims": ["verified"]}, fence_token_or_state="fence-1",
-    )["candidate_hash"]
-    assert base["evidence_revision"] != build_review_binding(
-        candidate="answer", evidence={"claims": ["changed"]}, fence_token_or_state="fence-1",
-    )["evidence_revision"]
-    assert base["binding_hash"] != build_review_binding(
-        candidate="answer", evidence={"claims": ["verified"]}, fence_token_or_state="fence-2",
-    )["binding_hash"]
-    assert len(base["fence_hash"]) == 64
-    assert "fence_token_or_state" not in base
-    assert "fence-1" not in json.dumps(base)

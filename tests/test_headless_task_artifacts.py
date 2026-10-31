@@ -385,7 +385,7 @@ def test_task_artifact_endpoint_serves_only_declared_artifacts(tmp_path):
     data = tmp_path / "data"
     artifact_dir = task_artifacts_dir(data, "task-artifact")
     patch_path = artifact_dir / "workspace.patch"
-    patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
+    patch_path.write_bytes(b"diff --git a/a b/a\n")  # exact LF bytes on every platform
     write_task_result(
         data,
         "task-artifact",

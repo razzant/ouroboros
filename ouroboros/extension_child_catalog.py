@@ -48,6 +48,7 @@ def _stage_out_of_process_surfaces(
     """
 
     from ouroboros.extension_ui_validation import read_module_sources
+    from ouroboros.extension_widget_assets import capture_widget_sources
 
     def _proxy(item: Dict[str, Any]) -> Dict[str, Any]:
         item["handler"] = _out_of_process_handler_proxy
@@ -64,8 +65,14 @@ def _stage_out_of_process_surfaces(
         for item in (catalog.get("ui_tabs") or [])
         if isinstance(item, dict) and isinstance(item.get("render"), dict)
         and str(item["render"].get("kind") or "") == "module"
+        and item["render"].get("entry_type") != "module"
     } - {""})
     module_sources = read_module_sources(skill.skill_dir, *entries) if entries else {}
+    widget_sources = {}
+    for raw in catalog.get("ui_tabs") or []:
+        render = _validate_child_ui_descriptor(skill.name, dict(raw or {}))["render"]
+        if render.get("entry_type") == "module":
+            widget_sources.update(capture_widget_sources(skill, render))
 
     # Per-kind: the descriptor validator, and the descriptor field carrying the
     # registry key (None = the child's own "key" field, for the UI kinds, which
@@ -79,6 +86,10 @@ def _stage_out_of_process_surfaces(
     }
     with _lock:
         for kind, live, label in SURFACE_KINDS:
+            if kind in {"realtime_providers", "conversation_features"}:
+                if catalog.get(kind):
+                    raise ExtensionRegistrationError("realtime providers require in-process execution")
+                continue
             validate, key_field = validators[kind]
             staged = getattr(api._staged, kind)
             for raw in catalog.get(kind) or []:
@@ -93,6 +104,7 @@ def _stage_out_of_process_surfaces(
                     live, staged, key, _proxy(item) if key_field else item, label,
                 )
         api._staged.module_sources.update(module_sources)
+        api._staged.widget_sources.update(widget_sources)
 
 
 def _validate_child_catalog_namespace(skill_name: str, surface_kind: str, value: str) -> None:

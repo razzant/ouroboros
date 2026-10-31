@@ -249,7 +249,7 @@ def test_deadline_rail_reaps_a_hung_editor_without_false_completion(hung_editor,
     meta["finalization_requested_at"] -= h.queue.FINALIZATION_GRACE_SEC + 1
     h.queue.enforce_task_timeouts()
     job = jobs.get_nowait()
-    assert job["deadline_reached"] and not job["will_retry"] and "root" not in h.queue.RUNNING
+    assert job["deadline_reached"] and "will_retry" not in job and "root" not in h.queue.RUNNING
     task_reaper.reap_timed_out_task(job)
     h.child.join(10)
     assert not h.child.is_alive() and not (h.root / "returned").exists()

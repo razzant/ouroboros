@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros.settings_setup_contract import ONBOARDING_COMPLETED_KEY
 from tests.test_onboarding_complete_endpoint import (
-    LIVE_SNAPSHOT, WIZARD_PAYLOAD, _profile, _profile_account,
+    LIVE_SNAPSHOT, WIZARD_PAYLOAD, _pool, _profile,
     onboarding as onboarding,  # explicit fixture re-export, not another settings writer
 )
 
@@ -195,18 +195,22 @@ def test_main_review_recovery_refuses_a_main_it_cannot_honour(settings, message)
         review_rows_on_main({"enabled": True, "items": []}, settings)
 
 
-def test_codex_only_preview_and_finish_share_models_agents_and_atomic_settings(onboarding, pool_seams):
+@pytest.mark.parametrize("safety_pin", [None, "", "claudexor::codex=owner-checker"],
+                         ids=["untouched-safety", "blank-safety", "pinned-safety"])
+def test_codex_only_preview_and_finish_share_models_agents_and_atomic_settings(onboarding, pool_seams, safety_pin):
     """One managed account supplies real model defaults and agent review, without API keys."""
     model = "claudexor::codex=provider-default"
     onboarding.calls["snapshot_payload"] = {
         **LIVE_SNAPSHOT,
         "harnesses": [LIVE_SNAPSHOT["harnesses"][1]],
-        "profiles": {"harnessAccounts": [_profile_account("codex", "shared")],
-                     "profiles": [_profile("codex", "shared")]},
+        "profiles": {"profiles": [_profile("codex", "shared")], "harnessAccounts": [],
+                     "accountPools": [_pool("codex", {"kind": "profile", "profileId": "shared"})]},
         "model_catalog": [{"value": model, "is_default": True, "input_modalities": ["text", "image"],
                            "credential_profile_id": "shared", "max_context_window": 872000}],
     }
     draft = {"subscriptionsConnected": True, "OUROBOROS_MODEL": "", "TOTAL_BUDGET": 25.0}
+    if safety_pin is not None:
+        draft["OUROBOROS_MODEL_SAFETY"] = safety_pin
     preview = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)
     assert preview.status_code == 200, preview.text
     proposed = preview.json()
@@ -216,6 +220,7 @@ def test_codex_only_preview_and_finish_share_models_agents_and_atomic_settings(o
     assert not onboarding.settings_path.exists()
     completed = onboarding.client.post("/api/onboarding/complete", json={
         **draft, **proposed["model_settings"], "OUROBOROS_SUBAGENTS": catalog,
+        **({"OUROBOROS_MODEL_SAFETY": safety_pin} if safety_pin is not None else {}),
         "OUROBOROS_MODEL_ACCOUNTS": {"main": "shared", "light": ""},
         "OUROBOROS_MODEL_CONTEXT_WINDOWS": {"main": 1000000},
     })
@@ -229,17 +234,45 @@ def test_codex_only_preview_and_finish_share_models_agents_and_atomic_settings(o
     assert onboarding.calls["supervisor"] == 1
     assert json.loads(saved["OUROBOROS_SUBAGENTS"])["items"] == catalog["items"]
     assert not saved.get("OUROBOROS_REVIEWER_SLOTS")
+    assert saved.get("OUROBOROS_MODEL_SAFETY", "") == (safety_pin or "")
+    assert saved["OUROBOROS_SAFETY_MODE"] == "light"
+    assert saved["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "full"
+
+    # A later owner change to Light must reach an untouched/blank Safety slot,
+    # including its account, window and processing. A pinned checker ends inheritance.
+    from ouroboros import config
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+    from ouroboros.model_slots import get_safety_model, model_role_option
+    from ouroboros.settings_integrity import TaskSettingsSnapshot, task_settings_scope
+
+    options = {"OUROBOROS_MODEL_ACCOUNTS": {"light": "shared"},
+               "OUROBOROS_MODEL_CONTEXT_WINDOWS": {"light": 64000},
+               "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"light": "economy"}}
+    _owner_update_settings(fields_on_saved_document({
+        "OUROBOROS_MODEL_LIGHT": "claudexor::codex=next-light", **options}), allow_safety_lowering=True)
+    loaded = config.load_settings()
+    projected = {}
+    config.apply_settings_to_env(loaded, environ=projected)
+    with task_settings_scope(TaskSettingsSnapshot(settings=loaded, environ=projected)):
+        assert get_safety_model() == (safety_pin or "claudexor::codex=next-light")
+        assert tuple(model_role_option(key, "safety") for key in options) == (
+            ("", 0, "") if safety_pin else ("shared", 64000, "economy"))
 
 
-def test_codex_only_finish_computes_omitted_quick_path_models(onboarding):
+@pytest.mark.parametrize("modalities, vision", [
+    (["text", "image"], "claudexor::codex=default"), (["text"], ""), (["text", 42], ""), (["image", ""], "")])
+def test_codex_only_finish_computes_omitted_quick_path_models(onboarding, modalities, vision):
     onboarding.calls["snapshot_payload"] = {
         **LIVE_SNAPSHOT,
         "model_catalog": [{"value": "claudexor::codex=default", "is_default": True,
-                           "input_modalities": ["text", "image"]}],
+                           "input_modalities": modalities}],
     }
     response = onboarding.client.post("/api/onboarding/complete", json={"subscriptionsConnected": True})
     assert response.status_code == 200, response.text
     assert onboarding.saved()["OUROBOROS_MODEL"] == "claudexor::codex=default"
+    # Vision is saved only from a stated image row; otherwise it stays blank (Auto).
+    assert onboarding.saved()["OUROBOROS_MODEL_VISION"] == vision
+    assert onboarding.saved().get("OUROBOROS_MODEL_SAFETY", "") == ""
 
 
 def test_finish_preserves_visible_empty_inheritance_and_shipped_value(onboarding):
@@ -310,3 +343,26 @@ def test_main_review_recovery_does_not_invent_main_access(onboarding, model):
     assert response.status_code == 400, response.text
     assert not onboarding.settings_path.exists()
     assert onboarding.calls["snapshot"] == 0
+
+
+@pytest.mark.parametrize("subscriptions,local", [(False, False), (True, False), (False, True)])
+def test_named_only_api_connections_survive_atomic_completion(onboarding, subscriptions, local):
+    rows = [{"kind": "openai-compatible", "name": name, "label": name.title(),
+             "base_url": f"http://127.0.0.1:{port}/v1", **({"api_key": "b"} if name == "beta" else {})}
+            for name, port in (("alpha", 41001), ("beta", 41002))]
+    main, light = (f"openai-compatible@{name}::same-model" for name in ("alpha", "beta"))
+    payload = {**WIZARD_PAYLOAD, "OPENROUTER_API_KEY": "", "OUROBOROS_CONNECTIONS": rows,
+               "OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": light, "OUROBOROS_MODEL_FALLBACKS": "",
+               "subscriptionsConnected": subscriptions}
+    if local:
+        payload.update(LOCAL_MODEL_SOURCE="/tmp/fixture.gguf", LOCAL_ROUTING_MODE="fallback")
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=payload)
+    assert preview.status_code == 200, preview.text
+    assert not onboarding.settings_path.exists()
+    response = onboarding.client.post("/api/onboarding/complete", json=payload)
+    assert response.status_code == 200, response.text
+    saved = onboarding.saved()
+    assert saved["OUROBOROS_CONNECTIONS"] == rows
+    assert (saved["OUROBOROS_MODEL"], saved["OUROBOROS_MODEL_LIGHT"], saved["OUROBOROS_MODEL_FALLBACKS"]) == (main, light, "")
+    assert saved[ONBOARDING_COMPLETED_KEY]
+    assert onboarding.calls["snapshot"] == (2 if subscriptions else 0)

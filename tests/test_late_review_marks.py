@@ -1,17 +1,16 @@
 """Late review feedback kept in view as a host mark of its owning room (#1738), end to end.
 
-A real publisher (a late acceptance settlement, a plan council reply that settles after its
-task ended) persists the full source, then keeps ONE host mark in the room that owns the work.
+A real publisher (a plan council reply that settles after its task ended) persists the full
+source, then keeps ONE host mark in the room that owns the work; the helper's own tests publish
+the record a pre-fold late acceptance settlement wrote, whose marks stay as history.
 The next request of that room carries it through the real memory view and context assembly;
-another room's request does not; consciousness reads every room's. Showing, reading, a page seal and a fitted window never
-release it; only the integrating mind's ``memory_mark(release_id, reason)`` does, and a replay
+another room's request does not; consciousness reads foreign marks by pointer. Showing, reading, a page seal and a fitted window never
+release it; only the integrating mind's ``memory_mark(release_ids, reason)`` does, and a replay
 never brings it back, also after the index is lost. An unproven room keeps no mark. No test
 calls a model or the network.
 """
 from __future__ import annotations
 
-import dataclasses
-import hashlib
 import json
 import re
 import threading
@@ -63,7 +62,7 @@ def _ctx(root, task_id, *, chat=1, meta=None, direct=False):
 
 
 def _release(root, mark_id, *, reason="dealt with it", **ctx):
-    return json.loads(_memory_mark(_ctx(root, ctx.pop("task_id", "main1"), **ctx), release_id=mark_id,
+    return json.loads(_memory_mark(_ctx(root, ctx.pop("task_id", "main1"), **ctx), release_ids=[mark_id],
                                    reason=reason))
 
 
@@ -159,13 +158,19 @@ def test_the_next_request_of_the_owning_room_carries_it_and_another_room_never_d
     main_c = blocks(env, memory, {"id": "next-main", "chat_id": 1})[2]
     alpha_c = blocks(env, memory, {"id": "next-alpha", "chat_id": rooms["alpha"]})[2]
     assert SECTION in main_c and "MAIN-DEFECT-main1" in main_c
-    assert f"memory_mark(release_id='{marks['main1']}', reason=…)" in main_c
+    assert f"memory_mark(release_ids=['{marks['main1']}'], reason=…)" in main_c
     assert "full source (sha256 " in main_c and "memory_read(source_ref=" in main_c
     assert "MAIN-DEFECT-bound" not in main_c and "MAIN-DEFECT-pres1" not in main_c
     assert SECTION in alpha_c and "MAIN-DEFECT-bound" in alpha_c and "MAIN-DEFECT-main1" not in alpha_c
     assert "MAIN-DEFECT-bound" in alpha_c.split(SECTION, 1)[1].split("\n## ", 1)[0], "in its own section"
     wake = room_text(root, {"id": "wake1", "chat_id": 1, "metadata": WAKE})
-    assert all(f"MAIN-DEFECT-{task}" in wake for task in marks), "consciousness reads every room's"
+    assert "MAIN-DEFECT-main1" in wake
+    assert "MAIN-DEFECT-bound" not in wake and "MAIN-DEFECT-pres1" not in wake
+    for task in ("bound", "pres1"):
+        lines = [line for line in wake.splitlines() if f"Late review of task {task}:" in line]
+        assert len(lines) == 1 and f'memory_read(node_id="{marks[task]}")' in lines[0]
+        assert f"MAIN-DEFECT-{task}" in _memory_read(_ctx(root, "wake1"), node_id=marks[task])
+    assert len(_late_marks(root)) == 3  # projection/read never releases any mark
     presence = room_text(root, {"id": "pt1", "chat_id": 555, "metadata": PRESENCE})
     assert "MAIN-DEFECT-pres1" in presence and "MAIN-DEFECT-main1" not in presence
     beta = room_text(root, {"id": "tb2", "chat_id": rooms["beta"]})
@@ -173,13 +178,12 @@ def test_the_next_request_of_the_owning_room_carries_it_and_another_room_never_d
     child = room_text(root, {"id": "kid7", "chat_id": 1, **CHILD})  # the room's marks, as the child already reads
     assert "MAIN-DEFECT-main1" in child and "MAIN-DEFECT-bound" not in child
     helper_section = child.split(SECTION, 1)[1].split("\n## ", 1)[0]
-    assert "the integrating mind releases it" in helper_section and "release_id=" not in helper_section
+    assert "the integrating mind releases it" in helper_section and "release_ids=" not in helper_section
     assert "until I release it with my reason" in main_c
 
 
 def test_showing_reading_sealing_and_a_fitted_window_never_release_it(tmp_path):
     from ouroboros import chat_chain, memory_inventory
-    from ouroboros.llm_local import _compact_local_text
 
     shared.world(tmp_path)
     record = _record(tmp_path, "main1", 1, "KEEP-THIS-CRITIQUE")
@@ -203,8 +207,7 @@ def test_showing_reading_sealing_and_a_fitted_window_never_release_it(tmp_path):
     level = memory_floor.fit_memory_view(snapshot, {"margin": 1, "physical": 1, "budget": 1})
     assert level.addressed, "the window took everything it may take"
     fitted = mv.render_room(snapshot, level)
-    assert "KEEP-THIS-CRITIQUE" in fitted and f"release_id='{mark_id}'" in fitted and "memory_read(source_ref=" in fitted
-    assert "KEEP-THIS-CRITIQUE" in _compact_local_text(fitted, "dynamic")
+    assert "KEEP-THIS-CRITIQUE" in fitted and f"release_ids=['{mark_id}']" in fitted and "memory_read(source_ref=" in fitted
     assert [mark["id"] for mark in _late_marks(tmp_path)] == [mark_id]
 
 
@@ -216,7 +219,8 @@ def test_only_the_integrating_mind_releases_it_with_a_reason(tmp_path):
            for task in ("m1", "m2", "m3", "m4")}
     for meta in (CHILD, NANNY):
         refused = _release(tmp_path, ids["m1"], task_id="kid1", meta=meta)
-        assert refused["reason"] == "not_integrator" and refused["conflict_ids"] == [ids["m1"]]
+        assert refused["released_ids"] == [] and refused["refused"][0]["id"] == ids["m1"]
+        assert refused["refused"][0]["reason"] == "not_integrator"
     assert _release(tmp_path, ids["m1"], reason="")["reason"] == "invalid"
     assert ChronicleStore(tmp_path).release_mark(ids["m1"], {"kind": "host", "operation": "late_review"},
                                                  "the host never decides").reason == "not_integrator"
@@ -230,7 +234,7 @@ def test_only_the_integrating_mind_releases_it_with_a_reason(tmp_path):
     child_ctx = _ctx(tmp_path, "kid1", meta=CHILD)
     note = json.loads(_chronicle_write(_ctx(tmp_path, "root0001"), kind="note", text="a note"))
     own = json.loads(_memory_mark(child_ctx, text="mine", node_id=note["node_id"]))
-    assert json.loads(_memory_mark(child_ctx, release_id=own["mark_id"], reason="done"))["ok"]
+    assert json.loads(_memory_mark(child_ctx, release_ids=[own["mark_id"]], reason="done"))["ok"]
 
 
 def test_a_released_mark_stays_released_across_replay_restart_and_index_loss(tmp_path):
@@ -263,110 +267,39 @@ def test_the_marks_source_reader_survives_retention_packing_its_bytes(tmp_path):
     assert "PACKED-CRITIQUE" in source and f"sha256 {record['source_ref']['sha256'][:12]}" in source
 
 
-# --- real publisher: a late acceptance settlement -----------------------------------------------
+def test_a_foreign_focus_reads_the_marks_source_by_the_named_reader_never_the_authors_recipe(tmp_path):
+    """The producer's ``read_file(root='artifact_store')`` recipe resolves in the author's drive only (the
+    26.10 consciousness wake tried it and the digest as a CAS blob); the full mark names the reader every
+    focus has, for marks already stored with that recipe too, and the packed bytes read through it."""
+    from ouroboros import evidence_packer
 
-def _late_wave(tmp_path, monkeypatch, verdict="FAIL", chat_id=1):
-    from ouroboros.review_substrate import ReviewSlot
-    from ouroboros.task_results import write_task_result
-    from tests.test_acceptance_async_operation import _released_wave, _SlotModel, _terminal_ctx
-
-    settled = threading.Event()
-    module = __import__("ouroboros.review_custody", fromlist=["_settle_review_attempt"])
-    original = module._settle_review_attempt
-
-    def settle(*args, **kwargs):
-        try:
-            return original(*args, **kwargs)
-        finally:
-            settled.set()
-
-    monkeypatch.setattr("ouroboros.review_custody._settle_review_attempt", settle)
-    gates = {"model/a": threading.Event()}
-    ctx = _terminal_ctx(tmp_path, task_id="late-root")  # chat 1
-    if chat_id != 1:
-        write_task_result(tmp_path, "late-root", "completed", chat_id=chat_id, result="The delivered answer.")
-    try:
-        first = _released_wave(tmp_path, ctx, slots=[ReviewSlot(slot_id="a", model="model/a", effort="high",
-                                                                timeout_sec=20)],
-                               model=_SlotModel(gates, {"model/a": verdict}), task_id="late-root")
-        run = {**json.loads(json.dumps(dataclasses.asdict(first))), "authority": "host_root",
-               "panel_id": "panel_1", "binding_hash": "binding-one", "candidate_hash": "c1"}
-        ctx._execution_trace["review_runs"].append(run)
-        gates["model/a"].set()
-        assert settled.wait(10)
-        events = []
-        while not any(e.get("system_type") == "acceptance_late_settlement" for e in events):
-            events.append(ctx.event_queue.get(timeout=10))
-    finally:
-        gates["model/a"].set()
-    return ctx, events
+    shared.world(tmp_path)
+    seed_result(tmp_path, "main1", {"status": "completed", "chat_id": 1})
+    record = _record(tmp_path, "main1", 1, "FOREIGN-CRITIQUE")
+    assert '"tool": "read_file"' in json.dumps(record["source_ref"])  # the author-relative recipe stays stored
+    mark_id = publish_late_review(tmp_path, record).mark_id
+    evidence_packer.run_pass(tmp_path)  # no loose file is left at the author-relative path either
+    node = _memory_read(_ctx(tmp_path, "wake1", meta=WAKE), node_id=mark_id)
+    assert '"tool": "read_file"' not in node, "the author's recipe never reaches another focus"
+    shown = json.loads(re.search(r"\nsource: memory_read\(source_ref=(\{.*?\})\)", node).group(1))
+    assert shown["task_id"] == "main1" and shown["size"] == record["source_ref"]["size"]
+    assert "FOREIGN-CRITIQUE" in _memory_read(_ctx(tmp_path, "wake1", meta=WAKE), source_ref=shown)
+    plain = json.loads(_memory_mark(_ctx(tmp_path, "main1"), text="mine", task_id="main1"))
+    assert "\nsource: " not in _memory_read(_ctx(tmp_path, "main1"), node_id=plain["mark_id"])  # other targets unchanged
 
 
-def test_a_late_acceptance_settlement_keeps_its_verdict_in_view_once(tmp_path, monkeypatch):
-    from ouroboros.acceptance_settlement import enqueue_late_acceptance_settlement, late_publication_owed
-    from ouroboros.task_results import load_task_result
+def test_a_retained_source_is_read_without_the_chronicle_and_other_modes_still_wait(tmp_path, monkeypatch):
+    from ouroboros.tools import chronicle
 
-    ctx, events = _late_wave(tmp_path, monkeypatch)
-    row = next(e for e in events if e.get("system_type") == "acceptance_late_settlement")
-    stored = load_task_result(tmp_path, "late-root")
-    panel = stored["review_projection"]["panels"][0]
-    marks = _late_marks(tmp_path)
-    assert len(marks) == 1 and marks[0]["room_id"] == "1"
-    mark = marks[0]
-    assert mark["id"] == late_review_mark_id("task_acceptance", "late-root", "acceptance-late:acceptance-subject-one")
-    assert row["text"] in mark["text"] and "rejected it" in mark["text"], "the card's own sentence, verbatim"
-    assert mark["target_ref"] == {**panel["applied_source_ref"], "task_id": "late-root"}
-    source = _memory_read(_ctx(tmp_path, "root0001"), source_ref=mark["target_ref"])
-    raw = __import__("ouroboros.artifacts", fromlist=["x"]).read_actor_source_bytes(
-        tmp_path, "late-root", panel["applied_source_ref"])
-    assert hashlib.sha256(raw).hexdigest() == panel["applied_source_ref"]["sha256"]
-    assert f"sha256 {panel['applied_source_ref']['sha256'][:12]}" in source
-    assert row["text"].splitlines()[0] in room_text(tmp_path)
-    # Every settler of the wave ends in the same publisher: a recovery replay keeps one mark.
-    assert enqueue_late_acceptance_settlement(ctx, "late-root", "acceptance-subject-one", stored, panel) == "published"
-    assert [m["id"] for m in _late_marks(tmp_path)] == [mark["id"]]
-    assert _release(tmp_path, mark["id"], direct=True)["ok"]
-    assert enqueue_late_acceptance_settlement(ctx, "late-root", "acceptance-subject-one", stored, panel) == "published"
-    assert _late_marks(tmp_path) == [] and not late_publication_owed("late-root", "acceptance-subject-one")
+    shared.world(tmp_path)
+    ref, _data = _source(tmp_path, "main1", "NO-CHRONICLE-NEEDED")
 
+    def pending(_root):
+        raise chronicle._NotActivated({"kind": "import_pending"})
 
-def test_an_unproven_room_publishes_the_card_and_keeps_no_mark(tmp_path, monkeypatch):
-    _ctx_unused, events = _late_wave(tmp_path, monkeypatch, verdict="PASS", chat_id=777)
-    assert any(e.get("system_type") == "acceptance_late_settlement" for e in events)
-    assert _late_marks(tmp_path) == []
-
-
-def test_a_failed_acceptance_mark_stays_owed_past_a_restart_and_maintenance_places_it(tmp_path, monkeypatch):
-    from ouroboros import acceptance_settlement
-    from ouroboros.late_review_marks import replay_owed_late_reviews
-
-    real = ChronicleStore.publish
-    monkeypatch.setattr(ChronicleStore, "publish", _refuse_publication)
-    _ctx_unused, _events = _late_wave(tmp_path, monkeypatch)
-    assert _late_marks(tmp_path) == [] and len(_owed_rows(tmp_path)) == 1
-    monkeypatch.setattr(ChronicleStore, "publish", real)
-    with acceptance_settlement._LATE_LOCK:  # a restart drops the process-local publication duty
-        acceptance_settlement._LATE_UNPUBLISHED.clear()
-    assert replay_owed_late_reviews(tmp_path)["settled"] == 1 and _owed_rows(tmp_path) == {}
-    [mark] = _late_marks(tmp_path)
-    assert mark["review"]["publication_id"] == "acceptance-late:acceptance-subject-one" and "rejected it" in mark["text"]
-
-
-def test_a_failed_mark_keeps_the_late_publication_owed_until_a_replay_places_it(tmp_path, monkeypatch):
-    from ouroboros import late_review_marks
-    from ouroboros.acceptance_settlement import enqueue_late_acceptance_settlement, late_publication_owed
-    from ouroboros.task_results import load_task_result
-
-    real = late_review_marks.publish_late_review
-    monkeypatch.setattr(late_review_marks, "publish_late_review",
-                        lambda root, record: late_review_marks.LateReviewMark("failed", detail="lock timeout"))
-    ctx, _events = _late_wave(tmp_path, monkeypatch)
-    assert late_publication_owed("late-root", "acceptance-subject-one") and _late_marks(tmp_path) == []
-    monkeypatch.setattr(late_review_marks, "publish_late_review", real)
-    stored = load_task_result(tmp_path, "late-root")
-    panel = stored["review_projection"]["panels"][0]
-    assert enqueue_late_acceptance_settlement(ctx, "late-root", "acceptance-subject-one", stored, panel) == "published"
-    assert len(_late_marks(tmp_path)) == 1 and not late_publication_owed("late-root", "acceptance-subject-one")
+    monkeypatch.setattr(chronicle, "_activated", pending)
+    assert "NO-CHRONICLE-NEEDED" in _memory_read(_ctx(tmp_path, "wake1"), source_ref={**ref, "task_id": "main1"})
+    assert "memory is not active" in _memory_read(_ctx(tmp_path, "wake1"), room_id=1)
 
 
 def _owed_rows(root):
@@ -384,17 +317,18 @@ def _refuse_publication(self, records, *, scan_state=None):
 def _sweep(root, monkeypatch):
     """The real off-loop maintenance pass, its unrelated steps idle: owed late reviews are replayed there."""
     import supervisor.workspace_preparation as preparation
-    from ouroboros import evidence_packer
     from ouroboros import server_maintenance as maintenance
+    from ouroboros.maintenance import child as maintenance_child
 
     monkeypatch.setattr(maintenance, "DATA_DIR", root)
-    for name in ("_STARTUP_PRUNES_OWED", "_STARTUP_TREES_OWED", "_STARTUP_SOURCE_PRUNES_OWED", "_STARTUP_TEMP_SWEEP_OWED"):
-        monkeypatch.setattr(maintenance, name, [False])
+    monkeypatch.setattr(maintenance, "_run_reconcile_prunes", lambda *_a: None)
     monkeypatch.setattr(maintenance, "_periodic_zombie_reconcile", lambda **_kw: None)
     monkeypatch.setattr(maintenance, "_run_drive_custody_pass", lambda *_a: None)
     monkeypatch.setattr(preparation, "recover_interrupted_preparations", lambda *_a, **_kw: None)
-    monkeypatch.setattr(evidence_packer.packer, "tick", lambda *_a, **_kw: None)
+    monkeypatch.setattr(maintenance_child, "tick", lambda *_a, **_kw: None)
     maintenance._run_periodic_reconcile_sweep([0], latch=SimpleNamespace(release=lambda: None))
+    from ouroboros.maintenance import run_job
+    run_job(root, "ended_plan_asks")
 
 
 def test_a_failed_publication_stays_owed_and_one_replay_after_restart_places_it_once(tmp_path, monkeypatch):
@@ -562,7 +496,7 @@ def test_a_late_reply_reaches_its_rooms_next_view_and_consciousness_and_no_other
     transport.release("m/a")
     [mark] = _until(lambda: _plan_marks(h.drive))
     room = room_text(h.drive)
-    assert SECTION in room and "Plan council reply from m/a (seat s1)" in room and f"release_id='{mark['id']}'" in room
+    assert SECTION in room and "Plan council reply from m/a (seat s1)" in room and f"release_ids=['{mark['id']}']" in room
     assert "Plan council reply from m/a" in room_text(h.drive, {"id": "wake1", "chat_id": 1, "metadata": WAKE})
     other = room_text(h.drive, {"id": "alpha-turn", "chat_id": council.rooms["alpha"]})
     assert "Plan council reply" not in other
@@ -638,6 +572,8 @@ def test_an_unreadable_producer_keeps_the_seat_pending_until_a_later_pass_places
         fault.setattr(observability, "read_call_payload", unreadable)
         _sweep(h.drive, monkeypatch)
     assert _plan_marks(h.drive) == [] and _participant(h, "s1")["status"] == "pending"
+    from ouroboros.maintenance_jobs import record
+    record(h.drive, "ended_plan_asks", state="pending")  # explicit source repair
     _sweep(h.drive, monkeypatch)
     [mark] = _plan_marks(h.drive)
     assert mark["review"]["subject"]["seat_id"] == "s1"

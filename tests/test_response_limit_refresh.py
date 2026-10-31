@@ -29,6 +29,8 @@ def test_expired_maximum_throttles_failed_catalog_refresh_then_recovers_on_wire(
     route = dict(provider=provider, model=model, base_url=target["base_url"])
     # The independent window acknowledgement must not hide output-limit refreshes.
     ce.record_owner_ack(root, **route, window_tokens=100_000)
+    # Window discovery now runs beside an ack; this test measures the independent output refresh cadence.
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: (100_000, clock[0].isoformat()))
     state = {"outage": "", "maximum": 4096}
     gets = []
 
@@ -73,25 +75,27 @@ def test_expired_maximum_throttles_failed_catalog_refresh_then_recovers_on_wire(
     assert len(gets) == 2  # A failed refresh is throttled; its old fact stays stale.
     assert ce._load(root)["response_limits"][original["route_fp"]] == original
 
-    # A different exact route still reads its catalog during this route's outage.
+    # A different exact route reads its own catalog during this route's outage. OpenRouter's catalog is one
+    # document: this process's failed read of it answers every route until the failed-evidence TTL ends.
+    answered = provider == "openrouter" and outage != "omitted"
     other = {**route, "model": "vendor/other" if provider == "openrouter" else "openai-compatible::other"}
     assert resolve_response_limit(root, **other, allow_fetch=True).ceiling(65536) == 65536
-    assert len(gets) == 3
+    assert len(gets) == 3 - answered
     # Explicit limits take precedence even while the failed refresh is cooling down.
     record_response_ack(root, **route, max_output_tokens=2048)
-    assert probe_and_send(2048)["source"] == "owner_ack" and len(gets) == 3
+    assert probe_and_send(2048)["source"] == "owner_ack" and len(gets) == 3 - answered
     record_response_ack(root, **route, max_output_tokens=0)
-    assert probe_and_send(65536) == stale and len(gets) == 3
+    assert probe_and_send(65536) == stale and len(gets) == 3 - answered
 
     clock[0] += timedelta(seconds=2)
-    assert probe_and_send(65536) == stale and len(gets) == 4
-    assert probe_and_send(65536) == stale and len(gets) == 4
+    assert probe_and_send(65536) == stale and len(gets) == 4 - answered
+    assert probe_and_send(65536) == stale and len(gets) == 4 - answered
     state.update(outage="", maximum=8192)
     clock[0] += timedelta(seconds=ce._FAILED_TTL_SEC + 1)
     # A hot-path read never fetches, even after the retry interval elapses.
-    assert resolve_response_limit(root, **route).ceiling(65536) == 65536 and len(gets) == 4
+    assert resolve_response_limit(root, **route).ceiling(65536) == 65536 and len(gets) == 4 - answered
     recovered = probe_and_send(8192)
     assert recovered["observed_at"] != original["observed_at"] and not recovered["stale"]
-    assert recovered["max_output_tokens"] == 8192 and len(gets) == 5
+    assert recovered["max_output_tokens"] == 8192 and len(gets) == 5 - answered
     assert asdict(resolve_response_limit(root, **route, allow_fetch=True)) == recovered
-    assert len(gets) == 5
+    assert len(gets) == 5 - answered

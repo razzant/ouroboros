@@ -2,16 +2,8 @@ import json
 
 import pytest
 
-from ouroboros.presence_bindings import (
-    PRESENCE_BINDINGS_FILENAME,
-    PresenceBinding,
-    PresenceBindingError,
-    PresenceEndpoint,
-    load_presence_binding,
-    list_presence_bindings,
-    new_presence_binding_id,
-    save_presence_binding,
-)
+from ouroboros.presence_bindings import PRESENCE_BINDINGS_FILENAME, PresenceBinding, PresenceBindingError, PresenceEndpoint, list_presence_bindings
+from tests.frozen_presence_bindings import load_presence_binding, new_presence_binding_id, save_presence_binding
 
 
 def _binding(transport_skill="telegram-bot"):

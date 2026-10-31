@@ -2,17 +2,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { computeHydratedDirectActivities } from '../modules/chat.js';
 import {
-    computeDerivedChatStatus,
-    computeHydratedDirectActivities,
-} from '../modules/chat.js';
-import {
-    chatStatusCounts,
     createStateSnapshotSequencer,
     isForegroundLiveCard,
-    routingAnnotationText,
     unkeyedFrameEndsTurn,
 } from '../modules/chat_activity.js';
+import { routingAnnotationText } from '../modules/routing_receipt.js';
+import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
+import { room } from './work_fixture.js';
+
+// The header is the server's room (work_status.roomStatusView); a state carrying one room.
+const inRoom = (activity, extra = {}) => ({ ...emptyWorkState(), room: room(activity, extra) });
 
 const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
 
@@ -39,13 +40,12 @@ test('only a legacy unkeyed model final clears unscoped state; a System row sett
 });
 
 test('System voice concludes no Main turn; an unkeyed model final still ends it (#1403)', () => {
-    // What the live handler does with the unscoped turn for each frame (the branch pinned above).
-    const turn = { isConnected: true, hasActiveLiveCard: false, activeDirectCount: 1, pendingSubmissionsCount: 1 };
-    const after = (frame) => computeDerivedChatStatus(unkeyedFrameEndsTurn(frame)
-        ? { ...turn, activeDirectCount: 0, pendingSubmissionsCount: 0 } : turn).text;
+    // What the live handler does with the owner's unscoped send for each frame (the branch pinned above):
+    // the send is this client's own fact, the room the server's.
+    const after = (frame) => roomStatusView(emptyWorkState(), { sending: !unkeyedFrameEndsTurn(frame) }).text;
     for (const kind of ['reminder', 'skill_notice', 'terminal_incident', 'budget_notice', 'startup_notice',
         'presence_recovery_required', 'command_reply', '']) {
-        assert.equal(after({ role: 'system', system_type: kind, task_id: '', content: 'Call mother' }), 'Working', kind);
+        assert.equal(after({ role: 'system', system_type: kind, task_id: '', content: 'Call mother' }), 'Sending', kind);
     }
     assert.equal(after({ role: 'assistant', task_id: '', content: 'Done.' }), 'Online');
     // The voice decides, never the words: a reply that quotes a reminder still ends the turn.
@@ -121,8 +121,8 @@ test('state snapshots and failure authority stay monotonic across reversed compl
     const older = snapshots.begin();
     const newer = snapshots.begin();
 
-    assert.deepEqual(older, { generation: 1, requestedAt: 100 });
-    assert.deepEqual(newer, { generation: 2, requestedAt: 200 });
+    assert.deepEqual(older, { generation: 1, requestedAt: 100, path: '/api/state' });
+    assert.deepEqual(newer, { generation: 2, requestedAt: 200, path: '/api/state' });
     assert.equal(snapshots.isCurrent(older), true);
     assert.equal(snapshots.apply(newer, { activities: [] }), true);
     // An older non-OK/catch path can no longer regress the newer header.
@@ -131,49 +131,21 @@ test('state snapshots and failure authority stay monotonic across reversed compl
     assert.deepEqual(applied, [{ data: { activities: [] }, requestedAt: 200 }]);
 });
 
-test('computeDerivedChatStatus: offline state when ws is disconnected', () => {
-    const status = computeDerivedChatStatus({
-        isConnected: false,
-        hasActiveLiveCard: true,
-        activeDirectCount: 1,
-        pendingSubmissionsCount: 1,
-    });
-    assert.deepEqual(status, {
-        kind: 'offline',
-        text: 'Reconnecting...',
-        showDots: false,
+test('the header: offline beats every room, whatever the room or the owner\'s sends', () => {
+    assert.deepEqual(roomStatusView(inRoom('working'), { connected: false, sending: true }), {
+        kind: 'offline', text: 'Reconnecting…', tone: 'offline', mark: 'ring', owner: false, amber: '',
     });
 });
 
-test('computeDerivedChatStatus: working state when active live card is present', () => {
-    const status = computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: true,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 0,
+test('the header: a working room says Working with moving dots and the transcript typing row', () => {
+    // The transcript's typing row follows the moving mark (chat.js syncChatStatus).
+    assert.deepEqual(roomStatusView(inRoom('working')), {
+        kind: 'thinking', text: 'Working', tone: 'live', mark: 'moving', owner: false, amber: '',
     });
-    assert.deepEqual(status, {
-        kind: 'thinking',
-        text: 'Working...',
-        showDots: false,
-    });
+    assert.equal(roomStatusView(inRoom('working', { call: 'thinking' })).text, 'Thinking');
 });
 
-test('computeDerivedChatStatus: neutral work when only direct activity counts are known', () => {
-    const status = computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 1,
-        pendingSubmissionsCount: 0,
-    });
-    assert.deepEqual(status, {
-        kind: 'thinking',
-        text: 'Working',
-        showDots: true,
-    });
-});
-
-test('direct neutral and explicit legacy phases reuse the installed translation memory', async () => {
+test('the server room\'s words reuse the installed translation memory', async () => {
     const { applyPayload, currentPayload, CODE_PREFIX } = await import('../modules/i18n.js');
     const prior = currentPayload();
     try {
@@ -181,53 +153,21 @@ test('direct neutral and explicit legacy phases reuse the installed translation 
             [CODE_PREFIX + 'task.chip.working']: { text: 'Работает' },
             [CODE_PREFIX + 'task.chip.thinking']: { text: 'Думает' },
         } });
-        for (const [phase, expected] of [['working', 'Работает'], ['thinking', 'Думает']]) {
-            const counts = chatStatusCounts(new Map([['call', { kind: 'direct_chat', phase }]]), []);
-            assert.equal(computeDerivedChatStatus(counts).text, expected);
+        for (const [call, expected] of [['working', 'Работает'], ['thinking', 'Думает'], ['', 'Работает']]) {
+            assert.equal(roomStatusView(inRoom('working', { call })).text, expected);
         }
-        assert.equal(computeDerivedChatStatus({ activeDirectCount: 2 }).text, 'Работает');
     } finally { applyPayload(prior); }
 });
 
-test('computeDerivedChatStatus: sending state with dots when local submissions are pending', () => {
-    const status = computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 1,
-    });
-    assert.deepEqual(status, {
-        kind: 'thinking',
-        text: 'Sending...',
-        showDots: true,
+test('the header: the owner\'s own unconfirmed send says Sending with dots over a quiet room', () => {
+    assert.deepEqual(roomStatusView(emptyWorkState(), { sending: true }), {
+        kind: 'thinking', text: 'Sending', tone: 'live', mark: 'moving', owner: false, amber: '',
     });
 });
 
-test('computeDerivedChatStatus: idle server status remains Online', () => {
-    const status = computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 0,
-    });
-    assert.deepEqual(status, {
-        kind: 'online',
-        text: 'Online',
-        showDots: false,
-    });
-});
-
-test('computeDerivedChatStatus: online idle state by default', () => {
-    const status = computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 0,
-    });
-    assert.deepEqual(status, {
-        kind: 'online',
-        text: 'Online',
-        showDots: false,
+test('the header: an idle ready room is Online', () => {
+    assert.deepEqual(roomStatusView(emptyWorkState()), {
+        kind: 'online', text: 'Online', tone: 'online', mark: 'none', owner: false, amber: '',
     });
 });
 
@@ -319,73 +259,20 @@ test('computeHydratedDirectActivities: a concluded turn is never resurrected by 
     assert.ok(updated.has('act-live'));
 });
 
-test('computeDerivedChatStatus: priority order is preserved (offline > live card > direct work > sending > online)', () => {
-    // 1. Disconnected beats everything
-    assert.equal(computeDerivedChatStatus({
-        isConnected: false,
-        hasActiveLiveCard: true,
-        activeDirectCount: 5,
-        pendingSubmissionsCount: 3,
-    }).text, 'Reconnecting...');
-
-    // 2. Active live card beats direct work & sending & attention
-    assert.equal(computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: true,
-        activeDirectCount: 5,
-        pendingSubmissionsCount: 3,
-    }).text, 'Working...');
-
-    // 3. Direct work beats local pending submissions & attention
-    assert.equal(computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 2,
-        pendingSubmissionsCount: 3,
-    }).text, 'Working');
-
-    // 4. Local pending submissions beat idle
-    assert.equal(computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 1,
-    }).text, 'Sending...');
-
-    // 5. No server activity means Online
-    assert.equal(computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 0,
-    }).text, 'Online');
-
-    // 6. Clean idle state
-    assert.equal(computeDerivedChatStatus({
-        isConnected: true,
-        hasActiveLiveCard: false,
-        activeDirectCount: 0,
-        pendingSubmissionsCount: 0,
-    }).text, 'Online');
+test('the header order: offline > the room\'s work > the owner\'s send > Online', () => {
+    assert.equal(roomStatusView(inRoom('working'), { connected: false, sending: true }).text, 'Reconnecting…');
+    assert.equal(roomStatusView(inRoom('working'), { sending: true }).text, 'Working');
+    assert.equal(roomStatusView(inRoom('queued'), { sending: true }).text, 'Sending');
+    assert.equal(roomStatusView(emptyWorkState(), { sending: true }).text, 'Sending');
+    assert.equal(roomStatusView(emptyWorkState()).text, 'Online');
 });
 
-test('computeDerivedChatStatus: paused work is not Working or Queued (#322)', () => {
-    // The census phase is shared by a budget pause, the owner's Pause and a
-    // Restart hold (Batch4), so the header states the pause, not a cause.
-    assert.deepEqual(
-        computeDerivedChatStatus({ pausedManagedCount: 2 }),
-        { kind: 'online', text: 'Paused', showDots: false },
-    );
-    // Runnable queued work outranks the paused disclosure.
-    assert.equal(
-        computeDerivedChatStatus({ pausedManagedCount: 1, queuedManagedCount: 1 }).text,
-        'Queued...',
-    );
-    // Active work outranks both.
-    assert.equal(
-        computeDerivedChatStatus({ pausedManagedCount: 1, activeManagedCount: 1 }).text,
-        'Working...',
-    );
+test('a paused room is not Working or Queued (#322), and its reason stays on its row', () => {
+    // A budget pause, the owner's Pause and a Restart hold share one word in the header; the row says who or what.
+    assert.deepEqual(roomStatusView(inRoom('paused')),
+        { kind: 'online', text: 'Paused', tone: 'held', mark: 'pause', owner: false, amber: '' });
+    assert.equal(roomStatusView(inRoom('queued')).text, 'Queued');
+    assert.equal(roomStatusView(inRoom('working')).text, 'Working');
 });
 
 test('sequenced failures stop stale replies without replacing a newer accepted census', () => {
@@ -403,23 +290,12 @@ test('sequenced failures stop stale replies without replacing a newer accepted c
     assert.deepEqual(events, ['unavailable', 'fresh']);
 });
 
-for (const kind of ['managed_task', 'direct_chat']) {
-test(`Batch4: a paused or pausing ${kind} card does not drive working header state`, () => {
-    const root = { isConnected: true };
-    const paused = { root, groupId: 'p', finished: false, parkedPhase: 'budget_paused' };
-    const pausing = { root, groupId: 's', finished: false, parkedPhase: 'budget_pausing' };
-    const both = chatStatusCounts(new Map([
-        ['p', { kind, phase: 'budget_paused' }],
-        ['s', { kind, phase: 'budget_pausing' }],
-    ]), [paused, pausing]);
-    assert.equal(both.hasActiveLiveCard, false);
-    assert.equal(computeDerivedChatStatus(both).text, 'Pausing…');
-    const saved = chatStatusCounts(new Map([['p', { kind, phase: 'budget_paused' }]]), [paused]);
-    assert.equal(computeDerivedChatStatus(saved).text, 'Paused');
-    assert.equal(computeDerivedChatStatus(saved).showDots, false);
-    // Resumed: the census says working again and the released card drives Working.
-    const resumed = chatStatusCounts(new Map([['p', { kind, phase: 'working' }]]),
-        [{ root, groupId: 'p', direct: kind === 'direct_chat', finished: false, parkedPhase: '' }]);
-    assert.equal(computeDerivedChatStatus(resumed).text, kind === 'direct_chat' ? 'Working' : 'Working...');
+test('Batch4: a paused or pausing room never drives a working header; a card never drives it at all', () => {
+    assert.equal(roomStatusView(inRoom('working', { transition: 'pausing' })).text, 'Pausing…');
+    const saved = roomStatusView(inRoom('paused'));
+    assert.deepEqual([saved.text, saved.mark], ['Paused', 'pause'], 'a paused room stands: no moving mark, no typing row');
+    // Resumed: the server's room says working again.
+    assert.equal(roomStatusView(inRoom('working')).text, 'Working');
+    // The producer reads no card: the same room with any card set says the same.
+    assert.equal(roomStatusView({ ...inRoom('paused'), works: [{ activity: 'working', confirmed: true }] }).text, 'Paused');
 });
-}

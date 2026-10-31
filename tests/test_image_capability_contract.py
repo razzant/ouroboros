@@ -554,6 +554,14 @@ def _conflict(**fields):
     return mutate
 
 
+def _beside(value, **fields):
+    """Modalities ``value`` next to a flag: an unclear list makes the row unknown, an absent one is silent."""
+    def mutate(row):
+        row["architecture"]["input_modalities"] = value
+        row.update(copy.deepcopy(fields))
+    return mutate
+
+
 PARSER_CASES = [
     ("missing-key", _drop_modalities, None),
     ("missing-architecture", _drop_architecture, None),
@@ -563,6 +571,12 @@ PARSER_CASES = [
     ("non-list-object", _set_modalities({"image": True}), None),
     ("list-without-image", _set_modalities(["text", "file"]), False),
     ("list-with-image", _set_modalities(["text", "image"]), True),
+    ("blank-item", _set_modalities([""]), None),
+    ("blank-beside-text", _set_modalities(["text", " "]), None),
+    ("blank-beside-image", _set_modalities(["image", ""]), None),
+    ("blank-item-poisons-a-flag", _beside(["image", ""], supports_vision=True), None),
+    ("null-beside-a-flag", _beside(None, supports_vision=False), False),
+    ("empty-list-beside-a-flag", _beside([], supports_vision=True), True),
     ("supports-vision-true", _with(supports_vision=True), True),
     ("supports-vision-false", _with(supports_vision=False), False),
     ("capabilities-supports-vision-true", _with(capabilities={"supports_vision": True}), True),

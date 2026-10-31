@@ -6,6 +6,8 @@ chat history row (``_record_task_facts``) and the task_done selection carry the
 projection, and the real card formatter (``review_record_card.js``) and the task card's
 Reviews section (``review_presentation.js``) print it. No hand-built projection.
 """
+
+from tests import _dialogue as dialogue_test
 import json
 import subprocess
 from pathlib import Path
@@ -37,17 +39,21 @@ def _answer(part, verdict, findings=()):
             "coverage": "n/a" if part == "change" else "full"}
 
 
-def _gate_record(task_id, *, root_task_id="", opus_findings=12):
+def _gate_record(task_id, *, root_task_id="", opus_findings=12, opus_pending=False):
     """One composed commit-gate wave: ``sol`` retrieves (asked both parts), ``opus`` is a
-    packet seat whose change answer FAILs with one critical among ``opus_findings``, and
-    ``critic`` was added beside the pool and errored."""
+    packet seat whose change answer FAILs with one critical among ``opus_findings`` (or, with
+    ``opus_pending``, whose operation is still in flight), and ``critic`` was added beside the
+    pool and errored."""
     notes = [{"item": f"note {n}", "verdict": "FAIL", "severity": "advisory"} for n in range(opus_findings - 1)]
+    opus = ({"slot_id": "opus", "model_id": "anthropic/claude-opus-5", "status": "pending", "parts": ["change"],
+             "operation_state": "in_flight", "late_result_pending": True} if opus_pending else
+            {"slot_id": "opus", "model_id": "anthropic/claude-opus-5", "status": "responded", "parts": ["change"],
+             "answers": {"change": _answer("change", "FAIL", [CRITICAL, *notes])}})
     raws = [
         {"slot_id": "sol", "model_id": "openai/gpt-5.6-sol", "status": "responded", "parts": ["change", "coupling"],
          "answers": {"change": _answer("change", "PASS"),
                      "coupling": _answer("coupling", "PASS", [{"item": "doc drift", "verdict": "PASS"}])}},
-        {"slot_id": "opus", "model_id": "anthropic/claude-opus-5", "status": "responded", "parts": ["change"],
-         "answers": {"change": _answer("change", "FAIL", [CRITICAL, *notes])}},
+        opus,
         {"slot_id": "critic", "model_id": "", "status": "error", "parts": ["change"]},
     ]
     plans = [
@@ -72,7 +78,7 @@ def _terminal(tmp_path, task_id):
     _store_task_result(env, task, "done", {"rounds": 1, "cost": 0}, {"tool_calls": []})
     stored = load_task_result(tmp_path, task_id) or {}
     _record_task_facts(env, task, {"rounds": 1}, {"tool_calls": []}, tmp_path / "logs")
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     history = next(row for row in rows if row.get("summary_kind") == "host_task_facts" and row["task_id"] == task_id)
     return stored, _task_done_review_projection(stored, {}), history
 
@@ -113,8 +119,10 @@ def test_ledger_record_reaches_the_task_card_with_panel_facts_and_per_part_answe
     assert "Reviewer opus finding: [critical FAIL] unbounded retry loop — reason: retries forever" in lines
     assert "Reviewer opus findings omitted: 4" in lines
     assert any(line.startswith("Reviewer critic: role=commit_gate additional reviewer")
-               and "model=google/gemini-3.6-flash · transport=error · parse=none" in line
+               and "model=not reported · requested=google/gemini-3.6-flash · transport=error · parse=none" in line
                and "quorum=abstains" in line for line in lines)
+    assert panel["actors"][-1]["requested_model"] == "google/gemini-3.6-flash"
+    assert panel["actors"][-1]["observed_model"] == ""
     assert "Reviewer critic answers: change=error (findings 0, critical 0)" in lines
 
     # The task card's Reviews section shows the same record under its own group.
@@ -147,3 +155,118 @@ def test_card_shows_only_this_tasks_records_and_says_when_older_ones_exist(tmp_p
     assert projection["review_records_omitted"] == "1+"
     (group,) = [g for g in _render("t-many", projection)["groups"] if g["surface"] == "review_record"]
     assert group["countIsAuthoritative"] is False and group["attemptCount"] == SHOWN
+
+
+# What the strictness-keyed composer records (IMPL_SPEC §4.6, names as L1 writes them): the pool
+# snapshot, strictness, who chose, the seats never reached; per seat its cost. Added here to a
+# record the real builder made, so the projection and the card read exactly the stored shape.
+SECRET = "sk-or-v1-" + "0123456789abcdef" * 3
+
+
+def _pool_record(task_id, strictness="advisory", opus_pending=False, **panel):
+    record = _gate_record(task_id, opus_pending=opus_pending)
+    if strictness in ("advisory", "blocking"):  # the enforcement the wave ran under says the same
+        record.enforcement, record.enforcement_blocks = strictness, strictness == "blocking"
+    record.panel = {**record.panel, "strictness": strictness, "chosen_by": "ouroboros", "pool": ["sol", "opus", "grok"],
+                    "not_reached": [{"seat_id": "critic", "cause": f"engine refused token {SECRET}"}], **panel}
+    costs = {"sol": {"cost_usd": 0.4213, "cost_kind": "measured"}, "opus": {"cost_usd": None, "cost_kind": "subscription"},
+             "critic": {"cost_usd": None, "cost_kind": "unknown"}}
+    for seat in record.rows:
+        seat.update(costs[seat["seat_id"]])
+    return record
+
+
+def test_pool_facts_reach_the_card_in_words_while_an_older_record_projects_as_before(tmp_path):
+    old = rl.write_record(tmp_path, _gate_record("t-old"))
+    rl.write_record(tmp_path, _pool_record("t-pool"))
+    (old_panel,) = _terminal(tmp_path, "t-old")[0]["review_projection"]["panels"]
+    # The older record: its own panel block, no cost, no seat additions, the card's old lines.
+    assert old_panel["panel_facts"] == old["panel"] and "cost" not in old_panel
+    assert not any({"cost", "additional"} & set(actor) for actor in old_panel["actors"])
+    old_lines = _render("t-old", {"panels": [old_panel]})["card"].splitlines()
+    assert any(line.startswith("Panel composition: composed · chosen by author · seats=2") for line in old_lines)
+    assert not any(line.startswith(("Panel: ", "Wave total", "Why these reviewers")) for line in old_lines)
+
+    stored, _event, history = _terminal(tmp_path, "t-pool")
+    projection = stored["review_projection"]
+    assert history["review_projection"] == projection
+    (panel,) = projection["panels"]
+    facts = panel["panel_facts"]
+    assert facts["strictness"] == "advisory" and facts["pool"] == ["sol", "opus", "grok"] and facts["chosen_by"] == "ouroboros"
+    assert facts["not_reached"] == [{"seat_id": "critic", "cause": "engine refused token ***REDACTED***"}]
+    assert SECRET not in json.dumps(projection)
+    actors = {actor["slot_id"]: actor for actor in panel["actors"]}
+    assert actors["sol"]["cost"] == {"kind": "usd", "usd": 0.4213} and actors["sol"]["additional"] is False
+    assert actors["opus"]["cost"] == {"kind": "subscription", "usd": None}
+    assert actors["critic"]["cost"] == {"kind": "unknown", "usd": None} and actors["critic"]["additional"] is True
+    assert panel["cost"] == {"usd": 0.4213, "seats": {"usd": 1, "subscription": 1, "unknown": 1}}
+
+    shown = _render("t-pool", projection)
+    lines = shown["card"].splitlines()
+    assert "Panel: Advisory · chosen by Ouroboros · 2 of 3 ticked reviewers · 1 adviser, not counted" in lines
+    assert "Why these reviewers: two engines are enough for a docs fix" in lines
+    assert "Not reached: critic (engine refused token ***REDACTED***)" in lines
+    assert "Wave total: $0.42 for the priced seats · 1 seat on a subscription · 1 seat cost unknown" in lines
+    assert any(line.startswith("Reviewer sol: counted · $0.42 · role=commit_gate reviewer") for line in lines)
+    assert any(line.startswith("Reviewer critic: adviser, not counted · cost unknown · role=") for line in lines)
+    assert not any(line.startswith("Panel composition:") for line in lines)
+    (group,) = [g for g in shown["groups"] if g["surface"] == "review_record"]
+    assert "Panel: Advisory · chosen by Ouroboros · 2 of 3 ticked reviewers" in group["attempts"][0]["detailText"]
+
+
+def test_malformed_pool_facts_are_dropped_never_guessed(tmp_path):
+    from ouroboros.review_projection import ledger_record_panel
+
+    # A Blocking wave that widened the requested subset: named seats survive, junk entries do not.
+    record = rl.write_record(tmp_path, _pool_record("t-wide", strictness="blocking", chosen_by="owner", not_reached="x",
+                                                     widened_from=["sol", {"seat_id": "opus"}, 7, ""]))
+    facts = ledger_record_panel(record)["panel_facts"]
+    assert facts["widened_from"] == ["sol", "opus"] and "not_reached" not in facts
+    # A seat's own cost facts decide (an explicit unknown outranks the older `usd` carrier, a
+    # measured kind needs an amount); a seat recorded without them shows the money it reported.
+    sol, opus, critic = record["rows"]
+    sol.update(cost_kind="unknown", cost_usd=None, usd=0.5)
+    opus.pop("cost_kind"), opus.pop("cost_usd"), opus.update(usd=0.25)
+    critic.update(cost_kind="measured", cost_usd=None)
+    assert {actor["slot_id"]: actor["cost"] for actor in ledger_record_panel(record)["actors"]} == {
+        "sol": {"kind": "unknown", "usd": None}, "opus": {"kind": "usd", "usd": 0.25},
+        "critic": {"kind": "unknown", "usd": None}}
+    lines = _render("t-wide", {"panels": [ledger_record_panel(record)]})["card"].splitlines()
+    assert "Why these reviewers: widened to every ticked reviewer (Blocking) from the requested sol, opus · reason given: two engines are enough for a docs fix" in lines
+    # Neither a pool nor a strictness the card can read: the record prints as before it existed.
+    broken = rl.write_record(tmp_path, _pool_record("t-broken", strictness=" ", pool={"sol": True}))
+    projected = ledger_record_panel(broken)
+    assert "cost" not in projected and not {"pool", "strictness"} & set(projected["panel_facts"])
+    assert "Panel composition: composed" in _render("t-broken", {"panels": [projected]})["card"]
+
+
+def test_an_open_seat_reads_as_awaiting_and_a_preflight_keeps_its_pre_pool_line(tmp_path):
+    from ouroboros.review_projection import ledger_record_panel
+
+    # A wave whose opus seat is still in flight, built by the real ledger builder. Its `not_reached`
+    # is whatever the producer lists (before fix round 1 the open seat too); the card reads opus's own
+    # status, so opus is awaited and only the critic that failed is not reached.
+    open_record = _pool_record("t-open", opus_pending=True)
+    open_record.panel["not_reached"] = [entry for entry in rl.panel_not_reached(open_record.rows)
+                                        if entry["seat_id"] != "opus"] + [{"seat_id": "opus", "cause": "in_flight"}]
+    record = rl.write_record(tmp_path, open_record)
+    assert record["state"] == "pending"
+    (opus,) = [actor for actor in ledger_record_panel(record)["actors"] if actor["slot_id"] == "opus"]
+    assert (opus["transport_status"], opus["operation_state"]) == ("pending", "in_flight")
+    lines = _render("t-open", {"panels": [ledger_record_panel(record)]})["card"].splitlines()
+    assert "Awaiting an answer: opus" in lines, lines
+    assert not any(line.startswith("Not reached: opus") for line in lines)
+    assert any(line.startswith("Not reached: critic (") for line in lines)
+
+    # A preflight seats one named row and owes no reason: its card keeps the pre-pool line, also for
+    # a record written while the composer still stamped pool facts on preflights, and the projection
+    # adds no pool-era cost to it. The same record on the commit gate is a pool panel.
+    preflight = _pool_record("t-pre")
+    preflight.surface = "preflight"
+    projected = ledger_record_panel(rl.write_record(tmp_path, preflight))
+    assert "cost" not in projected and not any({"cost", "additional"} & set(actor) for actor in projected["actors"])
+    lines = _render("t-pre", {"panels": [projected]})["card"].splitlines()
+    assert any(line.startswith("Panel composition: composed · chosen by ouroboros · seats=2") for line in lines), lines
+    assert not any(line.startswith(("Panel: ", "Why these reviewers", "Wave total", "Awaiting")) for line in lines)
+    gate = ledger_record_panel(rl.write_record(tmp_path, _pool_record("t-gate")))
+    assert "cost" in gate and gate["actors"][0]["cost"]["kind"] == "usd"

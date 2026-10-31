@@ -459,7 +459,8 @@ def test_coop_noop_verdict_for_non_workspace_parent(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(projects_root))
     tree, patch_path = _coop_tree_with_child_work(projects_root)
     drive = tmp_path / "state"; drive.mkdir()
-    ctx = ToolContext(repo_dir=tmp_path / "sys", drive_root=drive, task_id="parent1")
+    ctx = ToolContext(repo_dir=tmp_path / "sys", drive_root=drive, task_id="parent1",
+                      task_metadata={"work_kind": "owner"})  # an owner task's minted kind
     art = task_artifact_dir_path(drive, "childX", create=True)
     patch = patch_path.read_bytes()
     (art / "workspace.patch").write_bytes(patch)

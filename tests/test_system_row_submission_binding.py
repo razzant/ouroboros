@@ -1,12 +1,13 @@
 """A System row that answers an owner submission names it; nothing else settles Sending (#1403).
 
-Voice confers no finality, so the web header no longer reads every unkeyed System
-row as the end of the Main turn. The host refusals and command replies that answer
-one owner message carry that message's ``client_message_id`` on the live frame, so
-the browser retires only that ``Sending...``. The field is not persisted: history
-never folds the System row into the owner's bubble, and nothing here is a read or
-delivery receipt.
+Voice confers no finality, so an unkeyed System reply names the submission it
+answers with a live-only ``client_message_id``. Registered direct turns link that
+submission through a typing receipt and conclude with a task-keyed terminal.
+Only that ``Sending...`` settles; history never folds the System row into the
+owner's bubble, and nothing here is a read or delivery receipt.
 """
+
+from tests import _dialogue as dialogue_test
 
 import asyncio
 import json
@@ -36,7 +37,7 @@ def test_live_frame_names_the_submission_and_the_durable_row_does_not(tmp_path, 
 
     (frame,) = [row for row in frames if row.get("type") == "chat"]
     assert frame["role"] == "system" and frame["client_message_id"] == "cm-owner"
-    stored = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text().splitlines()]
+    stored = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert [row["client_message_id"] for row in stored] == ["cm-owner", ""]
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(
         types.SimpleNamespace(query_params={"chat_id": "1"})))
@@ -64,13 +65,23 @@ def test_owner_command_reply_names_its_submission(monkeypatch):
     assert kwargs["progress_meta"] == {"client_message_id": "cm-bg"}
 
 
-def test_direct_lane_refusals_name_their_submission(monkeypatch):
+def test_direct_lane_refusals_name_their_submission(tmp_path, monkeypatch):
+    from queue import SimpleQueue
     from supervisor import state as state_mod
     from supervisor import worker_chat_lane, workers
+    from tests._agent_entry_helpers import task_entry_agent
 
-    sent = []
+    sent, frames = [], []
+    bridge = message_bus.LocalChatBridge()
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    agent = task_entry_agent(tmp_path, lambda _task: pytest.fail("exhausted budget entered the task body"))
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: agent)
+    monkeypatch.setattr(workers, "get_event_q", SimpleQueue)
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: sent.append((a, k)))
-    monkeypatch.setattr(state_mod, "budget_remaining", lambda *_a, **_k: 0)
+    monkeypatch.setattr(state_mod, "budget_remaining", lambda _state, *, strict: 0)
     monkeypatch.setattr(state_mod, "load_state", lambda: {})
     worker_chat_lane._handle_chat_direct_locked(1, "hi", task_metadata={"client_message_id": "cm-1"})
     ref = {"chat_id": 1, "client_message_id": "cm-2", "ts": "2026-10-13T00:00:00+00:00", "text_sha256": "0" * 64}
@@ -78,10 +89,20 @@ def test_direct_lane_refusals_name_their_submission(monkeypatch):
         "client_message_id": "cm-2", "origin_message_ref": ref, "_host_operation": True})
     first, second = sent
     assert first[0][1].startswith("🚫 Budget exhausted.")
-    assert first[1]["progress_meta"] == {"client_message_id": "cm-1"}
-    # A host operation keeps its terminal correlation beside the submission.
-    assert second[1]["progress_meta"] == {"client_message_id": "cm-2", "origin_message_ref": ref,
-                                          "task_terminal_status": "failed"}
+    assert second[0][1] == first[0][1]
+    assert first[1]["task_id"] != second[1]["task_id"]
+    # The receipt links Sending to this registered turn; its keyed refusal closes only that turn.
+    for (args, kwargs), client_id in zip(sent, ("cm-1", "cm-2")):
+        assert args[0] == 1
+        assert kwargs["role"] == "system" and kwargs["system_type"] == "task_not_started"
+        assert kwargs["task_id"]
+        receipts = [row for row in frames if row.get("type") == "typing"
+                    and row.get("activity_id") == kwargs["task_id"]]
+        assert receipts
+        assert all(row["client_message_id"] == client_id and row["chat_id"] == 1 for row in receipts)
+    assert first[1]["progress_meta"] == {"task_terminal_status": "failed"}
+    # Only a host operation keeps durable terminal correlation; client ids stay on the live receipt.
+    assert second[1]["progress_meta"] == {"origin_message_ref": ref, "task_terminal_status": "failed"}
 
     # The update gate's refusal names the submission it answers, too.
     sent.clear()
@@ -92,23 +113,10 @@ def test_direct_lane_refusals_name_their_submission(monkeypatch):
     assert kwargs["progress_meta"] == {"client_message_id": "cm-3"} and kwargs["system_type"] == "managed_update_notice"
 
 
-def test_force_plan_refusal_names_its_submission(monkeypatch):
-    from ouroboros import server_owner_routing
-    from supervisor import state as state_mod
-    from supervisor import worker_chat_lane
+def test_ordinary_host_failure_names_its_submission():
+    from supervisor.worker_chat_lane import _host_operation_failure
 
-    sent = []
-    monkeypatch.setattr(worker_chat_lane, "owner_conversation_admitted", lambda *_a: True)
-    monkeypatch.setattr(state_mod, "budget_remaining", lambda *_a, **_k: 0)
-    monkeypatch.setattr(state_mod, "load_state", lambda: {})
-    monkeypatch.setattr(server_owner_routing, "_reserved_project_for_chat", lambda *_a: {})
-    ctx = types.SimpleNamespace(send_with_budget=lambda *a, **k: sent.append((a, k)))
-    server_owner_routing._route_owner_message(types.SimpleNamespace(), ctx, {
-        "chat_id": 1, "text": "plan it", "client_message_id": "cm-swarm",
-        "task_metadata": {"force_plan": True}})
-    (args, kwargs), = sent
-    assert args[1].startswith("🚫 Budget exhausted.")
-    assert kwargs["progress_meta"] == {"client_message_id": "cm-swarm"}
+    assert _host_operation_failure({"client_message_id": "cm-swarm", "force_plan": True})["progress_meta"] == {"client_message_id": "cm-swarm"}
 
 
 def test_initialization_notice_names_the_refused_frame():

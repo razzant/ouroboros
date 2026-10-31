@@ -24,8 +24,9 @@ import json
 
 import pytest
 
-from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, _shot
+from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, _painted, _shot
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
+from tests.ui_chat_viewport_smoke import set_viewport
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
@@ -51,7 +52,8 @@ ROW = """() => {
             right: rect(ctx).right, disabled: ctx.dataset.disabled || '',
         },
         eff: { open: eff.dataset.open, fit: eff.dataset.fit || '', shown: shown(eff), right: rect(eff).right, head: eff.querySelector('.chat-capsule-head').textContent },
-        swarmShown: shown(row.querySelector('.chat-composer-pills')),
+        subShown: shown(row.querySelector('.chat-subagents-mode')),  // the third capsule, closed
+        menuShown: shown(row.querySelector('.composer-menu')),  // a room's ☰ (the stack layout shows it)
         namesShown: [...row.querySelectorAll('.chat-capsule-name')].map(shown),
         solo: row.dataset.ownerSolo || '', compact: row.dataset.ownerCompact || '',
         oneLine: Math.max(...tops) - Math.min(...tops) < 2, rowHeight: rect(row).height,
@@ -99,7 +101,32 @@ FRAMES = """async ({ sel, frames }) => {
                  whole: whole(), compact: row.dataset.ownerCompact || '' };
     };
     const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-    const run = async () => { const out = []; for (let i = 0; i < frames; i += 1) { await frame(); out.push(sample()); } return out; };
+    // Every frame a press can paint, however few this host draws (a loaded WebKit draws two or three per
+    // transition): the row's transitions are held from the press on, stepped through their whole timeline, then
+    // finished, and the frames after that are sampled as they come.
+    const held = () => {
+        const moving = document.getAnimations().filter((animation) => 'transitionProperty' in animation
+            && row.contains(animation.effect?.target));
+        moving.forEach((animation) => animation.pause());
+        return moving;
+    };
+    const run = async () => {
+        held();
+        await frame();  // the press's own frame work runs; what it starts is held too
+        const moving = held();
+        const end = Math.max(0, ...moving.map((animation) => animation.effect.getComputedTiming().endTime));
+        const out = [];
+        for (let i = 0; i < frames; i += 1) {
+            moving.forEach((animation) => { animation.currentTime = end * i / (frames - 1); });
+            // The step is read once the product has refit to it: its ResizeObserver hands the fit to the next
+            // frame (composer_owner_controls.js observeLayout), so that frame runs before the read.
+            for (let wait = 0; wait < 3; wait += 1) await frame();
+            out.push(sample());
+        }
+        moving.forEach((animation) => animation.finish());
+        for (let i = 0; i < 4; i += 1) { await frame(); out.push(sample()); }
+        return out;
+    };
     const press = () => head.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
     const closed = sample();
     press();
@@ -213,6 +240,14 @@ def _wait_for_transitions(page, selector: str) -> None:
         .every(animation => !animation.pending && animation.playState !== 'running')""", arg=selector, timeout=5_000)
 
 
+def _morph_settled(page) -> None:
+    # A capsule's morph ends with its glass: the controls that stepped aside leave the line then.
+    page.wait_for_function("""() => { const row = document.querySelector('#page-chat .chat-toolbar-row');
+        return !('ownerLeaving' in row.dataset) && row.getAnimations({subtree: true})
+            .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+            .every(animation => !animation.pending && animation.playState !== 'running'); }""", timeout=10_000)
+
+
 def _record(tmp_path, name: str, facts) -> None:
     (_evidence_dir(tmp_path) / f"{name}.json").write_text(json.dumps(facts, indent=1), encoding="utf-8")
 
@@ -234,7 +269,7 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             _open_chat(page, url, width=1440, theme="light")
             closed = _row(page)
             assert closed["ctx"]["head"] == "ContextMax" and closed["ctx"]["checked"] == ["max"], closed
-            assert closed["ctx"]["tabbable"] == [] and closed["oneLine"] and closed["namesShown"] == [True, True], closed
+            assert closed["ctx"]["tabbable"] == [] and closed["oneLine"] and closed["namesShown"] == [True, True, True], closed
             _shot(page, tmp_path, f"capsules-closed-{engine}-light")
             posts = []
             page.on("request", lambda r: posts.append(json.loads(r.post_data)) if r.url.endswith("/api/owner/context-mode") else None)
@@ -242,7 +277,7 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             _until(page, "r.ctx.open === 'true'")
             page.wait_for_timeout(450)
             opened = _row(page)
-            assert opened["ctx"]["fit"] == "inline" and opened["eff"]["shown"] and opened["swarmShown"], opened
+            assert opened["ctx"]["fit"] == "inline" and opened["eff"]["shown"] and opened["subShown"], opened
             assert opened["oneLine"] and opened["ctx"]["right"] <= opened["rowRight"] + 1 and not opened["docScroll"], opened
             assert posts == [], "opening saves nothing"
             _shot(page, tmp_path, f"capsules-context-open-{engine}-light")
@@ -271,11 +306,12 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             assert "Context mode refused by the test." in page.locator(".toast").first.inner_text()
             _until(page, "r.ctx.mode === 'nano' && r.ctx.disabled === 'false' && r.ctx.checked.join() === 'nano'")
             page.unroute("**/api/owner/context-mode")
-            # The one global value: a reload reads Nano back from /api/state.
-            page.add_init_script("try { localStorage.setItem('ouroboros.theme', 'dark'); } catch (e) {}")
+            # The one global value: a reload reads Nano back from /api/state, in Dark chosen as Settings does.
+            page.evaluate("() => window.ouroTheme.set('dark')")
             page.reload(wait_until="domcontentloaded")
             page.wait_for_function(f"() => document.querySelector('{EFFORT}')?.dataset.known === 'true'", timeout=30_000)
             _until(page, "r.ctx.mode === 'nano' && r.ctx.head === 'ContextNano'", timeout=30_000)
+            assert _painted(page) == ["dark", "dark"], "the dark shots show the dark theme"
             _shot(page, tmp_path, f"capsules-closed-nano-{engine}-dark")
             page.click(f"{CONTEXT} .chat-capsule-head")
             _until(page, "r.ctx.open === 'true'")
@@ -302,6 +338,7 @@ def test_one_capsule_open_at_a_time_and_a_narrow_switch_keeps_both_reachable(dir
             press = page.tap if touch else page.click
             closed = _row(page)
             assert closed["oneLine"] and not closed["docScroll"], closed
+            assert closed["menuShown"] is (width < 1000), ("a phone's room keeps ☰ first in the row", closed)
             seen = {"closed": closed}
             for first, second in (("effort", "context"), ("context", "effort")):
                 heads = {"effort": f"{EFFORT} .chat-capsule-head", "context": f"{CONTEXT} .chat-capsule-head"}
@@ -309,13 +346,16 @@ def test_one_capsule_open_at_a_time_and_a_narrow_switch_keeps_both_reachable(dir
                 press(heads[first])
                 _until(page, f"r.{short[first]}.open === 'true'")
                 page.wait_for_timeout(450)
+                _morph_settled(page)  # a slow WebKit runner is still mid-morph after the 450 ms
                 one = _row(page)
                 if one[short[first]]["fit"] == "solo":
-                    # Alone on the line: the pills and the other capsule step aside; an outside
-                    # press gives the line back before the other capsule can be reached.
-                    assert one["solo"] == first and not one[short[second]]["shown"] and not one["swarmShown"], one
+                    # Alone on the line: the room's ☰, the pills and the other capsule step aside; an
+                    # outside press gives the line back before the other capsule can be reached.
+                    assert one["solo"] == first and not one[short[second]]["shown"] and not one["subShown"], one
+                    assert not one["menuShown"], one
                     press("#chat-messages")
-                    _until(page, f"r.{short[first]}.open === 'false' && r.solo === '' && r.{short[second]}.shown && r.swarmShown")
+                    _until(page, f"r.{short[first]}.open === 'false' && r.solo === '' && r.{short[second]}.shown && r.subShown"
+                                 f" && r.menuShown === {str(closed['menuShown']).lower()}")
                 else:
                     assert width > 1000 and one["solo"] == "" and one[short[second]]["shown"], one
                 # The second capsule opens with one press (on a desktop the first one closes at once),
@@ -323,6 +363,7 @@ def test_one_capsule_open_at_a_time_and_a_narrow_switch_keeps_both_reachable(dir
                 press(heads[second])
                 _until(page, f"r.{short[second]}.open === 'true' && r.{short[first]}.open === 'false'")
                 page.wait_for_timeout(450)
+                _morph_settled(page)
                 two = _row(page)
                 assert two[short[second]]["shown"] and two["solo"] in ("", second), two
                 assert two["oneLine"] and two[short[second]]["right"] <= two["rowRight"] + 1 and not two["docScroll"], two
@@ -332,8 +373,8 @@ def test_one_capsule_open_at_a_time_and_a_narrow_switch_keeps_both_reachable(dir
                 page.keyboard.press("Escape")
                 _until(page, "r.ctx.open === 'false' && r.eff.open === 'false'")
                 back = _row(page)
-                assert back["ctx"]["shown"] and back["eff"]["shown"] and back["swarmShown"] and back["solo"] == "", back
-                assert back["oneLine"], back
+                assert back["ctx"]["shown"] and back["eff"]["shown"] and back["subShown"] and back["solo"] == "", back
+                assert back["menuShown"] is closed["menuShown"] and back["oneLine"], back
             _record(tmp_path, f"capsules-switch-{engine}-{width}", seen)
         finally:
             browser.close()
@@ -424,15 +465,18 @@ def test_closed_names_reduced_motion_and_a_resize_that_refits(direct_server_with
             assert all(set(d.replace(" ", "").split(",")) == {"0s"} for d in durations), durations
             page.click(f"{EFFORT} .chat-capsule-head")
             _until(page, "r.eff.open === 'true' && r.eff.fit === 'inline'")
+            # The pointer leaves the row: a pointer resting on a capsule is hover, which opens a closed one (WebKit
+            # moves it over again as the row reflows); this flow is a press, two resizes and Escape.
+            page.mouse.move(2, 2)
             facts = {"wide": _row(page)}
             # The window narrows to a phone's width with the strip open: it refits alone, one line.
-            page.set_viewport_size({"width": 390, "height": 900})
+            set_viewport(page, 390, 900)
             _until(page, "['solo', 'overflow'].includes(r.eff.fit) && r.solo === 'effort'")
             facts["narrow"] = _row(page)
             assert facts["narrow"]["oneLine"] and not facts["narrow"]["docScroll"], facts
             assert facts["narrow"]["eff"]["right"] <= facts["narrow"]["rowRight"] + 1, facts
-            page.set_viewport_size({"width": 1440, "height": 900})
-            _until(page, "r.eff.fit === 'inline' && r.solo === '' && r.ctx.shown && r.swarmShown")
+            set_viewport(page, 1440, 900)
+            _until(page, "r.eff.fit === 'inline' && r.solo === '' && r.ctx.shown && r.subShown")
             page.keyboard.press("Escape")
             # Probe both sides of the actual named row's width. System fonts differ between
             # Linux and macOS; 390/340 are not product breakpoints (DESIGN).
@@ -707,18 +751,19 @@ def test_right_to_left_strips_that_scroll_keep_the_moved_mode_and_bracket_in_vie
             assert at_end["maxWhole"] and at_end["ultraWhole"] and at_end["scroll"] == "end" and "to left" in at_end["fade"], seen
             assert at_end["max"][0] - at_end["shellLeft"] >= at_end["inset"] - 0.5, seen
             # A press lands on the level under it: back at the start, a press on None (outside the
-            # range, on the min side) carries the min bracket there.
+            # helper range) sets primary there without moving the min bracket.
             page.evaluate(f"() => {{ document.querySelector('{EFFORT} .chat-effort-strip').scrollLeft = 0; }}")
             page.wait_for_function(f"() => document.querySelector('{EFFORT} .chat-effort-strip').dataset.scroll === 'start'")
             none = page.evaluate(MARKS)["none"]
             box = page.locator(f'{EFFORT} [data-effort-seg="none"]').bounding_box()
             with page.expect_response(lambda r: r.url.endswith("/api/owner/effort-range"), timeout=30_000) as saved:
                 page.mouse.click(none[0] + (none[1] - none[0]) * 0.75, box["y"] + box["height"] / 2)
-            assert json.loads(saved.value.request.post_data)["min"] == "none", saved.value.request.post_data
+            assert json.loads(saved.value.request.post_data)["recommended"] == "none", saved.value.request.post_data
+            assert json.loads(saved.value.request.post_data)["min"] == "low", saved.value.request.post_data
             page.wait_for_timeout(300)
             seen["effort-press"] = pressed = page.evaluate(MARKS)
             # The scale's outer edge is two whole-pixel offsets (as Ultra's is left to right): within a pixel.
-            assert abs(pressed["band"][1] - pressed["none"][1]) <= 1 and abs(pressed["min"][1] - pressed["band"][1]) <= 0.6, seen
+            assert abs(pressed["pill"][1] - pressed["none"][1]) <= 1 and abs(pressed["min"][1] - pressed["band"][1]) <= 0.6, seen
             _shot(page, tmp_path, f"capsules-rtl-effort-press-{engine}-320")
         finally:
             _record(tmp_path, f"capsules-rtl-{engine}-320", seen)
@@ -748,15 +793,15 @@ def test_long_closed_values_on_a_320px_phone_give_way_on_one_line(direct_server_
             seen["capped"] = capped = page.evaluate(CAPPED)
             _shot(page, tmp_path, f"capsules-long-values-closed-{engine}-{direction}-320")
             assert closed["oneLine"] and closed["rowHeight"] < 40 and capped["contained"] and not closed["docScroll"], seen
-            assert closed["compact"] == "values" and closed["namesShown"] == [False, False], seen
-            assert closed["swarmShown"] and closed["ctx"]["shown"] and closed["eff"]["shown"], seen
-            context, effort = capped["capsules"]
+            assert closed["compact"] == "values" and closed["namesShown"] == [False, False, False], seen
+            assert closed["subShown"] and closed["ctx"]["shown"] and closed["eff"]["shown"], seen
+            subagents, context, effort = capped["capsules"]
             assert context["word"] == context_word and context["cut"], seen
-            for capsule in (context, effort):  # the cut value keeps clear of both ends of its shell
+            for capsule in (subagents, context, effort):  # a value, cut or whole, keeps clear of both ends of its shell
                 assert capsule["value"][0] >= capsule["shell"][0] + 1 and capsule["value"][1] <= capsule["shell"][1] - 1, seen
-            # The whole word stays the button's: its accessible name, Effort's tooltip, the open strip.
+            # The whole word stays the button's: its accessible name and the open strip (no hover-only title).
             assert context_word in page.locator(f"{CONTEXT} .chat-capsule-head").aria_snapshot(), seen
-            assert effort_word in effort["label"] and effort_word in effort["title"], seen
+            assert effort_word in effort["label"] and not effort["title"], seen
             page.tap(f"{CONTEXT} .chat-capsule-head")
             _until(page, "r.ctx.open === 'true'")
             page.wait_for_timeout(450)
@@ -822,3 +867,87 @@ def test_long_values_open_and_close_without_a_wrapping_frame(direct_server_with_
         assert abs(run["settled"]["width"] - run["closed"]["width"]) <= 0.5 and run["values"][0] == run["values"][1], (key, run)
         if run["fit"] == "inline":  # it still animates: frames between the two widths, both ways
             assert _between(run["opening"], ends) >= 3 and _between(run["closing"], ends) >= 3, key
+
+
+# The phone's alone strip, frame by frame (owner 19.10, 2A; capsule_morph.js): every animation of the press, paused
+# and read at fixed times — the head's place, the line's height, the controls that step aside — then finished.
+MORPH_FRAMES = """async ({ sel, times }) => {
+    const row = document.querySelector('#page-chat .chat-toolbar-row');
+    const el = document.querySelector(sel);
+    const head = el.querySelector('.chat-capsule-head');
+    const rect = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, width: r.width }; };
+    const shownKids = () => [...row.children].filter((kid) => kid !== el && getComputedStyle(kid).display !== 'none');
+    const before = { capsule: rect(el), head: rect(head), kids: shownKids().map(rect), height: row.getBoundingClientRect().height };
+    head.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    const animations = [el, ...row.children].flatMap((node) => node.getAnimations({ subtree: true }))
+        .filter((animation, i, all) => all.indexOf(animation) === i);
+    animations.forEach((animation) => animation.pause());
+    const frames = [];
+    for (const t of times) {
+        animations.forEach((animation) => { animation.currentTime = t; });
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const leaving = [...row.querySelectorAll(':scope > [data-capsule-leaving]')];
+        frames.push({ t, height: row.getBoundingClientRect().height, head: rect(head).left, morph: el.dataset.morph || '',
+            surface: Boolean(el.querySelector(':scope > .chat-capsule-surface')),
+            leaving: leaving.map((kid) => ({ left: rect(kid).left, opacity: Number(getComputedStyle(kid).opacity) })),
+            back: shownKids().map((kid) => Number(getComputedStyle(kid).opacity)) });
+    }
+    animations.forEach((animation) => { try { animation.finish(); } catch (e) { animation.cancel(); } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const after = { morph: el.dataset.morph || '', surfaces: el.querySelectorAll('.chat-capsule-surface').length,
+        leaving: row.querySelectorAll('[data-capsule-leaving]').length, ownerLeaving: row.hasAttribute('data-owner-leaving'),
+        fit: el.dataset.fit || '', open: el.dataset.open, solo: row.dataset.ownerSolo || '', head: rect(head).left,
+        kids: shownKids().length, height: row.getBoundingClientRect().height };
+    return { before, count: animations.length, frames, after };
+}"""
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_strip_that_opens_alone_grows_from_its_capsule_and_folds_back(direct_server_with_data, engine, tmp_path):  # noqa: F811
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    runs = {}
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, engine, viewport={"width": 390, "height": 860}, is_mobile=True, has_touch=True)
+        try:
+            _open_chat(page, url, width=390, height=860, theme="light")
+            page.wait_for_timeout(300)
+            for name, selector in (("effort", EFFORT), ("context", CONTEXT)):
+                runs[f"{name}-open"] = page.evaluate(MORPH_FRAMES, {"sel": selector, "times": [0, 60, 150, 300]})
+                _shot(page, tmp_path, f"capsules-morph-{name}-open-{engine}")
+                runs[f"{name}-close"] = page.evaluate(MORPH_FRAMES, {"sel": selector, "times": [0, 80, 220]})
+            page.emulate_media(reduced_motion="reduce")
+            runs["reduced"] = page.evaluate(MORPH_FRAMES, {"sel": EFFORT, "times": [0]})
+            page.keyboard.press("Escape")
+        finally:
+            _record(tmp_path, f"capsules-morph-{engine}", runs)
+            browser.close()
+    for name in ("effort", "context"):
+        opening, closing = runs[f"{name}-open"], runs[f"{name}-close"]
+        assert opening["after"]["fit"] in ("solo", "overflow") and opening["after"]["solo"] == name, (name, opening["after"])
+        first, last = opening["frames"][0], opening["frames"][-1]
+        # The glass is its own layer while it moves; the head starts where the closed capsule's head stood.
+        assert first["morph"] == "open" and first["surface"], (name, first)
+        assert abs(first["head"] - opening["before"]["head"]["left"]) <= 1, (name, first, opening["before"])
+        assert abs(last["head"] - opening["after"]["head"]) <= 1, (name, last, opening["after"])
+        # The controls that step aside stand where they stood and fade; the line never takes a second line.
+        assert len(first["leaving"]) == len(opening["before"]["kids"]) >= 2, (name, first)
+        assert all(abs(kid["left"] - box["left"]) <= 1 for kid, box in zip(first["leaving"], opening["before"]["kids"])), (name, first)
+        assert all(kid["opacity"] > 0.9 for kid in first["leaving"]), (name, first)
+        assert all(kid["opacity"] < 0.05 for kid in opening["frames"][2]["leaving"]), (name, opening["frames"][2])
+        assert all(abs(frame["height"] - opening["before"]["height"]) <= 1 for frame in opening["frames"]), (name, opening["frames"])
+        # Nothing it added outlives it.
+        assert opening["after"]["surfaces"] == 0 and opening["after"]["leaving"] == 0 and not opening["after"]["ownerLeaving"], name
+        assert opening["after"]["morph"] == "" and opening["after"]["kids"] == 0, (name, opening["after"])
+        # Closing runs back: the head rides home, the controls fade in, and the line is whole again.
+        c0 = closing["frames"][0]
+        assert c0["morph"] == "close" and c0["surface"] and abs(c0["head"] - closing["before"]["head"]["left"]) <= 1, (name, c0)
+        assert c0["back"] and all(opacity < 0.1 for opacity in c0["back"]), (name, c0)
+        assert closing["after"]["open"] == "false" and closing["after"]["solo"] == "", (name, closing["after"])
+        assert closing["after"]["kids"] == len(opening["before"]["kids"]) and closing["after"]["surfaces"] == 0, (name, closing["after"])
+        assert abs(closing["after"]["head"] - opening["before"]["head"]["left"]) <= 1, (name, closing["after"], opening["before"])
+        assert all(abs(frame["height"] - opening["before"]["height"]) <= 1 for frame in closing["frames"]), (name, closing["frames"])
+    reduced = runs["reduced"]
+    assert reduced["frames"][0]["morph"] == "" and not reduced["frames"][0]["surface"], ("reduced motion: at once", reduced)

@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
-from tests.test_loop_compaction import _applied, _candidate_request, _ctx, _failed_capture, _fit, _measure_cycle
+from tests.test_loop_compaction import _candidate_request, _ctx, _failed_capture, _fit, _measure_cycle, _steps_applied
 
 
 def test_a_nano_overflow_stays_nano_and_the_retry_carries_the_failed_allowance(tmp_path, monkeypatch):
@@ -21,10 +21,6 @@ def test_a_nano_overflow_stays_nano_and_the_retry_carries_the_failed_allowance(t
     events, ceilings = [], []
     measure = _measure_cycle([_fit(profile="owner_nano", mode="nano")])
 
-    def reclaim(ctx, _disposition, **_kwargs):
-        ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
-        return _applied()
-
     def dispatch(ctx, disposition, *, candidate_predicate=None, max_tokens=None, **_kwargs):
         ceilings.append(max_tokens)
         if len(ceilings) == 1:
@@ -36,7 +32,7 @@ def test_a_nano_overflow_stays_nano_and_the_retry_carries_the_failed_allowance(t
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
+    _steps_applied(monkeypatch)
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture",
                         lambda: _failed_capture(profile="owner_nano", mode="nano", reserve=20_000))
@@ -93,10 +89,6 @@ def test_a_local_pre_dispatch_refusal_is_compared_with_its_own_candidate_facts(t
     stale = replace(stale, physical_context=replace(stale.physical_context, round_id="exec:round:0"))
     checked = []
 
-    def reclaim(ctx, _disposition, **_kwargs):
-        ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
-        return _applied()
-
     def dispatch(ctx, disposition, *, candidate_predicate=None, max_tokens=None, **_kwargs):
         if candidate_predicate is None:
             ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
@@ -107,7 +99,7 @@ def test_a_local_pre_dispatch_refusal_is_compared_with_its_own_candidate_facts(t
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
+    _steps_applied(monkeypatch)
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: stale)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)

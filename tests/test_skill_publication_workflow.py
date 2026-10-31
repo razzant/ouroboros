@@ -54,17 +54,16 @@ def test_clear_does_not_repair_or_erase_malformed_existing_record(tmp_path, cont
 
 def test_clear_api_uses_actual_receipt_and_never_contacts_hub(tmp_path, monkeypatch):
     _stub_marketplace_roots(monkeypatch, tmp_path)
-    monkeypatch.setattr(api.ouroboroshub, 'load_catalog', lambda *a, **k: pytest.fail('local clear must not fetch GitHub'))
     shown = _published()
     path = provenance.write_publication_record(tmp_path, 'demo', shown)
     before = path.read_bytes()
     stale = _published(version='older')
-    response = asyncio.run(api.api_ouroboroshub_clear_publication(
-        _BodyRequest({'expected_published': stale}, {'name': 'demo'})))
+    response = asyncio.run(api.api_skill_publication_clear(
+        _BodyRequest({'expected_published': stale}, {'skill': 'demo'})))
     assert response.status_code == 409 and json.loads(response.body)['code'] == 'publication_changed'
     assert path.read_bytes() == before
-    response = asyncio.run(api.api_ouroboroshub_clear_publication(
-        _BodyRequest({'expected_published': shown}, {'name': 'demo'})))
+    response = asyncio.run(api.api_skill_publication_clear(
+        _BodyRequest({'expected_published': shown}, {'skill': 'demo'})))
     assert response.status_code == 200 and json.loads(response.body)['publication_cleared']
     assert provenance.read_publication_record(tmp_path, 'demo') == (None, None)
 
@@ -72,7 +71,7 @@ def test_clear_api_uses_actual_receipt_and_never_contacts_hub(tmp_path, monkeypa
 @pytest.mark.parametrize('name,body', [('..', {'expected_published': {}}), ('demo', {}), ('demo', {'expected_published': []})])
 def test_clear_api_rejects_invalid_target_and_missing_displayed_receipt(tmp_path, monkeypatch, name, body):
     _stub_marketplace_roots(monkeypatch, tmp_path)
-    response = asyncio.run(api.api_ouroboroshub_clear_publication(_BodyRequest(body, {'name': name})))
+    response = asyncio.run(api.api_skill_publication_clear(_BodyRequest(body, {'skill': name})))
     assert response.status_code == 400
 
 
@@ -84,8 +83,8 @@ def test_clear_write_failure_is_visible_and_keeps_receipt(tmp_path, monkeypatch)
     def broken_write(*args, **kwargs):
         raise OSError('controlled write failure')
     monkeypatch.setattr(provenance, 'update_json_locked', broken_write)
-    response = asyncio.run(api.api_ouroboroshub_clear_publication(
-        _BodyRequest({'expected_published': shown}, {'name': 'demo'})))
+    response = asyncio.run(api.api_skill_publication_clear(
+        _BodyRequest({'expected_published': shown}, {'skill': 'demo'})))
     assert response.status_code == 500
     assert 'controlled write failure' in json.loads(response.body)['error']
     assert path.read_bytes() == before

@@ -1,16 +1,14 @@
-"""Owner-created links from authenticated transport rooms to behavior skills."""
+"""Read frozen transport bindings for migration and retained-work authentication."""
 
 from __future__ import annotations
 
 import json
 import re
-import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from ouroboros.contracts.skill_manifest import canonical_skill_name
-from ouroboros.utils import update_json_locked
 
 PRESENCE_BINDINGS_FILENAME = "presence_bindings.json"
 PRESENCE_BINDINGS_SCHEMA_VERSION = 1
@@ -80,10 +78,6 @@ class PresenceBinding:
             raise PresenceBindingError("presence_binding_invalid_enabled", "binding.enabled")
 
 
-def new_presence_binding_id() -> str:
-    return uuid.uuid4().hex
-
-
 def conversation_key(provider: str, account_id: str, conversation_id: str, thread_id: str = "") -> str:
     """The one concurrency/history identity of a provider conversation (no thread = ``0``)."""
     parts = (provider, account_id, conversation_id, thread_id or "0")
@@ -132,57 +126,12 @@ def _read_state(data_root: Path) -> dict[str, Any]:
     return value
 
 
-def load_presence_binding(
-    data_root: Path,
-    transport_skill: str,
-    binding_id: str,
-) -> PresenceBinding:
-    """Load one exact binding and prove it belongs to the authenticated skill."""
-
-    if not _BINDING_ID_RE.fullmatch(str(binding_id or "")):
-        raise PresenceBindingError("presence_binding_invalid_id", "binding_id")
-    value = _read_state(data_root)["bindings"].get(binding_id)
-    if value is None:
-        raise PresenceBindingError("presence_binding_not_found", "binding_id")
-    binding = _binding_from_payload(value, f"bindings.{binding_id}")
-    if binding.transport_skill != transport_skill:
-        raise PresenceBindingError("presence_binding_wrong_transport", "transport_skill")
-    if not binding.enabled:
-        raise PresenceBindingError("presence_binding_disabled", "binding.enabled")
-    return binding
-
-
 def list_presence_bindings(data_root: Path) -> tuple[PresenceBinding, ...]:
     state = _read_state(data_root)
     return tuple(
         _binding_from_payload(value, f"bindings.{binding_id}")
         for binding_id, value in sorted(state["bindings"].items())
     )
-
-
-def save_presence_binding(data_root: Path, binding: PresenceBinding) -> PresenceBinding:
-    """Owner-side upsert; transport callers receive only the opaque id."""
-
-    if not isinstance(binding, PresenceBinding):
-        raise PresenceBindingError("presence_binding_invalid_payload", "binding")
-    path = _state_path(data_root)
-
-    def _update(current: dict[str, Any]) -> dict[str, Any]:
-        if not current:
-            current = {"schema_version": PRESENCE_BINDINGS_SCHEMA_VERSION, "bindings": {}}
-        if current.get("schema_version") != PRESENCE_BINDINGS_SCHEMA_VERSION or not isinstance(current.get("bindings"), dict):
-            raise PresenceBindingError("presence_bindings_invalid_state", "presence_bindings")
-        bindings = dict(current["bindings"])
-        bindings[binding.binding_id] = asdict(binding)
-        return {"schema_version": PRESENCE_BINDINGS_SCHEMA_VERSION, "bindings": bindings}
-
-    try:
-        update_json_locked(path, _update, strict_existing_dict=True)
-    except PresenceBindingError:
-        raise
-    except (OSError, TimeoutError, ValueError) as exc:
-        raise PresenceBindingError("presence_bindings_write_failed", "presence_bindings") from exc
-    return binding
 
 
 __all__ = [
@@ -192,8 +141,5 @@ __all__ = [
     "PresenceBindingError",
     "PresenceEndpoint",
     "conversation_key",
-    "load_presence_binding",
     "list_presence_bindings",
-    "new_presence_binding_id",
-    "save_presence_binding",
 ]

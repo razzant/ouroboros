@@ -254,6 +254,7 @@ def test_gh_requests_reach_the_handler_once_without_contacting_an_account(tmp_pa
     calls = []
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
 
     def handler(_ctx, cmd, _resolved_binding=None, **_kwargs):
         calls.append(list(cmd))

@@ -15,6 +15,8 @@ render arm is pinned in ``web/tests/chat_plain_system_rows.test.js``.
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 import types
@@ -95,11 +97,9 @@ def test_completion_summary_event_text_is_plain_and_fully_normalized(
     assert enqueue_project_completion_summary(
         ctx.DRIVE_ROOT, {"status": "completed"}, "root-project", root, result, done,
     ) is True
-    assert queued[0]["text"] == (
-        "Launch 🚀 › Ship release · Done\nOpen the Project for details."
-    )
-    # The model's own answer already lives in the room this row points at, so
-    # Main states the outcome and the way in, never a cut of the same bytes.
+    assert queued[0]["text"] == "Launch 🚀 › Ship release · Done"
+    # The model's own answer already lives in the room this row points at, so Main states the outcome; its Project
+    # reference is the way in (owner 17.10: no sentence promising what only the capsule does), never a cut of the bytes.
     assert PLAIN_EXCERPT not in queued[0]["text"]
     for marker in ("#", "**", "`"):
         assert marker not in queued[0]["text"]
@@ -248,8 +248,11 @@ def test_history_normalizes_old_project_rows_on_read_without_rewriting_log(tmp_p
     assert assistant["text"] == "## Assistant heading stays markdown"
     assert assistant["markdown"] is True
 
-    # The durable log was read, never rewritten.
-    assert chat_path.read_bytes() == before
+    # The durable rows were read, never rewritten: the cutover moved the chain file's exact bytes into
+    # the frozen archive, and the store holds every line as written.
+    from tests._dialogue import lines
+    assert b"".join(path.read_bytes() for path in sorted((tmp_path / "archive").glob("chat_*.jsonl"))) == before
+    assert lines(tmp_path) == [json.dumps(row, ensure_ascii=False) for row in rows]
 
 
 def test_strip_markdown_is_the_single_shared_stripper():
@@ -286,13 +289,10 @@ def test_cancel_receipt_rides_verbatim_live_durable_and_on_replay(
     monkeypatch.setattr(
         message_bus, "load_state", lambda: {"session_id": "s-1", "owner_id": 7},
     )
-    monkeypatch.setattr(
-        message_bus, "_advance_project_visible_revision", lambda _chat_id: None,
-    )
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
 
     verbatim = (
-        "⚠️ Task t-1 was cancelled. Below is the last persisted intermediate "
+        "⚠️ Task t-1 was stopped. Below is the last persisted intermediate "
         "model message, preserved WITHOUT review.\n\n"
         "## Heading\n**bold** and `code` and an unclosed `backtick"
     )
@@ -306,11 +306,7 @@ def test_cancel_receipt_rides_verbatim_live_durable_and_on_replay(
     assert live["role"] == "system"
     assert live["system_type"] == "cancel_receipt"
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     durable = next(row for row in rows if row.get("type") == "cancel_receipt")
     assert durable["text"] == verbatim
 
@@ -403,8 +399,7 @@ def test_the_task_summary_row_carries_reason_detail_only_when_there_is_a_cause(t
     assert _completion_verdict(clean, {}) == ""
     assert append_terminal_task_projection(tmp_path, "root-project", root, clean,
                                            {"status": "completed", "outcome_axes": clean["outcome_axes"]})
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     (projection,) = [row for row in rows if row.get("summary_kind") == "terminal_root_projection"]
     assert projection["outcome"] == "Done" and "reason_detail" not in projection
     # The other direction: a non-clean result writes the renderer's own clause, byte-identical.
@@ -412,8 +407,7 @@ def test_the_task_summary_row_carries_reason_detail_only_when_there_is_a_cause(t
     root_warn = {**root, "id": "root-project-warn"}
     assert append_terminal_task_projection(tmp_path, "root-project-warn", root_warn, warn,
                                            {"status": "completed", "outcome_axes": warn["outcome_axes"]})
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     warned = [row for row in rows if row.get("summary_kind") == "terminal_root_projection"][-1]
     assert warned["reason_detail"] == _completion_verdict(warn, {}) != ""
 
@@ -529,8 +523,7 @@ def test_host_verdict_leads_both_lifecycle_rows(tmp_path, monkeypatch):
     ) is True
     assert queued[0]["text"] == (
         "Launch 🚀 › Ship release · Done with warnings\n"
-        "The reviewers did not reach a verdict on this answer. "
-        "Open the Project for details."
+        "The reviewers did not reach a verdict on this answer."
     )
     assert "final_message" not in queued[0]["text"]
     assert "Release shipped." not in queued[0]["text"]
@@ -545,16 +538,11 @@ def test_host_verdict_leads_both_lifecycle_rows(tmp_path, monkeypatch):
     ) is True
     assert queued[1]["text"] == (
         "Launch 🚀 › Ship release · Done with warnings\n"
-        "The task ran out of budget before it could finish cleanly. "
-        "Open the Project for details."
+        "The task ran out of budget before it could finish cleanly."
     )
 
     assert append_terminal_task_projection(tmp_path, "root-project", root, result, done)
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     projection = next(row for row in rows if row.get("summary_kind") == "terminal_root_projection")
     assert projection["text"] == (
         "Done with warnings. Root task root-project. "
@@ -580,7 +568,7 @@ def test_host_verdict_and_the_card_line_compose_the_same_sentence():
 
     for case in _parity_cases():
         clause = case.get("acceptance_clause") or ""
-        if clause:
+        if "acceptance_clause" in case:
             assert _completion_verdict(case["record"], {}) == clause, case["name"]
 
 
@@ -611,7 +599,7 @@ def test_terminal_row_reports_the_depth_request_only_when_one_exists(tmp_path):
 
     rows = {
         json.loads(line)["task_id"]: json.loads(line)
-        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in dialogue_test.log_text(tmp_path / "logs" / "chat.jsonl").splitlines()
         if line.strip()
     }
     # The depth facts stay on the task result, where a reader can compare them;
@@ -648,7 +636,7 @@ def test_a_host_salvage_row_is_never_a_bare_headline_and_reason(tmp_path):
 
     row = next(
         json.loads(line)
-        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in dialogue_test.log_text(tmp_path / "logs" / "chat.jsonl").splitlines()
         if line.strip()
     )
     assert row["outcome"] == "Failed"
@@ -706,11 +694,11 @@ def test_a_cancelled_salvage_keeps_bytes_or_a_pointer_in_the_main_row(tmp_path, 
     ) is True
     text = queued[0]["text"]
     assert f"{SALVAGE_EXCERPT_LABEL}: Rewrote the atlas builder." in text
-    # Bytes AND the pointer: this writer has no other way back to the full copy.
-    assert text.endswith("… Open the Project for details.")
+    # The bytes, then the row's Project reference as the way back to the full copy (no invitation sentence).
+    assert text.endswith("…") and "Open the Project" not in text
 
     # A root whose own lineage chat IS Main: there the receipt is a real second
-    # copy, so the label stands, but never without the invitation.
+    # copy, so the label stands alone.
     queued.clear()
     main_bound = {**task, "chat_id": 1}
     main_result = {
@@ -720,6 +708,4 @@ def test_a_cancelled_salvage_keeps_bytes_or_a_pointer_in_the_main_row(tmp_path, 
     assert enqueue_project_completion_summary(
         tmp_path, {}, "salvage-root", main_bound, main_result, done,
     ) is True
-    assert queued[0]["text"].endswith(
-        f"{SALVAGE_EXCERPT_LABEL}. Open the Project for details."
-    )
+    assert queued[0]["text"].endswith(f"{SALVAGE_EXCERPT_LABEL}.")

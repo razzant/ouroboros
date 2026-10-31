@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 
-def test_macos_attention_uses_system_sound(monkeypatch):
+def test_macos_attention_is_visual_only(monkeypatch):
     from ouroboros import platform_layer
 
     calls = []
     monkeypatch.setattr(platform_layer, "IS_MACOS", True)
-    monkeypatch.setattr(platform_layer.pathlib.Path, "is_file", lambda self: self.as_posix() == "/System/Library/Sounds/Glass.aiff")
     monkeypatch.setattr(platform_layer.subprocess, "run", lambda *args, **kwargs: (calls.append((args, kwargs)) or type("Result", (), {"returncode": 0})()))
     shown = []
     result = platform_layer.request_native_attention(lambda: shown.append(True))
 
-    assert result == {"ok": True, "status": "native_sound", "sound_played": True, "window_attention": "launcher"}
+    assert result == {"ok": True, "status": "window_only", "sound_played": False, "window_attention": "launcher"}
     assert shown == [True]
-    assert calls and calls[0][0][0] == ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"]
-    assert calls[0][1]["timeout"] == 2
+    assert calls == [], "macOS attention must not bypass notification permission with a sound"
 
 
 def test_windows_attention_uses_message_beep(monkeypatch):
@@ -55,14 +53,18 @@ def test_linux_attention_uses_canberra(monkeypatch):
 def test_failed_sound_backend_is_reported_and_can_fallback(monkeypatch):
     from ouroboros import platform_layer
 
-    monkeypatch.setattr(platform_layer, "IS_MACOS", True)
-    monkeypatch.setattr(platform_layer.pathlib.Path, "is_file", lambda self: True)
-    monkeypatch.setattr(platform_layer.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 1})())
+    monkeypatch.setattr(platform_layer, "IS_MACOS", False)
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)
+    monkeypatch.setattr(platform_layer, "IS_LINUX", True)
+    monkeypatch.setattr(platform_layer.shutil, "which", lambda name: "/usr/bin/" + name)
+    calls = []
+    monkeypatch.setattr(platform_layer.subprocess, "run", lambda *args, **kwargs: (calls.append(args[0]) or type("Result", (), {"returncode": 1})()))
 
     result = platform_layer.request_native_attention(lambda: None)
     assert result["ok"] is True
     assert result["status"] == "window_only"
     assert result["sound_played"] is False
+    assert calls == [["/usr/bin/canberra-gtk-play", "-i", "message-new-instant"]]
 
 
 def test_sound_off_can_raise_window_without_playing_sound(monkeypatch):

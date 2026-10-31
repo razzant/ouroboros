@@ -102,9 +102,8 @@ def test_unknown_local_probe_ignores_legacy_cache_and_cloud_metadata(
     path = ce._store_path(tmp_path)
     before = path.read_bytes() if path.exists() else None
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: pytest.fail("cloud metadata"))
-    monkeypatch.setattr(ce, "_generative_probe_window", lambda *a, **k: pytest.fail("generation probe"))
     evidence = ce.probe(tmp_path, provider="openrouter", model="remote/name", use_local=True,
-                        allow_fetch=allow_fetch, allow_generative=True)
+                        allow_fetch=allow_fetch)
     assert evidence.window_tokens == 0
     assert evidence.status == ce.STATUS_UNPROBEABLE
     assert not ce.is_known(evidence)
@@ -191,7 +190,7 @@ def test_running_local_dispatch_uses_serving_capacity_without_cloud_fallback(
     text = "Keep this source intact. " * 1000  # Exceeds the fictitious 4096 allowance.
     plan = main_plan(text=text)
     messages = plan.messages_for("max")
-    fit = measure_main_fit(plan, messages, None, drive_root=tmp_path,
+    fit = measure_main_fit(plan, messages, None,
                            profile="owner_max", rendered_mode="max", round_id="local-fit:round:2")
     assert fit.action == "send"
     assert fit.measurement.capacity_total_tokens == (window or None)
@@ -215,7 +214,7 @@ def test_local_main_forecast_keeps_real_pressure_and_nano_headroom(manager, main
     manager._serving_context_length = window
     plan = main_plan(mode)
     messages = plan.messages_for(mode)
-    fit = measure_main_fit(plan, messages, None, drive_root=tmp_path,
+    fit = measure_main_fit(plan, messages, None,
                            profile="owner_" + mode, rendered_mode=mode, round_id="local-fit:round:2")
     assert fit.action == "send"
     assert plan.output_reserve_tokens == local_context_limits(65536)[1]
@@ -224,10 +223,11 @@ def test_local_main_forecast_keeps_real_pressure_and_nano_headroom(manager, main
         min(NANO_MIN_HEADROOM_TOKENS, plan.output_reserve_tokens) if mode == "nano" else plan.output_reserve_tokens)
     assert fit.measurement.reply_allowance_tokens == plan.output_reserve_tokens  # a short input: the whole ceiling
     messages.append({"role": "user", "content": "pressure " * 100000})
-    pressured = measure_main_fit(plan, messages, None, drive_root=tmp_path,
+    pressured = measure_main_fit(plan, messages, None,
                                 profile="owner_" + mode, rendered_mode=mode, round_id="local-fit:round:3")
-    assert pressured.action == "reclaim_once"
-    assert pressured.measurement.capacity_deficit_tokens > 0
+    # A predicted deficit is a fact, never a pass by itself (owner 7A); Nano's target names its own miss.
+    assert pressured.action == ("send_target_miss" if pressured.measurement.target_deficit_tokens else "send")
+    assert pressured.predicted_capacity_miss and pressured.measurement.capacity_deficit_tokens > 0
 
 
 @pytest.mark.parametrize("mode", ["max", "low", "nano"])
@@ -260,7 +260,7 @@ def test_main_forecast_rebinds_remote_local_restart_and_unknown(manager, main_pl
         assert plan.output_reserve_tokens == reserve
         assert plan.window_tokens == window
         assert ce.is_known(plan) is bool(window)
-        fit = context_fit.measure_main_fit(plan, messages, None, drive_root=tmp_path,
+        fit = context_fit.measure_main_fit(plan, messages, None,
             profile="owner_" + mode, rendered_mode=mode, round_id="route-switch:round:2")
         assert fit.action == "send"
         assert fit.measurement.capacity_total_tokens == (window or None)

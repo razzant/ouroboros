@@ -29,14 +29,15 @@ class El {
     }
     async emit(type) { for (const handler of [...(this.listeners.get(type) || [])]) await handler(); }
     append(...nodes) { this.children.push(...nodes); }
-    focus() {}
+    after(...nodes) { this.following = nodes; }
+    focus() { this.ownerDocument.focused = this; }
     scrollIntoView() {}
 }
 
 /** Mount one card's header rows the way renderHeaderFields lays them out; rerendering remounts. */
 function mount(server, savedIdentity, { idValue = server.id } = {}) {
     const doc = { createElement: () => new El(doc) };
-    const view = { server, idInput: new El(doc, idValue), rows: [] };
+    const view = { server, doc, idInput: new El(doc, idValue), rows: [] };
     const build = () => {
         view.addButton = new El(doc);  // a rerender replaces the card's controls
         const rows = headerDraftRows(server).rows.map(([, name, value], number) => {
@@ -69,7 +70,7 @@ function mount(server, savedIdentity, { idValue = server.id } = {}) {
         view.card = card;
         bindHeaderFields(card, { server, savedIdentity, onChange: () => {}, render: build });
     };
-    globalThis.document = { querySelector: () => null };
+    globalThis.document = { querySelector: (selector) => (selector === '[data-mcp-index="0"]' ? view.card : null) };
     build();
     view.type = async (row, field, value) => { view.rows[row][field].value = value; await view.rows[row][field].emit('input'); };
     view.errors = () => validateHeaderFields(view.card, server, savedIdentity).map(({ message }) => message);
@@ -140,11 +141,21 @@ test('saved A and B: remove B, rename masked A to B — Save and Test refuse; Sh
     await view.type(0, 'name', 'B');
     assert.deepEqual(view.errors(), ['The saved value belongs to header A. Restore that name, or enter a new value.']);
     await view.rows[0].toggle.emit('click');
-    const [source, preview] = view.rows[0].secretRow.children;
+    const [source] = view.rows[0].secretRow.children;
+    const [preview] = view.rows[0].value.following;
     assert.deepEqual(reads, [{ mcp_server_id: 'docs', header_name: 'A' }]);
     assert.equal(preview.textContent, 'alpha');
     assert.equal(source.textContent, 'Saved value for A');
     assert.equal(view.rows[0].value.value, MASK, 'Show never changes the draft');
+});
+
+test('Remove hands the caret to the header now in its place, else to Add', async () => {
+    const view = mount({ id: 'docs', url: 'https://docs.example/mcp', headers: { A: MASK, B: MASK } }, 'docs');
+    await view.rows[0].remove.emit('click');
+    assert.equal(view.doc.focused, view.rows[0].name);
+    assert.equal(view.rows[0].name.value, 'B');
+    await view.rows[0].remove.emit('click');
+    assert.equal(view.doc.focused, view.addButton);
 });
 
 test('a renamed server keeps no masked value, legacy token included', async () => {
