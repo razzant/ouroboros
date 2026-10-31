@@ -244,9 +244,10 @@ def test_empty_aggregate_and_full_target_facts_are_valid(room):
     assert world.client.post("/presence/turn", json=wire(world.event, reaction=full)).status_code == 200
 
 
-def test_identity_does_not_claim_the_capability_before_shared_sleep_composition(room):
+def test_identity_advertises_the_context_as_the_strict_integer(room):
     world = room()
-    assert "presence_reaction_context" not in world.client.get("/identity").json()
+    advertised = world.client.get("/identity").json()["presence_reaction_context"]
+    assert type(advertised) is int and advertised == 1
 
 
 # --- A live author hears context, never a wake ---

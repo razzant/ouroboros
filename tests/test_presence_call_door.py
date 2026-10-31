@@ -204,5 +204,6 @@ def test_the_skill_door_answers_an_invalid_reaction_as_the_turn_door_does(tmp_pa
     assert (refused.status_code, refused.json()["code"]) == (400, "presence_reaction_invalid")
     assert _heard(tmp_path) == []
     heard = client.post("/call/open", json={"role": "meeting", "event": _reaction()})
-    assert heard.json()["code"] == "place_reaction_context_only" and len(_heard(tmp_path)) == 1
+    assert (heard.status_code, heard.json()["code"]) == (403, "place_reaction_context_only")
+    assert len(_heard(tmp_path)) == 1
     assert opened["hubs"] == []

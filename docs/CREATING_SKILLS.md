@@ -1132,19 +1132,20 @@ Use the connector's ordinary content-hash-bound skill token for:
   identity; narrow wake declarations may use them. A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
-  without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` or `counts`, provider
-  `{type, value}` observed in this event only (a delta or one actor's snapshot, never the whole state); `target`
+  without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
+  `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
+  paired exactly with `actor.kind: anonymous`. These are observations of this event only, never the whole state; `target`
   `{message_id, resolution: resolved|unresolved, author?, excerpt?: {text (500 max), truncated}}`. `actor.kind` is
   `user`, `chat` or `anonymous`: the last two are `authenticated: false` and never account candidates; `anonymous`
   has no id; `kind: user` does not mean the owner. `event.thread_id` is the proven conversation, empty when
   unresolved. Invalid: 400 `presence_reaction_invalid`. After Paused/Off it settles `silent`
   (`reaction_context_only`), never a focus or retry, whatever the wake list says; a live author of a resolved
-  target's conversation hears it as background (a bot only under `from_bot`). `/identity`
-  `presence_reaction_context: 1`, absent until shared `model_sleep` wake filtering is composed, tells a connector
-  to send it; until then it keeps reactions locally and never replays them, live or as history:
-  `/presence/history` refuses a whole batch holding one, recording none of its messages. A reaction reaches a live
-  author as context and never becomes its `reply_anchor`. A receipt's `message.reaction`
-  (`schema_version`, `operation` set/add/remove, `new`, `old` only if known, `target`, `effect`
+  target's conversation hears it as background (a bot only under `from_bot`), which ends no wait and reopens no
+  final. `/identity` `presence_reaction_context: 1` (strictly that integer; an older host has no such key) promises
+  this for `schema_version: 1` and tells a connector to send it; without it a connector keeps reactions locally and
+  never replays them, live or as history: `/presence/history` refuses a whole batch holding one, recording none of
+  its messages. A reaction reaches a live author as context and never becomes its `reply_anchor`. A receipt's
+  `message.reaction` (`schema_version`, `operation` set/add/remove, `new`, `old` only if known, `target`, `effect`
   applied/already_present/already_absent) is later turns' action evidence, never speech; a missing effect reads
   as not reported, never as done. Its `target` is the requested address, never proof of which message changed.
   Words a receipt sends beside its reaction stay that part's speech.

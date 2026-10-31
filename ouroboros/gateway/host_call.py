@@ -34,7 +34,8 @@ log = logging.getLogger(__name__)
 _REFUSAL_STATUS = {
     "calls_disabled": 403, "presence_origin_mismatch": 403, "presence_binding_wrong_transport": 403,
     "place_not_connected": 403, "place_silent": 403, "place_paused": 403, "place_off": 403, "place_advises": 403,
-    "place_no_wake_match": 403, "place_disconnected": 403, "consciousness_allowance_exhausted": 429,
+    "place_no_wake_match": 403, "place_reaction_context_only": 403,
+    "place_disconnected": 403, "consciousness_allowance_exhausted": 429,
     "presence_event_invalid": 400, "presence_identity_missing": 400, "presence_reaction_invalid": 400,
     "presence_call_invalid_setting": 400,
     "presence_call_model_unset": 503,
