@@ -112,7 +112,7 @@ def test_direct_lane_runs_the_turn_while_the_resolver_holds_the_repo(tx_repo, mo
     tx = _write_tx("assisted_resolution")
     notices, turns = [], []
     _wire_gate(monkeypatch, update_merge.assisted_writer_gate_reason(tx), notices)
-    monkeypatch.setattr(lane, "_handle_chat_direct_locked", lambda *a, **k: turns.append(a[1]))
+    monkeypatch.setattr(lane, "_run_chat_task", lambda *a, **k: turns.append(a[2]))
 
     lane.handle_chat_direct(1, "how is the update going?")
 
@@ -124,7 +124,7 @@ def test_direct_lane_refuses_while_the_tree_is_being_materialized(tx_repo, monke
     _write_tx("materializing_assisted")
     notices, turns = [], []
     _wire_gate(monkeypatch, "managed_update_tx:materializing_assisted", notices)
-    monkeypatch.setattr(lane, "_handle_chat_direct_locked", lambda *a, **k: turns.append(a[1]))
+    monkeypatch.setattr(lane, "_run_chat_task", lambda *a, **k: turns.append(a[2]))
 
     lane.handle_chat_direct(1, "hello?")
 
