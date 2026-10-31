@@ -1,0 +1,57 @@
+# TEMPLATE for the parent (never dispatched by its author). The qualification branch is the frozen candidate commit
+# plus ONE equipment commit that adds devtools/update_windows_qualification/ (this file included) and this file at
+# .github/workflows/; its inputs.json binds the candidate's sha and tree. Pushing that branch starts the job (as the
+# NTFS probe's qualification/update-ntfs-39e did): a workflow_dispatch-only file that is absent from the default
+# branch cannot be dispatched. No pull_request trigger, no concurrency group (it cancels nothing), a read-only token
+# that is never persisted, no provider secret. The candidate is checked out on its own, at its own commit and tree.
+name: update-windows-qualification
+
+on:
+  push:
+    branches: ['qualification/update-windows-*']
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Empty = the full qualification. A subset is a development run and never exits 0."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: windows-2022
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CASES: ${{ inputs.cases }}
+    steps:
+      - name: Equipment commit (this workflow's own; full history holds the candidate, its one parent)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: equipment-src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Choose a fresh, short run root
+        run: |
+          $runRoot = 'D:\wq-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+          "WQ_RUN_ROOT=$runRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Qualify (exit code is the verdict)
+        run: |
+          $equipment = (Resolve-Path -LiteralPath 'equipment-src').Path
+          & (Join-Path $equipment 'devtools\update_windows_qualification\run.ps1') -RunRoot $env:WQ_RUN_ROOT `
+            -EquipmentRepo $equipment -EquipmentCommit $env:GITHUB_SHA -Cases $env:CASES
+
+      - name: Retain evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: update-windows-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.WQ_RUN_ROOT }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
