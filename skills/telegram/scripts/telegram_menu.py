@@ -130,6 +130,7 @@ class TelegramMenuManager:
         # so install, checks and the rollback restore reach the server the bot now uses.
         self._api_root = str(api_root).rstrip("/") if api_root else None
         self._client = client
+        self.last_rejected_api_root: str | None = None
 
     @property
     def snapshot_path(self) -> Path:
@@ -187,6 +188,7 @@ class TelegramMenuManager:
         if response.status_code >= 400 or not isinstance(body, dict) or not body.get("ok"):
             # Telegram descriptions may echo the request URL, which contains the
             # token.  Deliberately expose no remote free text here.
+            self.last_rejected_api_root = api_root
             raise TelegramMenuRejectedError(f"Telegram API rejected {method}.")
         return body.get("result")
 

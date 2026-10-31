@@ -41,7 +41,7 @@ from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
-    PollCursor, park_until_settings_change, saved_server as _saved_server, server_fingerprint, update_key,
+    PollCursor, bot_id, park_until_settings_change, saved_server as _saved_server, server_fingerprint, update_key,
 )
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .scripts.telegram_settings import (
@@ -617,7 +617,7 @@ async def _start_poller(api):
         lang = await _migrate_bridge_language(api, _settings, lang)
         server = _saved_server(api)
         client = _telegram_client(api, server=server)
-        cursor = PollCursor(_state_file(api, "poll_offset.json"), server[0])
+        cursor = PollCursor(_state_file(api, "poll_offset.json"), server[0], bot_id(client.token))
         try:
             await _validate_bot(api, client, command_mode, lang)
             validated = True
@@ -668,6 +668,7 @@ async def _poller(api) -> None:
 
     retry_delay = TELEGRAM_RETRY_INITIAL_SEC
     degraded_cause = ""
+    conflict_reported = False
     while True:
         revalidating = False
         try:
@@ -678,7 +679,7 @@ async def _poller(api) -> None:
                 # validates the token there again and is polled from its own oldest update.
                 validated = validated and server is not None and saved[0] == server[0]
                 client, server = _telegram_client(api, server=saved), saved
-                cursor.follow(saved[0])
+                cursor.follow(saved[0], bot_id(client.token))
                 api.log("info", "Telegram Bot API settings changed; polling follows the saved server.")
             if not validated:
                 revalidating = True
@@ -690,6 +691,9 @@ async def _poller(api) -> None:
             if degraded_cause:
                 api.log("info", f"Telegram poller recovered after {degraded_cause}; polling resumed.")
                 degraded_cause = ""
+            if conflict_reported:
+                _save_bridge_status(api, "ready")
+                conflict_reported = False
             retry_delay = TELEGRAM_RETRY_INITIAL_SEC
             if updates:
                 local_settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
@@ -886,6 +890,10 @@ async def _poller(api) -> None:
             if not degraded_cause:
                 degraded_cause = type(exc).__name__
                 api.log("warning", f"Telegram poller degraded ({degraded_cause}): {exc}")
+            if getattr(exc, "status_code", None) == 409 and not conflict_reported:
+                # A webhook or another poller holds the token: no update arrives until it stops.
+                _save_bridge_status(api, "degraded", "telegram_conflict")
+                conflict_reported = True
             await asyncio.sleep(retry_delay)
             retry_delay = next_telegram_retry_delay(retry_delay)
         except TelegramSettingsError:

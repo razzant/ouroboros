@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import sys
 import threading
 import time
@@ -23,13 +24,14 @@ from ouroboros import extension_plugin_api
 from ouroboros.extension_registry_state import _StagedSupervisedTask
 from tests.test_telegram_api_base_loopback import (
     _BotServer,
+    _RefusingServer,
     _host_inbox,
     _owner_message,
     _recording_clients,
     _state,
     _until,
 )
-from tests.test_telegram_proxy import _PACKAGE, _load
+from tests.test_telegram_proxy import _PACKAGE, _TOKEN, _load
 from tests.test_telegram_settings import _RouteRequest
 
 _CLOUD = "https://api.telegram.org"
@@ -41,14 +43,6 @@ class _CloudServer(_BotServer):
     def _get_updates(self, offset: int) -> list[dict]:
         self.queue = [item for item in self.queue if item[0] >= offset]
         return [update for _id, update in self.queue]
-
-
-class _RefusingServer(_BotServer):
-    """A reachable origin that refuses this token for good."""
-
-    def respond(self, http_method, path, form):
-        self.calls.append((path.rsplit("/", 1)[-1], form))
-        return 401, b'{"ok": false, "error_code": 401, "description": "Unauthorized"}', "application/json"
 
 
 class _ConflictingServer(_BotServer):
@@ -191,6 +185,84 @@ def test_an_unchanged_cloud_restart_keeps_a_legacy_offset(tmp_path, monkeypatch)
     assert _texts(received) == ["still here"]
     assert cloud.methods("getUpdates")[0]["offset"] == "4243"
     assert _cursor(state)["offset"] == 4244 and _cursor(state)["base"] == _CLOUD
+    assert _cursor(state)["bot"] == "123456"
+
+
+class _AnyTokenCloud(_CloudServer):
+    """The cloud fake answering every token of the bot as its own (the queue is the bot's)."""
+
+    def respond(self, http_method, path, form):
+        path = re.sub(r"^/(file/)?bot[^/]+/", lambda match: f"/{match.group(1) or ''}bot{_TOKEN}/", path)
+        return super().respond(http_method, path, form)
+
+
+def test_another_bot_on_the_same_server_reads_its_own_queue_from_the_start(tmp_path, monkeypatch):
+    # The cursor was the bot 999999's; the token is now the bot 123456's, whose IDs are lower
+    # and whose owner chat shares the chat ID, so its message IDs can equal the old bot's.
+    plugin, _api_mod, _notifier = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    received = _host_inbox(monkeypatch, plugin)
+    cloud = _AnyTokenCloud(first_update_id=10)
+    _in_memory(monkeypatch, {"api.telegram.org": cloud})
+    state, api = _state(tmp_path)
+    first = _owner_message("first for the new bot")
+    cloud.push(first)
+    cloud.push(_owner_message("second for the new bot"))
+    (state / "poll_offset.json").write_text(json.dumps({
+        "offset": 5000, "base": _CLOUD, "bot": "999999",
+        "handled": {_CLOUD: [f"m:42:{first['message']['message_id']}"]},
+    }), encoding="utf-8")
+
+    asyncio.run(_poll(plugin, api, lambda: len(received) == 2 and len(cloud.methods("getUpdates")) >= 2))
+
+    assert _texts(received) == ["first for the new bot", "second for the new bot"]
+    assert [form["offset"] for form in cloud.methods("getUpdates")][:2] == ["0", "12"]
+    assert _cursor(state)["bot"] == "123456" and _cursor(state)["offset"] == 12
+    assert list(_cursor(state)["handled"]) == [_CLOUD]
+
+
+def test_a_rotated_token_of_the_same_bot_keeps_its_position_and_no_secret_is_saved(tmp_path, monkeypatch):
+    plugin, _api_mod, _notifier = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    received = _host_inbox(monkeypatch, plugin)
+    cloud = _AnyTokenCloud(first_update_id=4243)
+    _in_memory(monkeypatch, {"api.telegram.org": cloud})
+    state, api = _state(tmp_path)
+    api.granted["TELEGRAM_BOT_TOKEN"] = "123456:ROTATED-SECRET"
+    (state / "poll_offset.json").write_text(json.dumps({"offset": 4243, "base": _CLOUD, "bot": "123456"}),
+                                            encoding="utf-8")
+    cloud.push(_owner_message("after rotation"))
+
+    asyncio.run(_poll(plugin, api, lambda: received and len(cloud.methods("getUpdates")) >= 2))
+
+    assert _texts(received) == ["after rotation"]
+    assert cloud.methods("getUpdates")[0]["offset"] == "4243"
+    saved = (state / "poll_offset.json").read_text(encoding="utf-8")
+    assert _cursor(state)["bot"] == "123456" and "SECRET" not in saved
+
+
+def test_a_server_that_lost_its_queue_is_read_past_one_poll_of_updates(tmp_path, monkeypatch):
+    # The same base answers from an oldest update far below the saved offset (its queue was
+    # reset). Each returned update is confirmed, so the next poll moves past this one's limit
+    # instead of being answered the same head again.
+    plugin, _api_mod, _notifier = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    received = _host_inbox(monkeypatch, plugin)
+
+    async def scenario():
+        async with _BotServer(first_update_id=1) as server:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin, TELEGRAM_MAX_UPDATES_PER_POLL="2")
+            (state / "poll_offset.json").write_text(
+                json.dumps({"offset": 900001, "base": server.origin, "bot": "123456"}), encoding="utf-8")
+            for number in range(5):
+                server.push(_owner_message(f"message {number}"))
+            await _poll(plugin, api, lambda: len(received) == 5 and len(server.methods("getUpdates")) >= 4)
+            return server, state
+
+    server, state = asyncio.run(scenario())
+    assert _texts(received) == [f"message {number}" for number in range(5)]
+    assert [form["offset"] for form in server.methods("getUpdates")][:4] == ["900001", "3", "5", "6"]
+    assert _cursor(state)["offset"] == 6
 
 
 @contextlib.contextmanager
@@ -341,6 +413,29 @@ def test_a_wait_begun_without_a_reading_ends_only_on_a_successful_one(tmp_path, 
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("unavailable", [{}, {"TELEGRAM_BOT_TOKEN": ""}, {"TELEGRAM_BOT_TOKEN": None}])
+def test_an_unavailable_token_is_no_reading_and_only_a_changed_token_ends_the_wait(tmp_path, monkeypatch, unavailable):
+    # A closing host answers {} for the token: that says nothing about the saved token.
+    binding, _settings, api = _parked(tmp_path, monkeypatch)
+    fingerprint = binding.server_fingerprint(api)
+    granted = dict(api.granted)
+
+    async def scenario():
+        parked = asyncio.create_task(binding.park_until_settings_change(api, fingerprint))
+        api.granted = dict(unavailable)
+        assert binding.server_fingerprint(api) is None
+        await asyncio.sleep(0.05)
+        assert not parked.done()
+        api.granted = granted  # available again and unchanged
+        await asyncio.sleep(0.05)
+        assert not parked.done()
+        api.granted = {"TELEGRAM_BOT_TOKEN": "123456:CORRECTED"}
+        await asyncio.wait_for(parked, 5)
+
+    asyncio.run(scenario())
+    assert api.logs.count(("warning", _UNREADABLE)) == 1
+
+
 @pytest.mark.parametrize("readable", [True, False])
 def test_a_parked_wait_stays_cancellable(tmp_path, monkeypatch, readable):
     binding, settings, api = _parked(tmp_path, monkeypatch)
@@ -366,6 +461,11 @@ def test_a_competing_poll_is_retried_without_a_save_or_the_restart_budget(tmp_pa
     monkeypatch.setattr(plugin, "TELEGRAM_RETRY_INITIAL_SEC", 0.01)
     monkeypatch.setattr(plugin, "next_telegram_retry_delay", lambda delay: delay)
     received = _host_inbox(monkeypatch, plugin)
+    written: list[tuple[str, str]] = []
+    save_status = plugin._save_bridge_status
+    monkeypatch.setattr(plugin, "_save_bridge_status",
+                        lambda api, state, reason_code="": (written.append((state, reason_code)),
+                                                            save_status(api, state, reason_code))[-1])
     server = _ConflictingServer(conflicts, first_update_id=30)
     with _host_loop(monkeypatch) as loop:
         asyncio.run_coroutine_threadsafe(server.__aenter__(), loop).result(5)
@@ -382,6 +482,8 @@ def test_a_competing_poll_is_retried_without_a_save_or_the_restart_budget(tmp_pa
                 future.cancel()
             asyncio.run_coroutine_threadsafe(server.__aexit__(None, None, None), loop).result(5)
     assert len(server.methods("getMe")) == 1  # one run of the poller: nothing restarted it
+    # Degraded while the token is held, ready after the first successful poll: one write each.
+    assert written == [("ready", ""), ("degraded", "telegram_conflict"), ("ready", "")]
     assert _status(state) == {"state": "ready", "reason_code": ""}
     warnings = [message for level, message in api.logs if level == "warning" and "degraded" in message]
     assert warnings == ["Telegram poller degraded (TelegramRequestRejected): Telegram API getUpdates returned HTTP 409."]

@@ -90,8 +90,9 @@ request stays silent.
 
 Version 1.4.0 can use a Bot API server you already run instead of the cloud
 (`TELEGRAM_API_BASE`, `TELEGRAM_API_FILES_DIR`, below). The polling position
-belongs to one server: a newly chosen server is read from its oldest pending
-update, and a batch already handled is not handled again.
+belongs to one server and one bot: a newly chosen server or another bot's token
+is read from its oldest pending update, and a batch already handled is not
+handled again.
 
 Version 1.2.1 marks questions that wait for an owner answer and clears the
 waiting line after an answer submitted through Telegram.
@@ -183,9 +184,12 @@ poll or retry wait (up to about a minute). An empty value means
 error naming the key. The server receives the bot token in every request path
 and becomes the source of the bot's updates, so prefer a loopback address or an
 `https://` origin: a plain `http://` origin on another machine carries the
-token unencrypted. A saved `TELEGRAM_PROXY` carries these calls too, and so
-does an environment or system proxy the install already uses; to reach a
-loopback origin directly, list its host in `NO_PROXY`. If the server refuses
+token unencrypted. A saved `TELEGRAM_PROXY` carries these calls too, whatever
+`NO_PROXY` says: clear it to reach a server on this computer's loopback, and
+remember that it sees the token in the request path of a plain `http://`
+origin. An environment or system proxy the bridge already uses carries them
+as well unless the server's host is listed in `NO_PROXY`; the Mini App
+companion never uses those proxies. If the server refuses
 the token for good, polling waits, sending it nothing more, until the token,
 the base or the files directory changes. This skill neither installs nor runs
 the server; it keeps polling (no webhook) and keeps its 10 MiB download and
@@ -213,15 +217,19 @@ App companion would undo the call with its next poll.
 3. Quit Ouroboros so that none of its processes remain; closing or hiding the
    window is not enough. Stop every other client of this token as well, such as
    a Presence connector for Telegram.
-4. Call one method on the old server, then send it nothing more. The token is
+4. Log the bot out of the old server, then send it nothing more. The token is
    part of the request path: keep it out of shell history, logs and shared text.
    - Cloud to your server: `logOut` on `https://api.telegram.org`. Without it
      Telegram does not guarantee that updates reach your server. After a
      successful `logOut` the bot cannot log in to the cloud again for 10 minutes.
-   - Between two of your servers: `close` on the old one. It returns error 429
-     during the first 10 minutes after the bot was launched there; wait and repeat.
+   - Between two of your servers: `logOut` on the old one. The server's README
+     also describes a move that keeps the old server's pending updates:
+     `deleteWebhook` and `close` there, then moving the bot's subdirectory from
+     its working directory to the new server's ("Moving a bot from one local
+     server to another" in `tdlib/telegram-bot-api`). `close` alone leaves the
+     bot logged in on the old server, and updates may then go missing.
    - Your server back to the cloud, at least 10 minutes after the cloud `logOut`:
-     `logOut` (or `close`) on your server.
+     `logOut` on your server.
 5. With Ouroboros still quit, edit only these two keys in the skill's
    `settings.json`, adding them if absent and keeping every other key. The global
    settings document `<data>/settings.json` holds neither of them, so leave it alone.
@@ -235,12 +243,14 @@ App companion would undo the call with its next poll.
    for both to return to the cloud.
 6. Start Ouroboros. It reads the new server from its oldest pending update. If it
    reports invalid settings, quit and restore the backup or correct the two keys;
-   the backup does not undo the `logOut` or `close`.
+   the backup does not undo the `logOut`.
 
 Poll each bot token from one place only: another program polling the same token
 takes updates this bridge would then miss. While a competing poll holds the token
-(error 409), the bridge logs one warning and retries with its usual backoff, so it
-recovers by itself when the other poll stops.
+(error 409), the bridge logs one warning, shows as degraded (`telegram_conflict`)
+and retries with its usual backoff; it is ready again after the first poll that
+succeeds. A webhook set on the token blocks polling with the same error until it is
+removed with `deleteWebhook`, which Ouroboros never calls for you.
 
 With the default base the Bot API stays `https://api.telegram.org` with TLS
 through the proxy and no redirects. Proxy credentials follow the selected

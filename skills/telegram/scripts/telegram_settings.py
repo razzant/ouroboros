@@ -332,11 +332,20 @@ def make_settings_save(api):
                 payload["TELEGRAM_API_FILES_DIR"] = validate_telegram_files_dir(payload["TELEGRAM_API_FILES_DIR"]) or ""
         except ValueError as exc:
             return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
+        # The saved values in the form a Save would store them, so a hand-edited spelling of
+        # the same server (a trailing slash, the default port) reads as unchanged.
         try:
             stored = load_settings(Path(api.get_state_dir()))
+        except TelegramSettingsError:
+            stored = {}
+        try:
             saved_server = validate_telegram_api_base(stored.get("TELEGRAM_API_BASE"))
-        except (TelegramSettingsError, ValueError):
-            stored, saved_server = {}, ""
+        except ValueError:
+            saved_server = ""
+        try:
+            saved_files_dir = validate_telegram_files_dir(stored.get("TELEGRAM_API_FILES_DIR")) or ""
+        except ValueError:
+            saved_files_dir = None
         owner_ignored = server_ignored = False
         if not request_may_change_owner(request):
             if "TELEGRAM_CHAT_ID" in payload:
@@ -344,9 +353,10 @@ def make_settings_save(api):
                 owner_ignored = True
             # The saved server supplies every update and the sender IDs the owner check
             # trusts, so changing it is owner binding too; an unchanged value passes quietly.
-            for key in ("TELEGRAM_API_BASE", "TELEGRAM_API_FILES_DIR"):
-                if key in payload and payload.pop(key) != str(stored.get(key) or ""):
-                    server_ignored = True
+            if "TELEGRAM_API_BASE" in payload:
+                server_ignored |= validate_telegram_api_base(payload.pop("TELEGRAM_API_BASE")) != saved_server
+            if "TELEGRAM_API_FILES_DIR" in payload:
+                server_ignored |= payload.pop("TELEGRAM_API_FILES_DIR") != saved_files_dir
         try:
             merge_settings(Path(api.get_state_dir()), payload)
         except TelegramSettingsError as exc:
@@ -391,6 +401,13 @@ class TelegramSettingsObserver:
             current_owner = 0
         enabled = str(settings.get("TELEGRAM_MINIAPP_ENABLED") or "on").strip().lower() in _TRUE
         return owner > 0 and current_owner == owner and enabled
+
+    def api_base(self) -> str | None:
+        """The saved Bot API server; None while it cannot be read or is invalid."""
+        try:
+            return telegram_api_base(self.state_dir)
+        except (TelegramSettingsError, ValueError):
+            return None
 
 __all__ = [
     "MINIAPP_MARKER_HEADER",

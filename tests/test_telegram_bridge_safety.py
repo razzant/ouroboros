@@ -289,7 +289,7 @@ def test_poller_isolates_updates_notifies_only_authorized_owner_and_saves_highes
 
     assert attempts == ["one", "two"]
     assert json.loads((tmp_path / "poll_offset.json").read_text(encoding="utf-8")) == {
-        "offset": 4, "base": "https://api.telegram.org", "handled": {"https://api.telegram.org": []},
+        "offset": 4, "base": "https://api.telegram.org", "bot": "", "handled": {"https://api.telegram.org": []},
     }
     client = FakeTelegramClient.instances[-1]
     notices = [item for item in client.sent if item[0] == 42 and "Could not deliver" in item[1]]

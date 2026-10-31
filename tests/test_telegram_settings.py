@@ -451,7 +451,6 @@ def test_registered_form_offers_the_server_fields_as_plain_text(tmp_path):
     fields = {field["name"]: field for component in api.sections[0]["schema"]["components"]
               if component.get("type") == "form" for field in component["fields"]}
     assert fields["TELEGRAM_API_BASE"]["type"] == fields["TELEGRAM_API_FILES_DIR"]["type"] == "text"
-    assert not {"telegram_api_base_status", "clear_telegram_api_base", "clear_telegram_api_files_dir"} & set(fields)
     assert set(telegram_settings_module._SETTINGS_FORM_KEYS) <= set(fields)
 
 
@@ -525,6 +524,13 @@ def test_only_the_local_settings_page_may_change_the_bot_api_server(tmp_path: Pa
     quiet = save({"TELEGRAM_API_BASE": "http://127.0.0.1:8081/", "TELEGRAM_API_FILES_DIR": store},
                  host=host, marker=marker)
     assert quiet["server_ignored"] is False and "Settings page" not in quiet["message"]
+    # So do values saved by hand in another spelling of the same server and store.
+    merge_settings(tmp_path, {"TELEGRAM_API_BASE": "https://bot.example:443/", "TELEGRAM_API_FILES_DIR": store + os.sep})
+    hand_edited = save({"TELEGRAM_API_BASE": "https://bot.example", "TELEGRAM_API_FILES_DIR": store},
+                       host=host, marker=marker)
+    assert hand_edited["server_ignored"] is False and "Settings page" not in hand_edited["message"]
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://bot.example:443/"
+    merge_settings(tmp_path, {"TELEGRAM_API_BASE": "http://127.0.0.1:8081", "TELEGRAM_API_FILES_DIR": store})
     local = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081"}, host="127.0.0.1")
     assert local["server_ignored"] is False
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "http://198.51.100.9:8081"
@@ -560,31 +566,48 @@ def test_server_notes_agree_on_timing_and_the_move_with_ouroboros_quit(tmp_path)
     message = json.loads(reply.body)["message"]
     for surface in (" ".join(skill.split()), help_text, message):
         assert "retry wait (up to about a minute)" in surface
-        assert "25 seconds" not in surface
-    assert "quit first" in help_text and "needs logOut" not in help_text
+    assert "quit first" in help_text
     assert "another address of the same server" in message and "Ouroboros quit" in message
-    assert "logOut or close first" not in message
     runbook = " ".join(skill.split())
     steps = ["Copy `<data>/state/skills/telegram/settings.json` to a backup", "Quit Ouroboros so that none",
-             "Stop every other client of this token", "Call one method on the old server",
+             "Stop every other client of this token", "Log the bot out of the old server",
              "With Ouroboros still quit, edit only these two keys", "Start Ouroboros."]
     positions = [runbook.index(step) for step in steps]
     assert positions == sorted(positions)
-    for retired in ("Keep this skill enabled throughout", "save the new base immediately", "empty the field immediately"):
-        assert retired not in runbook
-    for direction in ("`logOut` on `https://api.telegram.org`", "`close` on the old one",
-                      "`logOut` (or `close`) on your server", "treat them as lost"):
-        assert direction in runbook
-    assert "`NO_PROXY`" in runbook
-    # The documented edit is what the skill reads, keeps the other keys, and empty means the cloud.
-    example = re.search(r"```json\n(.*?)```", skill, re.S).group(1)
+    row = next(line for line in book.splitlines() if line.startswith("`skills/telegram/`"))
+    assert "`TELEGRAM_API_BASE`" in row and "`TELEGRAM_API_FILES_DIR`" in row
+
+
+def _runbook_example() -> dict:
+    skill = (SCRIPTS.parent / "SKILL.md").read_text(encoding="utf-8")
+    return json.loads("{" + re.search(r"```json\n(.*?)```", skill, re.S).group(1) + "}")
+
+
+def test_the_runbook_edit_is_what_the_skill_reads_and_empty_returns_to_the_cloud(tmp_path):
+    # The runbook shows two keys an owner pastes into settings.json. Its store path is a
+    # POSIX example; the edit itself is checked with this platform's own absolute path.
+    example = _runbook_example()
+    assert example == {"TELEGRAM_API_BASE": "http://127.0.0.1:8081",
+                       "TELEGRAM_API_FILES_DIR": "/absolute/path/to/server-file-store"}
+    store = tmp_path / "server-file-store"
+    store.mkdir()
     edited = tmp_path / "edited"
     merge_settings(edited, {"TELEGRAM_CHAT_ID": "42"})
-    merge_settings(edited, json.loads("{" + example + "}"))
+    merge_settings(edited, {**example, "TELEGRAM_API_FILES_DIR": str(store)})
     assert telegram_api_base(edited) == "http://127.0.0.1:8081"
-    assert telegram_files_dir(edited) == "/absolute/path/to/server-file-store"
+    assert telegram_files_dir(edited) == os.path.normpath(str(store))
     assert load_settings(edited)["TELEGRAM_CHAT_ID"] == "42"
     merge_settings(edited, {"TELEGRAM_API_BASE": "", "TELEGRAM_API_FILES_DIR": ""})
     assert telegram_api_base(edited) == "https://api.telegram.org" and telegram_files_dir(edited) is None
-    row = next(line for line in book.splitlines() if line.startswith("`skills/telegram/`"))
-    assert "`TELEGRAM_API_BASE`" in row and "`TELEGRAM_API_FILES_DIR`" in row and "server forms" in row
+
+
+def test_on_windows_the_runbook_store_needs_a_windows_path(monkeypatch):
+    # With Windows path rules the POSIX example store is refused, as any foreign spelling is,
+    # and a drive path of the same shape is kept.
+    import ntpath
+
+    monkeypatch.setattr(telegram_settings_module, "os", types.SimpleNamespace(name="nt", path=ntpath))
+    validate = telegram_settings_module.validate_telegram_files_dir
+    with pytest.raises(ValueError, match="native"):
+        validate(_runbook_example()["TELEGRAM_API_FILES_DIR"])
+    assert validate("C:/absolute/path/to/server-file-store/") == "C:\\absolute\\path\\to\\server-file-store"

@@ -11,6 +11,12 @@ but had not yet confirmed: after a return to it, or when two spellings of the ba
 one server (127.0.0.1 and localhost). The cursor keeps the identities of the last handled
 batch of each recent server (chat and message ID, callback query ID: the same on every
 server, never reused), so such a replay is confirmed without being handled again.
+
+A server also keeps one queue per bot, so the cursor names the bot it belongs to: the
+numeric ID that opens every token (``<bot id>:<secret>``), never the secret part. Another
+bot starts from its oldest update with no replay history, since its message IDs may
+repeat the old bot's; a rotated token of the same bot keeps its position. A file saved
+before the cursor named its bot keeps its offset: which bot it came from is unknown.
 """
 from __future__ import annotations
 
@@ -32,11 +38,22 @@ def saved_server(api) -> tuple[str, str | None]:
 
 
 def server_fingerprint(api):
-    """The token and saved server a client is built from: local reads, no request; None if unreadable."""
+    """The token and saved server a client is built from: local reads, no request.
+
+    None when either is unavailable: a host that is closing answers ``{}`` for the token,
+    which says nothing about the saved token.
+    """
     try:
-        return str(api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN") or "").strip(), saved_server(api)
+        token = str(api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN") or "").strip()
+        return (token, saved_server(api)) if token else None
     except Exception:
         return None
+
+
+def bot_id(token: str) -> str:
+    """The bot's numeric ID from its token, or "" when the token has none."""
+    head = str(token or "").split(":", 1)[0].strip()
+    return head if head.isdigit() else ""
 
 
 async def park_until_settings_change(api, fingerprint) -> None:
@@ -69,24 +86,28 @@ def update_key(update: dict) -> str:
 
 
 class PollCursor:
-    def __init__(self, path: Path, base: str):
-        self.path, self.base, self.offset = Path(path), CLOUD_BASE, 0
+    def __init__(self, path: Path, base: str, bot: str = ""):
+        self.path, self.base, self.bot, self.offset = Path(path), CLOUD_BASE, "", 0
         self._handled: dict[str, list[str]] = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.offset = int(data.get("offset") or 0)
             # A file without a base predates server binding: it was the cloud's.
             self.base = str(data.get("base") or CLOUD_BASE)
+            self.bot = str(data.get("bot") or "")
             self._handled = {str(key): [str(item) for item in value]
                              for key, value in dict(data.get("handled") or {}).items()}
         except Exception:
             pass
-        self.follow(base)
+        self.follow(base, bot)
 
-    def follow(self, base: str) -> None:
-        """Bind to ``base``; a different server starts from its own oldest update."""
-        if base != self.base:
+    def follow(self, base: str, bot: str = "") -> None:
+        """Bind to ``base`` and ``bot``; a different server or bot starts from its own oldest update."""
+        if bot and self.bot and bot != self.bot:
+            self.base, self.offset, self._handled = base, 0, {}
+        elif base != self.base:
             self.base, self.offset = base, 0
+        self.bot = bot or self.bot
 
     def is_replay(self, update: dict) -> bool:
         key = update_key(update)
@@ -99,5 +120,6 @@ class PollCursor:
         self._handled = dict(list(self._handled.items())[-_RECENT_SERVERS:])
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"offset": offset, "base": self.base, "handled": self._handled}), encoding="utf-8")
+        tmp.write_text(json.dumps({"offset": offset, "base": self.base, "bot": self.bot, "handled": self._handled}),
+                       encoding="utf-8")
         tmp.replace(self.path)

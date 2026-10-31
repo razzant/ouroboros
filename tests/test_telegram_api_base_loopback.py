@@ -29,6 +29,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 import companion  # noqa: E402
 import telegram_menu  # noqa: E402
+from telegram_settings import merge_settings  # noqa: E402
 
 _CLOUD = "https://api.telegram.org"
 _MESSAGE_IDS = itertools.count(100)
@@ -131,6 +132,14 @@ class _BotServer:
     async def __aexit__(self, *_exc):
         self._server.close()
         await self._server.wait_closed()
+
+
+class _RefusingServer(_BotServer):
+    """A reachable origin that refuses this token for good."""
+
+    def respond(self, http_method, path, form):
+        self.calls.append((path.rsplit("/", 1)[-1], form))
+        return 401, b'{"ok": false, "error_code": 401, "description": "Unauthorized"}', "application/json"
 
 
 async def _until(condition, timeout: float = 5.0) -> None:
@@ -353,3 +362,172 @@ def test_a_save_moves_polling_sends_and_the_menu_to_the_new_server(tmp_path, mon
     assert json.loads((state / "poll_offset.json").read_text(encoding="utf-8"))["offset"] == 8
     assert ("info", "Telegram Bot API settings changed; polling follows the saved server.") in api.logs
     assert not [row for row in api.logs if row[0] in ("error", "warning")]
+
+
+class _CompanionStatus:
+    def __init__(self) -> None:
+        self.transitions: list[tuple[str, str]] = []
+
+    @property
+    def state(self) -> str:
+        return self.transitions[-1][0] if self.transitions else "starting"
+
+    @property
+    def reason_code(self) -> str:
+        return self.transitions[-1][1] if self.transitions else ""
+
+    def transition(self, state: str, _message: str, *, reason_code: str, **_kwargs) -> None:
+        self.transitions.append((state, reason_code))
+
+
+def test_the_companion_owner_check_reaches_a_server_saved_after_a_refusal(tmp_path, monkeypatch):
+    plugin, _telegram_api, _notifier = _load()
+
+    async def scenario():
+        async with _RefusingServer() as refusing, _BotServer() as corrected:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=refusing.origin)
+            status = _CompanionStatus()
+
+            async def tick(_delay, _stop, **_kwargs):
+                if status.reason_code == "telegram_owner_rejected" and not corrected.calls:
+                    reply = await plugin._make_settings_save(api)(
+                        _RouteRequest({"TELEGRAM_API_BASE": corrected.origin}, host="127.0.0.1"))
+                    assert reply.status_code == 200
+
+            monkeypatch.setattr(companion, "_wait_or_stop", tick)
+            async with httpx.AsyncClient(timeout=12, follow_redirects=False, trust_env=False) as shared:
+                owner, menu = await companion._wait_for_owner(
+                    companion.TelegramSettingsObserver(state, 8765), _TOKEN, state, shared, status, asyncio.Event())
+                assert owner == 42 and await menu.install("https://loopback.trycloudflare.com/")
+            return refusing, corrected, status
+
+    refusing, corrected, status = asyncio.run(scenario())
+    assert [method for method, _form in refusing.calls] == ["getMe"]
+    assert [method for method, _form in corrected.calls][:2] == ["getMe", "getChat"]
+    assert corrected.button["type"] == "web_app"
+    assert status.transitions == [("blocked", "telegram_owner_rejected")]
+
+
+class _Tunnel:
+    returncode = None
+
+    def __init__(self, *_args) -> None:
+        pass
+
+    async def start(self) -> None:
+        return None
+
+    async def wait_url(self, timeout_sec: float) -> str:
+        return "https://loopback.trycloudflare.com/"
+
+    async def wait(self) -> int:
+        await asyncio.Event().wait()
+        return 0
+
+    async def stop(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("save_before_wait", [False, True])
+def test_a_mini_app_blocked_by_a_refusing_server_resumes_on_a_saved_server(tmp_path, monkeypatch, save_before_wait):
+    # The real menu sync and blocked wait: an invalid (unknown) or unchanged server keeps the
+    # block, and the first changed server saved in Settings installs the button there.
+    plugin, _telegram_api, _notifier = _load()
+
+    async def scenario():
+        async with _RefusingServer() as refusing, _BotServer() as corrected:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=refusing.origin)
+            settings = state / "settings.json"
+            saved = settings.read_text(encoding="utf-8")
+            status = _CompanionStatus()
+            ticks: list[int] = []
+            if save_before_wait:
+                # A corrected Save can land before the old server's failure is handled.
+                respond = refusing.respond
+                def reject_after_save(*args):
+                    merge_settings(state, {"TELEGRAM_API_BASE": corrected.origin})
+                    return respond(*args)
+                refusing.respond = reject_after_save
+
+            async def tick(_delay, _stop, **_kwargs):
+                ticks.append(len(refusing.calls))
+                assert len(ticks) < 10, "still blocked after another server was saved"
+                if save_before_wait:
+                    return
+                if len(ticks) in (1, 3):
+                    settings.write_text(saved.replace(refusing.origin, "ftp://not-a-server"), encoding="utf-8")
+                elif len(ticks) == 2:
+                    settings.write_text(saved, encoding="utf-8")
+                elif len(ticks) == 4:
+                    settings.write_text(saved, encoding="utf-8")
+                    reply = await plugin._make_settings_save(api)(
+                        _RouteRequest({"TELEGRAM_API_BASE": corrected.origin}, host="127.0.0.1"))
+                    assert reply.status_code == 200
+
+            async def verified(*_args, **_kwargs):
+                return None
+
+            async def monitored(*_args, **_kwargs):
+                raise companion.SidecarStoppedError("menu installed on the saved server")
+
+            monkeypatch.setattr(companion, "_wait_or_stop", tick)
+            monkeypatch.setattr(companion, "QuickTunnel", _Tunnel)
+            monkeypatch.setattr(companion, "_wait_for_public_verification", verified)
+            monkeypatch.setattr(companion, "_monitor_generation", monitored)
+            sidecar = type("Sidecar", (), {"set_public_url": lambda self, _url: None,
+                                           "clear_public_url": lambda self: None})()
+            server_task = asyncio.create_task(asyncio.Event().wait())
+            async with httpx.AsyncClient(timeout=12, follow_redirects=False, trust_env=False) as shared:
+                context = companion._GenerationContext(
+                    menu=telegram_menu.TelegramMenuManager(_TOKEN, 42, state, client=shared),
+                    settings_observer=companion.TelegramSettingsObserver(state, 8765), owner=42,
+                    button_text="Ouroboros", core_port=8765, status=status,
+                    stop_event=asyncio.Event(), server_task=server_task)
+                try:
+                    with pytest.raises(companion.SidecarStoppedError, match="saved server"):
+                        await companion._run_tunnel_generations(state / "cloudflared", state, 45678, sidecar, context)
+                finally:
+                    server_task.cancel()
+                    await asyncio.gather(server_task, return_exceptions=True)
+            return refusing, corrected, status, ticks
+
+    refusing, corrected, status, ticks = asyncio.run(scenario())
+    assert [method for method, _form in refusing.calls] == ["getChatMenuButton"]
+    assert len(ticks) == (1 if save_before_wait else 4)  # unknown/unchanged readings keep it blocked
+    assert corrected.button["type"] == "web_app"
+    assert ("blocked", "telegram_rejected") in status.transitions
+    assert status.transitions[-1] == ("ready", "healthy")
+
+
+@pytest.mark.parametrize("reason", ["MENU_BLOCKED", "SETTINGS_BLOCKED"])
+def test_another_saved_server_does_not_end_other_blocks(tmp_path, monkeypatch, reason):
+    state, _api = _state(tmp_path, TELEGRAM_API_BASE="http://127.0.0.1:8081")
+    settings = state / "settings.json"
+    blocked = getattr(companion._GenerationResult, reason)
+    ticks: list[int] = []
+
+    class _DriftedMenu:
+        async def check_snapshot_owned(self):
+            raise companion.TelegramMenuConflictError("still changed outside the skill")
+
+    async def tick(_delay, _stop, **_kwargs):
+        ticks.append(1)
+        values = json.loads(settings.read_text(encoding="utf-8"))
+        values["TELEGRAM_API_BASE"] = f"http://127.0.0.1:{8081 + len(ticks)}"
+        if reason == "SETTINGS_BLOCKED":
+            values["TELEGRAM_CHAT_ID"] = "0"
+        if len(ticks) == 3:
+            values["TELEGRAM_MINIAPP_ENABLED"] = "off"
+        settings.write_text(json.dumps(values), encoding="utf-8")
+
+    monkeypatch.setattr(companion, "_wait_or_stop", tick)
+
+    async def scenario():
+        observer = companion.TelegramSettingsObserver(state, 8765)
+        if reason == "SETTINGS_BLOCKED":
+            observer.owner_chat_id = lambda: 42  # the owner stays; only exposure is unsafe
+        return await companion._wait_blocked_state(blocked, _DriftedMenu(), observer, 42, _CompanionStatus(),
+                                                   asyncio.Event(), None)
+
+    assert asyncio.run(scenario()) is companion._GenerationResult.DISABLED
+    assert len(ticks) == 3
