@@ -1121,9 +1121,9 @@ Use the connector's ordinary content-hash-bound skill token for:
   Silent/Paused scopes restrict the opaque operation; a thread selects its topic.
   Hosts advertising `presence_place_binding_version: 1` additionally accept `operation=bind` at enqueue,
   returning `{ok,allowed,binding,state,code,label,place_id}`. The snapshot is
-  `{version:1,connector,provider,account_id,conversation_id,thread_id,place_id}`; empty `place_id` means confirmed
+  `{version:1,connector,provider,account_id,conversation_id,thread_id,place_id,connected_revision}`; empty `place_id` means confirmed
   unbound, null binding means unresolved. Retain it with the effect. Delivery uses `operation=check`, JSON-encoded
-  `binding` and identical target fields. Current scopes still apply; disconnected bound work never becomes unbound.
+  `binding` and identical targets. Current scopes apply; disconnected work stays held even after reconnect with the same ID.
   `require_place=true` requires a Place for transport-bound replies, not every tool call from a Presence focus.
   Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
@@ -1743,9 +1743,9 @@ def register(api):
 
 ### Provider sign-in return
 
-Redirect the provider to `<public base>/onboarding/static/provider-return.html`. This passive builtin page survives
-custom or disabled main UI and keeps the normal network login. Check that the page exists before issuing consent
-on an older host. A remote Web client needs its registered reachable base; loopback requires a browser on that host.
+Redirect to `<public base>/onboarding/static/provider-return.html`. This builtin page survives custom/disabled main UI
+and retains network login. Check it exists before consent. Remote Web clients need their registered reachable base;
+loopback requires a browser on that host.
 An opaque widget's `location.origin` is `null`: use the host-bridged begin request's Origin or a configured public base
 (prefix included), not the frame's URL. Telegram launches need the ordinary authorized web/desktop handoff.
 

@@ -55,6 +55,31 @@ def test_bound_capture_cannot_become_unbound_when_disconnected(client, tmp_path)
     assert not held["allowed"] and held["code"] == "place_disconnected"
     assert held["binding"] == captured["binding"]
     assert bind(client).json()["allowed"], "a newly chosen unbound operation is distinct from retained bound work"
+    reconnected = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
+    assert reconnected.place_id == own.place_id
+    assert check(client, captured["binding"]).json()["code"] == "place_disconnected"
+    fresh = bind(client).json()
+    assert fresh["allowed"] and fresh["binding"] != captured["binding"]
+    places.edit_place(tmp_path, reconnected.place_id, "add_note", author="owner", text="Keep this connection.")
+    assert check(client, fresh["binding"]).json()["allowed"], "ordinary edits do not replace a connection"
+
+
+def test_legacy_place_keeps_zero_birth_revision_until_reconnected(client, tmp_path):
+    own = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
+    path = places.places_path(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    del document["places"][own.place_id]["connected_revision"]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    captured = bind(client).json()["binding"]
+    assert captured["connected_revision"] == 0
+    places.edit_place(tmp_path, own.place_id, "set_state", author="owner", state="silent")
+    assert check(client, captured).json()["code"] == "place_silent"
+    places.edit_place(tmp_path, own.place_id, "set_state", author="owner", state="active")
+    assert check(client, captured).json()["allowed"]
+    assert places.connect_place(tmp_path, connector="connector", provider="service", account_id="C").connected_revision == 0
+    places.edit_place(tmp_path, own.place_id, "disconnect", author="owner")
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
+    assert check(client, captured).json()["code"] == "place_disconnected"
 
 
 @pytest.mark.parametrize("account", ["", "*"])
@@ -73,6 +98,7 @@ def test_same_account_unknown_scope_stays_unknown(client, tmp_path):
     response = bind(client).json()
     assert not response["allowed"] and response["binding"] is None
     assert response["code"] == "place_unattributable"
+    assert bind(client, require_place="true").json()["code"] == "place_unattributable"
     opaque = bind(client, conversation_id="").json()
     assert not opaque["allowed"] and opaque["code"] == "place_silent"
 

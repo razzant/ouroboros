@@ -132,6 +132,7 @@ class Place:
     destination: Mapping[str, str] | None = None
     scope: str = "account"
     contribution_id: str = ""
+    connected_revision: int = 0  # creation revision; legacy rows predate this observation
 
 
 def places_path(drive_root: Any) -> Path:
@@ -154,6 +155,8 @@ def _validate(place: Place) -> Place:
         raise PlaceError("place_invalid")
     if type(place.revision) is not int or place.revision < 0:
         raise PlaceError("place_revision_invalid")
+    if type(place.connected_revision) is not int or place.connected_revision < 0:
+        raise PlaceError("place_revision_invalid", "connected_revision")
     if any(not valid_wake_fact(w.fact) or w.author not in AUTHORS for w in place.wakes):
         raise PlaceError("place_wake_invalid", "wakes")
     if any(not n.text.strip() or n.author not in AUTHORS for n in place.notes):
@@ -404,7 +407,8 @@ def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int |
         if result is None:
             rows.pop(place_id, None)
         else:
-            result = _validate(replace(result, revision=current["revision"] + 1))
+            result = _validate(replace(result, revision=current["revision"] + 1,
+                                       connected_revision=old.connected_revision if old else current["revision"] + 1))
             rows[place_id] = asdict(result)
         return {**current, "revision": current["revision"] + 1, "places": rows}
 

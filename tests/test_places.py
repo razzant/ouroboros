@@ -124,12 +124,15 @@ def test_thread_scope_resolves_only_the_exact_thread(tmp_path, monkeypatch, thre
     assert p.resolve_place(tmp_path, connector="slack-bridge", binding_id="thread") == thread
 
 
-def test_place_storage_keys_are_rollback_compatible():
+def test_place_storage_keys_and_legacy_connection_revision():
     assert set(asdict(p.Place("id", "bridge", "chat"))) == {
         "place_id", "connector", "provider", "account_id", "conversation_id", "label", "state", "wakes",
         "notes", "owner_accounts", "working_folder", "model", "context_topics", "legacy_binding_ids", "revision",
-        "thread_id", "destination", "scope", "contribution_id",
+        "thread_id", "destination", "scope", "contribution_id", "connected_revision",
     }
+    legacy = asdict(p.Place("id", "bridge", "chat"))
+    del legacy["connected_revision"]
+    assert p._decode(legacy).connected_revision == 0
 
 
 def test_connect_state_is_atomic_and_repeat_preserves_owner_choice(tmp_path):

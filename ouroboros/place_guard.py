@@ -195,7 +195,8 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
         if (not isinstance(binding, Mapping) or type(binding.get("version")) is not int
                 or binding["version"] != PLACE_BINDING_VERSION or binding.get("connector") != connector
                 or any(binding.get(key) != value for key, value in target.items())
-                or not isinstance(binding.get("place_id"), str)):
+                or not isinstance(binding.get("place_id"), str)
+                or type(binding.get("connected_revision")) is not int or binding["connected_revision"] < 0):
             raise ValueError("The retained outbox binding does not match this connector and destination.")
         if binding["place_id"]:
             try:
@@ -207,6 +208,9 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
                         "code": "place_disconnected", "label": "", "place_id": binding["place_id"]}
             if original.connector != connector or original.provider != target["provider"]:
                 raise ValueError("The retained place belongs to a different connector or provider.")
+            if original.connected_revision != binding["connected_revision"]:
+                return {"allowed": False, "binding": dict(binding), "state": "disconnected",
+                        "code": "place_disconnected", "label": original.label, "place_id": original.place_id}
             primary_scope = places.resolve_place(drive_root, connector=connector, binding_id=original.place_id, **target)
             declared_scope, _ = places.target_place([original], targets=declared_targets,
                                                     conversation="conversation_id", thread="thread_id")
@@ -229,10 +233,10 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
                     "code": "place_scope_changed", "label": "", "place_id": binding["place_id"]}
         if current is None and (not attributable or require_place):
             return {"allowed": False, "binding": dict(binding) if binding else None, "state": "unknown",
-                    "code": "place_not_connected" if require_place else "place_unattributable", "label": "", "place_id": ""}
+                    "code": "place_unattributable" if not attributable else "place_not_connected", "label": "", "place_id": ""}
     captured = dict(binding) if binding is not None else {
         "version": PLACE_BINDING_VERSION, "connector": connector, **target,
-        "place_id": current.place_id if current else ""}
+        "place_id": current.place_id if current else "", "connected_revision": current.connected_revision if current else 0}
     return _outbox_decision(current, captured)
 
 
