@@ -145,18 +145,15 @@ def test_a_direct_project_turn_continues_after_stop_restore_and_resume(tmp_path,
         assert _candidate_ineligible(queue, row, 5.0, {}) is False, "the assigner may launch the continuation"
 
 
-@pytest.mark.serial
-def test_a_direct_turn_without_a_recorded_basis_keeps_its_project_hold(tmp_path, monkeypatch):
-    """A row from before the basis existed proves no original identity; Resume never synthesizes one."""
+def _held_row_without_basis(tmp_path, monkeypatch, queue, tid="legacy-direct"):
+    """A direct turn from before the basis existed: saved, stopped, restored and resumed."""
     from ouroboros import working_checkpoint as wc
     from ouroboros.projects_registry import bind_task_to_project, create_project
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from ouroboros.task_status import execution_owner_record
     from tests._budget_pause_exact_helpers import _loop_ctx
 
-    queue, _workers = _install(tmp_path, monkeypatch)
     project = create_project(tmp_path, PID, name="Room 2547")
-    tid = "legacy-direct"
     bind_task_to_project(tmp_path, tid, PID, project["chat_id"], origin={"absent": "mid_task_no_origin"})
     write_task_result(tmp_path, tid, STATUS_RUNNING, chat_id=project["chat_id"], task_attempt=0,
                       _is_direct_chat=True, project_id=PID,
@@ -167,13 +164,46 @@ def test_a_direct_turn_without_a_recorded_basis_keeps_its_project_hold(tmp_path,
     _crash_without_projections(tmp_path, monkeypatch, queue)
     row = next(row for row in queue.PENDING if row["id"] == tid)
     assert "_project_admission" not in row
+    return _resume_and_revalidate(queue, tid)
 
-    row = _resume_and_revalidate(queue, tid)
+
+@pytest.mark.serial
+def test_a_direct_turn_without_a_recorded_basis_keeps_its_project_hold(tmp_path, monkeypatch):
+    """A row from before the basis existed proves no original identity; Resume never synthesizes one."""
+    queue, _workers = _install(tmp_path, monkeypatch)
+
+    row = _held_row_without_basis(tmp_path, monkeypatch, queue)
 
     hold = row.get("_project_admission_restore_hold") or {}
     assert hold.get("reason") == "project_routing_fence_lookup_failed"
     assert "missing or invalid" in hold.get("detail", "")
     assert "_project_admission" not in row, "no basis is recaptured from today's registry"
+
+
+@pytest.mark.serial
+def test_the_owners_re_placement_readmits_a_row_without_a_recorded_basis(tmp_path, monkeypatch):
+    """The recovery for such a row is an explicit present-day decision: the existing move into
+    its own Project grants a basis for this room now, and its saved continuation then runs."""
+    from ouroboros.project_placement import move_task_to_project, placement_basis
+    from supervisor.task_admission import _working_resume_granted, revalidate_project_holds
+    from supervisor.worker_assignment import _candidate_ineligible
+
+    queue, workers = _install(tmp_path, monkeypatch)
+    row = _held_row_without_basis(tmp_path, monkeypatch, queue)
+    assert row.get("_project_admission_restore_hold")
+
+    outcome = move_task_to_project(tmp_path, row["id"], PID, origin={"absent": "mid_task_no_origin"},
+                                   basis=placement_basis(tmp_path, row["id"], PID),
+                                   running=workers.RUNNING, pending=workers.PENDING, initiated_by="owner")
+    with queue._queue_lock:
+        revalidate_project_holds()
+
+    assert outcome["status"] == "delivered" and outcome["adopted"] is True
+    assert row["_project_admission"]["project_id"] == PID and not row["_project_admission"].get("legacy_basis")
+    assert not row.get("_project_admission_restore_hold"), row.get("_project_admission_restore_hold")
+    assert _working_resume_granted(row, tmp_path) is True, "the same saved continuation is the next attempt"
+    with queue._queue_lock:
+        assert _candidate_ineligible(queue, row, 5.0, {}) is False
 
 
 @pytest.mark.serial
