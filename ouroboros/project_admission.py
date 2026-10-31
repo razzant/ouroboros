@@ -7,6 +7,7 @@ occupancy never invalidates admission; each pass parses registry and bindings on
 """
 from __future__ import annotations
 
+import copy
 import json
 from contextlib import contextmanager
 from typing import Any, Optional
@@ -27,6 +28,18 @@ def host_unscoped(task: dict) -> bool:
     """Fresh host admission proved no Project scope; restore never backfills it."""
     return (task.get("_project_scope_none") is True
             and not task.get("project_id") and "_project_admission" not in task)
+
+
+def carried_basis(source: dict) -> dict:
+    """The Project basis a row or result carries, copied unchanged (#2547).
+
+    The one definition every writer of a task result and every rebuild of a
+    queue row (snapshot, direct root, restored locator) uses. A missing basis
+    stays missing, so restore still holds the row; nothing is recaptured.
+    Host-attested absence stays a queue-row fact: a Main row rebuilt from a
+    result takes no Project hold that it would release.
+    """
+    return {"_project_admission": copy.deepcopy(source["_project_admission"])} if "_project_admission" in source else {}
 
 
 def hold_unreadable_result(task: dict) -> bool:

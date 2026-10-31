@@ -20,6 +20,7 @@ import uuid
 from typing import Any, Optional
 
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+from ouroboros.project_admission import carried_basis
 from ouroboros.utils import utc_now_iso
 from ouroboros.subagents import subagent_intent_fields
 from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION, normalize_for_restore
@@ -200,8 +201,8 @@ def persist_queue_snapshot(reason: str = "") -> bool:
                 "id": t.get("id"), "type": t.get("type"), "priority": t.get("priority"),
                 "attempt": t.get("_attempt"), "queued_at": t.get("queued_at"),
                 "queue_seq": t.get("_queue_seq"),
-                "task": {**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t),
-                         **{key: t[key] for key in ('_project_admission', 'admitted_dispatch', '_project_scope_none', '_working_recovery',
+                "task": {**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t), **carried_basis(t),
+                         **{key: t[key] for key in ('admitted_dispatch', '_project_scope_none', '_working_recovery',
                                                     # #939: the execution budget and its carried clock offset travel with the row.
                                                     'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec') if key in t}},
             })
@@ -486,11 +487,10 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                       or wait.get("task_attempt") or 1)
         record: dict = {
             "id": task_id, "type": "task", "chat_id": stored.get("chat_id"), "_is_direct_chat": True,
-            "_attempt": attempt, "root_task_id": task_id, "depth": 0,
+            "_attempt": attempt, "root_task_id": task_id, "depth": 0, **carried_basis(stored),
         }
-        for key in ("origin_message_ref", "origin_message_text", "metadata", "project_id", "_project_admission",
-                    "tool_profile", "detached_at", "detached_by",
-                    "task_contract", "title", "text", "budget_drive_root"):
+        for key in ("origin_message_ref", "origin_message_text", "metadata", "project_id", "tool_profile", "detached_at",
+                    "detached_by", "task_contract", "title", "text", "budget_drive_root"):
             if stored.get(key) not in (None, ""):
                 record[key] = stored[key]
         if (saved_wait and int(wait.get("task_attempt") or 0) == attempt and tx_id

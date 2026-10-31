@@ -500,10 +500,10 @@ class OuroborosAgent:
         atomic record instead of being minted by whichever surface writes next.
         """
         try:
+            from ouroboros.project_admission import carried_basis
             from ouroboros.task_status import execution_owner_record
 
-            canonical = pathlib.Path(task.get("budget_drive_root") or getattr(self.env, "budget_drive_root", None)
-                                     or self.env.drive_root)
+            canonical = pathlib.Path(task.get("budget_drive_root") or getattr(self.env, "budget_drive_root", None) or self.env.drive_root)
             assigned_owner = task.get("_execution_owner") or {}
             execution_kind = assigned_owner.get("kind") or (
                 "presence" if task.get("_presence_turn") else "direct" if task.get("_is_direct_chat") else "pooled")
@@ -542,7 +542,7 @@ class OuroborosAgent:
                 # The producer's raw origin marker (promote_chat_to_task, presence_promote,
                 # api, ...): ``dialogue_provenance.run_origin`` reads it from this record.
                 source=task.get("source"),
-                project_id=str(task.get("project_id") or ""), **{key: task[key] for key in ("_project_admission",) if isinstance(task.get(key), dict)},  # a direct turn's only basis carrier (#2547)
+                project_id=str(task.get("project_id") or ""), **carried_basis(task),  # a direct turn's only basis carrier (#2547)
                 role=task.get("role"),
                 description=task.get("description"),
                 objective=task.get("objective") or task.get("description"),
