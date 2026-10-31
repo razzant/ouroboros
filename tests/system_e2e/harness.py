@@ -149,7 +149,7 @@ SCENARIOS = {
     # #1729/#1730 in real processes: the owner's doors on one live task that keeps its id (no retry exists since #1376).
     "S40": ("owner Pause / Resume / Stop on one live task, same id: after a Pause and a consumed Resume (and without them) the same id runs again and continues its saved work; a Pause of the running task fences its logical root, a model write served after the acceptance never lands while one before it did, one Resume reopens the tree and Stop ends it Cancelled with no late effect and no successor row", LANE_MOCK),
     "S41": ("live skill-smoke adapter: ordinary author, one independent rebuttal, immutable payload, true/unknown criticism red, tool-policy and identity controls", LANE_MOCK),
-    "S42": ("direct Project turn across an application stop: a WS turn in a Project room writes in the room, the tree is SIGTERMed while its next model round is held, the next boot restores the same id with its saved working state, one owner Resume over HTTP releases the stop hold and the Project verification, and a worker continues the saved loop to a completed result carrying the continuation's answer (#2547)", LANE_MOCK),
+    "S42": ("direct Project turn across an application stop: a WS turn in a Project room writes in the room, the tree is SIGTERMed while its next model round is held, the next boot restores the same id with its saved working state, one owner Resume over HTTP releases the stop hold and the Project verification, and a worker continues the saved loop to a completed result carrying the continuation's answer; in a folderless room the resumed write still lands in the turn's task drive after a sibling start_task gives the room its first folder (#2547)", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"

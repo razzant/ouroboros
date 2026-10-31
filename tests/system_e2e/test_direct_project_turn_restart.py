@@ -145,3 +145,109 @@ def test_s42_direct_project_turn_continues_after_stop_restart_and_owner_resume(e
         finally:
             gate.release.set()
             server.stop()
+
+
+TURN_A, TURN_B, SIBLING = "S42_FOLDERLESS_TURN", "S42_SIBLING_STARTER", "S42_SIBLING_TASK"
+PROOF = "s42-resource-proof.txt"
+
+
+def _request(body: dict) -> str:
+    """The current request: the last user message naming one of this scenario's turns.
+    Host notes (the request clock) follow it, and room history may quote earlier turns."""
+    from tests.system_e2e.harness import message_text
+
+    texts = [message_text(m) for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "user"]
+    return next((text for text in reversed(texts) if any(mark in text for mark in (TURN_A, TURN_B, SIBLING))), "")
+
+
+class _FolderStub(ScriptedStubModel):
+    """Turn A writes before the stop and again after Resume; turn B starts a sibling
+    task with an explicit folder; the sibling answers at once."""
+
+    def __init__(self, gate: ModelGate, folder) -> None:
+        super().__init__(gate=gate)
+        self.folder, self.served = str(folder), []
+
+    def _next_step(self, body):
+        request = _request(body)
+        if SIBLING in request:
+            return {"final": "sibling done"}
+        if TURN_B in request:
+            if "B:start" in self.served:
+                return {"final": "sibling started"}
+            self.served.append("B:start")
+            return {"tool": "start_task", "arguments": {
+                "objective": f"{SIBLING}: work in the explicit folder", "title": "S42 sibling",
+                "workspace_root": self.folder}}
+        if TURN_A not in request:
+            return None
+        writes = [item for item in self.served if item.startswith("A:")]
+        content = ("before stop", "after resume")[len(writes)] if len(writes) < 2 else None
+        self.served.append(f"A:{content or 'final'}")
+        return ({"tool": "write_file", "arguments": {"root": "active_workspace", "path": PROOF, "content": content}}
+                if content else {"final": FINAL})
+
+
+def _turn_a_second_round(body: dict) -> bool:
+    return (bool(body.get("tools")) and TURN_A in _request(body)
+            and PROOF in json.dumps([m for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "tool"]))
+
+
+def _send(server, project, text):
+    from websockets.sync.client import connect
+
+    message_id = "e2e-s42-" + uuid.uuid4().hex
+    with connect(ws_url(server), open_timeout=30, proxy=None) as ws:
+        ws.send(json.dumps({"type": "chat", "client_message_id": message_id, "content": text,
+                            "chat_id": project["chat_id"], "project_id": project["id"]}))
+    return message_id
+
+
+@pytest.mark.integration
+@pytest.mark.serial
+def test_s42_resumed_folderless_work_keeps_its_task_drive_after_a_sibling_gives_the_room_a_folder(e2e_clone, tmp_path):
+    require_lane(LANE_MOCK)
+    folder = tmp_path / "sibling-folder"
+    folder.mkdir()
+    gate = ModelGate(_turn_a_second_round, timeout=900)
+    root = tmp_path / "server"
+    with _FolderStub(gate, folder) as stub:
+        settings = keyless_settings(stub, OUROBOROS_MAX_WORKERS=1)
+        server = start_server(e2e_clone, root, settings)
+        try:
+            oracle = ArtifactOracle(server.data_root)
+            project = _api(server.base_url, "POST", "/api/projects", {"name": "S42 folderless room"},
+                           timeout=60).get("project") or {}
+            assert project.get("id") and not project.get("working_dir"), project
+            message_id = _send(server, project, f"{TURN_A}: write the proof note in this room, then report.")
+            task = wait_until(lambda: _received(oracle, message_id), 60)
+            assert task and task.get("_is_direct_chat") is True, task
+            task_id = task["id"]
+            assert gate.arrived.wait(240), "turn A never reached its second round"
+            drive = server.data_root / "task_drives" / task_id
+            assert (drive / PROOF).read_text(encoding="utf-8") == "before stop"
+            assert wait_until(lambda: _saved(server.data_root, task_id), 60), "no working state was saved"
+        finally:
+            server.stop()
+
+        server = start_server(e2e_clone, root, settings)
+        try:
+            oracle = ArtifactOracle(server.data_root)
+            assert wait_until(lambda: _pending(oracle, task_id), 60), "turn A was not restored"
+            _send(server, project, f"{TURN_B}: start the sibling task in its explicit folder.")
+            room = wait_until(lambda: next((p for p in _api(server.base_url, "GET", "/api/projects", timeout=30)
+                                            .get("projects") or [] if p.get("id") == project["id"]
+                                            and p.get("working_dir")), None), 120)
+            assert room and room["working_dir"] == str(folder), room
+            resumed = _api_status(server.base_url, "POST", f"/api/tasks/{task_id}/resume", {}, timeout=60)
+            assert resumed["status"] == 200 and (resumed.get("body") or {}).get("ok") is True, resumed
+            stored = wait_until(lambda: (lambda row: row if row.get("status") in {"completed", "failed", "cancelled"}
+                                         else None)(oracle.task_result(task_id)), 180)
+            assert stored and stored.get("status") == "completed", {
+                "result": oracle.task_result(task_id), "pending": _pending(oracle, task_id), "served": stub.served}
+            assert (drive / PROOF).read_text(encoding="utf-8") == "after resume"
+            assert not (folder / PROOF).exists(), "resumed work wrote into the folder the room acquired later"
+            assert stub.served[:3] == ["A:before stop", "B:start", "A:after resume"], stub.served
+        finally:
+            gate.release.set()
+            server.stop()
