@@ -481,13 +481,16 @@ def test_second_park_exposes_late_child_without_changing_initial_replay(tmp_path
             assert host.client.post("/fixture/release-review").status_code == 200
         final = eventually(lambda: (reply if (reply := host.work(ref)).status_code == 200 else None))
         assert final.json()["child_work_ref"] == child_ref, final.text
-        # A Stop while parked ends on the zero-call control rail: the direct turn's owner Stop settles failed
-        # (owner_requested_finalization) and speaks nothing; a released review lets the author complete.
-        assert final.json()["status"] == ("failed" if ending == "stop" else "completed")
+        # A Stop while parked ends on the zero-call control rail (owner_requested_finalization): Stop now of an
+        # inline Presence turn settles cancelled (#2012), retained and never spoken; a released review lets the
+        # author complete.
+        assert final.json()["status"] == ("cancelled" if ending == "stop" else "completed")
         assert ending != "stop" or (final.json()["text"], final.json()["output_ref"]) == ("", "")
+        assert ending != "stop" or (final.json()["code"], final.json()["reason_code"]) == (
+            "presence_turn_cancelled", "owner_requested_finalization")
         assert len(host.inputs()) == (4 if ending == "stop" else 5)
-        # Polling reads the durable terminal before handle_task's finally closes
-        # its model receiver. Require actual closure too; terminal is not its ACK.
+        # A completed answer polls final once recorded, before handle_task's finally closes its model
+        # receiver (a cancelled one only after the author ended). Require actual closure too; terminal is not its ACK.
         eventually(lambda: host.client.get("/fixture/live").json() == [])
         assert host.turn().json() == initial
         assert host_result(host.root / "data", ref)["presence_continuation"]["initial"] == record["presence_continuation"]["initial"]
@@ -518,21 +521,28 @@ def test_terminal_poll_precedes_author_teardown_but_cleanup_must_finish(tmp_path
         marker = tmp_path / "before-author-close.json"
         blocked = eventually(lambda: json.loads(marker.read_text()) if marker.exists() else None)
         assert blocked["task_id"] == ref and blocked["closed"] is False
-        assert blocked["status"] == "failed"  # the owner's Stop of a parked direct turn settles failed, silently
-        final = host.work(ref)
-        # A recorded failed is final the moment it is recorded (``presence_recovery.retained_work_view``: only
-        # an unanswered terminal, cancelled or reconciled, of a still-live author stays observed as 202).
-        assert (final.status_code, final.json()["status"], final.json()["text"]) == (200, "failed", "")
-        assert final.json()["child_work_ref"] == LATE_CHILD
+        # The owner's Stop now of a parked direct turn is recorded cancelled, silently (#2012), before the
+        # author's teardown closes its model receiver: the durable terminal is not process cleanup.
+        assert blocked["status"] == "cancelled"
+        polled = host.work(ref)
+        # Only a canonical answer is final the moment it is recorded (``presence_recovery.retained_work_view``):
+        # an unanswered terminal of a still-live author stays observed as 202 until its execution ends.
+        assert (polled.status_code, polled.json()["status"]) == (202, "pending"), polled.text
+        assert polled.json()["child_work_ref"] == LATE_CHILD
         assert host.client.get("/fixture/live").json() == [ref]
         assert len(host.inputs()) == 4
         assert host.client.post("/fixture/release-close").status_code == 200
         eventually(lambda: host.client.get("/fixture/live").json() == [])
+        # The receiver closes before the stack leaves the live registry: wait for the ended view, never one read.
+        final = eventually(lambda: (reply if (reply := host.work(ref)).status_code == 200 else None))
+        assert (final.json()["status"], final.json()["text"], final.json()["output_ref"]) == ("cancelled", "", "")
+        assert final.json()["code"] == "presence_turn_cancelled" and final.json()["child_work_ref"] == LATE_CHILD
         assert host.work(ref).json() == final.json()
         assert host.turn().json() == initial and len(host.inputs()) == 4
         assert host.work(LATE_CHILD).status_code == 202
         (tmp_path / "teardown-order-facts.json").write_text(json.dumps({
-            "blocked": blocked, "terminal": final.json(), "initial": record["presence_continuation"]["initial"],
+            "blocked": blocked, "polled": polled.json(), "terminal": final.json(),
+            "initial": record["presence_continuation"]["initial"],
             "receiver_closed_after_release": True, "model_calls": 4}, indent=2))
     finally:
         host.close()
