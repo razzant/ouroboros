@@ -1,0 +1,77 @@
+Behaviour changes of the public equipment copies, relative to their originals with the comment-only hygiene
+applied (earlier lab identifiers removed from comments and docstrings of qb1.sh, procwatch.py and mkbundle.sh).
+That hygiene is not reproduced here; OVERLAY-MANIFEST.json gives each original's and each copy's sha256.
+procwatch.py, mkbundle.sh and capture.py have no behaviour change, so only qb1.sh appears below.
+
+--- a/equipment/lab/guest/qb1.sh+comment-hygiene
++++ b/ci-macos-probe/probe/equipment/guest/qb1.sh
+@@ -244,7 +244,7 @@
+     for f in "$ROOT"/runs/*/Applications "$Q"/runs/*/Applications; do echo "== $f"; /bin/ls -la "$f" 2>&1; done > "$out/prior-runs-apps.txt"
+     /bin/ps -axww -o pid,ppid,pgid,user,lstart,command | /usr/bin/grep -i -E 'ouroboros|python|osascript|app_install' \
+         | /usr/bin/grep -v -F -e qb1.sh -e 'grep -i' > "$out/ps-ouroboros.txt" 2>&1
+-    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u anka > "$out/listen.txt" 2>&1
++    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u "$(/usr/bin/id -u)" > "$out/listen.txt" 2>&1
+     { for f in "$GH/Library/WebKit/com.ouroboros.agent" "$GH/Library/Preferences/com.ouroboros.agent.plist" "$GH/Ouroboros" \
+                "$GH/.gitconfig"; do echo "== $f"; /bin/ls -ld -T "$f" 2>&1; done; } > "$out/profile.txt" 2>&1
+     /usr/bin/shasum -a 256 "$OBSPY" "$Q"/bin/* "$BIND" "$CBUNDLE" "$GIT" "$(dmg_of 7.7.0)" "$(dmg_of 7.8.0)" \
+@@ -715,7 +715,7 @@
+         | /usr/bin/grep -v -F -e qb1.sh -e procwatch.py -e 'grep -i' > "$out/ps-ouroboros.txt" 2>&1
+     pids=$(/usr/bin/awk '{print $1}' "$out/ps-run.txt")
+     [ -n "$pids" ] && "$OBSPY" -I -S -B "$PW" snap "$out/env-snap.json" $pids > /dev/null 2> "$out/env-snap.stderr"
+-    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u anka > "$out/listen.txt" 2>&1
++    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u "$(/usr/bin/id -u)" > "$out/listen.txt" 2>&1
+     [ -n "$pids" ] && /usr/sbin/lsof -nP -a -i -p "$(echo $pids | /usr/bin/tr ' ' ',')" > "$out/sockets.txt" 2>&1
+     { /bin/ls -la "$R/Applications"; for f in "$R"/Applications/*.app "$R"/Applications/.*.app; do [ -d "$f" ] && bundle_facts "$f"; done
+       /bin/ls -laR "$R"/Applications/.Ouroboros-update-* 2>/dev/null | /usr/bin/head -40; } > "$out/bundles.txt" 2>&1
+@@ -893,9 +893,10 @@
+ localfn() {   # localfn RUN STEP [YAML_VERSION] [venv|private|base]: the owner's untracked local function on the interpreter
+               # the live server runs (its exec argv[0], read from the kernel), with that interpreter's packages. PASS: the
+               # helper's token, yaml (YAML_VERSION when given) loaded from inside that interpreter's prefix (b1s: or the
+-              # run's user base) and, when given, that serving prefix. b1p also runs the external base, kept apart: it
+-              # shows the base unchanged and never stands in for the body's result.
+-    run_root "$1"; local out pid n py want_yaml="${3:-}" want_prefix="" userbase="" body_rc base_rc=- checked V WHY
++              # user base the server's own observed environment names, with which the helper runs) and, when given, that
++              # serving prefix. b1p also runs the external base, kept apart: it shows the base unchanged and never stands
++              # in for the body's result.
++    run_root "$1"; local out pid n py want_yaml="${3:-}" want_prefix="" userbase="" body_rc base_rc=- checked V WHY penv line
+     case "${4:-}" in '') ;; venv) want_prefix="$VENV" ;; private) want_prefix="$PRIVATE" ;; base) want_prefix="${BASE%/bin/*}" ;;
+                      *) die "ENV is venv, private or base" ;; esac
+     out=$(step_dir "$2") || exit 2
+@@ -905,6 +906,21 @@
+ print(json.dumps({"result": ns["owner_local_function"](), "executable": sys.executable,
+                   "real": os.path.realpath(sys.executable), "version": sys.version.split()[0],
+                   "prefix": sys.prefix, "base_prefix": sys.base_prefix}, sort_keys=True))'
++    # b1s: the serving process's own package-loading environment as observed (server-snap.json): HOME, VIRTUAL_ENV,
++    # __PYVENV_LAUNCHER__ and every PYTHON* name it holds, each recorded in plain; otherwise not established
++    local penv_py='import json, re, sys
++try:
++    with open(sys.argv[1]) as handle:
++        env = json.load(handle)[0]["env"]
++    keys, plain = env["keys"], env["plain"]
++except (OSError, ValueError, LookupError, TypeError) as exc:
++    sys.exit("no environment record (%s)" % type(exc).__name__)
++names = sorted(k for k in keys if k in ("HOME", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__") or k.startswith("PYTHON"))
++bad = [k for k in names if k not in plain or "\n" in plain[k] or re.search(r"\.\.\.\[\d+ chars\]$", plain[k])]
++if bad:
++    sys.exit("not recorded in plain: %s" % " ".join(bad))
++for k in names:
++    print("%s=%s" % (k, plain[k]))'
+     server_rows > "$out/server.txt"; n=$(/usr/bin/grep -c . "$out/server.txt")
+     if [ "$n" != 1 ]; then
+         echo "$out"; verdict "$out" UNKNOWN "the helper on the serving interpreter" "$n serving server processes (server.txt)"; return
+@@ -918,8 +934,13 @@
+     case "$py" in /*) ;; *) echo "$out"; verdict "$out" UNKNOWN "the helper on the serving interpreter" \
+                                "the serving interpreter of pid $pid is not readable (server-snap.json)"; return ;; esac
+     case "$KIND" in
+-        site) userbase="$DATA/state/python-userbase"
+-              /usr/bin/env -i HOME="$HOMEDIR" PATH=/usr/bin:/bin PYTHONUSERBASE="$userbase" PYTHONDONTWRITEBYTECODE=1 \
++        site) if ! "$OBSPY" -I -S -B -c "$penv_py" "$out/server-snap.json" > "$out/package-env.txt" 2> "$out/package-env.stderr"
++              then echo "$out"; verdict "$out" UNKNOWN "the helper on the serving interpreter" \
++                       "the serving package environment of pid $pid is not established (package-env.stderr)"; return
++              fi
++              userbase=$(/usr/bin/sed -n 's/^PYTHONUSERBASE=//p' "$out/package-env.txt")
++              penv=(); while IFS= read -r line; do penv+=("$line"); done < "$out/package-env.txt"
++              /usr/bin/env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 "${penv[@]+"${penv[@]}"}" \
+                   "$py" -c "$code" "$REPO/owner-untracked/owner_local_function.py" > "$out/localfn.json" 2> "$out/stderr.txt" ;;
+         *) "$py" -I -B -c "$code" "$REPO/owner-untracked/owner_local_function.py" > "$out/localfn.json" 2> "$out/stderr.txt" ;;
+     esac
