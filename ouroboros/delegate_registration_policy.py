@@ -222,19 +222,18 @@ def resolve_registration(gateway, scope_root: str, execution_root: str, access: 
 
 
 # How a run's ``maxSeconds`` was decided (#1196), recorded on the START_REQUESTED
-# and STARTED rows as ``max_seconds_basis``. Only a cap the nanny ASKED for — an
-# explicit finite leaf cap, at most narrowed by the engine's schema bound — makes
-# a later ``wall_clock_exceeded`` a finite-leaf expiry a continuation may follow;
-# a cap the nanny's own deadline or lifetime derived (or narrowed) expiring IS
-# that deadline, and a row that predates the field is unknown, never assumed.
+# and STARTED rows as ``max_seconds_basis``: a fact beside the number, which no
+# admission or continuation decision reads (a continuation follows any stop). A cap
+# the nanny asked for, one its own deadline or lifetime derived or narrowed, or
+# none (``unbounded``: no ``maxSeconds`` was sent); a row that predates the field is
+# unknown, and an older row's ``operation_window`` names the retired 6 h fallback.
 CAP_BASIS_REQUESTED = "requested"
 CAP_BASIS_REQUESTED_CLAMPED_SCHEMA = "requested_clamped_by_schema"
 CAP_BASIS_REQUESTED_CLAMPED_DEADLINE = "requested_clamped_by_deadline"
 CAP_BASIS_REQUESTED_CLAMPED_LIFETIME = "requested_clamped_by_lifetime"
 CAP_BASIS_DEADLINE_DERIVED = "deadline_derived"
 CAP_BASIS_LIFETIME_DERIVED = "lifetime_derived"
-CAP_BASIS_OPERATION_WINDOW = "operation_window"
-FINITE_LEAF_CAP_BASES = frozenset({CAP_BASIS_REQUESTED, CAP_BASIS_REQUESTED_CLAMPED_SCHEMA})
+CAP_BASIS_UNBOUNDED = "unbounded"
 
 # The STARTED row's string facts as ``(RunCustody attribute, row key)`` pairs —
 # one table shared by the replay and the ``record_started`` emit.

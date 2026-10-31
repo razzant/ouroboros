@@ -423,11 +423,12 @@ def test_run_script_timeout_360():
 
 
 def test_preflight_review_timeout_is_the_review_change_envelope():
-    """Both names are the same review_change action, so they share its finite envelope."""
+    """Both names are the same review_change action, so they share its envelope: finite with a
+    task lifetime, none without one (1A: the wave's drain observes the owner's controls)."""
     from ouroboros.tools import preflight_review, review_change
     [envelope] = [entry.timeout_sec for entry in review_change.get_tools() if entry.name == "review_change"]
     entries = {entry.name: entry for entry in preflight_review.get_tools()}
-    assert envelope > 0
+    assert envelope is None or envelope > 0
     for name in ("preflight_review", "advisory_review"):
         assert entries[name].timeout_sec == envelope
 

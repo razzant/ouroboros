@@ -500,6 +500,28 @@ def owner_stop_ending(record: Dict[str, Any]) -> tuple:
 REASON_OWNER_STOPPED_DIRECT_TURN = "owner_stopped_direct_chat_turn"
 
 
+def in_process_stop_now(owner_ctx: Any) -> Optional[bool]:
+    """Whether Stop now holds the in-process turn ``owner_ctx`` acts for (an inline Presence or a direct
+    chat turn, whose Stop kills no process): its open immediate intent, one read. A pooled worker reads
+    nothing (its Stop is the kill). ``None`` is unknown, never "no Stop": the projection, or this turn's
+    own row in it, cannot be read, and nothing bounds how long that lasts; another row's damage hides no
+    Stop of this turn. A running in-slot wait and a command wait poll it (``_await_messages``,
+    ``shell_process.communicate_or_stop``)."""
+    waiter = getattr(owner_ctx, "model_wait_context", None)
+    if waiter is None or getattr(waiter, "worker_slot_held", True):
+        return False
+    from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, read_active_intents, stop_policy
+
+    task_id = str(waiter.task_id or "").strip()
+    if not task_id:
+        return None  # no turn identity to read: unknown, as a refused read
+    intents, unseen = read_active_intents(waiter.canonical_root)
+    if unseen is None or task_id in unseen:
+        return None
+    intent = intents.get(task_id)
+    return isinstance(intent, dict) and stop_policy(intent) == STOP_POLICY_IMMEDIATE
+
+
 def presence_stop_now(owner_ctx: Any) -> bool:
     """Whether Stop now holds the inline Presence turn whose final answer closes its admission.
 
@@ -507,16 +529,10 @@ def presence_stop_now(owner_ctx: Any) -> bool:
     gate reads it before each call; a call already sent can still return that answer, so each
     closing admission (the ordinary, the forced, an authored stop's at a hard rail) reads it once
     more, as ``_handle_model_wait_control`` does. A pooled worker (its Stop is the kill) and a
-    direct turn (custody's control) keep their own rails.
+    direct turn (custody's control) keep their own rails; an unknown read answers False here.
     """
-    waiter = getattr(owner_ctx, "model_wait_context", None)
-    task = getattr(waiter, "task", None)
-    if getattr(waiter, "worker_slot_held", True) or not (isinstance(task, dict) and task.get("_presence_turn")):
-        return False
-    from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
-
-    intent = active_intent(waiter.canonical_root, waiter.task_id)
-    return isinstance(intent, dict) and stop_policy(intent) == STOP_POLICY_IMMEDIATE
+    task = getattr(getattr(owner_ctx, "model_wait_context", None), "task", None)
+    return bool(isinstance(task, dict) and task.get("_presence_turn") and in_process_stop_now(owner_ctx))
 
 
 def _mark_owner_stop_control_drained(

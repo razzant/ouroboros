@@ -360,7 +360,6 @@ def _expiry_enforcement_queue(monkeypatch, tmp_path, task_id, meta):
     q_isolated = _isolate_queue(monkeypatch, tmp_path, running={task_id: meta})
     monkeypatch.setattr(q, "FINALIZATION_GRACE_SEC", 120.0, raising=False)
     monkeypatch.setattr(q, "get_task_idle_timeout_sec", lambda: 60.0)
-    monkeypatch.setattr(q, "get_per_call_timeout_ceiling_sec", lambda: 0.0)
     monkeypatch.setattr(q, "get_task_abs_ceiling_sec", lambda: 10_000_000.0)
     monkeypatch.setattr(q, "_ensure_reaper_started", lambda: None)
     jobs = []

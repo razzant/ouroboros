@@ -32,7 +32,6 @@ def test_split_root_post_work_is_exempt_from_the_solve_ceiling_once_its_actor_dr
                       root_phase_checkpoint={"post_task_synthesis": "running"})
     write_task_result(actor, "owner", "completed" if settled else "running", result="answer")
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000)  # runtime is ~4000s
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)

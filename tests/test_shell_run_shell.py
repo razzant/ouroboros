@@ -122,10 +122,15 @@ class TestPerCallTimeout:
     def test_resolve_override_no_deadline_passthrough(self):
         assert _resolve_effective_timeout(360, None, override_sec=5) == 5
 
-    def test_resolve_override_clamped_by_deadline(self, tmp_path):
-        # remaining ~100s -> cap = max(60, min(1800, 50)) = 60 -> min(99999, 60)
+    def test_resolve_override_clamped_by_deadline(self, tmp_path, monkeypatch):
+        # remaining ~100 s is inside the 120 s finalization reserve: the child gets 1 s, a fast
+        # typed timeout, never the former 60 s floor that spent half the reserve.
+        monkeypatch.setattr("ouroboros.task_pacing.effective_finalization_reserve_sec", lambda ctx: 120.0)
         ctx = self._ctx_with_deadline(tmp_path, 100)
-        assert _resolve_effective_timeout(360, ctx, override_sec=99999) == 60
+        assert _resolve_effective_timeout(360, ctx, override_sec=99999) == 1
+        # ~1000 s left: the remainder less the reserve, never half of it.
+        ctx = self._ctx_with_deadline(tmp_path, 1000)
+        assert 878 <= _resolve_effective_timeout(360, ctx, override_sec=99999) <= 880
 
     def test_resolve_override_zero_falls_through_to_default(self, monkeypatch):
         # override 0 -> falls through to the config SSOT default (OUROBOROS_TOOL_TIMEOUT_SEC=600),
@@ -327,17 +332,30 @@ def test_run_shell_deadline_caps_real_default_timeout(monkeypatch):
     monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 600})
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr("ouroboros.deadline_utils.utc_now", lambda: datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr("ouroboros.task_pacing.effective_finalization_reserve_sec", lambda ctx: 120.0)
     ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:10:00Z"})
 
-    assert _resolve_effective_timeout(600, ctx) == 300
+    assert _resolve_effective_timeout(600, ctx) == 480  # 600 s left less the reserve, not half of it
 
 
 def test_run_shell_explicit_timeout_wins_over_deadline(monkeypatch):
+    from datetime import datetime, timezone
+
     monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
+    # The clock is pinned: this deadline is 20 minutes ahead, not already behind us.
+    monkeypatch.setattr("ouroboros.deadline_utils.utc_now", lambda: datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc))
     ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:20:00Z"})
 
-    assert _resolve_effective_timeout(360, ctx) == 42
+    assert _resolve_effective_timeout(360, ctx) == 42  # the former 60 s floor widened it
+
+
+def test_a_spent_deadline_resolves_no_fresh_window(monkeypatch):
+    monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
+    ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:20:00Z"})  # long past
+
+    assert _resolve_effective_timeout(360, ctx, override_sec=7200) == 1
 
 
 # ---------------------------------------------------------------------------

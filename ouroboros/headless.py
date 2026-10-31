@@ -126,7 +126,8 @@ def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mod
     """Create a forked or empty execution drive; other modes keep the parent.
 
     Forks copy identity/world/registry and global knowledge except on Project
-    tasks, which copy no knowledge file. Memory initializes empties.
+    tasks, which copy no knowledge file. Memory initializes empties. The drive's
+    ``state/state.json`` is written last, after the seed: a drive it names is complete.
     """
 
     mode = str(memory_mode or "shared").strip().lower()
@@ -139,6 +140,8 @@ def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mod
     child.mkdir(parents=True, exist_ok=True)
     for rel in ("memory", "logs", "state", "task_results"):
         (child / rel).mkdir(parents=True, exist_ok=True)
+    if mode == "forked":
+        _copy_stable_memory(parent, child, project_id=str(project_id or "").strip())
     atomic_write_json(
         child / "state" / "state.json",
         {
@@ -149,12 +152,25 @@ def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mod
         },
         trailing_newline=True,
     )
-    if mode == "forked":
-        _copy_stable_memory(parent, child, project_id=str(project_id or "").strip())
     from ouroboros.task_custody import record_drive_arrival
 
     record_drive_arrival(parent, parent / HEADLESS_TASKS_DIR, task_id)  # the settlement lap looks at it alone
     return child
+
+
+def prepared_drive_mode(drive: pathlib.Path, task_id: str) -> Optional[str]:
+    """``prepare_task_drive``'s own record of the complete drive it made for ``task_id``: its mode; "" when the
+    record is unreadable or names another task or mode; ``None`` when none was written (no drive, or one whose
+    preparation never finished)."""
+    path = pathlib.Path(drive) / "state" / "state.json"
+    if not path.exists():
+        return None
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    named = isinstance(state, dict) and state.get("headless_task_id") == task_id
+    return state["memory_mode"] if named and state.get("memory_mode") in {"forked", "empty"} else ""
 
 
 def _resolve_retention_days(retention_days: Optional[int]) -> int:

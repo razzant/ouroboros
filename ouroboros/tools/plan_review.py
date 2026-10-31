@@ -36,7 +36,6 @@ from ouroboros.config import (
     get_llm_transport_read_timeout_sec,
     get_review_enforcement,
     get_task_abs_ceiling_sec,
-    operation_window_sec,
 )
 from ouroboros.tools import plan_ask, plan_packet
 from ouroboros.tools.plan_review_runtime import REVIEWER_EFFORT_SCHEMA as _REVIEWER_EFFORT_SCHEMA
@@ -54,13 +53,16 @@ RETIRED_FIELDS = frozenset({"spec", "review_disposition", "author_action", "auth
                             "invariants", "decisions", "deferred", "affected_resources"})
 
 
-def _plan_task_tool_timeout_sec() -> float:
+def _plan_task_tool_timeout_sec() -> Optional[float]:
     """The outer settlement envelope of one call (never a cognition cutoff): an
-    ``agent_session`` participant inherits the task's operation window, an API
-    participant one transport read plus one finalization grace, and the entry covers
-    either plus one grace."""
-    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()),
-                operation_window_sec(get_task_abs_ceiling_sec()))
+    ``agent_session`` participant inherits the task's lifetime, an API participant one
+    transport read plus one finalization grace, and the entry covers either plus one grace.
+    ``None`` without a lifetime: a session seat then has no window, so neither does the
+    entry; the call's drain observes the owner's controls and a deadline still clamps it."""
+    lifetime = get_task_abs_ceiling_sec()
+    if lifetime is None:
+        return None
+    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()), float(lifetime))
             + get_finalization_grace_sec())
 
 

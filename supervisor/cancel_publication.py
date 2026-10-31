@@ -431,7 +431,7 @@ def _publish_cancelled_task(
     reload, so the stored status is emitted instead.
     """
     from supervisor import workers
-
+    from ouroboros.model_wait import record_execution_close
     from ouroboros.task_results import STATUS_CANCELLED
     from ouroboros.headless import terminal_task_files_ready
 
@@ -439,10 +439,10 @@ def _publish_cancelled_task(
         return CANCEL_FAILED  # Publication/cleanup cannot outrun terminal source custody.
 
     settled_status = str((stored or {}).get("status") or STATUS_CANCELLED)
-    # The row leaves RUNNING only NOW — death confirmed, terminal result durable.
-    # A natural task_done that raced us may have consumed the row already; that
-    # handler also emitted the terminal event, so whoever pops the row owns the
-    # emit and the card resolves exactly once.
+    # The row leaves RUNNING only NOW — death confirmed, terminal result durable; its #939 clock closes first.
+    # A natural task_done that raced us may have consumed the row already (it closed the clock and emitted the
+    # terminal event), so whoever pops the row owns the emit and the card resolves exactly once.
+    record_execution_close(q.DRIVE_ROOT, task_id, task, q.RUNNING.get(task_id))
     with q._queue_lock:
         row_owned = q.RUNNING.pop(task_id, None) is not None
     try:

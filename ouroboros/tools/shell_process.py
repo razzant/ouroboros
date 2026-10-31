@@ -3,11 +3,14 @@
 Owns the tracked subprocess registry, the one admission/publication protocol
 its producers start children through (``tracked_start``) and the restart
 exit's own finalization scope (``exit_finalization``), its panic-time
-request and the ordinary stop's tree kill, the
+request and the ordinary stop's tree kill, the one command wait that also
+reads an in-process turn's Stop now (``communicate_or_stop``), the
 PYTHONPATH scrubbing that keeps an external workspace from shadow-importing
 Ouroboros, the single normalized per-command timeout resolution (which the
-loop's outer wait reuses, ``command_timeout_for_call``), the return-code and
-bounded stdout/stderr rendering, and the probe that decides whether a
+loop's outer wait reuses, ``command_timeout_for_call``) with the refusal a spent
+task bound gives before any child starts, the return-code and complete
+stdout/stderr rendering with the result of a child that never returned
+(``unfinished_command_result``), and the probe that decides whether a
 resolved cwd is reachable through the workspace executor. The
 run_command/run_script handlers and the tool descriptors stay with
 ``tools/shell.py``.
@@ -16,19 +19,20 @@ run_command/run_script handlers and the tool descriptors stay with
 from __future__ import annotations
 
 import logging
+import math
 import os
 import pathlib
 import subprocess
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, List, Mapping, Optional
+from typing import Any, Callable, List, Mapping, Optional
 
 from ouroboros.platform_layer import kill_process_tree, request_process_tree_kill, scrub_repo_from_pythonpath, subprocess_new_group_kwargs
 from ouroboros.config import SETTINGS_DEFAULTS, load_settings, runtime_environ
 from ouroboros.owned_shutdown import stop_begun
 from ouroboros.tools.registry import ToolContext
-from ouroboros.deadline_utils import deadline_remaining_sec
+from ouroboros.deadline_utils import deadline_clamped_timeout_sec, deadline_expired
 from ouroboros.workspace_executor import executor_ref_from_ctx
 from ouroboros.workspace_executor import map_host_path as executor_map_host_path
 
@@ -49,6 +53,84 @@ class CommandAdmissionClosed(RuntimeError):
     """Emergency Stop or this server generation's begun stop refused a tracked start before its Popen."""
 
     process_not_started = True
+
+
+class CommandStopped(subprocess.SubprocessError):
+    """Stop now ended an in-process turn's command wait (``communicate_or_stop``): neither a result nor a
+    timeout. ``exit_observed`` is the observed end only (the child's exit and, where the caller's stop
+    confirms the backend, that confirmation); otherwise it is unknown, never a confirmed kill.
+    ``output``/``stderr`` keep everything the command wrote, whole."""
+
+    def __init__(self, cmd: Any, output: str, stderr: str, *, exit_observed: bool) -> None:
+        super().__init__(f"Stop now ended {cmd!r}; its exit was {'observed' if exit_observed else 'not observed'}")
+        self.cmd, self.output, self.stderr, self.exit_observed = cmd, output, stderr, exit_observed
+
+
+def unfinished_command_result(ctx: Any, ended: subprocess.SubprocessError, timeout_sec: int, tool: Optional[str], *,
+                              root: str, cwd: Any) -> str:
+    """The result of a run_command/run_script child that never returned, after its handler published the process
+    facts. A timeout keeps its legacy text, typed ``TOOL_TIMEOUT`` by the adapter. Stop now (``CommandStopped``) is
+    the calling ``tool``'s typed ``SHELL_ERROR``, never a success: the host killed the command; everything it wrote
+    is kept, masked, beside whether its exit was observed."""
+    if isinstance(ended, CommandStopped):
+        from ouroboros.tools.tool_result import _publish_process_result
+
+        seen = ("its exit was observed" if ended.exit_observed
+                else "its exit was NOT observed, so whether it still runs is unknown")
+        return _publish_process_result(ctx, "SHELL_ERROR", (
+            f"⚠️ SHELL_ERROR ({tool or 'run_command'}): Stop now ended this turn while the command ran; the host sent "
+            f"its process tree the timeout's own kill and {seen} (root={root}, cwd={cwd}).\n\n"
+            f"{_format_process_output(ended.output, ended.stderr)}"))
+    return (
+        f"⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of {timeout_sec}s "
+        f"and the host killed what it could still reach of its process tree; a background child may survive untracked (root={root}, cwd={cwd}). NOTE: this is the per-command "
+        f"FOREGROUND timeout, NOT the task deadline. For genuinely long-running compute (training, "
+        f"sampling, large builds/downloads), start it with start_service and poll "
+        f"service_status/service_logs while you do other work, or pass an explicit timeout_sec=<seconds> "
+        f"(only the task's own deadline or budget narrows it) — and preserve a best-effort deliverable before the task deadline."
+    )
+
+
+def turn_stop_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
+    """The command wait's Stop-now reader for an in-process turn (``owner_stop.in_process_stop_now``), or
+    ``None`` for a pooled worker, whose Stop is the worker kill, and for no turn at all."""
+    waiter = getattr(ctx, "model_wait_context", None)
+    if waiter is None or getattr(waiter, "worker_slot_held", True):
+        return None
+    from supervisor.owner_stop import in_process_stop_now
+
+    return lambda: in_process_stop_now(ctx)
+
+
+def communicate_or_stop(proc: subprocess.Popen, timeout: Optional[float], stop: Optional[Callable[[], Any]] = None,
+                        end: Optional[Callable[[], Any]] = None) -> tuple:
+    """The one command wait. Without ``stop`` it is ``proc.communicate(timeout)``, as before. With a reader
+    the same requested timeout is waited in slices of the in-flight control cadence
+    (``config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC``); its deadline raises ``TimeoutExpired`` for the caller's
+    own kill. Only a reader answering True stops: ``end()`` stops the work through the caller's own kill
+    (False: it could not confirm the backend's end), the output is read with a 5 s bound and
+    ``CommandStopped`` is raised. An unknown read (``None``) stops nothing and claims no absent Stop."""
+    if stop is None:
+        return proc.communicate(timeout=timeout)
+    from ouroboros import config
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        part = config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC
+        try:
+            return proc.communicate(timeout=part if deadline is None else min(part, max(0.0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(proc.args, timeout) from None
+        if stop() is True:
+            break
+    confirmed = end() if end is not None else None
+    try:
+        output, stderr = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired as exc:  # a descendant outside the group may still hold a pipe
+        output, stderr = exc.output, exc.stderr
+    output, stderr = (value.decode(errors="replace") if isinstance(value, bytes) else value or "" for value in (output, stderr))
+    raise CommandStopped(proc.args, output, stderr, exit_observed=proc.poll() is not None and confirmed is not False)
 
 
 @contextmanager
@@ -118,8 +200,10 @@ def _tracked_subprocess_run(cmd, **kwargs):
     output, decode tolerantly (errors='replace') so binary stdout/stderr (a MIPS
     interpreter, a DOOM framebuffer, raw bytes) surfaces as readable text instead
     of raising UnicodeDecodeError and collapsing the whole call into a
-    shell_error."""
+    shell_error. ``stop`` (``turn_stop_reader``) lets an in-process turn's Stop now
+    end the wait through the timeout's own group kill (``communicate_or_stop``)."""
     timeout = kwargs.pop("timeout", None)
+    stop = kwargs.pop("stop", None)
     record_path = None
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("errors", "replace")
@@ -163,7 +247,7 @@ def _tracked_subprocess_run(cmd, **kwargs):
             confirmed()
         raise
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = communicate_or_stop(proc, timeout, stop, lambda: _kill_process_group(proc))
         return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
         _kill_process_group(proc)
@@ -264,69 +348,113 @@ def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     return scrub_repo_from_pythonpath(env, system_repo)
 
 
+def command_bound_spent(ctx: ToolContext | None) -> bool:
+    """Whether the task's real bound is already spent: its owner deadline has passed or its
+    explicit execution window (#939) has none left. A command started now would outlive the
+    bound by design, so the handlers refuse before any child starts, as ``delegate_start``
+    does; a bound still running, however short, is a clamp, not a refusal."""
+    if ctx is None:
+        return False
+    from ouroboros.model_wait import explicit_execution_window_remaining
+
+    execution_left = explicit_execution_window_remaining(ctx)
+    return deadline_expired(ctx) or (execution_left is not None and execution_left <= 0)
+
+
+def command_bound_refusal_text(tool_name: str) -> str:
+    return (f"⚠️ TASK_DEADLINE_BLOCKED ({tool_name}): this task's deadline or execution budget is already "
+            "spent, so no command was started. Finalize with the verified work so far.")
+
+
+def _longest_command_wait() -> tuple[int, str]:
+    """The longest wait one command can be given here and the wait that sets it: a physical representation, not a
+    policy. The loop's outer wait on the call's future takes at most ``threading.TIMEOUT_MAX`` and adds the settlement
+    margin; where ``subprocess`` reads the child's pipes with ``selectors.PollSelector`` (POSIX), ``poll(2)`` takes a C
+    ``int`` of milliseconds. Past either, the wait raised OverflowError instead of running the command."""
+    import selectors
+
+    from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC
+
+    bounds = [(int(threading.TIMEOUT_MAX) - NESTED_SETTLEMENT_MARGIN_SEC,
+               "the call's outer wait: threading.TIMEOUT_MAX less the settlement margin")]
+    if os.name != "nt" and hasattr(selectors, "PollSelector"):
+        bounds.append(((2**31 - 1) // 1000, "the child's pipe reader: poll(2) takes a C int of milliseconds"))
+    return min(bounds)
+
+
+def _requested_command_timeout(default_timeout_sec: int, override_sec: Any = None) -> tuple[float, str]:
+    """The REQUESTED per-command timeout and where it came from, one precedence chain: per-call ``timeout_sec`` > env
+    ``OUROBOROS_TOOL_TIMEOUT_SEC`` > settings.json > config ``SETTINGS_DEFAULTS`` > the in-code last resort. A
+    non-finite ``timeout_sec`` (JSON ``1e400``, ``-Infinity``, ``NaN``) stays itself for the refusal to name; a
+    non-positive or non-numeric one asks for nothing, as before. An env/settings value equal to the config default is
+    honored (the prior ``!= default_setting`` skip fell through to the in-code 360 s)."""
+    if isinstance(override_sec, float) and not math.isfinite(override_sec):
+        return override_sec, "timeout_sec"
+    try:
+        requested = int(override_sec) if override_sec is not None else 0
+    except (TypeError, ValueError):
+        requested = 0
+    if requested > 0:
+        return requested, "timeout_sec"
+    raw = str(os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC", "") or "").strip()
+    try:
+        if raw and int(raw) > 0:
+            return int(raw), "Tool Timeout (OUROBOROS_TOOL_TIMEOUT_SEC)"
+    except ValueError:
+        pass
+    try:
+        settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
+        if settings_val > 0:
+            return settings_val, "Tool Timeout (OUROBOROS_TOOL_TIMEOUT_SEC)"
+    except Exception:
+        pass
+    cfg_default = int(SETTINGS_DEFAULTS.get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
+    return (cfg_default if cfg_default > 0 else int(default_timeout_sec)), "the default timeout"
+
+
+def command_start_refusal(ctx: ToolContext | None, tool_name: str, override_sec: Any = None) -> str:
+    """Why a command must not start ('' when it may), decided before any child exists: the task's real bound is spent
+    (``command_bound_spent``), or its timeout asks for a wait this platform cannot represent
+    (``_longest_command_wait``), a non-finite one included. A representable timeout is never narrowed here."""
+    if command_bound_spent(ctx):
+        return command_bound_refusal_text(tool_name)
+    requested, source = _requested_command_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, override_sec)
+    longest, bound = _longest_command_wait()
+    if 0 < requested <= longest:  # compared as parsed: a JSON integer may lie past any float, NaN compares false
+        return ""
+    return (f"⚠️ TOOL_ARG_ERROR ({tool_name}): {source}={requested!r} seconds is not a wait this platform can "
+            f"represent; one command here waits at most {longest} seconds ({bound}). No command was started: ask for "
+            f"at most {longest} seconds, or use start_service for longer work.")
+
+
 def _resolve_effective_timeout(
     default_timeout_sec: int,
     ctx: ToolContext | None = None,
     override_sec: int | None = None,
 ) -> int:
-    """Resolve the effective per-command timeout as ONE normalized pipeline:
-    resolve the REQUESTED value from a single precedence chain (per-call
-    ``override_sec`` > env ``OUROBOROS_TOOL_TIMEOUT_SEC`` > settings.json > config
-    ``SETTINGS_DEFAULTS`` > the in-code last-resort ``default_timeout_sec``), then
-    apply the per-call ceiling, then clamp toward the remaining task-deadline budget
-    (60s floor when a deadline exists), then floor at 1s. The outer budget loop
-    remains the hard deadline enforcer.
+    """Resolve the effective per-command timeout as ONE normalized pipeline: the REQUESTED value
+    (``_requested_command_timeout``), narrowed only by the task's real bound: the nearer of the owner
+    deadline and the explicit execution window, less the finalization reserve
+    (``deadline_utils.deadline_clamped_timeout_sec``, the network tools' clamp too).
 
-    Hygiene fix (SSOT): the prior code skipped an env/settings value EQUAL to the
-    config default (``!= default_setting``), so ``OUROBOROS_TOOL_TIMEOUT_SEC=600``
-    (= the SETTINGS_DEFAULTS value) silently fell through to the in-code 360s default.
-    The configured value is now honored regardless of equality, and env/settings
-    values no longer BYPASS the ceiling/deadline clamp. RELEASE NOTE: installs that
-    relied on the buggy effective 360s now get the configured 600s — a foreground
-    command may hold the task longer (still bounded by ceiling + task deadline).
+    A request is honored as written: no separate per-call ceiling (the owner retired
+    ``OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC``), no floor that widens a short request, no
+    half of the remainder held back. Inside the reserve the child gets 1 s, a fast typed
+    timeout; a spent bound gets 1 s here and the handlers start nothing (``command_start_refusal``,
+    checked just before the child starts), so no resolution outlives it. A request this
+    platform cannot wait on is refused before any child starts, and the resolution stays within
+    that wait. The loop's outer wait (``loop_tool_execution._get_tool_timeout``) also takes a saved
+    Tool Timeout of its own: one past ``threading.TIMEOUT_MAX`` still raises there, for every tool.
     """
-    from ouroboros.config import get_per_call_timeout_ceiling_sec
-
-    # 1. Resolve the REQUESTED timeout from a single precedence chain.
-    requested: int | None = None
-    if override_sec is not None:
-        try:
-            ov = int(override_sec)
-        except (TypeError, ValueError):
-            ov = 0
-        if ov > 0:
-            requested = ov
-    if requested is None:
-        raw = str(os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC", "") or "").strip()
-        if raw:
-            try:
-                v = int(raw)
-                if v > 0:
-                    requested = v
-            except ValueError:
-                pass
-    if requested is None:
-        try:
-            settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
-            if settings_val > 0:
-                requested = settings_val
-        except Exception:
-            pass
-    if requested is None:
-        cfg_default = int(SETTINGS_DEFAULTS.get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
-        requested = cfg_default if cfg_default > 0 else int(default_timeout_sec)
-
-    # 2. Per-call ceiling.
-    effective = min(requested, get_per_call_timeout_ceiling_sec())
-
-    # 3. Clamp toward the remaining task-deadline budget (60s floor when a deadline exists).
+    requested, _source = _requested_command_timeout(default_timeout_sec, override_sec)
+    longest, _bound = _longest_command_wait()
+    requested = requested if 0 < requested <= longest else longest
+    # Narrow toward the task's real bound; never widen, never past a spent one.
     if ctx is not None:
-        remaining = deadline_remaining_sec(ctx)
-        if remaining > 0:
-            effective = int(max(60, min(effective, remaining * 0.5)))
-
-    # 4. Floor at 1s.
-    return max(1, int(effective))
+        if command_bound_spent(ctx):
+            return 1
+        requested = deadline_clamped_timeout_sec(ctx, requested)
+    return max(1, int(requested))
 
 
 # The handlers that bound their child with ``_resolve_effective_timeout``. The loop's outer
@@ -354,8 +482,11 @@ def command_timeout_for_call(tool_name: str, args: Mapping[str, Any], ctx: ToolC
 from ouroboros.tools.process_facts import describe_returncode as _describe_returncode  # noqa: E402, F401 — historical private spelling for call sites and tests
 
 
-def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> str:
-    """Mask diagnostic copies before bounds can split a selected secret."""
+def _format_process_output(stdout: str, stderr: str) -> str:
+    """The complete labelled output with its diagnostic copies masked.
+
+    No bound is applied here: the producer's whole text reaches the exact-source delivery
+    (``tool_result_delivery``), which keeps it readable and bounds only what the mind is shown."""
     from ouroboros.tools.process_facts import redact_process_data
 
     stdout_text = redact_process_data(str(stdout or ""))
@@ -365,10 +496,7 @@ def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> 
         parts.append(f"STDOUT:\n{stdout_text}")
     if stderr_text.strip():
         parts.append(f"STDERR:\n{stderr_text}")
-    rendered = "\n\n".join(parts) if parts else "STDOUT:\n(empty)"
-    if len(rendered) > limit:
-        rendered = rendered[: limit // 2] + "\n...(truncated)...\n" + rendered[-limit // 2 :]
-    return rendered
+    return "\n\n".join(parts) if parts else "STDOUT:\n(empty)"
 
 
 def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
@@ -401,7 +529,7 @@ def _publish_finished_process_facts(ctx, res, started_ts) -> int:
 
 
 def _publish_unfinished_process_facts(
-    ctx, started_ts, *, timed_out: bool = False, spawn_error: BaseException | None = None,
+    ctx, started_ts, *, timed_out: bool = False, spawn_error: BaseException | None = None, killed: bool = False,
 ) -> None:
     """Typed facts for a child with no returncode (timeout / pre-exec failure).
 
@@ -426,8 +554,9 @@ def _publish_unfinished_process_facts(
                           timed_out=timed_out,
                           # The deadline is enforced BY the host killing the
                           # subprocess tree, so a timeout is always also a host
-                          # kill — the one fact a Windows kill can still carry.
-                          killed_by_host=timed_out,
+                          # kill — the one fact a Windows kill can still carry. A Stop now kill
+                          # (``killed``) is claimed only once its exit was observed.
+                          killed_by_host=timed_out or killed,
                           pre_exec_failure=(
                               type(spawn_error).__name__
                               if isinstance(spawn_error, OSError) else ""))

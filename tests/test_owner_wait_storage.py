@@ -331,7 +331,6 @@ def test_pending_park_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
         finally:
             conn.execute("ROLLBACK")
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000 if hard_axis == "absolute_ceiling" else 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     reaps = stdqueue.Queue()

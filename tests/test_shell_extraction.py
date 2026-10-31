@@ -128,8 +128,10 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # only outputs accept a relative '../', judged by resolved location. Rolled for the
     # tool-reuse sprint (20.10): run_script says the selected cwd is not on Python's
     # import path and that a reusable script lives in a skill payload run with run_command.
+    # Rolled for the R1 platform-wait refusal: both timeout_sec descriptions say only the task's deadline or budget
+    # narrows a timeout and that one this platform cannot wait on is refused.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "466aa899d0d740260f9eddb78cb22226ffdebe29e73b0407d5c07bd5636ebd92"
+        "8fa8cdd98000032c970512ab62996281bdff885e80e977699ae2b220edb71309"
     )
     original = json.loads(schema_bytes)
     for schema in original:
@@ -146,7 +148,7 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # sentence and its local-POSIX limit), so this derived digest rolled with the one above.
     assert hashlib.sha256(json.dumps(original, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode()).hexdigest() == (
-        "4ba056c5559b6d6766712f1235ad06d7dc2d36fd76a3103a5b3d6896cdecd0f6"
+        "3551b8d0cb3fcd4689936be9aca215b9e3a39033991dd1652a9f6050c3a4361a"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

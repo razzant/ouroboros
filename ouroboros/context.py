@@ -150,6 +150,13 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     return frame_presence_user_content(task, content)
 
 
+def _first_user_content(task: Dict[str, Any], env: Any) -> Any:
+    """A task's first input, its staged images read from the drive its actor runs on. A row on the canonical drive may
+    record no ``drive_root`` (promotion's and Continue's do not: assignment and terminal files read that field as a
+    fork), so the actor's own ``env.drive_root`` names the store its inputs were staged in."""
+    return build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root})
+
+
 def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Native image blocks for staged attachment images (v6.52.0, P1).
 
@@ -819,7 +826,7 @@ def _capture_context_core(
 
         core = _capture_declared_context_core(
             env, memory, task, ctx, runtime_builder=build_runtime_section,
-            user_builder=build_user_content, captured_at=captured_at, base_prompt=base_prompt,
+            user_builder=lambda row: _first_user_content(row, env), captured_at=captured_at, base_prompt=base_prompt,
             bible_md=bible_md, architecture_md=architecture_md, development_md=development_md,
             books=books, book_errors=book_errors, design_nav=design_nav, connections=connections,
         )
@@ -1013,7 +1020,7 @@ def _capture_context_core(
         dynamic_sections=capture_sections(dynamic_parts, prefix="dynamic"),
         section_root=_section_root_for(env, ctx), section_task_id=str(task.get("id") or ""),
         user_content_json=json.dumps(
-            build_user_content(task), ensure_ascii=False, sort_keys=True,
+            _first_user_content(task, env), ensure_ascii=False, sort_keys=True,
         ),
         docs_need_development=docs_need_development,
         reference_books=tuple(books),

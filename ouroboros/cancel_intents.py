@@ -771,9 +771,17 @@ def active_intents(
     enforcement is degraded) before the read still returns ``{}`` — fail-soft
     read, fail-closed write.
     """
+    return read_active_intents(drive_root, disclose_corruption=disclose_corruption, strict=strict)[0]
+
+
+def read_active_intents(
+    drive_root: Any, *, disclose_corruption: bool = False, strict: bool = False,
+) -> Tuple[Dict[str, Dict[str, Any]], Optional[List[str]]]:
+    """``active_intents`` and, from the same one read, the task ids it could not see: the quarantined
+    malformed rows, or ``None`` when the projection itself is unreadable (every row unseen)."""
     path = _intents_path_read(drive_root)
     if not path.is_file():
-        return {}
+        return {}, []
     try:
         from ouroboros.utils import read_json_dict
 
@@ -793,7 +801,7 @@ def active_intents(
             })
         if strict:
             raise CancelIntentProjectionCorrupt(str(exc)) from exc
-        return {}
+        return {}, None
     malformed = [str(tid) for tid, row in intents.items() if not isinstance(row, dict)]
     if malformed:
         # GR6-3 row strictness on the enforcement read: a malformed per-task
@@ -835,7 +843,7 @@ def active_intents(
         str(tid): dict(row)
         for tid, row in intents.items()
         if isinstance(row, dict)
-    }
+    }, malformed
 
 
 def _intents_path_read(drive_root: Any) -> pathlib.Path:

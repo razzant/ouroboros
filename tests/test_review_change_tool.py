@@ -317,7 +317,12 @@ def test_the_schema_is_the_planned_call() -> None:
     # only an UNKNOWN body fact; a recognized body or foreign root is unchanged.
     description = props["treat_as_body"]["description"]
     assert "unknown" in description and "unchanged" in description and "even if it is not the body" not in description
-    assert entry.timeout_sec and entry.timeout_sec > 0
+    # A finite lifetime gives a finite settlement envelope; none gives none (1A: the wave's
+    # drain and the system report observe the owner's controls instead of a 6 h host timer).
+    from ouroboros.config import get_task_abs_ceiling_sec
+
+    assert (entry.timeout_sec is None) == (get_task_abs_ceiling_sec() is None)
+    assert entry.timeout_sec is None or entry.timeout_sec > 0
 
 
 # --- Root, subject and rules layer --------------------------------------------------

@@ -3,8 +3,8 @@
 A fresh install (no settings document) runs with neither; a document an earlier release
 wrote without them keeps the finite values it ran under, and reading never rewrites it;
 a typo — blank, zero, negative, a word — is never "no bound"; explicit owner/evaluator
-values bind exactly; and every operation that used to inherit the task lifetime keeps a
-finite window of its own.
+values bind exactly, a short accepted lifetime included; and an operation that inherits the
+lifetime has no invented window when the task has none, while every true bound narrows it.
 """
 
 from __future__ import annotations
@@ -132,25 +132,31 @@ def test_runtime_readers_absent_empty_malformed_and_floors(monkeypatch):
     assert (get_max_rounds(), get_task_abs_ceiling_sec()) == (200, 21600)
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "12")
     monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "60")
-    assert (get_max_rounds(), get_task_abs_ceiling_sec()) == (12, 300), "the 300 s floor stays"
+    # Retired pin "the 300 s floor stays": the gateway accepted 60 and runtime widened it (R8).
+    assert (get_max_rounds(), get_task_abs_ceiling_sec()) == (12, 60), "an accepted lifetime applies as written"
+    monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "1")
+    assert get_task_abs_ceiling_sec() == 1
     monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "unlimited")
     assert get_task_abs_ceiling_sec() is None
 
 
-def test_operation_window_is_finite_and_every_deadline_still_narrows_it(monkeypatch):
-    from ouroboros.config import OPERATION_WINDOW_FALLBACK_SEC, operation_window_sec
+def test_a_retrieving_operation_has_no_invented_window_and_every_true_bound_narrows_it(monkeypatch):
+    """Retired pin (1A): an unbounded task's session got the 6 h operation window. Now absence
+    stays absence; an explicit window, a deadline and a finite lifetime still narrow."""
+    import ouroboros.config as config
     from ouroboros.deadline_utils import review_operation_timeout_sec
 
     monkeypatch.delenv("OUROBOROS_TASK_ABS_CEILING_SEC", raising=False)
-    assert operation_window_sec(None) == float(OPERATION_WINDOW_FALLBACK_SEC) == 21600.0
-    assert operation_window_sec(3600) == 3600.0
-    # An agent session with no lifetime bound gets the finite window, never "no window".
-    assert review_operation_timeout_sec(10_000_000, route="agent_session") == 21600.0
+    monkeypatch.delenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", raising=False)
+    assert not hasattr(config, "operation_window_sec") and not hasattr(config, "OPERATION_WINDOW_FALLBACK_SEC")
+    assert review_operation_timeout_sec(retrieves=True) is None
+    assert review_operation_timeout_sec(10_000_000, retrieves=True) == 10_000_000
     soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=600)).isoformat()
-    narrowed = review_operation_timeout_sec(10_000_000, route="agent_session", deadline_at=soon)
+    narrowed = review_operation_timeout_sec(retrieves=True, deadline_at=soon)
     assert 0 < narrowed <= 600
     monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "1800")
-    assert review_operation_timeout_sec(10_000_000, route="agent_session") == 1800.0
+    assert review_operation_timeout_sec(10_000_000, retrieves=True) == 1800.0
+    assert review_operation_timeout_sec(retrieves=True) == 1800.0
 
 
 def test_round_limit_resolution_keeps_the_presence_inline_cap(monkeypatch):

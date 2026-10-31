@@ -18,7 +18,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from tests.test_presence_continuation_process import Host, eventually, host_result
+from tests.test_presence_continuation_process import ANSWER, Host, eventually, host_result
 from tests.test_presence_continuation_process import tmp_path as _short_socket_tmp_path
 
 tmp_path = _short_socket_tmp_path  # the child Host's macOS-safe short AF_UNIX root
@@ -81,12 +81,15 @@ def test_public_stop_reaches_a_parked_author_in_another_process(tmp_path, monkey
 
 
 
-def test_public_wrap_up_reaches_a_parked_author_in_another_process(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scenario,answered", [("incoming", True), ("wrap_up_foreign_tool", False)],
+                         ids=["native_finish_answers", "foreign_tool_says_nothing"])
+def test_public_wrap_up_reaches_a_parked_author_in_another_process(tmp_path, monkeypatch, scenario, answered):
     """Wrap up instead of Stop now, the same parked author in another Host process. This process's
     shared owner finds the turn only through the author census, records the graceful intent and arms
     the existing episode on the child's own mailbox; the child wakes, drains it and takes its one
-    tool-less ``[OWNER_STOP]`` round. This fixture's model answers that round with a tool call a
-    tool-less round cannot take, so the honest ending is a Wrap up without an answer: nothing is said."""
+    tool-less ``[OWNER_STOP]`` round. The fixture's model answers that round with its native finish,
+    which is the answer the owner receives; answered instead with a tool that round cannot take, the
+    honest ending is a Wrap up without an answer: nothing is said."""
     import queue as queues
     import threading
 
@@ -99,7 +102,7 @@ def test_public_wrap_up_reaches_a_parked_author_in_another_process(tmp_path, mon
     from supervisor.owner_stop import owner_stop_ending
     from supervisor.task_lifecycle import sweep_cancel_intents
 
-    host = Host(tmp_path, 1, "blocking")
+    host = Host(tmp_path, 1, "blocking", scenario)
     try:
         first = host.turn().json()
         assert first.get("status") == "continuing", first
@@ -127,24 +130,26 @@ def test_public_wrap_up_reaches_a_parked_author_in_another_process(tmp_path, mon
         request_id = ci.active_intent(data, ref)["request_id"]
         assert [(entry["kind"], entry["msg_id"]) for entry in drain_owner_entries(data, ref, set())] == [
             ("finalize_now", f"ownerstop:{request_id}")]
-        # The child's own loop drained it and took the one bounded round: no further call, nothing said.
+        # The child's own loop drained it and took the one bounded round: no further call.
         final = eventually(lambda: (reply if (reply := host.work(ref)).status_code == 200 else None))
-        assert final.json()["status"] == "failed" and final.json()["text"] == "" and final.json()["outcome"] == "silent"
+        status = "completed" if answered else "failed"
+        assert (final.json()["status"], final.json()["text"], final.json()["outcome"]) == (
+            (status, ANSWER, "message") if answered else (status, "", "silent"))
         inputs = host.inputs()
         assert len(inputs) == 3 and inputs[-1]["messages"][-1]["content"].startswith("[OWNER_STOP]")
         assert ci.active_intent(data, ref)["control_drained_at"]
         row = host_result(data, ref)
-        assert row["status"] == "failed" and row["reason_code"] == "owner_requested_finalization"
+        assert row["status"] == status and row["reason_code"] == "owner_requested_finalization"
         assert row["cancel_origin"]["stop_policy"] == "finalize_then_cancel"
         assert row["cancel_origin"]["request_id"] == request_id
-        assert owner_stop_ending(row) == ("wrap_up", "stop")
+        assert owner_stop_ending(row) == ("wrap_up", "summary" if answered else "stop")
         assert [(event["type"], event["system_type"]) for event in iter(lambda: bus.get_nowait() if not bus.empty() else None, None)] == [
-            ("send_message", "finalization_notice")]
+            ("send_message", "finalization_notice")]  # the episode's own toast, answered or not
         # As for Stop now, the tree stays pending while the author's own paid review still runs.
         eventually(lambda: ref not in live_authors(drive_root=data))
         assert sweep_cancel_intents(now=time.time() + 3600) == {ref: "failed"}
         assert host.client.post("/fixture/release-review").status_code == 200
         eventually(lambda: sweep_cancel_intents(now=time.time() + 3600) == {ref: "cancelled"})
-        assert ci.active_intents(data) == {} and host_result(data, ref)["status"] == "failed"
+        assert ci.active_intents(data) == {} and host_result(data, ref)["status"] == status
     finally:
         host.close()

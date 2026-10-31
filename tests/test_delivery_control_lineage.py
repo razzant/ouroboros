@@ -294,13 +294,20 @@ def test_provider_terminal_incomplete_replace_prefers_current_candidate(
         provider_terminal=True,
     )
 
-    assert text == current.full_text
+    # Owner 30 Oct (A): a whole request the provider cut at its output limit is not an incomplete reply; it
+    # replaces the candidate, the cut disclosed (test_forced_completion_request). A null finish or a native
+    # call keeps the current candidate.
+    selected = response_meta["finish_reason"] == "length"
+    assert text == ("decoded replacement" if selected else current.full_text)
     assert raw not in text
-    assert registry._ctx._delivery_candidate is current
-    assert registry._ctx._delivery_control_required is False
+    assert (registry._ctx._delivery_candidate is current) is not selected
+    # Only the selected request resolves its control (#447): a null-finished reply and one that also carried a
+    # native call are not adopted and consume nothing, so the latch stays armed (R4).
+    assert registry._ctx._delivery_control_required is not selected
     assert usage["execution_status"] == "failed"
     assert usage["reason_code"] == "provider_terminal"
-    assert returned_trace["forced_finalization"]["source"] == "retained_candidate"
+    assert returned_trace["forced_finalization"]["source"] == ("model" if selected else "retained_candidate")
+    assert ("output limit (length)" in str(usage.get("terminal_host_notice") or "")) is selected
 
 
 @pytest.mark.parametrize(
@@ -362,7 +369,9 @@ def test_incomplete_armed_invalid_keeps_typed_reason(
     assert text == ("Answer" if host_suffix else retained.full_text)
     assert raw not in text
     assert published.degraded_reason == loop.REASON_DELIVERY_CONTROL_DEGRADED
-    assert registry._ctx._delivery_control_required is False
+    # A reply that also carried a native call consumes nothing (latch armed); publishing a host-suffixed
+    # retained answer's model bytes replaces the candidate, which clears it as on every forced rail.
+    assert registry._ctx._delivery_control_required is (bool(response_meta["tool_call_count"]) and not host_suffix)
     assert usage["execution_status"] == execution_status
     assert usage["reason_code"] == external_reason
     assert usage["terminal_origin"] == loop.TERMINAL_ORIGIN_MODEL_FINAL

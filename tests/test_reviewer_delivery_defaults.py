@@ -183,8 +183,8 @@ def test_the_classifier_ignores_the_process_environment_startup_projects_setting
     ({"OUROBOROS_MAX_ROUNDS": "unlimited"}, "77", None, None, None),
     ({"OUROBOROS_TASK_ABS_CEILING_SEC": None}, "60", 21600, "saved_invalid", None),
     ({"OUROBOROS_TASK_ABS_CEILING_SEC": ""}, "60", 21600, "saved_invalid", ""),
-    ({"OUROBOROS_TASK_ABS_CEILING_SEC": 60}, None, 300, "saved", 60),
-    ({}, "60", 300, "env", 60),
+    ({"OUROBOROS_TASK_ABS_CEILING_SEC": 60}, None, 60, "saved", 60),  # retired: the 300 s floor (R8)
+    ({}, "60", 60, "env", 60),
 ])
 def test_startup_notice_matches_loaded_runtime_bounds_and_raw_presence(
         monkeypatch, tmp_path, document, launch_env, expected, origin, raw):
@@ -239,8 +239,7 @@ def test_startup_notice_matches_loaded_runtime_bounds_and_raw_presence(
     assert f"= {effective} {'seconds' if key == lifetime else 'rounds'}" in text
     assert ("key is absent" in text) == (origin == "document_absent_key")
     assert ("finite fallback" in text) == (origin == "saved_invalid")
-    if key == lifetime and raw == 60:
-        assert "as 60; the runtime minimum applies" in text
+    assert "runtime minimum" not in text  # an accepted value applies as written
     assert "nothing was changed here" in text and "chose" not in text
 
 
@@ -272,13 +271,74 @@ def test_an_upgraded_untouched_install_hears_each_notice_once(notice_world):
     # Which reviewers run is the review-pool migration's own report
     # (server_maintenance._startup_review_pool_notice), not an upgrade notice.
     notice_world.notices.startup_upgrade_notices({})
-    assert [kw["system_type"] for _chat, _text, kw in notice_world.sent] == ["optional_bounds_notice"]
+    assert [kw["system_type"] for _chat, _text, kw in notice_world.sent] == ["optional_bounds_notice",
+                                                                             "command_timeout_notice"]
     assert all(kw["require_write"] and kw["role"] == "system" for _c, _t, kw in notice_world.sent)
     assert "200 rounds" in notice_world.sent[0][1] and "21600 seconds" in notice_world.sent[0][1]
     notice_world.notices.startup_upgrade_notices({})
-    assert len(notice_world.sent) == 1  # never repeated
-    assert "optional_bounds_notified" in notice_world.state
+    assert len(notice_world.sent) == 2  # never repeated
+    assert "optional_bounds_notified" in notice_world.state and "command_timeout_notified" in notice_world.state
     assert not hasattr(notice_world.notices, "REVIEWER_DEFAULT_NOTICE")
+
+
+@pytest.mark.parametrize("saved, shown", [(1800, "(1800 s by default; 1800 s in this install's settings)"),
+                                          (900, "(1800 s by default; 900 s in this install's settings)")])
+def test_every_install_that_ran_under_the_per_call_ceiling_hears_once_that_it_retired(notice_world, monkeypatch,
+                                                                                       saved, shown):
+    # The read seam strips the retired key, so the value shown is the document's; a configured value too.
+    monkeypatch.setattr(notice_world.notices, "_raw_settings_document",
+                        lambda: {"OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC": saved})
+    settings = {"OUROBOROS_TASK_IDLE_TIMEOUT_SEC": 900}
+    notice_world.notices.startup_upgrade_notices(settings)
+    notice_world.notices.startup_upgrade_notices(settings)
+    texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "command_timeout_notice"]
+    assert len(texts) == 1 and texts[0].startswith(f"⏱️ The separate per-call ceiling of earlier versions {shown} "
+                                                   "is retired. ")
+    assert "spent, or a timeout this platform cannot wait on, starts no command" in texts[0]
+    assert "await_messages wait lasts as long as it asks, within the deadline and Stop" in texts[0]
+    assert "flagged idle after Idle Timeout (900 s here) of silence" in texts[0]
+
+
+def test_the_retired_per_call_ceiling_has_no_getter_and_a_stored_value_is_stripped(tmp_path, monkeypatch):
+    """The last readers moved (commands 3A, await_messages B, silence A): a document that saved the
+    1800 default (nearly every install) loads without it, the env cannot bring it back, and the
+    retired-key notice names what replaced it."""
+    import json
+
+    from ouroboros import config, runtime_limits
+    from ouroboros.settings_defaults import RETIRED_SETTING_KEYS, RETIRED_SETTING_SUCCESSORS, retired_setting_keys_notice
+
+    key = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
+    assert key in RETIRED_SETTING_KEYS and key not in config.SETTINGS_DEFAULTS
+    assert not hasattr(config, "get_per_call_timeout_ceiling_sec")
+    assert not hasattr(runtime_limits, "get_per_call_timeout_ceiling_sec")
+    assert RETIRED_SETTING_SUCCESSORS[key] == ("OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_TASK_IDLE_TIMEOUT_SEC")
+    assert f"{key} -> OUROBOROS_TOOL_TIMEOUT_SEC, OUROBOROS_TASK_IDLE_TIMEOUT_SEC" in retired_setting_keys_notice((key,))
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({key: 1800, "OUROBOROS_MAX_WORKERS": 7}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
+    monkeypatch.setenv(key, "30")
+    loaded = config.load_settings()
+    assert int(loaded["OUROBOROS_MAX_WORKERS"]) == 7 and key not in loaded
+
+
+def test_a_document_without_the_key_hears_only_what_is_true_on_a_fresh_install_too(notice_world, monkeypatch):
+    """Opus R1: an install that ran under the implicit 1800 s default need not have saved the key, so any settings
+    document still owes the notice (3A: every old install), and a fresh install hears it once its first document
+    exists. Its words therefore claim no ceiling of this install: they say what earlier versions did."""
+    monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: {"OUROBOROS_MAX_WORKERS": 5})
+    notice_world.notices.startup_upgrade_notices({})
+    [text] = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "command_timeout_notice"]
+    assert text.startswith("⏱️ The separate per-call ceiling of earlier versions (1800 s by default) is retired. ")
+    assert "this install" not in text and "on this install" not in text
+    assert "command_timeout_notified" in notice_world.state
+
+
+def test_an_install_that_never_ran_under_the_command_ceiling_hears_nothing(notice_world, monkeypatch):
+    monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: None)
+    notice_world.notices.startup_upgrade_notices({})
+    assert [kw["system_type"] for _chat, _text, kw in notice_world.sent] == []
+    assert "command_timeout_notified" not in notice_world.state
 
 
 def test_no_owner_chat_or_a_failed_write_leaves_the_notice_owed(notice_world, monkeypatch):
@@ -342,7 +402,8 @@ def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_pa
     prepare_startup_state(tmp_path)
     monkeypatch.setattr(notices, "_raw_settings_document", lambda: {"OUROBOROS_MAX_ROUNDS": 150,
                         "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"})
-    ss.save_state({"owner_chat_id": 7, "owner_id": 1})
+    # Only the task-limits notice is owed here; the command-timeout notice already went.
+    ss.save_state({"owner_chat_id": 7, "owner_id": 1, notices.COMMAND_TIMEOUT_NOTICE_KEY: "already"})
     real_update, real_append = ss.update_state, ds.append
     delivered = []
     failed = False

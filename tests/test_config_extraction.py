@@ -129,8 +129,7 @@ _ADDED_OWNERS = {
     "defaults_for_settings_document": settings_scales,
     "_optional_bound_setting": runtime_limits,
     "get_max_rounds": runtime_limits,
-    "OPERATION_WINDOW_FALLBACK_SEC": runtime_limits,
-    "operation_window_sec": runtime_limits,
+    "IDLE_LEASE_MAX_SEC": runtime_limits,
     # #939: the numeric duration resolver is a leaf; config supplies its settings seam.
     "_CURRENT_TASK_CEILING": runtime_limits,
     "explicit_execution_timeout_sec": runtime_limits,
@@ -249,8 +248,6 @@ _MOVED_OWNERS = {
     "get_max_active_subagents_per_root": runtime_limits,
     "get_max_subagent_depth": runtime_limits,
     "get_max_workers": runtime_limits,
-    "get_per_call_timeout_ceiling_sec": runtime_limits,
-    "get_plan_task_deadline_min_sec": runtime_limits,
     "get_post_task_evolution_budget_usd": runtime_limits,
     "get_restart_drain_max_sec": runtime_limits,
     "get_safety_call_timeout_sec": runtime_limits,

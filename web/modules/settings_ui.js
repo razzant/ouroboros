@@ -652,6 +652,11 @@ export function renderSettingsPage() {
                                 <label for="s-tool-timeout">Tool Timeout (s)</label>
                                 <input id="s-tool-timeout" type="number" value="600" class="ui-control" name="s-tool-timeout">
                             </div>
+                            <div class="form-field ui-field">
+                                <label for="s-model-max-concurrency">Concurrent Requests per Model</label>
+                                <input id="s-model-max-concurrency" type="number" step="1" value="3" class="ui-control" name="s-model-max-concurrency" aria-describedby="s-model-max-concurrency-help">
+                                <div class="settings-inline-note ui-field-help" id="s-model-max-concurrency-help">Direct API and local-model requests at once, counted per model, key and server. <code>0</code> or less = no limit. A request over the limit waits up to <span id="s-model-slot-wait">180</span>&nbsp;s, then is refused and not sent. Claudexor routes are not limited here.</div>
+                            </div>
                         </div>
                     </div>
 

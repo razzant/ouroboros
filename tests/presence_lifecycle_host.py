@@ -196,6 +196,8 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
             # Its tool delivered the result: the mind chooses silence; a receipt never chooses for it.
             return {"content": None, "tool_calls": [tool_call("finish_task", {
                 "action": "finish", "silent": True, "answer": TOOL_NOTE}, "select")]}
+        if scenario == "wrap_up_foreign_tool" and h.calls == 3:
+            return review("foreign-tool")  # a tool the owner's tool-less Wrap up round cannot take
         return finish("select", message=REVISED_ANSWER if scenario == "late_child" else ANSWER)
 
     h.script = script

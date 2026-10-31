@@ -55,6 +55,7 @@ from ouroboros.tools.shell_audit import (
 )
 from ouroboros.tools.shell_process import (  # noqa: F401
     _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
+    CommandStopped,
     _active_subprocesses,
     _describe_returncode,
     _executor_can_run_cwd,
@@ -64,7 +65,10 @@ from ouroboros.tools.shell_process import (  # noqa: F401
     _shell_env_for_cwd,
     _subprocess_lock,
     _tracked_subprocess_run,
+    command_start_refusal,
     kill_all_tracked_subprocesses,
+    turn_stop_reader,
+    unfinished_command_result,
 )
 from ouroboros.tools.shell_effects import (  # noqa: F401
     _get_changed_files,
@@ -154,6 +158,7 @@ _SHELL_BUILTINS = frozenset([
 ])
 
 _SHELL_OPERATORS = frozenset(["&&", "||", "|", ";", ">", ">>", "<", "<<"])
+_PREFER_READERS = "For reading files, prefer `read_file`.\nFor searching code, prefer `search_code`."
 # A redirect GLUED into a single argv element ("2>/dev/null", "2>&1", ">out.log",
 # "&>x") — the standalone-operator set above misses these. Anchored at the element
 # START so a '>' inside a sed/awk/grep expression ("s/a>b/c/g") is NOT flagged.
@@ -291,9 +296,7 @@ def _run_shell(
     **kwargs,
 ) -> str:
     # Per-call timeout override (canonical timeout_sec; timeout accepted as alias).
-    timeout_sec = kwargs.get("timeout_sec")
-    timeout = kwargs.get("timeout")
-    _timeout_override = timeout_sec if timeout_sec is not None else timeout
+    _timeout_override = kwargs["timeout_sec"] if kwargs.get("timeout_sec") is not None else kwargs.get("timeout")
     bucket = str(kwargs.get("bucket") or "")
     skill_name = str(kwargs.get("skill_name") or "")
     if isinstance(cmd, str):
@@ -316,9 +319,7 @@ def _run_shell(
                     'Correct usage:\n'
                     '  run_command(cmd=["git", "log", "--oneline", "-10"])\n\n'
                     'Wrong usage (the failure that brought you here):\n'
-                    '  run_command(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n'
-                    'For reading files, prefer `read_file`.\n'
-                    'For searching code, prefer `search_code`.')
+                    '  run_command(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n' + _PREFER_READERS)
             try:
                 parts = shlex.split(cmd)
                 if parts:
@@ -333,9 +334,7 @@ def _run_shell(
                 '  run_command(cmd=["grep", "-r", "pattern", "path/"])\n'
                 '  run_command(cmd=["python", "-c", "print(1+1)"])\n\n'
                 'Wrong usage:\n'
-                '  run_command(cmd="grep -r pattern path/")\n\n'
-                'For reading files, prefer `read_file`.\n'
-                'For searching code, prefer `search_code`.')
+                '  run_command(cmd="grep -r pattern path/")\n\n' + _PREFER_READERS)
 
     if not isinstance(cmd, list):
         return _pre_spawn_refusal(ctx, "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings.")
@@ -405,7 +404,6 @@ def _run_shell(
         _scratch_reason = _scratch_safety_reason(ctx, scratch_abs, pathlib.Path(work_dir), repo_root)
         if _scratch_reason:
             return _pre_spawn_refusal(ctx, f"⚠️ SCRATCH_BLOCKED: {_scratch_reason}.")
-    timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=_timeout_override)
     bootstrap_process_path()
     # Emergency bundled-node PATH prepend; None on every healthy path (env stays byte-identical).
     node_resolution = active_node_resolution(ctx)
@@ -413,13 +411,17 @@ def _run_shell(
     selected_env = selected_process_environment()
     run_env = apply_env_path_prepend(overlay_env(_shell_env_for_cwd(ctx, pathlib.Path(work_dir)), selected_env), node_resolution)
     record_runtime_selection(ctx, cmd, work_dir, run_env)
+    timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=_timeout_override)
+    if refusal := command_start_refusal(ctx, "run_command", _timeout_override):  # last, beside the dispatch
+        return _pre_spawn_refusal(ctx, refusal)
     # Two clocks (D2-1): EPOCH feeds the st_mtime audit; MONOTONIC feeds durations.
     _command_start_epoch = time.time()
     _command_start_ts = time.monotonic()
     res = None
+    stop = turn_stop_reader(ctx)  # an in-process turn's Stop now; a pooled worker's Stop is its kill
     try:
         if output_context is not None or _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
-            res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec,
+            res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec, stop=stop,
                                    env_overlay=interpreter_path_overlay(node_resolution),
                                    **({"executor": output_context.executor} if output_context else {}),
                                    **({"target_env": selected_env} if selected_env else {}))
@@ -427,7 +429,7 @@ def _run_shell(
             res = _tracked_subprocess_run(
                 cmd, cwd=str(work_dir),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=timeout_sec,
+                text=True, timeout=timeout_sec, stop=stop,
                 **({"env": run_env} if run_env is not None else {}),
             )
         process_meta = {"operation_outcome": getattr(res, "operation_outcome", "completed")}
@@ -533,18 +535,13 @@ def _run_shell(
         return _disclose_output_audit_failure(ctx, result, audit_error)
     except OwnerPauseRefused as exc:
         return _publish_tool_result(ctx, launch_refusal_result(exc))
-    except subprocess.TimeoutExpired:
-        _publish_unfinished_process_facts(ctx, _command_start_ts, timed_out=True)
-        # Timeout-created scratch still needs its exclusion fingerprint.
+    except (CommandStopped, subprocess.TimeoutExpired) as ended:
+        stopped = isinstance(ended, CommandStopped)
+        _publish_unfinished_process_facts(ctx, _command_start_ts, timed_out=not stopped,
+                                          killed=stopped and ended.exit_observed)
+        # Timeout- or Stop-created scratch still needs its exclusion fingerprint.
         _record_scratch_fingerprints(ctx, scratch_abs)
-        return (
-            f"⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of {timeout_sec}s "
-            f"and the host killed what it could still reach of its process tree; a background child may survive untracked (root={binding.root}, cwd={work_dir}). NOTE: this is the per-command "
-            f"FOREGROUND timeout, NOT the task deadline. For genuinely long-running compute (training, "
-            f"sampling, large builds/downloads), start it with start_service and poll "
-            f"service_status/service_logs while you do other work, or pass an explicit timeout_sec=<seconds> "
-            f"(up to the per-call ceiling) — and preserve a best-effort deliverable before the task deadline."
-        )
+        return unfinished_command_result(ctx, ended, timeout_sec, kwargs.get("_tool"), root=binding.root, cwd=work_dir)
     except Exception as e:
         if res is None:
             _publish_unfinished_process_facts(ctx, _command_start_ts, spawn_error=e)
@@ -587,6 +584,8 @@ def _run_script(
     body = str(script or "")
     if not body.strip():
         return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, "⚠️ TOOL_ARG_ERROR (run_script): script is required.", tool="run_script"))
+    if refusal := command_start_refusal(ctx, "run_script", timeout_sec if timeout_sec is not None else timeout):
+        return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, refusal, tool="run_script"))
     try:
         binding = _resolved_binding or build_resolved_resource_binding(
             ctx, operation="shell", process_cwd=cwd, bucket=bucket, skill_name=skill_name,
@@ -646,7 +645,7 @@ def _run_script(
         result = _run_shell(
             ctx, argv, cwd=cwd, outputs=outputs, scratch=scratch,
             _resolved_binding=binding, timeout_sec=timeout_sec, timeout=timeout,
-            env_from_settings=kwargs.get("env_from_settings"),
+            env_from_settings=kwargs.get("env_from_settings"), _tool="run_script",
         )
     except (OSError, ValueError) as exc:
         if shell_entered:
@@ -744,8 +743,8 @@ def get_tools() -> List[ToolEntry]:
 	                "timeout_sec": {
 	                    "type": "integer",
 	                    "description": (
-	                        "Optional per-call timeout in seconds for long builds/tests (alias: timeout). "
-	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
+	                        "Optional per-call timeout in seconds for long builds/tests (alias: timeout). Narrowed only by "
+	                        "the task's deadline or budget; one this platform cannot wait on is refused. Omit for the default."
 	                    ),
 	                },
 	                **RESULT_VIEW_PARAMS,
@@ -790,8 +789,8 @@ def get_tools() -> List[ToolEntry]:
 	                "timeout_sec": {
 	                    "type": "integer",
 	                    "description": (
-	                        "Optional per-call timeout in seconds for long scripts (alias: timeout). "
-	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
+	                        "Optional per-call timeout in seconds for long scripts (alias: timeout). Narrowed only by "
+	                        "the task's deadline or budget; one this platform cannot wait on is refused. Omit for the default."
 	                    ),
 	                },
 	                **RESULT_VIEW_PARAMS,

@@ -1,9 +1,9 @@
 """await_messages: hold the worker slot until an unread mailbox entry exists.
 
-The tool delivers nothing and takes no lease of its own. Its window is bounded by
-the request, the per-call timeout ceiling and, under a deadline, the emit window.
+The tool delivers nothing and takes no lease of its own. Its window is the request
+and, under a deadline or execution budget, the emit window: no ceiling of its own (owner 30 Oct, B).
 What keeps the supervisor's idle rail off a waiting task is the executor's typed
-in-flight tool lease (kind ``tool``), NOT the ceiling, and the close of that lease
+in-flight tool lease (kind ``tool``), NOT the window, and the close of that lease
 is the progress stamp the next model round starts from (a completed tool call is
 the task's own work, like a completed model round or a narration line). The
 lifecycle tests drive the real enforcer through that lease instead of comparing
@@ -22,7 +22,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import ouroboros.config as config_mod
 from ouroboros.owner_mailbox import (
     KIND_FINALIZE_NOW,
     PROVENANCE_PEER_TASK,
@@ -59,7 +58,6 @@ def _ctx(tmp_path):
 
 def _install_clock(monkeypatch, clock):
     monkeypatch.setattr(control_mod, "time", clock)
-    monkeypatch.setattr(config_mod, "get_per_call_timeout_ceiling_sec", lambda: 1800)
 
 
 def test_pending_mail_returns_immediately_without_delivering_or_acknowledging(tmp_path, monkeypatch):
@@ -88,16 +86,16 @@ def test_pending_mail_returns_immediately_without_delivering_or_acknowledging(tm
         ("typing_start", None, "thinking")]
 
 
-def test_empty_mailbox_times_out_after_the_ceiling_bounded_window(tmp_path, monkeypatch):
+def test_an_empty_mailbox_waits_the_whole_requested_window(tmp_path, monkeypatch):
     clock = _FakeClock()
     _install_clock(monkeypatch, clock)
 
     out = json.loads(_await_messages(_ctx(tmp_path), 5000))
 
     assert out["reason"] == "timeout" and out["pending"] is False
-    assert (out["requested_sec"], out["window_sec"], out["window_bound"]) == (5000, 1800, "ceiling")
-    assert out["elapsed_sec"] == 1800.0 and out["slot"] == "held"
-    assert max(clock.sleeps) <= _AWAIT_MESSAGES_POLL_SEC and sum(clock.sleeps) == 1800.0
+    assert (out["requested_sec"], out["window_sec"], out["window_bound"]) == (5000, 5000, "requested")
+    assert out["elapsed_sec"] == 5000.0 and out["slot"] == "held"
+    assert max(clock.sleeps) <= _AWAIT_MESSAGES_POLL_SEC and sum(clock.sleeps) == 5000.0
     assert "cache_horizon" not in out  # no applied horizon recorded on this ctx
 
 
@@ -132,11 +130,33 @@ def test_an_owner_stop_control_ends_the_wait_like_any_message(tmp_path, monkeypa
     assert out["elapsed_sec"] == 2 * _AWAIT_MESSAGES_POLL_SEC
 
 
+@pytest.mark.parametrize("state", ["stop-now", "unreadable"])
+def test_an_in_process_turn_reads_its_open_intent_and_keeps_an_unreadable_one_unknown(tmp_path, monkeypatch, state):
+    """R4: an inline Presence turn's Stop now writes no mail, so the poll reads the turn's open intent: an immediate
+    one ends the wait at once; an unreadable projection stops nothing and is recorded as unknown, never as no Stop."""
+    clock = _FakeClock()
+    _install_clock(monkeypatch, clock)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "cancel_intents.json").write_text(json.dumps(
+        {"intents": {"waiter": {"stop_policy": "immediate", "request_id": "r1"}}}) if state == "stop-now" else "{not json",
+        encoding="utf-8")
+    ctx = _ctx(tmp_path)
+    ctx.model_wait_context = SimpleNamespace(worker_slot_held=False, canonical_root=tmp_path, task_id="waiter")
+
+    out = json.loads(_await_messages(ctx, 6))
+
+    if state == "stop-now":
+        assert (out["reason"], out["pending"], out["elapsed_sec"]) == ("owner_stop", False, 0)
+        assert "owner_stop_state" not in out
+    else:
+        assert (out["reason"], out["owner_stop_state"], out["elapsed_sec"]) == ("timeout", "unknown", 6)
+
+
 @pytest.mark.parametrize("requested, window, bound", [
     (0, 1, "minimum"), (-5, 1, "minimum"), (1, 1, "requested"),
-    (1800, 1800, "requested"), (1801, 1800, "ceiling"),
+    (1800, 1800, "requested"), (1801, 1801, "requested"), (7200, 7200, "requested"),
 ])
-def test_the_window_is_bounded_by_the_request_and_the_per_call_ceiling(tmp_path, monkeypatch, requested, window, bound):
+def test_the_window_is_the_request_with_a_one_second_floor(tmp_path, monkeypatch, requested, window, bound):
     clock = _FakeClock()
     _install_clock(monkeypatch, clock)
 
@@ -159,9 +179,9 @@ def test_a_deadline_bounds_the_window_inside_the_executors_emit_window(tmp_path,
     monkeypatch.setattr(pacing, "effective_finalization_reserve_sec", lambda ctx: 60.0)
     ctx = _ctx(tmp_path)
     ctx.task_metadata = {"deadline_at": (utc_now() + _dt.timedelta(seconds=400)).isoformat()}
-    outer = _deadline_clamped_timeout(SimpleNamespace(_ctx=ctx), "await_messages", 1860)
+    outer = _deadline_clamped_timeout(SimpleNamespace(_ctx=ctx), "await_messages", None)
 
-    out = json.loads(_await_messages(ctx, 1800))
+    out = json.loads(_await_messages(ctx, 7200))
 
     assert out["window_bound"] == "deadline" and out["reason"] == "deadline" and out["pending"] is False
     assert outer - 2 <= out["window_sec"] <= outer - 1 < outer <= 340  # emit window ≈ 400 − 60
@@ -188,6 +208,39 @@ def test_a_spent_emit_window_peeks_once_and_returns_without_sleeping(tmp_path, m
     assert out["reason"] == "owner_mailbox_pending" and out["pending"] is True and clock.sleeps == []
 
 
+def test_under_an_execution_budget_the_real_executor_gets_the_typed_result_not_a_timeout(tmp_path, monkeypatch):
+    """Through the real dispatch, in real time: the executor's kill timer for this windowless entry is the
+    task's explicit execution budget less the reserve (``deadline_clamped_timeout_sec``, #939), and the real
+    handler ends its wait one second inside it with its typed ``deadline`` result, never a TOOL_TIMEOUT
+    while the wait keeps sleeping in an abandoned thread."""
+    import ouroboros.loop_tool_execution as lte
+    import ouroboros.task_pacing as pacing
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "unlimited")
+    monkeypatch.setattr(pacing, "effective_finalization_reserve_sec", lambda ctx: 1.0)
+    monkeypatch.setattr(lte, "load_settings", lambda: {})
+    (tmp_path / "work").mkdir()
+    (tmp_path / "logs").mkdir()
+    ctx = ToolContext(repo_dir=tmp_path / "work", drive_root=tmp_path, task_id="waiter")
+    ctx.task_attempt, ctx.task_metadata, ctx.task_started_at = 1, {"execution_timeout_sec": 5}, _time.time()
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=tmp_path)
+    registry.set_context(ctx)
+    args = {"timeout_sec": 6}
+    outer = lte._get_tool_timeout(registry, "await_messages", args)
+    assert outer is not None and 2 <= outer <= 4, outer
+    call = {"id": "call-await", "function": {"name": "await_messages", "arguments": json.dumps(args)}}
+
+    start = _time.monotonic()
+    result = lte._execute_with_timeout(registry, call, tmp_path / "logs", outer, task_id="waiter")
+    took = _time.monotonic() - start
+
+    assert result["tool_result"].code != "TOOL_TIMEOUT", result["result"]
+    out = json.loads(result["result"])
+    assert (out["reason"], out["window_bound"], out["pending"]) == ("deadline", "deadline", False)
+    assert 1 <= out["window_sec"] <= outer - 1 and took < outer
+
+
 def test_the_applied_cache_horizon_is_reported_from_the_recorded_fact(tmp_path, monkeypatch):
     clock = _FakeClock()
     _install_clock(monkeypatch, clock)
@@ -205,11 +258,11 @@ def test_a_non_integer_window_is_an_argument_error(tmp_path):
     assert out.startswith("⚠️ TOOL_ARG_ERROR (await_messages)")
 
 
-def _supervisor_over_one_stale_task(monkeypatch, tmp_path, *, now: float, ceiling: float, stale_sec: float):
+def _supervisor_over_one_stale_task(monkeypatch, tmp_path, *, now: float, stale_sec: float):
     """The real enforcer, lease handler and executor frames over ONE RUNNING row whose
-    last progress stamp is ``stale_sec`` old — deeper than the rail
-    ``max(idle, ceiling + 120)`` — so a supervisor tick that finds no reprieve dates
-    silence attention (#1376); only a hard rail reaps into ``jobs``."""
+    last progress stamp is ``stale_sec`` old — deeper than the configured silence
+    window (60 s here) — so a supervisor tick that finds no reprieve dates silence
+    attention (#1376); only a hard rail reaps into ``jobs``."""
     from supervisor import queue as squeue, workers
 
     task_id = "waiter"
@@ -221,14 +274,13 @@ def _supervisor_over_one_stale_task(monkeypatch, tmp_path, *, now: float, ceilin
     monkeypatch.setattr(squeue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(squeue, "FINALIZATION_GRACE_SEC", 0.0)
     monkeypatch.setattr(squeue, "get_task_idle_timeout_sec", lambda: 60.0)
-    monkeypatch.setattr(squeue, "get_per_call_timeout_ceiling_sec", lambda: ceiling)
     monkeypatch.setattr(squeue, "get_task_abs_ceiling_sec", lambda: 10_000_000.0)
     monkeypatch.setattr(squeue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(squeue, "persist_queue_snapshot", lambda reason="": True)
     jobs: list[dict] = []
     monkeypatch.setattr(squeue, "_reap_queue", types.SimpleNamespace(put=jobs.append))
     monkeypatch.setattr(workers, "WORKERS", {})
-    assert stale_sec > max(60.0, ceiling + 120.0)
+    assert stale_sec > 60.0
     events: queue.Queue = queue.Queue()
     tools = SimpleNamespace(_ctx=SimpleNamespace(event_queue=events, task_id=task_id, task_attempt=1,
                                                  task_metadata={}))
@@ -261,8 +313,8 @@ def test_the_idle_rail_spares_a_waiting_task_through_the_executors_tool_lease_an
     """The real enforcer, driven through the real executor frames.
 
     ``last_progress_at`` is stamped by completed model rounds and narration, so a
-    round that spent 1500s in earlier tools and then waits the full ceiling sits
-    3300s past its last stamp — far beyond the rail ``max(idle, ceiling + 120)``.
+    round that spent 1500s in earlier tools and then waits the 1800s it asked for sits
+    3300s past its last stamp — far beyond the configured silence window.
     The task survives while the executor's ``tool_call_started`` cognitive lease is
     open; and when ``tool_call_finished`` closes it, that close IS a progress stamp
     (a completed tool call is the task's own work), so the supervisor tick between
@@ -272,19 +324,18 @@ def test_the_idle_rail_spares_a_waiting_task_through_the_executors_tool_lease_an
     the rail is intact, only re-based.
     """
     now = _time.time()
-    ceiling = 1800.0
-    sim = _supervisor_over_one_stale_task(monkeypatch, tmp_path, now=now, ceiling=ceiling,
-                                          stale_sec=1500.0 + ceiling)
+    waited = 1800.0
+    sim = _supervisor_over_one_stale_task(monkeypatch, tmp_path, now=now, stale_sec=1500.0 + waited)
 
-    started = _executor_frame(sim, {"type": "tool_call_started", "timeout_sec": int(ceiling) + 60,
+    started = _executor_frame(sim, {"type": "tool_call_started", "timeout_sec": None,
                                     "args": {"timeout_sec": 1800}})
     assert (started["kind"], started["phase"], started["operation_id"]) == ("tool", "started", "call-1")
     assert sim.meta["active_operation_leases"]["call-1"]["kind"] == "tool"
     sim.tick(now)
     assert sim.jobs == [] and sim.task_id in sim.running and "finalization_requested_at" not in sim.meta
-    assert sim.meta["last_progress_at"] == now - (1500.0 + ceiling)  # an OPEN lease is not progress
+    assert sim.meta["last_progress_at"] == now - (1500.0 + waited)  # an OPEN lease is not progress
 
-    finished = _executor_frame(sim, {"type": "tool_call_finished", "duration_sec": ceiling, "is_error": False})
+    finished = _executor_frame(sim, {"type": "tool_call_finished", "duration_sec": waited, "is_error": False})
     assert finished["phase"] == "finished" and "active_operation_leases" not in sim.meta
     assert now <= sim.meta["last_progress_at"] <= _time.time()  # the close stamped progress
 
@@ -295,7 +346,7 @@ def test_the_idle_rail_spares_a_waiting_task_through_the_executors_tool_lease_an
 
     # The ordinary idle rail is intact: one full window after the stamp with no model
     # round since, the task's silence is dated for attention and it keeps running.
-    rail = max(60.0, ceiling + 120.0)
+    rail = 60.0  # the configured window itself (owner 30 Oct, A), no command ceiling beneath it
     stamp = sim.meta["last_progress_at"]
     sim.tick(stamp + rail - 1.0)
     assert sim.jobs == [] and sim.task_id in sim.running and "silence_attention" not in sim.meta
@@ -313,12 +364,10 @@ def test_a_closed_tool_lease_stamps_progress_but_extends_no_hard_rail(tmp_path, 
     from supervisor import queue as squeue
 
     now = _time.time()
-    ceiling = 1800.0
-    sim = _supervisor_over_one_stale_task(monkeypatch, tmp_path, now=now, ceiling=ceiling,
-                                          stale_sec=1500.0 + ceiling)
-    _executor_frame(sim, {"type": "tool_call_started", "timeout_sec": int(ceiling) + 60,
-                          "args": {"timeout_sec": 1800}})
-    _executor_frame(sim, {"type": "tool_call_finished", "duration_sec": ceiling, "is_error": False})
+    waited = 1800.0
+    sim = _supervisor_over_one_stale_task(monkeypatch, tmp_path, now=now, stale_sec=1500.0 + waited)
+    _executor_frame(sim, {"type": "tool_call_started", "timeout_sec": None, "args": {"timeout_sec": 1800}})
+    _executor_frame(sim, {"type": "tool_call_finished", "duration_sec": waited, "is_error": False})
     assert sim.meta["last_progress_at"] >= now
     if hard_rail == "absolute_ceiling":
         monkeypatch.setattr(squeue, "get_task_abs_ceiling_sec", lambda: 4000.0)  # started 5000s ago
@@ -350,13 +399,13 @@ def test_registered_on_every_contract_surface_and_takes_no_lease_of_its_own():
     assert set(entry.schema["parameters"]["properties"]) == {
         "timeout_sec", "mode", "senders", "tasks", "runs", "services", "wake_at", "wake_after_sec"}
     assert entry.schema["parameters"]["properties"]["mode"]["enum"] == ["in_slot", "warm", "cold"]
-    # The registered kill timeout sits above the largest window the tool can choose.
-    assert entry.timeout_sec == int(config_mod.get_per_call_timeout_ceiling_sec()) + 60
+    # No outer window of its own: the request, the executor's deadline clamp and Stop (its mail or the turn's intent) bound it.
+    assert entry.timeout_sec is None
     for surface in (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
                     ACTING_SUBAGENT_TOOL_NAMES, UNTRUNCATED_TOOL_RESULTS, _DEADLINE_CLAMPED_TOOLS):
         assert "await_messages" in surface
     assert TOOL_POLICY["await_messages"] == POLICY_SKIP
-    assert "await_messages" not in _PER_CALL_TIMEOUT_TOOLS  # the ceiling is the clamp, not a per-call override
+    assert "await_messages" not in _PER_CALL_TIMEOUT_TOOLS  # its own window bounds it, not a per-call override
     # No lease and no slot lending of its own: the body names no lease and emits no
     # supervisor event — the executor's per-call tool lease is the one that spares it.
     body = inspect.getsource(control_mod._await_messages).split('"""', 2)[2]  # past the docstring
@@ -364,6 +413,21 @@ def test_registered_on_every_contract_surface_and_takes_no_lease_of_its_own():
     description = entry.schema["description"]
     assert "holds your worker slot" in description and "delivers nothing" in description
     assert "never reaped" not in description and "in-flight tool lease" in description
+
+
+def test_the_schema_states_the_attention_lease_bound_the_enforcer_applies():
+    """R4: without a deadline or execution budget the tool lease spares silence attention for IDLE_LEASE_MAX_SEC
+    from its start, while a longer wait keeps running; the schema says so instead of "while it runs"."""
+    from ouroboros.config import IDLE_LEASE_MAX_SEC
+    from supervisor.cognitive_operations import _handle_cognitive_operation
+
+    meta = {"task": {"id": "w"}, "attempt": 1}
+    _handle_cognitive_operation({"task_id": "w", "task_attempt": 1, "operation_id": "call-1", "phase": "started",
+                                 "kind": "tool"}, SimpleNamespace(RUNNING={"w": meta}))
+    lease = meta["active_operation_leases"]["call-1"]["until_ts"] - _time.time()
+    assert IDLE_LEASE_MAX_SEC - 60 < lease <= IDLE_LEASE_MAX_SEC
+    description = control_mod.await_messages_entry().schema["description"]
+    assert f"at most {IDLE_LEASE_MAX_SEC // 3600} hours" in description and "keeps running" in description
 
 
 def test_unknown_or_replayed_completion_cannot_refresh_progress():

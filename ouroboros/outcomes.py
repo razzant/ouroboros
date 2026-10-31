@@ -1095,12 +1095,13 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         usage_status == RESULT_FAILED
         and usage_reason in BEST_EFFORT_REASON_CODES
         and bool(usage.get("_best_effort_extracted"))
-        and text.strip()
+        and (text.strip() or usage.get("wake_silent") is True)
     ):
         # Forced finalization (deadline grace / budget / round limit) that
         # actually EXTRACTED a model answer: honest best-effort, not failure.
         # Deterministic structural gate: forced reason code + the loop's typed
-        # "model answer extracted" fact + non-empty text. A model may begin
+        # "model answer extracted" fact + non-empty text or the author's typed
+        # silent selection (its words may be none). A model may begin
         # its answer with a warning or cross; typography is not provenance. Host
         # fallback strings (e.g. budget rejection notices) never set the
         # extraction fact and stay failed — no text-shape whitewashing.

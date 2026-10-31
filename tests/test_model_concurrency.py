@@ -426,3 +426,36 @@ def test_queue_lock_failure_refuses_but_recovery_runs(monkeypatch, isolated_queu
     monkeypatch.setattr(mc.platform_layer, "acquire_exclusive_file_lock", acquire)
     with mc.model_call_slot("model", route=ROUTE):
         assert len(_records(isolated_queue, "slot")) == 1
+
+
+def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so(isolated_queue):
+    """The Settings field's contract: the 0 / 3 / 7 an owner saves is what the NEXT physical call of a task
+    that started under 3 admits under (the cap is read from the settings document at each call), the save
+    reports that as an immediate effect, a saved 0 means no queue at all, and a positive cap still waits
+    and then refuses. A cap of 0 OR LESS (a hand-saved -1 included) has always meant no queue and is read
+    exactly as saved. The factory value stays 3."""
+    from ouroboros import config
+    from ouroboros.gateway.settings import _effect_buckets
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
+    from ouroboros.utils import atomic_write_json
+
+    key = "OUROBOROS_MODEL_MAX_CONCURRENCY"
+    assert config.SETTINGS_DEFAULTS[key] == 3
+    snapshot = task_settings_snapshot({key: 3}, {key: "3", "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": "1"})
+    settings = isolated_queue / "settings.json"
+    with task_settings_scope(snapshot):
+        assert mc._cap() == 3, "no saved document: the task's own admitted value"
+        for saved in (0, -1, 7, -5, 3):
+            atomic_write_json(settings, {key: saved})
+            assert mc._cap() == saved and mc.enabled() is (saved > 0)
+            assert _effect_buckets([key]) == ([key], []), "saved as an immediate effect, not 'from the next task'"
+        for saved in (0, -1, -5):  # no queue at all, whatever 0-or-less number the document holds
+            atomic_write_json(settings, {key: saved})
+            with mc.model_call_slot("model", route=ROUTE):
+                assert not _records(isolated_queue, "slot") and not _records(isolated_queue, "ticket")
+        atomic_write_json(settings, {key: 2})
+        with mc.model_call_slot("model", route=ROUTE), mc.model_call_slot("model", route=ROUTE):
+            assert len(_records(isolated_queue, "slot")) == 2
+            with pytest.raises(mc.ModelSlotTimeout):
+                with mc.model_call_slot("model", route=ROUTE):
+                    pytest.fail("a request over the cap was sent anyway")

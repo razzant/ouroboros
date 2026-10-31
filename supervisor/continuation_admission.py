@@ -66,7 +66,7 @@ def _recorded_admission(result: Dict[str, Any], predecessor: str, nonce: str) ->
 
 def _replay(q: Any, predecessor: str, nonce: str, successor: str) -> Optional[Dict[str, Any]]:
     from ouroboros.work_stop import hold_fact as budget_hold_fact
-    from ouroboros.owner_continue import binding_sha, mark_claim_admitted
+    from ouroboros.owner_continue import binding_sha, carried_execution_fields, mark_claim_admitted
     from ouroboros.task_results import load_task_result, write_task_result
 
     try:
@@ -95,9 +95,8 @@ def _replay(q: Any, predecessor: str, nonce: str, successor: str) -> Optional[Di
                                   continuation_admission=admission, metadata=(row or stored).get("metadata"),
                                   root_task_id=successor, chat_id=binding.get("chat_id"),
                                   project_id=binding.get("project_id") or "",
-                                  **{k: v for k, v in (row or {}).items()
-                                     if k in {"deadline_at", "reasoning_effort", "workspace_root", "workspace_mode"}
-                                     and v})
+                                  **{k: v for k, v in (row or {}).items() if k in _SUCCESSOR_ROW_KEYS and v},
+                                  **carried_execution_fields(binding))
             if row is not None and row.get("_continuation_prepared"):
                 prepared = row.pop("_continuation_prepared")
                 if q.persist_queue_snapshot(reason="owner_continue_binding_recovered") is not True:
@@ -425,10 +424,165 @@ def _work_identity(q: Any, predecessor: str, result: Dict[str, Any]) -> tuple[st
     return predecessor, _work_name(result)
 
 
+def _recorded_work_limits(result: Dict[str, Any], metadata: Dict[str, Any], contract: Dict[str, Any]) -> Dict[str, Any]:
+    """The same work's own limits, grants and acceptance conditions, as its record carries them.
+
+    Each field is read the way the predecessor's registry and acceptance readers bound it: withheld tools from every
+    carrier (``task_disabled_tools``), resources with the contract winning per key over the row's own map, the policy,
+    the ingress claims, the answer protocol, the delegation rights and the budget profile (its cost stop) an API caller
+    declared from the contract (canonical over stored) else the row, as ``build_task_contract`` reads them. The
+    successor holds them on its stored contract carrier, which its admission builds into its own contract
+    (``enqueue_task``) and its scheduled result keeps for a successor that never starts; its workspace executor rides
+    where the API door stores it. Nothing is added or widened, and only these fields move: the whole contract would
+    also hand on the predecessor's identity (lineage, objective, source).
+    """
+    from ouroboros.consciousness_authority import task_disabled_tools
+    from ouroboros.contracts.task_contract import (
+        build_task_contract, normalize_acceptance_claims, normalize_allowed_resources, normalize_answer_protocol,
+        normalize_disabled_tools, normalize_resource_policy,
+    )
+
+    resources: Dict[str, Any] = {}
+    for source in (result, metadata, contract):
+        resources.update(normalize_allowed_resources(source.get("allowed_resources")))
+    claims = contract.get("acceptance_claims")
+    if claims is None:  # ``success_criteria`` is the builder's input alias of the same claims
+        claims = contract.get("success_criteria") or result.get("acceptance_claims") or metadata.get("acceptance_claims")
+    limits = {
+        "allowed_resources": resources,
+        "resource_policy": normalize_resource_policy(contract.get("resource_policy") or metadata.get("resource_policy")
+                                                     or result.get("resource_policy")),
+        "disabled_tools": normalize_disabled_tools(sorted(task_disabled_tools({**result, "task_contract": contract}))),
+        "acceptance_claims": normalize_acceptance_claims(claims),
+        "answer_protocol": normalize_answer_protocol(contract.get("answer_protocol") or metadata.get("answer_protocol")
+                                                     or result.get("answer_protocol")),
+        **{key: value for key, value in build_task_contract(result).items() if key in {"delegation_budget", "budget_profile"}},
+    }
+    fields = {key: value for key, value in limits.items() if value}
+    carried: Dict[str, Any] = {"task_contract": fields} if fields else {}
+    executor = metadata.get("executor_ref") or result.get("executor_ref")
+    if isinstance(executor, dict) and executor:
+        carried["executor_ref"] = dict(executor)
+    teardown = str(metadata.get("service_teardown") or "").strip().lower()
+    if teardown in {"keep", "stop"}:  # the services' fate at the task's end (``tools/services.task_service_teardown``)
+        carried["service_teardown"] = teardown
+    return carried
+
+
+# The successor row's own copy of what its Continue and its restore read back (the queue row holds it too).
+_SUCCESSOR_ROW_KEYS = ("deadline_at", "reasoning_effort", "workspace_root", "workspace_mode",
+                       "memory_mode", "drive_root", "child_drive_root", "budget_drive_root", "depth")
+_GROUP_FIELDS = ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source",
+                 "billing_group_limit_revision")  # the whole-work group a chain keeps (``_billing_group``)
+# A recorded root drive mode -> the mode its successor's own drive is prepared with: every root drive
+# producer forks unless it recorded "empty"; the API door's project-scoped "shared" runs forked.
+_DRIVE_MODES = {"empty": "empty", "forked": "forked", "shared": "forked"}
+
+
+def _successor_drive_mode(q: Any, predecessor: str, result: Dict[str, Any]) -> str:
+    """The mode of the drive the predecessor's own producer prepared; "" when it ran on the canonical drive. Evidence
+    is a producer's fact only: the row's recorded child drive at ``prepare_task_drive``'s path for this task (API door,
+    promotion, schedule occurrence, this admission), or that producer's record naming this task; a ``task_drives/<id>``
+    scratch folder or any other path proves nothing. The mode is the recorded one (``_DRIVE_MODES``), else the record's;
+    an unsupported value, or one the record contradicts, refuses as unknown: never invented, never silently canonical."""
+    from ouroboros.confined_files import root_spellings
+    from ouroboros.headless import prepared_drive_mode, task_state_dir
+    from ouroboros.task_custody import recorded_execution_drive
+
+    drive = task_state_dir(q.DRIVE_ROOT, predecessor) / "data"
+    state = prepared_drive_mode(drive, predecessor) or ""
+    if not (recorded_execution_drive(result, drive, root_spellings(q.DRIVE_ROOT)) or state):
+        return ""
+    raw = str(result.get("memory_mode") or "").strip().lower()
+    mode = _DRIVE_MODES.get(raw, "") if raw else state
+    if not mode or (state and state != mode):
+        raise ValueError("continuation_drive_mode_unknown")
+    return mode
+
+
+def _successor_drive_fields(q: Any, binding: Dict[str, Any]) -> Dict[str, Any]:
+    """The successor's own drive fields, at the one producer's path for its id ({} on the canonical drive)."""
+    if not binding.get("memory_mode"):
+        return {}
+    from ouroboros.headless import task_state_dir
+
+    path = str(task_state_dir(q.DRIVE_ROOT, binding["successor_task_id"]) / "data")
+    return {"memory_mode": binding["memory_mode"], "drive_root": path, "child_drive_root": path,
+            "budget_drive_root": str(q.DRIVE_ROOT)}
+
+
+def _prepare_successor_drive(q: Any, successor: str, mode: str, project_id: str) -> None:
+    """The successor's OWN drive, prepared once by ``headless.prepare_task_drive`` from the current canonical root,
+    never from the predecessor's. A drive its producer's record (written last) names for this successor and mode is
+    complete and reused untouched; one naming anything else is a conflict; one without a record never finished and is
+    prepared again. A failed preparation admitted nothing, so its partial drive is freed."""
+    from ouroboros.headless import prepare_task_drive, prepared_drive_mode, task_state_dir
+
+    state = prepared_drive_mode(task_state_dir(q.DRIVE_ROOT, successor) / "data", successor)
+    if state == mode:
+        return
+    if state is not None:
+        raise ValueError("continuation_drive_conflict")
+    try:
+        prepare_task_drive(q.DRIVE_ROOT, successor, mode, project_id=project_id)
+    except Exception as exc:
+        _release_unadmitted_drive(q, successor)
+        raise ValueError("continuation_drive_unavailable") from exc
+
+
+def _release_unadmitted_drive(q: Any, successor: str, staged: Optional[List[Dict[str, Any]]] = None) -> None:
+    """Free what this attempt prepared once the successor's admission is PROVEN absent (a refused enqueue, a rollback
+    its snapshot recorded, a failed preparation or input copy): its own drive through the one deletion owner, else the
+    input copies it made (``staged``) while no reservation or live row holds the id; never after a durable or unknown
+    publication, whose accepted work keeps them."""
+    if staged is not None:
+        from ouroboros.artifacts import remove_staged_attachments
+
+        with q._queue_lock:  # a retry reserves under this lock before it copies or reuses the same files
+            if successor not in q.ADMISSION_RESERVATIONS and q.task_settlement_liveness(successor) is False:
+                remove_staged_attachments(staged)
+        return
+    from ouroboros.headless import remove_subagent_task_drive
+
+    try:
+        remove_subagent_task_drive(q.DRIVE_ROOT, successor, live=q.task_settlement_liveness,
+                                   guard=q.task_settlement_interlock, admission_rollback=True)
+    except Exception:
+        log.warning("Continue %s: its unadmitted drive stays for the drive prune", successor, exc_info=True)
+
+
+def _carry_inputs(q: Any, task: Dict[str, Any], predecessor: str, inputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copy the work's declared inputs into the successor's OWN store and declare them on its row as the API door does
+    (manifest, ``attachments``, images, a read line each); returns the copy. A failed copy keeps none of its files and,
+    having admitted nothing, frees the successor's own drive too (``continuation_inputs_unavailable``)."""
+    from ouroboros.artifacts import attachment_manifest_projection, materialize_inherited_attachment_manifest
+    from ouroboros.artifacts import remove_staged_attachments
+    from ouroboros.owner_continue import inputs_text
+
+    drive = pathlib.Path(task.get("drive_root") or q.DRIVE_ROOT)
+    copied, error = materialize_inherited_attachment_manifest(inputs, drive, task["id"])
+    try:
+        if error:
+            raise OSError(error)
+        authority = attachment_manifest_projection(drive, task["id"], copied) if copied else {}
+    except (OSError, ValueError, TypeError) as exc:
+        remove_staged_attachments(copied)
+        if task.get("child_drive_root"):
+            _release_unadmitted_drive(q, task["id"])
+        raise ValueError("continuation_inputs_unavailable") from exc
+    if authority:
+        task.update(authority, attachments=authority["attachment_manifest"],
+                    attachment_images=[row for row in copied if row.get("status") == "staged" and row.get("is_image")])
+        task["text"] = task["objective"] = f"{task['text']}\n\n{inputs_text(predecessor, copied, authority)}"
+    return copied
+
+
 def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: Dict[str, Any],
                     verdict: Dict[str, Any], sources: Dict[str, Any], admission: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.owner_continue import owner_corpus_rows, recorded_system_checkout, work_order_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.dialogue_provenance import presence_binding_authority_metadata
+    from ouroboros.task_pacing import recorded_producer_ceiling
 
     authority_source: Dict[str, Any] = {}
     try:
@@ -441,9 +595,11 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     except Exception:
         log.debug("Predecessor authority pointer unavailable for %s", predecessor, exc_info=True)
     deadline_at = str(binding.get("deadline_at") or "")
+    drive = _successor_drive_fields(q, binding)
     text = work_order_text(predecessor, verdict["cause"], sources, deadline_at=deadline_at,
                            authority_source=authority_source, checkout=recorded_system_checkout(result),
-                           successor_task_id=str(binding.get("successor_task_id") or ""))
+                           successor_task_id=str(binding.get("successor_task_id") or ""),
+                           drive_mode=drive.get("memory_mode", ""))
     # Every episode carries its work: the first root's id and name. The title is
     # that name under ONE prefix, however long the chain.
     work_id, work_name = _work_identity(q, predecessor, result)
@@ -479,17 +635,31 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
         "id": binding["successor_task_id"], "type": "task", "chat_id": binding.get("chat_id"),
         "project_id": str(binding.get("project_id") or ""), "text": text, "objective": text,
         "title": f"{CONTINUE_TITLE_PREFIX}{title}", "suggested_name": f"{CONTINUE_TITLE_PREFIX}{title}",
-        "root_task_id": binding["successor_task_id"], "depth": 0, "delegation_role": "root",
+        "root_task_id": binding["successor_task_id"], "depth": result.get("depth", 0), "delegation_role": "root",
         **({"deadline_at": deadline_at} if deadline_at else {}),
         **{key: binding[key] for key in ("workspace_root", "workspace_mode") if binding.get(key)},
+        # The work's explicit execution budget (#939): the same total, and the closed execution
+        # handed on once (``settle_execution_carry`` at assignment), never a fresh allowance.
+        **({"execution_timeout_sec": binding["execution_timeout_sec"],
+            "_execution_handoff_sec": binding["execution_consumed_sec"]} if "execution_timeout_sec" in binding else {}),
+        # The work's recorded isolation: its OWN drive of the same mode, prepared at admission (``drive``).
+        **drive,
         "metadata": {
             # Legacy results may keep their verified owner reference only on
-            # the source row. Explicit kind/origin stamps still take priority.
-            **consciousness_origin_metadata({**metadata, **(
+            # the source row. Explicit kind/origin stamps still take priority;
+            # a wake's own row names itself as the successor's origin wake.
+            **consciousness_origin_metadata({**metadata, "task_id": predecessor, **(
                 {"origin_message_ref": origin_ref} if isinstance(origin_ref, dict) and origin_ref else {})}),
+            # A place-bound predecessor's binding only: never its speaker carrier, turn or lease.
+            **presence_binding_authority_metadata(metadata, task_contract=contract),
             **({"project_id": binding["project_id"]} if binding.get("project_id") else {}),
             **({"model_role": model_role} if model_role else {}),
             **({"resource_intent": dict(intent)} if isinstance(intent, dict) and intent.get("kind") else {}),
+            # The same work's withheld tools, protected artifacts, resources, criteria, executor and teardown.
+            **_recorded_work_limits(result, metadata, contract),
+            # A producer's money TOTAL for the whole work (a wake's allowance), unchanged: its group spend meets it.
+            **({"root_cost_ceiling_usd": total} if (total := recorded_producer_ceiling(result)) else {}),
+            **{key: drive[key] for key in ("child_drive_root", "budget_drive_root") if key in drive},
             # Keep verified owner-door provenance on its canonical carrier;
             # the new objective below is still the host's continuation text.
             **({"origin_message_ref": dict(origin_ref), "origin_message_text": original["content"]}
@@ -503,14 +673,13 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                 "cause": verdict["cause"],
                 "owner_sources": {"original": sources.get("original"), "schedule": sources.get("schedule"),
                                   **({"start": sources["start"]} if sources.get("start") else {}),
+                                  **({"wake": sources["wake"]} if sources.get("wake") else {}),
+                                  **({"api": sources["api"]} if sources.get("api") else {}),
                                   "later": sources.get("later") or [],
                                   "held_owner_messages": sources.get("held_owner_messages") or {},
                                   "open_relays": sources.get("open_relays") or {}},
                 "peer_context": sources.get("peer_context") or [],
-                "billing_group_id": binding.get("billing_group_id"),
-                "billing_group_limit_usd": binding.get("billing_group_limit_usd"),
-                "billing_group_limit_source": binding.get("billing_group_limit_source"),
-                "billing_group_limit_revision": binding.get("billing_group_limit_revision"),
+                **{key: binding.get(key) for key in _GROUP_FIELDS},
                 "admission": admission,
             },
         },
@@ -535,8 +704,7 @@ def _billing_group(q: Any, predecessor: str, result: Dict[str, Any]) -> Dict[str
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     carried = result.get("billing_group") or metadata.get("billing_group") or metadata.get("continuation") or {}
     if carried.get("billing_group_id") and "billing_group_limit_usd" in carried:
-        return {key: carried.get(key) for key in (
-            "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")}
+        return {key: carried.get(key) for key in _GROUP_FIELDS}
     from ouroboros.usage_admission import ledger_billing_binding, original_group_limit
 
     group = str(result.get("root_task_id") or predecessor)
@@ -600,8 +768,8 @@ def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dic
 def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[str, Any]:
     """Admit (or replay) the owner's Continue of one interrupted root (module docstring)."""
     from ouroboros.owner_continue import (
-        VERB, BINDING_VERSION, binding_sha, claim_on_predecessor, continuation_eligibility,
-        continuation_room, owner_sources, successor_id, valid_nonce,
+        VERB, BINDING_VERSION, binding_sha, carried_execution_fields, claim_on_predecessor, continuation_eligibility,
+        continuation_room, declared_inputs, execution_carry, owner_sources, successor_id, valid_nonce,
     )
     from ouroboros.task_results import STATUS_SCHEDULED, load_task_result, validate_task_id, write_task_result
 
@@ -633,6 +801,11 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
     sources = owner_sources(q.DRIVE_ROOT, result, predecessor)
     if sources["gaps"]:
         return {"ok": False, "error": "owner_source_missing", "gaps": list(sources["gaps"])}
+    try:  # before anything is written: an unknown mode or input set leaves the predecessor untouched
+        drive_mode = "" if claim else _successor_drive_mode(q, predecessor, result)
+        inputs = declared_inputs(predecessor, result, sources)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     try:
         billing = {} if claim else _billing_group(q, predecessor, result)
     except Exception:
@@ -649,6 +822,9 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
         "workspace_mode": str(result.get("workspace_mode") or ""),
         "deadline_at": str(result.get("deadline_at") or (result.get("metadata") or {}).get("deadline_at")
                            or (result.get("task_contract") or {}).get("deadline_at") or ""), **billing,
+        # Eligibility refused an unknown or spent budget: this is the known total and closed execution.
+        **(execution_carry(result) or {}),
+        **({"memory_mode": drive_mode} if drive_mode else {}),  # its own drive's mode; none on the canonical drive
     }
     binding["admission_token"] = f"continue:{binding_sha({k: v for k, v in binding.items() if k != 'admission_token'})[:40]}"
     if not claim:
@@ -700,39 +876,53 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                 "successor_task_id": successor, "unconfirmed": True}
     task["_admission_token"] = token
     task["_continuation_prepared"] = admission["binding_sha256"]
+    try:  # file copies never run under the queue lock
+        if binding.get("memory_mode"):
+            _prepare_successor_drive(q, successor, binding["memory_mode"], str(task.get("project_id") or ""))
+        staged = _carry_inputs(q, task, predecessor, inputs)
+    except ValueError as exc:
+        q.release_task_admission(successor, token)
+        return {"ok": False, "error": str(exc), "successor_task_id": successor}
+    refused, unadmitted = None, False  # a proven absence frees the successor's drive or input copies after the lock
     with q.prepared_root_billing(task), q._queue_lock:  # the ledger read happens before the lock
-        admitted = q.enqueue_task(task, project_admission=project_basis)
+        admitted = q.enqueue_task(task, project_admission=project_basis, continuation=True)  # no consciousness slot
         if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
             q.release_task_admission(successor, token)
-            return {"ok": False, "error": str(admitted["_admission_blocked"]), "successor_task_id": successor}
-        if q.persist_queue_snapshot(reason="owner_continue_admitted") is not True:
+            refused, unadmitted = {"ok": False, "error": str(admitted["_admission_blocked"]),
+                                   "successor_task_id": successor}, True
+        elif q.persist_queue_snapshot(reason="owner_continue_admitted") is not True:
             q.PENDING[:] = [row for row in q.PENDING if str(row.get("id") or "") != successor]
-            q.persist_queue_snapshot(reason="owner_continue_rollback")
+            unadmitted = q.persist_queue_snapshot(reason="owner_continue_rollback") is True
             q.release_task_admission(successor, token)
             # The claim stays: the same nonce retries this admission, a new one is refused.
-            return {"ok": False, "error": "queue_snapshot_persist_failed", "successor_task_id": successor}
-        try:
-            write_task_result(
-                q.DRIVE_ROOT, successor, STATUS_SCHEDULED, continuation_admission=admission,
-            chat_id=task.get("chat_id"), project_id=task.get("project_id") or "", title=task["title"],
-            suggested_name=task["suggested_name"], root_task_id=successor, metadata=task["metadata"],
-            # The binding a successor that never starts must still hand on to its own Continue.
-            **{key: task[key] for key in ("deadline_at", "reasoning_effort", "workspace_root", "workspace_mode")
-               if task.get(key)},
-            **({"reason_code": HOLD_CONTINUATION_WRITER,
-                "resource_limit": {"status": "budget_hold", "auto_resume": False, "exact_continuation": False,
-                                   **task["_budget_pause_hold"]}} if blockers else {}),
-            result=("Continue accepted; held until the interrupted task's own work is settled."
-                    if blockers else "Continue accepted and durably scheduled."))
-        except Exception as exc:
-            return {"ok": False, "error": "continuation_publication_unconfirmed",
-                    "successor_task_id": successor, "unconfirmed": True, "detail": str(exc)[:200]}
-        prepared = admitted.pop("_continuation_prepared")
-        if q.persist_queue_snapshot(reason="owner_continue_committed") is not True:
-            admitted["_continuation_prepared"] = prepared
-            return {"ok": False, "error": "queue_snapshot_persist_failed",
-                    "successor_task_id": successor, "unconfirmed": True}
-        q.release_task_admission(successor, token)
+            refused = {"ok": False, "error": "queue_snapshot_persist_failed", "successor_task_id": successor}
+        else:
+            try:
+                write_task_result(
+                    q.DRIVE_ROOT, successor, STATUS_SCHEDULED, continuation_admission=admission,
+                    chat_id=task.get("chat_id"), project_id=task.get("project_id") or "", title=task["title"],
+                    suggested_name=task["suggested_name"], root_task_id=successor, metadata=task["metadata"],
+                    # The binding a successor that never starts must still hand on to its own Continue.
+                    **{key: task[key] for key in _SUCCESSOR_ROW_KEYS if task.get(key)},
+                    **carried_execution_fields(binding),
+                    **({"reason_code": HOLD_CONTINUATION_WRITER,
+                        "resource_limit": {"status": "budget_hold", "auto_resume": False, "exact_continuation": False,
+                                           **task["_budget_pause_hold"]}} if blockers else {}),
+                    result=("Continue accepted; held until the interrupted task's own work is settled."
+                            if blockers else "Continue accepted and durably scheduled."))
+            except Exception as exc:  # the queue row and its snapshot are durable: the drive stays with them
+                return {"ok": False, "error": "continuation_publication_unconfirmed",
+                        "successor_task_id": successor, "unconfirmed": True, "detail": str(exc)[:200]}
+            prepared = admitted.pop("_continuation_prepared")
+            if q.persist_queue_snapshot(reason="owner_continue_committed") is not True:
+                admitted["_continuation_prepared"] = prepared
+                return {"ok": False, "error": "queue_snapshot_persist_failed",
+                        "successor_task_id": successor, "unconfirmed": True}
+            q.release_task_admission(successor, token)
+    if refused is not None:
+        if unadmitted and (binding.get("memory_mode") or staged):
+            _release_unadmitted_drive(q, successor, None if binding.get("memory_mode") else staged)
+        return refused
     try:
         from ouroboros.owner_continue import mark_claim_admitted
 
@@ -765,9 +955,8 @@ def release_settled_continuations(tree_root: str) -> List[str]:
     from supervisor import queue as q
     released: List[str] = []
     with q._queue_lock:
-        task_ids = [str(task.get("id") or "") for task in q.PENDING if isinstance(task, dict)
-                and writer_wait(task)
-                and ((task.get("metadata") or {}).get("continuation") or {}).get("predecessor_task_id") == tree_root]
+        task_ids = [str(task.get("id") or "") for task in q.PENDING
+                    if held_continuation_predecessors([task]) == [tree_root]]
     for task_id in task_ids:
         observation = observe_held_budget_selection(q, task_id)
         with q._queue_lock:

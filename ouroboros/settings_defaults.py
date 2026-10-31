@@ -136,10 +136,10 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
     # #4 self-DoS guard: max concurrent provider calls per (model, use_local) route; excess
     # worker threads wait (deadline-bounded) instead of storming one model's rate limit. <=0
-    # disables. Default-on, fail-soft (see ouroboros/model_concurrency.py).
+    # disables. Default-on (see ouroboros/model_concurrency.py).
     "OUROBOROS_MODEL_MAX_CONCURRENCY": 3,
     # Hard ceiling (seconds) a provider call waits for a concurrency slot when the task has
-    # NO deadline; past it the call proceeds WITHOUT a slot (never blocks forever). SSOT here.
+    # NO deadline; past it the call is refused before dispatch ($0), never sent without a slot. SSOT here.
     "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 180,
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"
     # for an invented language); "" = not chosen, the English source renders. Written by
@@ -173,7 +173,6 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # seconds (budget/cost stays a separate hard axis).
     "OUROBOROS_TASK_IDLE_TIMEOUT_SEC": 900,
     "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited",
-    "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC": 1800,
     "OUROBOROS_FINALIZATION_GRACE_SEC": FINALIZATION_GRACE_DEFAULT_SEC,
     "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
     "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
@@ -287,10 +286,6 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # pinning a worker on a dead socket.
     "OUROBOROS_WEBSEARCH_TIMEOUT_SEC": 480,
     "OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC": 2700,
-    # v6.54.3 (1.5): plan_task deadline scaling. With a task deadline the planning swarm's
-    # wait ceiling is min(configured ceiling, remaining/4); below this floor plan_task SKIPS
-    # with a typed reason + telemetry rather than eat the tail of the budget.
-    "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC": 300,
     # Shared paid-review-cycle cap (SSOT + per-gate meaning: ouroboros/review_cycles.py):
     # STRING "N"|"unlimited": paid result/commit/skill waves (plan asks stand outside it); final feedback still permits author response. Explicit task-local author limits and free identical-material replay remain separate.
     "OUROBOROS_REVIEW_MAX_CYCLES": "2",
@@ -410,6 +405,10 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC",
     "OUROBOROS_ACCEPTANCE_RESERVE_PCT",
     "OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC",  # #2389: the description is ordinary Main work; no host one-shot to bound
+    # Its remaining/4 floor outlived the quarter-window planning wait it scaled: a plan ask is refused
+    # only by a spent deadline (less the finalization reserve), budget or Stop.
+    "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC",
+    "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC",  # owner 3A; 30 Oct: await waits its ask, silence its window
 )
 
 
@@ -474,6 +473,7 @@ RETIRED_SETTING_SUCCESSORS: dict[str, tuple[str, ...]] = {
     **{key: ("OUROBOROS_SUBAGENTS",) for key in REVIEW_POOL_MIGRATED_SETTING_KEYS},
     # Evolution tasks and consciousness wakes start at the top of the owner's effort range.
     **{key: ("OUROBOROS_EFFORT_MAX",) for key in EFFORT_RANGE_RETIRED_SETTING_KEYS},
+    "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC": ("OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_TASK_IDLE_TIMEOUT_SEC"),
 }
 
 

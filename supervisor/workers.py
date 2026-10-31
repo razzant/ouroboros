@@ -20,7 +20,7 @@ from supervisor.message_bus import send_with_budget
 from supervisor.message_bus import coerce_chat_identity  # noqa: F401 -- worker_health leaf reads it via the _pool() handle
 from ouroboros.config import DATA_DIR, REPO_DIR as CONFIG_REPO_DIR, WORKER_SPAWN_GRACE_SEC
 from ouroboros.depth_evidence import parse_task_depth
-from ouroboros.model_wait import stamp_execution_handoff
+from ouroboros.model_wait import record_execution_close, stamp_execution_handoff
 from ouroboros.review_owner_custody import (
     reconcile_confirmed_dead_review_owners as _reconcile_review_owners,
 )
@@ -1377,6 +1377,7 @@ def kill_workers(
                     preserved_successors.append(str(task_id))
                     RUNNING.pop(str(task_id), None)
                     continue
+                record_execution_close(DRIVE_ROOT, str(task_id), task, meta)  # #939: this attempt ends here
                 if _settle_terminalization_task(
                     task,
                     reason=result_reason,

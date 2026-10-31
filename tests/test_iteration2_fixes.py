@@ -104,15 +104,13 @@ def test_timeout_resolver_env_equal_to_default_is_honored(monkeypatch):
     assert resolve(360) == 600  # was silently dropped to 360 (== default skipped)
 
 
-def test_timeout_resolver_ceiling_and_override(monkeypatch):
-    from ouroboros.config import get_per_call_timeout_ceiling_sec
+def test_timeout_resolver_honors_requests_past_the_retired_command_ceiling(monkeypatch):
     from ouroboros.tools.shell import _resolve_effective_timeout as resolve
 
-    ceiling = get_per_call_timeout_ceiling_sec()
     monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "999999")
-    assert resolve(360) == ceiling  # env clamped to ceiling
+    assert resolve(360) == 999999  # env honored as written
     assert resolve(360, None, 300) == 300  # per-call override honored
-    assert resolve(360, None, 999999) == ceiling  # override clamped to ceiling
+    assert resolve(360, None, 7200) == 7200  # override honored past the old 1800 s ceiling
 
 
 # ------------------------------- #3 view_image -------------------------------
