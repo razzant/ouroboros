@@ -173,7 +173,8 @@ def validate_telegram_files_dir(value: Any) -> Optional[str]:
 
     Accepts Unix (``/store``), Windows drive (``C:\\store``) and UNC
     (``\\\\server\\share\\store``) spellings, with optional trailing slashes.
-    Path-illegal characters are rejected by the pathlib round-trip. The
+    Only a NUL byte is refused as a character; other characters a filesystem
+    forbids pass and simply never match a file at download time. The
     filesystem root of either spelling ("/" or a drive root) is rejected: it
     would make the disk-fallback confinement vacuous (every resolvable path
     lies under it), letting a malicious server response name any readable
@@ -332,13 +333,20 @@ def make_settings_save(api):
         except ValueError as exc:
             return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
         try:
-            saved_server = validate_telegram_api_base(load_settings(Path(api.get_state_dir())).get("TELEGRAM_API_BASE"))
+            stored = load_settings(Path(api.get_state_dir()))
+            saved_server = validate_telegram_api_base(stored.get("TELEGRAM_API_BASE"))
         except (TelegramSettingsError, ValueError):
-            saved_server = ""
-        owner_ignored = False
-        if "TELEGRAM_CHAT_ID" in payload and not request_may_change_owner(request):
-            payload.pop("TELEGRAM_CHAT_ID", None)
-            owner_ignored = True
+            stored, saved_server = {}, ""
+        owner_ignored = server_ignored = False
+        if not request_may_change_owner(request):
+            if "TELEGRAM_CHAT_ID" in payload:
+                payload.pop("TELEGRAM_CHAT_ID", None)
+                owner_ignored = True
+            # The saved server supplies every update and the sender IDs the owner check
+            # trusts, so changing it is owner binding too; an unchanged value passes quietly.
+            for key in ("TELEGRAM_API_BASE", "TELEGRAM_API_FILES_DIR"):
+                if key in payload and payload.pop(key) != str(stored.get(key) or ""):
+                    server_ignored = True
         try:
             merge_settings(Path(api.get_state_dir()), payload)
         except TelegramSettingsError as exc:
@@ -353,11 +361,16 @@ def make_settings_save(api):
         server = validate_telegram_api_base(payload.get("TELEGRAM_API_BASE"))
         if "TELEGRAM_API_BASE" in payload and server != saved_server:
             message += (f" Bot API server: {server}. Telegram calls use it now; polling moves after its"
-                        " current long poll (about 25 seconds). Moving the bot between servers needs"
-                        " logOut or close first, as the skill's notes describe.")
+                        " current long poll or retry wait (up to about a minute). This suits another address"
+                        " of the same server; moving the bot to a different server is done with Ouroboros"
+                        " quit, as the skill's notes describe.")
         if owner_ignored:
             message += " Owner binding was left unchanged."
-        return JSONResponse({"ok": True, "owner_ignored": owner_ignored, "message": message})
+        if server_ignored:
+            message += (" The Bot API server settings were left unchanged: change them from the Settings"
+                        " page on the computer running Ouroboros.")
+        return JSONResponse({"ok": True, "owner_ignored": owner_ignored, "server_ignored": server_ignored,
+                             "message": message})
     return _settings_save
 
 

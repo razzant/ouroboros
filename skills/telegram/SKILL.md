@@ -89,9 +89,9 @@ refusal comes here only when no acknowledgement carried the reason, and an accep
 request stays silent.
 
 Version 1.4.0 can use a Bot API server you already run instead of the cloud
-(`TELEGRAM_API_BASE`, `TELEGRAM_API_FILES_DIR`, below). Polling confirms the
-updates a server returns even when their numbers start below the saved offset,
-as they do on a server new to the bot.
+(`TELEGRAM_API_BASE`, `TELEGRAM_API_FILES_DIR`, below). The polling position
+belongs to one server: a newly chosen server is read from its oldest pending
+update, and a batch already handled is not handled again.
 
 Version 1.2.1 marks questions that wait for an owner answer and clears the
 waiting line after an answer submitted through Telegram.
@@ -168,20 +168,28 @@ to keep a saved value, or use **Clear saved Telegram proxy** to remove it.
 Disable and re-enable the skill after changing the proxy so its poller and
 companion also pick up the change. No additional Secrets grant is needed.
 
-To use a Bot API server you already run (`tdlib/telegram-bot-api`) instead of
-`https://api.telegram.org`, enter its origin as `TELEGRAM_API_BASE` in this
-skill's Telegram settings: `http://` or `https://`, a host and an optional port,
-with no path, query or fragment (for example `http://127.0.0.1:8081`). Every
-Telegram call of this skill then goes there: polling, replies, downloads,
-notifications and the Mini App menu button. A Save applies to the next call;
-polling moves after its current long poll, within about 25 seconds. An emptied
-field returns to `https://api.telegram.org`, and an invalid value is refused
-with an error naming the key. The server receives the bot token in every
-request path and becomes the source of the bot's updates, so prefer a loopback
-address or an `https://` origin: a plain `http://` origin on another machine
-carries the token unencrypted. A saved `TELEGRAM_PROXY` carries these calls
-too. This skill neither installs nor runs the server; it keeps polling (no
-webhook) and keeps its 10 MiB download and 50 MiB upload limits.
+A Bot API server you already run (`tdlib/telegram-bot-api`) can replace
+`https://api.telegram.org`. `TELEGRAM_API_BASE` names its origin: `http://` or
+`https://`, a host and an optional port, with no path, query or fragment (for
+example `http://127.0.0.1:8081`). Every Telegram call of this skill then goes
+there: polling, replies, downloads, notifications and the Mini App menu button.
+Moving the bot to a different server follows the procedure with Ouroboros quit,
+below. Another address of the same running server can be saved live in this
+skill's Telegram settings on the Settings page of the computer running
+Ouroboros (the Mini App and remote clients cannot change it, as with the owner
+binding). A Save applies to the next send; polling moves after its current long
+poll or retry wait (up to about a minute). An empty value means
+`https://api.telegram.org`, and the form refuses an invalid value with an
+error naming the key. The server receives the bot token in every request path
+and becomes the source of the bot's updates, so prefer a loopback address or an
+`https://` origin: a plain `http://` origin on another machine carries the
+token unencrypted. A saved `TELEGRAM_PROXY` carries these calls too, and so
+does an environment or system proxy the install already uses; to reach a
+loopback origin directly, list its host in `NO_PROXY`. If the server refuses
+the token for good, polling waits, sending it nothing more, until the token,
+the base or the files directory changes. This skill neither installs nor runs
+the server; it keeps polling (no webhook) and keeps its 10 MiB download and
+50 MiB upload limits.
 
 A server started with `--local` answers `getFile` with an absolute path in its
 own file store and does not serve that file over HTTP. Set
@@ -191,17 +199,48 @@ the identical path). Downloads then read the file from disk, only inside that
 directory; a path outside it, including one reached through a symlink, is
 refused. An emptied field keeps downloads on HTTP.
 
-Moving the bot follows the Bot API rules, and Ouroboros never calls `logOut`
-or `close` for you. From the cloud to your server: disable this skill, call
-`logOut` once on `https://api.telegram.org` (without it Telegram does not
-guarantee that updates reach the local server), save the new base and enable
-the skill. After a successful `logOut` the bot cannot log in to the cloud
-server again for 10 minutes. Between two of your servers, call `close` on the
-old one first; it returns error 429 during the first 10 minutes after the bot
-was launched there. Back to the cloud: disable the skill, empty the field,
-wait until those 10 minutes have passed and enable it. Poll each bot token
-from one place only: another program polling the same token, such as a
-Presence connector for Telegram, takes updates this bridge would then miss.
+Moving the bot to a different server is manual, and Ouroboros never calls
+`logOut` or `close` for you. Do it with Ouroboros quit: `telegram-bot-api` launches
+a logged-out bot again on any request to that server, so a running bridge or Mini
+App companion would undo the call with its next poll.
+
+1. Have the new server running if it is yours (with `--local`, at the store path
+   you share), and let the bridge answer pending messages. Updates the old server
+   holds and Ouroboros has not read do not move with the bot: treat them as lost.
+2. Copy `<data>/state/skills/telegram/settings.json` to a backup beside it, as
+   private as the original, since it can hold proxy credentials. `<data>` is the
+   data folder, `~/Ouroboros/data` by default.
+3. Quit Ouroboros so that none of its processes remain; closing or hiding the
+   window is not enough. Stop every other client of this token as well, such as
+   a Presence connector for Telegram.
+4. Call one method on the old server, then send it nothing more. The token is
+   part of the request path: keep it out of shell history, logs and shared text.
+   - Cloud to your server: `logOut` on `https://api.telegram.org`. Without it
+     Telegram does not guarantee that updates reach your server. After a
+     successful `logOut` the bot cannot log in to the cloud again for 10 minutes.
+   - Between two of your servers: `close` on the old one. It returns error 429
+     during the first 10 minutes after the bot was launched there; wait and repeat.
+   - Your server back to the cloud, at least 10 minutes after the cloud `logOut`:
+     `logOut` (or `close`) on your server.
+5. With Ouroboros still quit, edit only these two keys in the skill's
+   `settings.json`, adding them if absent and keeping every other key. The global
+   settings document `<data>/settings.json` holds neither of them, so leave it alone.
+
+   ```json
+   "TELEGRAM_API_BASE": "http://127.0.0.1:8081",
+   "TELEGRAM_API_FILES_DIR": "/absolute/path/to/server-file-store"
+   ```
+
+   Use `""` for `TELEGRAM_API_FILES_DIR` on a server without `--local`, and `""`
+   for both to return to the cloud.
+6. Start Ouroboros. It reads the new server from its oldest pending update. If it
+   reports invalid settings, quit and restore the backup or correct the two keys;
+   the backup does not undo the `logOut` or `close`.
+
+Poll each bot token from one place only: another program polling the same token
+takes updates this bridge would then miss. While a competing poll holds the token
+(error 409), the bridge logs one warning and retries with its usual backoff, so it
+recovers by itself when the other poll stops.
 
 With the default base the Bot API stays `https://api.telegram.org` with TLS
 through the proxy and no redirects. Proxy credentials follow the selected

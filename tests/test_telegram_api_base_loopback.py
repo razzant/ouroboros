@@ -300,14 +300,14 @@ def test_every_consumer_reaches_a_saved_server_and_reads_its_store(tmp_path, mon
     assert {method for method, _form in bot.calls} >= _SEND_METHODS | {"setMyCommands", "getUpdates", "getFile", "file"}
     assert urls and all(url.startswith(f"{bot.origin}/") for url in urls)
     assert bot.button == {"type": "commands"}
-    assert json.loads((state / "poll_offset.json").read_text(encoding="utf-8")) == {"offset": 4243}
+    assert json.loads((state / "poll_offset.json").read_text(encoding="utf-8"))["offset"] == 4243
     assert not [row for row in api.logs if row[0] in ("error", "warning")]
 
 
 def test_a_save_moves_polling_sends_and_the_menu_to_the_new_server(tmp_path, monkeypatch):
     """A Save reaches every call at once and polling after its current long poll. The new
-    server numbers its updates from its own start, below the saved offset: each update is
-    handled once and confirmed there, never replayed."""
+    server is read from its own oldest update, never with the old server's offset: each
+    update is handled once and confirmed there, never replayed."""
     plugin, _telegram_api, _notifier = _load()
     monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
     received = _host_inbox(monkeypatch, plugin)
@@ -347,9 +347,9 @@ def test_a_save_moves_polling_sends_and_the_menu_to_the_new_server(tmp_path, mon
     assert [item["text"] for item in received] == ["hello from the old server"]
     help_replies = [form for form in new.methods("sendMessage") if form["text"] != "sent after Save"]
     assert len(help_replies) == 1
-    assert [form["offset"] for form in new.methods("getUpdates")][:2] == ["900001", "8"]
+    assert [form["offset"] for form in new.methods("getUpdates")][:2] == ["0", "8"]
     assert new.methods("getMe") and new.methods("setMyCommands")
     assert not [form for form in old.methods("sendMessage")]
-    assert json.loads((state / "poll_offset.json").read_text(encoding="utf-8")) == {"offset": 8}
+    assert json.loads((state / "poll_offset.json").read_text(encoding="utf-8"))["offset"] == 8
     assert ("info", "Telegram Bot API settings changed; polling follows the saved server.") in api.logs
     assert not [row for row in api.logs if row[0] in ("error", "warning")]

@@ -40,14 +40,15 @@ from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
 from .lib.telegram_typing import TypingCue, host_reply_preparation
+from .lib.telegram_poll_binding import (
+    PollCursor, park_until_settings_change, saved_server as _saved_server, server_fingerprint, update_key,
+)
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .scripts.telegram_settings import (
     TelegramSettingsError,
     merge_settings,
     make_settings_save as _make_settings_save,
     telegram_proxy,
-    telegram_api_base,
-    telegram_files_dir,
 )
 
 # Decided once in the server process: a proxy-routed install keeps its only egress, every
@@ -59,24 +60,14 @@ from .scripts.telegram_settings import (
 _HONOR_ENV_PROXIES = (not in_worker_process()) and env_proxies_configured()
 
 
-def _saved_server(api) -> tuple[str, str | None]:
-    """The saved Bot API server origin and its file store, read fresh for every client."""
-    state_dir = pathlib.Path(api.get_state_dir())
-    return telegram_api_base(state_dir), telegram_files_dir(state_dir)
-
-
 def _telegram_client(api, event=None, chat_id: int = 0, server: tuple[str, str | None] | None = None) -> TelegramClient:
     """Build each bridge client with the granted token, skill-local proxy and saved server."""
     granted = api.get_settings(["TELEGRAM_BOT_TOKEN"])
     api_base_url, files_dir = server or _saved_server(api)
-    return TelegramClient(
-        granted.get("TELEGRAM_BOT_TOKEN", ""),
-        trust_env=_HONOR_ENV_PROXIES,
-        proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
-        **(_mirror_options(api, event, chat_id) if event is not None else {}),
-        api_base_url=api_base_url,
-        files_dir=files_dir,
-    )
+    return TelegramClient(granted.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES,
+                          proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
+                          **(_mirror_options(api, event, chat_id) if event is not None else {}),
+                          api_base_url=api_base_url, files_dir=files_dir)
 
 _POLL_GENERATION_STARTED = time.time()
 
@@ -488,25 +479,6 @@ async def _inject(api, payload: Dict[str, Any]) -> None:
         pass
 
 
-def _load_offset(api) -> int:
-    path = _state_file(api, "poll_offset.json")
-    try:
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return int(data.get("offset") or 0)
-    except Exception:
-        pass
-    return 0
-
-
-def _save_offset(api, offset: int) -> None:
-    path = _state_file(api, "poll_offset.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"offset": offset}), encoding="utf-8")
-    tmp.replace(path)
-
-
 def _extract_sender_label(sender: dict, fallback_chat_id: int) -> str:
     """Build a human-readable sender label from a Telegram user dict."""
     return (
@@ -645,7 +617,7 @@ async def _start_poller(api):
         lang = await _migrate_bridge_language(api, _settings, lang)
         server = _saved_server(api)
         client = _telegram_client(api, server=server)
-        offset = _load_offset(api)
+        cursor = PollCursor(_state_file(api, "poll_offset.json"), server[0])
         try:
             await _validate_bot(api, client, command_mode, lang)
             validated = True
@@ -660,7 +632,7 @@ async def _start_poller(api):
             # ready nor failed. The in-loop validation overwrites it.
             _save_bridge_status(api, "degraded", "telegram_startup_deferred")
             api.log("warning", "Telegram token validation deferred by a transport failure; polling waits for the network.")
-        return client, server, offset, pinned_chat, max_updates, command_mode, lang, validated
+        return client, server, cursor, pinned_chat, max_updates, command_mode, lang, validated
     except TelegramSettingsError:
         _save_bridge_status(api, "error", "settings_invalid")
         api.log("error", "Telegram settings are invalid; owner binding is closed.")
@@ -685,7 +657,14 @@ def _fail_permanent_poll_rejection(api, exc, revalidating: bool) -> None:
 
 
 async def _poller(api) -> None:
-    client, server, offset, pinned_chat, max_updates, command_mode, lang, validated = await _start_poller(api)
+    while True:
+        fingerprint = server_fingerprint(api)
+        try:
+            started = await _start_poller(api)
+            break
+        except TelegramRequestRejected:
+            await park_until_settings_change(api, fingerprint)
+    client, server, cursor, pinned_chat, max_updates, command_mode, lang, validated = started
 
     retry_delay = TELEGRAM_RETRY_INITIAL_SEC
     degraded_cause = ""
@@ -696,15 +675,17 @@ async def _poller(api) -> None:
             if saved != server:
                 # A Save reaches polling at the next cycle, as it reaches every send at once:
                 # getUpdates, the replies and the downloads made here follow it. A new server
-                # validates the token there again.
-                validated = validated and saved[0] == server[0]
+                # validates the token there again and is polled from its own oldest update.
+                validated = validated and server is not None and saved[0] == server[0]
                 client, server = _telegram_client(api, server=saved), saved
+                cursor.follow(saved[0])
                 api.log("info", "Telegram Bot API settings changed; polling follows the saved server.")
             if not validated:
                 revalidating = True
                 await _validate_bot(api, client, command_mode, lang)
                 revalidating = False
                 validated = True
+            offset, handled = cursor.offset, []
             updates = await client.get_updates(offset)
             if degraded_cause:
                 api.log("info", f"Telegram poller recovered after {degraded_cause}; polling resumed.")
@@ -718,10 +699,12 @@ async def _poller(api) -> None:
                 try:  # Isolate one bad update without changing offset/retry semantics.
                     update_id = int(update.get("update_id") or 0)
                     if update_id > 0:
-                        # Confirm what this server returned, even below the saved offset: a
-                        # server new to this bot (or one that lost its queue) numbers from a
-                        # random start and answers a foreign offset from its oldest update.
+                        # Confirm what the server returned, even below the offset: a server
+                        # that lost its queue answers from its oldest update, again each poll.
                         offset = update_id + 1
+                    handled.append(update_key(update))
+                    if cursor.is_replay(update):
+                        continue
 
                     authorized_chat = await _authorized_owner(api, client, update, pinned_chat, lang)
                     if not authorized_chat:
@@ -888,12 +871,15 @@ async def _poller(api) -> None:
                         except Exception:
                             api.log("warning", "Telegram update failure notice could not be delivered.")
             if updates:
-                _save_offset(api, offset)
+                cursor.save(offset, handled)
             await asyncio.sleep(0.1)
         except (TelegramRequestRejected, TelegramTransportError) as exc:
-            if isinstance(exc, TelegramRequestRejected) and not exc.transient:
+            # Only getUpdates and getMe reach here: a 409 is another poller of this token, which may stop.
+            if isinstance(exc, TelegramRequestRejected) and not exc.transient and exc.status_code != 409:
                 _fail_permanent_poll_rejection(api, exc, revalidating)
-                raise
+                await park_until_settings_change(api, (client.token, server))
+                server, validated = None, False
+                continue
             # Transition logging only: one line entering degraded, one on
             # recovery; consecutive transient failures stay quiet while the
             # monotone backoff (reset by any successful poll) paces retries.
@@ -1497,10 +1483,9 @@ def register(api):
                          "help": "Remove the proxy instead of replacing it."},
                         {"name": "TELEGRAM_API_BASE", "label": "Bot API base URL", "type": "text",
                          "placeholder": "https://api.telegram.org",
-                         "help": "Origin of a telegram-bot-api server you run, e.g. http://127.0.0.1:8081. "
-                                 "Every Telegram call of this skill goes there; polling follows within about "
-                                 "25 seconds. Empty: https://api.telegram.org. Moving the bot to another server "
-                                 "needs logOut or close first (see the skill's notes)."},
+                         "help": "Origin of a telegram-bot-api server you run, e.g. http://127.0.0.1:8081. Every "
+                                 "Telegram call goes there; polling after its current long poll or retry wait (up to "
+                                 "about a minute). Empty: the cloud. Moving the bot to another server: quit first (skill's notes)."},
                         {"name": "TELEGRAM_API_FILES_DIR", "label": "Bot API files directory", "type": "text",
                          "placeholder": "/absolute/path/to/server-file-store",
                          "help": "For a server started with --local: its file store, mounted at the same absolute "

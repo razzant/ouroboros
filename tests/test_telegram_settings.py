@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -27,6 +28,8 @@ from telegram_settings import (  # noqa: E402
     miniapp_enabled,
     owner_chat_id,
     request_may_change_owner,
+    telegram_api_base,
+    telegram_files_dir,
 )
 
 
@@ -496,3 +499,92 @@ def test_files_dir_validator_accepts_native_absolute_paths():
                 validate(alias)
         accepted = os.path.normpath("C:\\store")
         assert validate(accepted) == accepted
+
+
+@pytest.mark.parametrize("host,marker", [("127.0.0.1", "1"), ("::1", "telegram"), ("203.0.113.7", ""), (None, "")])
+def test_only_the_local_settings_page_may_change_the_bot_api_server(tmp_path: Path, host, marker) -> None:
+    # The saved server supplies the updates and the sender IDs the owner check trusts.
+    plugin = _load_plugin()
+    store = str(tmp_path / "store")
+    merge_settings(tmp_path, {"TELEGRAM_API_BASE": "http://127.0.0.1:8081", "TELEGRAM_API_FILES_DIR": store})
+    handler = plugin._make_settings_save(_RouteApi(tmp_path))
+
+    def save(payload, **request):
+        reply = asyncio.run(handler(_RouteRequest(payload, **request)))
+        assert reply.status_code == 200
+        return json.loads(reply.body)
+
+    refused = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081", "TELEGRAM_API_FILES_DIR": "",
+                    "TELEGRAM_COMMAND_MODE": "strict"}, host=host, marker=marker)
+    assert refused["ok"] is True and refused["server_ignored"] is True
+    assert "change them from the Settings page on the computer running Ouroboros" in refused["message"]
+    saved = load_settings(tmp_path)
+    assert (saved["TELEGRAM_API_BASE"], saved["TELEGRAM_API_FILES_DIR"]) == ("http://127.0.0.1:8081", store)
+    assert saved["TELEGRAM_COMMAND_MODE"] == "strict"
+    # The remote form sends back what it was shown: unchanged values pass without a notice.
+    quiet = save({"TELEGRAM_API_BASE": "http://127.0.0.1:8081/", "TELEGRAM_API_FILES_DIR": store},
+                 host=host, marker=marker)
+    assert quiet["server_ignored"] is False and "Settings page" not in quiet["message"]
+    local = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081"}, host="127.0.0.1")
+    assert local["server_ignored"] is False
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "http://198.51.100.9:8081"
+
+
+def test_server_notes_agree_on_timing_and_the_move_with_ouroboros_quit(tmp_path):
+    # SKILL.md, the form help and the Save message describe one transition. A move is made with
+    # Ouroboros quit: any request after logOut would launch the bot on that server again.
+    plugin = _load_plugin()
+    skill = (SCRIPTS.parent / "SKILL.md").read_text(encoding="utf-8")
+    book = (SCRIPTS.parents[2] / "docs" / "architecture" / "13-external-skills-layer.md").read_text(encoding="utf-8")
+
+    class _RegisterApi(_RouteApi):
+        sections: list = []
+
+        def get_runtime_info(self):
+            return {"data_dir": str(self.state_dir)}
+
+        def register_settings_section(self, _section_id, **kwargs):
+            self.sections.append(kwargs)
+
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: None
+
+    api = _RegisterApi(tmp_path)
+    plugin.register_miniapp = lambda _api: None
+    plugin.register(api)
+    help_text = next(field["help"] for component in api.sections[0]["schema"]["components"]
+                     if component.get("type") == "form" for field in component["fields"]
+                     if field["name"] == "TELEGRAM_API_BASE")
+    reply = asyncio.run(plugin._make_settings_save(_RouteApi(tmp_path))(
+        _RouteRequest({"TELEGRAM_API_BASE": "http://127.0.0.1:8081"}, host="127.0.0.1")))
+    message = json.loads(reply.body)["message"]
+    for surface in (" ".join(skill.split()), help_text, message):
+        assert "retry wait (up to about a minute)" in surface
+        assert "25 seconds" not in surface
+    assert "quit first" in help_text and "needs logOut" not in help_text
+    assert "another address of the same server" in message and "Ouroboros quit" in message
+    assert "logOut or close first" not in message
+    runbook = " ".join(skill.split())
+    steps = ["Copy `<data>/state/skills/telegram/settings.json` to a backup", "Quit Ouroboros so that none",
+             "Stop every other client of this token", "Call one method on the old server",
+             "With Ouroboros still quit, edit only these two keys", "Start Ouroboros."]
+    positions = [runbook.index(step) for step in steps]
+    assert positions == sorted(positions)
+    for retired in ("Keep this skill enabled throughout", "save the new base immediately", "empty the field immediately"):
+        assert retired not in runbook
+    for direction in ("`logOut` on `https://api.telegram.org`", "`close` on the old one",
+                      "`logOut` (or `close`) on your server", "treat them as lost"):
+        assert direction in runbook
+    assert "`NO_PROXY`" in runbook
+    # The documented edit is what the skill reads, keeps the other keys, and empty means the cloud.
+    example = re.search(r"```json\n(.*?)```", skill, re.S).group(1)
+    edited = tmp_path / "edited"
+    merge_settings(edited, {"TELEGRAM_CHAT_ID": "42"})
+    merge_settings(edited, json.loads("{" + example + "}"))
+    assert telegram_api_base(edited) == "http://127.0.0.1:8081"
+    assert telegram_files_dir(edited) == "/absolute/path/to/server-file-store"
+    assert load_settings(edited)["TELEGRAM_CHAT_ID"] == "42"
+    merge_settings(edited, {"TELEGRAM_API_BASE": "", "TELEGRAM_API_FILES_DIR": ""})
+    assert telegram_api_base(edited) == "https://api.telegram.org" and telegram_files_dir(edited) is None
+    row = next(line for line in book.splitlines() if line.startswith("`skills/telegram/`"))
+    assert "`TELEGRAM_API_BASE`" in row and "`TELEGRAM_API_FILES_DIR`" in row and "server forms" in row

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import html as html_lib
 import mimetypes
+import os
 import pathlib
 import re
+import stat
 from typing import Any, BinaryIO, Dict, Optional
 
 import httpx
@@ -588,20 +591,12 @@ class TelegramClient:
         self.reply_to_message_id = int(reply_to_message_id)
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN is missing")
-        # An explicit proxy replaces ambient proxies for these calls only. With the
-        # default base the target stays https://api.telegram.org, so TLS runs end to
-        # end through the tunnel: the proxy sees the host, never the token-bearing
-        # path, and redirects are never followed. A custom TELEGRAM_API_BASE origin
-        # replaces the target; transport security is then whatever that origin
-        # provides (http:// bases are unencrypted by design of the deployer).
+        # An explicit proxy replaces ambient proxies for these calls only. With the default
+        # base the target stays https://api.telegram.org, so TLS runs end to end through the
+        # tunnel: the proxy sees the host, never the token-bearing path, and redirects are
+        # never followed. A TELEGRAM_API_BASE origin serves the same Bot API from the owner's
+        # server with that origin's own transport security; files_dir is a --local store.
         self.proxy = _telegram_proxy(proxy)
-        # Self-hosted telegram-bot-api server support: without an override the
-        # endpoints are the cloud Bot API. A custom base (http/https, no path
-        # segments beyond an optional trailing slash) keeps the identical Bot
-        # API surface but serves it from the operator's own server. files_dir
-        # enables disk fallback for downloads: a local server returns absolute
-        # file_path values on its own disk and does not serve /file/bot.../...
-        # over HTTP (tdlib/telegram-bot-api#26).
         base = _telegram_api_base(api_base_url)
         self.api_base = f"{base}/bot{self.token}"
         self.file_base = f"{base}/file/bot{self.token}"
@@ -699,44 +694,40 @@ class TelegramClient:
                 f"Telegram file download transport failed ({type(exc).__name__})."
             ) from None
         except RuntimeError as exc:
-            content = self._read_file_from_disk(file_path, exc)
+            if not self.files_dir:
+                raise
+            # Off the shared event loop: the store may be a slow or network disk.
+            content = await asyncio.to_thread(self._read_file_from_disk, file_path, exc)
         return bytes(content)
 
     def _read_file_from_disk(self, file_path: str, cause: Exception) -> bytes:
-        """Disk fallback for a self-hosted server's file store.
+        """Read a file of a --local server from its store (tdlib/telegram-bot-api#26).
 
-        A local telegram-bot-api returns absolute file_path values on its own
-        disk and does not serve them over HTTP (tdlib/telegram-bot-api#26);
-        TELEGRAM_API_FILES_DIR points at the store shared with the server.
-        Absolute paths are resolved as-is (the documented server behavior);
-        anything else is joined under the store. Both are confined to the
-        resolved store: file_path comes from the server's
-        own getFile response, but the check stays defensive against traversal.
+        Absolute paths are taken as the server names them, others are joined under the
+        store. Lexical confinement runs first, a pure comparison, so a UNC path is refused
+        before resolve() could touch an unrelated share; either spelling of the store passes
+        (it may be a symlinked one, as /tmp on macOS). The resolved path must stay inside the
+        resolved store and is the one opened, without following a final symlink; the type
+        comes from the open file, and at most the cap plus one byte is read.
         """
-        if not self.files_dir:
-            raise cause
         configured = pathlib.Path(self.files_dir)
         store = configured.resolve()
         raw = pathlib.Path(str(file_path or ""))
         candidate = raw if raw.is_absolute() else store / raw
-        # Lexical confinement FIRST: is_relative_to is a pure string comparison
-        # with no filesystem access, so a server-controlled UNC path
-        # (\\server\share\...) is refused before resolve() could touch an
-        # unrelated SMB share. The server names its files under the store as
-        # configured, which may be a symlinked spelling of the resolved store
-        # (/tmp and /var on macOS), so either spelling passes this step. Only
-        # lexically-contained paths are then resolved (symlink defense) and
-        # re-confined to the resolved store.
         if not (candidate.is_relative_to(configured) or candidate.is_relative_to(store)):
             raise cause from None
-        if not candidate.resolve().is_relative_to(store):
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(store):
             raise cause from None
-        if not candidate.is_file():
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        try:
+            handle = os.fdopen(os.open(resolved, flags), "rb")
+        except OSError:
             raise cause from None
-        size = candidate.stat().st_size
-        if size > _MAX_TELEGRAM_DOWNLOAD_BYTES:
-            raise RuntimeError("Telegram file exceeds the 10 MiB download limit.") from cause
-        data = candidate.read_bytes()
+        with handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise cause from None
+            data = handle.read(_MAX_TELEGRAM_DOWNLOAD_BYTES + 1)
         if len(data) > _MAX_TELEGRAM_DOWNLOAD_BYTES:
             raise RuntimeError("Telegram file exceeds the 10 MiB download limit.") from cause
         return data

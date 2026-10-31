@@ -356,3 +356,49 @@ def test_a_symlink_inside_the_store_cannot_lead_out_of_it(tmp_path):
                       str(store / "escape" / "outside.txt"), "escape/outside.txt"):
         with pytest.raises(RuntimeError, match="HTTP 404"):
             _disk_read(c, file_path)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW on this platform")
+def test_a_file_swapped_for_a_symlink_after_the_check_is_not_read(tmp_path, monkeypatch):
+    # The store's owner (the server) replaces the checked file with a link out of the store
+    # between confinement and the read: the read goes through the checked path and refuses it.
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    checked = store / "documents" / "file_0.txt"
+    checked.write_bytes(b"in the store")
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"outside the store")
+    concrete = type(Path("/"))
+    real_resolve = concrete.resolve
+
+    def resolve_then_swap(self, *args, **kwargs):
+        resolved = real_resolve(self, *args, **kwargs)
+        if self.name == "file_0.txt" and not checked.is_symlink():
+            checked.unlink()
+            os.symlink(secret, checked)
+        return resolved
+
+    monkeypatch.setattr(concrete, "resolve", resolve_then_swap)
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        _disk_read(c, "documents/file_0.txt")
+    assert checked.is_symlink()
+
+
+def test_the_disk_read_runs_off_the_event_loop_thread(tmp_path, monkeypatch):
+    import threading
+
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    (store / "documents" / "file_0.txt").write_bytes(b"from a worker thread")
+    threads = []
+    real_read = api_mod.TelegramClient._read_file_from_disk
+
+    def recording(self, *args):
+        threads.append(threading.get_ident())
+        return real_read(self, *args)
+
+    monkeypatch.setattr(api_mod.TelegramClient, "_read_file_from_disk", recording)
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+    assert _disk_read(c, "documents/file_0.txt") == b"from a worker thread"
+    assert threads and threads[0] != threading.get_ident()
