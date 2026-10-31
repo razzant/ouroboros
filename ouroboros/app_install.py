@@ -353,7 +353,7 @@ def _detach(log):
         sys.stdout.flush()
         os._exit(0)
     os.setsid()  # its own session and group: no group signal of the activating server reaches it
-    out = os.open(log or os.devnull, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    out = os.open(log or os.devnull, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
     for fd in (1, 2):
         os.dup2(out, fd)
     os.close(out)

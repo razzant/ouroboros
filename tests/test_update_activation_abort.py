@@ -83,8 +83,8 @@ def _activates(row):
     assert update_prepare.find(row["candidate_id"])["state"] == "activating"
 
 
-NODE = str(pathlib.Path.home() / ".claudexor" / "node" / "bin" / "node")
-NODE = NODE if os.path.exists(NODE) else shutil.which("node") or "node"
+_CLAUDEXOR_NODE = str(pathlib.Path.home() / ".claudexor" / "node" / "bin" / "node")
+NODE = _CLAUDEXOR_NODE if os.path.exists(_CLAUDEXOR_NODE) else shutil.which("node") or "node"
 _PANEL = """
 import { updateVerdict } from './modules/updates.js';
 import { activationAttemptView } from './modules/update_candidate.js';
