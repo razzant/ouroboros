@@ -740,7 +740,11 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     # Each narrowing is the fact the task keeps (read back as a memory shortage); a rung that changes nothing keeps it.
     tool_ctx, trace = ctx.tools._ctx, ctx.tools._ctx._execution_trace
     assert tool_ctx.memory_view_facts == trace[VIEW_TRACE_KEY] == mf.trace_facts(second.memory_facts)
-    everything = sum(whole for _step, _ident, whole, _short in mf.degradable_elements(snapshot))
+    # The rung spends a saving on host producers before memory, and which of them still have a shorter form is the
+    # process's (the runtime facts read review and delegation history from the shared data root): everything is both.
+    everything = (sum(whole for _step, _ident, whole, _short in mf.degradable_elements(snapshot))
+                  + sum(mf.view_tokens(part) for part in (*core.semi_stable_sections, *core.dynamic_head_sections,
+                                                          *core.dynamic_sections)))
     assert _coarsen_memory_view(ctx, fit, saving=everything) is True
     kept = tool_ctx.memory_view_facts
     assert kept == trace[VIEW_TRACE_KEY] == mf.trace_facts(ctx.context_fit_plan.projection("max").memory_facts)
