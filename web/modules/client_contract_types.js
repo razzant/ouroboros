@@ -625,6 +625,7 @@
 /** @typedef {import('./place_contract_types.js').PlaceStatusPayload} PlaceStatusPayload */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryAttention} PlaceHistoryAttention */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryImport} PlaceHistoryImport */
+/** @typedef {import('./place_contract_types.js').PlaceHistoryReaction} PlaceHistoryReaction */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryFacts} PlaceHistoryFacts */
 /** @typedef {import('./place_contract_types.js').PlaceDisconnectRequest} PlaceDisconnectRequest */
 /** @typedef {import('./place_contract_types.js').PlaceOwnerAccountRequest} PlaceOwnerAccountRequest */

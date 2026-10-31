@@ -151,6 +151,9 @@ def _event(value: Any, field: str) -> Any:
         raise PresenceHistoryInvalid(f"{field}.actor.authenticated", "actor.authenticated must be a boolean, as live")
     if "transport_queue" in value["conversation"]:
         raise PresenceHistoryInvalid(f"{field}.conversation.transport_queue", "history carries no inbox observation")
+    from ouroboros.dialogue_provenance import reaction_fact
+    if reaction_fact(value["message"]):  # a reaction withheld from an older core is never relabelled an earlier message
+        raise PresenceHistoryInvalid(f"{field}.message.reaction", "a reaction is not an earlier message")
     provider, account, conversation, thread = (value[key].strip() for key in (
         "provider", "account_id", "conversation_id", "thread_id"))
     source_event_id = value["source_event_id"].strip()

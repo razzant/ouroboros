@@ -1005,14 +1005,18 @@ def _retold(item: Mapping[str, Any], short: bool = False) -> str:
 
 
 def _row_pointer(item: Mapping[str, Any], what: str) -> str:
+    if item.get("kind") == "place_fact":  # no words to size
+        return f"{item['head']} (reaction — read by address)"
     return f"{item['head']} ({what}, {item['chars']} chars — read by address)"
 
 
 def _rows_line(room: Mapping[str, Any], items: List[Dict[str, Any]]) -> str:
     first, last = min(items, key=lambda i: i['pos']), max(items, key=lambda i: i['pos'])
     mine = sum(item['kind'] == 'ouroboros' for item in items)
+    reactions = sum(item['kind'] == 'place_fact' for item in items)
     return (f"{len(items)} earlier rows, oldest first, by address ({mine} my replies, "
-            f"{len(items) - mine} people's words), {_minute(first['ts'])} → {_minute(last['ts'])}; "
+            f"{len(items) - mine - reactions} people's words{f', {reactions} reactions' if reactions else ''}), "
+            f"{_minute(first['ts'])} → {_minute(last['ts'])}; "
             f"memory_read(room_id='{room['room_id']}', rows=true, from='{first['address']}', to='{last['address']}'). "
             "Verbatim rows within this range remain below in place.")
 
@@ -1047,8 +1051,9 @@ def _facts_text(facts: Mapping[str, Any], of: str = "this room") -> str:
     The earliest open row and the last row a page covers stand side by side: a page covers a set of rows,
     an earlier row can stay open, and the gap shows from the two facts without a frontier.
     """
+    reactions = f"reactions {facts['reactions']}, " if facts.get("reactions") else ""
     rows = (f"open {_minute(facts['earliest'])} → {_minute(facts['latest'])}; people {facts['people']}, "
-            f"mine {facts['mine']}, task facts {facts['task_facts']}, ~{facts['chars']} chars" if facts["rows"]
+            f"mine {facts['mine']}, {reactions}task facts {facts['task_facts']}, ~{facts['chars']} chars" if facts["rows"]
             else "no open rows")
     rows += "".join(f"; incomplete: {_GAP_WORDS.get(kind, kind)}" for kind in facts.get("gaps") or ())
     if facts.get("running_tasks"):
@@ -1062,7 +1067,7 @@ def _facts_text(facts: Mapping[str, Any], of: str = "this room") -> str:
 def _rooms_line(rooms: List[Dict[str, Any]]) -> str:
     """A bounded aggregate with a directory reader, regardless of the room count."""
     facts = [room["facts"] for room in rooms]
-    summed = {key: sum(item.get(key, 0) for item in facts) for key in ("rows", "people", "mine", "task_facts", "chars", "notes", "pages")}
+    summed = {key: sum(item.get(key, 0) for item in facts) for key in ("rows", "people", "mine", "reactions", "task_facts", "chars", "notes", "pages")}
     summed.update(earliest=min((item["earliest"] for item in facts if item["earliest"]), default=""),
                   latest=max((item["latest"] for item in facts), default=""),
                   last_covered=max((item["last_covered"] for item in facts), default=""))

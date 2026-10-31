@@ -29,6 +29,7 @@ def test_identity_negotiation_distinguishes_an_old_v1_host_before_work(client):
     assert identity["presence_wake_facts"] == list(places.WAKE_FACTS)
     assert identity["presence_wake_signals"] == 1
     assert identity["presence_explicit_completion"] == 1 and identity["presence_delivery_version"] == 1
+    assert identity["presence_reaction_context"] == 1
 
     # The published pre-contact wire shape (the same old version trio). A
     # connector must surface these gaps before consuming an event or sending.
@@ -49,6 +50,7 @@ def test_identity_negotiation_distinguishes_an_old_v1_host_before_work(client):
         assert setup_gaps({key: value for key, value in identity.items() if key != missing}) == [missing]
     assert old_host["notify_version"] == identity["notify_version"]  # no widened service-notice door
     assert "presence_explicit_completion" not in old_host  # absent: this host does not promise it
+    assert "presence_reaction_context" not in old_host  # absent: a connector keeps reactions local
 
 
 @pytest.mark.parametrize("fact", ["review_requested", "assigned", "signal.words"])

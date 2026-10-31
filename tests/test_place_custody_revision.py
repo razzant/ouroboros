@@ -759,3 +759,64 @@ def test_a_resumed_author_covers_only_the_arrivals_its_reentry_note_carries_whol
     covered_send(author, lambda: ({"content": "read"}, 0.0, "full"))
     assert reply_anchor(author, metadata) == {"source_event_id": "chat:a:8",
                                               "message": {"message_id": "8", "source_order": 8}}
+
+
+def post_reaction(h, number, target="1"):
+    """A person's typed reaction on an older message: the connector reports the reacted message's own id."""
+    reaction = {"schema_version": 1, "change": "add", "new": [{"type": "emoji", "value": "👍"}],
+                "target": {"message_id": target, "resolution": "resolved"}}
+    return h.client.post("/presence/turn", headers=V2_HEADERS, json={"continuation_version": 2, "event": {
+        "source_event_id": f"chat:a:{number}", "provider": "chat", "account_id": "a", "conversation_id": "r",
+        "thread_id": "", "conversation_key": "ignored", "actor": {"kind": "user", "platform_actor_id": "ann"},
+        "conversation": {}, "message": {"message_id": target, "source_order": number, "reaction": reaction},
+        "text": "", "facts": []}})
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_a_reaction_reaches_the_live_author_as_context_and_never_becomes_its_reply_anchor(v2, background):
+    h, go = v2, threading.Event()
+    h.script = [held(go, probe_call()), finish_call("Answer.", 2)]
+    assert post(h, 5, "please answer").json()["status"] == "continuing"
+    ref = turn_ref(h, 5)
+    wait_until(lambda: len(h.calls) == 1, "the author's first model send")
+    if background:  # ordinary background speech still anchors
+        assert post(h, 6, "by the way", facts=(), actor="other").json()["outcome"] == "silent"
+    assert post_reaction(h, 7).json()["outcome"] == "silent"
+    assert [entry["place_arrival"]["wake"] for entry in place_mail(h, ref)] == [False] * (2 if background else 1)
+    go.set()
+    late = settled(h, ref)
+    seen = arrivals_seen(h.calls[1])
+    assert late["text"] == "Answer." and len(h.calls) == 2
+    assert seen[-1]["source_event_id"] == "chat:a:7" and seen[-1]["non_speech"].startswith("Reaction, not speech: added 👍")
+    assert late["reply_anchor"] == ({"source_event_id": "chat:a:6", "message": {"message_id": "6", "source_order": 6}}
+                                    if background else
+                                    {"source_event_id": "chat:a:5", "message": {"message_id": "5", "source_order": 5}})
+
+
+def test_a_reentry_note_carries_a_reaction_as_context_and_never_as_coverage(tmp_path, monkeypatch):
+    from ouroboros import presence_continuation as pc, presence_observations
+    from ouroboros.presence_continuation import covered_send, reentry_note, reply_anchor
+
+    key = "chat:a:r:0"
+    reaction = {"schema_version": 1, "change": "add", "new": [{"type": "emoji", "value": "👍"}],
+                "target": {"message_id": "1", "resolution": "resolved"}}
+    rows = [{"ts": "2026-10-29T00:00:06+00:00", "chat_id": 7, "direction": "in", "task_id": "turn-6", "text": "words 6",
+             "client_message_id": "chat:a:6", "transport": {"conversation_key": key, "message": {"message_id": "6", "source_order": 6}}},
+            {"ts": "2026-10-29T00:00:07+00:00", "chat_id": 7, "direction": "in", "task_id": "turn-7", "text": "",
+             "sender_label": "Ann", "client_message_id": "chat:a:7", "transport": {
+                 "conversation_key": key, "actor": {"kind": "user"},
+                 "message": {"message_id": "1", "source_order": 7, "reaction": reaction}}}]
+    monkeypatch.setattr(pc, "_conversation_rows_since", lambda *_a: (rows, []))
+    monkeypatch.setattr(pc, "_retain_reentry", lambda *_a: "")
+    monkeypatch.setattr(presence_observations, "transport_queue_observation",
+                        lambda *_a: {"status": "unavailable", "reason": "transport_has_not_reported_queue"})
+    event = SimpleNamespace(conversation_key=key, provider="chat", account_id="a", conversation_id="r", thread_id="")
+    binding = pc.ReviewWaitBinding(None, tmp_path, "author", "identity", event, cursor={"at": "2026-10-29T00:00:00+00:00"})
+    author = SimpleNamespace(task_metadata={})
+    note = reentry_note(binding, author)
+    assert "- reaction from Ann (event chat:a:7" in note and "[Reaction, not speech: added 👍 on message 1]" in note
+    assert [row["source_event_id"] for row in author._presence_delivered] == ["chat:a:6"]
+    covered_send(author, lambda: ({"content": "read"}, 0.0, "full"))
+    metadata = {"presence_continuation_version": 2,
+                "presence": {"event": {"source_event_id": "chat:a:5", "message": {"message_id": "5", "source_order": 5}}}}
+    assert reply_anchor(author, metadata)["source_event_id"] == "chat:a:6"

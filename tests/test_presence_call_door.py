@@ -145,3 +145,65 @@ def test_host_door_checks_the_connected_place_of_the_connector(tmp_path, place):
         host_call._place(ctx, "other_bridge", place.place_id)
     with pytest.raises(ValueError):
         host_call._place(ctx, "meet_bridge", "unknown")
+
+
+THUMB = {"type": "name", "value": "thumbsup"}
+ANON = {"kind": "anonymous", "authenticated": False}
+
+
+def _reaction(kind="add", actor=None, text="", **fact):
+    values = {"add": {"new": [THUMB]}, "count": {"counts": [{**THUMB, "count": 3}]}}[kind]
+    reaction = {"schema_version": 1, "change": kind, **values, "target": {"message_id": "m1", "resolution": "resolved"}}
+    actor = actor or (ANON if kind == "count" else {"kind": "user", "platform_actor_id": "u1", "display_name": "Ann"})
+    return _event(actor=actor, message={"reaction": {**reaction, **fact}}, text=text, facts=["mention"])
+
+
+@pytest.mark.parametrize("event", [
+    _reaction("count", counts=3),  # a shape /presence/turn refuses; a reader of its count would raise
+    _reaction(change="noted"),
+    _reaction(text="thumbs up!"),  # a reaction carries no words
+    _reaction("count", actor={"kind": "user", "platform_actor_id": "u1"}),  # an aggregate has no individual
+])
+def test_an_invalid_typed_reaction_is_refused_before_the_room_hears_it(tmp_path, place, opened, event):
+    with pytest.raises(door.PresenceCallRefused) as refused:
+        _open(tmp_path, event=event)
+    assert refused.value.code == "presence_reaction_invalid"
+    assert _heard(tmp_path) == [] and opened["hubs"] == [] and opened["started"] == []
+
+
+@pytest.mark.parametrize("event", [_reaction(), _reaction("count")])
+def test_a_valid_typed_reaction_is_heard_as_context_and_opens_no_call(tmp_path, place, opened, event):
+    from ouroboros import dialogue_store
+
+    with pytest.raises(door.PresenceCallRefused) as refused:
+        _open(tmp_path, event=event)
+    assert refused.value.code == "place_reaction_context_only"
+    (direction, facts_json), = _heard(tmp_path)
+    assert direction == "in" and "reaction_context_only" in facts_json
+    row, = [entry.row for entry in dialogue_store.iter_rows(tmp_path, "chat")]
+    assert row["text"] == "" and row["transport"]["message"] == event["message"]
+    assert opened["hubs"] == [] and opened["started"] == []
+
+
+def test_an_older_connectors_own_reaction_key_keeps_the_call_path(tmp_path, place, opened):
+    assert _open(tmp_path, event=_event(message={"reaction": "thumbsup"}, facts=["mention"])).call_id
+    assert opened["started"]
+
+
+def test_the_skill_door_answers_an_invalid_reaction_as_the_turn_door_does(tmp_path, place, opened, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway import host_call, host_service
+
+    async def authenticated(*_args):
+        return "meet_bridge", {}
+    monkeypatch.setattr(host_call, "_authenticated", authenticated)
+    monkeypatch.setattr(host_service.HostServiceContext, "require_permission", lambda *_args: None)
+    client = TestClient(host_service.create_host_service_app(tmp_path))
+    refused = client.post("/call/open", json={"role": "meeting", "event": _reaction("count", counts=3)})
+    assert (refused.status_code, refused.json()["code"]) == (400, "presence_reaction_invalid")
+    assert _heard(tmp_path) == []
+    heard = client.post("/call/open", json={"role": "meeting", "event": _reaction()})
+    assert (heard.status_code, heard.json()["code"]) == (403, "place_reaction_context_only")
+    assert len(_heard(tmp_path)) == 1
+    assert opened["hubs"] == []
