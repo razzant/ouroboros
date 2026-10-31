@@ -42,9 +42,7 @@ from ouroboros.context import build_llm_messages
 from ouroboros.loop import carried_inline_round_cap, run_llm_loop
 from ouroboros.observability import task_timing_scope
 from ouroboros.process_custody import current_custody_session_id
-from ouroboros.config import EFFORT_SCALE, resolve_effort  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
 from ouroboros.agent_startup_checks import (
-    persist_early_origin_stub as _persist_early_origin_stub_impl,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     validate_task_authority_sources,
     verify_restart,
     verify_system_state,
@@ -60,14 +58,9 @@ from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.outcomes import infra_failed_axes
 from ouroboros import body_candidate, route_choice, subagent_bootstrap, subagent_runtime
 from ouroboros.subagents import (
-    CapabilityDelta,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
-    SubagentExecutorResolution,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
-    SUBAGENT_RESOLUTION_FIELDS,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     SubagentDispatch,
     effort_result_fields,
-    capability_delta_disclosures,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     envelope_from_task,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
-    resolve_subagent_dispatch,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
 )
 from ouroboros.settings_setup_contract import resolve_total_budget_usd
 from ouroboros.subagent_messages import initiator_meta, subagent_message_meta
@@ -503,7 +496,8 @@ class OuroborosAgent:
             from ouroboros.project_admission import carried_basis
             from ouroboros.task_status import execution_owner_record
 
-            canonical = pathlib.Path(task.get("budget_drive_root") or getattr(self.env, "budget_drive_root", None) or self.env.drive_root)
+            canonical = pathlib.Path(task.get("budget_drive_root") or getattr(self.env, "budget_drive_root", None)
+                                     or self.env.drive_root)
             assigned_owner = task.get("_execution_owner") or {}
             execution_kind = assigned_owner.get("kind") or (
                 "presence" if task.get("_presence_turn") else "direct" if task.get("_is_direct_chat") else "pooled")
@@ -542,7 +536,9 @@ class OuroborosAgent:
                 # The producer's raw origin marker (promote_chat_to_task, presence_promote,
                 # api, ...): ``dialogue_provenance.run_origin`` reads it from this record.
                 source=task.get("source"),
-                project_id=str(task.get("project_id") or ""), **carried_basis(task),  # a direct turn's only basis carrier (#2547)
+                project_id=str(task.get("project_id") or ""),
+                # A direct turn has no queue row: this record is its only durable basis carrier (#2547).
+                **carried_basis(task),
                 role=task.get("role"),
                 description=task.get("description"),
                 objective=task.get("objective") or task.get("description"),
