@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.3.9
+version: 1.4.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -88,6 +88,11 @@ needed, then the files that were not attached. The System line the web shows for
 refusal comes here only when no acknowledgement carried the reason, and an accepted
 request stays silent.
 
+Version 1.4.0 can use a Bot API server you already run instead of the cloud
+(`TELEGRAM_API_BASE`, `TELEGRAM_API_FILES_DIR`, below). Polling confirms the
+updates a server returns even when their numbers start below the saved offset,
+as they do on a server new to the bot.
+
 Version 1.2.1 marks questions that wait for an owner answer and clears the
 waiting line after an answer submitted through Telegram.
 Version 1.2.3 serves the stored settings on GET settings/save so the Settings
@@ -163,33 +168,45 @@ to keep a saved value, or use **Clear saved Telegram proxy** to remove it.
 Disable and re-enable the skill after changing the proxy so its poller and
 companion also pick up the change. No additional Secrets grant is needed.
 
-To route Bot API traffic through a self-hosted `telegram-bot-api` server
-instead of `https://api.telegram.org`, set `TELEGRAM_API_BASE` to its root URL
-(`scheme://host[:port]`, no path, query or fragment; e.g.
-`http://192.168.1.48:8081`). All Bot API calls — polling, sends, downloads,
-notifications, and the companion/menu egress — go to that base; transport
-security is whatever the chosen origin provides, so an `http://` base is
-unencrypted between this installation and the server (fine on a trusted LAN,
-not fine over the internet). A local server
-serves downloaded files from its own disk instead of HTTP (tdlib/
-telegram-bot-api#26): point `TELEGRAM_API_FILES_DIR` at the server's file
-store. **The store must be shared by path**: the directory is mounted (bind
-mount/volume) at the *same absolute path* for both the server and this
-installation, so the absolute `file_path` the server returns in `getFile` is
-directly readable here and stays confined to the store (not the filesystem
-root). File downloads fall back to reading from that store. Disable and
-re-enable the skill after
-changing either setting. Both settings live in this skill's Settings form;
-invalid values are rejected with an error naming the key. With neither set,
-behavior is unchanged: the default `https://api.telegram.org` and HTTP
-downloads.
+To use a Bot API server you already run (`tdlib/telegram-bot-api`) instead of
+`https://api.telegram.org`, enter its origin as `TELEGRAM_API_BASE` in this
+skill's Telegram settings: `http://` or `https://`, a host and an optional port,
+with no path, query or fragment (for example `http://127.0.0.1:8081`). Every
+Telegram call of this skill then goes there: polling, replies, downloads,
+notifications and the Mini App menu button. A Save applies to the next call;
+polling moves after its current long poll, within about 25 seconds. An emptied
+field returns to `https://api.telegram.org`, and an invalid value is refused
+with an error naming the key. The server receives the bot token in every
+request path and becomes the source of the bot's updates, so prefer a loopback
+address or an `https://` origin: a plain `http://` origin on another machine
+carries the token unencrypted. A saved `TELEGRAM_PROXY` carries these calls
+too. This skill neither installs nor runs the server; it keeps polling (no
+webhook) and keeps its 10 MiB download and 50 MiB upload limits.
+
+A server started with `--local` answers `getFile` with an absolute path in its
+own file store and does not serve that file over HTTP. Set
+`TELEGRAM_API_FILES_DIR` to that store: the same absolute path must exist on
+this computer and be readable by Ouroboros (for a container, mount the store at
+the identical path). Downloads then read the file from disk, only inside that
+directory; a path outside it, including one reached through a symlink, is
+refused. An emptied field keeps downloads on HTTP.
+
+Moving the bot follows the Bot API rules, and Ouroboros never calls `logOut`
+or `close` for you. From the cloud to your server: disable this skill, call
+`logOut` once on `https://api.telegram.org` (without it Telegram does not
+guarantee that updates reach the local server), save the new base and enable
+the skill. After a successful `logOut` the bot cannot log in to the cloud
+server again for 10 minutes. Between two of your servers, call `close` on the
+old one first; it returns error 429 during the first 10 minutes after the bot
+was launched there. Back to the cloud: disable the skill, empty the field,
+wait until those 10 minutes have passed and enable it. Poll each bot token
+from one place only: another program polling the same token, such as a
+Presence connector for Telegram, takes updates this bridge would then miss.
 
 With the default base the Bot API stays `https://api.telegram.org` with TLS
-through the proxy and no redirects; a custom `TELEGRAM_API_BASE` origin
-replaces the target, and transport security is then whatever that origin
-provides (see above). Proxy credentials follow the selected protocol: HTTP and
-SOCKS do
-not encrypt the connection to the proxy; HTTPS does. Invalid proxy settings
+through the proxy and no redirects. Proxy credentials follow the selected
+protocol: HTTP and SOCKS do not encrypt the connection to the proxy; HTTPS
+does. Invalid proxy settings
 produce an error naming the key without its value. With no skill proxy, the
 bridge retains its existing direct/ambient-proxy behavior and the companion's
 Telegram calls stay direct. This setting does not change the application proxy,

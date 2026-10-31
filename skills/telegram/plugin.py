@@ -59,17 +59,23 @@ from .scripts.telegram_settings import (
 _HONOR_ENV_PROXIES = (not in_worker_process()) and env_proxies_configured()
 
 
-def _telegram_client(api, event=None, chat_id: int = 0) -> TelegramClient:
-    """Build each bridge client with the granted token and skill-local proxy."""
-    granted = api.get_settings(["TELEGRAM_BOT_TOKEN"])
+def _saved_server(api) -> tuple[str, str | None]:
+    """The saved Bot API server origin and its file store, read fresh for every client."""
     state_dir = pathlib.Path(api.get_state_dir())
+    return telegram_api_base(state_dir), telegram_files_dir(state_dir)
+
+
+def _telegram_client(api, event=None, chat_id: int = 0, server: tuple[str, str | None] | None = None) -> TelegramClient:
+    """Build each bridge client with the granted token, skill-local proxy and saved server."""
+    granted = api.get_settings(["TELEGRAM_BOT_TOKEN"])
+    api_base_url, files_dir = server or _saved_server(api)
     return TelegramClient(
         granted.get("TELEGRAM_BOT_TOKEN", ""),
         trust_env=_HONOR_ENV_PROXIES,
-        proxy=telegram_proxy(state_dir),
+        proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
         **(_mirror_options(api, event, chat_id) if event is not None else {}),
-        api_base_url=telegram_api_base(state_dir),
-        files_dir=telegram_files_dir(state_dir),
+        api_base_url=api_base_url,
+        files_dir=files_dir,
     )
 
 _POLL_GENERATION_STARTED = time.time()
@@ -637,7 +643,8 @@ async def _start_poller(api):
     try:
         _settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
         lang = await _migrate_bridge_language(api, _settings, lang)
-        client = _telegram_client(api)
+        server = _saved_server(api)
+        client = _telegram_client(api, server=server)
         offset = _load_offset(api)
         try:
             await _validate_bot(api, client, command_mode, lang)
@@ -653,7 +660,7 @@ async def _start_poller(api):
             # ready nor failed. The in-loop validation overwrites it.
             _save_bridge_status(api, "degraded", "telegram_startup_deferred")
             api.log("warning", "Telegram token validation deferred by a transport failure; polling waits for the network.")
-        return client, offset, pinned_chat, max_updates, command_mode, lang, validated
+        return client, server, offset, pinned_chat, max_updates, command_mode, lang, validated
     except TelegramSettingsError:
         _save_bridge_status(api, "error", "settings_invalid")
         api.log("error", "Telegram settings are invalid; owner binding is closed.")
@@ -678,13 +685,21 @@ def _fail_permanent_poll_rejection(api, exc, revalidating: bool) -> None:
 
 
 async def _poller(api) -> None:
-    client, offset, pinned_chat, max_updates, command_mode, lang, validated = await _start_poller(api)
+    client, server, offset, pinned_chat, max_updates, command_mode, lang, validated = await _start_poller(api)
 
     retry_delay = TELEGRAM_RETRY_INITIAL_SEC
     degraded_cause = ""
     while True:
         revalidating = False
         try:
+            saved = _saved_server(api)
+            if saved != server:
+                # A Save reaches polling at the next cycle, as it reaches every send at once:
+                # getUpdates, the replies and the downloads made here follow it. A new server
+                # validates the token there again.
+                validated = validated and saved[0] == server[0]
+                client, server = _telegram_client(api, server=saved), saved
+                api.log("info", "Telegram Bot API settings changed; polling follows the saved server.")
             if not validated:
                 revalidating = True
                 await _validate_bot(api, client, command_mode, lang)
@@ -702,7 +717,10 @@ async def _poller(api) -> None:
                 authorized_chat = None
                 try:  # Isolate one bad update without changing offset/retry semantics.
                     update_id = int(update.get("update_id") or 0)
-                    if update_id >= offset:
+                    if update_id > 0:
+                        # Confirm what this server returned, even below the saved offset: a
+                        # server new to this bot (or one that lost its queue) numbers from a
+                        # random start and answers a foreign offset from its oldest update.
                         offset = update_id + 1
 
                     authorized_chat = await _authorized_owner(api, client, update, pinned_chat, lang)
@@ -1477,22 +1495,16 @@ def register(api):
                                  "Leave empty to keep the saved proxy. Disable and re-enable the skill after changing it."},
                         {"name": "clear_telegram_proxy", "label": "Clear saved Telegram proxy", "type": "checkbox",
                          "help": "Remove the proxy instead of replacing it."},
-                        {"name": "telegram_api_base_status", "label": "Saved Bot API base (at form load)", "type": "text",
-                         "disabled": True, "default": "https://api.telegram.org"},
                         {"name": "TELEGRAM_API_BASE", "label": "Bot API base URL", "type": "text",
                          "placeholder": "https://api.telegram.org",
-                         "help": "Self-hosted telegram-bot-api root, e.g. http://192.168.1.48:8081. "
-                                 "All Bot API calls (polling, sends, downloads, menu) go there. "
-                                 "Leave empty to keep the saved value. Disable and re-enable the skill after changing it."},
-                        {"name": "clear_telegram_api_base", "label": "Clear saved Bot API base", "type": "checkbox",
-                         "help": "Revert to the default https://api.telegram.org."},
+                         "help": "Origin of a telegram-bot-api server you run, e.g. http://127.0.0.1:8081. "
+                                 "Every Telegram call of this skill goes there; polling follows within about "
+                                 "25 seconds. Empty: https://api.telegram.org. Moving the bot to another server "
+                                 "needs logOut or close first (see the skill's notes)."},
                         {"name": "TELEGRAM_API_FILES_DIR", "label": "Bot API files directory", "type": "text",
                          "placeholder": "/absolute/path/to/server-file-store",
-                         "help": "Absolute directory of the self-hosted server's file store, shared with this "
-                                 "installation (bind mount). Enables the download disk fallback. Leave empty to keep "
-                                 "the saved value."},
-                        {"name": "clear_telegram_api_files_dir", "label": "Clear saved files directory", "type": "checkbox",
-                         "help": "Disable the disk fallback (HTTP downloads)."},
+                         "help": "For a server started with --local: its file store, mounted at the same absolute "
+                                 "path here. Downloads read files only inside it. Empty: HTTP downloads only."},
                         {"name": "TELEGRAM_COMMAND_MODE", "label": "Command mode", "type": "select",
                          "options": [
                              {"value": "full_access", "label": "Full access (default)"},

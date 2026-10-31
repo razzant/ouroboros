@@ -48,7 +48,6 @@ from telegram_settings import (
     TelegramSettingsError,
     TelegramSettingsObserver,
     miniapp_enabled,
-    telegram_api_base,
     telegram_proxy,
 )
 from telegram_menu import (
@@ -518,8 +517,7 @@ async def _wait_for_owner(
             )
             await _wait_or_stop(5.0, stop_event)
             continue
-        menu = TelegramMenuManager(token, owner, state_dir, client=telegram_client,
-                                   api_root=telegram_api_base(state_dir))
+        menu = TelegramMenuManager(token, owner, state_dir, client=telegram_client)
         try:
             await _run_startup_operation(
                 menu.verify_private_owner(),
@@ -1173,7 +1171,6 @@ def _prior_owner_reconciliation(
         menu_owner,
         state_dir,
         client=telegram_client,
-        api_root=telegram_api_base(state_dir),
     )
     return True, prior_menu
 

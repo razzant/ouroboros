@@ -710,23 +710,26 @@ class TelegramClient:
         TELEGRAM_API_FILES_DIR points at the store shared with the server.
         Absolute paths are resolved as-is (the documented server behavior);
         anything else is joined under the store. Both are confined to the
-        store via resolve().relative_to(): file_path comes from the server's
+        resolved store: file_path comes from the server's
         own getFile response, but the check stays defensive against traversal.
         """
         if not self.files_dir:
             raise cause
-        store = pathlib.Path(self.files_dir).resolve()
+        configured = pathlib.Path(self.files_dir)
+        store = configured.resolve()
         raw = pathlib.Path(str(file_path or ""))
         candidate = raw if raw.is_absolute() else store / raw
-        try:
-            # Lexical confinement FIRST: Path.relative_to is a pure string
-            # comparison with no filesystem access, so a server-controlled
-            # UNC path (\\server\share\...) is refused before resolve() could
-            # touch an unrelated SMB share. Only lexically-contained paths
-            # are then resolved (symlink defense) and re-confined.
-            candidate.relative_to(store)
-            candidate.resolve().relative_to(store)
-        except ValueError:
+        # Lexical confinement FIRST: is_relative_to is a pure string comparison
+        # with no filesystem access, so a server-controlled UNC path
+        # (\\server\share\...) is refused before resolve() could touch an
+        # unrelated SMB share. The server names its files under the store as
+        # configured, which may be a symlinked spelling of the resolved store
+        # (/tmp and /var on macOS), so either spelling passes this step. Only
+        # lexically-contained paths are then resolved (symlink defense) and
+        # re-confined to the resolved store.
+        if not (candidate.is_relative_to(configured) or candidate.is_relative_to(store)):
+            raise cause from None
+        if not candidate.resolve().is_relative_to(store):
             raise cause from None
         if not candidate.is_file():
             raise cause from None

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import inspect
 import json
 import os
 import sys
@@ -367,66 +366,90 @@ def test_api_base_validator_canonicalizes_ipv6_with_brackets():
         validate("http://::1:8081")
 
 
-def test_api_base_form_saves_preserves_empty_and_explicitly_clears(tmp_path):
+def test_api_base_form_keeps_what_it_shows_and_an_emptied_field_returns_to_the_cloud(tmp_path):
     plugin = _load_plugin()
     handler = plugin._make_settings_save(_RouteApi(tmp_path))
     base = "http://192.168.1.48:18085"
+
     def request(payload=None, method="POST"):
         return asyncio.run(handler(_RouteRequest(payload, host="127.0.0.1", method=method)))
-    # Save a self-hosted base.
-    assert request({"TELEGRAM_API_BASE": base}).status_code == 200
+
+    def message(payload):
+        reply = request(payload)
+        assert reply.status_code == 200
+        return json.loads(reply.body)["message"]
+
+    assert f"Bot API server: {base}." in message({"TELEGRAM_API_BASE": base})
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
-    # GET hydration shows the saved base in the status field.
-    hydrated = request(method="GET")
-    assert b"192.168.1.48:18085" in hydrated.body
-    # An empty field preserves the saved value (no accidental revert).
-    assert request({"TELEGRAM_API_BASE": ""}).status_code == 200
+    # The field itself is hydrated with the saved value, so an untouched Save sends it back.
+    assert json.loads(request(method="GET").body)["TELEGRAM_API_BASE"] == base
+    assert "Bot API server" not in message({"TELEGRAM_API_BASE": base})
+    # A request without the key leaves the saved value alone.
+    assert "Bot API server" not in message({"TELEGRAM_COMMAND_MODE": "strict"})
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
     # A fragment/query/base-with-path is rejected, and the stored value stands.
     for bad in ("https://host#", "https://host?x=1", "https://host/bot", "ftp://host"):
         refused = request({"TELEGRAM_API_BASE": bad})
         assert refused.status_code == 400, bad
+        assert "TELEGRAM_API_BASE" in json.loads(refused.body)["message"]
         assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
-    # Explicit clear checkbox reverts to the cloud default.
-    assert request({"clear_telegram_api_base": True}).status_code == 200
-    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == ""
     # Canonicalization: trailing slash and :443-on-https normalize away.
-    assert request({"TELEGRAM_API_BASE": "http://192.168.1.48:18085/"}).status_code == 200
+    assert "Bot API server" not in message({"TELEGRAM_API_BASE": base + "/"})
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
-    # ...including the https default port (no drift between saves).
-    assert request({"TELEGRAM_API_BASE": "https://host.example:443"}).status_code == 200
+    assert "Bot API server: https://host.example." in message({"TELEGRAM_API_BASE": "https://host.example:443"})
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://host.example"
+    # An emptied field returns to the cloud server, and the form then shows it empty.
+    assert "Bot API server: https://api.telegram.org." in message({"TELEGRAM_API_BASE": "  "})
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == ""
+    assert json.loads(request(method="GET").body)["TELEGRAM_API_BASE"] == ""
 
 
-def test_files_dir_form_saves_preserves_empty_and_explicitly_clears(tmp_path):
+def test_files_dir_form_keeps_a_canonical_path_and_an_emptied_field_clears_it(tmp_path):
     plugin = _load_plugin()
     handler = plugin._make_settings_save(_RouteApi(tmp_path))
     # Native absolute path for THIS platform (a POSIX literal would be
     # rejected at save time on Windows — see the validator tests below).
     store = str(tmp_path / "telegram-bot-api")
     (tmp_path / "telegram-bot-api").mkdir()
+
     def request(payload=None, method="POST"):
         return asyncio.run(handler(_RouteRequest(payload, host="127.0.0.1", method=method)))
-    assert request({"TELEGRAM_API_FILES_DIR": store}).status_code == 200
+
+    assert request({"TELEGRAM_API_FILES_DIR": store + os.sep}).status_code == 200
     assert load_settings(tmp_path)["TELEGRAM_API_FILES_DIR"] == store
-    # The persisted value revalidates unchanged on reload (idempotency).
-    settings = sys.modules[plugin._make_settings_save.__module__]
-    assert settings.validate_telegram_files_dir(store) == store
-    # An empty field preserves the saved value (F3 regression guard).
+    assert json.loads(request(method="GET").body)["TELEGRAM_API_FILES_DIR"] == store
+    refused = request({"TELEGRAM_API_FILES_DIR": "relative/dir"})
+    assert refused.status_code == 400
+    assert "TELEGRAM_API_FILES_DIR" in json.loads(refused.body)["message"]
+    assert request({"TELEGRAM_COMMAND_MODE": "strict"}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_FILES_DIR"] == store
     assert request({"TELEGRAM_API_FILES_DIR": ""}).status_code == 200
-    assert load_settings(tmp_path)["TELEGRAM_API_FILES_DIR"] == store
-    # Explicit clear disables the fallback.
-    assert request({"clear_telegram_api_files_dir": True}).status_code == 200
     assert load_settings(tmp_path)["TELEGRAM_API_FILES_DIR"] == ""
 
 
-def test_form_schema_contains_api_base_and_files_dir_controls():
+def test_registered_form_offers_the_server_fields_as_plain_text(tmp_path):
     plugin = _load_plugin()
-    source = inspect.getsource(plugin)
-    assert '"name": "TELEGRAM_API_BASE"' in source
-    assert '"name": "clear_telegram_api_base"' in source
-    assert '"name": "TELEGRAM_API_FILES_DIR"' in source
-    assert '"name": "clear_telegram_api_files_dir"' in source
+
+    class _RegisterApi(_RouteApi):
+        sections: list = []
+
+        def get_runtime_info(self):
+            return {"data_dir": str(self.state_dir)}
+
+        def register_settings_section(self, _section_id, **kwargs):
+            self.sections.append(kwargs)
+
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: None
+
+    api = _RegisterApi(tmp_path)
+    plugin.register_miniapp = lambda _api: None
+    plugin.register(api)
+    fields = {field["name"]: field for component in api.sections[0]["schema"]["components"]
+              if component.get("type") == "form" for field in component["fields"]}
+    assert fields["TELEGRAM_API_BASE"]["type"] == fields["TELEGRAM_API_FILES_DIR"]["type"] == "text"
+    assert not {"telegram_api_base_status", "clear_telegram_api_base", "clear_telegram_api_files_dir"} & set(fields)
+    assert set(telegram_settings_module._SETTINGS_FORM_KEYS) <= set(fields)
 
 
 def test_files_dir_validator_accepts_native_absolute_paths():

@@ -338,7 +338,9 @@ def test_upgrade_keeps_token_grant_and_local_proxy(
     local_state = drive / "state" / "skills" / "telegram"
     local_state.mkdir(parents=True)
     local_settings = local_state / "settings.json"
-    local_settings.write_text(json.dumps({"TELEGRAM_PROXY": _PROXY if owner_set_proxy else ""}), encoding="utf-8")
+    local_settings.write_text(json.dumps({"TELEGRAM_PROXY": _PROXY if owner_set_proxy else "",
+                                          "TELEGRAM_API_BASE": "http://127.0.0.1:8081",
+                                          "TELEGRAM_API_FILES_DIR": str(tmp_path / "tba-store")}), encoding="utf-8")
     settings_before = local_settings.read_bytes()
     old = load_skill(installed, drive)
     assert old is not None and not old.load_error

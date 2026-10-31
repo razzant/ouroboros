@@ -303,3 +303,56 @@ def test_download_traversal_stays_in_store(tmp_path):
 
     with pytest.raises(RuntimeError):
         asyncio.run(run())
+
+
+# --- the store as both sides spell it -----------------------------------------
+
+def _disk_read(client, file_path):
+    """Download through a server that serves no file over HTTP (a --local server)."""
+    transport, _ = _fake_server({})
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await client._download_bytes(file_path)
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    return asyncio.run(run())
+
+
+def _symlink(link, target):
+    try:
+        os.symlink(target, link, target_is_directory=Path(target).is_dir())
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable on this host")
+
+
+def test_a_store_configured_through_a_symlink_reads_the_servers_own_spelling(tmp_path):
+    # macOS spells /tmp and /var through symlinks: the server reports the path as
+    # mounted, which resolves to the same store here.
+    real = tmp_path / "real-store"
+    (real / "documents").mkdir(parents=True)
+    (real / "documents" / "file_0.txt").write_bytes(b"through the link")
+    alias = tmp_path / "alias-store"
+    _symlink(alias, real)
+    c = _client(api_base_url=_BASE, files_dir=str(alias))
+    for file_path in (str(alias / "documents" / "file_0.txt"), str(real / "documents" / "file_0.txt"),
+                      "documents/file_0.txt"):
+        assert _disk_read(c, file_path) == b"through the link"
+
+
+def test_a_symlink_inside_the_store_cannot_lead_out_of_it(tmp_path):
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.txt").write_bytes(b"not in the store")
+    _symlink(store / "documents" / "leak.txt", outside / "outside.txt")
+    _symlink(store / "escape", outside)
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+    for file_path in (str(store / "documents" / "leak.txt"), "documents/leak.txt",
+                      str(store / "escape" / "outside.txt"), "escape/outside.txt"):
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            _disk_read(c, file_path)

@@ -293,8 +293,6 @@ def make_settings_save(api):
                       if key in stored and key != "TELEGRAM_PROXY"}
             if "TELEGRAM_PROXY" in stored:
                 values["telegram_proxy_status"] = "Configured" if stored["TELEGRAM_PROXY"] else "Not configured"
-            if stored.get("TELEGRAM_API_BASE"):
-                values["telegram_api_base_status"] = str(stored["TELEGRAM_API_BASE"])
             return JSONResponse(values)
         try:
             data = await request.json()
@@ -322,30 +320,21 @@ def make_settings_save(api):
                 payload.pop("TELEGRAM_PROXY")
             else:
                 payload["TELEGRAM_PROXY"] = proxy
-        if data.get("clear_telegram_api_base") is True:
-            payload["TELEGRAM_API_BASE"] = ""
-        elif "TELEGRAM_API_BASE" in payload:
-            raw = str(payload.get("TELEGRAM_API_BASE") or "").strip()
-            if not raw:
-                # An untouched/emptied text field preserves the saved value;
-                # removal is the separate clear checkbox above.
-                payload.pop("TELEGRAM_API_BASE", None)
-            else:
-                try:
-                    payload["TELEGRAM_API_BASE"] = validate_telegram_api_base(raw)
-                except ValueError as exc:
-                    return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
-        if data.get("clear_telegram_api_files_dir") is True:
-            payload["TELEGRAM_API_FILES_DIR"] = ""
-        elif "TELEGRAM_API_FILES_DIR" in payload:
-            try:
-                files_dir = validate_telegram_files_dir(payload["TELEGRAM_API_FILES_DIR"])
-            except ValueError as exc:
-                return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
-            if files_dir is None:
-                payload.pop("TELEGRAM_API_FILES_DIR")
-            else:
-                payload["TELEGRAM_API_FILES_DIR"] = files_dir
+        # Both are plain text fields hydrated with the saved value: what the form shows is
+        # what Save keeps, an emptied field returns to the default (the cloud server, HTTP
+        # downloads) and a key absent from the request stays as saved.
+        try:
+            if "TELEGRAM_API_BASE" in payload:
+                raw = str(payload["TELEGRAM_API_BASE"] or "").strip()
+                payload["TELEGRAM_API_BASE"] = validate_telegram_api_base(raw) if raw else ""
+            if "TELEGRAM_API_FILES_DIR" in payload:
+                payload["TELEGRAM_API_FILES_DIR"] = validate_telegram_files_dir(payload["TELEGRAM_API_FILES_DIR"]) or ""
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
+        try:
+            saved_server = validate_telegram_api_base(load_settings(Path(api.get_state_dir())).get("TELEGRAM_API_BASE"))
+        except (TelegramSettingsError, ValueError):
+            saved_server = ""
         owner_ignored = False
         if "TELEGRAM_CHAT_ID" in payload and not request_may_change_owner(request):
             payload.pop("TELEGRAM_CHAT_ID", None)
@@ -361,6 +350,11 @@ def make_settings_save(api):
         if "TELEGRAM_PROXY" in payload:
             message += " Saved Telegram proxy: " + ("configured." if payload["TELEGRAM_PROXY"] else "cleared.")
             message += " Disable and re-enable the skill to apply the proxy to all Telegram calls."
+        server = validate_telegram_api_base(payload.get("TELEGRAM_API_BASE"))
+        if "TELEGRAM_API_BASE" in payload and server != saved_server:
+            message += (f" Bot API server: {server}. Telegram calls use it now; polling moves after its"
+                        " current long poll (about 25 seconds). Moving the bot between servers needs"
+                        " logOut or close first, as the skill's notes describe.")
         if owner_ignored:
             message += " Owner binding was left unchanged."
         return JSONResponse({"ok": True, "owner_ignored": owner_ignored, "message": message})
