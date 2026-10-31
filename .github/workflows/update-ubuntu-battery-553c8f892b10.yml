@@ -1,0 +1,134 @@
+# Ubuntu default battery of update candidate 553c8f892b10: qualification equipment, not a product lane.
+#
+# One ubuntu-latest job runs the repository's own full default battery once, on the exact tree of
+# candidate C (553c8f892b10ed7b278b0f87c0e48adb82b9a4a5): `scripts/run_tests.py --sequential` is the
+# complete Node lane, then the default parallel pass and the serial pass, split as the hermetic commit
+# gate and ci.yml split them (ci.yml's `full-test-runs` runs the same two passes in shards). That owner
+# brings safe_test's disposable HOME/data, its scrubbed owner/provider environment, and its raw logs,
+# source record and pytest projections, which are uploaded whole. It is fail-fast and retries nothing:
+# a red lane stays red and the lanes after it are not run.
+#
+# This is NOT Windows or macOS, the opt-in marker lanes (integration, browser, ui_browser,
+# ui_browser_docker, portable_detail, skill_smoke, size_ratchet), ci.yml's lint, SQLite-floor, PERSIST
+# and benchmark-methodology jobs, a release build or an install qualification. ci.yml's own dispatch is
+# not used: plain dispatch also runs the paid provider and skill jobs with their secrets.
+#
+# No secret is referenced and the token is contents:read. This file rides one equipment commit above C
+# on a qualification branch (workflow_dispatch needs the file on the default branch, so the trigger is
+# the push). The job checks out C itself, by SHA, without keeping the token, and proves its commit and
+# tree before anything runs. `github.sha` is therefore the equipment commit, never the tested tree: the
+# tested identity is source-identity.txt and the owner's own source/source.json in the evidence.
+
+name: Ubuntu default battery of update candidate 553c8f892b10
+
+on:
+  push:
+    branches:
+      - 'qualification/update-ubuntu-battery-553c8f892b10-*'
+
+permissions:
+  contents: read
+
+# A second push to the branch waits behind a running battery instead of cancelling hours of work.
+concurrency:
+  group: update-ubuntu-battery-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ubuntu-default-battery:
+    runs-on: ubuntu-latest
+    # GitHub-hosted jobs end at 360 minutes. The battery step below expires first, so the evidence
+    # steps still run after it, as the producer steps of ci.yml do.
+    timeout-minutes: 350
+    env:
+      CANDIDATE_COMMIT: 553c8f892b10ed7b278b0f87c0e48adb82b9a4a5
+      CANDIDATE_TREE: 50ab1b2d1e7a5f0e3b935f103339dc509e6ca95c
+      # This job provisions pytest-xdist/pytest-timeout and node 22, so the gate's real-spawn tests
+      # run here instead of skipping, as in ci.yml's full-test-runs.
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: "1"
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: "1"
+    steps:
+      # Full history, as ci.yml's full-test-runs checks out.
+      - name: Check out exact candidate C without keeping the token
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the checkout is exactly C before anything runs
+        run: |
+          evidence="$RUNNER_TEMP/battery-evidence"
+          mkdir -p "$evidence"
+          commit="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          dirty="$(git status --porcelain --untracked-files=all)"
+          {
+            echo "candidate_commit=$commit"
+            echo "candidate_tree=$tree"
+            echo "expected_commit=$CANDIDATE_COMMIT"
+            echo "expected_tree=$CANDIDATE_TREE"
+            echo "worktree=$([ -z "$dirty" ] && echo clean || echo dirty)"
+            echo "workflow_commit=$GITHUB_SHA"
+            echo "workflow_ref=$GITHUB_REF"
+            echo "repository=$GITHUB_REPOSITORY run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+            echo "runner_image=${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          } | tee "$evidence/source-identity.txt"
+          test "$commit" = "$CANDIDATE_COMMIT" || { echo "::error::checked-out commit $commit is not C"; exit 1; }
+          test "$tree" = "$CANDIDATE_TREE" || { echo "::error::checked-out tree $tree is not the tree of C"; exit 1; }
+          test -z "$dirty" || { echo "::error::the checkout of C is not clean"; echo "$dirty"; exit 1; }
+      # What a red run may owe to the machine (disk, memory, cores) rather than to C.
+      - name: Record what this runner offers
+        run: |
+          { date -u +%FT%TZ; uname -srm; nproc; free -m; df -h / /mnt; } 2>&1 | tee "$RUNNER_TEMP/battery-evidence/runner-before.txt" || true
+      - name: Set up the locked Python environment on the shipped interpreter
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped  # the SQLite and journal mode fresh installs run, as ci.yml's full-test-runs
+      - name: The stores run WAL here
+        run: |
+          python -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); sys.exit(mode != sys.argv[1])" WAL
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      # One invocation of the repository's own full battery. The owner is fail-fast by design (a red
+      # lane skips the lanes after it) and retries nothing: the first red stays the verdict. Its safe_test
+      # evidence root is set here, so the raw logs, source record and pytest projections (the run's
+      # pytest/parallel and pytest/serial) land in one directory that is uploaded whole below.
+      - name: Run the full default battery once (Node lane, parallel pass, serial pass)
+        id: battery
+        timeout-minutes: 300
+        env:
+          OUROBOROS_TEST_EVIDENCE_ROOT: ${{ runner.temp }}/battery-evidence
+        run: python scripts/run_tests.py --sequential
+      # The owner's own per-pass lines (`=== node|parallel|serial: exit N in Ts`, `=== battery: GREEN|RED`).
+      - name: Record the result
+        if: ${{ always() }}
+        env:
+          BATTERY_OUTCOME: ${{ steps.battery.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          evidence="$RUNNER_TEMP/battery-evidence"
+          mkdir -p "$evidence"
+          { date -u +%FT%TZ; df -h / /mnt; } > "$evidence/runner-after.txt" 2>&1 || true
+          {
+            echo "### Ubuntu default battery of update candidate ${CANDIDATE_COMMIT:0:12}"
+            echo "Battery step outcome: $BATTERY_OUTCOME; job status so far: $JOB_STATUS."
+            echo 'Scope: one ubuntu-latest run of scripts/run_tests.py --sequential; not Windows or macOS, not the opt-in marker lanes.'
+            echo '```'
+            cat "$evidence/source-identity.txt" || echo 'source identity was not recorded'
+            echo '--- per-pass lines of the owner output ---'
+            grep -ah '^=== ' "$evidence"/run-*/command-*/stdout.bin || echo 'no per-pass lines were recorded'
+            echo '```'
+          } | tee "$evidence/result-summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the raw battery evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-ubuntu-battery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/battery-evidence/
+          retention-days: 30
+          if-no-files-found: error
