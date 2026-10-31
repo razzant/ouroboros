@@ -5,8 +5,10 @@
 that the next genuine drain delivers, never a wake, even when any mail would wake the wait; a
 missing or non-bool fact keeps the ordinary mail rule. Driven through the real consumers:
 ``await_messages`` in-slot, its warm park (``direct_owner_wait``), the cold sleep-wake pass
-(``supervisor.sleep_wake``), ``wait_task``/``wait_tasks``, a review panel's wait and
-``delegate_wait`` (``delegate_supervision.supervised_wait``).
+(``supervisor.sleep_wake``), ``wait_task``/``wait_tasks``, a review panel's wait,
+``delegate_wait`` (``delegate_supervision.supervised_wait``) and a provider-outage backoff
+(``loop_transport.transport_wait_step``). Real connectors' reactions through these consumers:
+``tests/test_place_reaction_connectors.py``.
 """
 
 from __future__ import annotations
@@ -297,6 +299,26 @@ def test_a_direct_question_park_wakes_for_waking_mail_named_past_a_passive_arriv
     _place(tmp_path, "sleeper", False, msg_id="place-event:quiet")
     _place(tmp_path, "sleeper", True, msg_id="place-event:wake", author_of="presence-next")
     assert direct_owner_wait(ctx, checkpoint) == "mail:presence-next"
+
+
+# -- a provider-outage backoff --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("wake, heard", [(False, False), (True, True), (_LEGACY, True)])
+def test_a_transport_backoff_hears_only_waking_or_legacy_place_mail(tmp_path, monkeypatch, wake, heard):
+    import time
+
+    from ouroboros import loop_transport
+
+    _place(tmp_path, "sleeper", wake)
+    observed = []
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda _seconds, check: observed.append(check()))
+    tools = SimpleNamespace(_ctx=SimpleNamespace(task_attempt=1, task_metadata={}))
+    assert loop_transport.transport_wait_step(
+        loop_transport.TransportWaitEpisode(started_monotonic=time.monotonic()), tools=tools,
+        error_kind="transport_unavailable", drive_root=tmp_path, drive_logs=tmp_path / "logs", task_id="sleeper",
+        model="unused", emit_progress=lambda *_a, **_k: None, incoming_messages=None, owner_msg_seen=set())
+    assert observed == [heard]
+    assert acknowledged_task_message_ids(tmp_path, "sleeper", attempt_key=1) == set(), "a peek acknowledges nothing"
 
 
 # -- a review panel's wait ----------------------------------------------------------------------------

@@ -77,6 +77,7 @@ def test_host_advertises_identity_without_losing_existing_capabilities(ingress):
     assert result["presence_identity"] == result["presence_wake_signals"] == result["places_version"] == 1
     assert type(result["presence_explicit_completion"]) is int and result["presence_explicit_completion"] == 1
     assert type(result["presence_place_binding_version"]) is int and result["presence_place_binding_version"] == 1
+    assert type(result["presence_reaction_context"]) is int and result["presence_reaction_context"] == 1
     assert result["presence_wake_facts"] == list(places.WAKE_FACTS)
     assert result["presence_delivery_version"] == result["presence_main_contact_version"] == 1
 

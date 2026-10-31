@@ -166,14 +166,17 @@ def note_place_delivery(ctx: Any, entry: Mapping[str, Any], controls: dict) -> N
     """A drained place arrival: a wake one may reopen a ready final, background alone never does.
 
     Each arrival the drain hands to the model is a candidate for coverage (``covered_send``), as is
-    each incoming message a reentry note carries whole (``reentry_note``, never a wake).
+    each incoming message a reentry note carries whole (``reentry_note``, never a wake). A typed
+    reaction reaches the model as context and is never covered, so it never becomes the reply anchor.
     Entries written before the ``wake`` fact existed keep their earlier reopening.
     """
+    from ouroboros.dialogue_provenance import reaction_fact
+
     arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), Mapping) else {}
     if arrival.get("wake") is not False:
         controls["place_event"] = True  # accepted context, never owner authority
-    if ctx is not None and arrival.get("source_event_id"):
-        message = arrival.get("message") if isinstance(arrival.get("message"), Mapping) else {}
+    message = arrival.get("message") if isinstance(arrival.get("message"), Mapping) else {}
+    if ctx is not None and arrival.get("source_event_id") and not reaction_fact(message):
         if not isinstance(getattr(ctx, "_presence_delivered", None), list):
             ctx._presence_delivered = []
         ctx._presence_delivered.append({  # written only on the author's loop thread: drains and reentry
@@ -521,9 +524,14 @@ def _row_fact(binding: ReviewWaitBinding, row: Mapping[str, Any]) -> str:
     owner = str(row.get("task_id") or "")
     turn = "this turn" if owner == binding.task_id else f"turn {owner}" if owner else "an unattributed turn"
     text = json.dumps(str(row.get("text") or ""), ensure_ascii=False)
+    from ouroboros.dialogue_provenance import dialogue_text, reaction_action_words, reaction_fact, wordless_reaction
+    reaction = reaction_fact((row.get("transport") or {}).get("message"))
     if row.get("type") == "presence_delivery":
         state = str(((row.get("transport") or {}).get("delivery") or {}).get("state") or "unknown")
-        return f"- delivery {state} for {turn}: {text}"
+        action = reaction_action_words(reaction, state) if reaction else ""
+        if action and not row.get("text"):
+            return f"- reaction action for {turn}, not speech: {action}"
+        return f"- delivery {state} for {turn}: {text}" + (f"; reaction action, not speech: {action}" if action else "")
     imported = row.get("historical_import")
     if isinstance(imported, dict):  # recorded since the yield, sent long before: room history, no turn's input
         sender = row.get("sender_label") or row.get("sender_session_id") or "an unnamed participant"
@@ -532,6 +540,8 @@ def _row_fact(binding: ReviewWaitBinding, row: Mapping[str, Any]) -> str:
                 f"by {sender}{own} (event {row.get('client_message_id')}; not a new arrival): {text}")
     if row.get("direction") == "in":
         sender = row.get("sender_label") or row.get("sender_session_id") or "an unnamed participant"
+        if wordless_reaction(row):
+            return f"- reaction from {sender} (event {row.get('client_message_id')}, taken by {turn}): {dialogue_text(row)}"
         return f"- message from {sender} (event {row.get('client_message_id')}, taken by {turn}): {text}"
     if row.get("direction") == "out":
         return f"- reply recorded by {turn} (authored; delivery unconfirmed): {text}"
@@ -555,7 +565,7 @@ def _history_reader(ctx: Any, event: Any, since: str, *, retained_source: bool =
 def _carried_arrivals(ctx: Any, rows: list) -> None:
     """The incoming messages a reentry note carries whole reach the model as drained arrivals do: each joins
     coverage (``covered_send``) with its exact captured message, as context and never a wake. Rows named
-    only by address, imported earlier history, replies and delivery facts move nothing."""
+    only by address, imported earlier history, replies, delivery facts and reactions move nothing."""
     for row in rows:
         transport = row.get("transport") if isinstance(row.get("transport"), Mapping) else {}
         if (row.get("direction") == "in" and row.get("type") != "presence_delivery" and row.get("client_message_id")

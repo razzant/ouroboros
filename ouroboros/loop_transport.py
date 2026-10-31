@@ -89,7 +89,8 @@ class TransportWaitEpisode:
     final_redial_done: bool = False
     outcome_custody: Dict[str, Any] = field(default_factory=dict)
     continuation_granted: bool = False
-    mailbox_peek: OwnerMailboxPeek = field(default_factory=OwnerMailboxPeek, repr=False)
+    # A context-only place arrival shortens no backoff: it reaches the next round's drain at the scheduled redial.
+    mailbox_peek: OwnerMailboxPeek = field(default_factory=lambda: OwnerMailboxPeek(waking_only=True), repr=False)
 
     @property
     def waited_sec(self) -> float:
@@ -553,8 +554,9 @@ def _owner_signal_pending(
 ) -> bool:
     """Peek unread input; acceptance may exclude context-only task messages.
 
-    Transport and wait callers still wake for every message. Owner admission
-    uses the same typed provenance boundary as the ordinary mailbox drain.
+    Transport and wait callers wake for what their ``waking_only`` peek counts: every
+    message but a context-only place arrival. Owner admission uses the same typed
+    provenance boundary as the ordinary mailbox drain.
     """
     if incoming_messages is not None and not incoming_messages.empty():
         return True

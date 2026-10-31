@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from ouroboros import dialogue_store
+from ouroboros.dialogue_provenance import reaction_action_words, reaction_fact, reaction_words
 from ouroboros.places import PlaceError, get_place, is_owner_account
 from ouroboros.store import StoreError
 
@@ -33,6 +34,11 @@ def record_facts(entry):
     for key in ('identity', 'sends_as', 'sends_as_owner'):
         if (value := transport.get(key)) is not None:
             facts[key] = value
+    reaction = reaction_fact(transport.get('message'))
+    if reaction and kind != 'place_notice':  # English host words for the act; words the row sent stay its text
+        state = delivery.get('state') if isinstance(delivery, dict) else ''
+        facts['reaction'] = {'summary': reaction_action_words(reaction, state) if kind == 'presence_delivery'
+                             else reaction_words(reaction)}
     if kind == 'place_notice':
         for key in ('held_text', 'held', 'checked'):
             if (value := entry.get(key)) is not None:

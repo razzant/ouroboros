@@ -172,4 +172,11 @@
  * @property {PlaceIdentity=} identity
  * @property {PlaceHistoryImport=} historical_import  // never owner confirmation or attention
  * @property {string=} sent_at  // the provider send time its arrival recorded; absent: unknown, never inferred
+ * @property {PlaceHistoryReaction=} reaction  // a typed reaction arrival or receipt; absent: not one
+ */
+
+/**
+ * The host's English words for a row's typed reaction, never speech; words the row sent stay its text.
+ * @typedef {Object} PlaceHistoryReaction
+ * @property {string} summary
  */
