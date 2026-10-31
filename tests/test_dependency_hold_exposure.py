@@ -515,8 +515,12 @@ _FRAME = {"window": 200_000, "reserve": 16_000}  # Astra's R2 frame: the support
 
 def _held_children(tmp_path, monkeypatch, count):
     """``count`` held children behind the real readers (the task store stubbed, as in the R1 probe), and a root
-    whose results reach its transcript through the loop's own measured delivery (``process_tool_results``)."""
-    from ouroboros import task_status
+    whose results reach its transcript through the loop's own measured delivery (``process_tool_results``).
+
+    A ``timeout_sec=0`` wait over the same holds returns the same bytes in every test (``elapsed_sec`` 0.0, as a
+    15.6 ms Windows clock mostly measures it), so its retained source has the same path and sha256 here as in an
+    earlier test of this process; each test therefore starts from a fresh reading ledger, as a new worker does."""
+    from ouroboros import delegate_output, task_status
     from ouroboros.tools import control_task_results as readers
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.tool_result import _TOOL_RESULT_ATTR
@@ -537,6 +541,9 @@ def _held_children(tmp_path, monkeypatch, count):
     monkeypatch.setattr(task_status, "load_effective_task_result", load)
     monkeypatch.setattr(task_status, "_load_queue_snapshot", lambda _root: {"pending": [], "running": []})
     monkeypatch.setattr("ouroboros.loop_transport._owner_signal_pending", lambda *_a, **_k: False)
+    clock = task_status.time  # every wait here is timeout_sec=0: a stopped clock ends it at its first deadline check
+    monkeypatch.setattr(task_status, "time", SimpleNamespace(time=clock.time, monotonic=lambda: 0.0, sleep=clock.sleep))
+    monkeypatch.setattr(delegate_output, "_READ_COVERAGE", {})
     return ctx, rows
 
 
@@ -842,12 +849,8 @@ _SLEEP_FRAME = {"window": 8_000, "reserve": 2_000}  # Astra's R4 probe: a sleep 
 
 def _sleepable_children(tmp_path, monkeypatch, count):
     """``_held_children`` whose root may request its sleep (``await_messages``), as in Astra's R4 probe: an owner
-    to sleep under, and each child a task this installation knows. Its holds return the same bytes in every test,
-    so each starts from a fresh reading ledger, as a new worker does."""
-    from ouroboros import delegate_output
-
+    to sleep under, and each child a task this installation knows."""
     ctx, rows = _held_children(tmp_path, monkeypatch, count)
-    monkeypatch.setattr(delegate_output, "_READ_COVERAGE", {})
     ctx.owner_wait_callback = lambda *_args: "owner_text"
     monkeypatch.setattr("ouroboros.task_results.load_task_result",
                         lambda _root, task_id, **_kwargs: rows.get(task_id, {}))
