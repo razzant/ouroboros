@@ -40,7 +40,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ouroboros.config import (
     adaptive_quorum, get_finalization_grace_sec, get_llm_transport_read_timeout_sec, get_review_enforcement,
-    get_runtime_mode, get_task_abs_ceiling_sec, operation_window_sec,
+    get_runtime_mode, get_task_abs_ceiling_sec,
 )
 from ouroboros.preflight_receipts import bind_execution_exhibit
 from ouroboros.review_body_fact import body_fact, layer_for
@@ -1202,11 +1202,14 @@ def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *,
     return publish_delivery(ctx, text, record) if record else text
 
 
-def _review_change_tool_timeout_sec() -> float:
-    # The plan_task envelope: a settlement bound covering an API transport read or
-    # a delegated session's operation window, never a cognition cutoff.
-    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()),
-                operation_window_sec(get_task_abs_ceiling_sec()))
+def _review_change_tool_timeout_sec() -> Optional[float]:
+    # The plan_task envelope: a settlement bound covering an API transport read or a
+    # delegated session's lifetime-bounded window, never a cognition cutoff; ``None``
+    # without a lifetime (the wave's drain and the system report observe owner controls).
+    lifetime = get_task_abs_ceiling_sec()
+    if lifetime is None:
+        return None
+    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()), float(lifetime))
             + get_finalization_grace_sec())
 
 

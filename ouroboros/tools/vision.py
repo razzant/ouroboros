@@ -176,27 +176,26 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
     remaining = dispatch_window_remaining_sec(deadline_at=kwargs.pop("_deadline_at", None),
                                               deadline_ts=kwargs.pop("_deadline_ts", None),
                                               reserve_sec=2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0))
+    # A subscription call waits on its task's clocks only; ``None`` = none exists, and the
+    # child then has no timeout (its control watcher still ends it on Stop).
     operation_timeout = _vision_execution_window() if subscription else provider_timeout
     if remaining is not None:
-        operation_timeout = min(operation_timeout, remaining)
-    if operation_timeout <= 0:
+        operation_timeout = remaining if operation_timeout is None else min(operation_timeout, remaining)
+    if operation_timeout is not None and operation_timeout <= 0:
         raise TimeoutError("VLM task execution window exhausted before child dispatch")
-    child_timeout = operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
+    child_timeout = None if operation_timeout is None else operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
     return run_vision_child(child_timeout=child_timeout, subscription=subscription,
                             model_role=model_role, processing_preference=processing_preference, **kwargs)
 
 
-def _vision_execution_window() -> float:
-    from ouroboros.config import get_task_abs_ceiling_sec, operation_window_sec
+def _vision_execution_window() -> Optional[float]:
+    from ouroboros.deadline_utils import task_execution_window_sec
 
-    context = current_model_wait()
-    remaining = context.execution_window_remaining() if context else None
-    # An owner (or task) without an absolute clock still bounds this individual image.
-    return operation_window_sec(get_task_abs_ceiling_sec()) if remaining is None else remaining
+    return task_execution_window_sec()
 
 
-def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> float:
-    """Only a subscription image call adopts the task's existing execution cap."""
+def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> Optional[float]:
+    """Only a subscription image call adopts the task's existing execution cap (``None`` = none)."""
     from ouroboros.provider_models import provider_for_model
 
     context = current_model_wait()
@@ -208,7 +207,8 @@ def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> float:
     )
     if provider_for_model(model) != "claudexor":
         return 0.0
-    return _vision_execution_window() + (2 * NESTED_SETTLEMENT_MARGIN_SEC)
+    window = _vision_execution_window()
+    return None if window is None else window + (2 * NESTED_SETTLEMENT_MARGIN_SEC)
 
 
 def _path_is_under(path: "pathlib.Path", root: "pathlib.Path") -> bool:

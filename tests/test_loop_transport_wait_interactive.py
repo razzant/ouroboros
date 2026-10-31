@@ -83,10 +83,10 @@ def _run_until_terminal(episode, tmp_path, tools, notes, task_id="t-i", limit=50
 
 @pytest.mark.parametrize("flag", ["is_direct_chat"])
 def test_interactive_bound_is_the_raw_idle_getter_measured_from_entry(tmp_path, monkeypatch, flag):
-    """The bound is the RAW configured idle timeout — the queue's effective idle
-    rail (max(idle, per-call ceiling + 120)) belongs to managed records these
-    turns never have — it starts at episode entry, its expiry ends the episode
-    with its own detail, and the waiting rows carry the shrinking window."""
+    """The bound is the configured idle timeout itself, the same literal window
+    the queue's silence rail applies to managed records, which these turns never
+    have; it starts at episode entry, its expiry ends the episode with its own
+    detail, and the waiting rows carry the shrinking window."""
     clock = _FakeClock(monkeypatch)
     monkeypatch.setattr(loop_transport, "get_task_idle_timeout_sec", lambda: 90)
     notes = _NoteRecorder()

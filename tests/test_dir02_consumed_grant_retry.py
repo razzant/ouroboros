@@ -54,8 +54,7 @@ def test_consumed_g1_selection_after_recovery(
 
     # Silence beside a held descendant manufactures no reap job.
     assert queue._has_pending_descendant("held")
-    clock[0] += max(float(queue.get_task_idle_timeout_sec()),
-                    float(queue.get_per_call_timeout_ceiling_sec()) + 120.0) + 1
+    clock[0] += float(queue.get_task_idle_timeout_sec()) + 1
     queue.enforce_task_timeouts()
     assert "held" in workers.RUNNING
     assert not workers.RUNNING["held"].get("finalization_requested_at")

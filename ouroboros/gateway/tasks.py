@@ -62,6 +62,7 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros import artifacts as artifact_store
+from ouroboros.artifacts import render_attachment_lines as _render_attachment_lines
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_results import (
     STATUS_FAILED,
@@ -332,10 +333,12 @@ def _complete_api_task_admission(
     metadata: Dict[str, Any],
 ) -> JSONResponse:
     """Publish one API admission; retain custody when persistence is unknown."""
+    from ouroboros.model_wait import execution_opening
+
     result_fields = {
         **({"created_at": task["created_at"]} if task.get("created_at") else {}),
         **{key: task.get(key) for key in (
-            "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role",
+            "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role", "depth",
             "chat_id", "title", "suggested_name", "context", "expected_output", "constraints",
             "task_contract", "workspace_root",
         )},
@@ -353,6 +356,7 @@ def _complete_api_task_admission(
         "metadata": metadata,
         **{key: task[key] for key in ("attachment_manifest", "attachment_manifest_ref", "reasoning_effort",
                                       "execution_timeout_sec") if key in task},
+        **execution_opening(task),  # #939: nothing of it ran yet; a Continue before its first start reads 0
         "api_admission": {"token": admission_token, "status": "accepted"},
         "result": "Task accepted and durably scheduled.",
     }
@@ -1476,55 +1480,6 @@ def _compose_task_text(
     if rendered:
         parts.append(f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]")
     return "".join(parts)
-
-
-def _render_attachment_lines(attachments: Any) -> str:
-    """Render the complete staged/rejected attachment report.
-
-    v6.52.0 (P1): each line is a ready-to-use read_file call against the canonical
-    artifact_store root — NEVER a bare absolute host path. ``attachments`` is the
-    manifest returned by ``stage_task_attachments``.  Legacy staged-only rows
-    remain readable; new rows carry ordinal/status/reason and rejected rows are
-    rendered without source paths or secret contents."""
-    ref = attachments.get("attachment_manifest_ref") if isinstance(attachments, dict) else None
-    if isinstance(attachments, dict):
-        attachments = attachments.get("attachment_manifest")
-    if not isinstance(attachments, list):
-        return ""
-    lines: List[str] = []
-    if ref:
-        lines.append(f"Complete input manifest ({ref.get('count')} declarations): read_file(root='artifact_store', path='{ref.get('path')}'). Inline rows below are a preview.")
-    for item in attachments:
-        if not isinstance(item, dict):
-            continue
-        try:
-            ordinal = int(item.get("ordinal"))
-        except (TypeError, ValueError):
-            ordinal = len(lines)
-        status = str(item.get("status") or "staged")
-        label = str(item.get("label") or f"attachment {ordinal + 1}").strip()
-        if status == "rejected":
-            reason = str(item.get("reason") or "staging_failed").strip()
-            lines.append(f"- {label}: rejected (reason={reason}, ordinal={ordinal})" + (f" rule: {rule}" if (rule := str(item.get("rule") or "").strip()) else ""))
-            continue
-        relpath = str(item.get("relpath") or "").strip()
-        root = str(item.get("root") or "artifact_store").strip() or "artifact_store"
-        label = label or pathlib.Path(relpath).name
-        if not relpath:
-            continue
-        kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
-        # v6.54.3: also surface the REAL staged path for process tools — scripts
-        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
-        # models GUESS wrong absolute paths that tripped light-mode path guards.
-        # The staged path lives inside this task's own artifact_store, so both
-        # forms address the same file.
-        abs_path = str(item.get("abs_path") or "").strip()
-        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
-        lines.append(
-            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
-            f"{script_hint} [status=staged, ordinal={ordinal}]"
-        )
-    return "\n".join(lines)
 
 
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:

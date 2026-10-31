@@ -466,8 +466,7 @@ def test_a_managed_update_window_never_times_out_the_saved_work_it_returns(tmp_p
     monkeypatch.setattr(queue, "_reap_queue", reaps)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 120)
-    monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 900)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1800)  # idle window 1920 s
+    monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 1920)  # the window this timeline was written for
     monkeypatch.setattr(queue_timeouts, "time", SimpleNamespace(time=lambda: clock[0]))
 
     def run(task_id, wid, *, progress_at, **task):

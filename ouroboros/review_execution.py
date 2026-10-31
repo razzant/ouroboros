@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from ouroboros.owner_pause import run_operation, OwnerPauseRefused
 
 from ouroboros.config import runtime_setting
-from ouroboros.model_wait import current_model_wait, monotonic_now, operation_wait_scope
+from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait, monotonic_now, operation_wait_scope
 
 import asyncio
 import hashlib
@@ -586,6 +586,7 @@ _REVIEW_SESSION_INSTRUCTIONS = (
 
 _SESSION_POLL_SEC = 3.0
 _CLAUDEXOR_MAX_SECONDS = 604_800
+_OWN_WINDOW = object()  # an executor no custody bound: it resolves its slot's own window
 
 
 def _retire_orphaned_review_registration(
@@ -641,7 +642,7 @@ class SessionInvocation:
     task_id: str
     surface: str
     slot_id: str
-    timeout_sec: float
+    timeout_sec: Optional[float]  # None = no logical window: the run is sent without maxSeconds
     logical_key_extra: tuple = ()
     output_schema: Optional[Dict[str, Any]] = None
     session_route: Any = None
@@ -762,7 +763,6 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 if shape.investigation:
                     bind_checking_thread(custody_drive, task_id, f"{surface}:{slot_id}", thread_id)
             invocation_id = custody.new_invocation_id()
-            seconds = bounded_seconds(timeout_sec, default=300, maximum=_CLAUDEXOR_MAX_SECONDS)
             run_request = prepare_review_session_request(
                 invocation, route, prompt=prompt, root=root, ephemeral=ephemeral,
                 thread_id=thread_id, schema_asked=schema_asked,
@@ -778,8 +778,9 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             if (not recovering and invocation.owner_deadline_at and owner_deadline_exhausted(
                 deadline_at=invocation.owner_deadline_at, reserve_sec=get_finalization_grace_sec())):
                 raise _deadline_exhausted_error()
-            seconds = bounded_seconds(run_request.get("maxSeconds"), maximum=_CLAUDEXOR_MAX_SECONDS,
-                                      default=timeout_sec if timeout_sec is not None else 300)
+            # The cap the stored body itself sends (a replay keeps its bytes); absence = clock off, 0.
+            seconds = (bounded_seconds(run_request["maxSeconds"], default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
+                       if "maxSeconds" in run_request else 0)
             unrequested = False  # neither a paid stamp nor an ambiguous write can be undone
             invoke_review_paid_stamp(invocation.dispatch_stamp)
             try:
@@ -850,7 +851,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 "root": root, "surface": surface, "slot_id": slot_id,
             }))
         # Pending custody remains above throughout polling, including failures.
-        window = float(timeout_sec) if timeout_sec is not None else 300.0
+        window = float("inf") if timeout_sec is None else float(timeout_sec)  # no window: observe until terminal
         poll_deadline = time.monotonic() + window
         detail = _poll_session_terminal(gateway, custody, custody_drive, entry, run_id, window)
         seen_runs = {run_id}
@@ -1075,9 +1076,12 @@ def _await_session_attention(gateway: Any, run_id: str, seen: Optional[str], rem
 def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry: Any,
                            run_id: str, seconds: float) -> Dict[str, Any]:
     """Poll a delegated review run on the slot clock; verified cancel and
-    completion-wins semantics remain owned by the existing cancel seam."""
+    completion-wins semantics remain owned by the existing cancel seam. With no clock, a
+    run no panel owns ends on its owner's control (a panel's run outlives its author, #1006)."""
+    from ouroboros.delegate_registration_policy import review_owned_source
     from ouroboros.gateways.claudexor import pending_interactions as _cx_pending
     deadline = time.monotonic() + max(0.0, float(seconds))
+    owner = None if deadline < float("inf") or review_owned_source(getattr(entry, "source", "")) else current_model_wait()
     detail, unobserved = _observe_session(gateway, run_id, max(0.0, deadline - time.monotonic()), None)
     seen: Optional[str] = None
     while not custody.is_terminal(detail):
@@ -1101,12 +1105,14 @@ def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry
                 + ") instead of silently burning its whole budget waiting")
             error.checking_terminal_detail = carried
             raise error
-        if time.monotonic() >= deadline:
+        stop = owner.control_reason() if owner is not None else None
+        if stop or time.monotonic() >= deadline:
             outcome, state, carried = _slot_cancel_outcome(
-                gateway, custody, custody_drive, entry, run_id, "review_slot_timeout")
+                gateway, custody, custody_drive, entry, run_id, f"owner_{stop}" if stop else "review_slot_timeout")
             settled = _natural_success_terminal(gateway, custody, run_id, state, carried)
             if settled is not None:
                 return settled
+            if stop: raise ModelWaitInterrupted(stop)  # the cancel's verified or unverified receipt rides custody
             # Blind on both reads (the cancel/verify raised, or its verify read reached no
             # state either): nothing terminal is known, so the run is not "timed out".
             if unobserved is not None and (outcome == "cancel_attempt_exception" or (
@@ -1350,12 +1356,14 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
                 raise ReviewRouteUnavailable("agent_session slot has no repository root", code="session_root_missing")
             from ouroboros.config import get_finalization_grace_sec
             from ouroboros.deadline_utils import review_operation_timeout_sec
-            logical_deadline = getattr(self, "_logical_deadline_monotonic", None)
+            # Custody's clock when it bound one (None = no window, never a fresh one); else the slot's own.
+            logical_deadline = getattr(self, "_logical_deadline_monotonic", _OWN_WINDOW)
             logical_timeout = (
-                max(0.001, float(logical_deadline) - monotonic_now()) if logical_deadline is not None else
-                review_operation_timeout_sec(getattr(slot, "timeout_sec", None), route=getattr(slot, "route", None),
+                review_operation_timeout_sec(getattr(slot, "timeout_sec", None), retrieves=True,
                     deadline_at=getattr(request, "deadline_at", "") or "",
-                    transport_timeout_sec=getattr(slot, "transport_timeout_sec", None), reserve_sec=get_finalization_grace_sec()))
+                    transport_timeout_sec=getattr(slot, "transport_timeout_sec", None), reserve_sec=get_finalization_grace_sec())
+                if logical_deadline is _OWN_WINDOW else None if logical_deadline is None
+                else max(0.001, float(logical_deadline) - monotonic_now()))
             invocation = SessionInvocation(
                 task_id=str(request.task_id or ""),
                 surface=request.surface,

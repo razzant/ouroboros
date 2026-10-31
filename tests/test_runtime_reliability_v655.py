@@ -657,23 +657,47 @@ def _deadline_skip_events(events):
     return [e for e in drained if e.get("type") == "plan_task_deadline_skip"]
 
 
-def test_plan_task_skips_under_tight_deadline(harness, monkeypatch):
-    # 400 s left gives a 100 s planning window, under the 300 s useful floor: the ask is the
+@pytest.mark.parametrize("seconds", [60, -5], ids=["inside-reserve", "expired"])
+def test_plan_task_skips_only_a_spent_deadline(harness, monkeypatch, seconds):
+    # A deadline spent down to its finalization reserve leaves no dispatch: the ask is the
     # paid act, so the whole write+ask call is refused before anything is written or sent.
-    monkeypatch.setenv("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", "300")
+    monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     substrate = harness.install({})
-    text, result = _write(_deadline_ctx(harness, 400), ask="council")
+    text, result = _write(_deadline_ctx(harness, seconds), ask="council")
     assert "PLAN_ASK_SKIPPED_DEADLINE" in text and "PLAN_TASK_SKIPPED_DEADLINE" in text
     assert result.code == "CAPABILITY_UNAVAILABLE" and "Nothing was written" in text
     assert substrate.calls == []
     assert _record(harness)["revisions"] == [] and _record(harness)["asks"] == []
     [event] = _deadline_skip_events(harness.events)
-    assert event["task_id"] == "task-1" and event["min_useful_sec"] == 300
+    assert event["task_id"] == "task-1" and event["reserve_sec"] == 120.0
+    assert "min_useful_sec" not in event and "scaled_ceiling_sec" not in event
 
 
-@pytest.mark.parametrize("seconds", [None, 86_400], ids=["no-deadline", "roomy-deadline"])
+def test_the_retired_plan_floor_has_no_getter_and_a_stored_value_is_stripped(tmp_path, monkeypatch):
+    """R4 retires OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC with no successor: a document that saved
+    its 300 default (nearly every install) loads without it, and the env cannot bring it back."""
+    import json
+
+    from ouroboros import config
+    from ouroboros.settings_defaults import RETIRED_SETTING_KEYS, RETIRED_SETTING_SUCCESSORS
+
+    key = "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC"
+    assert key in RETIRED_SETTING_KEYS and key not in RETIRED_SETTING_SUCCESSORS
+    assert key not in config.SETTINGS_DEFAULTS and not hasattr(config, "get_plan_task_deadline_min_sec")
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({key: 300, "OUROBOROS_MAX_WORKERS": 7}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
+    monkeypatch.setenv(key, "900")
+    loaded = config.load_settings()
+    assert int(loaded["OUROBOROS_MAX_WORKERS"]) == 7 and key not in loaded
+
+
+# Retired pin (R4): 400 s left was refused as "a 100 s planning window under the 300 s useful
+# floor" of the quarter-window wait that no longer exists; 1199 s and 600 s are council time.
+@pytest.mark.parametrize("seconds", [None, 86_400, 1_199, 600, 400],
+                         ids=["no-deadline", "roomy-deadline", "1199s", "600s", "400s"])
 def test_plan_task_no_deadline_does_not_skip(harness, monkeypatch, seconds):
-    monkeypatch.setenv("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", "300")
+    monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     substrate = harness.install({})
     text, result = _write(_deadline_ctx(harness, seconds), ask="council")
     assert result.status == "ok" and "SKIPPED_DEADLINE" not in text

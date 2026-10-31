@@ -122,13 +122,21 @@ _COLAB_MODEL_OVERRIDE_KEYS = frozenset({
 })
 
 
+# What a launch gives a Drive document that holds no value of its own for a launch knob: the first-launch triple.
+_COLAB_FIRST_LAUNCH = {
+    "TOTAL_BUDGET": float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]),
+    "OUROBOROS_RUNTIME_MODE": "advanced",
+    "OUROBOROS_MAX_WORKERS": 1,
+}
+
+
 def build_colab_settings(
     secrets: Dict[str, str],
     *,
     github_repo: str = "",
-    total_budget: float = float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]),
-    runtime_mode: str = "advanced",
-    max_workers: int = 1,
+    total_budget: Optional[float] = None,
+    runtime_mode: Optional[str] = None,
+    max_workers: Optional[int] = None,
     models: Dict[str, str] | None = None,
     network_password: str = "",
     existing: Optional[Dict[str, Any]] = None,
@@ -139,8 +147,11 @@ def build_colab_settings(
     On a re-run, ``existing`` (the current Drive ``settings.json``) is merged over
     the defaults FIRST, so prior owner choices that the Colab launch does not set
     explicitly — a pinned ``TELEGRAM_CHAT_ID``, tweaked model slots, an auto-grant
-    preference — survive instead of being reset to defaults. The launch knobs
-    below (secrets, budget, runtime mode, workers, host, repo) then win.
+    preference — survive instead of being reset to defaults. The launch's secrets,
+    host and repo then win. Budget, runtime mode and workers are launch knobs
+    only when given (``None`` is "not given"): an explicit value wins, even one equal to
+    the first-launch value, else the Drive document's own value stays, else a document
+    that holds none takes the first-launch 200 / advanced / 1.
     ``drive_document_present`` says whether that Drive file existed (default: a
     non-empty ``existing``): an existing document keeps the finite optional bounds it
     ran under when it lacks them (``config.defaults_for_settings_document``).
@@ -168,9 +179,15 @@ def build_colab_settings(
     settings.update(normalize_effort_document(loaded))
     if github_repo:
         settings["GITHUB_REPO"] = github_repo
-    settings["TOTAL_BUDGET"] = float(total_budget)
-    settings["OUROBOROS_RUNTIME_MODE"] = runtime_mode
-    settings["OUROBOROS_MAX_WORKERS"] = int(max_workers)
+    for key, explicit in (
+        ("TOTAL_BUDGET", None if total_budget is None else float(total_budget)),
+        ("OUROBOROS_RUNTIME_MODE", runtime_mode),
+        ("OUROBOROS_MAX_WORKERS", None if max_workers is None else int(max_workers)),
+    ):
+        if explicit is not None:
+            settings[key] = explicit
+        elif key not in loaded:  # the document's own value, as every reader normalizes it, stays when it holds one
+            settings[key] = _COLAB_FIRST_LAUNCH[key]
     settings["OUROBOROS_SERVER_HOST"] = "127.0.0.1"
     settings["OUROBOROS_UPDATE_CHANNEL"] = normalize_update_channel(
         settings.get("OUROBOROS_UPDATE_CHANNEL")

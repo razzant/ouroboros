@@ -31,9 +31,8 @@ Field-tested configuration and operational hazards from the 2026-07-20 full 1-se
   `deadline_at` and the waiting itself spends $0, so the rails that can bind here are the
   OPTIONAL ones you configure, not a window the wait invents. A managed (queued) task's
   outage episode carries no wait bound of its own: `loop_transport` measures its window from
-  the owner deadline, and with no `deadline_at` there is none — the 6h
-  `OPERATION_WINDOW_FALLBACK_SEC` belongs to other operations (deep self-review, plan
-  review, vision) and is NOT applied to this wait. Set `OUROBOROS_TASK_ABS_CEILING_SEC` if
+  the owner deadline, and with no `deadline_at` there is none (no other operation invents
+  one either). Set `OUROBOROS_TASK_ABS_CEILING_SEC` if
   you want a finite per-attempt lifetime (the runtime ships `unlimited`); otherwise only
   Stop/cancel and the budget bind a headless CLB solve task. Silence past
   `OUROBOROS_TASK_IDLE_TIMEOUT_SEC` (measured from last real progress) brings attention,

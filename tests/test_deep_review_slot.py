@@ -342,13 +342,16 @@ def test_session_row_runs_through_the_session_executor_with_the_report_contract(
     last = reviewer_slot_last_executions()[_DEEP_SLOT_ID]
     assert last["effective"] == {"route": "agent_session:codex", "model": "gpt-5.6-sol", "verdict_method": "report"}
     assert last["requested"]["session_target"] == "codex=gpt-5.6-sol" and last["requested"]["profile_id"] == "koshak"
-    # Without an owner deadline the window is the task's operation window: its finite
-    # absolute lifetime, else the finite operation fallback (never an unbounded session).
-    _FakeSessionExecutor.instances = []
-    from ouroboros.config import get_task_abs_ceiling_sec, operation_window_sec
-    run_deep_self_review(review_repo, review_drive, object(), lambda _m: None, slot=_session_row())
-    assert _FakeSessionExecutor.instances[0].assignment.slot.timeout_sec == operation_window_sec(
-        get_task_abs_ceiling_sec())
+    # Without an owner deadline the window is the task's finite lifetime; with none either,
+    # there is no window (retired pin: the 6 h operation fallback), never a socket timeout.
+    monkeypatch.delenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", raising=False)
+    for lifetime, expected in (("3600", 3600.0), ("unlimited", None)):
+        monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", lifetime)
+        _FakeSessionExecutor.instances = []
+        run_deep_self_review(review_repo, review_drive, object(), lambda _m: None, slot=_session_row())
+        executor = _FakeSessionExecutor.instances[0]
+        assert executor.assignment.slot.timeout_sec == expected
+        assert (executor._logical_deadline_monotonic is None) == (expected is None)
 
 
 def test_retrieving_failure_is_typed_and_recorded_never_a_report(review_repo, review_drive, monkeypatch):

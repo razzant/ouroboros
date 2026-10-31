@@ -12,8 +12,12 @@ resolution; two cases run a real child through the real dispatcher at scaled tim
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import subprocess
 import sys
+import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from subprocess import CompletedProcess
@@ -86,7 +90,7 @@ def _dispatched(monkeypatch, registry, tool, args):
     pytest.param("run_script", {"timeout": 900}, 600, None, None, None, id="alias-script"),
     pytest.param("run_command", {"timeout_sec": None}, 600, None, None, None, id="null-canonical"),
     pytest.param("verify_and_record", {"timeout_sec": 3000}, 600, None, "3600", None, id="raised-ceiling-verify"),
-    pytest.param("run_command", {"timeout_sec": 900}, 600, None, "30", 3600, id="deadline-floor-above-ceiling"),
+    pytest.param("run_command", {"timeout_sec": 900}, 600, None, "30", 3600, id="deadline-with-configured-ceiling-30"),
     pytest.param("verify_and_record", {"timeout_sec": 1800}, 600, None, None, 7200, id="deadline-explicit-verify"),
     pytest.param("run_command", {}, 600, None, None, 7200, id="deadline-default-run-command"),
     pytest.param("run_script", {"timeout_sec": 3000}, 600, None, "3600", None, id="control-explicit-script"),
@@ -121,6 +125,114 @@ def test_an_alias_beside_its_canonical_name_starts_no_child(tmp_path, monkeypatc
     assert seen == [] and "TOOL_ARG_ERROR" in text, text
 
 
+def _outer_floor(registry, tool):
+    """The outer wait's own floor: the saved 600 s Tool Timeout or the registered window."""
+    return max(600, registry.get_timeout(tool))
+
+
+@pytest.mark.parametrize("tool", sorted(REQUIRED))
+@pytest.mark.parametrize("requested", [10, 60, 7200])
+@pytest.mark.parametrize("ceiling", [None, "30"], ids=["shipped-ceiling", "configured-ceiling-30"])
+def test_a_requested_command_timeout_is_honored_as_written(tmp_path, monkeypatch, tool, requested, ceiling):
+    """No separate per-call ceiling and no floor: 10 stays 10, 7200 stays 7200, whatever a
+    stray ``OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC`` says (retired: nothing reads it)."""
+    _settings(monkeypatch, 600)
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
+    if ceiling is None:
+        monkeypatch.delenv("OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC", raising=False)
+    else:
+        monkeypatch.setenv("OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC", ceiling)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    args = {"timeout_sec": requested}
+
+    outer = lte._get_tool_timeout(registry, tool, args)
+    seen, text = _dispatched(monkeypatch, registry, tool, args)
+
+    assert seen == [requested], text
+    assert outer == max(_outer_floor(registry, tool), requested + MARGIN)
+
+
+def _pinned_clock(monkeypatch):
+    now = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("ouroboros.deadline_utils.utc_now", lambda: now)
+    monkeypatch.setattr("ouroboros.task_pacing.effective_finalization_reserve_sec", lambda ctx: 120.0)
+    return now
+
+
+@pytest.mark.parametrize("tool", sorted(REQUIRED))
+@pytest.mark.parametrize("requested,left,child", [
+    pytest.param(10, 7200, 10, id="short-request-long-deadline"),  # the former 60 s floor widened it
+    pytest.param(60, 7200, 60, id="minute-request-long-deadline"),
+    pytest.param(7200, 600, 480, id="long-request-short-deadline"),  # what is left less the reserve, not half
+    pytest.param(600, 60, 1, id="inside-the-reserve"),  # a fast typed timeout, not a refusal
+])
+def test_a_live_task_deadline_only_narrows_the_child(tmp_path, monkeypatch, tool, requested, left, child):
+    _settings(monkeypatch, 600)
+    now = _pinned_clock(monkeypatch)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    registry._ctx.task_metadata = {"deadline_at": (now + timedelta(seconds=left)).isoformat()}
+    args = {"timeout_sec": requested}
+
+    outer = lte._get_tool_timeout(registry, tool, args)
+    seen, text = _dispatched(monkeypatch, registry, tool, args)
+
+    assert seen == [child], text
+    assert outer == max(_outer_floor(registry, tool), child + MARGIN)
+
+
+@pytest.mark.parametrize("tool", sorted(REQUIRED))
+@pytest.mark.parametrize("spent", ["deadline", "execution-budget"])
+def test_a_spent_task_bound_starts_no_command(tmp_path, monkeypatch, tool, spent):
+    """A real expired bound refuses before any child starts; it never reopens a full window."""
+    _settings(monkeypatch, 600)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    if spent == "deadline":
+        registry._ctx.task_metadata = {"deadline_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
+    else:
+        registry._ctx.task_metadata = {"execution_timeout_sec": 60}
+        registry._ctx.task_started_at = time.time() - 120
+    args = {"timeout_sec": 7200}
+
+    outer = lte._get_tool_timeout(registry, tool, args)
+    seen, text = _dispatched(monkeypatch, registry, tool, args)
+
+    assert seen == [], text
+    assert f"TASK_DEADLINE_BLOCKED ({tool})" in text and "no command was started" in text
+    assert outer == _outer_floor(registry, tool)  # the resolution itself never outlives the bound
+
+
+@pytest.mark.parametrize("tool", sorted(REQUIRED))
+def test_a_bound_that_ends_in_the_final_preparation_starts_no_child(tmp_path, monkeypatch, tool):
+    """R2: the task's deadline is still ahead when the command prepares; its last preparation step, the runtime
+    selection over the launch environment, really takes past it (a slow PATH or filesystem lookup). The bound and
+    its timeout are read after that step, beside the dispatch, so no child starts, not even with the 1 s a spent
+    bound resolves to. ``run_script`` reaches that check through its own command (``_run_shell``)."""
+    import ouroboros.tools.shell as shell
+    import ouroboros.tools.verify as verify
+
+    _settings(monkeypatch, 600)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    selected = []
+
+    def slow(real):
+        def select(*args, **kwargs):
+            real(*args, **kwargs)
+            selected.append(datetime.now(timezone.utc))
+            time.sleep(2.5)
+        return select
+
+    for module in (shell, verify):
+        monkeypatch.setattr(module, "record_runtime_selection", slow(module.record_runtime_selection))
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=2)
+    registry._ctx.task_metadata = {"deadline_at": deadline.isoformat()}
+
+    seen, text = _dispatched(monkeypatch, registry, tool, {"timeout_sec": 600})
+
+    assert len(selected) == 1 and selected[0] < deadline, "every earlier check ran with the deadline ahead"
+    assert seen == [], text
+    assert "TASK_DEADLINE_BLOCKED" in text and "no command was started" in text
+
+
 SLEEPER = "import time; time.sleep(2); print('child finished')"
 
 
@@ -148,3 +260,108 @@ def test_a_real_child_settles_inside_the_outer_wait(tmp_path, monkeypatch, tool,
     assert "child finished" in result["result"], result["result"]
     rows = [json.loads(line) for line in (drive_logs / "tools.jsonl").read_text().splitlines()]
     assert [row["type"] for row in rows] == ["tool_call_started", "tool_call"], rows
+
+
+# Past what the platform can wait on (a parsed JSON integer may lie past any float), or not a finite number at all
+# (JSON 1e400, -Infinity, NaN).
+UNREPRESENTABLE = {"past-the-platform": 99999999999, "past-any-float": 10**400, "infinite": float("inf"),
+                   "negative-infinite": float("-inf"), "nan": float("nan")}
+
+
+def _settled_within(timeout):
+    """A real pending future's wait accepts ``timeout`` (the loop's outer wait on a call)."""
+    future = concurrent.futures.Future()
+    threading.Timer(0.05, future.set_result, ("settled",)).start()
+    return future.result(timeout=timeout) == "settled"
+
+
+@pytest.mark.parametrize("tool", sorted(REQUIRED))
+@pytest.mark.parametrize("requested", list(UNREPRESENTABLE))
+def test_a_timeout_the_platform_cannot_wait_on_is_refused_before_any_child_starts(tmp_path, monkeypatch, tool, requested):
+    """Opus R1: such a request reached the child's pipe reader and the loop's outer ``Future.result``, which raise
+    OverflowError, and the call escaped the executor. Now each consumer refuses it, typed, before any child starts,
+    naming the longest wait it can have here and the wait that sets that bound; the outer resolution stays finite."""
+    _settings(monkeypatch, 600)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    args = {"timeout_sec": UNREPRESENTABLE[requested]}
+    longest, bound = shell_process._longest_command_wait()
+
+    outer = lte._get_tool_timeout(registry, tool, args)  # resolved before dispatch, as the loop does
+    seen, text = _dispatched(monkeypatch, registry, tool, args)
+
+    assert seen == [], text
+    assert text.startswith(f"⚠️ TOOL_ARG_ERROR ({tool}): timeout_sec={UNREPRESENTABLE[requested]!r} seconds"), text
+    assert f"waits at most {longest} seconds ({bound}). No command was started" in text
+    assert _settled_within(outer)
+
+
+@pytest.mark.parametrize("tool", sorted(REQUIRED))
+def test_the_longest_representable_wait_runs_as_asked_and_a_saved_one_past_it_is_refused_by_name(tmp_path, monkeypatch,
+                                                                                               tool):
+    """The boundary itself: exactly the named maximum is honored as written (no narrowing); a saved Tool Timeout one
+    second past it is refused under its own name, not silently shortened."""
+    longest, _bound = shell_process._longest_command_wait()
+    _settings(monkeypatch, 600)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    seen, text = _dispatched(monkeypatch, registry, tool, {"timeout_sec": longest})
+    assert seen == [longest], text
+    assert _settled_within(lte._get_tool_timeout(registry, tool, {"timeout_sec": longest}))
+
+    _settings(monkeypatch, longest + 1)
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    outer = lte._get_tool_timeout(registry, tool, {})
+    seen, text = _dispatched(monkeypatch, registry, tool, {})
+    assert seen == [] and f"Tool Timeout (OUROBOROS_TOOL_TIMEOUT_SEC)={longest + 1} seconds" in text, text
+    assert _settled_within(outer)
+
+
+def test_the_named_maximum_is_the_real_limit_of_the_childs_pipe_reader():
+    """The physical fact behind the bound, on this platform's own waits: a child's pipe reader accepts the named
+    maximum; where ``poll(2)`` reads the pipes, one second more overflows its C int of milliseconds."""
+    import os
+    import selectors
+
+    longest, _bound = shell_process._longest_command_wait()
+    with subprocess.Popen([sys.executable, "-c", "print('ok')"], stdout=subprocess.PIPE) as proc:
+        assert proc.communicate(timeout=longest)[0].strip() == b"ok"
+    if os.name != "nt" and hasattr(selectors, "PollSelector"):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.PIPE)
+        try:
+            with pytest.raises(OverflowError):
+                proc.communicate(timeout=longest + 1)
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+            proc.stdout.close()
+
+
+SLEEP_THEN_PRINT = "import sys, time; time.sleep(float(sys.argv[1])); print('child finished')"
+
+
+@pytest.mark.parametrize("case,sleep,timeout_sec", [
+    pytest.param("success", "0", 30, id="success"),
+    pytest.param("timeout", "3", 1, id="timeout"),
+    pytest.param("refused", "0", 99999999999, id="refused"),
+    pytest.param("refused", "0", 10**400, id="refused-integer-past-any-float"),  # 401 digits, parsed from the call's JSON
+])
+def test_a_real_child_through_the_real_dispatcher_returns_its_own_typed_result(tmp_path, monkeypatch, case, sleep,
+                                                                                timeout_sec):
+    """The reviewed repro through the real dispatcher: every outcome is the call's own result, never an exception out of
+    the executor; a representable timeout is the child's as written, an unrepresentable one starts nothing."""
+    _settings(monkeypatch, 600)
+    registry = _dispatch_registry(tmp_path, monkeypatch)
+    args = {"cmd": [sys.executable, "-c", SLEEP_THEN_PRINT, sleep], "timeout_sec": timeout_sec}
+    call = {"id": f"call-{case}", "function": {"name": "run_command", "arguments": json.dumps(args)}}
+
+    result = lte._execute_with_timeout(registry, call, registry._ctx.drive_root / "logs",
+                                       lte._get_tool_timeout(registry, "run_command", args), task_id="timeout-contract")
+
+    text = result["result"]
+    if case == "success":
+        assert "child finished" in text, text
+    elif case == "timeout":
+        assert "TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of 1s" in text, text
+    else:
+        assert text.startswith(f"⚠️ TOOL_ARG_ERROR (run_command): timeout_sec={timeout_sec} seconds"), text
+        assert "child finished" not in text

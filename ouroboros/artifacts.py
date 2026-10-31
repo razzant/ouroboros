@@ -336,6 +336,55 @@ def attachment_manifest_projection(drive_root: Any, task_id: str, manifest: Any)
     return projection
 
 
+def render_attachment_lines(attachments: Any) -> str:
+    """Render the complete staged/rejected attachment report.
+
+    v6.52.0 (P1): each line is a ready-to-use read_file call against the canonical
+    artifact_store root — NEVER a bare absolute host path. ``attachments`` is the
+    manifest returned by ``stage_task_attachments``.  Legacy staged-only rows
+    remain readable; new rows carry ordinal/status/reason and rejected rows are
+    rendered without source paths or secret contents."""
+    ref = attachments.get("attachment_manifest_ref") if isinstance(attachments, dict) else None
+    if isinstance(attachments, dict):
+        attachments = attachments.get("attachment_manifest")
+    if not isinstance(attachments, list):
+        return ""
+    lines: List[str] = []
+    if ref:
+        lines.append(f"Complete input manifest ({ref.get('count')} declarations): read_file(root='artifact_store', path='{ref.get('path')}'). Inline rows below are a preview.")
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ordinal = int(item.get("ordinal"))
+        except (TypeError, ValueError):
+            ordinal = len(lines)
+        status = str(item.get("status") or "staged")
+        label = str(item.get("label") or f"attachment {ordinal + 1}").strip()
+        if status == "rejected":
+            reason = str(item.get("reason") or "staging_failed").strip()
+            lines.append(f"- {label}: rejected (reason={reason}, ordinal={ordinal})" + (f" rule: {rule}" if (rule := str(item.get("rule") or "").strip()) else ""))
+            continue
+        relpath = str(item.get("relpath") or "").strip()
+        root = str(item.get("root") or "artifact_store").strip() or "artifact_store"
+        label = label or pathlib.Path(relpath).name
+        if not relpath:
+            continue
+        kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
+        # v6.54.3: also surface the REAL staged path for process tools — scripts
+        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
+        # models GUESS wrong absolute paths that tripped light-mode path guards.
+        # The staged path lives inside this task's own artifact_store, so both
+        # forms address the same file.
+        abs_path = str(item.get("abs_path") or "").strip()
+        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
+        lines.append(
+            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
+            f"{script_hint} [status=staged, ordinal={ordinal}]"
+        )
+    return "\n".join(lines)
+
+
 def resolve_attachment_manifest(drive_root: Any, task_id: str, authority: Any) -> List[Dict[str, Any]]:
     """Resolve complete captured inputs under the actual owner, never preview fallback.
 
@@ -563,6 +612,46 @@ def materialize_inherited_attachment_manifest(
     except Exception as exc:
         remove_staged_attachments(copied)
         return [], f"{type(exc).__name__}: {exc}"
+
+
+def held_attachment_manifest(drives: Iterable[Any], task_id: str, authority: Any) -> List[Dict[str, Any]]:
+    """TASK's complete declared inputs as its own stores hold them now, ready for another task's own copy
+    (``materialize_inherited_attachment_manifest``). ``drives`` are TASK's drive roots in reading order: the
+    manifest resolves from the first one that reads it (``resolve_attachment_manifest``; none raises
+    ``ValueError``), and each staged row names the first ``attachments/`` file there that verifies against its
+    captured identity. A staged row that no store holds becomes ``rejected``/``source_missing`` with its label
+    and recorded identity: a gap, never other bytes."""
+    roots = [pathlib.Path(drive) for drive in drives]
+    for drive in roots:
+        try:
+            rows = resolve_attachment_manifest(drive, task_id, authority)
+            break
+        except (OSError, ValueError, TypeError):
+            continue
+    else:
+        raise ValueError(f"no store of {task_id} reads its attachment manifest")
+    held: List[Dict[str, Any]] = []
+    for row in rows:
+        rel, source = pathlib.PurePosixPath(str(row.get("relpath") or "")), None
+        if (row["status"] == "staged" and len(rel.parts) == 2 and rel.parts[0] == _ATTACHMENTS_SUBDIR
+                and ".." not in rel.parts):
+            for drive in roots:
+                store = task_artifact_dir_path(drive, task_id)
+                path = store.joinpath(*rel.parts)
+                try:
+                    if not path.is_symlink() and path.resolve(strict=True).is_relative_to(store.resolve(strict=False)):
+                        stream_artifact_file(path, expected=row)
+                        source = path
+                        break
+                except OSError:
+                    continue
+        if source is not None:
+            row = {**row, "abs_path": str(source)}
+        elif row["status"] == "staged":
+            row = {**{key: row[key] for key in ("ordinal", "label", "mime", "size", "sha256") if key in row},
+                   "status": "rejected", "reason": "source_missing"}
+        held.append(row)
+    return held
 
 
 def artifact_store_path_block_reason(

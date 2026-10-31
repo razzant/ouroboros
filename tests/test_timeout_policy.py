@@ -208,7 +208,9 @@ def test_review_timeout_override_rejects_non_finite_and_invalid_values(monkeypat
         }
 
 
-def test_review_route_owns_unset_logical_fallback(monkeypatch):
+def test_review_delivery_owns_unset_logical_fallback(monkeypatch):
+    """A packet row's one request settles at its socket bound; a retrieving row's many
+    requests never borrow it: a finite lifetime bounds them, else nothing does."""
     import ouroboros.config as config
     import ouroboros.deadline_utils as deadlines
 
@@ -216,12 +218,15 @@ def test_review_route_owns_unset_logical_fallback(monkeypatch):
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 21_600)
     monkeypatch.setattr(deadlines, "llm_transport_timeout_sec", lambda *_args: 2_700.0)
 
-    assert deadlines.review_operation_timeout_sec(route="api_chat") == 2_700.0
-    assert deadlines.review_operation_timeout_sec(route="agent_session") == 21_600.0
-    assert deadlines.review_operation_timeout_sec(600, route="agent_session") == 600.0
+    assert deadlines.review_operation_timeout_sec() == 2_700.0
+    assert deadlines.review_operation_timeout_sec(retrieves=True) == 21_600.0
+    assert deadlines.review_operation_timeout_sec(600, retrieves=True) == 600.0
+    monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: None)
+    assert deadlines.review_operation_timeout_sec(retrieves=True) is None
+    assert deadlines.review_operation_timeout_sec() == 2_700.0
     monkeypatch.setenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", "900")
-    assert deadlines.review_operation_timeout_sec(route="api_chat") == 900.0
-    assert deadlines.review_operation_timeout_sec(route="agent_session") == 900.0
+    assert deadlines.review_operation_timeout_sec() == 900.0
+    assert deadlines.review_operation_timeout_sec(retrieves=True) == 900.0
 
 
 def test_plan_task_outer_envelope_covers_agent_session_lifetime(monkeypatch):

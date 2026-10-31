@@ -2,7 +2,8 @@
 
 In-flight LLM, review, VLM and tool work is leased as typed ``cognitive_operation``
 facts for the idle rail; display-only in_slot_wait marks classify what a call awaits,
-not progress or permission. Leases are bounded by deadline and execution ceiling;
+not progress or permission. A lease ends at the deadline or a finite execution bound, else
+``IDLE_LEASE_MAX_SEC`` after it starts: the exemption ends, never the operation;
 deadline, budget, cancellation and ceiling enforcement never depend on these facts.
 """
 
@@ -81,13 +82,16 @@ def _handle_cognitive_operation(evt: Dict[str, Any], ctx: Any) -> None:
                     return
                 if supplied and stored and supplied != stored:
                     return
-        if phase == "finished" and isinstance(row, dict) and row.get("kind") == "tool":
+        if isinstance(row, dict) and (row.get("kind") == "review"
+                                      or (phase == "finished" and row.get("kind") == "tool")):
             # A tool call that physically completed is this task's own work, like a
             # completed model round (events_budget) or a narration line
             # (events_chat_delivery): the lease that spared the idle rail while the
             # call ran closes INTO a fresh progress stamp, so the round that follows
             # starts inside a full idle window instead of inheriting the time spent
-            # in earlier tools. Stamped before the pop so no tick reads the task as
+            # in earlier tools. A review seat that physically ended, with an answer
+            # or an error, closes the same way: a deep self-review reports nothing
+            # else before its end. Stamped before the pop so no tick reads the task as
             # both lease-less and stale. Deadline, absolute ceiling, budget and
             # cancellation never consult this stamp.
             meta["last_progress_at"] = time.time()
@@ -100,17 +104,18 @@ def _handle_cognitive_operation(evt: Dict[str, Any], ctx: Any) -> None:
         requested_until = float(evt.get("lease_until") or 0.0)
     except (TypeError, ValueError):
         requested_until = 0.0
-    from ouroboros.config import OPERATION_WINDOW_FALLBACK_SEC, resolve_task_execution_timeout_sec
+    from ouroboros.config import IDLE_LEASE_MAX_SEC, resolve_task_execution_timeout_sec
     from ouroboros.deadline_utils import parse_deadline_ts
     from ouroboros.model_wait import execution_elapsed_seconds
 
     task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
     ceiling = resolve_task_execution_timeout_sec(task)
     # A finite execution bound ends the lease where the task's remaining execution ends
-    # (the timeout rail's own clock); without one the operation's own finite window bounds
-    # it from now, so a lost terminal never spares the idle rail forever.
+    # (the timeout rail's own clock); without one the finite idle lease bounds it from now,
+    # so a lost terminal never spares the idle rail forever. The operation itself keeps
+    # running on its own bounds, or none: this fact only spares the silence attention.
     hard_until = (now + max(0.0, float(ceiling) - execution_elapsed_seconds(meta, now)) if ceiling is not None
-                  else now + float(OPERATION_WINDOW_FALLBACK_SEC))
+                  else now + float(IDLE_LEASE_MAX_SEC))
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     deadline = parse_deadline_ts(task.get("deadline_at") or metadata.get("deadline_at"))
     if deadline is not None:

@@ -911,15 +911,13 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext,
             + (native_note or "Use analyze_screenshot to inspect it. ")
             + "Call send_photo(image_base64='__last_screenshot__') to deliver it to the user."
         )
+    # The whole page text goes on: the exact-source delivery keeps it readable and bounds only the view.
     elif output == "html":
-        html = page.content()
-        return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
+        return page.content()
     elif output == "markdown":
-        text = _evaluate_bounded(page, _MARKDOWN_JS)
-        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+        return _evaluate_bounded(page, _MARKDOWN_JS)
     else:  # text
-        text = page.inner_text("body")
-        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+        return page.inner_text("body")
 
 
 def _wait_for_page_state(page: Any, selector: str, state: str, timeout: int,
@@ -1125,9 +1123,8 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                 return _publish_tool_result(ctx, ToolResult(
                     status="error", code="TOOL_ARG_ERROR", text="Error: value (JS code) required for evaluate"))
             result = _evaluate_bounded(page, _evaluate_source(value), effective_default_ms)
-            out = str(result)
             observation[0] = True
-            return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
+            return str(result)
         elif normalized_action == "scroll":
             direction = value or "down"
             if direction == "down":

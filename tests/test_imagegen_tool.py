@@ -598,6 +598,6 @@ def test_registered_and_parallel_control_reaches_loop_owner(monkeypatch, ctx, pa
 def test_image_network_tools_share_the_caller_deadline_clamp(monkeypatch, ctx, tool):
     from ouroboros import loop_tool_execution as execution, task_pacing
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root); registry.set_context(ctx)
-    monkeypatch.setattr(execution, "deadline_remaining_sec", lambda _: 40)
+    monkeypatch.setattr("ouroboros.deadline_utils.deadline_remaining_sec", lambda _: 40)  # the clamp's one owner
     monkeypatch.setattr(task_pacing, "effective_finalization_reserve_sec", lambda _: 15)
     assert execution._get_tool_timeout(registry, tool, {}) == 25

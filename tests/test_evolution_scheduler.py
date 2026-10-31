@@ -225,7 +225,6 @@ def test_timeout_marks_evolution_reaping_before_scheduler_can_replace_it(tmp_pat
     reaper_jobs = _CaptureQueue()
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 10)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue, "_reap_queue", reaper_jobs)

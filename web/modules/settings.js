@@ -80,6 +80,7 @@ const VALUE_FIELDS = [
 const NUMBER_FIELDS = [
     ['s-workers', 'OUROBOROS_MAX_WORKERS', 10], ['s-presence-max-active', 'OUROBOROS_PRESENCE_MAX_ACTIVE', 2], ['s-active-subagents', 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', 6], ['s-subagent-depth', 'OUROBOROS_MAX_SUBAGENT_DEPTH', 3, true],
     ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 600], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
+    ['s-model-max-concurrency', 'OUROBOROS_MODEL_MAX_CONCURRENCY', 3, true],  // 0 = no limit: a choice, not unset
     ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384], ['s-gc-retention-days', 'OUROBOROS_GC_RETENTION_DAYS', 7],
     ['s-bg-wakeup-min', 'OUROBOROS_BG_WAKEUP_MIN', 900], ['s-bg-wakeup-max', 'OUROBOROS_BG_WAKEUP_MAX', 14400],
     ['s-consciousness-max-tasks', 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS', 2, true],  // 0 = never starts tasks: a choice, not unset
@@ -98,6 +99,14 @@ function byId(id) {
 // of ANY tab wrote the fallback back. Only a missing value takes the fallback.
 export function storedOrFallback(value, fallback) {
     return fallback && (value === undefined || value === null || value === '') ? fallback : value;
+}
+
+// The slot wait the concurrency help names: a finite value, below 0 shown as 0 because
+// `model_concurrency._max_slot_wait_sec` counts it so, else the 180 s default. Only the
+// sentence follows it; the saved value stays.
+export function slotWaitSeconds(saved) {
+    const wait = Number.parseFloat(saved);
+    return Number.isFinite(wait) ? Math.max(0, wait) : 180;
 }
 
 // What the core serves at its own address right now (`served_ui` on /api/state),
@@ -743,6 +752,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
             else byId(id).value = fallback;
         });
+        // The wait the concurrency field's help names is the install's own, not a copy of its default.
+        byId('s-model-slot-wait').textContent = String(slotWaitSeconds(s.OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC));
         (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
             const id = field.settingsInputId;
             const input = byId(id);

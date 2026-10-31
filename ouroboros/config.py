@@ -96,7 +96,7 @@ from ouroboros.runtime_limits import (
     CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC,  # noqa: F401
     CLAUDEXOR_STOP_EXIT_WAIT_SEC, BODY_MAINTENANCE_INTERVAL_SEC,  # noqa: F401
     DELEGATE_WAIT_CEILING_SEC,  # noqa: F401
-    DELEGATE_WAIT_WINDOW_MAX_SEC, OPERATION_WINDOW_FALLBACK_SEC,  # noqa: F401
+    DELEGATE_WAIT_WINDOW_MAX_SEC, IDLE_LEASE_MAX_SEC,  # noqa: F401
     MAX_ACTIVE_SUBAGENTS_HARD_CAP, MAX_SUBAGENT_DEPTH_HARD_CAP,  # noqa: F401
     WAKE_DEFAULT_SEC,  # noqa: F401
     _bounded_positive_int_setting,  # noqa: F401
@@ -115,8 +115,6 @@ from ouroboros.runtime_limits import (
     get_max_subagent_depth,  # noqa: F401
     get_max_workers,  # noqa: F401
     get_onboarding_snapshot_timeout_sec,  # noqa: F401
-    get_per_call_timeout_ceiling_sec,  # noqa: F401
-    get_plan_task_deadline_min_sec,  # noqa: F401
     get_post_task_evolution_budget_usd,  # noqa: F401
     get_model_substitution_redos,  # noqa: F401
     get_restart_drain_max_sec,  # noqa: F401
@@ -124,7 +122,7 @@ from ouroboros.runtime_limits import (
     get_settings_document_lock_timeout_sec,  # noqa: F401
     get_safety_max_tokens,  # noqa: F401
     get_search_code_wall_sec, get_supervisor_liveness_deadline_sec,  # noqa: F401
-    get_task_abs_ceiling_sec, get_max_rounds, operation_window_sec,  # noqa: F401
+    get_task_abs_ceiling_sec, get_max_rounds,  # noqa: F401
     explicit_execution_timeout_sec, _CURRENT_TASK_CEILING,  # noqa: F401
     resolve_task_execution_timeout_sec as _resolve_task_execution_timeout_sec,
     get_task_idle_timeout_sec, get_vision_caption_timeout_sec,  # noqa: F401

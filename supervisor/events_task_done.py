@@ -532,8 +532,12 @@ def _finish_task_done_dispatch(
 
     from ouroboros.obligations import drive_finished
     drive_finished(ctx.DRIVE_ROOT, {**task, "id": task_id}, final_task_result)
+    from ouroboros.model_wait import record_execution_close
+    from ouroboros.task_status import SETTLED_STATUSES
     from supervisor.queue import _queue_lock, clear_acceptance_fence_for_root
 
+    if task_id and task_done_event.get("status") in SETTLED_STATUSES:  # #939: close its clock before the release
+        record_execution_close(ctx.DRIVE_ROOT, str(task_id), task, ctx.RUNNING.get(str(task_id)))
     with _queue_lock:
         if task_id:
             ctx.RUNNING.pop(str(task_id), None)

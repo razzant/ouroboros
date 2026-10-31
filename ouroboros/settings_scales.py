@@ -257,6 +257,9 @@ IMMEDIATE_SETTINGS = frozenset({
     # the currently running task's next tool call. The inner shell subprocess
     # timeout still prefers the worker env (next task) — disclosed residual.
     "OUROBOROS_TOOL_TIMEOUT_SEC",
+    # model_concurrency._cap() reads the settings document at every physical call in every
+    # process, so a saved cap reaches running work at its next call, not at the next task.
+    "OUROBOROS_MODEL_MAX_CONCURRENCY",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
     "OUROBOROS_UPDATE_CHANNEL",

@@ -205,7 +205,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     # --- telemetry_only: recorded in the ledger, no runtime action follows -----
     "plan_task_deadline_skip": _telemetry(
         "ouroboros/tools/plan_review_runtime.py",
-        note="the fact that a deadline left no useful planning window"),
+        note="the fact that a spent deadline (less the finalization reserve) left a plan ask no dispatch"),
     "quiz_answer_injected": _telemetry(
         "ouroboros/owner_mailbox.py"),
     "review_density_probe": _telemetry(

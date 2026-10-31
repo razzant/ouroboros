@@ -283,9 +283,9 @@ class WindowObservations:
 # metadata with a hard expiry (no background thread holds anything): the worker
 # grants it for one window, bounded by min(task deadline, the run's own
 # maxSeconds horizon, this absolute ceiling), and releases it when the wait
-# returns. The ceiling exceeds the delegate_wait ToolEntry timeout (2100s, which
-# DELEGATE_WAIT_CEILING_SEC equals) by +300 headroom so a full window plus its
-# own teardown never draws silence attention mid-hold.
+# returns. The ceiling exceeds one hold's bound (DELEGATE_WAIT_CEILING_SEC, 2100s:
+# the 1800s max window plus its teardown) by +300 headroom so a full window never
+# draws silence attention mid-hold; the call's own outer bound is the task lifetime.
 DELEGATE_WAIT_LEASE_GRACE_SEC = 120
 EXTERNAL_WAIT_LEASE_CEILING_SEC = DELEGATE_WAIT_CEILING_SEC + 300
 
