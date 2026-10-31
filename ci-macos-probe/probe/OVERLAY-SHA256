@@ -1,0 +1,4 @@
+85fd666195fd383684c20168c17751569809c849c6daf7e51bddc50be1264cdc  equipment/guest/qb1.sh
+c4d1816854d0c03c3f4033a9facb92e7d0e3286477d696c6b137ea0bb952aeb7  equipment/guest/procwatch.py
+29dc75354f0f3d5daff0936182965af970e3aa6b8ae05329401095367f9a378b  equipment/host/mkbundle.sh
+bf1ecea3cdf3b761122ff86189c93cdaf04de187164d7169b571d731b4a798a0  equipment/scripts/capture.py

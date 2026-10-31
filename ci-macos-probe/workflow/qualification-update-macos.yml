@@ -1,0 +1,48 @@
+# One bounded b1s probe of the unified Update qualification on a GitHub-hosted macOS arm64 runner (test equipment,
+# not product): the stock official 7.8.0 app, opened through LaunchServices, whose own stock updater delivers product
+# C from a run-local mirror. Public inputs only, no secrets. The run's own output root is uploaded whatever the probe
+# reached, provided the runner survives to its upload step (a lost runner uploads nothing). It holds the raw receipts
+# and, from the first qb1 step, the live guest evidence; nothing outside it is ever selected.
+# See ci-macos-probe/README.md. The execution commit is C plus this overlay; the probe checks that itself.
+name: qualification-update-macos
+
+on:
+  push:
+    branches:
+      - 'qualification/update-macos-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-update-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  b1s-probe:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out the execution commit (read-only token, not persisted)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # exec: the probe is the step's own process, so a cancel or timeout signal reaches it directly.
+      - name: Run the b1s probe (verdicts in RESULT.txt and claims.tsv)
+        timeout-minutes: 160
+        shell: bash
+        run: exec /bin/bash ci-macos-probe/probe/run-probe.sh "$RUNNER_TEMP/qb-ci-probe-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+      # Only the output root this run created: its receipts and out/guest-evidence (qb1's evidence folder is a link
+      # into it, made by this run), never a path the run did not create.
+      - name: Upload the run's output (public)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qb-ci-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qb-ci-probe-${{ github.run_id }}-${{ github.run_attempt }}/out
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
