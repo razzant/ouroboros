@@ -155,6 +155,7 @@ def test_selection_replaces_only_the_named_records_and_the_rest_stay_whole(tmp_p
     assert "Alpha asked again and I counted." not in room
     assert G_TEXT not in room
     source = _memory_read(_ctx(tmp_path), node_id=a1, revision=a1)
+    assert f"; told in my story by account {g}; revision {a1};" in source.split("\n")[0]  # where its words went
     assert f"as of revision {a1}: the original alone" in source
     assert "text:\nAlpha asked again and I counted." in source
     main_room = mv.render_room(_snapshot(tmp_path))
@@ -169,7 +170,8 @@ def test_selection_replaces_only_the_named_records_and_the_rest_stay_whole(tmp_p
     restored = _snapshot(tmp_path, alpha_task)
     assert "Alpha asked again and I counted." in mv.render_story(restored)
     assert "Alpha asked again and I counted." not in mv.render_room(restored)  # once, in the restored story
-    assert _memory_read(_ctx(tmp_path), node_id=a1, revision=a1) == source
+    # The same version, read the same; only the header's current fact is gone with the withdrawn selection.
+    assert _memory_read(_ctx(tmp_path), node_id=a1, revision=a1) == source.replace(f"; told in my story by account {g}", "")
     assert "\nMy accounts across rooms: 1 written, 0 in the common view (the rest one memory_read away).\n" in withdrawn + "\n"
 
 

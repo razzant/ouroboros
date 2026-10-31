@@ -52,7 +52,8 @@ from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (RoomLabelResolver, is_presence_task, render_memory_row, render_row_text,
                                            row_class, warm_lineage)
 from ouroboros.mark_anchors import describe as describe_anchor
-from ouroboros.memory_view_account import account_entries, account_lines, accounts_line, told_map
+from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line,
+                                         told_here, told_map)
 from ouroboros.memory_view_legacy import INDENT, indented as _indented, retold_lines
 from ouroboros.utils import append_jsonl, sha256_text, utc_now_iso
 
@@ -384,12 +385,7 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
     joins the end and preserves the prefix on routes with prefix caching. With one cache marker for the whole
     block B, a new page misses that block (``context_fit._system_blocks``). A fold rewrites the story from its
     first changed retelling, as before."""
-    fixes: Dict[str, List[Dict[str, Any]]] = {}
-    for record in store.records(kinds=("correction", "decision")):
-        if record["kind"] == "correction" or record.get("accepted") is False:
-            fixes.setdefault(str(record.get("target_id") or ""), []).append(
-                {"kind": "correction" if record["kind"] == "correction" else "rejection", "id": record["id"],
-                 "text": record.get("text"), "reason": record.get("reason")})
+    fixes = fix_map(store)
     records = [record for record in store.room_records(room_id, kinds=("page", "part"))
                if not record.get("folded_into")]
     from ouroboros.memory_sealing import capture_terminal_rows, terminal_links
@@ -631,7 +627,8 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     """The current room: its head and standing facts, page (retold records, pages under parts, notes), origin words, lanes.
 
     Retold records already whole in my story are not repeated. A selected account carries its records, a part
-    it tells its members too; their detail stays at their source readers rather than reappearing in this room.
+    it tells its members too; their detail stays at their source readers rather than reappearing in this room,
+    where ``told`` names how many of the room's records accounts in my story tell, and which ones (``told_here``).
     A standing part (the mind's, or a helper's draft not pending as a candidate) stands for its members here
     as in the story: they keep their period and address (``standing``), a viewer with a story only.
     """
@@ -648,7 +645,7 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                              "facts": _with_gaps(memory_inventory.room_facts(store, room, entries, lineage,
                                                                              len(notes.get(room, ()))), gaps, room),
                              "legacy": [], "under_parts": [], "notes": [], "origins": [], "since": "",
-                             "lane1": [], "lane2": []}
+                             "lane1": [], "lane2": [], "told": []}
     if spec.room_page:
         units = {unit.record_id: unit for unit in memory_inventory.legacy_units(store, root)}
         retold = [record for record in records if record["kind"] in ("legacy", "gap")]
@@ -671,6 +668,8 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                                  **({"standing": True} if spec.story and record["folded_into"] in standing else {})}
                                 for record in (records if spec.story else store.pages_of_room(room)) if record["kind"] in ("page", "part") and record["id"] not in told and (record.get("folded_into") or record["id"] in own)]
         facts["notes"] = list(notes.get(room, ()))
+        main = room == MAIN_ROOM and spec.role != "nanny"  # Main's page carries the room-less retellings too
+        facts["told"] = told_here(story, {room, *((LEGACY_ROOM_ID,) if main else ())})
     if spec.origin_words and room.lstrip("-").isdigit() and int(room) in memory_inventory.membership_facts(
             root).project_chat_ids:
         facts["origins"] = _origins(root, room, entries if spec.room_lanes else [])
@@ -981,7 +980,7 @@ def _page_lines(entry: Mapping[str, Any]) -> List[str]:
     head = f"### {entry['label']} · {entry['period']} · {entry['kind']} {entry['id']}"
     if entry.get("kind") == "account":  # its words, compact composition, and new source changes still in full
         return ["", head, *account_lines(entry)]
-    lines = ["", head, _indented(entry["text"]), *(f"- quote ({q.get('speaker')}, {q.get('address')}): {q.get('text')}" for q in entry.get("quotes") or ())]
+    lines = ["", head, _indented(entry["text"]), *map(quote_line, entry.get("quotes") or ())]
     if entry.get("status") == "draft":
         lines.append(f"(draft by a helper ({entry.get('signer') or 'Light'}), not yet accepted or rejected by me)")
     elif entry.get("status") == "accepted":
@@ -1002,6 +1001,14 @@ def _retold(item: Mapping[str, Any], short: bool = False) -> str:
     if short:
         return f"{head} — {len(item['text'])} chars — memory_read(node_id='{item['id']}')"
     return "\n".join([f"{head}\n{_indented(item['text'])}", *(_page_lines(item)[3:] if "stamp" in item else ())])
+
+
+def _told_here_line(item: Mapping[str, Any]) -> str:
+    """Where this room's records my accounts tell went: their count and span, the accounts and the room's reader."""
+    many = len(item["accounts"]) > 1
+    return (f"- {item['count']} record{'' if item['count'] == 1 else 's'}, {_period(item['span'])}: told in my story by "
+            f"my account{'s' if many else ''} {', '.join(item['accounts'])}; memory_read(room_id='{item['room_id']}') "
+            "lists each with its words and teller")
 
 
 def _row_pointer(item: Mapping[str, Any], what: str) -> str:
@@ -1266,6 +1273,8 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     lines += (["", "### Pages under my parts" if all(i["part"] for i in room["under_parts"]) else "### Pages of this room",
                *(_retold(item, item["id"] in retold or item.get("standing", False)) for item in room["under_parts"])]
               if room["under_parts"] else [])
+    if room.get("told"):
+        lines += ["", "### Records of this room my accounts tell"] + [_told_here_line(item) for item in room["told"]]
     if room["origins"]:
         lines += ["", "### Words that started this work (retention-proof)"]
         lines += [f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] " + _indented(item["text"]).lstrip()

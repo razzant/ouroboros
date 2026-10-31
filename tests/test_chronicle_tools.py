@@ -371,7 +371,7 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
     shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="the account says it")
     assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters.")
     hidden = write(ctx, kind="selection", target_id=account["node_id"], replaces=[], shown=False, reason="back")
-    assert hidden["effect"].startswith("withdrawn: the account leaves the common view and the records it told return")
+    assert hidden["effect"].startswith("withdrawal saved: other selections and folds still determine what appears.")
     first = write(ctx, kind="correction", target_id="legacy-b01-r5", text="It was 26.09, not 25.09.")
     assert first["ok"] and first["revision"] == first["node_id"]
     again = json.loads(_chronicle_write(ctx, kind="correction", target_id="legacy-b01-r5", text="second"))
