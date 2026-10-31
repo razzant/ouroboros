@@ -762,12 +762,14 @@ class OuroborosAgent:
         # to the PROJECT FOLDER (project_room_lens_dir keys on this metadata; the
         # robot-room incident: "." resolved to the system repo and the agent
         # narrated the wrong tree). A set-but-broken working_dir rides as a LOUD
-        # note instead (never a silent repo fallback). Kept resources win (room_lens_applies).
+        # note instead (never a silent repo fallback). Kept resources win (room_lens_applies),
+        # and so does the folder the turn's carried basis was admitted with (#2547).
         from ouroboros.workspace_admission import room_chat_lens_dir, room_lens_applies
 
         if _resolved_project_id and room_lens_applies(task):
             try:
-                _room_dir, _room_note = room_chat_lens_dir(self.env.drive_root, _resolved_project_id)
+                _room_dir, _room_note = room_chat_lens_dir(
+                    self.env.drive_root, _resolved_project_id, basis=task.get("_project_admission"))
                 if _room_dir:
                     task_metadata["_project_room_dir"] = _room_dir
                 if _room_note:

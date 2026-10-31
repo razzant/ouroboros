@@ -42,6 +42,20 @@ def carried_basis(source: dict) -> dict:
     return {"_project_admission": copy.deepcopy(source["_project_admission"])} if "_project_admission" in source else {}
 
 
+def admitted_folder(basis: Any, project_id: str) -> Optional[str]:
+    """The room folder a carried basis recorded, ``""`` for a room with none (#2547).
+
+    Work admitted on this basis keeps that resource across stops and pooled
+    continuations: a later rebind, or a sibling's first folder for the room, never
+    moves it. ``None`` when nothing usable is carried (no basis, a legacy stamp,
+    another room), and the caller reads the room's current row as before.
+    """
+    if (not isinstance(basis, dict) or basis.get("legacy_basis") or basis.get("project_id") != project_id
+            or not isinstance(basis.get("project"), dict)):
+        return None
+    return str(basis["project"].get("working_dir") or "").strip()
+
+
 def hold_unreadable_result(task: dict) -> bool:
     """Whether accepted Project work whose own result is unreadable waits held, never failed.
 
