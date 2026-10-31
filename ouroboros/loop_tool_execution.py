@@ -20,10 +20,9 @@ from ouroboros import budget_pause
 from ouroboros.tool_custody import submit_tool_future
 from ouroboros.config import (
     NESTED_SETTLEMENT_MARGIN_SEC,
-    get_finalization_grace_sec,
     load_settings,
 )
-from ouroboros.deadline_utils import deadline_remaining_sec
+from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
@@ -258,16 +257,19 @@ def _tc_args(tc: Dict[str, Any]) -> Dict[str, Any]:
 
 def _get_tool_timeout(
     tools: ToolRegistry, tool_name: str, tool_args: Optional[Dict[str, Any]] = None
-) -> int:
-    """Return max(settings/env timeout, per-tool minimum).
+) -> Optional[int]:
+    """Return max(settings/env timeout, per-tool minimum); ``None`` for a long-lived entry
+    with no window (``ToolEntry.timeout_sec=None``), which Tool Timeout never re-caps and only
+    the deadline clamp below can narrow.
 
     A handler that bounds its own child (``shell_process.COMMAND_TIMEOUT_TOOLS``) waits
     at least that child's timeout plus the settlement margin, resolved by the handler's
     own function from the arguments dispatch hands it (its alias folding, on a copy), so
     the child's cleanly reported timeout fires first; a second rule once ran a 1800 s
-    check under a 1000 s wait (#1376). Near a task deadline the child keeps its 60 s
-    floor, so this wait can outlast that deadline as the registered window already
-    could; what settles after the wait ends is a late result (``late_tool_results``).
+    check under a 1000 s wait (#1376). Near a task bound the child is narrowed to what is
+    left of it less the finalization reserve and a spent bound starts no child, but this
+    wait never drops below the registered window, so it can outlast that bound as it
+    already could; what settles after the wait ends is a late result (``late_tool_results``).
     """
     settings_val = 0
     try:
@@ -284,11 +286,12 @@ def _get_tool_timeout(
             except ValueError:
                 pass
     per_tool = tools.get_timeout(tool_name)
-    base = max(settings_val, per_tool) if settings_val > 0 else per_tool
+    base = max(settings_val, per_tool) if settings_val > 0 and per_tool is not None else per_tool
     if tool_name in {"analyze_screenshot", "vlm_query"}:
         from ouroboros.tools.vision import _vision_tool_timeout
 
-        base = max(base, _vision_tool_timeout(tools._ctx, tool_args or {}))
+        vision = _vision_tool_timeout(tools._ctx, tool_args or {})
+        base = None if vision is None else max(base, vision)
     if tool_name in _PER_CALL_TIMEOUT_TOOLS:
         call_args, entry = dict(tool_args or {}), (getattr(tools, "_entries", None) or {}).get(tool_name)
         if entry is not None:
@@ -311,40 +314,15 @@ _DEADLINE_CLAMPED_TOOLS = frozenset({
 })
 
 
-def _deadline_clamped_timeout(tools: ToolRegistry, tool_name: str, base_timeout: int) -> int:
-    """min(tool timeout, remaining − finalization reserve) for network/long tools.
-
-    ``remaining`` is the nearer explicit bound: ``deadline_at`` or the execution
-    window (#939). With neither the behavior is byte-identical. An already-elapsed
-    bound is also left unclamped — the loop's forced finalization owns that path.
-    The clamp never floors PAST the reserve: inside or near the finalization window
-    the tool gets a near-immediate (1s) timeout — a fast, cleanly-messaged failure —
-    rather than a grace-period-eating floor (review round 1: a 30s floor let one web
-    call consume the reserve the clamp exists to protect)."""
+def _deadline_clamped_timeout(tools: ToolRegistry, tool_name: str, base_timeout: Optional[int]) -> Optional[int]:
+    """min(tool timeout, remaining − finalization reserve) for network/long tools; a tool
+    with no window (``None``) takes the clamped remainder itself, else keeps ``None``. The
+    arithmetic is ``deadline_utils.deadline_clamped_timeout_sec`` (one owner): with neither
+    bound the behavior is byte-identical, an elapsed one stays unclamped (forced
+    finalization owns it), and near the reserve the tool gets 1 s, never a grace-eating floor."""
     if tool_name not in _DEADLINE_CLAMPED_TOOLS:
         return base_timeout
-    try:
-        remaining = deadline_remaining_sec(getattr(tools, "_ctx", None))
-        from ouroboros.model_wait import explicit_execution_window_remaining
-        execution_left = explicit_execution_window_remaining(getattr(tools, "_ctx", None))  # #939
-        if execution_left is not None:
-            remaining = min(remaining, execution_left) if remaining > 0 else execution_left
-    except Exception:
-        return base_timeout
-    if remaining <= 0:
-        return base_timeout
-    # v6.55.0: the plain finalization GRACE emit-window (task_pacing SSOT), NOT the pct
-    # reserve (a review gate): clamping out the last pct-of-total strands long tasks idle.
-    try:
-        from ouroboros.task_pacing import effective_finalization_reserve_sec
-
-        reserve = effective_finalization_reserve_sec(getattr(tools, "_ctx", None))
-    except Exception:
-        reserve = float(get_finalization_grace_sec())
-    window = remaining - reserve
-    if window >= base_timeout:
-        return base_timeout
-    return int(max(1.0, min(float(base_timeout), window)))
+    return deadline_clamped_timeout_sec(getattr(tools, "_ctx", None), base_timeout)
 
 
 def _truncate_tool_result(
@@ -826,7 +804,7 @@ def tool_timeout_text(fn_name: str, timeout_sec: float, reset_msg: str = "") -> 
 
 
 @contextlib.contextmanager
-def abandoned_on_timeout(timeout_sec: float, *, bounded: bool = True) -> Iterator[Callable[..., Any]]:
+def abandoned_on_timeout(timeout_sec: Optional[float], *, bounded: bool = True) -> Iterator[Callable[..., Any]]:
     """Own the private worker of ONE call so a timed-out call can be ABANDONED.
 
     The late-settlement half of tool execution, without its task-log rows, so
@@ -980,11 +958,12 @@ def _execute_with_timeout(
     tools: ToolRegistry,
     tc: Dict[str, Any],
     drive_logs: pathlib.Path,
-    timeout_sec: int,
+    timeout_sec: Optional[int],
     task_id: str = "",
     stateful_executor: Optional[StatefulToolExecutor] = None,
 ) -> Dict[str, Any]:
-    """Execute one tool call with timeout handling.
+    """Execute one tool call with timeout handling (``None``: a long-lived handler that
+    observes the owner's controls itself, waited for without a host timeout).
 
     The call's identity is frozen and its durable ``tool_call_started`` row written
     BEFORE submission (#1316): that row means host processing began, not that the
@@ -1039,7 +1018,8 @@ def _execute_with_timeout(
                     with execution_deadline_scope(monotonic_now() + timeout_sec):
                         return submit_tool(tool_ctx, fn_name, stateful_executor.submit, fn, *values)
             else:
-                submit = scope.enter_context(abandoned_on_timeout(timeout_sec, bounded=not is_reviewed_mutative))
+                submit = scope.enter_context(abandoned_on_timeout(
+                    timeout_sec, bounded=not is_reviewed_mutative and timeout_sec is not None))
             from ouroboros.owner_pause import OwnerPauseRefused
             from ouroboros.store import StoreError
             try:

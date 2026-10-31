@@ -204,23 +204,79 @@ def execution_consumed_seconds(meta: dict) -> float:
     return max(0.0, value) if math.isfinite(value) else 0.0
 
 
+def closed_execution_total(meta: dict, now: float | None = None) -> float:
+    """An ended attempt's total execution (#939) from its RUNNING row. A quota wait
+    still open at the last observation stops there, never extended further:
+    the raw clock facts are read, never a reader's derived ``execution_sec``."""
+    clock = meta.get("model_wait_quota_clock")
+    closed = {**meta, "model_wait_quota_clock": {**clock, "active": False}} if isinstance(clock, dict) else meta
+    return execution_elapsed_seconds(closed, time.time() if now is None else now)
+
+
 def stamp_execution_handoff(successor: dict, meta: dict | None, now: float | None = None) -> None:
     """Record an ended attempt's total execution on its successor (#939).
 
     At assignment, ``settle_execution_carry`` keeps this total: a preserved
     origin excludes the intervening queue via the existing paused carrier;
-    a fresh origin carries the total as an offset. A quota wait
-    still open at the last observation stops there, never extended further:
-    the raw clock facts are read, never a reader's derived ``execution_sec``.
+    a fresh origin carries the total as an offset (``closed_execution_total``).
     """
     from ouroboros.runtime_limits import explicit_execution_timeout_sec
 
     successor.pop("_execution_handoff_sec", None)
     if explicit_execution_timeout_sec(successor) is None or not isinstance(meta, dict) or not meta:
         return
-    clock = meta.get("model_wait_quota_clock")
-    closed = {**meta, "model_wait_quota_clock": {**clock, "active": False}} if isinstance(clock, dict) else meta
-    successor["_execution_handoff_sec"] = execution_elapsed_seconds(closed, time.time() if now is None else now)
+    successor["_execution_handoff_sec"] = closed_execution_total(meta, now)
+
+
+# The result-row fact a budgeted task's terminal writer leaves for the work's next Continue
+# (``owner_continue.execution_carry``): ``{"sec": closed total, "attempt": the attempt it closed}``,
+# ``attempt`` 0 when written at admission, before any attempt of this id (``execution_opening``). It holds only while it
+# names the row's last started attempt (``task_attempt``): a later start that never closed is
+# unknown, never this older total.
+EXECUTION_CLOSE_KEY = "execution_consumed"
+
+
+def execution_close(task: dict, meta: dict | None, now: float | None = None) -> dict:
+    """``{EXECUTION_CLOSE_KEY: ...}`` for an ending attempt of a budgeted task, else ``{}``."""
+    from ouroboros.runtime_limits import explicit_execution_timeout_sec
+
+    if explicit_execution_timeout_sec(task) is None or not isinstance(meta, dict) or not meta:
+        return {}
+    attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
+    return {EXECUTION_CLOSE_KEY: {"sec": closed_execution_total(meta, now), "attempt": attempt}}
+
+
+def execution_opening(task: dict, consumed: float = 0.0) -> dict:
+    """The attempt-0 close a budgeted row is admitted with, else ``{}``: what ran before any attempt of this id
+    (nothing at the task door, the carried total for a Continue's successor). Every start stamps ``task_attempt``
+    of at least 1, so it answers only for a row that never started."""
+    from ouroboros.runtime_limits import explicit_execution_timeout_sec
+
+    return {EXECUTION_CLOSE_KEY: {"sec": float(consumed), "attempt": 0}} if explicit_execution_timeout_sec(task) else {}
+
+
+def record_execution_close(drive_root: Any, task_id: str, task: dict, meta: dict | None) -> None:
+    """Write ``execution_close`` onto the task's EXISTING result before its RUNNING row is released.
+
+    Never creates a row; a failed write leaves the total unknown to Continue, never a new quota."""
+    fields = execution_close(task, meta)
+    if not fields or not task_id:
+        return
+    from ouroboros.task_result_schema import require_writable_task_result_schema, stamp_task_result_schema
+    from ouroboros.task_store import patch_document
+
+    def update(current: dict) -> dict | None:
+        if not current:
+            return None
+        require_writable_task_result_schema(current)
+        return stamp_task_result_schema({**current, **fields})
+
+    try:
+        patch_document(pathlib.Path(task.get("budget_drive_root") or drive_root), str(task_id), update)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Execution total of %s not recorded; its Continue reads it as unknown",
+                                            task_id, exc_info=True)
 
 
 def native_sleep_started_at(handoff: Any) -> float | None:
@@ -1382,9 +1438,10 @@ def monotonic_now(review_slot_id: str | None = None) -> float:
     return now - context.paused_seconds(slot, now=now)
 
 
-def future_result(future: Any, timeout: float) -> Any:
-    """Keep the existing Future and its execution budget across a quota pause."""
-    if current_model_wait() is None:
+def future_result(future: Any, timeout: float | None) -> Any:
+    """Keep the existing Future and its execution budget across a quota pause. ``None`` is
+    no budget: a long-lived handler that observes its owner's controls is waited for itself."""
+    if timeout is None or current_model_wait() is None:
         return future.result(timeout=timeout)
     deadline = monotonic_now() + timeout
     while True:

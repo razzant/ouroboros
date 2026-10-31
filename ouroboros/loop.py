@@ -364,9 +364,20 @@ def _apply_runtime_overrides(
     return active_model, active_use_local, active_effort
 
 
+def carried_inline_round_cap(task_metadata: Dict[str, Any]) -> Optional[int]:
+    """The inline cap a Presence turn really carries: a retained pre-Places turn's recorded positive
+    integer. A Place carries none, so absence stays ``None``; a present malformed value (zero, a
+    negative, a bool, text, a fraction) is a typo that takes the finite legacy 10, never "no bound"."""
+    raw = task_metadata.get("inline_max_rounds")
+    if raw is None:
+        return None
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1 else 10
+
+
 def _resolve_loop_max_rounds(ctx: Any = None) -> Optional[int]:
-    """The round limit that binds first: the configured total (``None`` = no limit) and a
-    Presence turn's own finite inline cap. ``None`` means no round limit at all."""
+    """The round limit that binds first: the configured total (``None`` = no limit) and the inline
+    cap a retained pre-Places Presence turn carries (``carried_inline_round_cap``; a Place carries
+    none). ``None`` means no round limit at all."""
     from ouroboros.config import get_max_rounds
 
     inline = getattr(ctx, "inline_max_rounds", None)
@@ -412,7 +423,7 @@ def _reset_turn_state(ctx: Any) -> None:
     # Its durable mailbox will deliver those entries to the next real consumer.
     ctx._pending_content_acks = []
     ctx._presence_completion, ctx._presence_completion_accepted = None, False
-    ctx._presence_forced_declaration = ctx._presence_forced_pending = None
+    ctx._presence_forced_declaration = ctx._presence_forced_pending = ctx._forced_completion = None
     ctx._completion_request = ctx._completion_selected = ctx._completion_observation = None
     ctx._completion_conflict, ctx._completion_held_sha256, ctx._acceptance_pending_review_choice = False, "", ""
     ctx._result_review_pending, ctx._result_review_shown, ctx._result_review_refused = "", set(), {}  # this turn's result review step

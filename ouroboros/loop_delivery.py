@@ -669,6 +669,81 @@ def selected_completion_text(request: dict, candidate: Any, messages: list,
     return None, "selection_unavailable: select the current retained/whole held answer or supply complete bytes"
 
 
+OWNER_REPLY_OWED_REFUSAL = ("owner_reply_owed: your human wrote after your last live message; "
+                            "answer before finishing silently")
+
+
+def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *, tool_ctx: Any = None,
+                                envelope_keys: Tuple[str, ...] = (), messages: list | None = None,
+                                held_sha256: str = "") -> tuple[dict | None, str | None, str]:
+    """One forced completion request, from a native ``finish_task`` call or its serialized text:
+    ``(request, selected text, "")`` or ``(None, None, error)``. Pure: finish_task's own contract
+    (``completion_request``), the same byte selection and the silence rule of
+    ``consume_completion_request``; nothing is staged, executed or acknowledged here."""
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.tools.control_runtime import completion_request
+
+    if malformed or not isinstance(parsed, dict) or getattr(parsed, "duplicate_keys", set()):
+        return None, None, "invalid_completion_request: one exact JSON object of finish_task arguments"
+    request, error = completion_request(tool_ctx, {key: value for key, value in parsed.items() if key not in envelope_keys})
+    if error:
+        return None, None, "invalid_completion_request: " + error
+    text, error = selected_completion_text(request, candidate, messages or [], held_sha256)
+    if not error and request.get("wake_silent") and tool_ctx is not None and owner_reply_owed(tool_ctx):
+        error = OWNER_REPLY_OWED_REFUSAL
+    return (None, None, error) if error else (request, text, "")
+
+
+def forced_completion_call(response_meta: dict, tool_schemas: Any) -> tuple[dict | None, str]:
+    """A forced reply's one ``finish_task`` call (``{name, arguments}``) when that call offered the tool and the
+    response is complete apart from it and a provider length cut (``forced_response_is_incomplete``), else
+    ``None`` with why a present completion stays unadopted; nothing executes either way. The call, never its
+    arguments, marks adoption: absent, malformed or cut arguments are a refused request, not a missing one."""
+    from ouroboros.loop_llm_call import forced_response_is_incomplete
+
+    calls = response_meta.get("reply_calls") or []
+    names = [call.get("name") for call in calls]
+    if "finish_task" not in names:
+        return None, ""
+    if names != ["finish_task"]:
+        return None, "completion_beside_other_calls"
+    if not any((schema.get("function") or {}).get("name") == "finish_task"
+               for schema in tool_schemas or [] if isinstance(schema, dict)):
+        return None, "completion_tool_not_offered"
+    if forced_response_is_incomplete(response_meta, completion_request=True):
+        return None, "completion_response_incomplete"
+    return calls[0], ""
+
+
+def record_forced_completion(trace: dict, tool_ctx: Any, response_meta: dict, *, native: Any,
+                             unadopted: str) -> dict | None:
+    """Type on the trace how a forced reply's completion request fared (``forced_completion_request``,
+    beside the actual ``tool_call_count`` and the provider's length cut, ``response_cut``); return the request
+    when it selected the bytes. A request in a reply that could not be adopted (the native reason, or one
+    contained beside foreign calls) is not_adopted."""
+    from ouroboros.loop_llm_call import forced_response_cut
+
+    verdict = getattr(tool_ctx, "_forced_completion", None)
+    if not unadopted and not isinstance(verdict, dict):
+        return None
+    blocked = unadopted or verdict.get("unadopted", "")
+    reason, cut = blocked or verdict["error"], forced_response_cut(response_meta)
+    trace["forced_completion_request"] = {
+        "form": "native" if native is not None or unadopted else "text",
+        "status": "not_adopted" if blocked else "refused" if reason else "selected",
+        "tool_call_count": response_meta.get("tool_call_count"), **({"reason": reason} if reason else {}),
+        **({"response_cut": cut} if cut else {})}
+    return None if reason else verdict["request"]
+
+
+def carry_forced_selection(tool_ctx: Any, request: dict | None, candidate: Any) -> None:
+    """A selected forced request's silence travels with its bytes, as ``consume_completion_request``'s
+    does, so the Place reply gate and the wake outcome read the author's whole act, never half of it."""
+    if candidate is not None and isinstance(request, dict):
+        candidate.quiet = bool(request.get("wake_silent"))
+        tool_ctx._completion_selected = request
+
+
 def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, content: Any = None) -> bool:
     """Resolve one staged author act after the full batch, using its original observation."""
     from ouroboros.tool_capabilities import completion_observation_calls
@@ -685,7 +760,7 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
     text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
     if request.get("wake_silent") and owner_reply_owed(tool_ctx):
-        error = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
+        error = OWNER_REPLY_OWED_REFUSAL
     if getattr(tool_ctx, "_completion_conflict", False):
         error = "contradictory_completion_requests: select again after reading the completed batch"
     if observation.get("owner_source_sha256") != owner_source_sha256(tool_ctx):
@@ -904,23 +979,24 @@ def _resolve_forced_delivery_control_body(
     candidate: Optional[DeliveryCandidate],
     *,
     armed: bool, envelope_keys: Tuple[str, ...] = (), messages: list | None = None, held_sha256: str = "",
+    tool_ctx: Any = None, native: bool = False,
 ) -> Tuple[str, bool, bool, bool, bool]:
-    """Return text plus retained/degraded/consumed/replaced facts."""
+    """Return text plus retained/degraded/consumed/replaced facts. ``native`` marks ``raw`` as the
+    arguments of the reply's one ``finish_task`` call: a completion request whatever its shape.
+    With ``tool_ctx`` the request's verdict is left on ``tool_ctx._forced_completion``."""
 
     if not isinstance(candidate, _loop().DeliveryCandidate):
         candidate = None
-    parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw)
-    if isinstance(parsed, dict) and "action" in parsed:
-        allowed = {"action", "answer", "answer_sha256", "rationale", "acceptance_subject", "pending_review", *envelope_keys}
-        valid = (not duplicate_protocol_key and not embedded_protocol and not getattr(parsed, "duplicate_keys", set())
-                 and not set(parsed) - allowed and parsed.get("action") in {"finish", "stop"}
-                 and (("answer" in parsed) != ("answer_sha256" in parsed))
-                 and parsed.get("pending_review", "wait") in {"wait", "finish"}
-                 and (parsed["action"] != "stop" or isinstance(parsed.get("rationale"), str) and parsed["rationale"].strip()))
-        text, error = selected_completion_text(parsed, candidate, messages or [], held_sha256) if valid else (None, "invalid_completion_request")
+    parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw if isinstance(raw, str) else "")
+    if native or isinstance(parsed, dict) and "action" in parsed:
+        request, text, error = forced_completion_selection(
+            parsed, duplicate_protocol_key or embedded_protocol, candidate, tool_ctx=tool_ctx,
+            envelope_keys=envelope_keys, messages=messages, held_sha256=held_sha256)
+        if tool_ctx is not None:
+            tool_ctx._forced_completion = {"request": request, "error": error}
         if error:
             return candidate.full_text if candidate else "", candidate is not None, True, True, False
-        retained = candidate is not None and parsed.get("answer_sha256") == candidate.content_sha256
+        retained = candidate is not None and request.get("answer_sha256") == candidate.content_sha256
         return text, retained, False, True, not retained
     control_kind, replacement, _error = _classify_parsed_delivery_control(
         parsed, duplicate_protocol_key, embedded_protocol, envelope_keys=envelope_keys,

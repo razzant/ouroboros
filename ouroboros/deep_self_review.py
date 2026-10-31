@@ -44,7 +44,7 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
     load_governance_doc,
 )
 from ouroboros.shell_parse import is_absolute_path_text  # noqa: E402
-from ouroboros.utils import utc_now_iso  # noqa: E402
+from ouroboros.utils import emit_cognitive_operation_event, utc_now_iso  # noqa: E402
 from ouroboros.provider_models import legacy_openai_base, provider_for_model, provider_has_credentials  # noqa: E402
 from ouroboros.reviewer_slot_config import (  # noqa: E402
     ROUTE_KIND_API,
@@ -628,7 +628,7 @@ def _run_retrieving_review(
     the caller's goal and questions, in the request's goal and the task text."""
     from dataclasses import asdict
 
-    from ouroboros.config import get_finalization_grace_sec, get_task_abs_ceiling_sec, operation_window_sec
+    from ouroboros.config import get_finalization_grace_sec
     from ouroboros.deadline_utils import review_operation_timeout_sec
     from ouroboros.observability import persist_call
     from ouroboros.review_execution import ReviewAssignment, _review_route_executor
@@ -666,15 +666,11 @@ def _run_retrieving_review(
         policy=policy,
         deadline_at=deadline_at,
     )
-    # The logical window: the task's operation window (its finite absolute lifetime,
-    # else the operation fallback) narrowed by the owner deadline — the same clock the
-    # coordinator gives a slot; without it the native episode would run with no window
-    # at all and a session would fall to the transport's own defaults.
-    window = review_operation_timeout_sec(
-        operation_window_sec(get_task_abs_ceiling_sec()),
-        route="agent_session" if row.is_session else "api_chat",
-        deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec(),
-    )
+    # The logical window: what truly bounds either retrieving delivery — an explicit review
+    # window, the owner deadline less the grace, the task's finite execution window — the
+    # clock the coordinator gives a slot; ``None`` when none exists, never a socket timeout.
+    window = review_operation_timeout_sec(retrieves=True, deadline_at=deadline_at,
+                                          reserve_sec=get_finalization_grace_sec())
     from ouroboros.config import review_model_uses_local
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_substrate import ReviewSlot
@@ -706,11 +702,12 @@ def _run_retrieving_review(
         from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 
         executor = NativeToolRoundReviewExecutor(assignment, llm=llm)
-    executor._logical_deadline_monotonic = time.monotonic() + window
+    executor._logical_deadline_monotonic = None if window is None else time.monotonic() + window
     delivery = "agent_session" if row.is_session else "native_tool_rounds"
     emit_progress(
         f"Deep self-review via {delivery} on {sendable}: {_memory_line(task_facts['memory'])}, "
-        f"BIBLE.md ({task_facts['bible_chars']:,} chars) delivered inline; window {window:.0f}s..."
+        f"BIBLE.md ({task_facts['bible_chars']:,} chars) delivered inline; "
+        + ("no logical window..." if window is None else f"window {window:.0f}s...")
     )
     prompt_ref: Dict[str, Any] = {}
     try:
@@ -724,9 +721,19 @@ def _run_retrieving_review(
         log.debug("deep self-review prompt custody write failed", exc_info=True)
     scope = _review_usage_scope(current_usage_scope() or UsageScope(), request)
     memory = task_facts["memory"]
+    # Outside the loop and review custody no round, usage or tool fact reaches the supervisor before
+    # the delivery ends: the review holds a seat's typed lease, which spares only silence attention
+    # while it is in flight (on the supervisor's own bounds), and every exit, an error, budget or
+    # cancel included, closes it into a fresh progress stamp (``supervisor/cognitive_operations``).
+    lease = {"task_id": task_id, "operation_id": assignment.call_id, "kind": "review",
+             "task_attempt": getattr(usage_ctx, "task_attempt", None), "slot_id": slot.slot_id}
+    events = getattr(usage_ctx, "event_queue", None)
+    emit_cognitive_operation_event(events, phase="started", **lease)
+    settled = "failed"
     try:
         with usage_scope(scope):
             attempt = executor.execute()
+        settled = "finished"
     except Exception as exc:
         # The memory fact precedes EVERY «Выполняется как» record — this
         # failure-custody row included — and rides the typed failure the caller
@@ -745,6 +752,8 @@ def _run_retrieving_review(
         log.error("Deep self-review failed: %s", exc, exc_info=True)
         return _failed(f"❌ Deep self-review failed: {type(exc).__name__}: {exc}",
                        reason_code="deep_self_review_error", usage=custody)
+    finally:
+        emit_cognitive_operation_event(events, phase=settled, **lease)
     usage = dict(attempt.usage or {})
     # Attached FIRST: the usage handed to every «Выполняется как» record below
     # and the returned usage carry the memory fact. The durable D22 projection

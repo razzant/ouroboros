@@ -37,7 +37,11 @@ from ouroboros.tool_access import (
     canonical_data_root,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
-from ouroboros.tools.process_facts import process_environment_tool, redact_process_data, record_runtime_selection, selected_process_environment
+from ouroboros.tools.process_facts import (
+    active_resolved_runtime, process_environment_tool, publish_process_facts, redact_process_data,
+    record_runtime_selection, selected_process_environment,
+)
+from ouroboros.tools.shell_process import CommandStopped, command_start_refusal, command_timeout_for_call, turn_stop_reader
 from ouroboros.utils import utc_now_iso
 
 # Durable receipt evidence is bounded but the truncation is DISCLOSED (BIBLE P1, never
@@ -70,6 +74,20 @@ def _bounded(text: Any, cap: int) -> str:
     if len(t) <= cap:
         return t
     return t[:cap] + f"\n…[truncated {len(t) - cap} of {len(t)} chars]"
+
+
+def _interrupted_check(ended: BaseException, timeout: Any, *, started_ts: float, resolved_runtime: str) -> tuple:
+    """``(why, output, facts)`` of a check that never returned: its timeout, or Stop now of an in-process turn
+    (``CommandStopped``), whose host kill is claimed only once its exit was observed. A stopped check's output is
+    the whole text it wrote; the receipt and the reply keep their bounded, masked views of it (``_bounded``), as
+    of a completed run's. The process facts are published once, as for a completed run."""
+    stopped = isinstance(ended, CommandStopped)
+    why = (f"check ended by Stop now; its exit was {'observed' if ended.exit_observed else 'NOT observed'}"
+           if stopped else f"check timed out after {timeout}s")
+    output = (ended.output + (("\n" + ended.stderr) if ended.stderr else "")) if stopped else ""
+    facts = publish_process_facts(started_ts=started_ts, resolved_runtime=resolved_runtime,
+                                  timed_out=not stopped, killed_by_host=not stopped or ended.exit_observed)
+    return why, output, facts
 
 
 def _publish_verification(ctx: ToolContext, text: str, receipt: dict, *, compared: bool, detail: str = "") -> str:
@@ -707,18 +725,15 @@ def _verify_and_record(
                 "artifact_paths=[<file_a>, <file_b>] — exactly two files to compare byte-for-byte "
                 "after the check runs."
             )
-        from ouroboros.tools.process_facts import (
-            active_resolved_runtime as _active_resolved_runtime,
-            publish_process_facts as _publish_process_facts,
-        )
         from ouroboros.tools.shell import (
             _executor_can_run_cwd,
             _shell_env_for_cwd,
             _tracked_subprocess_run,
         )
-        from ouroboros.tools.shell_process import command_timeout_for_call
         from ouroboros.workspace_executor import execute as executor_execute
 
+        if refusal := command_start_refusal(ctx, "verify_and_record", kwargs.get("timeout_sec")):
+            return refusal
         try:
             binding = _resolved_binding or build_resolved_resource_binding(
                 ctx,
@@ -737,8 +752,6 @@ def _verify_and_record(
             "source": binding.source,
             "skill_name": binding.skill_name,
         }
-        # The one resolution the loop's outer wait also reads, so this check's own timeout fires first.
-        timeout = command_timeout_for_call("verify_and_record", kwargs, ctx)
         bootstrap_process_path()  # mirror run_command: ensure the check sees the full PATH
         use_executor = _executor_can_run_cwd(ctx, pathlib.Path(work_dir))
         # R4: the node resolver never rewrites args["check"] — the ORIGINAL argv
@@ -763,11 +776,16 @@ def _verify_and_record(
         # Disclosure ONLY: receipt identity/reconciliation (`check` text) is
         # untouched, and the agent-visible result text below is unchanged.
         _check_started_ts = time.monotonic()
-        _resolved_runtime = _active_resolved_runtime(ctx)
+        _resolved_runtime = active_resolved_runtime(ctx)
         from ouroboros.workspace_executor import overlay_env
         selected_env = selected_process_environment()
         run_env = apply_env_path_prepend(overlay_env(_shell_env_for_cwd(ctx, pathlib.Path(work_dir)), selected_env), node_resolution)
         record_runtime_selection(ctx, exec_argv, work_dir, run_env)
+        # The one resolution the loop's outer wait also reads, so this check's own timeout fires first; read with
+        # the bound after the preparation, beside the dispatch: a bound it spent starts no check.
+        timeout = command_timeout_for_call("verify_and_record", kwargs, ctx)
+        if refusal := command_start_refusal(ctx, "verify_and_record", kwargs.get("timeout_sec")):
+            return refusal
         try:
             if use_executor:
                 # Route the check through the host-owned executor backend (e.g. docker_exec
@@ -777,41 +795,42 @@ def _verify_and_record(
                 res = executor_execute(
                     ctx, exec_argv, pathlib.Path(work_dir), timeout,
                     env_overlay=interpreter_path_overlay(node_resolution),
+                    stop=turn_stop_reader(ctx),
                     **({"target_env": selected_env} if selected_env else {}),
                 )
             else:
                 res = _tracked_subprocess_run(
                     exec_argv, cwd=str(work_dir),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
+                    stop=turn_stop_reader(ctx),
                     **({"env": run_env} if run_env is not None else {}),
                 )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, CommandStopped) as ended:
             # The check is a child of THIS call, so its death is published on the
             # typed process-facts channel exactly like run_command's, and the
             # receipt discloses the SAME published facts (one derivation).
-            _facts = _publish_process_facts(
-                started_ts=_check_started_ts, resolved_runtime=_resolved_runtime,
-                timed_out=True, killed_by_host=True,
-            )
+            why, out, _facts = _interrupted_check(ended, timeout, started_ts=_check_started_ts,
+                                                  resolved_runtime=_resolved_runtime)
             # Same renderer as the completed-run receipt below, so it carries the same
             # stamp: a timeout red must be reconcilable by the later green of that argv.
-            receipt.update({"status": "fail", "returncode": None, "matched": None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN, "summary": f"check timed out after {timeout}s"})
+            receipt.update({"status": "fail", "returncode": None, "matched": None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN,
+                            "summary": why + (f"\n{_bounded(out, _RECEIPT_OUTPUT_CAP)}" if out else "")})
             receipt.update({k: v for k, v in _facts.items() if k in _RECEIPT_PROCESS_KEYS})
             if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
                 return _receipt_custody_failure(
-                    kind, f"check timed out after {timeout}s",
+                    kind, why,
                 )
             return _publish_verification(ctx, (
-                f"verify_and_record [{kind}] FAIL: check timed out after {timeout}s. "
+                f"verify_and_record [{kind}] FAIL: {why}. "
                 f"root={binding.root}, cwd={binding.target_path}. Receipt recorded."
-            ), receipt, compared=False, detail=receipt["summary"])
+            ) + (f"\n\n{_bounded(out, _TOOL_OUTPUT_CAP)}" if out else ""), receipt, compared=False, detail=receipt["summary"])
         # Full output captured in-handler BEFORE any transport truncation.
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
         # Same typed publication as the timeout branch: the check's own exit and
         # (POSIX) signal, measured here where the truth is, not re-read from the
         # ``exit=`` the result text renders for the agent.
-        _facts = _publish_process_facts(
+        _facts = publish_process_facts(
             returncode=rc, started_ts=_check_started_ts,
             resolved_runtime=_resolved_runtime,
         )
@@ -949,7 +968,7 @@ def get_tools() -> List[ToolEntry]:
                     "type": "string",
                     "description": "Exact skill identity for a run-kind cwd=skill_payload[/subdir].",
                 },
-                "timeout_sec": {"type": "integer", "description": "Optional check timeout override."},
+                "timeout_sec": {"type": "integer", "description": "Optional check timeout override; one this platform cannot wait on is refused."},
             }, "required": ["contract_kind"]},
         }, _verify_and_record, is_code_tool=True, timeout_sec=900, mutates_worktree=True),
     ]

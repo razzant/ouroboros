@@ -22,7 +22,7 @@ import time
 from typing import Any, Dict
 
 from supervisor.cognitive_operations import _active_operation_progressing
-from ouroboros.model_wait import execution_elapsed_seconds
+from ouroboros.model_wait import execution_elapsed_seconds, record_execution_close
 from ouroboros.runtime_limits import resolve_task_execution_timeout_sec
 from supervisor.task_model_wait import model_waiting
 from supervisor.task_reaper import (
@@ -596,15 +596,9 @@ def _enforce_task_timeouts_locked(
         deadline_ts = _queue()._task_deadline_ts(task)
         deadline_reached = bool(deadline_ts and now >= deadline_ts)
 
-        idle_timeout = max(
-            float(_queue().get_task_idle_timeout_sec()),
-            float(_queue().get_per_call_timeout_ceiling_sec()) + 120.0,
-        )
-        # Deep review can spend a long interval reasoning between tool calls.
-        # Preserve its one-hour idle tolerance; episode deadlines and absolute
-        # ceilings still apply independently.
-        if task_type == "deep_self_review":
-            idle_timeout = max(idle_timeout, 3600.0)
+        # The configured silence window itself (owner 30 Oct, A), deep review's included; in-flight model
+        # calls, commands and waits hold their own typed leases below, so length alone is not silence.
+        idle_timeout = float(_queue().get_task_idle_timeout_sec())
         abs_ceiling = resolve_task_execution_timeout_sec(  # None = no execution bound (#939)
             task, global_ceiling=_queue().get_task_abs_ceiling_sec())
         last_progress_at = float(meta.get("last_progress_at") or started_at)
@@ -770,6 +764,8 @@ def _enforce_task_timeouts_locked(
         current_worker = workers.WORKERS.get(worker_id)
         if current_worker is not None and current_worker.busy_task_id != task_id:
             continue  # A stale queue row cannot hand a newer worker to teardown.
+        # The hard bound ends this attempt here: its #939 clock closes before the reaper's terminal.
+        record_execution_close(_queue().DRIVE_ROOT, str(task_id), task, meta)
         _queue().RUNNING.pop(task_id, None)
         proc_handle = None
         captured_worker = None

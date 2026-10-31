@@ -39,7 +39,7 @@ from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
-from ouroboros.loop import run_llm_loop
+from ouroboros.loop import carried_inline_round_cap, run_llm_loop
 from ouroboros.observability import task_timing_scope
 from ouroboros.process_custody import current_custody_session_id
 from ouroboros.config import EFFORT_SCALE, resolve_effort  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
@@ -834,7 +834,7 @@ class OuroborosAgent:
         # nanny of a following parent carry none and follow that role's current slot (route_choice).
         route_choice.bind_task_route(ctx, task_metadata, presence=bool(task.get("_presence_turn")))
         if bool(task.get("_presence_turn")):
-            ctx.inline_max_rounds = int(task_metadata.get("inline_max_rounds") or 10)
+            ctx.inline_max_rounds = carried_inline_round_cap(task_metadata)
         self.tools.set_context(ctx)
 
         dispatch, _preflight_amended = self._run_delegate_preflight(drive_logs, task, dispatch)

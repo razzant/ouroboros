@@ -1,6 +1,6 @@
 """Ouroboros — the numeric runtime knobs and their clamps.
 
-Worker count, task liveness windows, per-call ceilings, reviewer budgets,
+Worker count, task liveness windows, reviewer budgets,
 subagent caps and delegation windows, plus fixed process and transport
 bounds. Environment-or-default getters clamp into documented bands, so a typo
 falls back to the shipped value instead of disabling a rail.
@@ -146,16 +146,17 @@ def _optional_bound_setting(key: str, *, low: int) -> Optional[int]:
 
 def get_max_rounds() -> Optional[int]:
     """The total round limit of one task loop; ``None`` = no limit (the shipped default).
-    Presence turns add their own finite inline cap (``loop._resolve_loop_max_rounds``)."""
+    A Place turn adds none; only a retained pre-Places Presence turn still carries the positive
+    inline cap it was admitted with (``loop.carried_inline_round_cap``), the narrower binds."""
     return _optional_bound_setting("OUROBOROS_MAX_ROUNDS", low=1)
 
 
 def get_task_abs_ceiling_sec() -> Optional[int]:
     """Absolute wall-clock backstop per task, independent of activity; ``None`` = no lifetime
     bound (the shipped default). Budget/cost and an explicit deadline stay separate hard axes,
-    and a productively-waiting orchestrator is never killed by a flat wall-clock timer. A set
-    value is floored at 300 s so a typo cannot end every task at birth."""
-    return _optional_bound_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=300)
+    and a productively-waiting orchestrator is never killed by a flat wall-clock timer. An
+    accepted positive value applies as written; a typo takes the finite legacy fallback."""
+    return _optional_bound_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=1)
 
 
 _CURRENT_TASK_CEILING = object()
@@ -186,25 +187,12 @@ def resolve_task_execution_timeout_sec(task: dict, *, global_ceiling=_CURRENT_TA
     return min(bounds) if bounds else None
 
 
-# The finite window ONE physical operation that inherits the task lifetime keeps when the task
-# has none: a delegated agent-session run, a retrieving review session, a VLM child, the
-# plan/preflight tool envelopes, an active-operation idle lease. It is the former shipped task
-# ceiling, so an unlimited task never turns a wedged operation into an unbounded one and never
-# shrinks those operations to a transport bound; a finite lifetime and every deadline still
-# narrow it. Structural, not a settings key.
-OPERATION_WINDOW_FALLBACK_SEC = 21600
-
-
-def operation_window_sec(task_lifetime_sec: Optional[float]) -> float:
-    """The outer window of an operation bounded by the task lifetime: that lifetime when it
-    is finite (``get_task_abs_ceiling_sec()``), else ``OPERATION_WINDOW_FALLBACK_SEC``."""
-    return float(OPERATION_WINDOW_FALLBACK_SEC if task_lifetime_sec is None else task_lifetime_sec)
-
-
-def get_per_call_timeout_ceiling_sec() -> int:
-    """SSOT ceiling for an explicit per-call run_command/run_script timeout_sec
-    (and the outer tool-execution cap that accommodates it)."""
-    return _clamped_number_setting("OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC", low=1, cast=int)
+# How long one typed in-flight fact (a cognitive operation lease, a review drain's in-slot
+# mark) may spare the idle rail when its task has no finite execution bound, so a lost
+# terminal row cannot hide silence forever. Attention only: it never stops, times out or
+# narrows the operation it describes, which an explicit window, deadline or lifetime bounds
+# or nothing does. Structural, not a settings key.
+IDLE_LEASE_MAX_SEC = 21600
 
 
 def get_model_substitution_redos() -> int:
@@ -244,11 +232,6 @@ def get_llm_transport_read_timeout_sec() -> float:
 
     The DEAD-SOCKET bound, not a latency target; explicit per-call timeouts win."""
     return _clamped_number_setting("OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC", low=60.0, high=7200.0)
-
-
-def get_plan_task_deadline_min_sec() -> float:
-    """Minimum useful deadline-scaled planning-swarm window (v6.54.3, 1.5)."""
-    return _clamped_number_setting("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", low=30.0, high=3600.0)
 
 
 def get_claudexor_quota_refresh_timeout_sec() -> int:
@@ -362,9 +345,9 @@ def get_max_subagent_depth() -> int:
     )
 
 
-# delegate_wait's ToolEntry per-call timeout (above it a configured ceiling buys a
-# KILLED call, not a longer wait; pinned by test) and the hard max WINDOW per call
-# (F5): 1800 < 2100 (kill) < 2400 (lease) — decoupled, a raised timeout never widens it.
+# One delegate_wait hold with its teardown, above the hard max WINDOW per call (F5) and
+# below the external-wait lease (delegate_progress): 1800 < 2100 < 2400. The call's own
+# outer bound is the task lifetime + 120 s, or none without one: neither widens a window.
 DELEGATE_WAIT_CEILING_SEC = 2100
 DELEGATE_WAIT_WINDOW_MAX_SEC = 1800
 

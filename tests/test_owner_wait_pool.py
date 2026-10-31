@@ -184,7 +184,6 @@ def test_dead_parked_worker_is_removed_without_respawn(pool):
 def test_owner_wait_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
     park(pool)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000 if hard_axis == "absolute_ceiling" else 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
@@ -424,7 +423,6 @@ def test_cold_loading_gets_new_idle_observation_without_resetting_hard_clock(poo
     workers.PENDING.append(task)
     workers.assign_tasks()
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000 if hard_axis == "absolute_ceiling" else 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
@@ -536,7 +534,6 @@ def test_idle_timeout_never_clones_a_checkpointed_attempt(pool, monkeypatch, sta
             pool.meta["owner_wait"]["task_attempt"] = 2
     monkeypatch.setattr(queue, "QUEUE_MAX_RETRIES", 3)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)

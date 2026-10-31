@@ -865,3 +865,49 @@ def test_cascade_stop_now_during_the_inflight_synthesis_keeps_the_intent_open_an
     assert checkpoint["post_task_stop_reason"] == (
         "owner_stopped:skipped=promotion"), checkpoint
     assert not active_intent(tmp_path, TURN_ID)
+
+
+def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_intent(tmp_path, monkeypatch):
+    """R4: the direct turn's Stop control is drained only at a round boundary, so a command the turn was running
+    kept its whole wait. The real public Stop now leaves the intent open for a turn still inside a step (202); the
+    turn's own command wait reads it, kills the command's process group within a poll and keeps the output so far.
+    Its boundary then ends the turn as before (the control stays in the mailbox)."""
+    import threading
+    import time
+
+    import ouroboros.config as config
+    from ouroboros.cancel_intents import active_intent
+    from ouroboros.model_wait import task_model_wait_scope
+    from ouroboros.tools.shell import _run_shell
+
+    _isolate_queue(monkeypatch, tmp_path)
+    _live_chat_agent(monkeypatch)
+    write_task_result(tmp_path, TURN_ID, "running", chat_id=0, description="modify yourself")
+    _write_snapshot(tmp_path, running_ids=())
+    monkeypatch.setattr(config, "get_direct_turn_stop_wait_sec", lambda: 0.5)
+    work = tmp_path / "work"
+    work.mkdir()
+    ran = {}
+
+    def turn_runs_a_command():
+        task = {"id": TURN_ID, "type": "task", "_is_direct_chat": True, "chat_id": 0, "_attempt": 1}
+        with task_model_wait_scope(task=task, drive_root=tmp_path, event_queue=None, worker_slot_held=False) as owner:
+            ctx = SimpleNamespace(repo_dir=work, drive_root=tmp_path, drive_logs=lambda: tmp_path, task_id=TURN_ID,
+                                  model_wait_context=owner)
+            ran["started"] = time.monotonic()
+            ran["text"] = _run_shell(ctx, ["sh", "-c", "echo started; sleep 25; echo finished"], timeout_sec=60)
+            ran["ended"] = time.monotonic()
+
+    turn = threading.Thread(target=turn_runs_a_command, name="direct-turn-command", daemon=True)
+    turn.start()
+    time.sleep(1.5)  # the command is inside its wait
+    with _client(tmp_path) as client:
+        pressed = time.monotonic()
+        cancel = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
+    turn.join(40)
+
+    assert not turn.is_alive()
+    assert cancel.status_code == 202 and cancel.json()["cancel_state"] == "pending", cancel.text
+    assert ran["ended"] - pressed < 5, f"the command ended {ran['ended'] - pressed:.1f}s after Stop now"
+    assert "started" in ran["text"] and "finished" not in ran["text"]
+    assert "finalize_now" in _mailbox_kinds(tmp_path) and active_intent(tmp_path, TURN_ID)

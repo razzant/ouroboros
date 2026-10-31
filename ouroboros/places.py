@@ -132,6 +132,7 @@ class Place:
     destination: Mapping[str, str] | None = None
     scope: str = "account"
     contribution_id: str = ""
+    connected_revision: int = 0  # internal connection observation, not part of the stored/public row
 
 
 def places_path(drive_root: Any) -> Path:
@@ -154,6 +155,8 @@ def _validate(place: Place) -> Place:
         raise PlaceError("place_invalid")
     if type(place.revision) is not int or place.revision < 0:
         raise PlaceError("place_revision_invalid")
+    if type(place.connected_revision) is not int or place.connected_revision < 0:
+        raise PlaceError("place_revision_invalid", "connected_revision")
     if any(not valid_wake_fact(w.fact) or w.author not in AUTHORS for w in place.wakes):
         raise PlaceError("place_wake_invalid", "wakes")
     if any(not n.text.strip() or n.author not in AUTHORS for n in place.notes):
@@ -163,9 +166,14 @@ def _validate(place: Place) -> Place:
     return place
 
 
-def _decode(value: Any) -> Place:
+def _decode(value: Any, connection: Any = None) -> Place:
     try:
         data = dict(value)
+        # Older writers preserve unknown document metadata, including after a
+        # disconnect/reconnect. Only a matching row revision proves continuity.
+        revision = data.get("revision", 0)
+        data["connected_revision"] = (connection["connected_revision"]
+            if isinstance(connection, Mapping) and connection.get("written_revision") == revision else revision)
         for name, cls in (("wakes", WakeItem), ("notes", NoteEntry), ("owner_accounts", OwnerAccount)):
             data[name] = tuple(cls(**item) for item in data.get(name, ()))
         for name in ("context_topics", "legacy_binding_ids"):
@@ -180,10 +188,11 @@ def _document(value: Any) -> dict:
         return {"schema_version": 1, "revision": 0, "places": {}, "migration": {}}
     if (not isinstance(value, dict) or value.get("schema_version") != 1
             or type(value.get("revision")) is not int or not isinstance(value.get("places"), dict)
-            or not isinstance(value.get("migration", {}), dict)):
+            or not isinstance(value.get("migration", {}), dict)
+            or not isinstance(value.get("connections", {}), dict)):
         raise PlaceError("places_invalid_state")
     for key, row in value["places"].items():
-        if _decode(row).place_id != key:
+        if _decode(row, value.get("connections", {}).get(key)).place_id != key:
             raise PlaceError("places_invalid_state")
     return value
 
@@ -215,7 +224,7 @@ def migrate_places(drive_root: Any) -> dict:
         known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
         for place in imported:
             if not known.intersection(place.legacy_binding_ids):
-                rows.setdefault(place.place_id, asdict(place))
+                rows.setdefault(place.place_id, place_summary(place))
         return {**current, "places": rows, "revision": current["revision"] + 1,
                 "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
 
@@ -231,7 +240,7 @@ def load_places(drive_root: Any) -> list[Place]:
     current = _read(drive_root)
     if not current.get("migration", {}).get("presence_bindings_v1"):
         current = migrate_places(drive_root)
-    return [_decode(value) for _key, value in sorted(current["places"].items())]
+    return [_decode(value, current.get("connections", {}).get(key)) for key, value in sorted(current["places"].items())]
 
 
 def migration_problems(drive_root: Any) -> list[dict]:
@@ -280,14 +289,37 @@ def places_of_connector(drive_root: Any, connector: str) -> list[Place]:
     return [place for place in load_places(drive_root) if place.connector == connector]
 
 
+def account_in_place_scope(place: Place, account_id: str) -> bool:
+    """An account may be addressed by the place itself or its declared destination.
+
+    IDs are exact connector-owned keys, not sender addresses or display labels.
+    An absent/wildcard account keeps the existing connector-wide scope.
+    """
+    return (place.account_id in ("", "*", account_id)
+            or bool(place.destination and place.destination.get("account_id", "") in ("", "*", account_id)))
+
+
 def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, list[str]],
-                     conversation: str = "", thread: str = "") -> tuple[Place | None, bool]:
+                     conversation: str = "", thread: str = "", provider: str = "") -> tuple[Place | None, bool]:
     """Resolve declared target values against stored account/conversation ids.
 
     Multiple destinations must be checked separately by the dispatch caller. An
-    unresolved value is unknown when scoped places exist, never an active default.
+    unresolved value inside an account's place scopes stays unknown. An explicit
+    account outside every applicable scope is an ordinary, unbound tool target.
     """
     places = places_of_connector(drive_root, connector)
+    if provider:
+        places = [place for place in places if place.provider == provider]
+    return target_place(places, targets=targets, conversation=conversation, thread=thread)
+
+
+def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
+                 conversation: str = "", thread: str = "") -> tuple[Place | None, bool]:
+    """Match outbound targets, including declared destinations, in the supplied scopes.
+
+    Dispatch loads the connector's current places; a retained outbox also uses
+    this matcher to validate its particular bound place. Ingress stays separate.
+    """
     if not places:
         return None, True
     values = {str(value) for key, group in targets.items() if key not in {thread, "thread_id", "account_id"}
@@ -301,7 +333,8 @@ def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, l
     def matches(account, room, topic):
         return ((not accounts or account in {"", "*"} or account in accounts)
                 and (not topic or topic in threads)
-                and ((room and room in conversations) or (not room and account and account in values)))
+                and ((room and room in conversations)
+                     or (not room and account and (account in values or (accounts and account == "*")))))
     exact = [p for p in places if matches(p.account_id, p.conversation_id, p.thread_id)
              or (p.destination and matches(p.destination.get("account_id", ""),
                                            p.destination.get("conversation_id", ""), p.destination.get("thread_id", "")))]
@@ -316,7 +349,23 @@ def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, l
     if (len(places) == 1 and not places[0].conversation_id and not places[0].thread_id
             and (not accounts or places[0].account_id in {"", "*"} or places[0].account_id in accounts)):
         return places[0], True
+    if accounts and not accounts.intersection({"", "*"}) and not any(
+            account_in_place_scope(place, account) for place in places for account in accounts):
+        return None, True
     return None, False
+
+
+def outbox_place(drive_root: Any, *, connector: str, provider: str, account_id: str,
+                 conversation_id: str, thread_id: str = "") -> Place | None:
+    """Current outbox scope; an opaque operation retains matching account holds."""
+    if not conversation_id:
+        restricted = next((p for p in places_of_connector(drive_root, connector)
+                           if p.provider == provider and p.account_id in ("", "*", account_id)
+                           and p.state in {STATE_SILENT, STATE_PAUSED}), None)
+        if restricted is not None:
+            return restricted
+    return resolve_place(drive_root, connector=connector, provider=provider, account_id=account_id,
+                         conversation_id=conversation_id, thread_id=thread_id)
 
 
 def wake_matches(place: Place, facts: Iterable[str]) -> tuple[WakeItem, ...]:
@@ -342,7 +391,10 @@ def note_identity(place_id: str, index: int, note: NoteEntry) -> str:
 
 
 def place_summary(place: Place) -> Mapping[str, Any]:
-    return asdict(place)
+    """The public and persisted row stays readable by bodies predating bindings."""
+    row = asdict(place)
+    row.pop("connected_revision")
+    return row
 
 
 def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int | None = None) -> Place | None:
@@ -354,7 +406,8 @@ def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int |
     def mutate(current: dict) -> dict:
         nonlocal result
         current = _document(current)
-        old = _decode(current["places"][place_id]) if place_id in current["places"] else None
+        old = (_decode(current["places"][place_id], current.get("connections", {}).get(place_id))
+               if place_id in current["places"] else None)
         if expected_revision is not None and (old.revision if old else 0) != expected_revision:
             raise PlaceError("place_revision_conflict", "revision", f"Current revision: {old.revision if old else 0}")
         result = change(old)
@@ -364,9 +417,13 @@ def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int |
         if result is None:
             rows.pop(place_id, None)
         else:
-            result = _validate(replace(result, revision=current["revision"] + 1))
-            rows[place_id] = asdict(result)
-        return {**current, "revision": current["revision"] + 1, "places": rows}
+            result = _validate(replace(result, revision=current["revision"] + 1,
+                                       connected_revision=old.connected_revision if old else current["revision"] + 1))
+            rows[place_id] = place_summary(result)
+        connections = {key: value for key, value in current.get("connections", {}).items() if key in rows}
+        if result is not None:
+            connections[place_id] = {"connected_revision": result.connected_revision, "written_revision": result.revision}
+        return {**current, "revision": current["revision"] + 1, "places": rows, "connections": connections}
 
     update_json_locked(places_path(drive_root), mutate, strict_existing_dict=True, reject_existing_empty_dict=True)
     return result

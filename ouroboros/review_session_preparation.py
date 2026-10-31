@@ -130,7 +130,6 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
     from ouroboros.review_execution import ReviewRouteUnavailable, _CLAUDEXOR_MAX_SECONDS
     from ouroboros.subagents import delegated_run_shape
     shape = shape or delegated_run_shape(False, str(getattr(invocation, "access", "") or "readonly"))
-    seconds = bounded_seconds(invocation.timeout_sec, default=300, maximum=_CLAUDEXOR_MAX_SECONDS)
     use_thread, output_schema = invocation.use_thread, invocation.output_schema
     instructions = instructions or invocation.instructions
     run_request = {
@@ -143,8 +142,9 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
         # A one-element explicit pool is the pin; primaryHarness is only preference.
         "harnesses": [route.route_id],
         "primaryHarness": route.route_id,
-        "maxSeconds": seconds,
     }
+    if invocation.timeout_sec is not None:  # no logical window: the engine's run clock stays off
+        run_request["maxSeconds"] = bounded_seconds(invocation.timeout_sec, default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
     if execution:
         run_request["execution"] = dict(execution)
     if use_thread:

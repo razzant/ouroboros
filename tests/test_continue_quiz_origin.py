@@ -332,13 +332,6 @@ def test_a_lost_or_legacy_opening_stays_a_named_gap(tmp_path, monkeypatch):
     _refused(tmp_path, workers, root["id"], "original_owner_message_text")
 
 
-def test_a_wake_started_root_without_an_answered_card_is_not_continued(tmp_path, monkeypatch):
-    """The producer's fact alone does not admit a source-less autonomous root."""
-    workers, root = _interrupted_wake_root(tmp_path, monkeypatch, answers=False)
-    assert root["metadata"]["origin_message_absent"] is True and root["metadata"]["owner_corpus"] == []
-    _refused(tmp_path, workers, root["id"], "start_quiz_answer_absent")
-
-
 @pytest.mark.parametrize("damage", [
     "card_missing", "card_unanswered", "words_changed", "identity_removed", "identity_malformed", "own_card",
     "foreign_card",
@@ -413,7 +406,10 @@ def test_a_card_rerouted_after_the_drafter_read_it_still_resolves(tmp_path, monk
 
 
 def test_peer_words_carrying_a_card_identity_stay_peer_context(tmp_path, monkeypatch):
-    """Metadata cannot relabel a task's words as the owner's answer."""
+    """Metadata cannot relabel a task's words as the owner's answer: the start opens on its
+    drafted objective alone (#1376) and the task's words stay peer context."""
+    from supervisor.continuation_admission import admit_continuation
+
     workers, root = _interrupted_wake_root(tmp_path, monkeypatch, answers=False)
 
     def peer_row(row):
@@ -421,7 +417,13 @@ def test_peer_words_carrying_a_card_identity_stay_peer_context(tmp_path, monkeyp
                                             "source_task_id": WAKE, "quiz_id": "q-start"}]
 
     _edit_result(tmp_path, root["id"], peer_row)
-    _refused(tmp_path, workers, root["id"], "start_quiz_answer_absent")
+    ack = admit_continuation(root["id"], action_nonce=NONCE)
+    assert ack["ok"] is True, ack
+    row = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
+    assert row["metadata"]["owner_corpus"] == []
+    assert row["metadata"]["continuation"]["owner_sources"]["start"]["answers"] == []
+    assert [(p["provenance"], p["text"]) for p in row["metadata"]["continuation"]["peer_context"]] == [
+        ("principal_task_message", "1. Yes, start it")]
 
 
 def test_a_recorded_absence_beside_an_owner_stamp_is_a_conflict(tmp_path, monkeypatch):

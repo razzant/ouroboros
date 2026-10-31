@@ -190,7 +190,6 @@ def test_timeout_precheck_yields_retry_leaf_to_logical_root_cascade(
     }
     monkeypatch.setattr(qenv.q, "FINALIZATION_GRACE_SEC", 0.0)
     monkeypatch.setattr(qenv.q, "get_task_idle_timeout_sec", lambda: 60.0)
-    monkeypatch.setattr(qenv.q, "get_per_call_timeout_ceiling_sec", lambda: 0.0)
     monkeypatch.setattr(qenv.q, "get_task_abs_ceiling_sec", lambda: 500.0)  # it ran 1000 s
     monkeypatch.setattr(qenv.q, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(qenv.q, "persist_queue_snapshot", lambda reason="": True)

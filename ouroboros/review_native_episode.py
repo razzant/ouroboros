@@ -759,13 +759,13 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             while True:
                 # Time, money and provider outcomes have their own owners.
                 # Approximate context sizing never decides whether to continue.
-                if owner_deadline_exhausted(
-                    deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec(),
-                ) or (logical_deadline is not None and monotonic_now() >= float(logical_deadline)):
+                owner_spent = owner_deadline_exhausted(deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec())
+                if owner_spent or (logical_deadline is not None and monotonic_now() >= float(logical_deadline)):
                     end_reason = "deadline_exhausted"
                     if shape == "report" and last_content:
                         break  # a report keeps its draft (marked incomplete below)
-                    raise _deadline_exhausted_error("owner deadline exhausted mid native review episode")
+                    raise _deadline_exhausted_error("owner deadline exhausted mid native review episode" if owner_spent
+                                                    else "slot logical window exhausted mid native review episode")
                 round_idx += 1
                 self._retire_reasoning(messages, schemas, round_idx)
                 chat_kwargs = self._chat_kwargs(messages, schemas, max_tokens)

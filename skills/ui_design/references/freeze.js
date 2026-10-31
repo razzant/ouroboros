@@ -2,7 +2,7 @@
 // product code and data, frozen, so it can become a frame of a one-file comparison page.
 // One async function expression, no dependencies; it reads the page and never changes it.
 //   Playwright: const {html, missing} = await page.evaluate(`(${src})()`), then write html to a file.
-//   Not through Ouroboros's browser_action: it cuts results at 20,000 characters (see browser.md).
+//   Through Ouroboros's browser_action a long frame arrives as a bounded view of its kept text; write it to a file (see browser.md).
 // It inlines same-origin stylesheets (url() assets become data: URIs), images, canvases and live form
 // values; scroll offsets become data-freeze-scroll="top,left" attributes (the comparison template
 // restores them); scripts, inline event handlers, preloads and <base> are removed. Anything it could not

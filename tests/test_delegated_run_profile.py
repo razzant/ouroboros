@@ -530,22 +530,22 @@ def test_the_guards_that_protect_a_delegated_run_fail_closed(tmp_path, monkeypat
     assert json.loads(delegate._delegate_cancel(ctx, "run-x").text)["reason"] == "run_not_owned"
     delegate._CUSTODY.clear()
 
-    # 2. A run with no knowable deadline gets a conservative cap, never an omitted one:
-    #    an omitted cap is Claudexor's 7-day schema bound on a run nobody can cancel.
+    # 2. A run with no knowable deadline and no lifetime sends NO cap. Retired pin (1A): the
+    #    6 h operation fallback, justified by a 7-day omission the pinned engine never had —
+    #    there omission is its run clock off; custody, Stop and money still end a run.
     bare = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     bare.task_id = "t-a"
     bare.task_metadata = {"root_task_id": "t-a"}          # no deadline_at at all
-    # The cap is the EXISTING operation-window SSOT, not a second hardcoded one: a 1h guess
-    # would have truncated a headless/benchmark run that legitimately has no deadline. A
-    # task without a lifetime bound (the shipped default) still sends a FINITE cap.
-    from ouroboros.config import OPERATION_WINDOW_FALLBACK_SEC, get_task_abs_ceiling_sec
+    from ouroboros.config import get_task_abs_ceiling_sec
+    from ouroboros.delegate_registration_policy import CAP_BASIS_UNBOUNDED
 
     assert get_task_abs_ceiling_sec() is None
 
     def _seconds(context, requested):
         return delegate.bounded_max_seconds(context, requested).seconds
 
-    assert _seconds(bare, None) == OPERATION_WINDOW_FALLBACK_SEC
+    assert _seconds(bare, None) == 0
+    assert delegate.bounded_max_seconds(bare, None).basis == CAP_BASIS_UNBOUNDED
     # A finite configured lifetime is the window itself.
     monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "7200")
     assert _seconds(bare, None) == 7200

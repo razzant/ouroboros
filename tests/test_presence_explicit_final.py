@@ -496,6 +496,41 @@ def test_a_fresh_forced_answer_after_a_silent_selection_is_new_speech(room, monk
     assert room.transport.texts().count(wrapped) == 1 and NOTE not in room.transport.texts()
 
 
+@pytest.mark.parametrize("form", ["native", "text"])
+def test_a_place_root_at_its_round_limit_keeps_the_silence_it_selected(room, monkeypatch, form):
+    """A forced rail reads finish_task's one contract: the retained carrier's silence, as a call or the
+    same request in its text, stays internal words and no speech; the rail stays the recorded cause."""
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
+    request = {"action": "finish", "silent": True, "answer": NOTE}
+    root = promoted_root(room, monkeypatch, [
+        send(text=RESULT, request_id="root"),
+        finish(silent=True, answer=NOTE) if form == "native" else {"content": json.dumps(request)}])
+    assert root.trace["forced_completion_request"]["status"] == "selected"
+    assert (root.stored["wake_silent"], root.stored["result"]) == (True, NOTE)
+    assert (root.stored["reason_code"], root.stored["terminal_origin"]) == ("round_limit", "model_final")
+    assert (root.stored["metadata"]["presence_outcome"], root.stored["metadata"]["presence_result_text"]) == (
+        "silent", "")
+    before = room.transport.texts()
+    room.transport.work[root.id] = "chat:a:1"
+    room.transport.poll()
+    assert room.transport.texts() == before and before[-1] == RESULT and NOTE not in before
+
+
+@pytest.mark.parametrize("form", ["native", "text"])
+def test_a_place_root_gets_no_sentence_for_its_human_at_its_round_limit(room, monkeypatch, form):
+    """Silence is the carrier's; the sentence stays a self-started run's, on a forced rail as in the handler."""
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
+    request = {"action": "finish", "silent": True, "summary": "A line for the human.", "answer": NOTE}
+    root = promoted_root(room, monkeypatch, [
+        send(text=RESULT, request_id="root"),
+        finish(silent=True, summary=request["summary"], answer=NOTE) if form == "native"
+        else {"content": json.dumps(request)}])
+    fact = root.trace["forced_completion_request"]
+    assert fact["status"] == "refused" and fact["reason"].startswith("invalid_completion_request: silent and summary")
+    assert root.stored.get("wake_silent") is not True and not root.stored.get("wake_summary")
+    assert NOTE not in room.transport.texts() and NOTE not in root.stored["metadata"]["presence_result_text"]
+
+
 def test_a_voided_place_final_points_at_finish_task_and_frozen_registries_keep_their_words(tmp_path, monkeypatch):
     from ouroboros.loop_delivery import _void_presence_completion
     from ouroboros.place_reply import prepare_focus_reply

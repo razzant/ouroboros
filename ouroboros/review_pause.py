@@ -45,6 +45,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from ouroboros.config import IDLE_LEASE_MAX_SEC
 from ouroboros.owner_pause import episode_armed
 from ouroboros.review_operation import _CLOSED_DETACHED, _LIVE, _LOCK, START_UNBOUND, ReviewOperation
 
@@ -53,8 +54,8 @@ log = logging.getLogger(__name__)
 # How often the author's drain re-reads its own owner fence while its review
 # operation runs: a poll interval of the existing wait, not a bound.
 DETACH_POLL_SEC = 1.0
-# The author's drain mark outlives any panel window; the supervisor bounds its lease by the task.
-_DRAIN_MARK_SEC = 6 * 3600.0
+# The author's drain mark is an attention lease, never a panel window: its seats keep their own
+# windows (or none), and the supervisor bounds the lease by the task (``IDLE_LEASE_MAX_SEC``).
 ADDRESSED_EVENT = "addressed_event"
 HELPER_EVENT = "helper_result"
 REVIEW_EVENT = "review_result"
@@ -167,8 +168,9 @@ def slot_episode(entry: Any, scope: Any):
 
 
 def drain_slice(operation: Any, remaining: float) -> float:
-    """While its author may pause, the drain re-reads the author's fence each slice."""
-    return min(remaining, DETACH_POLL_SEC) if operation is not None else remaining
+    """While its author may pause, the drain re-reads the author's fence each slice; a drain
+    with no window (``inf``) waits in the same finite slices, never an unbounded block."""
+    return min(remaining, DETACH_POLL_SEC) if operation is not None or remaining == float("inf") else remaining
 
 
 def _author_coordinates(parent: Any) -> Tuple[str, str, str]:
@@ -392,7 +394,7 @@ def author_drain(parent: Any, operation: Any):
     from ouroboros import model_sleep
 
     key = f"review:{operation.owner_id}:{uuid.uuid4().hex}"
-    model_sleep.declare_in_slot_wait(ctx, key, time.time() + _DRAIN_MARK_SEC)
+    model_sleep.declare_in_slot_wait(ctx, key, time.time() + IDLE_LEASE_MAX_SEC)
     try:
         yield
     finally:

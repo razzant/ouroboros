@@ -12,13 +12,13 @@ Each path constant takes its `OUROBOROS_*` override, else derives from `APP_ROOT
 
 Tasks privately keep their entry Context/Effort, review settings and catalog (`TaskSettingsSnapshot`); route keys (`route_choice.ROUTE_SETTING_KEYS`: models, local flags, accounts, provider keys) read the saved document as it is now (none saved: as every other key). Absent/empty differ, route overrides win, Resume restores cognition, and overlays never enter env. `RoomResolver` follows lineage/conversion. `composer_cognition.py` copies Main once on project creation/recovery and seeds legacy cognition before Main changes. Subagents stays live: Main's `OUROBOROS_SUBAGENTS_MODE` or project `cognition.subagents_mode`, `off|auto|swarm`, default Auto, including legacy rooms. It bypasses checkpoints; Settings only masks it. Main effort is independent of helper bounds (`_effort_range_format=1`). Immediate keys, writers and granted skill keys read current disk, including clears; credential-free skill children reread it, payloads carry operator variables. Access stays boot-pinned; reload failures disclose prior env and missing values.
 
-`normalize_settings_raw()` runs before defaults in `load_settings`, `_owner_read_settings_raw` and `build_colab_settings`; dropped keys stay dropped. `safety_config.normalize_consciousness_safety` seeds absent coverage from saved owner coverage; explicit choices stay and guards compare the disk-derived value. `review_pool_migration.apply_at_read_seam` maps run seats to roster rows, retaining refused values. Retired keys/comma-lists drop with notice; comma-only/lane-free installs get factory rows. Review env keys are inert (one startup notice). Reads are pure/idempotent; `read_settings_json_verified` refuses changed pins. The loader proposes unauthored slots (§2); `apply_runtime_provider_defaults` only respells them, unpersisted. `apply_settings_to_env` marks slot/catalog echoes in internal `OUROBOROS_PROJECTED_PROPOSALS`, inherited by children, distinct from operator variables. Provider Test and credential plans share `provider_models.ACTIVE_MODEL_SETTING_KEYS`, including Safety pins; blank inherits.
+`normalize_settings_raw()` runs before defaults in `load_settings`, `_owner_read_settings_raw` and `build_colab_settings`; dropped keys stay dropped. Colab budget/mode/workers: launch > saved Drive > fresh 200/advanced/1. `safety_config.normalize_consciousness_safety` seeds absent coverage from saved owner coverage; explicit choices stay and guards compare the disk-derived value. `review_pool_migration.apply_at_read_seam` maps run seats to roster rows, retaining refused values. Retired keys/comma-lists drop with notice; comma-only/lane-free installs get factory rows. Review env keys are inert (one startup notice). Reads are pure/idempotent; `read_settings_json_verified` refuses changed pins. The loader proposes unauthored slots (§2); `apply_runtime_provider_defaults` only respells them, unpersisted. `apply_settings_to_env` marks slot/catalog echoes in internal `OUROBOROS_PROJECTED_PROPOSALS`, inherited by children, distinct from operator variables. Provider Test and credential plans share `provider_models.ACTIVE_MODEL_SETTING_KEYS`, including Safety pins; blank inherits.
 
-Optional bounds: `OUROBOROS_MAX_ROUNDS`/`OUROBOROS_TASK_ABS_CEILING_SEC` use `parse_positive_or_unlimited` (also review cycles) and ship `unlimited`. Money, deadlines and Stop/Panic still bind; silence triggers attention (§5). Legacy missing keys retain 200 rounds/21600 s (`OPTIONAL_BOUND_LEGACY`); blank, zero, negative or malformed values also take those finite defaults, logged and announced once by `upgrade_notices.py`. Readers return `None` for unlimited. `operation_window_sec()` inherits task lifetime, never a transport bound or an unbounded operation.
+Optional bounds: `OUROBOROS_MAX_ROUNDS`/`OUROBOROS_TASK_ABS_CEILING_SEC` use `parse_positive_or_unlimited` (also review cycles) and ship `unlimited`. Money, deadlines and Stop/Panic still bind; silence triggers attention (§5). Legacy missing keys retain 200 rounds/21600 s (`OPTIONAL_BOUND_LEGACY`); blank, zero, negative or malformed values also take those finite defaults, logged and announced once by `upgrade_notices.py`. Readers return `None` for unlimited. Operations take only true bounds (window, deadline, finite execution), else none.
 
 Five writers use `serialize_settings()` and exact bytes (no CRLF conversion). `config.save_settings`, `owner_settings._owner_update_settings` and `packaged_cli._save_settings` use `prepare_settings_for_persist` for disk-authored silence and context/safety ratchets. Exempt: `context_mode_compat.normalize_and_persist_context_mode_compat` updates only the raw compat pair; `colab_bootstrap.write_colab_settings` generates a foreign-root document. All persist review migration receipts before replacing the pre-image (`review_pool_receipts.persist_write_receipts`). `tests/_shared.py::settings_writers` rejects an unlisted sixth writer.
 
-An owner endpoint changes one decision in a document it does not own, so `_owner_update_settings(transform, expected_digest)` does the whole read-change-write under one settings lock: a no-change decision never rewrites the file, and a digest mismatch (`settings_document_digest()`) refuses before the transform runs, so a concurrent owner change is never reverted key by key while the request answers "saved". Incidental writers (launcher, `set_tool_timeout`) land one field (`fields_on_saved_document`).
+An owner endpoint changes one decision in a document it does not own: `_owner_update_settings(transform, expected_digest)` reads, changes and writes under one settings lock; a no-change decision never rewrites the file, and a digest mismatch (`settings_document_digest()`) refuses before the transform runs, so no concurrent owner change is reverted key by key while the request answers "saved". Incidental writers (launcher, `set_tool_timeout`) land one field (`fields_on_saved_document`).
 
 ### LLM output token budgets
 
@@ -68,15 +68,15 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_CONNECTIONS | [] | Extra keys/endpoints, a row each (Direct-provider routes), never env-exported |
 | OUROBOROS_NETWORK_PASSWORD | "" | Non-loopback HTTP gate password; unset only warns (§8 Docker) |
 | OUROBOROS_SERVER_HOST | 127.0.0.1 | HTTP bind host (`0.0.0.0` for Docker/non-loopback) |
-| OUROBOROS_UI_DIR | "" | Interface (§4, optional setup/login included): empty builtin, `none`, or a trusted directory with `index.html`; restart-required; a saved value, blank too, beats the environment, is never exported, and a merged save never authors an absent one (`SAVED_CHOICE_SETTINGS`) |
+| OUROBOROS_UI_DIR | "" | Interface (§4, optional setup/login included): empty builtin, `none`, or a trusted directory with `index.html`; restart-required; a saved value, blank too, beats env, is never exported, and a merged save never authors an absent one (`SAVED_CHOICE_SETTINGS`) |
 | OUROBOROS_UPDATE_CHANNEL | `stable` | Update feed stable/qa/development (§8) |
 | OUROBOROS_MANAGED_UPDATE_FETCH_TIMEOUT_SEC | 300 | Managed-update fetch ceiling |
-| OUROBOROS_RESCUE_GIT_TIMEOUT_SEC | 300 | Per-process ceiling on rescue Git commands |
+| OUROBOROS_RESCUE_GIT_TIMEOUT_SEC | 300 | Per-process rescue Git command ceiling |
 | OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD | unset | Env-only: `1` permits saving a non-loopback bind without a password |
 | OUROBOROS_MODEL | google/gemini-3.8-flash | Main model |
 | OUROBOROS_MODEL_HEAVY | "" | Outside `ACTIVE_MODEL_SETTING_KEYS`: read for migration, never routed |
 | OUROBOROS_MODEL_LIGHT | openai/gpt-6-luna | Light model |
-| OUROBOROS_MODEL_SAFETY | (empty) | Safety Supervisor; empty uses Light, then Main. Outside Cyber Pro only owner writes change the resolved checker (the owner Safety endpoints, the model-wait card); a provider change that re-proposes an unauthored slot saves and is audited |
+| OUROBOROS_MODEL_SAFETY | (empty) | Safety Supervisor; empty uses Light, then Main. Outside Cyber Pro only owner writes change the resolved checker (owner Safety endpoints, the model-wait card); a provider change that re-proposes an unauthored slot saves and is audited |
 | OUROBOROS_MODEL_ACCOUNTS | {} | Role-owned managed-account pins; empty = Auto |
 | OUROBOROS_PROCESSING_PREFERENCE | "" | Global provider-neutral preference standard/fast/economy; empty keeps the adapter default |
 | OUROBOROS_MODEL_PROCESSING_PREFERENCES | {} | Role-owned preferences; empty roles inherit the global one |
@@ -87,8 +87,8 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_CONSCIOUSNESS | "" | Background-consciousness model (empty inherits) |
 | OUROBOROS_MODEL_FALLBACKS | openai/gpt-5.6-luna | Cross-model fallback chain (`fallback_cooldown.py`); blank = none |
 | OUROBOROS_SERVED_MODEL_REDOS | 2 | Redos of a round another model answered, each a new operation (clamped 0-5) |
-| OUROBOROS_MODEL_MAX_CONCURRENCY | 3 | Concurrent physical calls of one model on one provider route (credential, endpoint), shared by every process of the installation with a fair queue, a turn the owner awaits first; routes the managed Claudexor engine serves are left to the engine (`model_concurrency.py`) |
-| OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC | 180 | Concurrency-slot wait bound |
+| OUROBOROS_MODEL_MAX_CONCURRENCY | 3 | Physical calls in flight per model and provider route (credential, endpoint), installation-wide, one fair queue, owner-awaited turns first; ≤0 = off (Settings › Runtime Limits; live); Claudexor-served routes are the engine's (`model_concurrency.py`) |
+| OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC | 180 | Concurrency-slot wait bound; then refused unsent |
 | OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC | 60 | Project-naming operation ceiling |
 | OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC | 8 | Inline naming bound when a card becomes a project (`gateway/projects.py`) |
 | OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC | 120 | One translation batch, slot wait and call together (`ui_translation.py`) |
@@ -114,11 +114,10 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified GC retention (`retention.py`) |
 | OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Restart drain bound |
 | TOTAL_BUDGET | 200.0 | Global USD budget, reached by known spend; non-positive = no finite limit; resolved live at every model call (`resolve_total_budget_usd`) |
-| OUROBOROS_PER_TASK_COST_USD | 50.0 | Hard cap over one task's whole tree: new paid calls are refused once its known spend (confirmed + estimated; holds are not spending) reaches it; no default early stop precedes it, only an explicit `cost_hard_stop_pct` profile does (`task_pacing.py`; §6 Budget tracking) |
+| OUROBOROS_PER_TASK_COST_USD | 50.0 | Hard cap over one task's whole tree: new paid calls are refused once its known spend (confirmed + estimated; holds are not spending) reaches it; only an explicit `cost_hard_stop_pct` profile stops earlier (`task_pacing.py`; §6 Budget tracking) |
 | OUROBOROS_RUB_USD_RATE | "" | Manual RUB→USD rate for RUB-priced providers |
 | OUROBOROS_PRICING_TTL_SEC | 21600 | Provider-catalog pricing cache TTL |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Default tool timeout |
-| OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC | 1800 | Per-call timeout clamp |
 | OUROBOROS_FINALIZATION_GRACE_SEC | 120 | Finalization grace window |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | `web_search` backing model |
 | OUROBOROS_WEBSEARCH_BACKEND | auto | `web_search` backend selection |
@@ -133,30 +132,29 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_EXTERNAL_HOST_RESULT | unset | Env-only: launcher-verified installed-artifact facts for one core generation, not a persisted PASS |
 | OUROBOROS_USER_FILES_ROOT | "" | Env-only: `user_files` jail root (empty = `$HOME`) |
 | OUROBOROS_OBSERVABILITY_KEEP_RAW | unset | Env-only: truthy persists raw observability payloads |
-| OUROBOROS_REVIEWER_SLOTS | (migrated) | Retired review-lane key: a stored value is read once into reviewer rows of `OUROBOROS_SUBAGENTS`; an unreadable value stays for the owner; never read from the environment. Rollback: restore the keys from the `before` of `state/review_migrations/<ts>-slots-to-pool.json`, which the owner message names (Review pool) |
+| OUROBOROS_REVIEWER_SLOTS | (migrated) | Retired review-lane key: a stored value is read once into reviewer rows of `OUROBOROS_SUBAGENTS`; an unreadable value stays for the owner; env inert. Rollback: restore the keys from the `before` of `state/review_migrations/<ts>-slots-to-pool.json`, which the owner message names (Review pool) |
 | OUROBOROS_SUBSCRIPTION_PRESET_VERSION | "" | One-shot install-preset marker; endpoint-authored, disk-only (`ENDPOINT_AUTHORED_SETTINGS`); absence authorizes nothing (§2) |
 | OUROBOROS_SUBAGENT_PRESET_RECEIPT | "" | Install-preset receipt; likewise |
 | OUROBOROS_ONBOARDING_COMPLETED_AT | "" | Onboarding completion fact; likewise |
 | OUROBOROS_ONBOARDING_ATTEMPT_ID | "" | Client attempt that wrote it (§2); likewise |
-| OUROBOROS_TASK_REVIEW_MODE | auto | Result review mode: `auto` forces nothing, `required` runs the host's result review at a root delivery with produced material, `off` refuses `review_change(subject="result")` (§6 Result review) |
+| OUROBOROS_TASK_REVIEW_MODE | auto | Result review mode `auto`/`required`/`off` (§6 Result review) |
 | OUROBOROS_SAFETY_MODE | full | Safety supervision mode; a fresh desktop wizard may author `light`; lowering is owner-guarded (§6 Safety and runtime mode) |
 | OUROBOROS_CONSCIOUSNESS_SAFETY_MODE | full | Coverage for consciousness work (own wakes, places, what they start); existing installs copy the saved Safety level once |
 | OUROBOROS_SAFETY_OWNER_RULES | (empty) | The owner's standing rules for every mind and check; owner-only |
 | OUROBOROS_SAFETY_MAX_TOKENS | 2000 | Safety-check output budget |
 | OUROBOROS_SAFETY_CALL_TIMEOUT_SEC | 60 | Safety-check call ceiling |
 | OUROBOROS_WEBSEARCH_TIMEOUT_SEC | 480 | `web_search` ceiling |
-| OUROBOROS_DIRECT_TURN_STOP_WAIT_SEC | 2 | Wait for a stopped direct turn to reach its round boundary before custody retries (clamped 0-10) |
-| OUROBOROS_ONBOARDING_SNAPSHOT_TIMEOUT_SEC | 45 | Bound on the onboarding Claudexor snapshot read; a wedged daemon refuses rather than hangs |
-| OUROBOROS_SETTINGS_DOCUMENT_LOCK_TIMEOUT_SEC | 30 | In-process document-lock bound for owner writes; lock contention refuses before the transform runs (`owner_settings.py`) |
+| OUROBOROS_DIRECT_TURN_STOP_WAIT_SEC | 2 | Wait for a stopped direct turn's round boundary before custody retries (clamped 0-10) |
+| OUROBOROS_ONBOARDING_SNAPSHOT_TIMEOUT_SEC | 45 | Onboarding Claudexor snapshot-read bound; a wedged daemon refuses, never hangs |
+| OUROBOROS_SETTINGS_DOCUMENT_LOCK_TIMEOUT_SEC | 30 | In-process document-lock bound for owner writes; contention refuses before the transform runs (`owner_settings.py`) |
 | OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC | 2700 | LLM transport read timeout |
-| OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC | 300 | `plan_task` deadline floor |
 | OUROBOROS_REVIEW_MAX_CYCLES | "2" | Shared paid review-cycle cap over the result-review/commit/skill gates (plan asks stand outside it); `unlimited` = no local count cap (`review_cycles.py`; §6 Review stack) |
-| OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES | (none) | Alias only: a stored value is MIGRATED into `OUROBOROS_REVIEW_MAX_CYCLES` (passes + 1) at load; an environment value is inert |
-| OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | unset | Env-only: logical review timeout (absent = route-owned; late results stay in custody) |
+| OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES | (none) | Alias only: a stored value migrates into `OUROBOROS_REVIEW_MAX_CYCLES` (passes + 1) at load; env inert |
+| OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | unset | Env-only: logical review window (late results stay in custody) |
 | OUROBOROS_REVIEW_MAX_TOKENS | 65536 | Env-only: reviewer output budget, clamped to the 8192 floor |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Review enforcement advisory/blocking; anything else coerces to the default (§6 Review stack) |
-| OUROBOROS_PREFLIGHT_TIMEOUT_SEC | 1800 | Env-only: total wall-clock budget of the hermetic test preflight (`preflight_runner.py`); the Android entry defaults to 3600 |
-| OUROBOROS_PREFLIGHT_SERIAL | unset | Env-only: `1` selects one serial pytest pass; scrubbed from the candidate environment |
+| OUROBOROS_PREFLIGHT_TIMEOUT_SEC | 1800 | Env-only: total wall-clock budget of the hermetic test preflight (`preflight_runner.py`); Android entry: 3600 |
+| OUROBOROS_PREFLIGHT_SERIAL | unset | Env-only: `1` selects one serial pytest pass; scrubbed from the candidate |
 | OUROBOROS_PREFLIGHT_TEST_WORKERS | unset | Env-only: xdist workers for the parallel pass (floor 2, else `os.cpu_count()`); scrubbed from the candidate |
 | OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | true | Auto-grant manifest requests to accepted bytes (clean review or trusted install; hash-bound) |
 | OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS | true | Derived Built in trust (`false`: review); once a source list is saved its Built in row decides |
@@ -182,8 +180,8 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_RETURN_REASONING | true | Ask OpenRouter to return reasoning; direct/local request copies strip OpenRouter-only fields |
 | OUROBOROS_REASONING_SUMMARY | auto | Readable reasoning-summary rendering; presentation-only, never added to history or returned to providers |
 | OUROBOROS_TASK_IDLE_TIMEOUT_SEC | 900 | Silence-attention threshold: no real own/subtree progress (§5); direct-chat outage/accounting-wait bound (§6) |
-| OUROBOROS_TASK_ABS_CEILING_SEC | unlimited | Optional absolute task lifetime in seconds (floor 300), activity-independent; deadline and budget stay separate axes |
-| OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC | 90 | Liveness watchdog; alerts and recommends `/restart`, never frees a lock held by a wedged turn |
+| OUROBOROS_TASK_ABS_CEILING_SEC | unlimited | Optional absolute task lifetime in seconds, activity-independent |
+| OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC | 90 | Liveness watchdog; alerts and recommends `/restart`, never frees a wedged turn's lock |
 | LOCAL_MODEL_SOURCE | "" | Local-model source (HF repo or path) |
 | LOCAL_MODEL_FILENAME | "" | Local-model GGUF filename (split first shard expanded) |
 | LOCAL_MODEL_CONTEXT_LENGTH | 16384 | Local-model context window |
@@ -193,18 +191,18 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | USE_LOCAL_LIGHT | false | Route Light locally |
 | USE_LOCAL_CONSCIOUSNESS | false | Route Consciousness locally |
 | USE_LOCAL_FALLBACK | false | Route fallback locally |
-| OUROBOROS_MAX_ROUNDS | unlimited | Optional total task round limit (hot-reloadable; a Presence turn keeps its own finite inline cap) |
+| OUROBOROS_MAX_ROUNDS | unlimited | Optional total task round limit (hot-reloadable; a retained pre-Places turn keeps its inline cap) |
 | OUROBOROS_TRANSIENT_RETRY_MAX | 6 | Same-model transient retry budget |
 | OUROBOROS_SKILL_LIFECYCLE_TIMEOUT_SEC | 1800 | Skill lifecycle-lane timeout |
 | OUROBOROS_CLAUDEXOR_HARNESS_INSTALL_TIMEOUT_SEC | 300 | Harness install ceiling (kills the tracked group, typed refusal) |
 | OUROBOROS_CLAUDEXOR_QUOTA_REFRESH_TIMEOUT_SEC | 90 | Quota-refresh POST ceiling (clamped 1-90) |
-| OUROBOROS_BUNDLE_DIR | unset | Env-only: launcher-owned bundle root propagated to embedded children for Node/ripgrep discovery |
+| OUROBOROS_BUNDLE_DIR | unset | Env-only: launcher-owned bundle root passed to embedded children for Node/ripgrep discovery |
 | OUROBOROS_BG_WAKEUP_MIN | 900 | Lower bound (s) of the model-chosen wake interval (`set_next_wakeup`), re-read at each alarm |
 | OUROBOROS_BG_WAKEUP_MAX | 14400 | Upper bound (s); with no chosen interval the alarm uses `runtime_limits.WAKE_DEFAULT_SEC`, below the default cache TTL to keep the shared prefix warm |
 | OUROBOROS_CONSCIOUSNESS_AUTONOMY | act | Closed enum `observe`/`act`/`full` of what a wake may do; `act` excludes own code/prompts, evolution, restart and settings, `full` adds evolution (`consciousness_authority.py`) |
 | OUROBOROS_CONSCIOUSNESS_DAILY_USD | 20.0 | Rolling-24h ceiling over wakes and the tasks they start, on known spend; exhausted blocks new wakes; `0` is a real choice |
 | OUROBOROS_CONSCIOUSNESS_MAX_TASKS | 2 | Concurrent consciousness-started tasks; `0` = it never starts tasks |
-| OUROBOROS_POST_TASK_EVOLUTION | false | Post-task evolution promotion toggle; self-enablement is blocked at every write guard (§6 Background consciousness and Evolution) |
+| OUROBOROS_POST_TASK_EVOLUTION | false | Post-task evolution promotion toggle; every write guard blocks self-enablement (§6 Background consciousness and Evolution) |
 | OUROBOROS_POST_TASK_EVOLUTION_CADENCE | llm | Promotion cadence `llm` or `every_n:k` (malformed normalizes to `llm`) |
 | OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD | 0.0 | Remaining-global-budget start floor, not a cycle cap |
 | OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE | "" | Owner-only persistent campaign bias; still passes review gates |

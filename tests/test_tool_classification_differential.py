@@ -423,6 +423,9 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # Saved-setting selection uses the existing process access authority; its new
     # foreground refusal remains blocked through both text and native ACCESS_BLOCKED.
     "PROCESS_ENV_REFERENCE_BLOCKED": (True, "blocked"),
+    # A command whose task deadline or execution budget is already spent starts no child
+    # (shell_process.command_bound_spent): the substrate's refusal, after the golden source.
+    "TASK_DEADLINE_BLOCKED": (True, "blocked"),
     # Owner Batch4: a call the owner's Pause fenced before its launch handoff never
     # ran; it is the substrate's answer, homed with the other runtime refusals.
     "OWNER_PAUSE_NOT_STARTED": (True, "blocked"),

@@ -24,12 +24,10 @@ from ouroboros import delegate_continuation as continuation, delegate_custody as
 from ouroboros.delegate_registration_policy import (
     CAP_BASIS_DEADLINE_DERIVED,
     CAP_BASIS_LIFETIME_DERIVED,
-    CAP_BASIS_OPERATION_WINDOW,
     CAP_BASIS_REQUESTED,
     CAP_BASIS_REQUESTED_CLAMPED_DEADLINE,
     CAP_BASIS_REQUESTED_CLAMPED_LIFETIME,
-    CAP_BASIS_REQUESTED_CLAMPED_SCHEMA,
-    FINITE_LEAF_CAP_BASES,
+    CAP_BASIS_UNBOUNDED,
 )
 from tests._delegated_transport_shared import (  # noqa: F401 -- autouse transport fixture
     _delegating_ctx,
@@ -49,7 +47,7 @@ LIMIT = "subscription_window_exhausted"
 def _seed(tmp_path, run_id, *, task_id="t-a", root_task_id=None, state="failed", reason=LIMIT, settled=True,
           actor=ACTOR, route=ROUTE, access="readonly", mode="ask", isolation="", snapshot_id="",
           target_root="", execution_root="", continuation_of="", config_fingerprint=CFG,
-          work_order_fingerprint=WORK_ORDER, output="consumed", source="", **extra):
+          work_order_fingerprint=WORK_ORDER, output="consumed", source="", basis=CAP_BASIS_REQUESTED, **extra):
     """Durable rows for one prior run; the memo is cleared so lookups REPLAY them."""
     entry = custody.RunCustody(
         run_id=run_id, task_id=task_id, route_id=route, model="m", selected_subagent_id=actor,
@@ -60,7 +58,7 @@ def _seed(tmp_path, run_id, *, task_id="t-a", root_task_id=None, state="failed",
     )
     assert custody.record_started(tmp_path, entry, shape={
         "access": access, "mode": mode, "isolation": isolation, "delegated": bool(isolation),
-        "root": "/r", "max_seconds": 90, "max_seconds_basis": CAP_BASIS_REQUESTED})
+        "root": "/r", "max_seconds": 90, "max_seconds_basis": basis})
     if settled:
         row = {"run_id": run_id, "task_id": task_id, "route": route, "state": state}
         if reason is not None:
@@ -225,9 +223,11 @@ def test_former_refusals_are_advice_not_gates(tmp_path):
     _seed(tmp_path, "run-partial", work_order_coverage="partial",
           work_order_source_request={"complete_chars": 100, "coverage": "partial"})
     assert "work_order_partial" in _gate(tmp_path, "run-partial")[0]["advice"]
-    # The cap basis no longer matters: any cap's expiry continues.
-    for basis in (CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_OPERATION_WINDOW):
-        assert basis not in FINITE_LEAF_CAP_BASES
+    # The cap basis no longer matters: any cap's expiry continues, whatever its recorded
+    # basis (the retired FINITE_LEAF_CAP_BASES gate had no reader left), an older row's too.
+    for basis in (CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_UNBOUNDED, "operation_window"):
+        _seed(tmp_path, f"run-{basis}", basis=basis)
+        assert _gate(tmp_path, f"run-{basis}", canonical=WORK_ORDER)[0]["advice"] == []
     clean = _gate(tmp_path, "run-wo", canonical=WORK_ORDER)[0]
     assert clean["advice"] == []
 
@@ -771,7 +771,8 @@ def test_requested_cap_is_clamped_by_the_deadline_and_the_remaining_lifetime(tmp
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: None)
     plain = bounded_max_seconds(_ctx(), 120)
     assert (plain.seconds, plain.basis) == (120, CAP_BASIS_REQUESTED)
-    assert bounded_max_seconds(_ctx(), None).basis == CAP_BASIS_OPERATION_WINDOW
+    unbounded = bounded_max_seconds(_ctx(), None)
+    assert (unbounded.seconds, unbounded.basis) == (0, CAP_BASIS_UNBOUNDED)
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 300.0)
     clamped = bounded_max_seconds(_ctx(), 1000)
     assert clamped.basis == CAP_BASIS_REQUESTED_CLAMPED_LIFETIME and 150 <= clamped.seconds <= 200
@@ -781,7 +782,6 @@ def test_requested_cap_is_clamped_by_the_deadline_and_the_remaining_lifetime(tmp
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 10.0)
     spent = bounded_max_seconds(_ctx(started_ago=100.0), 60)
     assert spent.refusal_code == "task_lifetime_exhausted" and spent.seconds == 0
-    assert FINITE_LEAF_CAP_BASES == frozenset({CAP_BASIS_REQUESTED, CAP_BASIS_REQUESTED_CLAMPED_SCHEMA})
 
 
 def test_no_resume_causes_are_untouched_by_the_continuation_seam():

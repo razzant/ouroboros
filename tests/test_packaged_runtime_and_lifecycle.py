@@ -380,7 +380,6 @@ def _enforce_harness(monkeypatch, tmp_path, running, *, idle=900, grace=300, cei
     monkeypatch.setattr(queue_mod, "RUNNING", running)
     monkeypatch.setattr(queue_mod, "PENDING", [])
     monkeypatch.setattr(queue_mod, "get_task_idle_timeout_sec", lambda: idle)
-    monkeypatch.setattr(queue_mod, "get_per_call_timeout_ceiling_sec", lambda: 60)
     lifetime = ceiling if ceiling is not None else [10_000_000]
     monkeypatch.setattr(queue_mod, "get_task_abs_ceiling_sec", lambda: lifetime[0])
     monkeypatch.setattr(queue_mod, "FINALIZATION_GRACE_SEC", grace)

@@ -884,14 +884,14 @@ def bounded_max_seconds(ctx: ToolContext, requested: Optional[int]) -> MaxSecond
     fallback branch read as "no bound" and answered with hours of delegated
     work. An explicit ask is ``requested`` unless the deadline, the lifetime or
     the engine's schema bound narrowed it (each named); an omitted ask derives
-    from the tighter of deadline and lifetime, else the operation window.
+    from the tighter of deadline and lifetime, else no cap (``seconds`` 0).
     """
-    from ouroboros.config import operation_window_sec, resolve_task_execution_timeout_sec
+    from ouroboros.config import resolve_task_execution_timeout_sec
     from ouroboros.deadline_utils import deadline_remaining_sec, has_deadline
     from ouroboros.delegate_registration_policy import (
-        CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_LIFETIME_DERIVED, CAP_BASIS_OPERATION_WINDOW,
-        CAP_BASIS_REQUESTED, CAP_BASIS_REQUESTED_CLAMPED_DEADLINE, CAP_BASIS_REQUESTED_CLAMPED_LIFETIME,
-        CAP_BASIS_REQUESTED_CLAMPED_SCHEMA,
+        CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_LIFETIME_DERIVED, CAP_BASIS_REQUESTED,
+        CAP_BASIS_REQUESTED_CLAMPED_DEADLINE, CAP_BASIS_REQUESTED_CLAMPED_LIFETIME,
+        CAP_BASIS_REQUESTED_CLAMPED_SCHEMA, CAP_BASIS_UNBOUNDED,
     )
 
     try:
@@ -966,11 +966,9 @@ def bounded_max_seconds(ctx: ToolContext, requested: Optional[int]) -> MaxSecond
     if candidates:
         seconds, basis = min(candidates, key=lambda item: item[0])
         return MaxSecondsBound(max(1, min(_CLAUDEXOR_MAX_SECONDS, seconds)), basis)
-    # Neither a deadline nor a finite lifetime: the finite operation window.
-    # Omitting `maxSeconds` — the old behavior — handed the run Claudexor's
-    # 7-day schema bound; the cap is damage limitation, and custody (the
-    # durable start row plus reconciliation) is what actually stops an orphan.
-    return MaxSecondsBound(min(_CLAUDEXOR_MAX_SECONDS, int(operation_window_sec(None))), CAP_BASIS_OPERATION_WINDOW)
+    # Neither a deadline nor a finite lifetime: no cap. `maxSeconds` is omitted, which the pinned
+    # engine reads as its run clock off; Stop, money and custody (the start row plus reconciliation) remain.
+    return MaxSecondsBound(0, CAP_BASIS_UNBOUNDED)
 
 
 def _halt_breached_run(ctx: ToolContext, gateway: Any, entry: _RunCustody,
@@ -1310,7 +1308,7 @@ def _published_entry(core: Any) -> Any:
 
 
 def get_tools() -> List[ToolEntry]:
-    from ouroboros.config import EFFORT_SCALE, get_task_abs_ceiling_sec, operation_window_sec
+    from ouroboros.config import EFFORT_SCALE, get_task_abs_ceiling_sec
 
     return [
         ToolEntry("delegate_start", {
@@ -1471,7 +1469,8 @@ def get_tools() -> List[ToolEntry]:
                 "checkpoint_reason": {"type": "string", "description":
                     "Why one proactive inspection is worth a model call. No repeating cadence."},
             }},
-        }, _published_entry(_delegate_wait_entry), timeout_sec=operation_window_sec(get_task_abs_ceiling_sec()) + 120),
+        }, _published_entry(_delegate_wait_entry),  # no lifetime: no outer bound; the wait wakes on controls
+           timeout_sec=None if (lifetime := get_task_abs_ceiling_sec()) is None else lifetime + 120),
         ToolEntry("delegate_cancel", {
             "name": "delegate_cancel",
             "description": (

@@ -508,22 +508,36 @@ from ouroboros.context_budget import (  # one overflow vocabulary for every seam
     context_overflow_message as _context_overflow_message,
     output_or_body_size_message as _output_or_body_size_message,
 )
+_FORCED_TOOL_FINISH_REASONS = frozenset({"tool_calls", "function_call", "tool_use"})
 _FORCED_INCOMPLETE_FINISH_REASONS = (_STRUCTURED_CONTEXT_OVERFLOW_CODES | OUTPUT_LIMIT_FINISH_REASONS
-                                     | frozenset({"tool_calls", "function_call", "tool_use"}))
+                                     | _FORCED_TOOL_FINISH_REASONS)
 
 
-def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]]) -> bool:
-    """Return whether a forced provider response is not a complete final."""
+def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]], *, completion_request: bool = False) -> bool:
+    """Return whether a forced provider response is not a complete final. ``completion_request`` waives
+    exactly the reply's one completion call (its count and tool-call finish) and a provider length cut
+    (owner 30 Oct, A: a whole request is the author's act; its own parse refuses a cut inside it, and
+    ``forced_response_cut`` keeps the fact); an overflowed or null-finished response stays incomplete.
+    The response facts are read, never rewritten."""
     if not isinstance(response_meta, dict):
         return False
     finish_reason = response_meta.get("finish_reason")
-    return bool(response_meta.get("tool_call_count")) or (
+    reasons = _FORCED_INCOMPLETE_FINISH_REASONS - (
+        _FORCED_TOOL_FINISH_REASONS | OUTPUT_LIMIT_FINISH_REASONS if completion_request else frozenset())
+    return int(response_meta.get("tool_call_count") or 0) > int(completion_request) or (
         response_meta.get("finish_reason_present") is True
         and (
             finish_reason is None
-            or str(finish_reason).strip().lower() in _FORCED_INCOMPLETE_FINISH_REASONS
+            or str(finish_reason).strip().lower() in reasons
         )
     )
+
+
+def forced_response_cut(response_meta: Optional[Dict[str, Any]]) -> str:
+    """The provider's output-limit finish of a forced response, '' when it named none."""
+    meta = response_meta if isinstance(response_meta, dict) else {}
+    finish = str(meta.get("finish_reason") or "").strip().lower()
+    return finish if meta.get("finish_reason_present") is True and finish in OUTPUT_LIMIT_FINISH_REASONS else ""
 
 
 _NON_RETRYABLE_PROVIDER_MARKERS = {

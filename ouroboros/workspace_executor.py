@@ -119,11 +119,14 @@ def execute(
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
     executor: ExecutorRef | None = None,
+    stop: Any = None,
 ) -> ExecutorResult:
     """Run in the configured backend. Host/interpreter ``env_overlay`` applies
     only locally: host paths/PATH must not leak into Docker. Explicit target_env
     is separate and reaches either backend, through inert aliases in Docker.
-    In a body candidate or system copy, Docker must map the source copy and its sibling ``.env`` directory (else refused)."""
+    In a body candidate or system copy, Docker must map the source copy and its sibling ``.env`` directory (else refused).
+    ``stop`` is an in-process turn's Stop-now reader (``shell_process.communicate_or_stop``): each backend ends
+    through its own timeout kill, the container command through its owned pidfile, never the container."""
     executor = executor or executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
@@ -136,10 +139,10 @@ def execute(
     if executor.kind == "local":
         return _execute_local(
             executor, cmd, cwd_path, timeout_sec,
-            drive_root=drive_root, local_env=candidate_env,
+            drive_root=drive_root, local_env=candidate_env, stop=stop,
             env_overlay=env_overlay, **({"target_env": target_env} if target_env else {}),
         )
-    return _execute_docker(executor, cmd, backend_cwd, timeout_sec, drive_root=drive_root,
+    return _execute_docker(executor, cmd, backend_cwd, timeout_sec, drive_root=drive_root, stop=stop,
                            **({"target_env": overlay_env(candidate_env or {}, target_env), "replace_env": True}
                               if candidate_env is not None else {"target_env": target_env} if target_env else {}))
 
@@ -207,7 +210,10 @@ def _execute_local(
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
     local_env: "dict[str, str] | None" = None,
+    stop: Any = None,
 ) -> ExecutorResult:
+    from ouroboros.tools.shell_process import communicate_or_stop
+
     drive_root = _custody_drive_root(drive_root)
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
@@ -253,7 +259,7 @@ def _execute_local(
         confirmed()
     _FOREGROUND[proc] = (record_path, executor.kind)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        stdout, stderr = communicate_or_stop(proc, timeout_sec, stop, lambda: kill_process_tree(proc))
         return ExecutorResult(
             proc.returncode,
             stdout or "",
@@ -281,7 +287,10 @@ def _execute_docker(
     drive_root: pathlib.Path | None,
     target_env: "dict[str, str] | None" = None,
     replace_env: bool = False,
+    stop: Any = None,
 ) -> ExecutorResult:
+    from ouroboros.tools.shell_process import communicate_or_stop
+
     drive_root = _custody_drive_root(drive_root)
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
@@ -350,8 +359,15 @@ def _execute_docker(
         confirmed()
     _FOREGROUND[proc] = (record_path, executor.kind)
     cleanup_confirmed = False
+
+    def stop_backend() -> bool:  # Stop now: the timeout's own pidfile stop, then the host CLI
+        nonlocal cleanup_confirmed
+        cleanup_confirmed = _cleanup_docker_exec_timeout(executor.container_name, pidfile)
+        kill_process_tree(proc)
+        return cleanup_confirmed
+
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        stdout, stderr = communicate_or_stop(proc, timeout_sec, stop, stop_backend)
         cleanup_confirmed = _docker_exec_completed(executor.container_name, pidfile)
     except subprocess.TimeoutExpired:
         cleanup_confirmed = _cleanup_docker_exec_timeout(executor.container_name, pidfile)

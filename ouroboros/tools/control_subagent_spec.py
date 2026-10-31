@@ -123,8 +123,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         },
         "delegation_intent": {"type": "string", "description": "Whether/how this child should delegate further, including children/grandchildren. Propagates through its delegation budget and prompt; defaults to the parent's intent."},
         "may_mutate": {"type": "boolean", "default": False, "description": "Intent to allow this child acting descendants; ordinary mutative-subagent gating and depth/active caps still apply."},
-        "may_fan_out": {"type": "boolean", "default": True, "description": "Whether this child may spawn multiple children, within the per-root active cap."},
-        "max_children": {"type": "integer", "default": 0, "description": "Optional soft cap on this child's own direct children (0 = inherit / configured cap)."},
+        "may_fan_out": {"type": "boolean", "default": True, "description": "Whether this child may have more than one direct child: false allows one admitted in its whole lifetime, a finished one included. The per-root active cap still applies."},
+        "max_children": {"type": "integer", "default": 0, "description": "Optional cap on how many direct children this child may have admitted in its whole lifetime, finished ones included; a start past it is refused (0 = inherit your cap; never above it)."},
         "requested_depth": {
             "type": "integer", "default": 0,
             "description": "Intended absolute nesting depth from root=0 (children=1, grandchildren=2, great-grandchildren=3). Recorded as your request and reported as requested/permitted/achieved on the root result; never changes configured caps. 0/omitted means no request.",

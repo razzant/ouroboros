@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any
+from typing import Any, Optional
 
 from jsonschema import Draft202012Validator
 
@@ -267,8 +267,10 @@ def _decode_terminal(value: dict, receipt_id: str) -> tuple[str, dict]:
     raise error
 
 
-def run_vision_child(*, child_timeout: float, subscription: bool, **kwargs: Any) -> tuple[str, dict]:
-    """Run exactly one killable child; every retry remains the parent's decision."""
+def run_vision_child(*, child_timeout: Optional[float], subscription: bool, **kwargs: Any) -> tuple[str, dict]:
+    """Run exactly one killable child; every retry remains the parent's decision. ``None`` (a
+    subscription call no task clock bounds) waits without a timeout: Stop reaches it through the
+    control watcher below, Panic through the tracked process tree."""
     from ouroboros.tools.shell import _tracked_subprocess_run
 
     poll = kwargs.pop("model_poll_control", None)
