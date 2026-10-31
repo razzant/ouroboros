@@ -691,6 +691,7 @@ def room_facts(store: ChronicleStore, room: str, entries: List[Entry], lineage: 
     span = source_time_span(meta.get("ts") for _address, meta, _pos in entries)
     return {"rows": len(entries), "people": spoken.count("human"), "mine": spoken.count("ouroboros"),
             "task_facts": len(entries) - len(spoken),
+            **({"reactions": reactions} if (reactions := spoken.count("place_fact")) else {}),
             "chars": sum(int(meta.get("text_chars") or 0) for _address, meta, _pos in entries),
             "earliest": str(span["start"] or ""), "latest": str(span["end"] or ""), "notes": notes, "pages": len(pages),
             "last_covered": str(source_time_span(ends).get("end") or "") if ends else "",
@@ -702,20 +703,22 @@ def place_activity(entries: List[Entry]) -> Dict[str, Any]:
 
     Counts cover the open rows only. Multipart receipts count their source event once;
     failed receipts do not mark an event answered; imported earlier messages are history,
-    not arrivals. ``latest`` bounds the rows' stored times (as ``room_facts``), ``last_address``
-    names the last row as the room reads. No transcript text enters this index.
+    not arrivals; a wordless typed reaction is neither an arrival owing an answer nor one, while words
+    sent beside a reaction answer as any reply does. ``latest`` bounds the rows' stored times (as
+    ``room_facts``), ``last_address`` names the last row as the room reads. No transcript text enters this index.
     """
-    from ouroboros.dialogue_provenance import place_row_facts
+    from ouroboros.dialogue_provenance import place_row_facts, wordless_reaction
 
     rows = [entry for entry in entries if row_provenance(entry[1]) == "place"]
     if not rows:
         return {}
     facts = [place_row_facts(meta) for _address, meta, _pos in rows]
-    arrivals = {fact["source_event_id"] for (_address, meta, _pos), fact in zip(rows, facts)
-                if fact.get("source_event_id") and meta.get("direction") == "in"
+    worded = [not wordless_reaction(meta) for _address, meta, _pos in rows]
+    arrivals = {fact["source_event_id"] for (_address, meta, _pos), fact, words in zip(rows, facts, worded)
+                if words and fact.get("source_event_id") and meta.get("direction") == "in"
                 and not isinstance(meta.get("historical_import"), dict)}
-    answered = {fact["source_event_id"] for (_address, meta, _pos), fact in zip(rows, facts)
-                if fact.get("source_event_id") and meta.get("type") == "presence_delivery"
+    answered = {fact["source_event_id"] for (_address, meta, _pos), fact, words in zip(rows, facts, worded)
+                if words and fact.get("source_event_id") and meta.get("type") == "presence_delivery"
                 and (meta.get("transport") or {}).get("delivery", {}).get("state") in {"delivered", "accepted"}}
     return {"place_id": next((fact["place_id"] for fact in reversed(facts) if fact.get("place_id")), ""),
             "conversation_key": next((fact["conversation_key"] for fact in reversed(facts)

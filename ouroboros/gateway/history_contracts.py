@@ -93,6 +93,12 @@ class PlaceHistoryImport(TypedDict):
     received_at: str
 
 
+class PlaceHistoryReaction(TypedDict):
+    """The host's English words for a row's typed reaction, never speech; words the row sent stay its ``text``."""
+
+    summary: str
+
+
 class PlaceHistoryFacts(TypedDict, total=False):
     """Retained room speech/notices only. Absence is unknown, never delivered or woken."""
 
@@ -109,6 +115,7 @@ class PlaceHistoryFacts(TypedDict, total=False):
     checked: bool  # False on holds: the hold precedes the Safety check
     historical_import: PlaceHistoryImport  # never owner confirmation or attention
     sent_at: str  # the provider send time its arrival recorded (``source_order``); absent: unknown, never inferred
+    reaction: PlaceHistoryReaction  # a typed reaction arrival or receipt; absent: not one
 
 
 class ChatHistoryMessage(TypedDict, total=False):
@@ -273,7 +280,7 @@ class ChatHistoryResponse(TypedDict, total=False):
 
 
 __all__ = [
-    "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryFacts",
+    "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
     "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
 ]

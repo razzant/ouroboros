@@ -1131,6 +1131,24 @@ Use the connector's ordinary content-hash-bound skill token for:
   facts. `review_requested` and `assigned` mean requests addressed to the watched
   identity; narrow wake declarations may use them. A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
+- Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
+  without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
+  `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
+  paired exactly with `actor.kind: anonymous`. These are observations of this event only, never the whole state; `target`
+  `{message_id, resolution: resolved|unresolved, author?, excerpt?: {text (500 max), truncated}}`. `actor.kind` is
+  `user`, `chat` or `anonymous`: the last two are `authenticated: false` and never account candidates; `anonymous`
+  has no id; `kind: user` does not mean the owner. `event.thread_id` is the proven conversation, empty when
+  unresolved. Invalid: 400 `presence_reaction_invalid`. After Paused/Off it settles `silent`
+  (`reaction_context_only`), never a focus or retry, whatever the wake list says; a live author of a resolved
+  target's conversation hears it as background (a bot only under `from_bot`), which ends no wait and reopens no
+  final. `/identity` `presence_reaction_context: 1` (strictly that integer; an older host has no such key) promises
+  this for `schema_version: 1` and tells a connector to send it; without it a connector keeps reactions locally and
+  never replays them, live or as history: `/presence/history` refuses a whole batch holding one, recording none of
+  its messages. A reaction reaches a live author as context and never becomes its `reply_anchor`. A receipt's
+  `message.reaction` (`schema_version`, `operation` set/add/remove, `new`, `old` only if known, `target`, `effect`
+  applied/already_present/already_absent) is later turns' action evidence, never speech; a missing effect reads
+  as not reported, never as done. Its `target` is the requested address, never proof of which message changed.
+  Words a receipt sends beside its reaction stay that part's speech.
 - `GET /presence/place?provider=&account_id=&conversation_id=&thread_id=`: returns
   `{place_id, label, state}` for the connector's outbox recheck. `/identity`
   advertises `places_version: 1`. Optional `thread_id` selects the topic; omission keeps
@@ -1322,7 +1340,7 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   facts carry whole, never those named only by address. "Last" is the greatest
   `message.source_order`, or delivery order when one lacks it.
   - Arrivals drained after that send, such as at the author's final closure, never move the
-    anchor.
+    anchor. Nor does a typed reaction (`event.message.reaction`), whenever it arrives.
   - A send refused before dispatch, or answered by nothing, covers nothing.
   - A forced final keeps the coverage of the last answered send before it.
   - Reply to the anchored message in the turn's conversation and thread.
@@ -1463,9 +1481,10 @@ event facts resolve the place). Never send history through `/presence/turn` or
 
 - `import_id` (1-128 characters) is provenance, never identity. `records` holds 1-100
   records of one provider, account, conversation and thread.
-- `event` has exactly the live event fields; `facts` and `identity` are refused. Use the
-  source event id and provider facts live capture would send for that revision (an edited
-  message is its current revision), with the sender in `actor.platform_actor_id`.
+- `event` has exactly the live event fields; `facts`, `identity` and a typed
+  `message.reaction` are refused. Use the source event id and provider facts live capture
+  would send for that revision (an edited message is its current revision), with the
+  sender in `actor.platform_actor_id`.
 - `authorship` is `participant` (someone else sent it) or `platform_account` (sent from
   the connected account itself). Neither makes the sender the owner or Ouroboros.
 - `source_timestamp` is the provider's original send time, timezone-qualified and not

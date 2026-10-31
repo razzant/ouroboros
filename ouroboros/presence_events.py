@@ -1,4 +1,5 @@
-"""Presence event identity and origin validation for meeting calls (text turns parse in host_service_places)."""
+"""Presence event identity, origin and typed reaction validation for meeting calls (text turns parse in
+host_service_places)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -93,6 +94,9 @@ def presence_turn_event(payload: Any, admission: PresenceAdmission, *,
         continuation_version=continuing, facts=tuple(facts) if facts is not None else None)
     if not event.source_event_id or not event.conversation_key or not event.actor:
         raise PresenceTurnError("presence_identity_missing", "event")
+    from ouroboros.place_intake import reaction_refusal
+    if reaction_refusal(payload):  # refused before the room hears it, as ``/presence/turn`` refuses it
+        raise PresenceTurnError("presence_reaction_invalid", "event.message.reaction")
     if "transport_queue" in event.conversation:
         from ouroboros.presence_observations import validate_transport_queue
         validate_transport_queue(event.conversation["transport_queue"], event.conversation_key,

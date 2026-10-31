@@ -42,7 +42,7 @@ from ouroboros.consciousness_authority import (
     runtime_mode_cap_for,
 )
 from ouroboros.context_health import safe_read
-from ouroboros.dialogue_provenance import is_presence_task
+from ouroboros.dialogue_provenance import dialogue_speaker, is_presence_task, reaction_note, wordless_reaction
 
 log = logging.getLogger(__name__)
 
@@ -260,8 +260,9 @@ def _row_kind(row: Dict[str, Any]) -> str:
     Human input is classified by what its producer stamped, never by
     ``direction`` alone: A2A traffic is machine traffic, a Presence
     correspondent is not the owner, an Ouroboros-initiated Presence row is not
-    a human, a late card answer is carried by its ``quiz_answer`` row, and an
-    imported earlier message (``presence_history``) is counted, never listed as new.
+    a human, a late card answer is carried by its ``quiz_answer`` row, an
+    imported earlier message (``presence_history``) is counted, never listed as new,
+    and a typed reaction without words is context, never a correspondent's message.
     """
     from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 
@@ -281,13 +282,14 @@ def _row_kind(row: Dict[str, Any]) -> str:
         actor = (row.get("transport") or {}).get("actor") if isinstance(row.get("transport"), dict) else None
         if isinstance(actor, dict) and actor.get("kind") == "proactive_initiation":
             return ""
-        return "correspondent_message"
+        return "correspondent_reaction" if wordless_reaction(row) else "correspondent_message"
     return "owner_message"
 
 
 _KIND_WORDS = {  # (one, many)
     "owner_message": ("owner message", "owner messages"),
     "correspondent_message": ("Presence correspondent message", "Presence correspondent messages"),
+    "correspondent_reaction": ("Presence reaction (context, not speech)", "Presence reactions (context, not speech)"),
     "card_answer": ("card answer", "card answers"), "task_terminal": ("task terminal", "task terminals"),
     "direct_turn": ("own direct turn ended (counted, not listed: its exchange is the dialogue itself)",
                     "own direct turns ended (counted, not listed: their exchange is the dialogue itself)"),
@@ -323,6 +325,12 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
     if kind in {"owner_message", "correspondent_message"}:
         return (f"- {_KIND_WORDS[kind][0]} in {rooms.label(row)}, {when}: "
                 f"\"{_clip_preview(row.get('text'), 240)}\"")
+    if kind == "correspondent_reaction":  # who acted, the gesture and its target, in the host's words
+        transport = row.get("transport") if isinstance(row.get("transport"), dict) else {}
+        actor = transport.get("actor") if isinstance(transport.get("actor"), dict) else {}
+        actor_kind = f" ({actor['kind']})" if isinstance(actor.get("kind"), str) and actor["kind"] else ""
+        return (f"- Presence reaction in {rooms.label(row)}, {when}, by {dialogue_speaker(row)}{actor_kind}: "
+                f"{reaction_note(row)}")
     if kind == "history_import":
         return f"- imported earlier message in {rooms.label(row)}, sent {when}"
     if kind == "card_answer":

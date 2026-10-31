@@ -394,6 +394,100 @@ def dialogue_author(entry: Mapping[str, Any]) -> str:
     return f"{speaker} [{provenance}]" if provenance else speaker
 
 
+ANONYMOUS_REACTIONS = "Anonymous reactions"  # an aggregate has no person: the room row's label, never an id
+
+
+def reaction_fact(message: Any) -> Mapping[str, Any]:
+    """The typed reaction of one event or receipt ``message``, else ``{}``: ``schema_version`` 1 makes it this
+    fact (``place_intake.reaction_refusal``); a connector's own older ``reaction`` key is not."""
+    fact = _mapping(_mapping(message).get("reaction"))
+    version = fact.get("schema_version")
+    return fact if type(version) is int and version == 1 else {}
+
+
+def _reaction_values(values: Any) -> str:
+    """The provider's own values as sent: no emoji dictionary and no reading of what they mean."""
+    rows = [_mapping(value) for value in values] if isinstance(values, list) else []
+    return ", ".join(" ".join(str(row.get("value") or row.get("type") or "").split()) for row in rows)
+
+
+def _reaction_target(fact: Mapping[str, Any], lead: str = "on") -> str:
+    """The target as the fact names it; ``is_self`` is the connected account's message, never the owner's."""
+    target = _mapping(fact.get("target"))
+    author, excerpt = _mapping(target.get("author")), _mapping(target.get("excerpt"))
+    name = _text(author.get("display_name") or author.get("platform_actor_id"))
+    own = "this account's " if author.get("is_self") is True else ""
+    words = f"{lead} {own}message {_text(target.get('message_id'))}"
+    if name and author.get("is_self") is not True:
+        words += f" from {name}"
+    if _text(excerpt.get("text")):
+        words += (f": {json.dumps(_text(excerpt['text']), ensure_ascii=False)} "
+                  f"({'excerpt, truncated' if excerpt.get('truncated') is True else 'excerpt'})")
+    return words + ("; its conversation is not resolved" if target.get("resolution") == "unresolved" else "")
+
+
+def reaction_words(fact: Mapping[str, Any]) -> str:
+    """One arriving reaction as words. Its values are those observed in this event, not the message's or
+    the person's whole state (a delta on one provider, one actor's snapshot on another): nothing follows
+    from a value's absence, and no reading of a gesture as agreement or reading is added."""
+    change, old, new = fact.get("change"), _reaction_values(fact.get("old")), _reaction_values(fact.get("new"))
+    if change == "count":  # a fact retained before its door checked shape may hold anything: read only a list
+        counts = [_mapping(row) for row in fact["counts"]] if isinstance(fact.get("counts"), list) else []
+        listed = ", ".join(f"{_reaction_values([row])} {row.get('count')}" for row in counts)
+        said = f"counts observed: {listed}" if listed else "no counts reported"
+    else:
+        said = {"add": f"added {new}", "remove": f"removed {old}", "replace": f"changed {old} to {new}"}.get(str(change), "")
+    return f"{said} {_reaction_target(fact)}"
+
+
+def reaction_action_words(action: Mapping[str, Any], state: str = "") -> str:
+    """My own reaction receipt as words: an operation with its provider outcome, never speech. It reads as
+    done only when its ``state`` (the receipt's delivery state) and ``effect`` both say so; an unknown earlier
+    value stays unsaid. Its ``target`` is the address the request named, never proof of which message the
+    provider changed."""
+    old, new = _reaction_values(action.get("old")), _reaction_values(action.get("new"))
+    target, effect = _reaction_target(action, "requested on"), action.get("effect")
+    said = {"add": f"added reaction {new}", "remove": f"removed reaction {old}",
+            "set": f"set reaction {new}" if new else "cleared reactions"}.get(str(action.get("operation")), "unknown reaction operation")
+    said = f"{said}, {target}"
+    if state == "failed":
+        return f"failed: {said}"
+    if state == "uncertain":
+        return f"outcome unknown, may have landed, do not repeat: {said}"
+    if state not in ("delivered", "accepted"):
+        return f"state not recorded: {said}"
+    if effect in ("already_present", "already_absent"):
+        return f"no change: reaction {new or old} was {str(effect).replace('_', ' ')}, {target}"
+    if effect != "applied":
+        return f"effect not reported: {said}"
+    return f"{said} (accepted by the provider)" if state == "accepted" else said
+
+
+def reaction_note(entry: Mapping[str, Any]) -> str:
+    """A row's typed reaction or reaction receipt as its labelled fact, else ``""``: never stored, never anyone's words."""
+    transport = _mapping(entry.get("transport"))
+    fact = reaction_fact(transport.get("message"))
+    if not fact:
+        return ""
+    if entry.get("type") == "presence_delivery":
+        state = _text(_mapping(transport.get("delivery")).get("state"))
+        return f"[Reaction action, not speech: {reaction_action_words(fact, state)}]"
+    return f"[Reaction, not speech: {reaction_words(fact)}]" if entry.get("direction") == "in" else ""
+
+
+def wordless_reaction(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The typed reaction of a row without words of its own (its ``text``, or ``text_chars`` in a text-free
+    projection), else ``{}``: that row is the reaction fact alone. Words sent beside a reaction stay speech."""
+    words = row.get("text") if "text" in row else row.get("text_chars")
+    return {} if words else reaction_fact(_mapping(row.get("transport")).get("message"))
+
+
+def _with_reaction(entry: Mapping[str, Any], text: str) -> str:
+    """A row's words with its reaction fact: the fact stands in for no words and follows real ones."""
+    note = reaction_note(entry)
+    return (f"{text}\n{note}" if text else note) if note else text
+
+
 def dialogue_text(entry: Mapping[str, Any]) -> str:
     """Keep observed delivery metadata distinct from the quoted message body.
 
@@ -402,7 +496,7 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
     memory rows."""
     if entry.get("type") == "task_summary" and not _text(entry.get("text")):
         return _host_facts_text(entry)
-    text = str(entry.get("text", ""))
+    text = _with_reaction(entry, str(entry.get("text", "")))
     transport = _mapping(entry.get("transport"))
     message = _mapping(transport.get("message"))
     if entry.get("type") == "presence_delivery" and message:
@@ -504,7 +598,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
 
     ``kind`` is ``human`` (``in`` rows and an owner's quiz answer), ``child`` (an
     outgoing row with a delegated child's lineage), ``helper`` (the retired Light
-    retelling), ``host`` (every other ``system`` row), ``ouroboros`` or
+    retelling), ``host`` (every other ``system`` row), ``ouroboros``, ``place_fact``
+    (a wordless typed reaction or confirmed reaction receipt, ``actor_kind`` naming who acted) or
     ``unattributed``. ``lineage_epoch`` (``{"pos", ...}``, the first row that
     carries lineage, else the chain end at activation, recorded by the import as
     a data fact) splits outgoing rows without lineage: before it a row is the
@@ -522,6 +617,9 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
         return {"kind": "human", "label": "Owner", "via": "quiz"}
     direction = _direction(row)
     if direction == "in":
+        if wordless_reaction(row):  # the actor's act, in the host's words: never quotable as theirs
+            return {"kind": "place_fact", "label": dialogue_author(row),
+                    "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind"))}
         return {"kind": "human", "label": dialogue_author(row)}
     if direction == "system":
         if row.get("summary_kind") == LEGACY_RETELLING_SUMMARY_KIND:
@@ -529,6 +627,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
         host: dict[str, Any] = {"kind": "host", "label": _with_transport("host", row)}
         host.update({key: _text(row.get(key)) for key in ("type", "summary_kind") if _text(row.get(key))})
         return host
+    if row.get("type") == "presence_delivery" and wordless_reaction(row):  # words sent beside it stay my speech
+        return {"kind": "place_fact", "label": _with_transport("Ouroboros", row), "actor_kind": "ouroboros"}
     if _text(row.get("subagent_task_id")) or _text(row.get("delegation_role")).lower() == "subagent":
         return _child_author(row.get("subagent_task_id") or row.get("task_id"), row.get("parent_task_id"),
                              row.get("root_task_id"), row.get("subagent_role"))
@@ -542,10 +642,10 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
 
 
 def row_class(row: Mapping[str, Any], **lineage: Any) -> dict[str, Any]:
-    """``{"lane": 1|2, "author": row_author(...)}``: people and my own words to them are lane 1;
-    children's reports, host facts, the legacy retelling and unattributed rows are lane 2."""
+    """``{"lane": 1|2, "author": row_author(...)}``: people, a room's reaction facts and my own words to them
+    are lane 1; children's reports, host facts, the legacy retelling and unattributed rows are lane 2."""
     author = row_author(row, **lineage)
-    spoken = author["kind"] in {"human", "ouroboros"} and row.get("type") not in _FACT_TYPES
+    spoken = author["kind"] in {"human", "ouroboros", "place_fact"} and row.get("type") not in _FACT_TYPES
     return {"lane": 1 if spoken else 2, "author": author}
 
 
@@ -619,7 +719,7 @@ def render_row_text(row: Mapping[str, Any]) -> str:
     details, as words (``chat_history`` keeps ``dialogue_text``, which also renders empty host facts)."""
     message = _mapping(_mapping(row.get("transport")).get("message"))
     if row.get("type") == "presence_delivery" and message:
-        return str(row.get("text", "")) + f"\n[Delivery details: {_detail_words(message, '; ')}]"
+        return _with_reaction(row, str(row.get("text", ""))) + f"\n[Delivery details: {_detail_words(message, '; ')}]"
     quiz = row.get("quiz")
     if row.get("type") in {"quiz_answer", "quiz_closed"} and isinstance(quiz, dict):
         from ouroboros.tools.plan_dialogue import _quiz_text  # D15->D06 is allowed only as a lazy import
@@ -630,6 +730,15 @@ def render_row_text(row: Mapping[str, Any]) -> str:
     if row.get("type") == "card" and isinstance(row.get("card"), Mapping):  # its id lets a later turn replace it
         return f"[card {_text(row['card'].get('card_id'))}] " + dialogue_text(row)
     return dialogue_text(row)
+
+
+def quote_words(row: Mapping[str, Any]) -> str:
+    """The words an exact quote may take from one chat row (``chronicle_quotes``, ``memory_mark``): its
+    ``render_row_text``, except that a typed reaction carrier offers only its own ``text``. The reaction
+    fact and delivery details shown beside those words are the host's labels, never the speaker's."""
+    if reaction_fact(_mapping(row.get("transport")).get("message")):
+        return str(row.get("text") or "")
+    return render_row_text(row)
 
 
 def memory_row_header(address: Mapping[str, Any], row: Mapping[str, Any], *, author: Mapping[str, Any]) -> str:

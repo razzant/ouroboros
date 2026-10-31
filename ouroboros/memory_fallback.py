@@ -462,6 +462,8 @@ def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, An
         line = render_memory_row(address, row, author=author, indent=INDENT) if spoken or not task else ""
         pointer = (f"{memory_row_header(address, row, author=author)} (words, {len(render_row_text(row))} chars — "
                    "read by address)") if spoken and cls["author"].get("kind") != "human" else ""
+        if cls["author"].get("kind") == "place_fact":
+            pointer = f"{memory_row_header(address, row, author=author)} (reaction — read by address)"
         items.append(_Row((address, row, pos), task, line, pointer))
     return items
 
