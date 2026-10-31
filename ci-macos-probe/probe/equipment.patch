@@ -1,0 +1,128 @@
+Behaviour changes of the public equipment copies, relative to their originals with the comment-only hygiene
+applied (earlier lab identifiers removed from comments and docstrings of qb1.sh, procwatch.py and mkbundle.sh).
+That hygiene is not reproduced here; OVERLAY-MANIFEST.json gives each original's and each copy's sha256.
+qb1.sh: lsof by the actual uid; b1s localfn runs its helper with the server's observed package environment;
+localfn's yaml containment also counts a macOS app prefix's same-path Contents/Resources twin (PyInstaller).
+procwatch.py: PYTHONPYCACHEPREFIX is recorded in plain. mkbundle.sh and capture.py have no behaviour change.
+
+--- a/equipment/lab/guest/qb1.sh+comment-hygiene
++++ b/ci-macos-probe/probe/equipment/guest/qb1.sh
+@@ -244,7 +244,7 @@
+     for f in "$ROOT"/runs/*/Applications "$Q"/runs/*/Applications; do echo "== $f"; /bin/ls -la "$f" 2>&1; done > "$out/prior-runs-apps.txt"
+     /bin/ps -axww -o pid,ppid,pgid,user,lstart,command | /usr/bin/grep -i -E 'ouroboros|python|osascript|app_install' \
+         | /usr/bin/grep -v -F -e qb1.sh -e 'grep -i' > "$out/ps-ouroboros.txt" 2>&1
+-    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u anka > "$out/listen.txt" 2>&1
++    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u "$(/usr/bin/id -u)" > "$out/listen.txt" 2>&1
+     { for f in "$GH/Library/WebKit/com.ouroboros.agent" "$GH/Library/Preferences/com.ouroboros.agent.plist" "$GH/Ouroboros" \
+                "$GH/.gitconfig"; do echo "== $f"; /bin/ls -ld -T "$f" 2>&1; done; } > "$out/profile.txt" 2>&1
+     /usr/bin/shasum -a 256 "$OBSPY" "$Q"/bin/* "$BIND" "$CBUNDLE" "$GIT" "$(dmg_of 7.7.0)" "$(dmg_of 7.8.0)" \
+@@ -715,7 +715,7 @@
+         | /usr/bin/grep -v -F -e qb1.sh -e procwatch.py -e 'grep -i' > "$out/ps-ouroboros.txt" 2>&1
+     pids=$(/usr/bin/awk '{print $1}' "$out/ps-run.txt")
+     [ -n "$pids" ] && "$OBSPY" -I -S -B "$PW" snap "$out/env-snap.json" $pids > /dev/null 2> "$out/env-snap.stderr"
+-    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u anka > "$out/listen.txt" 2>&1
++    /usr/sbin/lsof -nP -a -iTCP -sTCP:LISTEN -u "$(/usr/bin/id -u)" > "$out/listen.txt" 2>&1
+     [ -n "$pids" ] && /usr/sbin/lsof -nP -a -i -p "$(echo $pids | /usr/bin/tr ' ' ',')" > "$out/sockets.txt" 2>&1
+     { /bin/ls -la "$R/Applications"; for f in "$R"/Applications/*.app "$R"/Applications/.*.app; do [ -d "$f" ] && bundle_facts "$f"; done
+       /bin/ls -laR "$R"/Applications/.Ouroboros-update-* 2>/dev/null | /usr/bin/head -40; } > "$out/bundles.txt" 2>&1
+@@ -893,9 +893,10 @@
+ localfn() {   # localfn RUN STEP [YAML_VERSION] [venv|private|base]: the owner's untracked local function on the interpreter
+               # the live server runs (its exec argv[0], read from the kernel), with that interpreter's packages. PASS: the
+               # helper's token, yaml (YAML_VERSION when given) loaded from inside that interpreter's prefix (b1s: or the
+-              # run's user base) and, when given, that serving prefix. b1p also runs the external base, kept apart: it
+-              # shows the base unchanged and never stands in for the body's result.
+-    run_root "$1"; local out pid n py want_yaml="${3:-}" want_prefix="" userbase="" body_rc base_rc=- checked V WHY
++              # user base the server's own observed environment names, with which the helper runs) and, when given, that
++              # serving prefix. b1p also runs the external base, kept apart: it shows the base unchanged and never stands
++              # in for the body's result.
++    run_root "$1"; local out pid n py want_yaml="${3:-}" want_prefix="" userbase="" body_rc base_rc=- checked V WHY penv line
+     case "${4:-}" in '') ;; venv) want_prefix="$VENV" ;; private) want_prefix="$PRIVATE" ;; base) want_prefix="${BASE%/bin/*}" ;;
+                      *) die "ENV is venv, private or base" ;; esac
+     out=$(step_dir "$2") || exit 2
+@@ -905,6 +906,21 @@
+ print(json.dumps({"result": ns["owner_local_function"](), "executable": sys.executable,
+                   "real": os.path.realpath(sys.executable), "version": sys.version.split()[0],
+                   "prefix": sys.prefix, "base_prefix": sys.base_prefix}, sort_keys=True))'
++    # b1s: the serving process's own package-loading environment as observed (server-snap.json): HOME, VIRTUAL_ENV,
++    # __PYVENV_LAUNCHER__ and every PYTHON* name it holds, each recorded in plain; otherwise not established
++    local penv_py='import json, re, sys
++try:
++    with open(sys.argv[1]) as handle:
++        env = json.load(handle)[0]["env"]
++    keys, plain = env["keys"], env["plain"]
++except (OSError, ValueError, LookupError, TypeError) as exc:
++    sys.exit("no environment record (%s)" % type(exc).__name__)
++names = sorted(k for k in keys if k in ("HOME", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__") or k.startswith("PYTHON"))
++bad = [k for k in names if k not in plain or "\n" in plain[k] or re.search(r"\.\.\.\[\d+ chars\]$", plain[k])]
++if bad:
++    sys.exit("not recorded in plain: %s" % " ".join(bad))
++for k in names:
++    print("%s=%s" % (k, plain[k]))'
+     server_rows > "$out/server.txt"; n=$(/usr/bin/grep -c . "$out/server.txt")
+     if [ "$n" != 1 ]; then
+         echo "$out"; verdict "$out" UNKNOWN "the helper on the serving interpreter" "$n serving server processes (server.txt)"; return
+@@ -918,8 +934,13 @@
+     case "$py" in /*) ;; *) echo "$out"; verdict "$out" UNKNOWN "the helper on the serving interpreter" \
+                                "the serving interpreter of pid $pid is not readable (server-snap.json)"; return ;; esac
+     case "$KIND" in
+-        site) userbase="$DATA/state/python-userbase"
+-              /usr/bin/env -i HOME="$HOMEDIR" PATH=/usr/bin:/bin PYTHONUSERBASE="$userbase" PYTHONDONTWRITEBYTECODE=1 \
++        site) if ! "$OBSPY" -I -S -B -c "$penv_py" "$out/server-snap.json" > "$out/package-env.txt" 2> "$out/package-env.stderr"
++              then echo "$out"; verdict "$out" UNKNOWN "the helper on the serving interpreter" \
++                       "the serving package environment of pid $pid is not established (package-env.stderr)"; return
++              fi
++              userbase=$(/usr/bin/sed -n 's/^PYTHONUSERBASE=//p' "$out/package-env.txt")
++              penv=(); while IFS= read -r line; do penv+=("$line"); done < "$out/package-env.txt"
++              /usr/bin/env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 "${penv[@]+"${penv[@]}"}" \
+                   "$py" -c "$code" "$REPO/owner-untracked/owner_local_function.py" > "$out/localfn.json" 2> "$out/stderr.txt" ;;
+         *) "$py" -I -B -c "$code" "$REPO/owner-untracked/owner_local_function.py" > "$out/localfn.json" 2> "$out/stderr.txt" ;;
+     esac
+@@ -928,6 +949,9 @@
+         "$BASE" -I -B -c "$code" "$REPO/owner-untracked/owner_local_function.py" > "$out/localfn-bare-interpreter.json" 2> "$out/stderr-base.txt"
+         base_rc=$?; rc_line "$base_rc" > "$out/rc-base.txt"
+     fi
++    # yaml is inside when its resolved file lies under the resolved prefix or user base. A macOS app keeps the
++    # data files of a prefix <X>.app/Contents/Frameworks/<P> at the same paths under Contents/Resources/<P>, linked
++    # (PyInstaller): that twin counts too, only for the path the helper named under the prefix, as an existing file
+     WHY=$("$OBSPY" -I -S -B -c 'import json, os, sys
+ path, token, yaml_want, prefix_want, userbase = sys.argv[1:6]
+ try:
+@@ -939,17 +963,23 @@
+ real = lambda p: os.path.realpath(p) if p else ""
+ prefix = real(fact.get("prefix"))
+ roots = [root for root in (prefix, real(userbase)) if root]
++named, loaded = os.path.normpath(result.get("yaml_file") or "."), real(result.get("yaml_file"))
++base = os.path.normpath(fact.get("prefix") or ".")
++head, sep, tail = prefix.rpartition(".app/Contents/Frameworks/")
++twin = bool(sep and tail and os.path.isabs(base) and named.startswith(base + os.sep) and os.path.isfile(loaded)
++            and loaded == head + ".app/Contents/Resources/" + tail + named[len(base):])
+ problems = []
+ if result.get("token") != token:
+     problems.append("token %r, not %r" % (result.get("token"), token))
+ if yaml_want and result.get("yaml") != yaml_want:
+     problems.append("yaml %s, not %s" % (result.get("yaml"), yaml_want))
+-if not any(real(result.get("yaml_file")).startswith(root + os.sep) for root in roots):
+-    problems.append("yaml loaded from %s, outside %s" % (result.get("yaml_file"), roots))
++if not twin and not any(loaded.startswith(root + os.sep) for root in roots):
++    problems.append("yaml loaded from %s (resolved %s), outside %s" % (result.get("yaml_file"), loaded, roots))
+ if prefix_want and prefix != real(prefix_want):
+     problems.append("serving prefix %s, not %s" % (prefix, real(prefix_want)))
+-print("; ".join(problems) if problems else "token ok, yaml %s from %s, prefix %s" % (
+-    result.get("yaml"), result.get("yaml_file"), prefix))
++print("; ".join(problems) if problems else "token ok, yaml %s from %s%s, prefix %s" % (
++    result.get("yaml"), result.get("yaml_file"), " (resolved %s, its Contents/Resources twin)" % loaded if twin else "",
++    prefix))
+ sys.exit(1 if problems else 0)' "$out/localfn.json" "$RUN-owner-local-function-1" "$want_yaml" "$want_prefix" "$userbase" 2>&1)
+     checked=$?
+     if [ "$body_rc" != 0 ]; then V=FAIL; WHY="the helper exited $body_rc on the serving interpreter $py (stderr.txt)"
+--- a/equipment/lab/guest/procwatch.py+comment-hygiene
++++ b/ci-macos-probe/probe/equipment/guest/procwatch.py
+@@ -52,7 +52,7 @@
+ SAFE_EXACT = {
+     "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH", "DEVELOPER_DIR", "LANG", "LC_ALL", "LC_CTYPE", "USER",
+     "LOGNAME", "SHELL", "PWD", "OLDPWD", "SHLVL", "_", "__CFBundleIdentifier", "__CF_USER_TEXT_ENCODING",
+-    "PYTHONPATH", "PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONUSERBASE", "PYTHONDONTWRITEBYTECODE",
++    "PYTHONPATH", "PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONUSERBASE", "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX",
+     "PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONSAFEPATH", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__",
+     "PIP_NO_INDEX", "PIP_DISABLE_PIP_VERSION_CHECK", "COMMAND_MODE", "MallocNanoZone",
+ }

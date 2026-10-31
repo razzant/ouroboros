@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "purpose": "one bounded b1s probe of the unified Update qualification on a GitHub-hosted macOS arm64 runner; test equipment, not product",
+  "product": {
+    "c": "553c8f892b10ed7b278b0f87c0e48adb82b9a4a5",
+    "tree": "50ab1b2d1e7a5f0e3b935f103339dc509e6ca95c",
+    "c_parent": "08bfafd851a139bade14fb75cec005ee9824b32f",
+    "c_delta_over_parent": ["ouroboros/app_install.py", "tests/test_consciousness_custody.py", "tests/test_tool_classification_differential.py", "tests/test_update_activation_abort.py"],
+    "first_attempt": "execution commit aab34cf26f565ce13c89a589b2e05aa54a9c2f20 ran against the earlier C 08bfafd851a139bade14fb75cec005ee9824b32f and stays bound to it",
+    "runtime_lock_sha256": "68e739bde5b7fbf90d2663eb01939f52c5c4b0b087097390e05807e143e8673d",
+    "base_v7_8_0": "6f3ddff05ff3e6c6f8d007ff96358df6af872e83",
+    "rule": "C stays apart from the execution commit E: E has exactly one parent, C, and only adds the public inventory (ci-macos-probe/SHA256SUMS, every file it lists, .github/workflows/qualification-update-macos.yml)"
+  },
+  "public_inputs": [
+    {"name": "Ouroboros-7.8.0.dmg", "url": "https://github.com/razzant/ouroboros/releases/download/v7.8.0/Ouroboros-7.8.0.dmg",
+     "bytes": 754985809, "sha256": "41b9a8901d29c9a9b5dfdda8780d9317c441ba8c2941d949041c15abae0eff57"},
+    {"name": "SHA256SUMS", "url": "https://github.com/razzant/ouroboros/releases/download/v7.8.0/SHA256SUMS",
+     "bytes": 2642, "sha256": "c3c1c197760efa4a4a6f6b791f097c5fc288343f2ca708137180401d84dec049"}
+  ],
+  "equipment": [
+    {"file": "probe/equipment/guest/qb1.sh", "original_sha256": "52747de9315b7d381832d8635707d73b862f5eb8b741c11435080357feffbecb",
+     "sha256": "aa2f7a97ae426aafcb83f66b4a7ced558fb500a78470d1b963d0a1c83617f618",
+     "change": "facts and obs record TCP listeners of the actual uid (lsof -u \"$(/usr/bin/id -u)\") instead of -u anka (recorders only); localfn for the site kind runs the helper with the serving process's observed package-loading environment from its procwatch snapshot, UNKNOWN when that is not recorded in plain; localfn's yaml containment also counts, for a resolved prefix <X>.app/Contents/Frameworks/<P>, the existing file at the same path under <X>.app/Contents/Resources/<P> of a path the helper named under that prefix (PyInstaller keeps data files there, linked), and prints the resolved path; comment-only hygiene of earlier lab identifiers"},
+    {"file": "probe/equipment/guest/procwatch.py", "original_sha256": "e666c919efe6dde0d7c7144b7ee3efb9b8010e1a488e7ab8817a37517c19242f",
+     "sha256": "c4d1816854d0c03c3f4033a9facb92e7d0e3286477d696c6b137ea0bb952aeb7",
+     "change": "the plain allowlist SAFE_EXACT gains exactly one name, PYTHONPYCACHEPREFIX (recorder only); docstring-only hygiene of earlier lab identifiers (the docstring is also its usage text)"},
+    {"file": "probe/equipment/host/mkbundle.sh", "original_sha256": "70e0a2b7fa66229a2831869729973d2d616bc0c59bf7e987b509617c5ed47d7f",
+     "sha256": "29dc75354f0f3d5daff0936182965af970e3aa6b8ae05329401095367f9a378b",
+     "change": "comment-only hygiene; the lab-mode commit message (code, unused by commit mode) is unchanged"},
+    {"file": "probe/equipment/scripts/capture.py", "original_sha256": "bf1ecea3cdf3b761122ff86189c93cdaf04de187164d7169b571d731b4a798a0",
+     "sha256": "bf1ecea3cdf3b761122ff86189c93cdaf04de187164d7169b571d731b4a798a0", "change": "none"}
+  ],
+  "equipment_patch": {"file": "probe/equipment.patch", "sha256": "b3c3d3b74d65e17c9afc5519d2eca985229adc9caab5dc1cd6d0ace2706eadb9",
+                      "form": "diff -u of the behaviour changes of qb1.sh and procwatch.py: each original with the comment-only hygiene applied against its copy; the hygiene itself is not reproduced (the digests above pin each original and copy); mkbundle.sh and capture.py have no behaviour change"},
+  "authored": {
+    "probe/run-probe.sh": "a968dfb0de95be30c6bcab4f86e98219c5f3bae866c26ccf08fd4a042bc730b8",
+    "workflow/qualification-update-macos.yml": "71c19baf863375d82560146b8eebe0948a4c8f3b3e6379683423efafdf791add",
+    "probe/OVERLAY-SHA256": "571b881871064f43384cef6e0fe111e53b4396ee5c9b8527d9345f30a5d35ad7",
+    "README.md": "2d6b1ffb32fe1c2f4cfdd9aa510586c5b3041bb5ff99e5e49b23ede3123e130b"
+  },
+  "actions": {
+    "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
+    "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02"
+  },
+  "placement": {
+    "ci-macos-probe/": "exactly SHA256SUMS and the files it lists, byte-identical; nothing else of a working copy",
+    ".github/workflows/qualification-update-macos.yml": "a byte-identical copy of workflow/qualification-update-macos.yml"
+  },
+  "offline_checks_by_author": "syntax parses and inert consumer checks of extracted decision code with stubbed producers; no probe, product, app, network, CI or native execution. Their evidence is local and not part of this inventory."
+}
