@@ -195,7 +195,8 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
         facts: ['direct_message', 'from_bot', { id: 'signal.words', label: 'PR words' }], labels: { direct_message: 'Declared mail' } });
     const heard = { ...row('heard'), place_history: { kind: 'message', attention: { decision: 'heard' },
         facts: ['any_message', 'direct_message', 'from_bot', 'signal.words'] } };
-    f.reply(({ url }) => url === current.source.url ? status.promise : page([heard]));
+    const statusUrl = `${current.source.url}?account_id=${encodeURIComponent(current.accountId)}`;
+    f.reply(({ url }) => url === statusUrl ? status.promise : page([heard]));
     const sheet = openPlaceSheet(current, { readRooms: async () => index() });
     t.after(() => sheet.close());
     const payload = { text: 'Ready', tone: 'ok', labels: { any_message: 'Every arrival', direct_message: unsafeText } };
@@ -212,7 +213,7 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
     assert.ok(f.q('[data-heard-fact="direct_message"]').hasAttribute('data-i18n-authored'));
     assert.equal(f.q('img'), null);
     assert.deepEqual(sheet.place.labels, { direct_message: 'Declared mail' });
-    assert.equal(f.requests.filter(({ url }) => url === current.source.url).length, 1);
+    assert.equal(f.requests.filter(({ url }) => url === statusUrl).length, 1);
 });
 
 test('reader labels return to core words when absent without replacing the retained message', async (t) => {
