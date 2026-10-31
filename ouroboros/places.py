@@ -132,7 +132,7 @@ class Place:
     destination: Mapping[str, str] | None = None
     scope: str = "account"
     contribution_id: str = ""
-    connected_revision: int = 0  # creation revision; legacy rows predate this observation
+    connected_revision: int = 0  # internal connection observation, not part of the stored/public row
 
 
 def places_path(drive_root: Any) -> Path:
@@ -166,9 +166,14 @@ def _validate(place: Place) -> Place:
     return place
 
 
-def _decode(value: Any) -> Place:
+def _decode(value: Any, connection: Any = None) -> Place:
     try:
         data = dict(value)
+        # Older writers preserve unknown document metadata, including after a
+        # disconnect/reconnect. Only a matching row revision proves continuity.
+        revision = data.get("revision", 0)
+        data["connected_revision"] = (connection["connected_revision"]
+            if isinstance(connection, Mapping) and connection.get("written_revision") == revision else revision)
         for name, cls in (("wakes", WakeItem), ("notes", NoteEntry), ("owner_accounts", OwnerAccount)):
             data[name] = tuple(cls(**item) for item in data.get(name, ()))
         for name in ("context_topics", "legacy_binding_ids"):
@@ -183,10 +188,11 @@ def _document(value: Any) -> dict:
         return {"schema_version": 1, "revision": 0, "places": {}, "migration": {}}
     if (not isinstance(value, dict) or value.get("schema_version") != 1
             or type(value.get("revision")) is not int or not isinstance(value.get("places"), dict)
-            or not isinstance(value.get("migration", {}), dict)):
+            or not isinstance(value.get("migration", {}), dict)
+            or not isinstance(value.get("connections", {}), dict)):
         raise PlaceError("places_invalid_state")
     for key, row in value["places"].items():
-        if _decode(row).place_id != key:
+        if _decode(row, value.get("connections", {}).get(key)).place_id != key:
             raise PlaceError("places_invalid_state")
     return value
 
@@ -218,7 +224,7 @@ def migrate_places(drive_root: Any) -> dict:
         known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
         for place in imported:
             if not known.intersection(place.legacy_binding_ids):
-                rows.setdefault(place.place_id, asdict(place))
+                rows.setdefault(place.place_id, place_summary(place))
         return {**current, "places": rows, "revision": current["revision"] + 1,
                 "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
 
@@ -234,7 +240,7 @@ def load_places(drive_root: Any) -> list[Place]:
     current = _read(drive_root)
     if not current.get("migration", {}).get("presence_bindings_v1"):
         current = migrate_places(drive_root)
-    return [_decode(value) for _key, value in sorted(current["places"].items())]
+    return [_decode(value, current.get("connections", {}).get(key)) for key, value in sorted(current["places"].items())]
 
 
 def migration_problems(drive_root: Any) -> list[dict]:
@@ -262,7 +268,7 @@ def resolve_place(drive_root: Any, *, connector: str, provider: str = "", accoun
             continue
         if provider and provider != place.provider:
             continue
-        if account_id and place.account_id not in ("", "*", account_id):
+        if account_id and place.account_id and account_id != place.account_id:
             continue
         if conversation_id and place.conversation_id and conversation_id != place.conversation_id:
             continue
@@ -385,7 +391,10 @@ def note_identity(place_id: str, index: int, note: NoteEntry) -> str:
 
 
 def place_summary(place: Place) -> Mapping[str, Any]:
-    return asdict(place)
+    """The public and persisted row stays readable by bodies predating bindings."""
+    row = asdict(place)
+    row.pop("connected_revision")
+    return row
 
 
 def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int | None = None) -> Place | None:
@@ -397,7 +406,8 @@ def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int |
     def mutate(current: dict) -> dict:
         nonlocal result
         current = _document(current)
-        old = _decode(current["places"][place_id]) if place_id in current["places"] else None
+        old = (_decode(current["places"][place_id], current.get("connections", {}).get(place_id))
+               if place_id in current["places"] else None)
         if expected_revision is not None and (old.revision if old else 0) != expected_revision:
             raise PlaceError("place_revision_conflict", "revision", f"Current revision: {old.revision if old else 0}")
         result = change(old)
@@ -409,8 +419,11 @@ def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int |
         else:
             result = _validate(replace(result, revision=current["revision"] + 1,
                                        connected_revision=old.connected_revision if old else current["revision"] + 1))
-            rows[place_id] = asdict(result)
-        return {**current, "revision": current["revision"] + 1, "places": rows}
+            rows[place_id] = place_summary(result)
+        connections = {key: value for key, value in current.get("connections", {}).items() if key in rows}
+        if result is not None:
+            connections[place_id] = {"connected_revision": result.connected_revision, "written_revision": result.revision}
+        return {**current, "revision": current["revision"] + 1, "places": rows, "connections": connections}
 
     update_json_locked(places_path(drive_root), mutate, strict_existing_dict=True, reject_existing_empty_dict=True)
     return result

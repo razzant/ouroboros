@@ -1124,6 +1124,8 @@ Use the connector's ordinary content-hash-bound skill token for:
   `{version:1,connector,provider,account_id,conversation_id,thread_id,place_id,connected_revision}`; empty `place_id` means confirmed
   unbound, null binding means unresolved. Retain it with the effect. Delivery uses `operation=check`, JSON-encoded
   `binding` and identical targets. Current scopes apply; disconnected work stays held even after reconnect with the same ID.
+  The stamp survives ordinary edits and repeated Connect. An older body can read/write Places, but its changed row
+  cannot prove connection continuity: prior bindings stay held; a fresh operation captures the newly observed revision.
   `require_place=true` requires a Place for transport-bound replies, not every tool call from a Presence focus.
   Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,

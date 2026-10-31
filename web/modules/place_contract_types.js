@@ -67,7 +67,6 @@
  * @property {Array<string>} context_topics
  * @property {Array<string>} legacy_binding_ids
  * @property {number} revision
- * @property {number=} connected_revision
  * @property {string} thread_id
  * @property {string} destination
  * @property {string} scope

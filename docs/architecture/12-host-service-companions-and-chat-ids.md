@@ -47,7 +47,7 @@ Reentry keeps exact rows and gaps in immutable `presence_reentry` artifacts, rea
 
 Entry/receipt identity is `presence_bindings.conversation_key` (empty thread `0`). Durable `first_lent_at` anchors parks/termination; returning authors update their own `open_turns` entry without replacing newer pointers. Outcomes: `message`, `silent`, `tool_delivered`, `deferred` (admitted, empty if quiet; orphans replay silent). `peer_roster.independent_message_target` admits `forward_to_worker` to source-bound RUNNING turns as peer context, never owner authority. Proactive speech uses connector tools.
 
-`places.py` owns atomic `state/places.json`, for `gateway/places_api.py` and `configure_presence`. Connect creates Silent; repeats keep choices; low-level/migration defaults stay Active. Only owner doors confirm accounts/activate; consciousness may set Silent/Paused. Writes advance revision; stale edit/disconnect returns current summary or null. Creation stamps `connected_revision`, stable through edits (legacy 0); outboxes retain it so reconnect cannot release old work. Migration copies bindings/instructions/topics/model/folder once, keeping files/routes.
+`places.py` owns atomic revisioned `state/places.json`, for `ouroboros/gateway/places_api.py` and `configure_presence`. Connect creates Silent; repeats keep choices; low-level/migration defaults stay Active. Only owner doors confirm accounts/activate; consciousness may set Silent/Paused. Stale edits/disconnect return current summary or null. Migration copies bindings/instructions/topics/model/folder once, keeping sources/routes. Internal connection stamps live beside rows, preserving old readers and queued-work custody (PERSISTENCE; wire and older-writer gaps: CREATING_SKILLS).
 
 `place_projection` owns PlaceSummary: label, icon, readiness, source/settings, facts/labels, revision, rooms, nullable spend and consciousness safety_mode. Status/launch retain brief stored views; display money may be stale, admission strict. Connect sources distinguish absent/nonempty/empty/unavailable; null accounts are not wildcards, broad/narrow places coexist (CLIENT_CONTRACT “Places”).
 
@@ -81,10 +81,8 @@ Heard-only events create no task/context blob; room rows keep identity/reason (`
 
 `places.place_room_index` indexes latest arrivals/nonterminal focus counts without history walks or per-arrival task loads; unknown stays null. Only the rooms endpoint decodes details. Legacy/outgoing-only rooms may be missing; import/gap flags describe the store, not provider completeness. Indexes build once from rows. `ouroboros/gateway/place_history.py` projects delivery/heard facts, exact-task starts, import/send times and current owner confirmation gated by captured actor authentication (CLIENT_CONTRACT “Places”). `account_candidates` suggests up to 20 nonbots from the newest 50 arrivals, excluding this account; it confirms no identity and keeps no actor list. Migration imports valid bindings, records `migration.problems` for `/api/places`, and publishes one marker.
 
-`places.outbox_place` resolves queued targets; an opaque mutation retains matching Silent/Paused account scopes,
-wildcards included. Declared tool targets keep account, conversation and thread separate, each recipient checked.
-An explicit account outside applicable scopes stays attributable without a Place. `place_guard.outbox_binding_facts`
-offers enqueue/delivery checks at `GET /presence/place`: retained provenance never overrides
-current scopes or turns disconnected bound work into unbound work. Default queries keep their lookup contract;
-capability and wire: CREATING_SKILLS “Places and focus transport ingress”. Retained-work GET/POST may omit `binding_id`;
-authentication checks the stored connector. POST accepts `transport_queue` plus optional `binding_id`; supplied legacy ids remain checked.
+`place_guard.outbox_binding_facts` captures/rechecks queued bindings through dispatch's `places.target_place`.
+Current scopes apply; disconnected bound work never becomes unbound. Explicit accounts outside applicable scopes remain ordinary tool targets.
+`places.outbox_place` keeps legacy lookups and opaque-operation matching Silent/Paused account holds, wildcards included.
+Account/conversation/thread stay distinct; each recipient is checked. Wire: CREATING_SKILLS.
+Retained-work GET/POST may omit `binding_id`; authentication checks the stored connector. POST accepts `transport_queue` and optional checked legacy `binding_id`.

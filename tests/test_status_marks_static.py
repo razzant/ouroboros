@@ -22,7 +22,7 @@ from typing import Iterator
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 WEB = REPO_ROOT / "web"
 SHEETS = ("web/ui.css", "web/style.css", "web/settings.css", "web/model_roles.css", "web/model_wait.css",
-          "web/room_work.css", "web/onboarding.css", "web/cards.css", "web/consciousness.css")
+          "web/room_work.css", "web/onboarding.css", "web/cards.css", "web/consciousness.css", "web/provider-return.css")
 CATEGORIES = ("owner", "warning", "system", "data", "palette")
 
 # category | sheet | [at-rule context » ]selector | properties

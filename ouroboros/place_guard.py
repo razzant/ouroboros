@@ -222,18 +222,19 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
         elif require_place:
             raise ValueError("Place-bound delivery cannot use an unbound snapshot.")
 
-    current = places.outbox_place(drive_root, connector=connector, **target)
-    if current is None:
-        current, attributable = places.place_for_target(
-            drive_root, connector=connector, provider=target["provider"],
-            targets=declared_targets,
-            conversation="conversation_id", thread="thread_id")
-        if current is None and binding and binding["place_id"]:
-            return {"allowed": False, "binding": dict(binding), "state": "changed",
-                    "code": "place_scope_changed", "label": "", "place_id": binding["place_id"]}
-        if current is None and (not attributable or require_place):
-            return {"allowed": False, "binding": dict(binding) if binding else None, "state": "unknown",
-                    "code": "place_unattributable" if not attributable else "place_not_connected", "label": "", "place_id": ""}
+    current, attributable = places.place_for_target(
+        drive_root, connector=connector, provider=target["provider"], targets=declared_targets,
+        conversation="conversation_id", thread="thread_id")
+    if not target["conversation_id"] and (current is None or current.state == places.STATE_ACTIVE):
+        # Opaque account holds supplement the outgoing matcher. A primary
+        # Active place cannot erase a hold found through a declared destination.
+        current = places.outbox_place(drive_root, connector=connector, **target) or current
+    if current is None and binding and binding["place_id"]:
+        return {"allowed": False, "binding": dict(binding), "state": "changed",
+                "code": "place_scope_changed", "label": "", "place_id": binding["place_id"]}
+    if current is None and (not attributable or require_place):
+        return {"allowed": False, "binding": dict(binding) if binding else None, "state": "unknown",
+                "code": "place_unattributable" if not attributable else "place_not_connected", "label": "", "place_id": ""}
     captured = dict(binding) if binding is not None else {
         "version": PLACE_BINDING_VERSION, "connector": connector, **target,
         "place_id": current.place_id if current else "", "connected_revision": current.connected_revision if current else 0}

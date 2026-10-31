@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict, replace
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -71,6 +71,7 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
     assert place.context_topics == ("social",) and place.working_folder == "/work" and place.model == "light"
     assert place.destination["conversation_id"] == "elsewhere"
     assert {w.fact for w in place.wakes} == {"legacy_addressed", "group_dm"}
+    assert "connected_revision" not in json.loads(p.places_path(root).read_text(encoding="utf-8"))["places"][place.place_id]
     saved = p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
     assert p.load_places(root) == [saved]
     assert (root / "state" / "presence_bindings.json").read_bytes() == source
@@ -124,15 +125,28 @@ def test_thread_scope_resolves_only_the_exact_thread(tmp_path, monkeypatch, thre
     assert p.resolve_place(tmp_path, connector="slack-bridge", binding_id="thread") == thread
 
 
-def test_place_storage_keys_and_legacy_connection_revision():
-    assert set(asdict(p.Place("id", "bridge", "chat"))) == {
+def test_place_storage_keys_are_rollback_compatible(tmp_path):
+    place = connect(tmp_path)
+    document = json.loads(p.places_path(tmp_path).read_text(encoding="utf-8"))
+    row = document["places"][place.place_id]
+    assert set(row) == {
         "place_id", "connector", "provider", "account_id", "conversation_id", "label", "state", "wakes",
         "notes", "owner_accounts", "working_folder", "model", "context_topics", "legacy_binding_ids", "revision",
-        "thread_id", "destination", "scope", "contribution_id", "connected_revision",
+        "thread_id", "destination", "scope", "contribution_id",
     }
-    legacy = asdict(p.Place("id", "bridge", "chat"))
-    del legacy["connected_revision"]
-    assert p._decode(legacy).connected_revision == 0
+    assert set(p.place_summary(place)) == set(row)
+    assert document["connections"][place.place_id] == {
+        "connected_revision": place.revision, "written_revision": place.revision}
+    assert p._decode(row).connected_revision == place.revision
+
+
+@pytest.mark.parametrize("wildcard_id,account_id", [("aa-wild", "zz-account"), ("zz-wild", "aa-account")])
+def test_outgoing_wildcard_cannot_shadow_concrete_ingress(tmp_path, wildcard_id, account_id):
+    wildcard = p.connect_place(tmp_path, connector="slack-bridge", provider="slack", account_id="*", place_id=wildcard_id)
+    concrete = connect(tmp_path, place_id=account_id)
+    assert p.resolve_place(tmp_path, connector="slack-bridge", provider="slack", account_id="team") == concrete
+    assert p.resolve_place(tmp_path, connector="slack-bridge", provider="slack", account_id="other") is None
+    assert p.resolve_place(tmp_path, connector="slack-bridge", binding_id=wildcard.place_id) == wildcard
 
 
 def test_connect_state_is_atomic_and_repeat_preserves_owner_choice(tmp_path):

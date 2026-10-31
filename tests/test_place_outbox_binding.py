@@ -1,12 +1,14 @@
 """Enqueue provenance survives disconnect; current account scopes still govern delivery."""
 from dataclasses import replace
 import json
+from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
 
-from ouroboros import places
+from ouroboros import places, place_guard
 from ouroboros.gateway import host_service
+from tests.test_tool_effects import published_tool as published_tool
 
 
 @pytest.fixture
@@ -64,22 +66,91 @@ def test_bound_capture_cannot_become_unbound_when_disconnected(client, tmp_path)
     assert check(client, fresh["binding"]).json()["allowed"], "ordinary edits do not replace a connection"
 
 
-def test_legacy_place_keeps_zero_birth_revision_until_reconnected(client, tmp_path):
+def test_legacy_place_keeps_observed_revision_until_reconnected(client, tmp_path):
     own = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
     path = places.places_path(tmp_path)
     document = json.loads(path.read_text(encoding="utf-8"))
-    del document["places"][own.place_id]["connected_revision"]
+    del document["connections"]
     path.write_text(json.dumps(document), encoding="utf-8")
     captured = bind(client).json()["binding"]
-    assert captured["connected_revision"] == 0
+    assert captured["connected_revision"] == own.revision
     places.edit_place(tmp_path, own.place_id, "set_state", author="owner", state="silent")
     assert check(client, captured).json()["code"] == "place_silent"
     places.edit_place(tmp_path, own.place_id, "set_state", author="owner", state="active")
     assert check(client, captured).json()["allowed"]
-    assert places.connect_place(tmp_path, connector="connector", provider="service", account_id="C").connected_revision == 0
+    assert places.connect_place(tmp_path, connector="connector", provider="service", account_id="C").connected_revision == own.revision
     places.edit_place(tmp_path, own.place_id, "disconnect", author="owner")
     places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
     assert check(client, captured).json()["code"] == "place_disconnected"
+
+
+@pytest.mark.parametrize("older_action", ["edit", "disconnect_reconnect"])
+def test_older_writer_cannot_reuse_stale_connection_metadata(client, tmp_path, older_action):
+    own = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
+    captured = bind(client).json()["binding"]
+    path = places.places_path(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    row = document["places"][own.place_id]
+    witness = dict(document["connections"][own.place_id])
+    # The older writer keeps unknown top-level metadata, but advances each
+    # changed row's revision; a reconnect reuses the deterministic Place ID.
+    if older_action == "disconnect_reconnect":
+        del document["places"][own.place_id]
+        document["revision"] += 1
+        path.write_text(json.dumps(document), encoding="utf-8")
+        assert check(client, captured).json()["code"] == "place_disconnected"
+        document["places"][own.place_id] = row
+    else:
+        row["model"] = "older-body-choice"
+    document["revision"] += 1
+    row["revision"] = document["revision"]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert document["connections"][own.place_id] == witness
+    held = check(client, captured).json()
+    assert not held["allowed"] and held["code"] == "place_disconnected" and held["binding"] == captured
+    fresh = bind(client).json()
+    assert fresh["allowed"] and fresh["binding"]["connected_revision"] == row["revision"]
+    assert check(client, fresh["binding"]).json()["allowed"]
+    places.edit_place(tmp_path, own.place_id, "add_note", author="owner", text="Current body observed this row.")
+    assert check(client, fresh["binding"]).json()["allowed"]
+    places.edit_place(tmp_path, own.place_id, "disconnect", author="owner")
+    assert own.place_id not in json.loads(path.read_text(encoding="utf-8"))["connections"]
+
+
+@pytest.mark.parametrize("state", ["silent", "paused"])
+def test_new_wildcard_hold_matches_dispatch_for_queued_account_work(client, tmp_path, published_tool, state):
+    own = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
+    captured = bind(client).json()["binding"]
+    broad = places.connect_place(tmp_path, connector="connector", provider="service", account_id="*", state=state)
+    name, tool = published_tool("message", target=["account_id", "to"], conversation="room", thread="thread")
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="caller", task_metadata={})
+    args = {"account_id": "C", "to": "recipient", "room": "thread"}
+    assert state.title() in place_guard.dispatch_refusal(ctx, name, args, ext_tool=tool)
+    assert bind(client).json()["code"] == f"place_{state}"
+    held = check(client, captured).json()
+    assert not held["allowed"] and held["code"] == f"place_{state}" and held["binding"] == captured
+    # The old query remains an ingress-style lookup, with no binding fields.
+    assert client.get("/presence/place", params=TARGET).json() == {
+        "place_id": own.place_id, "label": own.label, "state": "active"}
+    places.edit_place(tmp_path, broad.place_id, "set_state", author="owner", state="active")
+    assert not place_guard.dispatch_refusal(ctx, name, args, ext_tool=tool)
+    assert check(client, captured).json()["allowed"]
+
+
+@pytest.mark.parametrize("broad_account,room,thread", [("", "", ""), ("*", "thread", ""), ("*", "thread", "topic")])
+def test_outgoing_precedence_keeps_specific_active_scope(client, tmp_path, broad_account, room, thread):
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id=broad_account, state="silent")
+    own = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C", conversation_id=room)
+    if thread:
+        own = places._write(tmp_path, own.place_id, lambda row: replace(row, thread_id=thread))
+    target = {**TARGET, "thread_id": thread}
+    resolved, known = places.place_for_target(tmp_path, connector="connector", provider="service",
+        targets={key: [value] for key, value in target.items() if key != "provider" and value},
+        conversation="conversation_id", thread="thread_id")
+    assert known and resolved == own
+    captured = bind(client, thread_id=thread).json()
+    assert captured["allowed"] and captured["binding"]["place_id"] == own.place_id
+    assert check(client, captured["binding"], thread_id=thread).json()["allowed"]
 
 
 @pytest.mark.parametrize("account", ["", "*"])
@@ -175,3 +246,28 @@ def test_opaque_binding_stays_opaque_at_delivery(client, tmp_path):
     assert check(client, captured["binding"], conversation_id="").json()["allowed"]
     changed = check(client, captured["binding"], conversation_id="generated-message-id")
     assert changed.status_code == 400 and changed.json()["code"] == "place_binding_invalid"
+
+
+@pytest.mark.parametrize("state", ["silent", "paused"])
+def test_opaque_primary_lookup_keeps_declared_destination_hold(client, tmp_path, published_tool, state):
+    primary = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
+    captured = bind(client, conversation_id="").json()["binding"]
+    assert captured["place_id"] == primary.place_id
+    source = places.connect_place(tmp_path, connector="connector", provider="service", account_id="A",
+                                  conversation_id="source", state=state)
+    source = places._write(tmp_path, source.place_id, lambda row: replace(row, destination={"account_id": "C"}))
+    name, tool = published_tool("message", target=["account_id", "to"])
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="caller", task_metadata={})
+    args = {"account_id": "C", "to": "recipient"}
+    assert state.title() in place_guard.dispatch_refusal(ctx, name, args, ext_tool=tool)
+    # The legacy opaque lookup sees only the primary Active account; the
+    # outgoing matcher also sees the other Place's declared destination.
+    assert places.outbox_place(tmp_path, connector="connector", **{**TARGET, "conversation_id": ""}) == primary
+    queued = bind(client, conversation_id="").json()
+    assert not queued["allowed"] and queued["code"] == f"place_{state}"
+    held = check(client, captured, conversation_id="").json()
+    assert not held["allowed"] and held["code"] == f"place_{state}" and held["binding"] == captured
+    places.edit_place(tmp_path, source.place_id, "set_state", author="owner", state="active")
+    assert not place_guard.dispatch_refusal(ctx, name, args, ext_tool=tool)
+    assert bind(client, conversation_id="").json()["allowed"]
+    assert check(client, captured, conversation_id="").json()["allowed"]
