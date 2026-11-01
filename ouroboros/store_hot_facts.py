@@ -301,6 +301,48 @@ def controls(root, task_id: str) -> dict:
             "budget_pause": json.loads(row["budget_pause_facts"])}
 
 
+def statuses(root, task_ids) -> dict:
+    """Each id's stored status in ONE short read, for a pass over many queue rows: the status, ``None``
+    for no row, or the exception a single read of that id raises. No body is decoded for a derived row;
+    a store that cannot answer maps every id to its failure: unknown, never absent."""
+    from ouroboros import store
+    from ouroboros.store_import import OCCUPIED
+    from ouroboros.task_results import validate_task_id
+
+    answers: dict = {}
+    ids = []
+    for task_id in task_ids:
+        try:
+            ids.append(validate_task_id(task_id))
+        except ValueError as exc:
+            answers[str(task_id)] = exc
+    if not ids:
+        return answers
+    ids = sorted(set(ids))
+    try:
+        with store.open_store(root, write=False) as txn:
+            if int(txn.meta("schema_version") or VERSION) < VERSION:
+                rows = _read_rows(txn, ids)
+            else:
+                rows = {record["task_id"]: dict(record) for record in txn.conn.execute(
+                    "SELECT task_id,status,control_valid FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(ids),))}
+                underived = [tid for tid, row in rows.items() if row["control_valid"] is None]
+                rows.update(_read_rows(txn, underived))  # an older writer's row alone pays its body read
+                occupied = (txn.meta(OCCUPIED) or {}) if set(ids) - rows.keys() else {}
+                rows.update({tid: {"control_valid": 0} if occupied.get(tid) else None for tid in set(ids) - rows.keys()})
+    except Exception as exc:
+        return {**answers, **{tid: exc for tid in ids}}
+    for tid, row in rows.items():
+        if isinstance(row, Exception):
+            answers[tid] = row
+        elif row is not None and not row["control_valid"]:
+            answers[tid] = ValueError(f"task result authority is unreadable or invalid: task:{tid}")
+        else:
+            answers[tid] = None if row is None else row["status"]
+    return answers
+
+
 def underived(root: Any) -> bool:
     """Whether any row still lacks its hot-fact columns: indexed probes in one read transaction."""
     from ouroboros import store
