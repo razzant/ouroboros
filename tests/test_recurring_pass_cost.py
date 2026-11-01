@@ -17,7 +17,7 @@ from tests._cost_meter import CostMeter, tagged
 
 # The work a pass may not repeat: connections, transactions, statements, decoded JSON (a decoded task
 # body is one) and every write. The tag's count of each must be equal at both live-set sizes.
-WORK = ("connect", "begins", "statements", "commits", "writes", "json_loads")
+WORK = ("connect", "begins", "statements", "commits", "writes", "json_loads", "json_chars")
 
 
 def work(counts: dict) -> dict:
@@ -120,3 +120,68 @@ def test_l3_unknown_authority_never_dispatches(tmp_path, monkeypatch, meter, gap
     with queue._queue_lock:
         assert workers._drop_cancelled_pending() is False
     assert [row["id"] for row in workers.PENDING] == ["gap-0"]
+
+
+# ---- L2: the cold-custody pass, every 3 s while any actor lives -----------------------------------
+
+def _running(tmp_path, monkeypatch, name: str, rows: int):
+    from ouroboros.task_results import write_task_result
+
+    root = tmp_path / name
+    root.mkdir()
+    queue, _state, workers = _install_queue(root, monkeypatch)
+    for index in range(rows):
+        task_id = f"{name}-{index}"
+        write_task_result(root, task_id, "running", chat_id=0, text="running work " * 2000)
+        workers.RUNNING[task_id] = {"task": {"id": task_id, "type": "task", "chat_id": 0, "root_task_id": task_id},
+                                    "worker_id": index, "attempt": 1, "started_at": 1000.0}
+    return root, queue, workers
+
+
+def test_l2_the_cold_custody_pass_reads_once_at_any_running_count(tmp_path, monkeypatch, meter):
+    from ouroboros import budget_pause, sleep_custody
+
+    def one_pass(name, rows):
+        _root, queue, _workers = _running(tmp_path, monkeypatch, name, rows)
+        monkeypatch.setattr(budget_pause, "budget_pause_row", lambda *_a: pytest.fail("one read per running actor"))
+        outcome = counted(meter, f"L2:{name}", lambda: sleep_custody.reconcile(queue))
+        monkeypatch.undo()
+        assert outcome["result"] == set()
+        return outcome
+
+    small, large = one_pass("one", 1), one_pass("fifty", 50)
+    assert small["counts"] == large["counts"], (small["counts"], large["counts"])
+    assert small["counts"]["begins"] == 1 and small["counts"]["writes"] == 0, small
+
+
+def test_l2_a_saved_request_among_many_running_actors_is_still_accepted_and_kept(tmp_path, monkeypatch, meter):
+    """The companion: the real ``request, accept, retain`` protocol with 50 unrelated actors running beside it."""
+    from ouroboros import sleep_custody
+    from ouroboros.task_results import write_task_result
+    from tests.test_cold_external_custody import _park, _setup
+
+    env = _setup(tmp_path, monkeypatch)
+    for index in range(50):
+        task_id = f"beside-{index}"
+        write_task_result(tmp_path, task_id, "running", chat_id=0)
+        env.workers.RUNNING[task_id] = {"task": {"id": task_id, "type": "task", "chat_id": 0, "root_task_id": task_id},
+                                        "worker_id": index + 1, "attempt": 1, "started_at": 1000.0}
+    row = _park(env, tmp_path, monkeypatch)
+    assert sleep_custody.accepted_receipt("sleeper", row), row
+    calls = len(env.runtime.calls)
+    assert sleep_custody.reconcile(env.q, runtime=env.runtime) == {"sleeper"}
+    assert len(env.runtime.calls) == calls + 1, "the accepted receipt is rebound, the unrelated actors are not read"
+
+
+def test_l2_an_unanswering_store_infers_nothing_and_keeps_every_accepted_carrier(tmp_path, monkeypatch, meter):
+    from ouroboros import sleep_custody, store_hot_facts
+    from tests.test_cold_external_custody import _park, _setup
+
+    env = _setup(tmp_path, monkeypatch)
+    _park(env, tmp_path, monkeypatch)
+
+    def busy(*_a, **_k):
+        raise store_hot_facts.json.JSONDecodeError("store cannot answer", "", 0)
+
+    monkeypatch.setattr(store_hot_facts, "cold_custody_rows", busy)
+    assert sleep_custody.reconcile(env.q, runtime=env.runtime) == {"sleeper"}, "unknown is not an orphan"

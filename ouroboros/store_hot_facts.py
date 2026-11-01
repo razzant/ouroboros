@@ -343,6 +343,43 @@ def statuses(root, task_ids) -> dict:
     return answers
 
 
+# A saved cold request or receipt lives on a live pause row (``sleep_custody.accepted_receipt``).
+COLD_CUSTODY_STATES = ("requested", "accepted")
+# Non-ordinary JSON (``machine_json`` may write NaN, which ``json_valid`` rejects) passes: the caller decides.
+_COLD_ROWS = ("SELECT task_id, budget_pause_facts FROM tasks INDEXED BY tasks_budget_pause "
+              "WHERE budget_pause_state<>'' AND budget_pause_state IN ('pausing','paused','resume_granted') "
+              "AND control_valid=1 AND CASE WHEN json_valid(budget_pause_facts) THEN "
+              "json_extract(budget_pause_facts,'$.external_custody.state') IN ('requested','accepted') ELSE 1 END")
+
+
+def cold_custody_rows(root, task_ids) -> dict:
+    """Among ``task_ids``, each pause row carrying a saved cold request or receipt, in ONE indexed read:
+    the cost follows the rows that carry one, never how many ids the caller holds. A row an older writer has not
+    derived pays its own body read; a row whose control facts are invalid answers nothing here, so no
+    acceptance is inferred from it. Raises when the store cannot answer; the caller keeps what it knows."""
+    from ouroboros import store
+
+    wanted = {str(task_id) for task_id in task_ids}
+    with store.open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or VERSION) < VERSION:
+            derived, underived = [], sorted(wanted)
+        else:
+            derived = [(row["task_id"], row["budget_pause_facts"]) for row in txn.conn.execute(_COLD_ROWS)
+                       if row["task_id"] in wanted]
+            underived = sorted(wanted & {row["task_id"] for row in txn.conn.execute(
+                f"SELECT task_id FROM tasks INDEXED BY tasks_underived_hot WHERE {TASK_UNDERIVED}")})
+        held = _read_rows(txn, underived)
+    rows = {tid: json.loads(facts) for tid, facts in derived}
+    for tid, row in held.items():
+        if isinstance(row, Exception):
+            raise row
+        if row and row.get("control_valid"):
+            pause = json.loads(row["budget_pause_facts"])
+            if isinstance(pause, dict) and (pause.get("external_custody") or {}).get("state") in COLD_CUSTODY_STATES:
+                rows[tid] = pause
+    return {tid: pause for tid, pause in rows.items() if isinstance(pause, dict)}
+
+
 def underived(root: Any) -> bool:
     """Whether any row still lacks its hot-fact columns: indexed probes in one read transaction."""
     from ouroboros import store
