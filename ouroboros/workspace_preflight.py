@@ -411,21 +411,55 @@ def _note_open_scratch(data_root: Any, task_id: str, key: str, owner: pathlib.Pa
         logging.getLogger(__name__).warning("Open session scratch note not written: %s", note, exc_info=True)
 
 
+def _runs_still_open(root: pathlib.Path, task_id: str) -> bool:
+    """Whether delegated custody still holds a run of the task that has not settled, or a start
+    request with no bound run: a run spared by an undeliberate end of its task keeps working
+    (``delegate_custody_reconcile``), possibly in this scratch. An unreadable store counts as open."""
+    from ouroboros.delegate_custody_current import task_snapshot
+
+    try:
+        held = task_snapshot(root, task_id)
+    except Exception:
+        return True
+    return bool(held["pending"]) or any(not run.settled for run in held["runs"].values())
+
+
+def _retire_record(root: pathlib.Path, task_id: str, owner: pathlib.Path) -> bool:
+    """Put a copy of OWNER's record into the custody trash, then remove OWNER; False when no folder
+    was there. The entry is assembled in private staging and renamed into the trash whole, so the
+    trash remover never meets it half-made; until that rename the original stays where it was."""
+    from ouroboros.force_remove import force_rmtree
+    from ouroboros.task_custody import _STAGING_DIR, _TRASH_DIR
+
+    if not owner.is_dir() or owner.is_symlink():
+        return False
+    if os.path.lexists(owner / "scratch.json"):  # else an uncompleted preparation: nothing to release
+        name = f"{task_id}+scratch-{uuid.uuid4().hex[:12]}"  # '+' is in no task id, never a moved drive's
+        staged = root / _STAGING_DIR / name
+        (staged / SESSION_SCRATCH_DIRNAME / owner.name).mkdir(parents=True)
+        shutil.copyfile(owner / "scratch.json", staged / SESSION_SCRATCH_DIRNAME / owner.name / "scratch.json",
+                        follow_symlinks=False)
+        (root / _TRASH_DIR).mkdir(parents=True, exist_ok=True)
+        os.replace(staged, root / _TRASH_DIR / name)
+    force_rmtree(owner)
+    return True
+
+
 def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> Dict[str, Any]:
     """Hand the session scratch of every task proven over to the custody trash (#2586).
 
     A same-task start reuses its scratch while the task lives (``_session_scratch``), so the scratch
     waits for its task, not for its drive's retention term: terminal, not live by the supervisor's
-    probe ``live``, no lineage process (``subagent_worktrees._task_proven_over``) and not kept by the
-    owner (``owner_keep.gate``, the recorded facts read again inside). Each noted record's folder
-    moves, cheaply, into ``state/custody_trash``, whose remover deletes the scratch in the maintenance
-    child, off the serving process (``release_session_scratch``). A note whose folder already retired
-    with its drive, or that names no record of its task, is dropped; unknown liveness, a busy custody
-    lock or a failed move keeps the note for the next pass."""
+    probe ``live``, no lineage process (``subagent_worktrees._task_proven_over``), no delegated run
+    still open (``_runs_still_open``) and not kept by the owner (``owner_keep.gate``, the recorded facts
+    read again inside). Each noted record goes to ``state/custody_trash`` (``_retire_record``), whose
+    remover deletes the scratch in the maintenance child, off the serving process
+    (``release_session_scratch``). A note whose record already retired with its drive, or that names no
+    record of its task, is dropped; unknown liveness, a busy custody lock or a failed step keeps it for
+    the next pass. Links are never followed."""
     from ouroboros.body_candidate import _recorded_terminal
     from ouroboros.owner_keep import gate
     from ouroboros.subagent_worktrees import _task_proven_over
-    from ouroboros.task_custody import _TRASH_DIR
     from ouroboros.task_results import validate_task_id
 
     root = pathlib.Path(data_root)
@@ -443,7 +477,9 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
             validate_task_id(task_id)
         except ValueError:
             continue  # no note of a task: nothing in it is read
-        if not _task_proven_over(task_id, root, live):
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        if not _task_proven_over(task_id, root, live) or _runs_still_open(root, task_id):
             report["kept"] += 1
             continue
         with gate(root, task_id, timeout_sec=0) as held:
@@ -451,6 +487,8 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
                 report["kept"] += 1
                 continue
             for note in sorted(folder.glob("*.json")):
+                if note.is_symlink() or not note.is_file():
+                    continue
                 try:
                     owner = pathlib.Path(str(json.loads(note.read_text(encoding="utf-8"))["owner"]))
                     if (owner.name != note.stem or owner.parent.name != SESSION_SCRATCH_DIRNAME
@@ -463,10 +501,7 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
                         note.unlink()  # its record, if any, still retires with its drive
                     continue
                 try:
-                    if owner.is_dir() and not owner.is_symlink():
-                        entry = root / _TRASH_DIR / f"{task_id}.scratch-{uuid.uuid4().hex[:12]}"
-                        (entry / SESSION_SCRATCH_DIRNAME).mkdir(parents=True)
-                        os.replace(owner, entry / SESSION_SCRATCH_DIRNAME / owner.name)
+                    if _retire_record(root, task_id, owner):
                         report["released"].append(str(owner))
                     note.unlink()
                 except OSError as exc:

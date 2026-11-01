@@ -893,9 +893,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 433 target paths plus the three call wire/import-lock/tariff paths.
 # Two existing disposable families are now named by their owner-keep readers:
 # task_drives/*/session_scratch_owners and task_trees/*.
-# 438 -> 443 (#2586): ``state/session_scratch`` and its ``*/*.json`` notes of open session scratch, and the
-# finished task's scratch records the custody pass moves into ``state/custody_trash/*.scratch-*/`` (three spellings).
-EXPECTED_SCAN_PATHS = 443
+# 438 -> 444 (#2586): ``state/session_scratch`` and its ``*/*.json`` notes of open session scratch, and the
+# copy of a finished task's scratch record assembled in ``state/custody_staging/*/`` (three spellings) and
+# renamed whole into ``state/custody_trash/*``.
+EXPECTED_SCAN_PATHS = 444
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

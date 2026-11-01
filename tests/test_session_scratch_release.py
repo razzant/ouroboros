@@ -1,20 +1,22 @@
 """A finished task's session scratch goes once the task is over, not a retention term later (#2586).
 
 ``workspace_preflight.session_service_directories`` notes each scratch record under its task in the
-canonical root; ``release_finished_scratch`` (the custody pass) moves the record folder of a task proven
-over into the custody trash, whose remover deletes the scratch. A live, unknown, unfinished or
-owner-kept task keeps its scratch for a later start of the same task; a note whose record already
-retired with its drive, or that names no record of its task, is dropped and touches nothing; a
-producer's retention keeps its scratch in place without holding the trash. Isolated roots only.
+canonical root; ``release_finished_scratch`` (the custody pass) puts the record of a task proven over,
+with no delegated run still open, into the custody trash whole, whose remover deletes the scratch. A
+live, unknown, unfinished or owner-kept task, or one whose spared run still works, keeps its scratch;
+a note whose record already retired with its drive, that names no record of its task, or that sits
+behind a link touches nothing; the owner's Keep never reports a released scratch as kept; a producer's
+retention keeps its scratch in place without holding the trash. Isolated roots only.
 """
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 
 import pytest
 
-from ouroboros import headless, owner_keep, task_custody, test_environment
+from ouroboros import delegate_custody, headless, owner_keep, task_custody, test_environment
 from ouroboros.workspace_preflight import (
     OPEN_SCRATCH_DIR, SESSION_SCRATCH_DIRNAME, release_finished_scratch, session_service_directories,
 )
@@ -52,10 +54,101 @@ def test_a_finished_task_releases_its_scratch_on_the_custody_pass_long_before_it
     assert report == {"released": [str(_record(data).parent.resolve())], "kept": 0, "errors": []}
     assert _notes(data) == [] and not (data / OPEN_SCRATCH_DIR / "task-1").exists()
     assert drive.is_dir() and not _record(data).parent.exists()  # the drive itself waits for its own term
+    [entry] = (data / "state" / "custody_trash").iterdir()
+    assert entry.name.startswith("task-1+scratch-")
+    assert (entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
+    assert not any((data / "state" / "custody_staging").iterdir())
     assert scratch.is_dir()  # the delete is the maintenance child's, off the serving process
     assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
     assert not scratch.exists() and drive.is_dir()
     assert release_finished_scratch(data, OVER) == {"released": [], "kept": 0, "errors": []}
+
+
+@pytest.mark.parametrize("still_open", ["run", "start_request"])
+def test_a_spared_delegated_run_keeps_its_finished_tasks_scratch_until_it_settles(tmp_path, still_open):
+    data, scratch = _started(tmp_path)  # the task failed undeliberately; its run was left live (B1-A)
+    try:
+        if still_open == "run":
+            assert delegate_custody.emit(data, delegate_custody.STARTED, {"run_id": "run-1", "task_id": "task-1"})
+        else:
+            assert delegate_custody.emit(data, delegate_custody.START_REQUESTED, {
+                "invocation_id": "inv-1", "task_id": "task-1", "request": {"prompt": "x"}})
+        assert release_finished_scratch(data, OVER) == {"released": [], "kept": 1, "errors": []}
+        assert _record(data).is_file() and (scratch / "env" / "pyvenv.cfg").is_file()
+        if still_open == "run":
+            assert delegate_custody.emit(data, delegate_custody.SETTLED, {
+                "run_id": "run-1", "task_id": "task-1", "state": "succeeded"})
+        else:
+            assert delegate_custody.emit(data, delegate_custody.START_FAILED, {
+                "invocation_id": "inv-1", "task_id": "task-1", "definite": True, "error": "refused"})
+        assert release_finished_scratch(data, OVER)["released"]
+    finally:
+        delegate_custody._CUSTODY.clear()
+
+
+def test_the_trash_never_meets_a_half_made_scratch_entry(tmp_path, monkeypatch):
+    data, scratch = _started(tmp_path)
+    trash, real_replace, published = data / "state" / "custody_trash", os.replace, []
+
+    def replace(src, dst):
+        if pathlib.Path(dst).parent == trash:  # what the remover may see: complete at once, or nothing
+            assert not trash.exists() or not any(trash.iterdir())
+            assert (pathlib.Path(src) / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
+            published.append(dst)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    assert release_finished_scratch(data, OVER)["released"] and len(published) == 1
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
+
+
+def test_an_interrupted_release_keeps_the_record_and_its_note(tmp_path, monkeypatch):
+    data, scratch = _started(tmp_path)
+    real_replace = os.replace
+
+    def refused(src, dst):
+        raise PermissionError("the trash could not take it")
+
+    monkeypatch.setattr(os, "replace", refused)
+    report = release_finished_scratch(data, OVER)
+    assert report["released"] == [] and len(report["errors"]) == 1
+    assert _record(data).is_file() and _notes(data) == ["task-1/snap-1.json"]
+    assert not (data / "state" / "custody_trash").exists() or not any((data / "state" / "custody_trash").iterdir())
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert release_finished_scratch(data, OVER)["released"]
+    task_custody.remove_custody_trash(data)
+    assert not scratch.exists()
+
+
+def test_a_keep_racing_the_release_never_reports_the_released_scratch_as_kept(tmp_path, monkeypatch):
+    data, scratch = _started(tmp_path)
+    row = {"status": "completed", "task_id": "task-1"}
+    stale = owner_keep.inventory(data, "task-1", row)  # read before the release, as set_owner_keep does unlocked
+    places, _unknown, pins = stale
+    assert str(scratch) in places and owner_keep._present(data, "task-1", str(scratch), pins) is True
+    assert release_finished_scratch(data, OVER)["released"]  # accepted for deletion; the child has not run yet
+    assert scratch.is_dir() and owner_keep._present(data, "task-1", str(scratch), pins) is False
+    monkeypatch.setattr(owner_keep, "inventory", lambda *_args: stale)
+    answer = owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})
+    assert str(scratch) in answer["retired"] and str(scratch) not in answer["retained"]
+    assert answer["status"] == "partly_retired"
+
+
+def test_a_linked_note_folder_is_never_followed(tmp_path):
+    data, _scratch = _started(tmp_path, task_id="task-9")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "document.json").write_text('{"unrelated": true}\n', encoding="utf-8")
+    linked = data / OPEN_SCRATCH_DIR / "task-1"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable here: {exc}")
+    seed_result(data, "task-1", {"status": "completed"})
+    release_finished_scratch(data, OVER)
+    assert (outside / "document.json").read_text(encoding="utf-8") == '{"unrelated": true}\n'
+    assert linked.is_symlink()
 
 
 @pytest.mark.parametrize("status, live", [("completed", True), ("completed", None), ("running", False)],

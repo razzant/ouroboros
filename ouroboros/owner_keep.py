@@ -111,9 +111,9 @@ def _pin_place(copy: Dict[str, Any]) -> str:
 
 def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[List[str], List[str], Dict[str, str]]:
     """Everything a gated retirer could remove for this exact task, as ``(places, unknown, pins)``, ``pins``
-    naming the copy path whose record each ``pins:`` place stands on. One listing per current folder (copy
-    records, the copies' root, review seats and checkouts), no walk of history; a listing or marker that
-    cannot be read names its class in ``unknown`` instead."""
+    naming the copy path whose record each ``pins:`` place stands on, and the ownership record each session
+    scratch stands on. One listing per current folder (copy records, the copies' root, review seats and
+    checkouts), no walk of history; a listing or marker that cannot be read names its class in ``unknown``."""
     from ouroboros.copy_environments import ENV_SUFFIX, scratch_owner
     from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
     from ouroboros.private_copy_read import _copy_owner, read_records
@@ -160,7 +160,10 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
         drive = root / TASK_DRIVES_DIR / task_id / SESSION_SCRATCH_DIRNAME
         for owner in (sorted(drive.iterdir()) if drive.is_dir() else ()):
             with contextlib.suppress(FileNotFoundError):
-                places.append(str(_json(owner / "scratch.json").get("path") or ""))
+                scratch = str(_json(owner / "scratch.json").get("path") or "")
+                places.append(scratch)
+                if scratch:  # the task's while this record names it: a release moves the record first
+                    pins[scratch] = str(owner / "scratch.json")
     except (OSError, ValueError):
         unknown.append("environments")
     reviews = root / "state" / "review_checkouts"
@@ -187,11 +190,20 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
 
 def _present(root: pathlib.Path, task_id: str, place: str, pins: Dict[str, str]) -> Optional[bool]:
     """On disk now; a pin is there while its copy record, one file read under custody, still names it
-    for this task. ``None`` when that record cannot be read: nothing is claimed about the pin."""
+    for this task, and a session scratch while its ownership record in the task's drive still names
+    it (``workspace_preflight.release_finished_scratch`` removes that record when it accepts the
+    scratch for deletion). ``None`` when that record cannot be read: nothing is claimed about it."""
     from ouroboros.private_copy_read import record_at
 
     if place not in pins:
         return os.path.lexists(place)
+    if not place.startswith("pins:"):
+        try:
+            return _json(pathlib.Path(pins[place])).get("path") == place and os.path.lexists(place)
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError):
+            return None
     try:
         copy = record_at(pins[place], root) or {}
     except (OSError, ValueError):
@@ -236,8 +248,10 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
         present = {place: _present(base, task_id, place, pins) for place in places}
         retained = [place for place in places if present[place]]
         retired = [place for place in places if present[place] is False]
-        if None in present.values() and "private_copies" not in unknown:
-            unknown.append("private_copies")
+        for place in [place for place in places if present[place] is None]:
+            kind = "private_copies" if place.startswith("pins:") else "environments"
+            if kind not in unknown:
+                unknown.append(kind)
         if keep and retired and not retained and not unknown:
             return answer("already_retired", stands, retired=retired)
         if keep and not stands:
