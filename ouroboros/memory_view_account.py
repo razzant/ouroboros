@@ -233,8 +233,9 @@ def cited_records(store: ChronicleStore, sources: Any, fixes: Mapping[str, List[
 
 
 def told_here(story: List[Mapping[str, Any]], rooms: Any) -> List[Dict[str, Any]]:
-    """Per room of ``rooms``, the story records of that room an account tells: their count, combined span and the
-    accounts standing in my story that tell them (through accounts they tell in turn); the records stay at readers."""
+    """Per room of ``rooms``, the records of that room an account tells (``story`` entries with ``told_by``, and
+    any record folded under a part the caller adds the same way): their count, combined span and the accounts standing
+    in my story that tell them (through accounts they tell in turn); the records stay at readers."""
     by_id, groups = {entry["id"]: entry for entry in story}, {}
     for entry in story:
         if not entry.get("told_by") or str(entry.get("room_id")) not in rooms:

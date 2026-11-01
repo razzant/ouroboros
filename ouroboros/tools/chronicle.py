@@ -23,8 +23,8 @@ a decision, a local fold, a missing record) and how to read each original;
 ``revision`` reads a record as of one of its revisions. ``proposed_selection`` reads,
 before the choice, what a selection would change in my story and a room's page and
 every record it would tell or stop telling, from one state, checked by the write's own rules and
-writing nothing; its pages continue one document (``fingerprint``). The selection's write
-returns a counted receipt of the teller relations read after it, never a claim about display.
+writing nothing; its pages continue one document (``fingerprint``, named in every page's header). The selection's
+write returns a counted receipt of the teller relations read after it, never a claim about display.
 An account's verified ``quotes`` are checked as a page's are.
 
 A delegated child or nanny is not the integrating mind: the host signs its
@@ -1002,9 +1002,9 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
     (``capture(proposed=…)``), with it acting, compared line by line by the view's own renderers; then every
     record the account would tell and every one it tells now and would stop telling (``told_records`` of each
     view), whole as it acts now with its readers, whatever lines the comparison matched. A later page
-    continues only the same document: its continuation names the document's ``fingerprint``, and a page of
-    another one is refused, never joined. A refusal is returned as the ``PublishResult`` it is (the write's
-    own, or ``position_mismatch``).
+    continues only the same document: every page's header names the document's ``fingerprint``, complete or
+    not, and a page of another one is refused, never joined. A refusal is returned as the ``PublishResult``
+    it is (the write's own, or ``position_mismatch``).
     """
     from ouroboros import memory_view as mv
     from ouroboros.memory_floor import view_tokens
@@ -1077,7 +1077,7 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
             "that page belongs to another document than this read: my chronicle changed since, or the proposal, room "
             "or fingerprint differs. Read it again from start=0"))
     head = (f"[proposed selection of account {account}: replaces {len(proposal['replaces'])}, shown={proposal['shown']}; "
-            "a read, nothing written]")
+            f"a read, nothing written; fingerprint='{digest}']")  # on a complete page too, for a later start
     return _window(head, document, start, limit, lambda end: (
         f"memory_read(proposed_selection=<same>, room_id='{room}', start={end}, fingerprint='{digest}')"))
 
@@ -1305,7 +1305,7 @@ def chronicle_tools() -> List[ToolEntry]:
                                "description": "What chronicle_write kind=selection with these fields would change, read before choosing; nothing is written, a refusal is the write's. My story and room_id's page (default this task's room) now and with it, line by line, then every record the account would tell or stop telling, whole as it acts now, all from one state; continue with start and fingerprint.",
                                "properties": {"target_id": string, "replaces": {"type": "array", "items": string},
                                               "shown": {"type": "boolean"}}},
-        "fingerprint": {"type": "string", "description": "proposed_selection: the document a later page continues, as its continuation names it; a changed one is refused position_mismatch, never joined."},
+        "fingerprint": {"type": "string", "description": "proposed_selection: the document a later page continues, as the read's header names it; a changed one is refused position_mismatch, never joined."},
         "node_id": {"type": "string", "description": "One record: as it acts now, its host stamp, coverage, original text, corrections and decisions."},
         "room_id": {**room, "description": room["description"] + " '*' lists all open rooms (label, period, counts, reader); 'late_reviews' lists unreleased host review marks; 'notes' lists unsealed mind notes. Lists name ids, rooms, dates and exact readers, oldest first."},
         "after_seq": {"type": "integer", "minimum": 0, "description": "Room records and active marks after this sequence (the previous page's next_after_seq)."},

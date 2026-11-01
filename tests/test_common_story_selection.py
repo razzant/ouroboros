@@ -15,11 +15,14 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
+
 from ouroboros import chat_chain, memory_floor as mf, memory_view as mv
 from ouroboros.chronicle_store import ChronicleStore, body_sha256
 from ouroboros.memory_reader import read_memory
 from ouroboros.tools import chronicle as tools
 from ouroboros.tools.chronicle import _memory_read
+from ouroboros.utils import sha256_text
 from tests import _memory_inventory_shared as shared
 from tests.test_chronicle_tools import snapshot as tree
 from tests.test_common_story import G_TEXT, NANNY, _block, _ctx, _journal, _page, _part, _rooms, _snapshot, _story, _write
@@ -39,6 +42,11 @@ def _continuation(page):
     """``(start, fingerprint)`` a page's continuation line names."""
     cont = page.split("\n", 2)[1]
     return int(cont.split("next_start=")[1].split(" ")[0]), re.search(r"fingerprint='([0-9a-f]{16})'\)$", cont).group(1)
+
+
+def _header_fingerprint(page):
+    """The fingerprint a page's first line names, whether or not the page continues."""
+    return re.search(r"; fingerprint='([0-9a-f]{16})'\]$", page.split("\n", 1)[0]).group(1)
 
 
 def _proposal(root, room="1", **proposal):
@@ -75,7 +83,8 @@ def test_the_proposal_shows_the_story_and_page_the_real_selection_then_makes_and
     pages, read = _proposal(tmp_path, target_id=g, replaces=[a1, part])
     assert tree(tmp_path) == files  # no record, no index byte, no file: a read
     head = pages[0].split("\n", 3)
-    assert head[0] == f"[proposed selection of account {g}: replaces 2, shown=True; a read, nothing written]"
+    assert head[0] == (f"[proposed selection of account {g}: replaces 2, shown=True; a read, nothing written; "
+                       f"fingerprint='{sha256_text(read)[:16]}']")  # the digest of the document, not of its head
     assert read.startswith(f"the proposal: replaces 2: {a1}, {part}; shown=True. Nothing is written;")
     assert "acting selection now: none, so the account is not in my story" in read
     assert ("the account itself enters my story; other entries leaving it: 2; returning to it: 0; the account would "
@@ -156,6 +165,7 @@ def test_a_tight_tool_result_pages_the_proposal_and_its_pages_join_into_the_whol
     assert pages[1].split("\n")[1].endswith(f"memory_read(proposed_selection=<same>, room_id='1', start={start}, "
                                             f"fingerprint='{fingerprint}')")
     assert fingerprint == _continuation(pages[0])[1]  # one document, named on every page
+    assert {_header_fingerprint(page) for page in pages} == {fingerprint}  # and by every page's first line
 
 
 TWELVE = "\n".join(f"Line {n} of what Main heard, kept word for word." for n in range(1, 13))
@@ -249,6 +259,44 @@ def test_a_later_page_of_a_proposal_whose_state_changed_is_refused_never_joined(
     assert f"acting selection now: {chosen['node_id']} (shown=True, replaces 2)" in again
     assert _memory_read(ctx, node_id=g, fingerprint=fingerprint).startswith(
         "⚠️ TOOL_ARG_ERROR: fingerprint continues a proposed_selection read")
+
+
+def test_a_complete_first_proposal_still_names_the_fingerprint_an_explicit_later_range_needs(tmp_path, monkeypatch):
+    rooms, alpha, beta, a1, b1, h1 = _rooms(tmp_path)
+    g = _write(tmp_path, kind="account", text=G_TEXT, sources=[a1, b1])["node_id"]
+    proposal, ctx = {"target_id": g, "replaces": [a1, b1]}, _ctx(tmp_path)
+    first = _memory_read(ctx, proposed_selection=proposal, room_id="1")
+    head, cont, document = first.split("\n", 2)
+    assert cont == f"chars 0–{len(document)} of {len(document)}; complete"  # the window names no recipe: nothing continues
+    fingerprint = _header_fingerprint(first)  # the first line does, as the document's own digest
+    assert fingerprint == sha256_text(document)[:16]
+    assert head == (f"[proposed selection of account {g}: replaces 2, shown=True; a read, nothing written; "
+                    f"fingerprint='{fingerprint}']")
+    start = len(document) // 2  # an explicit range, asked for without any continuation
+    later = _memory_read(ctx, proposed_selection=proposal, room_id="1", start=start, fingerprint=fingerprint)
+    assert later.split("\n", 2)[1:] == [f"chars {start}–{len(document)} of {len(document)}; complete", document[start:]]
+    assert _header_fingerprint(later) == fingerprint
+    monkeypatch.setattr(tools, "tool_result_limit", lambda _name: 1_200)  # a tight reader pages the same document
+    assert _continuation(_memory_read(ctx, proposed_selection=proposal, room_id="1"))[1] == fingerprint
+
+
+def test_a_fingerprint_a_complete_proposal_named_is_refused_once_the_state_changed(tmp_path):
+    rooms, alpha, beta, a1, b1, h1 = _rooms(tmp_path)
+    g = _write(tmp_path, kind="account", text=G_TEXT, sources=[a1, b1])["node_id"]
+    proposal, ctx = {"target_id": g, "replaces": [a1, b1]}, _ctx(tmp_path)
+    first = _memory_read(ctx, proposed_selection=proposal, room_id="1")
+    assert first.split("\n", 2)[1].endswith("complete")
+    stale = _header_fingerprint(first)
+    _write(tmp_path, kind="selection", reason="chosen after a complete read", **proposal)
+    files, current = tree(tmp_path), _memory_read(ctx, proposed_selection=proposal, room_id="1")
+    assert _header_fingerprint(current) != stale  # the document it describes is now another one
+    for bound in ({"fingerprint": stale}, {"start": 40, "fingerprint": stale}):
+        out = json.loads(_memory_read(ctx, proposed_selection=proposal, room_id="1", **bound))
+        assert out["ok"] is False and out["reason"] == "position_mismatch", (bound, out)
+        assert out["detail"].endswith("Read it again from start=0") and _header_fingerprint(current) not in out["detail"]
+    assert tree(tmp_path) == files
+    fresh = _memory_read(ctx, proposed_selection=proposal, room_id="1", start=40, fingerprint=_header_fingerprint(current))
+    assert fresh.split("\n", 2)[1].startswith("chars 40–")  # the current fingerprint reads on
 
 
 # --- the selection's receipt -----------------------------------------------------------------------------
@@ -540,6 +588,69 @@ def test_the_room_names_the_account_that_tells_its_records_through_nesting_and_n
     _write(tmp_path, kind="selection", target_id=other, replaces=[p12], reason="other")
     main = mv.render_room(_snapshot(tmp_path))
     assert main.count("my accounts tell\n- ") == 1 and f"- 2 records, 2026-09-03 00:00 → 2026-09-03 00:02: told in my story by my accounts {one}, {other}; " in main
+
+
+def _folded_page_told(root, *, fold_first):
+    """Main's page P12 under a part, told by an account of mine; the fold and the selection in either order."""
+    rooms, alpha, beta, a1, b1, h1 = _rooms(root)
+    p12 = _page(root, "1", 12, 12, text="Main heard a long reply.")
+    g = _write(root, kind="account", text=G_TEXT, sources=[p12])["node_id"]
+    if fold_first:
+        part = _part(root, "1", [b1, p12], text="Main began and went on.")
+    _write(root, kind="selection", target_id=g, replaces=[p12], reason="told through it")
+    if not fold_first:
+        part = _part(root, "1", [b1, p12], text="Main began and went on.")
+    assert p12 not in {e["id"] for e in _snapshot(root).story}  # only the part stands in the story, never the member
+    return p12, part, g
+
+
+def _assert_folded_page_pointer(root, p12, part, g):
+    line = (f"### Records of this room my accounts tell\n- 1 record, 2026-09-03 00:02 → 2026-09-03 00:02: told in my story by "
+            f"my account {g}; memory_read(room_id='1') lists each with its words and teller")
+    room = mv.render_room(_snapshot(root))
+    assert line in room and f"node_id='{p12}'" not in room  # told: it leaves the page under its part, the line stands
+    assert f"told in my story by account {g}; " in _memory_read(_ctx(root), room_id="1")  # the pointer's reader names it
+    # Told on by a newer account: the line names the one standing in my story, through the older.
+    g2 = _write(root, kind="account", text="A SECOND TELLING", sources=[g])["node_id"]
+    _write(root, kind="selection", target_id=g2, replaces=[g], reason="second")
+    assert f"told in my story by my account {g2}; memory_read(room_id='1')" in mv.render_room(_snapshot(root))
+    # A nanny carries no story: the page stays whole under its part, no account stands in for it.
+    nanny = mv.render_room(_snapshot(root, {**NANNY, "chat_id": 1}))
+    assert "my accounts tell" not in nanny and "Main heard a long reply." in nanny
+    # Withdrawn: nothing tells the page, so it is under its part again and no line remains.
+    _write(root, kind="selection", target_id=g2, replaces=[], shown=False, reason="back")
+    _write(root, kind="selection", target_id=g, replaces=[], shown=False, reason="back")
+    room = mv.render_room(_snapshot(root))
+    assert "my accounts tell" not in room and f"under part {part} — " in room and f"memory_read(node_id='{p12}')" in room
+
+
+def test_the_room_names_the_account_that_tells_a_page_folded_before_the_selection(tmp_path):
+    _assert_folded_page_pointer(tmp_path, *_folded_page_told(tmp_path, fold_first=True))
+
+
+def test_the_room_names_the_account_that_tells_a_page_folded_after_the_selection(tmp_path):
+    _assert_folded_page_pointer(tmp_path, *_folded_page_told(tmp_path, fold_first=False))
+
+
+@pytest.mark.parametrize("source_room", ["1", "legacy"])
+def test_the_room_keeps_the_teller_of_an_individually_folded_legacy_record(tmp_path, source_room):
+    for fold_first in (True, False):
+        root = tmp_path / str(fold_first)
+        shared.world(root, flat="Earlier life before rooms, retained exactly.")
+        legacy = next(r["id"] for r in ChronicleStore(root).room_records(source_room) if r["kind"] == "legacy")
+        g = _write(root, kind="account", text=G_TEXT, sources=[legacy])["node_id"]
+        if fold_first:
+            _part(root, source_room, [legacy], text="An earlier part.")
+        _write(root, kind="selection", target_id=g, replaces=[legacy], reason="told here")
+        if not fold_first:
+            assert f"by my account {g}; memory_read(room_id='{source_room}')" in mv.render_room(_snapshot(root))
+            _part(root, source_room, [legacy], text="An earlier part.")
+        view = _snapshot(root)
+        assert legacy not in {entry["id"] for entry in view.story}
+        assert f"by my account {g}; memory_read(room_id='{source_room}')" in mv.render_room(view)
+        assert f"told in my story by account {g};" in _memory_read(_ctx(root), room_id=source_room)
+        assert "my accounts tell" not in mv.render_room(_snapshot(root, NANNY))
+        assert mv.render_room(view) == mv.render_room(mv.snapshot_from_json(mv.snapshot_json(view)))
 
 
 def test_an_edge_whose_cited_revision_the_journal_lost_cites_nothing_so_later_corrections_stay_beside(tmp_path):

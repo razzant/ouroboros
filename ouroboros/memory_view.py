@@ -628,14 +628,16 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
 
     Retold records already whole in my story are not repeated. A selected account carries its records, a part
     it tells its members too; their detail stays at their source readers rather than reappearing in this room,
-    where ``told`` names how many of the room's records accounts in my story tell, and which ones (``told_here``).
+    where ``told`` names how many of the room's records accounts in my story tell, and which ones (``told_here``),
+    records folded under a part among them.
     A standing part (the mind's, or a helper's draft not pending as a candidate) stands for its members here
     as in the story: they keep their period and address (``standing``), a viewer with a story only.
     """
     room = str(spec.room_id)
     records = store.room_records(room)
     whole = {e["id"] for e in story if e.get("kind") == "legacy" and e.get("text") and not e.get("told_by")}
-    told = set(told_map([e for e in story if e.get("kind") == "account"]))  # the latest shown selections
+    teller = told_map([e for e in story if e.get("kind") == "account"])  # the latest shown selections
+    told = set(teller)
     told |= {member for record in records if record["kind"] == "part" and record["id"] in told
              for member in store.folded_members(record["id"])}
     standing = {record["id"] for record in records if record["kind"] == "part"}  # room_records: no candidate or rejected
@@ -649,12 +651,15 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     if spec.room_page:
         units = {unit.record_id: unit for unit in memory_inventory.legacy_units(store, root)}
         retold = [record for record in records if record["kind"] in ("legacy", "gap")]
+        pointer_records = records
         if room == MAIN_ROOM and spec.role != "nanny":  # the room-less retellings (the flat summary, a mixed
             # era) predate rooms and were Main's memory: whole and first for every focus that starts with the top
             # level of the life account (a child included); a nanny carries no life account and no story, so it
             # gets neither the text nor a pointer
-            retold[:0] = [record for record in store.room_records(LEGACY_ROOM_ID, kinds=("legacy",))
-                          if _mapping(record.get("metadata")).get("legacy_type") not in ("gap", "cursor_gap")]
+            roomless = store.room_records(LEGACY_ROOM_ID)
+            pointer_records = [*records, *roomless]
+            retold[:0] = [record for record in roomless if record["kind"] == "legacy"
+                          and _mapping(record.get("metadata")).get("legacy_type") not in ("gap", "cursor_gap")]
         facts["legacy"] = [{"id": record["id"], "text": str(record.get("current_text") or ""), "period": _legacy_period(
                                 {"covers": record.get("covers"), "range_text": _mapping(record.get("metadata")).get(
                                     "legacy_range_text")}, getattr(unit, "ts_span", None)),
@@ -669,7 +674,12 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                                 for record in (records if spec.story else store.pages_of_room(room)) if record["kind"] in ("page", "part") and record["id"] not in told and (record.get("folded_into") or record["id"] in own)]
         facts["notes"] = list(notes.get(room, ()))
         main = room == MAIN_ROOM and spec.role != "nanny"  # Main's page carries the room-less retellings too
-        facts["told"] = told_here(story, {room, *((LEGACY_ROOM_ID,) if main else ())})
+        # A folded record is no story entry, so it joins ``told_here`` from the room's own records.
+        folded = [{"id": record["id"], "room_id": str(record["room_id"]), "told_by": teller[record["id"]],
+                   "source_period": memory_inventory.record_period(store, record, units).span}
+                  for record in pointer_records if record.get("folded_into")
+                  and record["id"] in teller]
+        facts["told"] = told_here([*story, *folded], {room, *((LEGACY_ROOM_ID,) if main else ())})
     if spec.origin_words and room.lstrip("-").isdigit() and int(room) in memory_inventory.membership_facts(
             root).project_chat_ids:
         facts["origins"] = _origins(root, room, entries if spec.room_lanes else [])
