@@ -48,6 +48,7 @@ class Client:
     instances: list = []
 
     def __init__(self, token, **_kwargs):
+        self.token = token
         self.sent, self.downloads = [], []
         Client.instances.append(self)
 

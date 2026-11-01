@@ -83,9 +83,9 @@ def test_direct_lane_refusals_name_their_submission(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: sent.append((a, k)))
     monkeypatch.setattr(state_mod, "budget_remaining", lambda _state, *, strict: 0)
     monkeypatch.setattr(state_mod, "load_state", lambda: {})
-    worker_chat_lane._handle_chat_direct_locked(1, "hi", task_metadata={"client_message_id": "cm-1"})
+    worker_chat_lane._run_chat_task(None, 1, "hi", task_metadata={"client_message_id": "cm-1"})
     ref = {"chat_id": 1, "client_message_id": "cm-2", "ts": "2026-10-13T00:00:00+00:00", "text_sha256": "0" * 64}
-    worker_chat_lane._handle_chat_direct_locked(1, "hi", task_metadata={
+    worker_chat_lane._run_chat_task(None, 1, "hi", task_metadata={
         "client_message_id": "cm-2", "origin_message_ref": ref, "_host_operation": True})
     first, second = sent
     assert first[0][1].startswith("🚫 Budget exhausted.")

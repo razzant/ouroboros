@@ -153,7 +153,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | unset | Env-only: logical review window (late results stay in custody) |
 | OUROBOROS_REVIEW_MAX_TOKENS | 65536 | Env-only: reviewer output budget, clamped to the 8192 floor |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Review enforcement advisory/blocking; anything else coerces to the default (§6 Review stack) |
-| OUROBOROS_PREFLIGHT_TIMEOUT_SEC | 1800 | Env-only: total wall-clock budget of the hermetic test preflight (`preflight_runner.py`); Android entry: 3600. An explicit value also replaces a prepared Update's one readiness-check budget (`UPDATE_CHECKS_TIMEOUT_SEC`, 7200 s: `update_checks.py`) |
+| OUROBOROS_PREFLIGHT_TIMEOUT_SEC | 1800 | Env-only: total wall-clock budget of the hermetic test preflight (`preflight_runner.py`); Android entry: 3600; if set, also an Update's check budget (`update_checks.py`) |
 | OUROBOROS_PREFLIGHT_SERIAL | unset | Env-only: `1` selects one serial pytest pass; scrubbed from the candidate |
 | OUROBOROS_PREFLIGHT_TEST_WORKERS | unset | Env-only: xdist workers for the parallel pass (floor 2, else `os.cpu_count()`); scrubbed from the candidate |
 | OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | true | Auto-grant manifest requests to accepted bytes (clean review or trusted install; hash-bound) |

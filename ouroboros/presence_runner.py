@@ -104,6 +104,11 @@ def presence_result_from_stored(stored: Mapping[str, Any], task_id: str, drive_r
     ))
 
 
+# The conversation's own delivery facts a Presence result stamps on its task's metadata, below.
+PRESENCE_DELIVERY_KEYS = ("presence_outcome", "presence_result_text", "presence_output_ref", "presence_work_ref",
+                          "presence_reply_anchor", "presence_declaration")
+
+
 def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, terminal_origin: str = "",
                                 retain_scheduled_handoff: bool = False, silent: bool = False) -> dict[str, Any]:
     """Freeze typed delivery metadata before the ordinary durable result write.

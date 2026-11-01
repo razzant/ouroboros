@@ -8,6 +8,7 @@ This certifies the generic consumer, not connector delivery or model judgment.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import json
@@ -353,6 +354,324 @@ def test_presence_main_live_and_late_answers_reach_the_related_work(wait_clone, 
                 from ouroboros.task_store import task_facts
                 (evidence / "tasks.json").write_text(json.dumps({task_id: oracle.task_result(task_id)
                     for task_id in task_facts(root)}, indent=2))
+                for path in (root.parent / "network.jsonl", root / "logs" / "supervisor.jsonl", root / "logs" / "server.log"):
+                    if path.is_file():
+                        shutil.copyfile(path, evidence / path.name)
+            finally:
+                try:
+                    browser.close()
+                finally:
+                    server.stop()
+                    assert server.proc is None or server.proc.poll() is not None
+
+
+PROJECT_QUESTION = "May I keep this request as private research inside the Project?"
+PROJECT_REPORT = "The community thread asks for a release date. I am keeping it as research."
+REPLY = "Research only; no dates promised."
+PROJECT_ANSWER = "Yes: private research inside the Project."
+FOLLOW_UP = "Should I also draft a public summary later?"
+PROJECT_FINAL = "The source work ended without an external reply."
+
+
+def _project_feed(page, project):
+    """The shipped sidebar's Project row opens its panel; returns the panel feed's selector."""
+    row = page.locator(f'.nav-project-row[data-project-id="{project["id"]}"]')
+    row.wait_for(state="attached", timeout=30000)
+    row.click()
+    feed = f'#pchat-{project["id"]}-messages'
+    page.locator(feed).wait_for(state="visible", timeout=30000)
+    return feed
+
+
+def _shown(page, feed, task_id, quiz_id):
+    """One question card's facts in one room's feed, with its bubble's row address."""
+    card = page.locator(f'{feed} .chat-quiz-card[data-task-id="{task_id}"][data-quiz-id="{quiz_id}"]')
+    return card, card.evaluate("el => ({state: el.dataset.state, address: el.closest('.chat-bubble').dataset.rowAddress,"
+                               " text: el.innerText})")
+
+
+def test_private_contact_of_project_work_is_one_row_in_main_and_its_project(wait_clone, tmp_path):
+    """The rendered consumer of private contact for work bound to a Project (owner choices A/A).
+
+    One stored report and question at their Main address, shown in Main and the Project panel; the owner's
+    direct Reply to the report in Main stands in the Project with its quote, which finds the report there;
+    an answer given in the Project whose response is lost still reaches its recorded state there with the
+    live state frame withheld from that tab (the Project's own reads: its history arrivals carry the shared
+    answer row, and its canonical recovery read); a later question closes from the Project; the inline work's
+    final stands once in the Project, live and in its history with its Done row, never in Main; a cold reload
+    of both rooms shows the same states. The place stays Silent and hears nothing."""
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    root = tmp_path / "instance" / "data"
+    root.mkdir(parents=True)
+    evidence = producer_evidence_dir(tmp_path / "evidence", "presence-contact-project-browser")
+    facts, errors, blocked, decisions, withheld, lost = {}, [], [], [], [], {"armed": True}
+    project = create_project(root, "community-research", name="Community research")
+    bound = {}
+
+    def bind_then_report(body):
+        from ouroboros.task_store import task_facts
+
+        oracle = ArtifactOracle(root)
+        bound["id"], = [task_id for task_id in task_facts(root)
+                        if ((oracle.task_result(task_id).get("metadata") or {}).get("presence") or {})
+                        .get("event", {}).get("source_event_id") == "project-required"]
+        bind_task_to_project(root, bound["id"], project["id"], project["chat_id"], origin={"absent": "system"})
+        return {"tool": "send_user_message", "arguments": {
+            "text": PROJECT_REPORT, "destination": "main", "request_id": "project-report"}}
+
+    def main_reply_turn(body):
+        assert REPLY in body_text(body)
+        return {"final": "Understood: research only."}
+
+    def resumed(body):
+        assert PROJECT_ANSWER in body_text(body)
+        return {"tool": "escalate", "arguments": {"question": FOLLOW_UP, "options": [], "wait_for_answer": False,
+                                                  "assumption": "Nothing is published.", "request_id": "follow-up"}}
+
+    steps = [bind_then_report,
+             {"tool": "escalate", "arguments": {"question": PROJECT_QUESTION, "options": [], "wait_for_answer": True,
+                                                "assumption": "No date has been promised.", "request_id": "scope"}},
+             main_reply_turn, resumed, {"final": PROJECT_FINAL}]
+    with ScriptedStubModel(steps, final_answer="Private research scope") as stub, sync_playwright() as pw:
+        settings = keyless_settings(stub, OUROBOROS_MAX_WORKERS=1,
+            OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off", OUROBOROS_CONSCIOUSNESS_DAILY_USD=10,
+            OUROBOROS_BG_WAKEUP_MIN=3600, OUROBOROS_BG_WAKEUP_MAX=7200)
+        write_settings_file(root / "settings.json", settings)
+        _seed_token(root, skill=SKILL, token=TOKEN, permissions=["presence"], manifest_permissions=["presence"])
+        place = places.connect_place(root, connector=SKILL, provider="fixture-chat", account_id="fixture-account",
+                                     conversation_id="community", label=LABEL, wakes=["mention"])
+        places.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
+        server = _Server(wait_clone, root, root / "settings.json")
+        oracle = ArtifactOracle(root)
+        browser = pw.chromium.launch()
+
+        def route(request):
+            if urlparse(request.request.url).netloc == urlparse(server.base_url).netloc:
+                request.fallback()
+            else:
+                blocked.append(request.request.url)
+                request.abort()
+
+        def new_context(theme, *, project_tab=False):
+            context = browser.new_context(viewport={"width": 1100, "height": 750},
+                                          color_scheme=theme, reduced_motion="reduce")
+            context.route("**/*", route)
+            context.on("page", lambda page: page.on("pageerror", lambda error: errors.append(str(error))))
+            context.on("request", lambda request: decisions.append(json.loads(request.post_data))
+                       if request.method == "POST" and request.url.endswith("/api/decisions") else None)
+
+            def history(response):  # every SPA history read whose window names a cause, as it was served
+                if "/api/chat/history" in response.url and response.status == 200:
+                    window = (response.json() or {}).get("window") or {}
+                    if window.get("truncated_by") or window.get("complete") is False:
+                        facts.setdefault("incomplete_history_reads", []).append({"url": response.url, "window": window})
+            context.on("response", history)
+            if project_tab:  # this tab's question reads, recorded in the page so no test hook delays its traffic
+                context.add_init_script("""(() => {
+                    const reads = window.__questionReads = [], fetched = window.fetch.bind(window);
+                    const facts = (q) => ({quiz_id: q.quiz_id, state: q.state, question_delivery: q.question_delivery || q.delivery});
+                    window.fetch = async (...args) => {
+                        const response = await fetched(...args), url = String(args[0]?.url || args[0]);
+                        if (/api\\/(chat\\/history|tasks\\/|decisions|state)/.test(url)) response.clone().json().then((body) => reads.push({
+                            at: performance.now(), url, status: response.status,
+                            questions: [...(body.messages || []).filter((m) => m.quiz).map((m) => facts(m.quiz)),
+                                        ...Object.values(body.owner_quiz || {}).map(facts),
+                                        ...(body.current_questions || []).map((q) => ({...facts(q), census: true}))],
+                            decision: url.endsWith('/api/decisions') ? body : undefined})).catch(() => {});
+                        return response;
+                    };
+                })();""")
+
+                def lose_first_answer(request):  # the server records it; this tab never hears the reply
+                    if lost["armed"] and request.request.method == "POST":
+                        lost["armed"] = False
+                        lost["status"] = request.fetch().status
+                        request.abort("connectionreset")
+                    else:
+                        request.fallback()
+
+                def withhold_answered_state(ws):
+                    upstream = ws.connect_to_server()
+                    ws.on_message(lambda message: upstream.send(message))
+
+                    def down(message):
+                        frame = json.loads(message) if isinstance(message, str) and message.startswith("{") else {}
+                        inner = frame.get("data") if isinstance(frame.get("data"), dict) else frame
+                        if inner.get("type") == "quiz_state" and inner.get("quiz_id") == facts.get("withhold_quiz"):
+                            withheld.append(inner)
+                            return
+                        ws.send(message)
+                    upstream.on_message(down)
+                context.route("**/api/decisions", lose_first_answer)
+                context.route_web_socket("**/ws", withhold_answered_state)
+            return context
+
+        main_context, project_context = new_context("dark"), new_context("light", project_tab=True)
+        main, panel = main_context.new_page(), project_context.new_page()
+        try:
+            server.start(ready_timeout=120)
+            facts["source"] = {"head": wait_clone.state.head.decode().strip(), "candidate": wait_clone.identity,
+                               "served_candidate": wait_clone.checkout_identity, "attestation": server.attestation}
+            assert _http(server.port, "POST", "/api/command", {"cmd": "/bg start"})["status"] == 200
+            assert wait_until(lambda: oracle.state().get("bg_consciousness_enabled") is True, 10)
+            for page in (main, panel):
+                page.goto(server.base_url, wait_until="domcontentloaded")
+                page.locator('#chat-status').filter(has_text="Online").wait_for(timeout=60000)
+            feed = _project_feed(panel, project)
+
+            def windows(stage):  # each room's history coverage as the SPA reads it, kept in the receipt
+                facts.setdefault("windows", []).append({"stage": stage, **{str(chat): _http(
+                    server.port, "GET", f"/api/chat/history?chat_id={chat}")["body"].get("window")
+                    for chat in (1, project["chat_id"])}})
+
+            windows("loaded")
+            facts["turn"] = _http(server.host_service_port, "POST", "/presence/turn",
+                                  _event(place, "project-required"), host=True)
+            assert facts["turn"]["body"]["status"] == "continuing", facts["turn"]
+            tid = bound["id"]
+            assert facts["turn"]["body"]["turn_ref"] == tid
+            row = wait_until(lambda: (row if (row := oracle.task_result(tid)).get("owner_quiz") else None), 30)
+            qid, = row["owner_quiz"]
+            facts["withhold_quiz"] = qid
+            report = '.chat-bubble[data-system-type="main_notice"]'
+            for page, room in ((main, "#chat-messages"), (panel, feed)):
+                page.locator(f'{room} .chat-quiz-card[data-quiz-id="{qid}"] .chat-quiz-comment').wait_for(timeout=30000)
+                page.locator(f"{room} {report}").filter(has_text=PROJECT_REPORT).wait_for(timeout=30000)
+            windows("question shown")
+            main_card, in_main = _shown(main, "#chat-messages", tid, qid)
+            panel_card, in_panel = _shown(panel, feed, tid, qid)
+            reports = [page.locator(f"{room} {report}").filter(has_text=PROJECT_REPORT)
+                       for page, room in ((main, "#chat-messages"), (panel, feed))]
+            facts["one_row"] = {"question": [in_main["address"], in_panel["address"]],
+                                "report": [node.get_attribute("data-row-address") for node in reports]}
+            assert in_main["address"] == in_panel["address"] and in_main["address"].startswith("row:1@")
+            assert len(set(facts["one_row"]["report"])) == 1 and facts["one_row"]["report"][0].startswith("row:1@")
+            for node in reports:  # each copy names its place source beside the voice, never as authored text
+                assert node.locator('.sender').locator(f'a[href="{SOURCE}"]').inner_text() == LABEL
+            assert panel_card.locator('..').locator('.sender').locator(f'a[href="{SOURCE}"]').inner_text() == LABEL
+            _capture(main, main_card, evidence, "project-question-in-main-dark", facts)
+            _capture(panel, panel_card, evidence, "project-question-in-project-light", facts)
+
+            # The owner's direct Reply in Main to the private report: one row, in Main and in its work's Project.
+            reports[0].locator('.message').click(button="right")
+            main.locator('.chat-row-menu:not([data-leaving]) [data-row-action="reply"]').click()
+            main.locator('#chat-input-reply').get_by_text("Replying to").wait_for(timeout=10000)
+            main.locator('#chat-input').fill(REPLY)
+            main.locator('#chat-send').click()
+            main.locator('#chat-messages').get_by_text("Understood: research only.", exact=True).wait_for(timeout=90000)
+            echoed = panel.locator(f'{feed} .chat-bubble.user.has-reply').filter(has_text=REPLY)
+            echoed.wait_for(timeout=30000)
+            quote = echoed.locator('.chat-quote-main')
+            assert "Ouroboros" in quote.inner_text() and "The community thread asks" in quote.inner_text()
+            quote.click()
+            target = panel.locator(f'{feed} {report}.is-quote-target').filter(has_text=PROJECT_REPORT)
+            target.wait_for(timeout=10000)
+            facts["reply"] = {"main": main.locator('#chat-messages .chat-bubble.user.has-reply').filter(has_text=REPLY)
+                              .get_attribute("data-row-address"), "project": echoed.get_attribute("data-row-address"),
+                              "quote_target": target.get_attribute("data-row-address")}
+            assert facts["reply"]["main"] == facts["reply"]["project"]
+            assert facts["reply"]["quote_target"] == facts["one_row"]["report"][0]
+            panel.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+            panel.screenshot(path=str(evidence / "project-reply-quote-target-light.png"), animations="disabled")
+
+            # Answer in the Project; the response is lost and the live answered frame withheld from this tab,
+            # so only the Project's own reads (history arrivals, the canonical recovery read) can settle it.
+            panel_card.locator('.chat-quiz-comment').fill(PROJECT_ANSWER)
+            panel_card.locator('.chat-quiz-send').click()
+            panel_card.get_by_text("You answered", exact=True).wait_for(timeout=60000)
+            assert lost["armed"] is False and lost["status"] == 200, lost
+            assert panel_card.locator('.chat-quiz-submission-note').inner_text().strip() == ""
+            main_card.get_by_text("You answered", exact=True).wait_for(timeout=30000)  # Main heard it live
+            facts["project_tab_reads_at_answer"] = panel.evaluate("() => window.__questionReads || []")
+            facts["recovered"] = _shown(panel, feed, tid, qid)[1]
+            _capture(panel, panel_card, evidence, "project-answer-recovered-light", facts)
+
+            source = wait_durable_result(oracle, tid, timeout=90)
+            follow, = [key for key in source["owner_quiz"] if key != qid]
+            assert source["owner_quiz"][qid]["comment"] == PROJECT_ANSWER
+            facts["withhold_quiz"] = None
+            follow_card = panel.locator(f'{feed} .chat-quiz-card[data-task-id="{tid}"][data-quiz-id="{follow}"]')
+            follow_card.get_by_text("Unanswered · task finished", exact=True).wait_for(timeout=30000)
+            follow_card.get_by_role("button", name="Close question without answering", exact=True).click()
+            follow_card.get_by_text("Question closed", exact=True).wait_for(timeout=30000)
+            assert wait_until(lambda: oracle.task_result(tid)["owner_quiz"][follow]["state"] == "closed", 30)
+            _capture(panel, follow_card, evidence, "project-follow-up-closed-light", facts)
+
+            # The inline work's own final, its place Silent: once in the Project it was turned into, live.
+            final = panel.locator(f'{feed} .chat-bubble.assistant').filter(has_text=PROJECT_FINAL)
+            final.wait_for(timeout=60000)
+            assert final.count() == 1 and final.locator('.message').inner_text().strip() == PROJECT_FINAL
+            assert main.locator('#chat-messages .chat-bubble').filter(has_text=PROJECT_FINAL).count() == 0
+            facts["project_final"] = {"address": final.get_attribute("data-row-address"),
+                                      "text": final.locator('.message').inner_text()}
+            _capture(panel, final, evidence, "project-inline-final-light", facts)
+
+            # Cold reloads: history alone gives both rooms the same rows and states.
+            for page in (main, panel):
+                page.reload(wait_until="domcontentloaded")
+                page.locator('#chat-status').filter(has_text="Online").wait_for(timeout=60000)
+            feed = _project_feed(panel, project)
+            for page, room, theme in ((main, "#chat-messages", "dark"), (panel, feed, "light")):
+                answered, closed = (page.locator(f'{room} .chat-quiz-card[data-task-id="{tid}"][data-quiz-id="{key}"]')
+                                    for key in (qid, follow))
+                answered.locator('.chat-quiz-answer').filter(has_text=PROJECT_ANSWER).wait_for(timeout=30000)
+                closed.get_by_text("Question closed", exact=True).wait_for(timeout=30000)
+                assert page.locator(f"{room} .chat-bubble.user.has-reply").filter(has_text=REPLY).count() == 1
+                assert page.locator(f"{room} {report}").filter(has_text=PROJECT_REPORT).count() == 1
+                finals = page.locator(f"{room} .chat-bubble").filter(has_text=PROJECT_FINAL)
+                if room == feed:
+                    finals.first.wait_for(timeout=30000)
+                assert finals.count() == (1 if room == feed else 0)
+                _capture(page, answered, evidence, f"reload-{'main' if room.startswith('#chat') else 'project'}-{theme}", facts)
+            panel.locator(f'{feed} .chat-bubble.assistant').filter(has_text=PROJECT_FINAL).evaluate(
+                "el => el.scrollIntoView({block: 'center', behavior: 'instant'})")  # clear of the floating composer
+            panel.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+            panel.screenshot(path=str(evidence / "reload-project-inline-final-light.png"), animations="disabled")
+            windows("reloaded")
+            shown = {chat: [row for row in _http(server.port, "GET", f"/api/chat/history?chat_id={chat}")["body"]["messages"]
+                            if row.get("task_id") == tid] for chat in (1, project["chat_id"])}
+            facts["final_rows"] = {str(chat): [(row.get("system_type"), row.get("text")) for row in rows]
+                                   for chat, rows in shown.items()}
+            assert [row["text"] for row in shown[project["chat_id"]] if row.get("role") == "assistant"
+                    and row.get("text") == PROJECT_FINAL] == [PROJECT_FINAL]
+            assert not [row for row in shown[1] if row.get("text") == PROJECT_FINAL]
+            assert [row["text"].split(".")[0] for row in shown[project["chat_id"]] if row.get("system_type") == "task_summary"
+                    and str(row.get("text") or "").startswith("Done.")] == ["Done"]  # its Done row stands there too
+            assert [entry.get("comment") for entry in decisions if entry.get("comment")] == [PROJECT_ANSWER]
+            facts["work_poll"] = _http(server.host_service_port, "GET", f"/presence/work/{tid}", host=True)
+            assert facts["work_poll"]["body"]["outcome"] == "silent" and not facts["work_poll"]["body"]["text"]
+            rows = [entry.row for entry in dialogue_store.iter_rows(root, "chat")]
+            private = [row for row in rows if row.get("presence_contact") or (row.get("quiz") or {}).get("presence_contact")]
+            assert private and {row.get("chat_id") for row in private} == {1}  # written once, to Main
+            assert not [row for row in rows if row.get("direction") == "out" and row.get("chat_id") not in (1, project["chat_id"])]
+            said = [row for row in rows if row.get("text") == PROJECT_FINAL and row.get("task_id") == tid]
+            assert [(row.get("chat_id"), row.get("direction")) for row in said] == [(project["chat_id"], "out")]
+            assert not [row for row in rows if row.get("type") == "presence_delivery" and row.get("task_id") == tid]
+            assert withheld, "the live answered frame reached this tab: the Project's own reads were not what settled it"
+            assert not errors and not blocked, (errors, blocked)
+            facts["passed"] = True
+        finally:
+            try:
+                for name, page in (("main", main), ("project", panel)):
+                    if not page.is_closed():
+                        page.screenshot(path=str(evidence / f"last-{name}.png"), animations="disabled")
+                if not panel.is_closed():  # diagnostics only: a failed read of them never costs the receipt
+                    with contextlib.suppress(Exception):
+                        facts["project_tab_question_reads"] = panel.evaluate("() => window.__questionReads || []")
+                    with contextlib.suppress(Exception):
+                        facts["project_tab_quiz_nodes"] = panel.evaluate("""() => [...document.querySelectorAll('.chat-quiz-card')]
+                            .map((card) => ({quiz: card.dataset.quizId, state: card.dataset.state, feed: card.closest('[id$="-messages"]')?.id,
+                                status: card.querySelector('.chat-quiz-status-text')?.textContent,
+                                bubble: card.closest('.chat-bubble')?.dataset.rowAddress}))""")
+                facts.update(errors=errors, blocked_browser_requests=blocked, decisions=decisions,
+                             withheld_frames=withheld, lost_response=lost, model_kinds=stub.kinds())
+                (evidence / "receipt.json").write_text(json.dumps(facts, indent=2, default=str))
+                (evidence / "model-calls.json").write_text(json.dumps([
+                    {"kind": kind, **_model_witness(body)} for kind, body in stub.calls], indent=2))
+                (evidence / "dialogue.json").write_text(json.dumps([entry.row for entry in dialogue_store.iter_rows(root, "chat")], indent=2))
                 for path in (root.parent / "network.jsonl", root / "logs" / "supervisor.jsonl", root / "logs" / "server.log"):
                     if path.is_file():
                         shutil.copyfile(path, evidence / path.name)

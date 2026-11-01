@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import html as html_lib
 import mimetypes
+import os
+import pathlib
 import re
+import stat
 from typing import Any, BinaryIO, Dict, Optional
 
 import httpx
 
-from ..scripts.telegram_settings import validate_telegram_proxy as _telegram_proxy
+from ..scripts.telegram_settings import (
+    validate_telegram_api_base as _telegram_api_base,
+    validate_telegram_files_dir as _telegram_files_dir,
+    validate_telegram_proxy as _telegram_proxy,
+)
 from .telegram_i18n import Index
 
 # Telegram hard-caps a single sendMessage at 4096 UTF-16 code units.
@@ -573,7 +581,8 @@ def message_chunks(text: str, parse_mode: str = "HTML") -> list[str]:
 
 class TelegramClient:
     def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None,
-                 on_message=None, reply_to_message_id: int = 0):
+                 on_message=None, reply_to_message_id: int = 0,
+                 api_base_url: Optional[str] = None, files_dir: Optional[str] = None):
         self.token = str(token or "").strip()
         self.trust_env = bool(trust_env)
         # One observer per mirrored host row, called for EVERY confirmed part,
@@ -582,12 +591,16 @@ class TelegramClient:
         self.reply_to_message_id = int(reply_to_message_id)
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN is missing")
-        # An explicit proxy replaces ambient proxies for these calls only. The target stays
-        # https://api.telegram.org, so TLS runs end to end through the tunnel: the proxy
-        # sees the host, never the token-bearing path, and redirects are never followed.
+        # An explicit proxy replaces ambient proxies for these calls only. With the default
+        # base the target stays https://api.telegram.org, so TLS runs end to end through the
+        # tunnel: the proxy sees the host, never the token-bearing path, and redirects are
+        # never followed. A TELEGRAM_API_BASE origin serves the same Bot API from the owner's
+        # server with that origin's own transport security; files_dir is a --local store.
         self.proxy = _telegram_proxy(proxy)
-        self.api_base = f"https://api.telegram.org/bot{self.token}"
-        self.file_base = f"https://api.telegram.org/file/bot{self.token}"
+        base = _telegram_api_base(api_base_url)
+        self.api_base = f"{base}/bot{self.token}"
+        self.file_base = f"{base}/file/bot{self.token}"
+        self.files_dir = _telegram_files_dir(files_dir)
 
     async def call(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None, timeout: int = 30) -> Dict[str, Any]:
         method_text = str(method or "")
@@ -680,7 +693,44 @@ class TelegramClient:
             raise RuntimeError(
                 f"Telegram file download transport failed ({type(exc).__name__})."
             ) from None
+        except RuntimeError as exc:
+            if not self.files_dir:
+                raise
+            # Off the shared event loop: the store may be a slow or network disk.
+            content = await asyncio.to_thread(self._read_file_from_disk, file_path, exc)
         return bytes(content)
+
+    def _read_file_from_disk(self, file_path: str, cause: Exception) -> bytes:
+        """Read a file of a --local server from its store (tdlib/telegram-bot-api#26).
+
+        Absolute paths are taken as the server names them, others are joined under the
+        store. Lexical confinement runs first, a pure comparison, so a UNC path is refused
+        before resolve() could touch an unrelated share; either spelling of the store passes
+        (it may be a symlinked one, as /tmp on macOS). The resolved path must stay inside the
+        resolved store and is the one opened, without following a final symlink; the type
+        comes from the open file, and at most the cap plus one byte is read.
+        """
+        configured = pathlib.Path(self.files_dir)
+        store = configured.resolve()
+        raw = pathlib.Path(str(file_path or ""))
+        candidate = raw if raw.is_absolute() else store / raw
+        if not (candidate.is_relative_to(configured) or candidate.is_relative_to(store)):
+            raise cause from None
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(store):
+            raise cause from None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        try:
+            handle = os.fdopen(os.open(resolved, flags), "rb")
+        except OSError:
+            raise cause from None
+        with handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise cause from None
+            data = handle.read(_MAX_TELEGRAM_DOWNLOAD_BYTES + 1)
+        if len(data) > _MAX_TELEGRAM_DOWNLOAD_BYTES:
+            raise RuntimeError("Telegram file exceeds the 10 MiB download limit.") from cause
+        return data
 
     async def get_updates(self, offset: int) -> list[dict]:
         payload = await self.call("getUpdates", data={"timeout": 20, "offset": offset}, timeout=25)

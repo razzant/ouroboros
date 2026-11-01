@@ -645,7 +645,7 @@ MAIN_NOTICE_TYPE = "main_notice"
 MAIN_PINNED_ROW_TYPES = frozenset({"project_started", "project_handoff", "project_completion_summary"})
 # Model-authored work speech written to a fixed address (Main, a relay's source room): one row,
 # also a member of its work's room (``room_membership.row_rooms``), so a Project keeps its whole
-# conversation. Presence private contact stays Main-only.
+# conversation. Presence private contact is Main's too and never a place room's (``row_rooms``).
 WORK_SPEECH_ELSEWHERE_TYPES = frozenset({MAIN_NOTICE_TYPE, "relay_reply"})
 # Rows whose written address is the producer's, never their task's room. The bus write seam
 # (``message_bus.send_with_budget``) and the supervisor send handler read this one set;

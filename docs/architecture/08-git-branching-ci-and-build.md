@@ -6,7 +6,7 @@ Branches/feeds, CI trust boundaries, keyless E2E, builds, dependency locks and r
 
 Candidates use `candidate/<task>` and private pins (§6), published explicitly. Auto-push sends the branch and its operation-created annotated tag; selected adoption withholds both (DEVELOPMENT "The tiered commit and CI gates"). Adoption keeps that creation fact; interrupted recording leaves the tag local. Neutral commits and legacy receipts backfill none. Tag failure is disclosed, not retried.
 
-The local `ouroboros-stable` ref is also the recovery point (no start falls back to it), moved by Save recovery point, `promote_to_stable`, which also pushes it, and each ready managed boot to its smoke-proved commit, apart from the QA feed. Launcher metadata is bootstrap provenance only: status, preflight, Colab bootstrap and apply resolve the selected channel and exact fetched SHA themselves: an older frozen launcher cannot redirect updates. QA and Development admit without comparing versions.
+The local `ouroboros-stable` ref is also the recovery point (never a fallback, §2), moved by Save recovery point, `promote_to_stable`, which also pushes it, and each ready managed boot to its smoke-proved commit, apart from the QA feed. Launcher metadata is bootstrap provenance only: status, preflight, Colab bootstrap and apply resolve the selected channel and exact fetched SHA themselves: an older frozen launcher cannot redirect updates. QA and Development admit without comparing versions.
 
 ### CI topology
 

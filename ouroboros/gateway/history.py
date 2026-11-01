@@ -739,8 +739,11 @@ def _collect_chat_rows(
             if entry.get("type") in {"quiz_answer", "quiz_closed"}:
                 if (replay_evidence is not None and isinstance(entry.get("quiz"), dict)
                         and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)):
+                    from ouroboros.owner_quiz import question_delivery_now  # as recorded; its delivery as it is now
+                    quiz, live = dict(entry["quiz"]), _quiz_source(str(entry.get("task_id") or ""))["quizzes"]
+                    quiz.update(question_delivery_now(live.get(str(quiz.get("quiz_id") or ""))))
                     replay_evidence.append({"text": "", "role": "system", "is_progress": False,
-                                            "system_type": entry["type"], "quiz": dict(entry["quiz"]),
+                                            "system_type": entry["type"], "quiz": quiz,
                                             "task_id": str(entry.get("task_id") or ""),
                                             "ts": str(entry.get("ts") or ""), **_history_identity(entry)})
                 continue

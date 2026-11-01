@@ -439,4 +439,6 @@ def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
     options = dict(built[0])
     assert callable(options.pop("on_message"))
     assert options.pop("reply_to_message_id") == 0
-    assert options == {"trust_env": expected, "proxy": None}
+    assert options == {"trust_env": expected, "proxy": None,
+                       "api_base_url": "https://api.telegram.org",
+                       "files_dir": None}

@@ -12,6 +12,16 @@ import {
     restartStatusCanSettle,
 } from '../modules/updates.js';
 
+const MODULES = new URL('../modules/', import.meta.url);
+const moduleSource = (name) => readFileSync(new URL(name, MODULES), 'utf8');
+// The source pins' texts, read once: this file imports both, so a missing one fails before any test either way.
+const UPDATES_JS = moduleSource('updates.js');
+const STATUS_JS = moduleSource('update_status.js');
+// One function of the panel: its declaration up to the next one.
+const panelFunction = (name) => {
+    const fn = UPDATES_JS.slice(UPDATES_JS.indexOf(`async function ${name}`));
+    return fn.slice(0, fn.indexOf('async function', 10));
+};
 
 test('update failure renders the rollback stash disclosure without losing diagnostics', () => {
     const stash = 'a'.repeat(40);
@@ -44,13 +54,8 @@ class FakeWS {
 
 
 test('ordinary update selects clean or assisted merge without recovery replacement or client-side stash', () => {
-    assert.equal(updateStrategyForPlan({
-        available: true,
-        kind: 'clean',
-        local_dirty_count: 0,
-        code_conflict_paths: [],
-        doc_conflict_paths: [],
-    }), 'auto_merge');
+    const clean = { available: true, kind: 'clean', local_dirty_count: 0, code_conflict_paths: [], doc_conflict_paths: [] };
+    assert.equal(updateStrategyForPlan(clean), 'auto_merge');
     assert.equal(updateStrategyForPlan({
         available: true,
         kind: 'conflicting',
@@ -58,55 +63,53 @@ test('ordinary update selects clean or assisted merge without recovery replaceme
         local_dirty_count: 2,
         code_conflict_paths: ['ouroboros/config.py'],
     }), 'assisted');
-    assert.equal(updateStrategyForPlan({
-        available: true,
-        kind: 'clean',
-        recommended_strategy: 'assisted',
-        local_dirty_count: 0,
-        code_conflict_paths: [],
-        doc_conflict_paths: [],
-    }), 'auto_merge');
+    assert.equal(updateStrategyForPlan({ ...clean, recommended_strategy: 'assisted' }), 'auto_merge');
     assert.equal(updateStrategyForPlan({ available: true, kind: 'unknown' }), '');
     assert.equal(updateStrategyForPlan({ available: false, kind: 'clean' }), '');
 
-    const source = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
-    const ordinary = source.slice(
-        source.indexOf('async function applyUpdate()'),
-        source.indexOf('async function replaceWithOfficial()'),
+    const ordinary = UPDATES_JS.slice(
+        UPDATES_JS.indexOf('async function applyUpdate()'),
+        UPDATES_JS.indexOf('async function replaceWithOfficial()'),
     );
     assert.doesNotMatch(ordinary, /['"]replace['"]/);
     assert.doesNotMatch(ordinary, /updateApply\(['"]stash['"]/);
 
     // The pill is a pointer, not a second apply surface (owner decision
     // 2026-08-31): it must never call updateApply or preflight itself.
-    const pill = readFileSync(new URL('../modules/update_status.js', import.meta.url), 'utf8');
-    assert.doesNotMatch(pill, /updateApply\(/);
-    assert.doesNotMatch(pill, /updatePreflight\(/);
-    assert.match(pill, /openDashboardTab\('updates'\)/);
+    assert.doesNotMatch(STATUS_JS, /updateApply\(/);
+    assert.doesNotMatch(STATUS_JS, /updatePreflight\(/);
+    assert.match(STATUS_JS, /openDashboardTab\('updates'\)/);
 });
 
 
-test('update apply sends exact preflight pins and recovery confirmation only when asked', async () => {
+// The requests `send` makes, each `[url, JSON body]`, against a fetch double that answers every one `status`, `reply`.
+async function sentRequests(status, reply, send) {
     const originalFetch = globalThis.fetch;
     const calls = [];
     globalThis.fetch = async (url, init) => {
-        calls.push({ url, init, body: JSON.parse(init.body) });
-        return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+        calls.push([url, JSON.parse(init.body)]);
+        return { ok: true, status, json: async () => reply };
     };
     try {
-        const plan = { base_sha: 'base123', target_sha: 'target456' };
-        await apiClient.updateApply('auto_merge', plan);
-        await apiClient.updateApply('replace', plan, { confirmRecovery: true });
+        await send();
     } finally {
         globalThis.fetch = originalFetch;
     }
+    return calls;
+}
 
-    assert.deepEqual(calls[0].body, {
+test('update apply sends exact preflight pins and recovery confirmation only when asked', async () => {
+    const plan = { base_sha: 'base123', target_sha: 'target456' };
+    const bodies = (await sentRequests(200, { status: 'ok' }, async () => {
+        await apiClient.updateApply('auto_merge', plan);
+        await apiClient.updateApply('replace', plan, { confirmRecovery: true });
+    })).map(([, body]) => body);
+    assert.deepEqual(bodies[0], {
         strategy: 'auto_merge',
         expected_base_sha: 'base123',
         expected_target_sha: 'target456',
     });
-    assert.deepEqual(calls[1].body, {
+    assert.deepEqual(bodies[1], {
         strategy: 'replace',
         expected_base_sha: 'base123',
         expected_target_sha: 'target456',
@@ -116,27 +119,25 @@ test('update apply sends exact preflight pins and recovery confirmation only whe
 
 
 test('detailed Updates UI makes destructive replacement an explicit recovery action', () => {
-    const source = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
-    assert.match(source, />Save recovery point<\/button>/);
-    assert.doesNotMatch(source, />Promote to QA<\/button>/);
-    assert.doesNotMatch(source, />Promote to Stable<\/button>/);
-    assert.match(source, /does not change the official QA feed/);
-    assert.match(source, /<summary>Recovery<\/summary>/);
-    assert.match(source, /Replace with Official Version \(Recovery\)/);
-    assert.match(source, /apiClient\.updateApply\('replace', plan, \{ confirmRecovery: true \}\)/);
-    assert.match(source, /updatePreflight\(\)/);
-    assert.match(source, /data\.check_ok === false/);
-    assert.match(source, /!data\.from_cache.*official_status_requires_check/);
-    assert.match(source, /restart_required/);
+    assert.match(UPDATES_JS, />Save recovery point<\/button>/);
+    assert.doesNotMatch(UPDATES_JS, />Promote to QA<\/button>/);
+    assert.doesNotMatch(UPDATES_JS, />Promote to Stable<\/button>/);
+    assert.match(UPDATES_JS, /does not change the official QA feed/);
+    assert.match(UPDATES_JS, /<summary>Recovery<\/summary>/);
+    assert.match(UPDATES_JS, /Replace with Official Version \(Recovery\)/);
+    assert.match(UPDATES_JS, /apiClient\.updateApply\('replace', plan, \{ confirmRecovery: true \}\)/);
+    assert.match(UPDATES_JS, /updatePreflight\(\)/);
+    assert.match(UPDATES_JS, /data\.check_ok === false/);
+    assert.match(UPDATES_JS, /!data\.from_cache.*official_status_requires_check/);
+    assert.match(UPDATES_JS, /restart_required/);
     // Restart now is honest about refusals: apiFetch does not reject on 4xx/5xx.
-    assert.match(source, /async function restartNow\(\)/);
-    assert.match(source, /if \(!resp\.ok\) throw new Error/);
-    assert.match(source, /Rollback \$\{data\.switch_deferred \? 'recorded' : 'completed'\}:.*Restart Ouroboros to finish/s);
-    assert.match(source, /Rollback \$\{data\.switch_deferred \? 'requested' : 'successful'\}:.*Server is restarting/s);
-    assert.match(source, /Rollback failed:.*Runtime shutdown was incomplete/s);
+    assert.match(UPDATES_JS, /async function restartNow\(\)/);
+    assert.match(UPDATES_JS, /if \(!resp\.ok\) throw new Error/);
+    assert.match(UPDATES_JS, /Rollback \$\{data\.switch_deferred \? 'recorded' : 'completed'\}:.*Restart Ouroboros to finish/s);
+    assert.match(UPDATES_JS, /Rollback \$\{data\.switch_deferred \? 'requested' : 'successful'\}:.*Server is restarting/s);
+    assert.match(UPDATES_JS, /Rollback failed:.*Runtime shutdown was incomplete/s);
 
-    const pillSource = readFileSync(new URL('../modules/update_status.js', import.meta.url), 'utf8');
-    assert.match(pillSource, /update_status_ready/);
+    assert.match(STATUS_JS, /update_status_ready/);
 });
 
 
@@ -152,67 +153,41 @@ test('the main pill says "Update available"; the commit identity is its title (o
 
 test('main update dialog never invents facts for an unverified preflight', () => {
     assert.equal(verifiedUpdatePlan(null), null);
-    assert.equal(verifiedUpdatePlan({ merge_plan: {
-        available: true,
-        kind: 'unknown',
-        base_sha: 'base123',
-        target_sha: 'target456',
-        local_dirty_count: 0,
-    } }), null);
-    assert.deepEqual(verifiedUpdatePlan({ merge_plan: {
-        available: true,
-        kind: 'clean',
-        base_sha: 'base123',
-        target_sha: 'target456',
-        local_dirty_count: 0,
-    } }), {
-        plan: {
-            available: true,
-            kind: 'clean',
-            base_sha: 'base123',
-            target_sha: 'target456',
-            local_dirty_count: 0,
-        },
-        strategy: 'auto_merge',
-    });
+    const plan = { available: true, kind: 'clean', base_sha: 'base123', target_sha: 'target456', local_dirty_count: 0 };
+    assert.equal(verifiedUpdatePlan({ merge_plan: { ...plan, kind: 'unknown' } }), null);
+    assert.deepEqual(verifiedUpdatePlan({ merge_plan: { ...plan } }), { plan, strategy: 'auto_merge' });
 
     // The verification helper still guards the one apply surface: the panel
     // imports it, and an unverified plan never reaches updateApply.
-    const panel = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
-    assert.match(panel, /verifiedUpdatePlan\(preflight\)/);
-    assert.match(panel, /could not be verified\. No files were changed\./);
+    assert.match(UPDATES_JS, /verifiedUpdatePlan\(preflight\)/);
+    assert.match(UPDATES_JS, /could not be verified\. No files were changed\./);
 });
 
 test('restart continuation and Replace gating are fail-closed in source', () => {
-    const src = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
     // The panel-lifetime flag re-applies restart_needed on every status refresh.
-    assert.match(src, /restartNeeded && !data\?\.update_tx\?\.active \? 'restart_needed' : ''/);
+    assert.match(UPDATES_JS, /restartNeeded && !data\?\.update_tx\?\.active \? 'restart_needed' : ''/);
     // A failed status read keeps the continuation too.
-    assert.match(src, /setPhase\(restartNeeded \? 'restart_needed' : ''\)/);
+    assert.match(UPDATES_JS, /setPhase\(restartNeeded \? 'restart_needed' : ''\)/);
     // render() alone owns the Replace gate, failing closed on unreadable status
     // and on every busy/blocked state including restart_needed.
-    assert.match(src, /statusReadFailed\(latestStatus\) \|\| \[\s*'loading', 'checking', 'updating', 'preflighting', 'restarting',\s*'restart_required', 'restart_needed', 'resolving', 'unmanaged',\s*\]/);
+    assert.match(UPDATES_JS, /statusReadFailed\(latestStatus\) \|\| \[\s*'loading', 'checking', 'updating', 'preflighting', 'restarting',\s*'restart_required', 'restart_needed', 'resolving', 'unmanaged',\s*\]/);
     // The catches never assign replaceBtn.disabled themselves.
-    const catches = src.split('catch').slice(1);
+    const catches = UPDATES_JS.split('catch').slice(1);
     for (const c of catches) {
         assert.doesNotMatch(c.slice(0, 400), /replaceBtn\.disabled\s*=/);
     }
 });
 
 test('Replace carries an in-flight latch that render respects across re-renders', () => {
-    const src = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
-    assert.match(src, /replaceBtn\.disabled = replaceInFlight \|\| statusReadFailed/);
+    assert.match(UPDATES_JS, /replaceBtn\.disabled = replaceInFlight \|\| statusReadFailed/);
     // The latch opens before the preflight request and closes in finally.
-    const fn = src.slice(src.indexOf('async function replaceWithOfficial'));
-    const body = fn.slice(0, fn.indexOf('async function', 10));
+    const body = panelFunction('replaceWithOfficial');
     assert.match(body, /replaceInFlight = true;[\s\S]*updatePreflight/);
     assert.match(body, /finally \{\s*replaceInFlight = false;\s*render\(\);/);
 });
 
 test('Replace outcomes say a restart was requested, never that the version already landed', () => {
-    const src = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
-    const fn = src.slice(src.indexOf('async function replaceWithOfficial'));
-    const body = fn.slice(0, fn.indexOf('async function', 10));
+    const body = panelFunction('replaceWithOfficial');
     const toasts = [...body.matchAll(/showToast\('([^']*)'/g)].map((match) => match[1]);
     assert.deepEqual(toasts, [
         'Recovery needs a restart that could not be requested. Restart Ouroboros to finish.',
@@ -273,29 +248,19 @@ test('restart reconciliation waits only for boot-owned transaction phases', () =
     assert.equal(restartStatusCanSettle({ warnings: ['status_error:down'] }), false);
     assert.equal(restartStatusCanSettle({}), true);
     assert.equal(restartStatusCanSettle({ update_tx: { active: false } }), true);
-    assert.equal(restartStatusCanSettle({
-        update_tx: { active: true, phase: 'pending_boot_smoke' },
-    }), false);
-    assert.equal(restartStatusCanSettle({
-        update_tx: { active: true, phase: 'applying_replace' },
-    }), false);
-    assert.equal(restartStatusCanSettle({
-        update_tx: { active: true, phase: 'pending_boot_smoke' },
-    }, { afterBootNotice: true }), true);
-    assert.equal(restartStatusCanSettle({
-        update_tx: { active: true, phase: 'gate_blocked' },
-    }), true);
-    assert.equal(restartStatusCanSettle({
-        update_tx: { active: true, phase: 'rolling_back' },
-    }), true);
+    const active = (phase) => ({ update_tx: { active: true, phase } });
+    assert.equal(restartStatusCanSettle(active('pending_boot_smoke')), false);
+    assert.equal(restartStatusCanSettle(active('applying_replace')), false);
+    assert.equal(restartStatusCanSettle(active('pending_boot_smoke'), { afterBootNotice: true }), true);
+    assert.equal(restartStatusCanSettle(active('gate_blocked')), true);
+    assert.equal(restartStatusCanSettle(active('rolling_back')), true);
 });
 
 test('all successful restart paths share one lifecycle entry', () => {
-    const source = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
-    assert.equal((source.match(/setPhase\('restarting'\)/g) || []).length, 1);
+    assert.equal((UPDATES_JS.match(/setPhase\('restarting'\)/g) || []).length, 1);
     // Definition plus rollback, the in-place apply, recovery replace, Restart now, and Restart to update.
-    assert.equal((source.match(/enterRestarting\(\)/g) || []).length, 6);
-    assert.doesNotMatch(source, /restartNeeded = false;\s*enterRestarting\(\)/);
+    assert.equal((UPDATES_JS.match(/enterRestarting\(\)/g) || []).length, 6);
+    assert.doesNotMatch(UPDATES_JS, /restartNeeded = false;\s*enterRestarting\(\)/);
 });
 
 
@@ -637,19 +602,10 @@ test('a request in flight holds every control of its verdict; Restart to update 
 });
 
 test('the candidate actions post their strategy and the candidate the panel showed', async () => {
-    const originalFetch = globalThis.fetch;
-    const calls = [];
-    globalThis.fetch = async (url, init) => {
-        calls.push({ url, body: JSON.parse(init.body) });
-        return { ok: true, status: 202, json: async () => ({ status: 'preparing' }) };
-    };
-    try {
+    assert.deepEqual(await sentRequests(202, { status: 'preparing' }, async () => {
         await apiClient.updateCandidate('prepare');
         await apiClient.updateCandidate('activate', 'update_d2f6a91c7e5b_4f9a1c');
-    } finally {
-        globalThis.fetch = originalFetch;
-    }
-    assert.deepEqual(calls.map((call) => [call.url, call.body]), [
+    }), [
         ['/api/update/apply', { strategy: 'prepare' }],
         ['/api/update/apply', { strategy: 'activate', candidate_id: 'update_d2f6a91c7e5b_4f9a1c' }],
     ]);
@@ -662,22 +618,21 @@ test('the panel reads only candidate fields the server projection emits', () => 
     const emitted = new Set([...fn.slice(0, fn.indexOf('\n\n\n') > 0 ? fn.indexOf('\n\n\n') : undefined)
         .matchAll(/"([a-z_]+)":/g)].map((match) => match[1]));
     for (const key of ['state', 'actions', 'start_failure', 'refusal', 'error']) assert.ok(emitted.has(key), key);
-    const source = readFileSync(new URL('../modules/update_candidate.js', import.meta.url), 'utf8');
+    const source = moduleSource('update_candidate.js');
     const read = new Set([...source.matchAll(/\bcandidate\.([a-z_]+)/g)].map((match) => match[1]));
     assert.ok(read.size >= 12, 'no candidate reads found — the regex or the module moved');
     assert.deepEqual([...read].filter((field) => !emitted.has(field)), [], 'update_candidate.js reads fields never emitted');
 });
 
 test('only updates.js asks for the candidate verdict, and the pill never prepares or activates', () => {
-    const modules = new URL('../modules/', import.meta.url);
-    const files = readdirSync(modules).filter((name) => name.endsWith('.js'));
-    const callers = files.filter((name) => /\bcandidateVerdict\b/.test(readFileSync(new URL(name, modules), 'utf8')));
+    const files = readdirSync(MODULES).filter((name) => name.endsWith('.js'));
+    const callers = files.filter((name) => /\bcandidateVerdict\b/.test(moduleSource(name)));
     assert.deepEqual(callers.sort(), ['update_candidate.js', 'updates.js']);
     for (const name of files.filter((file) => !['updates.js', 'api_client.js'].includes(file))) {
-        assert.doesNotMatch(readFileSync(new URL(name, modules), 'utf8'), /updateCandidate\(/, `${name} sends an Update action`);
+        assert.doesNotMatch(moduleSource(name), /updateCandidate\(/, `${name} sends an Update action`);
     }
     for (const name of ['updates.js', 'update_candidate.js', 'update_status.js']) {
-        assert.doesNotMatch(readFileSync(new URL(name, modules), 'utf8'), /stashed and restored/, name);
+        assert.doesNotMatch(moduleSource(name), /stashed and restored/, name);
     }
 });
 

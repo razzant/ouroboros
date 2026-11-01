@@ -483,9 +483,10 @@ def test_the_inventory_imports_no_model_client_and_reads_projects_lazily():
     assert mi.VIEW_TRACE_KEY == "memory_view"
 
 
-def test_private_main_contact_stays_in_mains_inventory_like_canonical_history(tmp_path):
-    """F5: a Presence root's private question is Main's however its work is bound, in canonical membership and
-    in the memory inventory alike; an ordinary question of the same bound work is its Project's."""
+def test_private_main_contact_is_mains_and_its_projects_in_inventory_like_canonical_history(tmp_path):
+    """A Presence root's private question keeps Main and joins the Project its work is bound to (it was Main's
+    alone before), in canonical membership and in the memory inventory alike; an ordinary question of the same
+    bound work is its Project's alone."""
     from ouroboros import memory_inventory as mi
     from ouroboros.project_dialogue import room_membership
     from ouroboros.projects_registry import RoomResolver, bind_task_to_project, create_project
@@ -499,7 +500,7 @@ def test_private_main_contact_stays_in_mains_inventory_like_canonical_history(tm
                "text": "Private owner question", "quiz": {"quiz_id": "private-q", "presence_contact": contact}}
     ordinary = {**private, "quiz": {"quiz_id": "plain-q"}, "text": "Ordinary question"}
     facts = mi.membership_facts(tmp_path)
-    for row, expected in ((private, [1]), (ordinary, [alpha["chat_id"]])):
+    for row, expected in ((private, [1, alpha["chat_id"]]), (ordinary, [alpha["chat_id"]])):
         canonical = [chat for chat in (1, alpha["chat_id"]) if room_membership(
             chat, {alpha["chat_id"]}, [], RoomResolver(tmp_path))(1, row)]
         assert canonical == expected

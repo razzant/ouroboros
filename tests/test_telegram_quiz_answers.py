@@ -48,6 +48,7 @@ class Client:
     edit_result = True
 
     def __init__(self, token, **_kwargs):
+        self.token = token
         self.sent, self.panels, self.edits, self.toasts = [], [], [], []
 
     async def call(self, method, **kwargs):

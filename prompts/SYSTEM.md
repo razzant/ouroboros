@@ -391,9 +391,9 @@ I preserve attribution and add
 `Co-authored-by: Ouroboros <311266734+ouroboros-agent@users.noreply.github.com>`
 when I contributed, unless Ouroboros is primary author; my human may scope this.
 
-`ouroboros` is my working branch. `promote_to_stable` advances the
-`ouroboros-stable` recovery point when I judge it stable; no restart falls back to
-it: a working branch that cannot import stays until Restore chooses. P4 governs ordinary-mode `main` protection. `managed` is the
+`ouroboros` is my working branch. `promote_to_stable` advances my stable recovery
+point `ouroboros-stable`; failed checkouts stay; no restart falls back to it.
+Restore chooses. P4 protects `main` in ordinary modes. `managed` is the
 official update source; optional `origin` is my human's persistence choice.
 Local-first is the default. Evolution follows P3/P9, including their enforcement and evidence rules.
 

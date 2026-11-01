@@ -396,13 +396,14 @@ class QuizOption(TypedDict):
     recommended: NotRequired[bool]
 
 
-class QuizOutbound(ChatReferenceFields):
+class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     """Outbound owner quiz card: a typed question with option buttons.
 
     Optional questions continue under ``assumption``; ``wait_for_answer`` marks
     required waiting without an implied answer. ``state`` carries lifecycle.
     Replay merges the stored ``answered_index`` and verbatim ``comment``; a
-    comment without an index is the owner's whole answer, not an option choice."""
+    comment without an index is the owner's whole answer, not an option choice.
+    A private Presence question's one frame names its work's Project in ``also_rooms``."""
 
     type: Literal["quiz"]
     role: Literal["assistant"]
@@ -1146,6 +1147,7 @@ class QuestionRoom(TypedDict, total=False):
     state: Required[Literal["known", "unknown"]]
     chat_id: int
     project_id: str
+    also_project_ids: List[str]  # a private Main question: the Project that shows the same row
 
 
 class TaskDetailResponse(TypedDict, total=False):

@@ -4,7 +4,7 @@ Managed updates rewrite the live tree under owner authority; persist target, wri
 
 - Separate the local work branch from the official feed (`ouroboros/update_channels.py`; ARCHITECTURE §8).
 - Prepare beside the serving tree, switch pre-import: separate layers, own packages per new lock/app, no unproven app swap; Restart keeps local work; returns need `qualify_return`, no data rollback (`test_update_*`).
-- Preflight reads saved prose/qualification for its exact pins (missing checks and accepted FAILs disclosed, no veto: `tests/test_update_qualification.py`); apply binds base and target. Smart, replace and Restore check the effective index lock before work stops; lock/read failures return not-applied, untouched. Apply closes writers, drains direct turns, stops workers/services, re-plans; reopen after verified abort/rollback or healthy restart. Evolution cleanup shares lock/admission.
+- Preflight reads saved prose/qualification for its exact pins (missing checks and accepted FAILs disclosed, no veto: `tests/test_update_qualification.py`); apply binds base and target. Apply closes writers, drains direct turns, stops workers/services, re-plans; reopen after verified abort/rollback or healthy restart. Evolution cleanup shares lock/admission.
 - Destructive apply, replace, rollback and materialization refuse turns; in `assisted_resolution`/`committing_assisted`, Main answers but other tasks' repo tools stay refused (`worker_chat_lane.conversation_admitted_during_update`); steer through `tell_task`.
 - Stash dirty work outside merge history, then restore. Never automatically drop an update stash, even on success: `rescue-local-*` pins it for Git cleanup. Only Git conflicts invoke the reviewed resolver; filenames create no policy.
 - Persist restoration intent before apply; consume it on completion (restored, preserved or incomplete). Failed persistence keeps the marker; interrupted replay never resets/reapplies over returned or later work (`supervisor/update_merge.py`).
@@ -12,7 +12,7 @@ Managed updates rewrite the live tree under owner authority; persist target, wri
 - The resolver stages the merge, binaries included; review needs exact staged mode/blob/size and parent ids. Missing metadata blocks.
 - Managed merge commits need a green full suite on the exact candidate ("The tiered commit and CI gates"). Non-commit resolver terminals roll back and best-effort preserve the failed-update branch; recovery requires fresh rescue. Boot holds Paused commits (`postcommit_resume`); Stop rolls back.
 - Fresh rescue precedes destructive rollback and boot re-materialization; capture failure is fail-open, durably disclosed with a transaction pointer (ARCHITECTURE §2).
-- `git_observation.host_git_env`: content reads never lock/refresh/repair the index; writers keep mandatory locks/repair; refusals: ARCHITECTURE §3 Updates.
+- `git_observation.host_git_env`: content reads never lock/refresh/repair the index; writers keep mandatory locks/repair; index-lock checks and refusals: ARCHITECTURE §3 Updates.
 - Manual Restore fences writers, pins HEAD, never pushes, interrupts without restart handoffs. Promotion binds one development SHA for QA and push. After-update facts reach panel and mind; the host never messages the owner (`tests/test_update_generation_facts.py`).
 - Apply shows its effects (ARCHITECTURE §3 Updates).
 - `git_bootstrap.json` (ARCHITECTURE §2): test zero-reset/zero-smoke repeats and change/transaction invalidation.

@@ -180,29 +180,14 @@ def handle_chat_direct(
             execution.meter = meter
             if not owner_conversation_admitted(chat_id, client_msg_id):
                 return
-            _handle_chat_direct_locked(
-                chat_id, text, image_data,
+            # The registered agent owns the strict money read, including its storage wait and controls.
+            _run_chat_task(
+                None, chat_id, text, image_data,
                 task_constraint=task_constraint, task_metadata=task_metadata,
                 **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
             )
     finally:
         registry.end_execution(execution)
-
-
-def _handle_chat_direct_locked(
-    chat_id: int,
-    text: str,
-    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
-    task_constraint: Optional[dict] = None,
-    task_metadata: Optional[dict] = None,
-    realtime_turn: Any = None,
-) -> None:
-    # The registered agent owns the strict money read, including its storage wait and controls.
-    _run_chat_task(
-        None, chat_id, text, image_data,
-        task_constraint=task_constraint, task_metadata=task_metadata,
-        **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
-    )
 
 
 def _host_operation_failure(metadata: Optional[dict]) -> dict:
@@ -474,18 +459,24 @@ def _admit_chat_task(
                 task.pop("image_base64", None)
                 task.pop("image_mime", None)
         # A rejected initial UI task must leave no partial project assignment.
-        # Bind only after all declared attachments have passed admission.
+        # Bind only after all declared attachments have passed admission, under the
+        # room basis the turn then carries like queued work, so restore and Resume
+        # readmit it on that basis (#2547).
         pid = str(task.get("project_id") or "").strip()
         if pid:
             try:
+                from ouroboros.project_admission import direct_turn_basis
                 from ouroboros.projects_registry import bind_task_to_project
 
+                basis = direct_turn_basis(_pool().DRIVE_ROOT, pid)
                 bind_task_to_project(
                     _pool().DRIVE_ROOT, task["id"], pid, chat_id,
                     origin=_pool()._origin_from_mapping(
                         task_metadata or {}, absent="mid_task_no_origin",
                     ),
+                    admission_basis=basis,
                 )
+                task["_project_admission"] = basis
             except Exception as exc:
                 _pool()._report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
         if not task["text"]:

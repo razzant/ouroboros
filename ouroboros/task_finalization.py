@@ -198,6 +198,33 @@ def stamp_root_final_phase(
         send_event.setdefault("progress_meta", {})["task_terminal_status"] = terminal_status
 
 
+# The address of a final owed while its Project room was unreadable: no ``chat_id`` until the outbox
+# replay's room rule reads (``supervisor.terminal_delivery``), never the conversation's own room.
+PROJECT_ROOM_ADDRESS = "project_room"
+
+
+def presence_root_project_room(env_drive_root: Any, task: Dict[str, Any]) -> int | None:
+    """The internal Project room a Presence-origin root lives in: 0 when proven none, ``None`` while unknown.
+
+    Its conversation hears the Presence result; the room its work lives in by the room
+    rule (``projects_registry.RoomResolver``, strict: a binding or an admitted registered
+    Project chat) keeps that root's ordinary final, as every root's. A place room shares the
+    Project id range and is never one, so no number decides. Unreadable authority is neither
+    a guessed room that could be external nor "none" (logged): the final stays owed with
+    ``PROJECT_ROOM_ADDRESS`` for the outbox replay to ask this again.
+    """
+    from ouroboros.projects_registry import RoomResolver
+
+    try:
+        root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
+        return int(RoomResolver(root, strict=True)(task.get("id"), task.get("parent_task_id"),
+                                                  task.get("root_task_id")) or 0)
+    except Exception:
+        log.warning("Project room of Presence root %s unreadable; its final stays owed for the room rule",
+                    task.get("id"), exc_info=True)
+        return None
+
+
 def prepare_terminal_send_event(
     env_drive_root: Any, task: Dict[str, Any], text: str,
     usage: Dict[str, Any], send_event: Dict[str, Any],
@@ -404,7 +431,8 @@ def register_final_answer_owed(
     single-send (the live put passes ``register=False`` to
     ``deliver_final_message_live`` and the send handler suppresses the second
     copy). Fail-soft: registration is crash insurance, never a gate on the send.
-    Rows without a chat id are skipped (the replay could never send them), and an
+    Rows without a chat id are skipped (the replay could never send them) unless the
+    replay addresses them (``PROJECT_ROOM_ADDRESS``), and an
     EMPTY canonical root is refused rather than resolved relative to the process
     CWD (AR2-4).
 
@@ -413,7 +441,7 @@ def register_final_answer_owed(
     disclosed write failure: the send still happens, without crash insurance)
     or ``skipped`` (no chat id / no canonical root: nothing to owe).
     """
-    if not send_event.get("chat_id"):
+    if not send_event.get("chat_id") and send_event.get("address") != PROJECT_ROOM_ADDRESS:
         return OWED_SKIPPED
     try:
         # The CANONICAL data root the supervisor's boot/tick replay reads: the

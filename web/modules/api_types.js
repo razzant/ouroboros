@@ -630,6 +630,7 @@
  * @property {string=} reply_to_relay
  * @property {string=} kind
  * @property {Object.<string,number>=} room_revisions
+ * @property {number[]=} also_rooms  // a private Main question: its work's Project shows the same row, one frame
  */
 
 /**
@@ -1237,6 +1238,7 @@
  * @property {'known'|'unknown'} state
  * @property {number=} chat_id
  * @property {string=} project_id
+ * @property {string[]=} also_project_ids  // a private Main question: the Project that shows the same row
  */
 /**
  * PROVENANCE for each independent facet of GET /api/claudexor/status. An empty collection

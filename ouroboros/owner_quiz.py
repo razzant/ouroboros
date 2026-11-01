@@ -109,6 +109,13 @@ def question_delivery_projection(block: Any) -> Dict[str, str]:
     return view
 
 
+def question_delivery_now(block: Any) -> Dict[str, Dict[str, str]]:
+    """``{"question_delivery": ...}`` of a question's current record, ``{}`` when it states none: what an
+    answer or closure row's snapshot (frozen when it was written) shows in its place, as its question row does."""
+    delivery = question_delivery_projection(block)
+    return {"question_delivery": delivery} if delivery else {}
+
+
 def record_answer_delivery_after_terminal(drive_root: Any, task_id: str, quiz_id: str) -> Dict[str, Any]:
     """The author settled before its recorded answer could be delivered; preserve that distinction."""
     def mutate(quizzes: Dict[str, Dict[str, Any]]) -> Any:

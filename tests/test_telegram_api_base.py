@@ -1,0 +1,404 @@
+"""TELEGRAM_API_BASE / TELEGRAM_API_FILES_DIR: self-hosted Bot API server support (#1812).
+
+Hermetic: no request leaves the machine; a loopback httpx transport stands in
+for the Bot API server, and the files dir is a tmp_path copy. Mirrors the
+TELEGRAM_PROXY test module's loader.
+"""
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import os
+import sys
+import types
+from pathlib import Path
+
+import httpx
+import pytest
+
+_ROOT = Path(__file__).resolve().parents[1] / "skills" / "telegram"
+_PACKAGE = "telegram_api_base_test"
+_TOKEN = "123456:SECRET-BOT-TOKEN"
+_BASE = "http://127.0.0.1:8081"
+
+
+def _load():
+    for name in [key for key in sys.modules if key == _PACKAGE or key.startswith(f"{_PACKAGE}.")]:
+        sys.modules.pop(name, None)
+    package = types.ModuleType(_PACKAGE)
+    package.__path__ = [str(_ROOT)]
+    sys.modules[_PACKAGE] = package
+    spec = importlib.util.spec_from_file_location(f"{_PACKAGE}.plugin", _ROOT / "plugin.py")
+    plugin = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = plugin
+    assert spec.loader is not None
+    spec.loader.exec_module(plugin)
+    return sys.modules[f"{_PACKAGE}.lib.telegram_api"], sys.modules[f"{_PACKAGE}.scripts.telegram_settings"]
+
+
+api_mod, settings_mod = _load()
+
+
+def _client(**kwargs):
+    return api_mod.TelegramClient(_TOKEN, **kwargs)
+
+
+# --- validator ---------------------------------------------------------------
+
+@pytest.mark.parametrize("value,expected", [
+    ("", "https://api.telegram.org"),
+    (None, "https://api.telegram.org"),
+    ("http://127.0.0.1:8081", "http://127.0.0.1:8081"),
+    ("http://127.0.0.1:8081/", "http://127.0.0.1:8081"),
+    ("https://tapi.lan", "https://tapi.lan"),
+])
+def test_api_base_valid(value, expected):
+    assert settings_mod.validate_telegram_api_base(value) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "127.0.0.1:8081",              # no scheme
+    "ftp://127.0.0.1",             # bad scheme
+    "http://user:pass@127.0.0.1",  # credentials
+    "http://127.0.0.1/bot",        # path
+    "http://127.0.0.1:8081/?q=1",  # query
+    "http://127.0.0.1:8081/#f",    # fragment
+    "http://127.0.0.1:99999",      # port range
+])
+def test_api_base_invalid(value):
+    with pytest.raises(ValueError):
+        settings_mod.validate_telegram_api_base(value)
+
+
+def test_files_dir_validator():
+    assert settings_mod.validate_telegram_files_dir("") is None
+    assert settings_mod.validate_telegram_files_dir(None) is None
+    # A native absolute spelling for THIS platform; the trailing-slash form
+    # normalizes to the same value.
+    native = os.path.normpath(os.path.join(os.path.abspath(os.sep), "srv", "tba"))
+    assert settings_mod.validate_telegram_files_dir(native) == native
+    assert settings_mod.validate_telegram_files_dir(native + os.sep) == native
+    with pytest.raises(ValueError):
+        settings_mod.validate_telegram_files_dir("relative/dir")
+
+
+# --- endpoints ---------------------------------------------------------------
+
+def test_default_endpoints_unchanged():
+    c = _client()
+    assert c.api_base == f"https://api.telegram.org/bot{_TOKEN}"
+    assert c.file_base == f"https://api.telegram.org/file/bot{_TOKEN}"
+    assert c.files_dir is None
+
+
+def test_custom_endpoints():
+    # Native absolute spelling for THIS platform.
+    native_store = os.path.normpath(os.path.join(os.path.abspath(os.sep), "srv", "tba"))
+    c = _client(api_base_url=_BASE, files_dir=native_store)
+    assert c.api_base == f"{_BASE}/bot{_TOKEN}"
+    assert c.file_base == f"{_BASE}/file/bot{_TOKEN}"
+    assert c.files_dir == native_store
+
+
+# --- live call routing + disk fallback ----------------------------------------
+
+def _fake_server(responses):
+    """Loopback transport: records requests, replies from `responses`."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return responses.get(request.url.path.rsplit("/", 1)[-1], httpx.Response(404, text="nf"))
+
+    transport = httpx.MockTransport(handler)
+    return transport, calls
+
+
+def test_call_hits_custom_base():
+    transport, calls = _fake_server({"getMe": httpx.Response(200, json={"ok": True, "result": {}})})
+    c = _client(api_base_url=_BASE)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport) as _:
+            # patch the client factory the same way call() uses it
+            orig = api_mod.httpx.AsyncClient
+            api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+            try:
+                payload = await c.call("getMe")
+            finally:
+                api_mod.httpx.AsyncClient = orig
+            return payload
+
+    payload = asyncio.run(run())
+    assert payload["ok"] is True
+    assert calls and calls[0].startswith(_BASE)
+
+
+def test_download_falls_back_to_disk(tmp_path):
+    # HTTP says 404 (local server behavior, tdlib#26); the file exists on disk.
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    payload = b"file-bytes-from-disk"
+    (store / "documents" / "file_1.bin").write_bytes(payload)
+    transport, calls = _fake_server({"file_1.bin": httpx.Response(404, text="not found")})
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await c._download_bytes("documents/file_1.bin")
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    assert asyncio.run(run()) == payload
+
+
+def test_download_falls_back_to_disk_absolute_path(tmp_path):
+    # A local telegram-bot-api returns ABSOLUTE file_path values on its own
+    # disk (e.g. "/srv/tba/documents/file_1.bin"); files_dir points at the
+    # same store. The fallback must honor the absolute path.
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    payload = b"absolute-path-bytes"
+    (store / "documents" / "file_1.bin").write_bytes(payload)
+    transport, _ = _fake_server({"file_1.bin": httpx.Response(404, text="not found")})
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await c._download_bytes(str(store / "documents" / "file_1.bin"))
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    assert asyncio.run(run()) == payload
+
+
+def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
+    # Lexical confinement must run BEFORE resolve(), and the test itself must
+    # stay hermetic: no exists()/stat() on absolute UNC paths (on Windows the
+    # join discards the store and could trigger DNS/SMB traffic). Instead we
+    # spy on the filesystem entry points and assert every probe stayed inside
+    # the store directory.
+    store = tmp_path / "store"
+    store.mkdir(parents=True)
+    transport, _ = _fake_server({"file_1.bin": httpx.Response(404, text="not found")})
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+    attempts = ["\\\\attacker.example\\share\\secret.bin", "//attacker.example/share/secret.bin"]
+    # pathlib.Path cannot be subclassed (its __new__ swaps in the concrete
+    # flavour class), so observe probes by patching the concrete class's
+    # methods instead. Scoped to this test and restored in finally.
+    import pathlib as _pl
+    concrete = type(_pl.Path("/"))
+    probed: list = []
+    originals = {}
+
+    def _spy(name):
+        real = getattr(concrete, name)
+
+        def wrapper(self, *args, **kwargs):
+            probed.append((name, str(self)))
+            return real(self, *args, **kwargs)
+
+        return real, wrapper
+
+    for name in ("resolve", "is_file", "stat"):
+        originals[name], wrapper = _spy(name)
+        setattr(concrete, name, wrapper)
+    try:
+        for raw_path in attempts:
+            async def run(rp=raw_path):
+                orig = api_mod.httpx.AsyncClient
+                api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+                try:
+                    return await c._download_bytes(rp)
+                finally:
+                    api_mod.httpx.AsyncClient = orig
+            with pytest.raises(Exception):
+                asyncio.run(run())
+    finally:
+        for name, real in originals.items():
+            setattr(concrete, name, real)
+    # Every filesystem probe stayed inside the store (no network-style path
+    # was ever resolved, stated or opened).
+    assert probed, "expected at least one filesystem probe to be observed"
+    for op, path in probed:
+        assert path.startswith(str(store)), (op, path)
+
+
+def test_download_rejects_absolute_path_outside_store(tmp_path):
+    # A file_path outside files_dir must not be readable, even absolute.
+    store = tmp_path / "store"
+    store.mkdir(parents=True)
+    secret = tmp_path / "secret.bin"
+    secret.write_bytes(b"secret")
+    transport, _ = _fake_server({"file_1.bin": httpx.Response(404, text="not found")})
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await c._download_bytes(str(secret))
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    with pytest.raises(Exception):
+        asyncio.run(run())
+
+
+def test_download_oversize_file_raises(tmp_path):
+    # st_size pre-check must reject before reading a >10 MiB file.
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    (store / "documents" / "file_1.bin").write_bytes(b"x" * (10 * 1024 * 1024 + 1))
+    transport, _ = _fake_server({"file_1.bin": httpx.Response(404, text="not found")})
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await c._download_bytes("documents/file_1.bin")
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    with pytest.raises(RuntimeError, match="10 MiB"):
+        asyncio.run(run())
+
+
+def test_download_without_files_dir_raises(tmp_path):
+    transport, _ = _fake_server({"file_1.bin": httpx.Response(404, text="not found")})
+    c = _client(api_base_url=_BASE)  # no files_dir
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await c._download_bytes("documents/file_1.bin")
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run())
+
+
+def test_download_traversal_stays_in_store(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"nope")
+    store = tmp_path / "store"
+    store.mkdir()
+    transport, _ = _fake_server({"file_1.bin": httpx.Response(404, text="nf")})
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await c._download_bytes("../secret.txt")
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run())
+
+
+# --- the store as both sides spell it -----------------------------------------
+
+def _disk_read(client, file_path):
+    """Download through a server that serves no file over HTTP (a --local server)."""
+    transport, _ = _fake_server({})
+
+    async def run():
+        orig = api_mod.httpx.AsyncClient
+        api_mod.httpx.AsyncClient = lambda **kw: orig(transport=transport, **{k: v for k, v in kw.items() if k != "transport"})
+        try:
+            return await client._download_bytes(file_path)
+        finally:
+            api_mod.httpx.AsyncClient = orig
+
+    return asyncio.run(run())
+
+
+def _symlink(link, target):
+    try:
+        os.symlink(target, link, target_is_directory=Path(target).is_dir())
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable on this host")
+
+
+def test_a_store_configured_through_a_symlink_reads_the_servers_own_spelling(tmp_path):
+    # macOS spells /tmp and /var through symlinks: the server reports the path as
+    # mounted, which resolves to the same store here.
+    real = tmp_path / "real-store"
+    (real / "documents").mkdir(parents=True)
+    (real / "documents" / "file_0.txt").write_bytes(b"through the link")
+    alias = tmp_path / "alias-store"
+    _symlink(alias, real)
+    c = _client(api_base_url=_BASE, files_dir=str(alias))
+    for file_path in (str(alias / "documents" / "file_0.txt"), str(real / "documents" / "file_0.txt"),
+                      "documents/file_0.txt"):
+        assert _disk_read(c, file_path) == b"through the link"
+
+
+def test_a_symlink_inside_the_store_cannot_lead_out_of_it(tmp_path):
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.txt").write_bytes(b"not in the store")
+    _symlink(store / "documents" / "leak.txt", outside / "outside.txt")
+    _symlink(store / "escape", outside)
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+    for file_path in (str(store / "documents" / "leak.txt"), "documents/leak.txt",
+                      str(store / "escape" / "outside.txt"), "escape/outside.txt"):
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            _disk_read(c, file_path)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW on this platform")
+def test_a_file_swapped_for_a_symlink_after_the_check_is_not_read(tmp_path, monkeypatch):
+    # The store's owner (the server) replaces the checked file with a link out of the store
+    # between confinement and the read: the read goes through the checked path and refuses it.
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    checked = store / "documents" / "file_0.txt"
+    checked.write_bytes(b"in the store")
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"outside the store")
+    concrete = type(Path("/"))
+    real_resolve = concrete.resolve
+
+    def resolve_then_swap(self, *args, **kwargs):
+        resolved = real_resolve(self, *args, **kwargs)
+        if self.name == "file_0.txt" and not checked.is_symlink():
+            checked.unlink()
+            os.symlink(secret, checked)
+        return resolved
+
+    monkeypatch.setattr(concrete, "resolve", resolve_then_swap)
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        _disk_read(c, "documents/file_0.txt")
+    assert checked.is_symlink()
+
+
+def test_the_disk_read_runs_off_the_event_loop_thread(tmp_path, monkeypatch):
+    import threading
+
+    store = tmp_path / "store"
+    (store / "documents").mkdir(parents=True)
+    (store / "documents" / "file_0.txt").write_bytes(b"from a worker thread")
+    threads = []
+    real_read = api_mod.TelegramClient._read_file_from_disk
+
+    def recording(self, *args):
+        threads.append(threading.get_ident())
+        return real_read(self, *args)
+
+    monkeypatch.setattr(api_mod.TelegramClient, "_read_file_from_disk", recording)
+    c = _client(api_base_url=_BASE, files_dir=str(store))
+    assert _disk_read(c, "documents/file_0.txt") == b"from a worker thread"
+    assert threads and threads[0] != threading.get_ident()
