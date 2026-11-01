@@ -414,5 +414,7 @@ def test_listed_input_disappearing_before_stat_is_a_named_gap(tmp_path, monkeypa
         return original_stat(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'stat', disappearing)
     record = test_evidence.source_evidence(source, tmp_path / 'evidence')
-    assert record['source_snapshot'] == 'incomplete'
+    # Diagnostics only (not a repair): a failure prints the record already computed, whole (a string, which
+    # pytest does not shorten), and nothing is re-read.
+    assert record['source_snapshot'] == 'incomplete', json.dumps(record, sort_keys=True, default=str)
     assert [gap['path'] for gap in record['gaps']] == ['vanishing.bin']

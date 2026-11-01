@@ -877,6 +877,10 @@ def test_a_deep_candidate_runs_its_unix_socket_cases_and_its_process_temp_is_rem
     assert verdict["ok"] is True and verdict["new"]["ok"] and verdict["new"]["cases"] == 1
     assert verdict["already_failing"] == [] and "baseline" not in verdict
     assert len(str(scratch / "run-01234567" / "tmp")) + len("/pymp-0123abcd/listener-0123abcd") > 104  # the old root
+    # The Panic fixture's own forkserver listener below this root fits Linux's 108 bytes, its NUL counted (macOS
+    # resolves /tmp longer, and that fixture forks by spawn there).
+    panic = "/b0/t/popen-gw1/test_cold_launcher_panic_stops1/tmp/pymp-0123abcd/listener-0123abcd"
+    assert len(verdict["process_root"] + panic) < 108, verdict["process_root"]
     assert pathlib.Path(manifest["tmpdir"]).parent == pathlib.Path(verdict["process_root"]).resolve()
     assert not pathlib.Path(verdict["process_root"]).exists() and folder.parent == scratch and folder.is_dir()
 

@@ -270,11 +270,16 @@ def _process_root() -> pathlib.Path:
     """A short disposable root for the test processes' HOME, TMPDIR and caches, where the commit gate keeps its
     own (``test_environment.default_temp_parent``): nested in a candidate's scratch, a multiprocessing socket
     outgrows macOS's 104-byte AF_UNIX limit, and a forkserver floor case then fails on W' and W alike, as if
-    already failing. ``selected_tests`` removes it when its runs end unless something beneath it is marked retained,
-    then keeps and names it (``_release``); each run's reports stay in the scratch."""
+    already failing. Named as ``scripts/safe_test.py`` names its root (``ob-``, without the ``.noindex`` that would
+    take this margin): the Panic fixture's forkserver listener (``<root>/b0/t/popen-gw1/<test>/tmp/pymp-*/listener-*``)
+    is then 99 bytes on Linux, within the 107 CPython binds there (108 with its NUL), where
+    ``ouroboros-update-checks-`` made it 120 and stopped the fixture before Panic. On macOS ``/tmp`` resolves 8 bytes
+    longer, past 103, and that fixture forks by spawn there. ``selected_tests`` removes it when its runs end unless
+    something beneath it is marked retained, then keeps and names it (``_release``); each run's reports stay in the
+    scratch."""
     from ouroboros.test_environment import default_temp_parent
 
-    return pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-update-checks-", dir=str(default_temp_parent())))
+    return pathlib.Path(tempfile.mkdtemp(prefix="ob-", dir=str(default_temp_parent())))
 
 
 def _release(root: pathlib.Path, unproven: str = "") -> Dict[str, Any]:
