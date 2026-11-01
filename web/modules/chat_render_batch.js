@@ -852,6 +852,20 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
     return { captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor, serializeTimelineAnchor, anchorOwnersReady };
 }
 
+/** The row a child's live note lands in, given the frame's source occurrence. A frame a row already holds keeps that row.
+ * Otherwise the newest unsaved note is the line it replaces in place, but never across a thought: a thought is its own
+ * row, so a note that came after one stands after it, the order replay shows. A saved row is never a line, and rows loaded
+ * before the note change nothing: identity is the occurrence alone. */
+export function childProgressKey(record, occurrence) {
+    if (record.items.some((item) => item.occurrenceKey === occurrence)) return occurrence;
+    for (let index = record.items.length - 1; index >= 0; index -= 1) {
+        const { dedupeKey, occurrenceKey } = record.items[index];
+        if (dedupeKey?.startsWith('subagent-progress:')) return dedupeKey;
+        if ([dedupeKey, occurrenceKey].some((key) => key?.startsWith('reasoning:'))) break;
+    }
+    return `subagent-progress:${occurrence}`;
+}
+
 /** Update one live timeline item using the same keys the card's producer owns.
  * Historical source-addressed insertions use mergeHistoricalTimelineItem; live
  * lifecycle notes keep their existing in-place semantics and disclosure key.
@@ -890,6 +904,8 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             // Replay compares the child's current status with older pages.
             // Its source time advances with the live status, not with narration.
             ...(syntheticKey.startsWith('subagent-lifecycle:') && rawTs ? { sourceTs: rawTs } : {}),
+            // A replaced note's row now holds this frame; the saved copy of the one it replaced stands as its own row.
+            ...(summary.occurrenceKey ? { occurrenceKey: summary.occurrenceKey, sourceTs: rawTs } : {}),
         };
         if (Object.entries(patch).some(([key, value]) => it[key] !== value)) {
             Object.assign(it, patch);
@@ -937,6 +953,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             sourceTs: rawTs,
             count: 1,
             dedupeKey: syntheticKey,
+            occurrenceKey: summary.occurrenceKey,
             lineKey,
         });
         timelineUpdate = 'append';

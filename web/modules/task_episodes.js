@@ -13,7 +13,6 @@ import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { reasonCodesNote, taskDoneIsTerminal, taskPresentation, taskReasonCodes, taskReasonDetail, taskTerminalPhase } from './log_events.js';
 import { fmt } from './i18n.js';
 import { outcomeTone } from './task_phase_chip.js';
-import { projectCollapsedActivity, renderCollapsedActivity } from './chat_activity.js';
 
 export function admittedSuccessor(row) {
     const admitted = (link) => (link && typeof link === 'object' && link.state === 'admitted' ? link.successor_task_id : '');
@@ -100,7 +99,7 @@ export function renderEpisodes(el, episodes = []) {
  * the hidden physical shell/record stays to take late rows. A successor with no card here runs where
  * this chat sees none of its frames (a Main
  * portal's room): `follow(successorId, predecessor)` may mint its card from the facts it holds.
- * `renamed(record)` hears each title this module writes (a portal's Project reference names itself again).
+ * `renamed(record)` hears each name this module sets: the card's one headline owner paints the line under it, and a portal's Project reference names itself again.
  */
 export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {} }) {
     const predecessors = new Map();  // successor task id -> predecessor task id
@@ -175,10 +174,7 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
         }
         if (name && record.titleEl.textContent !== name) {
             record.titleEl.textContent = name;
-            renamed(record);
-            // An unnamed successor's own latest line stood in for its title; under the work's name it is the line again.
-            renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: name, headline: record.collapsedActivity,
-                previous: record.collapsedActivity }));
+            renamed(record);  // an unnamed successor's latest line stood in for its title; its owner restores the line
             changed = true;
         }
         for (const predecessor of chain) {
@@ -206,12 +202,8 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             const titleChanged = Boolean(record.titleEl && record.titleEl.textContent !== name);
             let changed = record.suggestedName !== name || titleChanged;
             record.suggestedName = name;
-            if (titleChanged) { record.titleEl.textContent = name; renamed(record); }
-            // Restore the deferred collapsed activity after naming.
-            changed = renderCollapsedActivity(record, projectCollapsedActivity({
-                record, suggestedName: name, headline: record.collapsedActivity,
-                previous: record.collapsedActivity,
-            })) || changed;
+            if (titleChanged) record.titleEl.textContent = name;
+            changed = Boolean(renamed(record)) || changed;  // the owner restores a line deferred until the card had a name
             changed = sync(record) || changed;
             return Boolean(changed && record.root?.isConnected);
         },

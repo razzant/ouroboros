@@ -490,11 +490,23 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
     payload ``{"base64", "mime"}``. On any rejection returns ``(None, message)``.
     LOCAL FILES ONLY — no URL, no base64 (no new exfiltration surface). Shared by
     vlm_query(file_path=...) and view_image so both enforce identical checks.
-    A relative path resolves against the process working directory. An absent
+    A relative path means the caller's active workspace (read_file's default root), never the
+    process working directory: that is the serving checkout, whose same-named file
+    would answer for the task's. A workspace that cannot be named refuses. An absent
     path inside the admitted roots is a discovery miss (typed warning, no image),
     reported only after every admission guard; size/read/MIME failures stay errors."""
     import pathlib
-    fp = pathlib.Path(file_path).expanduser().resolve()
+    fp = pathlib.Path(file_path).expanduser()
+    if not fp.is_absolute():
+        try:
+            from ouroboros.tools.registry import active_repo_dir_for
+            fp = pathlib.Path(active_repo_dir_for(ctx)).expanduser() / fp
+        except Exception as e:
+            return None, _refuse(ctx, (
+                f"⚠️ Relative image path {file_path!r} has no active workspace to resolve against: {e}. "
+                "Name the image by its absolute path."
+            ))
+    fp = fp.resolve()
     allowed = _allowed_file_roots(ctx)
     if not any(_path_is_under(fp, root) for root in allowed):
         return None, _refuse(ctx, (
@@ -766,7 +778,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/), the skill-state tree (data/state/skills, e.g. a computer-use screenshot), the active task workspace, or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
+                            "description": "Local image path (preferred — avoids base64 in arguments): relative to the active workspace, or absolute inside the workspace, the uploads directory (data/uploads/), the skill-state tree (data/state/skills, e.g. a computer-use screenshot) or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
                         },
                         "image_url": {
                             "type": "string",
@@ -814,7 +826,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Local image file path inside the task workspace, uploads dir, the skill-state tree (data/state/skills), or the task's artifact_store/task_drive (e.g. /app/chart.png after list_files finds it, or artifact_store/video_frames/frame_001.png from extract_video_frames).",
+                            "description": "Local image path: relative to the active workspace (list_files' default root), or absolute inside the workspace, uploads dir, the skill-state tree (data/state/skills) or the task's artifact_store/task_drive (e.g. a frame path extract_video_frames returned).",
                         },
                     },
                     "required": ["path"],

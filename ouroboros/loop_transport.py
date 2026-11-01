@@ -34,7 +34,7 @@ row and its ordinary progress; exhaustion is a note for an interactive turn,
 while a managed task's exhaustion is its terminal result. Every episode note is
 the host speaking about the turn: it passes ``incident=None`` and keeps the
 default voice, so an ``emit_progress`` callable handed to ``run_llm_loop`` must
-accept the emitter's keyword facts (``incident``, ``narration``).
+accept the emitter's keyword facts (``incident``, ``narration``, ``reasoning``).
 
 Terminal/fallback text and salvage readers share this owner (extracted from byte-capped ``loop.py``).
 """
