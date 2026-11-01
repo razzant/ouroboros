@@ -376,13 +376,15 @@ try {
 """
 
 
-def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path, monkeypatch):
-    """The primary and two candidates refuse, the third answers. Through the real loop, chain
-    and call owner, the task's emitter, chat delivery, history and the card's and toast's own
-    readers, each notice names the route that just failed with only that route's class and
-    sentence, before the next route is dialed: a refused route is never announced as the
-    answer. A provider's markup reaches the owner as inert text, its secret redacted; the
-    record keeps the typed kind; each switch keeps its own toast key."""
+@pytest.mark.parametrize("last", ["answers", "refuses", "primary_answers_later"])
+def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path, monkeypatch, last):
+    """The primary and two candidates refuse; the third answers, or refuses too, when the primary's later
+    call may still answer. Through the real loop, chain and call owner, the task's emitter, chat delivery,
+    history and the card's and toast's own readers, each attempt names the route that just failed with only
+    that route's class and sentence, before the next route is dialed; the outcome row, ordinary progress with
+    no toast, names the adopted route or only the last attempt. A refused route is never announced as the
+    answer. A provider's markup reaches the owner as inert text, its secret redacted; the record keeps the
+    typed kind; each attempt keeps its own toast key."""
     import os
     import pathlib
     import queue
@@ -411,6 +413,8 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
         "alt/b": _BodyError("Error code: 400", status_code=400, body={"error": {
             "message": f"Field <img src=x onerror=alert(1)> is not allowed for key {secret}."}}),
     }
+    if last != "answers":
+        refusals["alt/c"] = _BodyError("Error code: 400", status_code=400, body={"error": {"message": "<b>No</b> route left."}})
 
     class _Routes:
         def __init__(self):
@@ -421,7 +425,7 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
 
         def chat(self, **kwargs):
             self.models.append(kwargs["model"])
-            if kwargs["model"] in refusals:
+            if kwargs["model"] in refusals and (last != "primary_answers_later" or self.models.count("test-model") < 2):
                 raise refusals[kwargs["model"]]
             return {"role": "assistant", "content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1}
 
@@ -439,17 +443,20 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
             drive_logs=work, emit_progress=partial(OuroborosAgent._emit_progress, agent),
             incoming_messages=queue.Queue(), task_id="task-1", drive_root=work)
 
-    assert result == "done" and llm.models == ["test-model", "alt/a", "alt/b", "alt/c"], "one call per route"
+    assert (result == "done") is (last != "refuses") and llm.models[:4] == ["test-model", "alt/a", "alt/b", "alt/c"], "one call per route"
+    assert last != "primary_answers_later" or llm.models[4:] == ["test-model"], "the primary's own later call answered"
     rows = [json.loads(line) for line in (work / "events.jsonl").read_text().splitlines()]
-    assert [(row["model"], row["error_kind"]) for row in rows if row["type"] == "llm_api_error"] == [
+    assert [(row["model"], row["error_kind"]) for row in rows if row["type"] == "llm_api_error"][:3] == [
         ("test-model", "bad_request"), ("alt/a", "auth_error"), ("alt/b", "bad_request")], "the record keeps the kind"
     expected = [
-        'Fallback: test-model → alt/a. Trying the next model after a rejected request. '
-        'The provider said: "Upstream request failed."',
-        "Fallback: alt/a → alt/b. Trying the next model after an authentication or authorization refusal; "
+        'Fallback: trying alt/a after a rejected request on test-model. The provider said: "Upstream request failed."',
+        "Fallback: trying alt/b after an authentication or authorization refusal on alt/a; "
         "sign-in is still needed there.",
-        "Fallback: alt/b → alt/c. Trying the next model after a rejected request. "
+        "Fallback: trying alt/c after a rejected request on alt/b. "
         'The provider said: "Field <img src=x onerror=alert(1)> is not allowed for key ***REDACTED***."',
+        "Fallback: alt/c is now the active route; it answered." if last == "answers" else
+        "Fallback: the last attempt, on alt/c, ended without a usable reply after a rejected request. "
+        'The provider said: "<b>No</b> route left."',
     ]
     frames = [events.get_nowait() for _ in range(events.qsize())]
     notes = [frame for frame in frames if frame["text"].startswith("💬 ⚡ Fallback: ")]
@@ -469,8 +476,8 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
                                append_jsonl=lambda *_: pytest.fail("delivery raised"))
     for frame in notes:
         events_chat_delivery._handle_send_message(frame, delivery)
-    assert [(row["task_incident"], row["toast_once"]) for row in live] == [
-        ("model_lane_switch", f"task-1:model_lane_switch:1:{name}") for name in ("alt/a", "alt/b", "alt/c")]
+    assert [(row.get("task_incident"), row.get("toast_once")) for row in live] == [
+        *[("model_lane_attempt", f"task-1:model_lane_attempt:1:{name}") for name in ("alt/a", "alt/b", "alt/c")], (None, None)]
     export_for_older_body(room)
     response = asyncio.run(make_chat_history_endpoint(room)(SimpleNamespace(query_params={"limit": "10"})))
     replay = [row for row in json.loads(response.body)["messages"] if row.get("is_progress")]
@@ -486,10 +493,13 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
     assert run.returncode == 0, run.stdout + run.stderr
     painted = json.loads(run.stdout)
     assert [view["full"] for view in painted["live"]] == expected == painted["replay"]
-    assert [view["toast"] for view in painted["live"]] == [{"text": text, "children": 0} for text in expected]
+    assert [view["toast"] for view in painted["live"]] == [{"text": text, "children": 0} for text in expected[:3]] + [None]
     assert not any(view["promote"] for view in painted["live"]), "a host note never claims the card title"
     assert all("<img" not in view["line"] for view in painted["live"])
     assert "Field &lt;img src=x onerror=alert(1)&gt; is not allowed" in painted["live"][2]["line"]
+    assert last == "answers" or ("&lt;b&gt;No&lt;/b&gt; route left." in painted["live"][3]["line"]
+                                 and "<b>No" not in painted["live"][3]["line"])
+    assert not any(word in view["full"] for view in painted["live"] for word in ("→", " stays ", "selected")), "no switch or walk verdict"
 
 
 # ---------------------------------------------------------------------------
