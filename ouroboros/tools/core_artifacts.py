@@ -679,6 +679,11 @@ def _escalate(
 
         if is_a2a_chat_id(getattr(ctx, "current_chat_id", None)):
             return "⚠️ ESCALATE_UNAVAILABLE: this machine-to-machine chat has no owner question delivery."
+        from ouroboros.native_task_wait import armed_conflict
+
+        if conflict := armed_conflict(ctx):  # checked before any card is recorded or sent
+            return (f"⚠️ ESCALATE_UNAVAILABLE: {conflict}. The quiz was not sent; ask with "
+                    "wait_for_answer=false now, or wait for the answer in a later turn.")
     if delegation_role not in ("", "root") and not parent_task_id:
         # A root has no parent. A child missing its lineage must not fall
         # through to the owner card path.

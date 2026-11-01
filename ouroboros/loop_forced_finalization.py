@@ -24,7 +24,7 @@ import pathlib
 import queue
 import time
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros.loop_llm_call import (
@@ -36,13 +36,8 @@ from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_OR
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, PhysicalAttemptPreconditionFailed
 
-
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_delivery import DeliveryCandidate
-
-if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_round_limits import _RoundLimitContext
 
 
@@ -626,16 +621,18 @@ def _prepare_forced_prompt(
 
 
 def _deliver_forced_late_results(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> bool:
-    """Locators of timed-out calls that settled since (``late_tool_results``) join the forced candidate
-    on the live transcript before it is priced and sealed: an authorized forced send is the task's next
-    turn too. Rails that end without a send never call this; a budget candidate priced and then not
-    sent leaves them in the transcript its pause or next ordinary round carries."""
+    """Locators of timed-out calls that settled since (``late_tool_results``) and an owed native task
+    wait's result (``native_task_wait.deliver_owed``) join the forced candidate on the live transcript
+    before it is priced and sealed: an authorized forced send is the task's next turn too. Rails that
+    end without a send never call this; a budget candidate priced and then not sent leaves them in the
+    transcript its pause or next ordinary round carries."""
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     if tools_ctx is not None:
         from ouroboros.late_tool_results import deliver_late_results
+        from ouroboros.native_task_wait import deliver_owed
 
-        return deliver_late_results(ctx.messages, tools_ctx, llm_trace, ctx.drive_logs,
-                                    _loop()._append_or_merge_user_message)
+        return deliver_owed(ctx) | deliver_late_results(ctx.messages, tools_ctx, llm_trace, ctx.drive_logs,
+                                                        _loop()._append_or_merge_user_message)
     return False
 
 
