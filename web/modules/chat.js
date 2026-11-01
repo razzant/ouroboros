@@ -106,6 +106,7 @@ import {
     syncLiveCardToggle,
     timelineScroll,
     updateLiveTimelineItem,
+    childProgressKey,
     upsertToolFoldRow,
 } from './chat_render_batch.js';
 import { measure } from './layout_batch.js';
@@ -566,7 +567,7 @@ export function createChatInstance({
             missing: observeMissingManagedTask, summary: appendTaskSummaryToLiveCard,
             collapse: (record) => (explicitCardExpansion.delete(record.groupId), record.root.dataset.expanded === '1'
                 && setLiveCardExpanded(record, false)) } });
-    const episodes = createTaskEpisodes({ records: liveCardRecords, reanchor: reanchorTaskCard, renamed: portals.relabel,
+    const episodes = createTaskEpisodes({ records: liveCardRecords, reanchor: reanchorTaskCard, renamed: (record) => (portals.relabel(record), syncCardHeadline(record)),
         activity: (record) => currentActivity(record), follow: portals.follow,
         expand: (record) => { setLiveCardExpanded(record, true); hydrateCardReviews(record.groupId); } });
     const rowMenu = createChatRowMenu({ feed: messagesDiv, replies, cardOf: (id) => liveCardRecords.get(id),
@@ -787,15 +788,14 @@ export function createChatInstance({
             || (work ? authoredTitle(record) || (record.finished ? 'Task activity' : '') : '');
     }
 
-    // Write only on change: a rewrite would destroy a selection being copied. A finished root's own sentence is its
-    // line under an authored title; a wake's sentence is its title, so its last narration stays the line; a host cause
-    // holding the line stays.
+    // Change only (a rewrite loses a copy selection). A finished root's own sentence, not narration, is its line
+    // or its sole head (owner 01.11, A); a held cause stays.
     function syncCardHeadline(record) {
         const title = cardTitle(record);
         const own = record.finished && !record.isSubagent && !record.causeHeld && record.wakeSummary;
-        const line = own && own !== title ? own : record.collapsedActivity;
+        const line = own ? (own !== title ? own : '') : record.collapsedActivity;
         if (record.titleEl.textContent !== title) { record.titleEl.textContent = title; portals.relabel(record); }
-        renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: title, headline: line, body: line }));
+        return renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: title, headline: line, body: line }));
     }
 
     // Fold host facts; absent counters stay absent.
@@ -1761,7 +1761,7 @@ export function createChatInstance({
         }
         updateLiveCardCount(record);
         // Cost does not move the activity clock.
-        if (ts && (summary.human || activityCandidate)) record.latestActivityTs = ts, record.latestActivityRaw = rawTs || '';
+        if (ts && (summary.human || summary.reasoning || activityCandidate)) record.latestActivityTs = ts, record.latestActivityRaw = rawTs || '';
         if (summary.executorChip
                 && !keepStickyExecutorChip(record.executorChip, summary.executorChip)) {
             record.executorChip = summary.executorChip;
@@ -2040,8 +2040,13 @@ export function createChatInstance({
             status: preserveTerminal ? '' : (msg?.status || ''),
         }, rawTs);
         if (!summary) return false;
-        // Same frame adopts one speech occurrence; progress replaces a line.
-        if (!summary.activity) summary.dedupeKey = ownLine ? `subagent-line:${childId}:${rawTs}:${content}` : `subagent-progress:${childId}`;
+        // One frame is one source occurrence, live or saved; only a live note's row is a line the next note replaces.
+        const occurrence = `${childId}:${rawTs}:${content}`;
+        if (summary.reasoning) summary.dedupeKey = `reasoning:${occurrence}`;
+        else if (!summary.activity) {
+            summary.occurrenceKey = `subagent-line:${occurrence}`;
+            summary.dedupeKey = ownLine || _historyRow?.history_id ? summary.occurrenceKey : childProgressKey(record, summary.occurrenceKey);
+        }
         if (preserveTerminal && !_historyReplayActive) {
             summary.phase = String(record.phaseEl?.dataset?.phase || 'done');
             summary.terminal = true;

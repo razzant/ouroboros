@@ -112,9 +112,9 @@ _PROGRESS_META_FIELDS = (
     # the pointer on reload while its outer task_id stays empty.
     "lifecycle_pointer",
     "initiator",  # the turn's origin label (a consciousness wake-up)
-    # The frame's voice: a replayed host note must stay a host note, or a reload
-    # would hand the card title back to the very line live rendering refused it.
-    "narration", "spoken",
+    # The frame's voice: a replayed host note (or the model's display reasoning) must
+    # stay what it was, or a reload would hand the card title back to a line live refused it.
+    "narration", "reasoning", "spoken",
     "card_row", "card_row_id", "card_row_revision",
     "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
 )

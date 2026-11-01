@@ -2078,10 +2078,12 @@ reload and after a reconnect.
 Narration leads; routine execution evidence stays compact; exceptions keep their
 explanation and controls. The block's title, collapsed activity line and
 timeline carry the turn's own narration (progress frames the model authored,
-marked by the typed `narration` fact the worker stamps at that one producer; a
-frame without it is legacy and read as narration) and whatever needs the owner's
-eyes: a failed or timed-out step, a wait, a review, a child. Host notes on how
-the turn runs (a checkpoint, a model fallback, a review verdict, a nudge) are
+typed `narration` at that one producer; an untyped frame is legacy narration)
+and whatever needs the owner's eyes: a failed or timed-out step, a wait, a
+review, a child. Provider reasoning, typed `reasoning`, stays whole and
+model-authored inside Details, root and child, and never reaches the title, the
+collapsed line or the census `last_line` (owner 01.11 10:53, A). Host notes on
+how the turn runs (a checkpoint, a model fallback, a review verdict, a nudge) are
 visible timeline rows that never claim the title or the collapsed line, so a
 turn with only host notes keeps its coined or task name and an empty activity
 line. An unnamed root takes its newest authored headline by that narration's
@@ -2095,9 +2097,9 @@ lifecycle.
 A task that ends with a cause states it on the collapsed line in the
 owner's words (the sentence of the durable row and the expanded body), so a
 `Done with warnings` chip never stands beside an unrelated last action; a clean
-ending keeps the last narration. Residual tool errors name the first recorded
-failure in plain words (a noun for the step and what happened, never a tool
-name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
+ending's own summary replaces the last narration (owner 01.11 10:52, A). Residual tool
+errors name the first recorded failure in plain words (a noun for the step and
+what happened, never a tool name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`
@@ -2279,7 +2281,7 @@ action changes model/account only. Closing the chat disposes view resources
 without claiming it stopped the task; continuation requires the Ouroboros
 process to keep running.
 
-A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary fills the title slot when the run has no authored name (a wake), else it is the card's line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
+A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary is the whole head (owner 01.11 10:52, A) when the run has no authored name (a wake), else the line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
 While running, the server supplies Own time, the focus's cause label or the
 schedule's name in that title slot; no summary leaves the title in place, with
 no invented sentence. Model waits, controls and temporary model changes last

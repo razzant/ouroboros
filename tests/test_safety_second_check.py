@@ -61,7 +61,19 @@ def test_speech_returns_both_reasons_even_when_second_overturns(supervisor):
     assert len(h.calls) == 2
 
 
-@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline")])
+@pytest.mark.parametrize("second,allowed", [("SAFE", True), ("DANGEROUS", False)])
+def test_second_check_reads_an_answer_envelope(supervisor, second, allowed):
+    h = supervisor
+    h.values["OUROBOROS_SUBAGENTS"] = catalog()
+    h.replies.extend([{"status": "DANGEROUS", "reason": "first reason"},
+                      json.dumps({"answer": json.dumps({"status": second, "reason": "second reason"})})])
+    ok, msg = h.module.check_safety("write_remote", {"x": 1}, ctx=h.ctx)
+    assert (ok, len(h.calls)) == (allowed, 2)
+    assert msg == "" if allowed else "second: DANGEROUS — second reason" in msg
+
+
+@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline"),
+                                 json.dumps({"answer": json.dumps({"status": "SAFE", "reason": " "})})])
 def test_second_unavailable_is_a_hold_without_an_extra_attempt(supervisor, bad):
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()

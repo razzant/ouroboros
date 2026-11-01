@@ -30,6 +30,7 @@ from ouroboros.project_facts import (
 )
 from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
 from ouroboros.focus import normalize_focus
+from ouroboros.task_carrier import inline_execution
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import completed_local_read
 from ouroboros.utils import (
@@ -648,7 +649,18 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
     import pathlib
 
     canonical = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or getattr(ctx, "drive_root", "")))
-    direct = bool(getattr(ctx, "is_direct_chat", False))
+    # The current carrier owns liveness; ``is_direct_chat`` keeps the origin after
+    # continue_in_background hands the same work to the pool.
+    direct = inline_execution(ctx)
+    attempt_owner = metadata.get("_execution_owner")
+
+    def _live(row: Dict[str, Any]) -> bool:
+        """RUNNING and, for a pooled attempt, still the one the row names: a new attempt rebinds it."""
+        recorded = row.get("execution_owner")
+        superseded = (isinstance(attempt_owner, dict) and attempt_owner.get("kind") == "pooled"
+                      and isinstance(recorded, dict) and recorded != attempt_owner)
+        return str(row.get("status") or "") == STATUS_RUNNING and not superseded
+
     if direct:
         try:
             from supervisor.workers import direct_chat_turn
@@ -658,7 +670,7 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current direct turn is no longer live"
     else:
         current = load_task_result(canonical, task_id)
-        if isinstance(current, dict) and str(current.get("status") or "") != STATUS_RUNNING:
+        if isinstance(current, dict) and not _live(current):
             return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
     try:
         focus = normalize_focus(text, source_ref, task_id=task_id)
@@ -681,7 +693,7 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
         return f"⚠️ FOCUS_SOURCE_UNRETAINED (update_focus): the source answer could not be retained ({type(exc).__name__})"
 
     def _project(current: Dict[str, Any], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if str(current.get("status") or "") != STATUS_RUNNING:
+        if not _live(current):
             return None
         prior = current.get("focus")
         if prior:
@@ -703,10 +715,10 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
                 if direct_chat_turn(task_id) is None:
                     return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current direct turn is no longer live"
             current = load_task_result(canonical, task_id)
-            if not isinstance(current, dict) or str(current.get("status") or "") != STATUS_RUNNING:
+            if not isinstance(current, dict) or not _live(current):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
             stored = write_task_result(canonical, task_id, STATUS_RUNNING, focus=focus, _field_projector=_project)
-            if not isinstance(stored, dict) or str(stored.get("status") or "") != STATUS_RUNNING:
+            if not isinstance(stored, dict) or not _live(stored):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
             if stored.get("focus") != focus:
                 return "⚠️ FOCUS_STALE (update_focus): a newer focus already exists"

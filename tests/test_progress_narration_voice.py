@@ -46,9 +46,15 @@ def test_every_emitted_note_declares_its_voice_explicitly():
     _emit(agent, "⚡ Fallback: switching model lane",
           incident={"task_incident": "model_lane_switch", "toast_once": "lane"})
 
-    host, narration, fallback = (events.get_nowait() for _ in range(3))
+    _emit(agent, "Weighing the next step", narration=True, reasoning=True)
+    _emit(agent, "A host note cannot be reasoning", reasoning=True)
+
+    host, narration, fallback, thought, hosted = (events.get_nowait() for _ in range(5))
     assert host["progress_meta"]["narration"] is False
     assert narration["progress_meta"]["narration"] is True
+    # Reasoning is stamped only on the model's own words, and only when true: absence is speech.
+    assert thought["progress_meta"]["reasoning"] is True and thought["role"] == "assistant"
+    assert "reasoning" not in narration["progress_meta"] and "reasoning" not in hosted["progress_meta"]
     # An incident note is still the host talking; the typed toast pair is untouched.
     assert fallback["progress_meta"]["narration"] is False
     assert fallback["progress_meta"]["task_incident"] == "model_lane_switch"
@@ -130,14 +136,14 @@ def test_bound_spoken_row_keeps_task_provenance():
         "initiator": "consciousness", "source": "live_call", "narration": True}
 
 
-@pytest.mark.parametrize("content, msg, expected", [
-    ("The answer is 42.", {}, "The answer is 42."),
+@pytest.mark.parametrize("content, msg, expected, facts", [
+    ("The answer is 42.", {}, "The answer is 42.", {"narration": True}),
     ([{"type": "thinking", "thinking": "x"}], {"reasoning": "weighing the options"},
-     "weighing the options"),
+     "weighing the options", {"narration": True, "reasoning": True}),
 ])
-def test_round_progress_is_the_only_narration_producer(content, msg, expected):
+def test_round_progress_is_the_only_narration_producer(content, msg, expected, facts):
     """Both of its emissions — visible round text and display reasoning — are the
-    turn's own speech."""
+    model's own words; the reasoning says it is reasoning, so it stays out of the card's head."""
     from ouroboros.loop import _emit_round_progress
 
     seen = []
@@ -146,7 +152,20 @@ def test_round_progress_is_the_only_narration_producer(content, msg, expected):
         seen.append((text, meta))
 
     _emit_round_progress(content, msg, emit, {"reasoning_notes": []})
-    assert seen == [(expected, {"narration": True})]
+    assert seen == [(expected, facts)]
+
+
+def test_the_loop_callable_contract_names_the_reasoning_fact():
+    """``loop_transport``'s callable contract: a sink of the documented shape takes a reasoning round;
+    one of the older shape refuses it loudly instead of losing the fact."""
+    from ouroboros.loop import _emit_round_progress
+
+    msg, seen = {"reasoning": "weighing the options"}, []
+    _emit_round_progress("", msg, lambda text, *, incident=None, narration=False, reasoning=False:
+                         seen.append((text, narration, reasoning)), {"reasoning_notes": []})
+    assert seen == [("weighing the options", True, True)]
+    with pytest.raises(TypeError, match="reasoning"):
+        _emit_round_progress("", msg, lambda _text, *, incident=None, narration=False: None, {"reasoning_notes": []})
 
 
 def test_voice_rides_the_live_frame_the_stored_row_and_the_replay(tmp_path, monkeypatch):
@@ -160,7 +179,8 @@ def test_voice_rides_the_live_frame_the_stored_row_and_the_replay(tmp_path, monk
     _emit(agent, "Checkpoint 3 at round 12")
     spoken = {"call_id": "synthetic", "item_id": "one", "played_ms": 60, "status": "interrupted"}
     _emit(agent, "Reading the failing test first.", narration=True, _progress_meta_override={"spoken": spoken})
-    frames = [events.get_nowait() for _ in range(2)]
+    _emit(agent, "Weighing whether the flake is timing — or order.", narration=True, reasoning=True)
+    frames = [events.get_nowait() for _ in range(3)]
 
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "chat.jsonl").touch()
@@ -187,9 +207,10 @@ def test_voice_rides_the_live_frame_the_stored_row_and_the_replay(tmp_path, monk
     replay = [row for row in json.loads(response.body)["messages"] if row.get("is_progress")]
 
     for rows in (live, stored, replay):
-        assert [row["narration"] for row in rows] == [False, True], rows
-        assert [row["role"] for row in rows] == ["system", "assistant"], rows
-        assert [row["system_type"] for row in rows] == ["host_progress", "model_narration"], rows
+        assert [row["narration"] for row in rows] == [False, True, True], rows
+        assert [row.get("reasoning") for row in rows] == [None, None, True], rows
+        assert [row["role"] for row in rows] == ["system", "assistant", "assistant"], rows
+        assert [row["system_type"] for row in rows] == ["host_progress", "model_narration", "model_narration"], rows
         assert rows[1]["spoken"] == spoken, rows
     # The voice is presentation only: the host note keeps its liveness semantics
     # (that marker is supervisor-authored HOST_NARRATION, a different key).
