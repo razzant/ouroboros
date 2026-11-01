@@ -1046,7 +1046,8 @@ def test_rejected_stream_settles_and_walks_the_fallback_chain_without_a_wait_epi
     for transcript in (messages, kwargs["tools"]._ctx.messages):
         assert not any("[SYSTEM NOTICE]" in str(m.get("content") or "") for m in transcript)
     # The host's own verdict on the stream is no provider sentence: the class alone is named.
-    assert "⚡ Fallback: test-model → other/model. Trying the next model after a provider error." in notes
+    assert "⚡ Fallback: trying other/model after a provider error on test-model." in notes
+    assert "⚡ Fallback: other/model is now the active route; it answered." in notes
 
 
 def test_code_less_stream_error_without_usage_keeps_the_upper_bound_and_still_walks_the_chain(

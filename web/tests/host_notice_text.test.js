@@ -241,6 +241,10 @@ test('command, plan and paused-evolution producer variants are covered', () => {
         // An OpenAI attempt and the stream's own search event stay two rows, each without its mark.
         ['ouroboros/tools/search.py', 'host_progress', '🔍 Trying ', 'OpenAI web search: q'],
         ['ouroboros/tools/search.py', 'host_progress', '🔍 Searching: ', 'q'],
+        // The route walk's attempt, adoption and no-adoption rows all open with the one known prefix.
+        ['ouroboros/loop_model_call.py', 'host_progress', '⚡ Fallback: trying ', 'alt/a after a rejected request on primary.'],
+        ['ouroboros/primary_route_observation.py', 'host_progress', '⚡ Fallback: ', 'alt/a is now the active route; it answered.'],
+        ['ouroboros/loop_model_call.py', 'host_progress', '⚡ Fallback: the last attempt, on ', 'alt/a, ended without a usable reply.'],
     ];
     for (const [path, type, prefix, suffix] of cases) {
         assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes(prefix));
@@ -248,6 +252,14 @@ test('command, plan and paused-evolution producer variants are covered', () => {
         assert.equal(hostNoticeDisplayText(raw, type), raw.slice(raw.indexOf(' ') + 1));
         assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
     }
+});
+
+test('a stored fallback row of the old producer keeps its own words and loses the same mark', () => {
+    const stored = '⚡ Fallback: primary → alt-a. Trying the next model after a rejected request.';
+    assert.equal(hostNoticeDisplayText(stored, 'host_progress'), 'Fallback: primary → alt-a. Trying the next model after a rejected request.');
+    assert.equal(hostRowDisplayText({ role: 'system', narration: false, is_progress: true, system_type: 'host_progress', text: `💬 ${stored}` }),
+        'Fallback: primary → alt-a. Trying the next model after a rejected request.');
+    assert.equal(hostNoticeDisplayText(stored, 'reminder'), stored);
 });
 
 test('child host progress shares root presentation without changing its raw dedupe identity', () => {

@@ -50,13 +50,80 @@ def _call_money(call: dict) -> str:
     return text + (f", engine billing {billing}" if isinstance(billing, str) and billing else ", billing basis not reported")
 
 
+def call_account(call: dict) -> str | None:
+    """The account a call's own request carried (``""`` is Auto), or None when its record names none.
+
+    Neither the account an engine reports serving it nor a later Settings or wait choice stands in."""
+    requested = call.get("requested_profile") if isinstance(call, dict) else None
+    return requested.strip() if isinstance(requested, str) else None
+
+
+def call_route(call: dict, model: str, use_local: bool) -> tuple[str, bool]:
+    """The model and locality a call's own record names, else the adopted route's own ``model``/``use_local``; a wait
+    choice read after that call returned never relabels it."""
+    recorded = call.get("use_local") if isinstance(call, dict) else None
+    return str((call or {}).get("model") or model), recorded if isinstance(recorded, bool) else bool(use_local)
+
+
+def own_call_record(usage: dict, answered: bool, meta_before, failure_before) -> dict:
+    """The record one call itself left, given the records it found: its response meta when it answered, else its own
+    failure row; ``{}`` when it left none (output recovery's gate sends nothing), so an earlier call's never names it."""
+    row, before = ((usage.get("_last_llm_call_meta"), meta_before) if answered
+                   else (usage.get("_last_llm_failure"), failure_before))
+    return row if isinstance(row, dict) and row is not before else {}
+
+
+def fallback_route_words(tool_ctx, model: str, use_local: bool, role: str, waiter, *, pin_note: bool = False,
+                         own_call: dict | None = None) -> str:
+    """A configured route in the owner's words. Before its send (``own_call`` None) it is named by what the dispatch
+    will use: a task-local wait override replaces the configured choice for this role, or selects Auto, so the same
+    binding speaks here as at the send. After a send, ``own_call`` is the record that call left: it names the route
+    (``call_route``) and its account is the one its request carried (``call_account``); a record naming none, or no
+    call of its own (``{}``), names no account."""
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, route_binding, task_model_binding
+    from ouroboros.provider_models import provider_for_model
+
+    overrides = waiter.overrides if waiter else None
+    if own_call is None:
+        name, local, _account = route_binding(model, use_local, role, overrides=overrides)
+        _role, bound = task_model_binding({"model_role": role, "task_metadata": getattr(tool_ctx, "task_metadata", {})},
+                                          overrides=overrides)
+        account = bound.strip() if bound is not None else str(model_role_option(MODEL_ACCOUNTS_KEY, role) or "")
+    else:
+        (name, local), account = call_route(own_call, model, use_local), call_account(own_call)
+    note = ""
+    if provider_for_model(name) == "claudexor" and account is not None:
+        note = f" (account: {account or 'Auto'}{'; pinned account: siblings were not tried' if pin_note and account else ''})"
+    return f"{name}{' (local)' if local else ''}{note}"
+
+
+def fallback_adoption_text(tool_ctx, model: str, use_local: bool, role: str, waiter, usage: dict, *,
+                           answered: bool, own_call: dict, fresh: bool = True) -> str:
+    """The walk's one row on the route it adopted, at the adoption itself: the chosen active route or the return
+    to the primary, named by ``own_call``, the record the adopted call itself left (``fallback_route_words``), and
+    whether that route answered (``fresh``: ``fallback_reason_text``). Ordinary progress with no incident: no browser
+    toast; Telegram sends it only as mirrored progress, which Silent mode mutes."""
+    from ouroboros.loop_transport import fallback_reason_text
+
+    primary, route = getattr(tool_ctx, "primary_route", None), fallback_route_words(tool_ctx, model, use_local, role,
+                                                                                     waiter, own_call=own_call)
+    adopted = (f"back on the primary route {route}" if isinstance(primary, dict) and primary.get("role") == role
+               else f"{route} is now the active route")
+    return (f"⚡ Fallback: {adopted}; it answered." if answered
+            else f"⚡ Fallback: {adopted}, with no usable answer{fallback_reason_text(usage, model, named=False, fresh=fresh)}")
+
+
 def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed_model: str,
-                     failure: dict, waiter, usage: dict | None = None, round_idx: int | None = None) -> str:
+                     failure: dict, waiter, usage: dict | None = None, round_idx: int | None = None,
+                     answered: bool = True, own_call: dict | None = None) -> str:
     """Facts after a host-driven switch away from the primary; the acting model decides what follows.
 
-    Each route is named by the binding its send applies, a wait-card choice included. The
+    Each route is named by the binding its send applies, a wait-card choice included; given ``own_call``, the record
+    the acting route's own call left, that record names the route (``call_route``, else the adopted ``model``/``use_local``)
+    and its account is the one that request carried (``call_account``). The
     answering call's own usage counts only when this round recorded it, its tokens as reported;
-    the primary's evidence is its last accepted call on its current binding, an earlier binding
+    a route adopted without a usable answer (``answered=False``, its reply allowance spent) has no such call.
+    The primary's evidence is its last accepted call on its current binding, an earlier binding
     named as one, or its absence. Tariffs come from the cache only, for the named binding at the
     answering input's reported size. Rendered once: a later price or ledger correction never
     rewrites what was sent.
@@ -77,18 +144,20 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
         if local:
             return f"{name} (local) (role {route_role})"
         provider = provider_for_model(name)  # the configured transport, never a payment basis
-        account_text = f"; account {account or 'Auto'}" if provider == "claudexor" else ""
+        account_text = f"; account {account or 'Auto'}" if provider == "claudexor" and account is not None else ""
         return f"{name} (role {route_role}{account_text}) via {provider}"
 
     usage = usage or {}
-    call = accepted_call(usage, round_idx)
+    call = accepted_call(usage, round_idx) if answered else {}
     reported = event_token_counts(call) if isinstance(call.get(REPORTED_TOKENS_KEY), dict) else {}
 
     def tariff(name: str, local: bool, provider: str = "") -> str:
         provider = provider or ("local" if local else provider_for_model(name))
         return "" if provider == "local" else "; " + cached_tariff_text(name, provider, reported.get("prompt_tokens"))
 
-    if not call:
+    if not answered:
+        answer = "That route has no accepted call this round."
+    elif not call:
         answer = "That answering call's own usage was not recorded."
     else:
         counts = ", ".join(f"{name} {'unknown' if reported.get(key) is None else format(reported[key], ',')}" for name, key
@@ -116,8 +185,11 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
                "transport_unavailable": " The complete request did not reach the provider; generation did not start."}.get(code, "")
     error = (f" Recorded error text: {json.dumps(str(failure['error']), ensure_ascii=False)}."
              if failure.get("error") else "")
+    acting = (route_binding(model, use_local, role, overrides=overrides) if own_call is None
+              else (*call_route(own_call, model, use_local), call_account(own_call)))
     return (f"[ROUTE FACTS] This task's primary route is {label(target, primary['role'])}; "
-            f"{label(route_binding(model, use_local, role, overrides=overrides), role)} answered this round after "
+            f"{label(acting, role)} "
+            f"{'answered this round' if answered else 'is now acting without a usable answer this round'} after "
             f"{failure.get('model') or failed_model} failed with {code}{f' ({detail})' if detail else ''} at {failure.get('ts') or 'an unrecorded time'}"
             f"{f' (its engine dated a reset at {reset})' if reset else ''}.{meaning}{error} {answer} {before} "
             "Facts, not an instruction: stay on this route, return with switch_model(primary=\"return\") (the next real "
