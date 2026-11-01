@@ -20,7 +20,7 @@ def test_absent_owner_client_rule_is_available_without_a_runtime_client_note():
 
 @pytest.mark.parametrize("clause", [
     "its route plus the facets it really runs with, defaults omitted",
-    "restart uses it if the working branch cannot import",
+    "no restart falls back to it",
     "Their exact composition and room detail remain readable",
     "not by merely reselecting the old one",
     "MCP tools are named `mcp_<server>__<tool>`",

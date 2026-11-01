@@ -399,7 +399,7 @@ function startFailureFacts(failure, { head = true } = {}) {
     const rows = head ? [{ head: 'Last start' }] : [];
     const add = (label, value, extra = {}) => { if (value) rows.push({ label, value: String(value), ...extra }); };
     add('Failed', failure.cause === 'import_failed' ? 'this checkout’s code did not import' : failure.cause);
-    add('These files', { healthy: 'started successfully before', unverified: 'never reached a successful start' }[failure.composition]);
+    add('These files', { healthy: 'started successfully before', unverified: 'no successful start recorded' }[failure.composition]);
     if (strings(failure.paths).length) rows.push({ label: 'Kept in place', value: strings(failure.paths).join('\n'), code: true });
     add('Rescue copy', failure.rescue);
     add('When', attemptTime(failure.at));
@@ -530,10 +530,11 @@ export function candidateVerdict(data = {}, base = {}) {
         const why = failure.composition === 'healthy'
             ? 'These files started successfully before, so something outside them changed: the Python environment, '
                 + 'the data or the system. Nothing was reset.'
-            : failure.composition === 'unverified'
-                ? `Local changes that never reached a successful start break it (${paths.length} path(s)). They stay in `
-                    + `place${failure.rescue ? ` and were copied to ${failure.rescue}` : ''}; the last commit was not `
-                    + 'started without them.'
+            : failure.composition === 'unverified'  // no successful start recorded: nothing says what broke it
+                ? ['No successful start of these files is recorded, so the cause is not known.', paths.length
+                    ? `Your ${paths.length} local change(s) stay in place${failure.rescue ? ` and were copied to `
+                        + failure.rescue : ''}; the last commit was not started without them.` : '']
+                    .filter(Boolean).join(' ')
                 : '';
         return make({ state: 'start_failed', tone: 'error', factsOpen: true, factsTitle: own.length ? '' : 'Last start',
             headline: 'The last start failed: this checkout’s code did not import.',

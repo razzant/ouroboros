@@ -78,6 +78,7 @@ def test_unverified_breaking_edit_is_kept_and_stops_in_recovery(repo, monkeypatc
     ok, message = git_ops_reset.safe_restart("bootstrap", unsynced_policy="keep")
 
     assert ok is False and "last commit was not started" in message
+    assert "the cause is unknown; its 3 local change(s) stay in place and were copied to" in message
     assert _composition(repo) == before  # nothing reset, nothing cleaned, no fallback checkout
     assert git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "ouroboros"
     failure = update_prepare.projection()["start_failure"]  # what the Updates panel reads
@@ -100,6 +101,24 @@ def test_a_healthy_composition_that_stops_importing_names_its_environment(repo, 
     assert git_ops_reset.safe_restart("owner_restart", unsynced_policy="keep")[0] is True
     assert "start_failure" not in update_prepare.projection()  # the next good start clears it
     assert update_prepare.retained_fact("healthy_composition", git_ops.DRIVE_ROOT)["composition"]
+
+
+def test_a_clean_checkout_with_no_ready_record_is_unverified_without_blaming_local_changes(repo, monkeypatch):
+    """No healthy receipt yet (a first start) and nothing edited: the failure is reported as unexplained, never as
+    local changes that break it; the import error stays readable and the checkout stays for Restore."""
+    git(repo, "reset", "-q", "--hard")
+    (repo / "notes.txt").unlink()
+    head = git(repo, "rev-parse", "HEAD")
+    error = "ModuleNotFoundError: No module named 'absent_dependency'"
+    monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": False, "returncode": 1, "stderr": error})
+
+    ok, message = git_ops_reset.safe_restart("bootstrap", unsynced_policy="keep")
+
+    assert ok is False and "no ready start of this composition is recorded, so the cause is unknown." in message
+    assert "local change" not in message and "last commit was not started" in message
+    failure = update_prepare.projection()["start_failure"]
+    assert (failure["composition"], failure["paths"], failure["detail"]) == ("unverified", [], error)
+    assert git(repo, "rev-parse", "HEAD") == head and git(repo, "status", "--porcelain") == ""
 
 
 UPDATE = {"kind": "update", "candidate_id": "update_c_1"}

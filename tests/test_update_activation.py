@@ -222,7 +222,7 @@ def test_a_start_that_does_not_attest_its_switch_is_shown_unconfirmed_until_one_
     assert healthy() == before != on_disk()  # ready, but nothing proves it ran the switched tree
     kept, why = git_ops_reset._kept_import_failure("bootstrap", {"returncode": 1, "stderr": "SyntaxError: boom"})
     failure = update_prepare.projection()["start_failure"]
-    assert kept is False and "never reached ready" in why and failure["composition"] == "unverified"
+    assert kept is False and "cause is unknown" in why and failure["composition"] == "unverified"
     assert pathlib.Path(failure["rescue"]).is_dir()
     body_switch._attest_loaded(str(scene.serving), scene.handoff())
 

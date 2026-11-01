@@ -3,7 +3,7 @@
 
 Owns the destructive tree movement and its admission gate: the resilient
 checkout/reset runner, the unsynced-policy block/rescue rules, the runtime
-dependency sync, the import smoke and the dev-then-stable safe restart. The
+dependency sync, the import smoke and the keep-the-checkout safe restart. The
 parent keeps the rebindable module state (``init`` REBINDS REPO_DIR/BRANCH_*
 and friends), the capture plumbing and the marker/meta probes, and re-exports
 every name here, so ``supervisor.git_ops`` stays the one public surface.
@@ -859,8 +859,8 @@ def _kept_import_failure(reason: str, result: Dict[str, Any]) -> Tuple[bool, str
     """``keep`` and a tree that does not import: never reset to the last commit, never fall back.
 
     A composition recorded healthy that now fails names its environment, data or the
-    outside world, not the edit; an unverified one (edited while the app was closed) is
-    copied into a rescue snapshot and stays in place. Either way the boot reports it.
+    outside world, not the edit; any other is unverified and its cause unknown (no matching
+    ready receipt): its dirty paths are rescued and stay in place. Either way the boot reports it.
     """
     from supervisor.update_prepare import fingerprint, retained_fact, snapshot
 
@@ -880,11 +880,12 @@ def _kept_import_failure(reason: str, result: Dict[str, Any]) -> Tuple[bool, str
                                                repo_state=repo_state)
         fact.update(composition="unverified", rescue=str(rescue.get("path") or ""),
                     paths=list(repo_state.get("dirty_lines") or [])[:20])
-        cause = (f"local changes that never reached ready break it ({len(fact['paths'])} path(s)); they stay in "
-                 f"place{' and were copied to ' + fact['rescue'] if fact['rescue'] else ''}")
+        kept = (f"; its {len(fact['paths'])} local change(s) stay in place"
+                f"{' and were copied to ' + fact['rescue'] if fact['rescue'] else ''}") if fact["paths"] else ""
+        cause = f"no ready start of this composition is recorded, so the cause is unknown{kept}"
     _note_start_failure(fact)
     return False, (f"Import test failed (rc={result.get('returncode', -1)}): {cause}. The checkout was kept; the "
-                   "last commit was not started without these changes.")
+                   "last commit was not started in its place.")
 
 
 def record_healthy_composition() -> None:

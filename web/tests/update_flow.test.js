@@ -524,7 +524,10 @@ test('a start that failed leads to recovery: what failed, the kept paths and the
     const verdict = updateVerdict({ ...STATUS, available: false, candidate: { state: 'none', actions: ['prepare'], start_failure: failure } });
     assert.equal(verdict.state, 'start_failed');
     assert.equal(verdict.headline, 'The last start failed: this checkout’s code did not import.');
-    assert.match(verdict.hint, /never reached a successful start break it \(2 path\(s\)\)\. They stay in place and were copied to \/data\/archive\/rescue\/20261027-141205/);
+    assert.equal(verdict.hint, 'No successful start of these files is recorded, so the cause is not known. Your 2 '
+        + 'local change(s) stay in place and were copied to /data/archive/rescue/20261027-141205; the last commit was '
+        + 'not started without them. Restore starts a version you choose.');
+    assert.equal(verdict.facts.find((row) => row.label === 'These files').value, 'no successful start recorded');
     assert.deepEqual(verdict.action, { id: 'recovery', label: 'Choose a version to restore' });
     assert.deepEqual(verdict.secondary, [], 'recovery is the one thing here: no Prepare beside it');
     const kept = verdict.facts.find((row) => row.label === 'Kept in place');
@@ -532,6 +535,14 @@ test('a start that failed leads to recovery: what failed, the kept paths and the
     assert.equal(verdict.facts.find((row) => row.label === 'Import error').value, failure.detail);
     const healthy = updateVerdict({ ...STATUS, candidate: { state: 'none', start_failure: { cause: 'import_failed', composition: 'healthy' } } });
     assert.match(healthy.hint, /started successfully before, so something outside them changed/);
+    // No successful start recorded and nothing edited (a first start): unexplained, never blamed on local changes.
+    const clean = updateVerdict({ ...STATUS, candidate: { state: 'none', start_failure: { cause: 'import_failed',
+        composition: 'unverified', rescue: '', paths: [], detail: "ModuleNotFoundError: No module named 'x'" } } });
+    assert.equal(clean.hint, 'No successful start of these files is recorded, so the cause is not known. Restore '
+        + 'starts a version you choose.');
+    assert.deepEqual(clean.action, { id: 'recovery', label: 'Choose a version to restore' });
+    assert.equal(clean.facts.find((row) => row.label === 'Import error').value,
+        "ModuleNotFoundError: No module named 'x'");
     // A failed import outside the keep policy: the checkout stays, no older branch starts on its own, Restore chooses.
     const plain = updateVerdict({ ...STATUS, candidate: { state: 'none', start_failure: { cause: 'import_failed',
         detail: 'ImportError: boom' } } });
