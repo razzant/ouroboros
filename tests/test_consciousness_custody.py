@@ -107,6 +107,8 @@ def test_stop_during_admission_reaches_the_wake_and_leaves_owner_running(clock, 
     monkeypatch.setattr(workers, "DRIVE_ROOT", clock.root)
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(queue, "RUNNING", {})
+    # The real Stop fences parent1's tree in this per-process registry; it must not outlive the test.
+    monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {})
     monkeypatch.setattr(workers, "WORKERS", {})
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=lambda event: None))
     monkeypatch.setattr("ouroboros.config.get_direct_turn_stop_wait_sec", lambda: 0)
