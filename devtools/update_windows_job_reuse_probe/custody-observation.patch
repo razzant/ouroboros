@@ -1,0 +1,101 @@
+--- a/devtools/update_windows_qualification/wq_custody.py
++++ b/devtools/update_windows_qualification/wq_custody.py
+@@ -17,6 +17,7 @@
+ import subprocess
+ import threading
+ import time
++from time import perf_counter_ns
+ 
+ from wq_verdict import under
+ from wq_win import CREATE_NO_WINDOW, CREATE_SUSPENDED
+@@ -69,6 +70,7 @@
+     def __init__(self, win, raw, label, scope_roots):
+         self.win, self.raw, self.label, self.scope_roots = win, raw, label, [str(root) for root in scope_roots]
+         self.job, self.started, self.closed, self.pumps = win.job(), [], False, []
++        self.last_stop_ns = None  # observation only: when the last stop_all finished (high-resolution clock)
+         raw.emit("custody_open", mode=label, scope_roots=self.scope_roots)
+ 
+     def spawn(self, label, argv, *, env, cwd, logs, interactive=False):
+@@ -77,6 +79,7 @@
+         out = open(os.path.join(logs, f"{label}.stdout"), "ab")
+         err = open(os.path.join(logs, f"{label}.stderr"), "ab")
+         self.raw.emit("spawn_intent", mode=self.label, label=label, argv=[str(a) for a in argv], cwd=str(cwd))
++        since_stop_ms = None if self.last_stop_ns is None else (perf_counter_ns() - self.last_stop_ns) / 1e6
+         try:
+             proc = subprocess.Popen([str(a) for a in argv], env=env, cwd=str(cwd),
+                                     stdin=subprocess.PIPE if interactive else subprocess.DEVNULL,
+@@ -85,23 +88,61 @@
+         finally:
+             out.close()
+             err.close()
++        stage = "assign"
+         try:
+             self.win.assign(self.job, int(proc._handle))
++            stage = "birth"
+             identity = {"pid": proc.pid, "birth": self.win.birth(int(proc._handle))}
++            stage = "resume"
+             self.win.resume(int(proc._handle))
+         except BaseException as exc:
+-            # Suspended and outside the Job: it has run no instruction and started nothing.
+-            proc.kill()
+-            proc.wait(timeout=30)
+-            self.raw.emit("spawn_refused", mode=self.label, label=label, error=repr(exc))
++            # ``stage`` is the call that refused. Only at "assign" is the child outside the Job; at "birth" it is a
++            # member, and at "resume" it may already be running. It was created suspended, but nothing here
++            # measures that, and the cleanup below is the only thing that ends it.
++            observed = self._refusal_readings(proc)  # before the kill below changes what they would say
++            cleanup = {"kill": "not_run", "wait": "not_run"}
++            try:
++                try:
++                    proc.kill()
++                except BaseException as kill_exc:
++                    cleanup["kill"] = repr(kill_exc)
++                    raise
++                cleanup["kill"] = "ok"
++                try:
++                    proc.wait(timeout=30)
++                except BaseException as wait_exc:
++                    cleanup["wait"] = repr(wait_exc)
++                    raise
++                cleanup["wait"] = "ok"
++            finally:  # the refusal is recorded after, never instead of, the cleanup, and whether or not it failed
++                self.raw.emit("spawn_refused", mode=self.label, label=label, error=repr(exc), stage=stage,
++                              since_stop_ms=since_stop_ms, observed=observed, pid=proc.pid, cleanup=cleanup)
+             raise
+         self.started.append({"label": label, **identity})
+-        self.raw.emit("spawned", mode=self.label, label=label, **identity)
++        self.raw.emit("spawned", mode=self.label, label=label, since_stop_ms=since_stop_ms, **identity)
+         holder = Interactive(proc, os.path.join(logs, f"{label}.stdout")) if interactive else None
+         if holder is not None:
+             self.pumps.append(holder)
+         return proc, identity, holder
+ 
++    def _refusal_readings(self, proc):
++        """What the handle and the Job answer at a refused start, one bounded read each, before any cleanup. A
++        reader that fails is its own ``read_error``, never a clean answer, and nothing here can replace the
++        original exception or skip the cleanup that follows. ``exit_code`` ``None`` reads still active;
++        ``in_any_job`` passes a NULL Job to IsProcessInJob: whether this process is in any Job at all."""
++        def read(reader):
++            try:
++                return reader()
++            except BaseException as exc:
++                return {"read_error": repr(exc)}
++        handle = lambda: int(proc._handle)  # noqa: E731 - read inside each reader's own guard
++        return {"exit_code": read(lambda: self.win.exit_code(handle())),
++                "birth": read(lambda: self.win.birth(handle())),
++                "in_this_job": read(lambda: self.win.in_job(handle(), self.job)),
++                "in_any_job": read(lambda: self.win.in_job(handle(), None)),
++                "job_active": read(lambda: self.win.active(self.job)),
++                "job_pids": read(lambda: self.win.pids(self.job)[:32])}
++
+     def members(self):
+         """Every process in the Job, by one handle each (identity, image, command line, parent); ``None`` when
+         the census cannot be taken completely (a failed walk, an incomplete Job list)."""
+@@ -173,6 +214,7 @@
+         result["active_after"] = active
+         result["not_gone"] = self.not_gone(result["before"], end)
+         result["confirmed"] = active == 0 and not any(row["state"] is True for row in result["not_gone"])
++        self.last_stop_ns = perf_counter_ns()
+         self.raw.emit("stop_all", mode=self.label, **result)
+         return result
+ 

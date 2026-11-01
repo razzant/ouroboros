@@ -1,0 +1,31 @@
+{
+ "digest": "sha256 of the file's LF form (the hosted image's Git checks text out with CRLF)",
+ "files": {
+  "custody-observation.patch": "eaaa91e412dd76857c64538beb219fdc7b252ad56c0f3623438ad5baee25934f",
+  "job_reuse_probe.py": "79455c40909feea9d8519636b0268aac2e86d67d185bb07c7776acd199e4341c",
+  "test_job_reuse_probe.py": "57d3e4c74f5b33ca58ef623dc849979d855a3cf163ba8911dc88c7a07e8601d5",
+  "wq_custody.original.py": "fb42f9898055ed2904de946336a79f1f4ae1716eb694b539b928f3443a6e400d",
+  "wq_custody.py": "b754524610edc2657a328b1158a3ce28f06e5e08156cf6ece708e0963064e37c",
+  "wq_verdict.py": "c3da7a050fd5d4b5de5d6f34fe8910c17057c346bebf92ac93d1e75727d24d07",
+  "wq_win.py": "b702ad00fd7938ee06133ed7ff883b70dd70b3672e1ac4e22e56a6333225d9ed"
+ },
+ "patched": {
+  "wq_custody.py": "wq_custody.original.py + custody-observation.patch; observation only"
+ },
+ "revision": "2 = 1 + repairs D1-D3: a failed kill/wait keeps the refusal and is recorded as cleanup (outcome stays refused, measurement incomplete); terminated arms need terminate == 'ok'; refusal_reproduced renamed target_refused (target starts only). wq_custody.original.py, wq_verdict.py, wq_win.py and the workflow are unchanged bytes.",
+ "schema": "update-windows-job-reuse-probe-manifest/1",
+ "source": {
+  "directory": "devtools/update_windows_qualification",
+  "equipment_commit": "bdb3d326ae77ab98538064f3c4c1e30d4c51e7bc",
+  "git_blobs": {
+   "wq_custody.py": "a21e40f299637c7f3825807964970cbffdf0a2e9",
+   "wq_verdict.py": "dcea262e3f63159785dd286b7af996e517356a25",
+   "wq_win.py": "86933ad82e2c998570b222956e12f78f5d2c0fb8"
+  }
+ },
+ "verbatim": {
+  "wq_custody.original.py": "wq_custody.py at that commit",
+  "wq_verdict.py": "wq_verdict.py at that commit",
+  "wq_win.py": "wq_win.py at that commit"
+ }
+}

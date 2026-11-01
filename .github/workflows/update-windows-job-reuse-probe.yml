@@ -1,0 +1,76 @@
+# A bounded observation on a hosted Windows image: which call refuses a process in a Job, and after which Job history.
+# Equipment, not product, and no qualification verdict. It builds nothing from the branch's product files, starts only
+# trivial Python children, and uses no secret. Pushing a matching branch starts it; the name deliberately stays
+# outside the qualification workflow's 'qualification/update-windows-*' pattern. No pull_request trigger, no
+# concurrency group (it cancels nothing), a read-only token that is never persisted.
+name: update-windows-job-reuse-probe
+
+on:
+  push:
+    branches: ['qualification/update-job-reuse-probe-*']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Equipment commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: equipment-src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fresh root and the qualification's pinned CPython
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'D:\jrp-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+          [IO.Directory]::CreateDirectory($root) | Out-Null
+          $nupkg = Join-Path $root 'python.zip'
+          Invoke-WebRequest -Uri 'https://api.nuget.org/v3-flatcontainer/python/3.10.11/python.3.10.11.nupkg' -OutFile $nupkg
+          if ((Get-Item -LiteralPath $nupkg).Length -ne 16283939) { throw 'Size mismatch' }
+          $sha = (Get-FileHash -LiteralPath $nupkg -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne '7c6f99b160a36a7e09492dfcff2b0a3a60bb5229ca44cdcc3ecb32871a6144d0') { throw 'SHA-256 mismatch' }
+          Expand-Archive -LiteralPath $nupkg -DestinationPath (Join-Path $root 'driver-python')
+          "JRP_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Probe (exit 0 means measured, never passed)
+        timeout-minutes: 6
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:JRP_ROOT 'driver-python\tools\python.exe'
+          $probe = (Resolve-Path -LiteralPath 'equipment-src\devtools\update_windows_job_reuse_probe').Path
+          $evidence = Join-Path $env:JRP_ROOT 'evidence'
+          [IO.Directory]::CreateDirectory($evidence) | Out-Null
+          & $python -E -s -B -m unittest discover -s $probe -p 'test_job_reuse_probe.py' -v 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'portable-tests-windows.txt')
+          if ($LASTEXITCODE -ne 0) { throw 'Portable tests failed on Windows; nothing was measured.' }
+          & $python -E -s -B (Join-Path $probe 'job_reuse_probe.py') --root (Join-Path $env:JRP_ROOT 'work') `
+            --python $python --evidence (Join-Path $evidence 'probe') 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'driver.txt')
+          exit $LASTEXITCODE
+
+      - name: Retain the trials' child logs beside the evidence
+        if: always()
+        run: |
+          if (-not $env:JRP_ROOT) { exit 0 }
+          $work = Join-Path $env:JRP_ROOT 'work\trials'
+          if (Test-Path -LiteralPath $work) {
+            [IO.Directory]::CreateDirectory((Join-Path $env:JRP_ROOT 'evidence')) | Out-Null
+            Copy-Item -LiteralPath $work -Destination (Join-Path $env:JRP_ROOT 'evidence\trials') -Recurse
+          }
+
+      - name: Retain evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: update-windows-job-reuse-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.JRP_ROOT }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
