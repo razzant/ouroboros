@@ -403,7 +403,6 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     # A bare loop has no agent-built context core, as in the chain's own tests.
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
-    monkeypatch.setattr("ouroboros.loop_llm_call.time.sleep", lambda _s: pytest.fail("a refusal is not retried"))
     secret = "sk-or-" + "fixture" * 6
     refusals = {
         "test-model": _BodyError("Error code: 400", status_code=400,
@@ -431,10 +430,14 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
     agent = SimpleNamespace(_last_progress_ts=None, _event_queue=events, _current_chat_id=1,
                             _current_task_id="task-1", tools=SimpleNamespace(_ctx=SimpleNamespace(task_attempt=0)),
                             _subagent_progress_meta=lambda _event: {})
-    result, _usage, _trace = loop.run_llm_loop(
-        messages=[{"role": "user", "content": "go"}], tools=ToolRegistry(repo_dir=work, drive_root=work), llm=llm,
-        drive_logs=work, emit_progress=partial(OuroborosAgent._emit_progress, agent),
-        incoming_messages=queue.Queue(), task_id="task-1", drive_root=work)
+    # `loop_llm_call.time` is the process-wide `time` module: the sentinel guards the loop only, or a
+    # later child wait that polls (a reaped-after-EOF Node exit, the tree kill's own `ps`) trips it.
+    with monkeypatch.context() as during_loop:
+        during_loop.setattr("ouroboros.loop_llm_call.time.sleep", lambda _s: pytest.fail("a refusal is not retried"))
+        result, _usage, _trace = loop.run_llm_loop(
+            messages=[{"role": "user", "content": "go"}], tools=ToolRegistry(repo_dir=work, drive_root=work), llm=llm,
+            drive_logs=work, emit_progress=partial(OuroborosAgent._emit_progress, agent),
+            incoming_messages=queue.Queue(), task_id="task-1", drive_root=work)
 
     assert result == "done" and llm.models == ["test-model", "alt/a", "alt/b", "alt/c"], "one call per route"
     rows = [json.loads(line) for line in (work / "events.jsonl").read_text().splitlines()]

@@ -427,6 +427,11 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # A command whose task deadline or execution budget is already spent starts no child
     # (shell_process.command_bound_spent): the substrate's refusal, after the golden source.
     "TASK_DEADLINE_BLOCKED": (True, "blocked"),
+    # Stop now ending a running run_command/run_script publishes the calling tool's native SHELL_ERROR
+    # (shell_process.unfinished_command_result). Only the native producer is new; the bare text keeps
+    # its golden `ident:SHELL_ERROR` answer, restated here and retained intact.
+    "SHELL_ERROR": (True, "shell_error"),
+    "native:SHELL_ERROR:SHELL_ERROR": (True, "shell_error"),
     # Owner Batch4: a call the owner's Pause fenced before its launch handoff never
     # ran; it is the substrate's answer, homed with the other runtime refusals.
     "OWNER_PAUSE_NOT_STARTED": (True, "blocked"),
