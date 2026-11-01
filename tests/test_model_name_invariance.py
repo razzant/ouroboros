@@ -31,6 +31,9 @@ compared with the plain control and must show its declared effects and nothing
 else, so a declared exception that stops diverging, or reaches wider than its
 scope, fails too.
 
+The exact direct MiniMax Flash tier exception has a separate test below: it
+diverges only at none/minimal/ultra. The high comparison remains unchanged.
+
 Out of reach: decisions made outside request assembly (which model a VLM call
 picks, whether a screenshot is attached), cache-TTL finalization after the
 builder, the direct Anthropic builder, and predicates over computed strings with
@@ -166,6 +169,9 @@ def _messages(*, declared: bool):
 
 
 PROMPT_SHAPES = ("main-declared-prefix", "undeclared-multiblock")
+# DEVELOPMENT "External facts", provider_models.MINIMAX_FLASH_EFFORT_ALIASES.
+MINIMAX_FLASH_NAME = "MiniMax-M3.1-Flash"
+MINIMAX_FLASH_TIERS = ("none", "minimal", "ultra")
 
 
 class _CaptionModel:
@@ -213,7 +219,7 @@ def empty_evidence(monkeypatch, tmp_path):
     return attempts
 
 
-def _normalized_payload(client, model: str, *, declared: bool) -> dict:
+def _normalized_payload(client, model: str, *, declared: bool, effort: str = "high") -> dict:
     """The physical payload with ONLY the named identity fields normalized."""
     from ouroboros import llm_probe
     from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
@@ -224,7 +230,7 @@ def _normalized_payload(client, model: str, *, declared: bool) -> dict:
         routing=VisionRoutingContext(model=model, llm=_CaptionModel(), accumulated_usage={}),
     )
     send = client._build_remote_kwargs(
-        copy.deepcopy(target), sent, "high", 1024, "auto", 0.2, copy.deepcopy(TOOLS), skip_capability_fetch=True,
+        copy.deepcopy(target), sent, effort, 1024, "auto", 0.2, copy.deepcopy(TOOLS), skip_capability_fetch=True,
     )
     probe = llm_probe._probe_candidate(target)
     resolved = target["resolved_model"]
@@ -356,3 +362,26 @@ def test_physical_payload_does_not_depend_on_the_model_name(empty_evidence):
         "exact name scope, payload path and DEVELOPMENT row.\n"
         + "\n".join(describe(key, found) for key, found in sorted(differences.items()))
     )
+
+
+def test_host_only_tiers_change_only_the_exact_direct_minimax_flash(empty_evidence):
+    from ouroboros.llm import LLMClient
+
+    client = LLMClient(api_key="sk-probe")
+    names = sorted({*_probe_names(), "minimax-m3.1-flash", f"{MINIMAX_FLASH_NAME}-next"})
+    assert {MINIMAX_FLASH_NAME, "MiniMax-M3"} <= set(names)
+    wrong: list[str] = []
+    try:
+        for tier in MINIMAX_FLASH_TIERS:
+            for route in ("minimax", "openai-compatible"):
+                control = _normalized_payload(client, ROUTES[route] + CONTROL, declared=False, effort=tier)
+                for name in names:
+                    payload = _normalized_payload(client, ROUTES[route] + name, declared=False, effort=tier)
+                    exact = route == "minimax" and name == MINIMAX_FLASH_NAME
+                    paths = _paths(control, payload)
+                    if paths != ({"/send/reasoning_effort"} if exact else set()):
+                        wrong.append(f"{tier} route={route} name={name}: {sorted(paths)}")
+    finally:
+        client._pop_effort_clamp_disclosure()
+    assert not wrong, "The tier projection must stay on its exact model and path:\n" + "\n".join(wrong)
+    assert empty_evidence == [], f"request assembly reached the network: {empty_evidence[:3]}"
