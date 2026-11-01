@@ -1,6 +1,7 @@
 """Store transactions report their lock-hold seconds per store kind, in memory; the hook never raises."""
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import time
 
@@ -42,7 +43,7 @@ def test_the_window_counts_holds_per_kind_and_side_and_drain_resets_it(tmp_path)
         time.sleep(0.07)  # the window's longest hold names the frame that opened it (a Windows tick's margin)
     longest = store_timing.drain()["current"]["write"]
     assert longest["max_sec"] >= 0.05 and longest["max_site"].startswith("tests.test_store_timing:test_the_window")
-    assert len(longest["sites"]) == 1 and longest["sites_omitted"] == 0, "nothing cut, nothing omitted"
+    assert len(longest["sites"]) == 1 and "sites_omitted" not in longest, "every site is published: nothing to omit"
 
 
 def test_a_failure_inside_the_hook_never_reaches_the_transaction(tmp_path, monkeypatch):
@@ -156,14 +157,81 @@ def _fourth_read(root):
         txn.row("t", "status")
 
 
-def test_the_window_keeps_each_site_and_publishes_the_top_sites_by_summed_hold(tmp_path):
+def test_the_window_publishes_every_site_most_summed_hold_first(tmp_path):
+    """No cut: the row is bounded by the sites the code has (40 to 48 of 43 to 51 were hidden behind a top three)."""
     write_task_result(tmp_path, "t", "running")
     store_timing.drain()
     for reader in (_short_read, _short_read, _short_read, _long_read, _third_read, _fourth_read):
         reader(tmp_path)
     read = store_timing.drain()["current"]["read"]
-    assert read["count"] == 6 and len(read["sites"]) == store_timing.TOP_SITES < 4  # four sites held, three published
-    assert read["sites_omitted"] == 1, "the cut is disclosed in band"
+    assert read["count"] == 6 and len(read["sites"]) == 4, read
     assert read["sites"][0]["site"].startswith("tests.test_store_timing:_long_read")
     totals = [site["total_sec"] for site in read["sites"]]
-    assert totals == sorted(totals, reverse=True) and sum(site["count"] for site in read["sites"]) <= 6
+    assert totals == sorted(totals, reverse=True) and sum(site["count"] for site in read["sites"]) == 6
+
+
+def _the_census(root):
+    _short_read(root)
+
+
+def _the_request(root):
+    _short_read(root)
+
+
+@pytest.fixture
+def named_callers(monkeypatch):
+    """This module's frames count as first-party callers (production names its own packages)."""
+    monkeypatch.setattr(store_timing, "_OWN_PACKAGES", store_timing._OWN_PACKAGES | {"tests"})
+
+
+def test_a_site_says_who_called_it_by_call_chain(tmp_path, named_callers):
+    """One site reached by two callers on two kinds of thread: ``_short_read``'s row says how much each spent, and two
+    instances of one thread class are one chain."""
+    import threading
+
+    write_task_result(tmp_path, "t", "running")
+    store_timing.drain()
+
+    def on(name, call, times):
+        for instance in range(times):
+            thread = threading.Thread(target=call, args=(tmp_path,), name=f"{name}_{instance}")
+            thread.start()
+            thread.join()
+
+    on("owner_pause_settlement", _the_census, 3)
+    on("asyncio", _the_request, 2)
+    [site] = [row for row in store_timing.drain()["current"]["read"]["sites"] if ":_short_read:" in row["site"]]
+    chains = {row["chain"]: row["count"] for row in site["chains"]}
+    assert chains == {"owner_pause_settlement: test_store_timing:_the_census": 3,
+                      "asyncio: test_store_timing:_the_request": 2}, site
+    assert site["count"] == sum(chains.values())
+    assert sum(row["total_sec"] for row in site["chains"]) == pytest.approx(site["total_sec"], abs=1e-3)
+
+
+def _deep_caller(root):
+    _the_census(root)
+
+
+def _deeper_caller(root):
+    with contextlib.ExitStack():  # a stdlib call between two first-party callers names nobody
+        _deep_caller(root)
+
+
+def test_a_call_chain_names_the_nearest_first_party_callers_only(tmp_path, named_callers):
+    """The tag stays short at any depth, its caller frames skip whatever is not first-party, and a thread's name
+    without first-party callers still tags the hold."""
+    write_task_result(tmp_path, "t", "running")
+    store_timing.drain()
+    _deeper_caller(tmp_path)
+    [site] = [row for row in store_timing.drain()["current"]["read"]["sites"] if ":_short_read:" in row["site"]]
+    [chain] = site["chains"]
+    assert chain["chain"] == "MainThread: test_store_timing:_the_census < test_store_timing:_deep_caller", site
+    assert ":_deeper_caller" not in chain["chain"] and store_timing.CHAIN_CALLERS == 2
+
+
+@pytest.mark.parametrize("thread_name, thread_class", [
+    ("asyncio_12", "asyncio"), ("Thread-123 (_run_direct)", "Thread (_run_direct)"), ("wake-turn-8f3a", "wake-turn"),
+    ("ThreadPoolExecutor-3_7", "ThreadPoolExecutor"), ("owner_pause_settlement", "owner_pause_settlement"),
+    ("cold-custody", "cold-custody"), ("supervisor-main", "supervisor-main")])
+def test_a_thread_class_drops_instance_tokens_and_keeps_a_duty_s_name(thread_name, thread_class):
+    assert store_timing._INSTANCE_TOKEN.sub("", thread_name) == thread_class
