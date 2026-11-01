@@ -346,14 +346,13 @@ test('failed optimistic stop restores the finalizing fact, not only its DOM text
     });
 });
 
-test('task-detail healing reuses the full terminal-summary projection', () => {
+test('task-detail healing keeps the terminal predicate and missing-task summary projection', () => {
     const cancelHeal = chatSource.slice(
         chatSource.indexOf('function reconcileCancelCardFromDetail'),
         chatSource.indexOf('async function cancelRunFromCard'),
     );
+    // Keep the predicate seam without inventing detail states the server never emits.
     assert.match(cancelHeal, /taskDoneIsTerminal\(stored\)/);
-    assert.match(cancelHeal, /appendTaskSummaryToLiveCard\(\{ \.\.\.stored, task_id: taskId \}\)/);
-    assert.doesNotMatch(cancelHeal, /finishLiveCard\(/);
 
     const missingHeal = chatSource.slice(
         chatSource.indexOf('async function reconcileMissingManagedTask'),

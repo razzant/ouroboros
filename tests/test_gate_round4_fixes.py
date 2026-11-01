@@ -10,7 +10,8 @@ GR4-3  the synthetic lifecycle-fault terminal fires the assisted-update and
        cooperative-checkpoint hooks exactly as the normal dispatch does;
 GR4-4  the cascade digest reports each child's CURRENT durable status;
 GR4-5  chat.js: a failed post-failure detail fetch proves nothing — the card
-       keeps the pending presentation and the disabled Cancel;
+       keeps the pending presentation and the disabled Cancel (runs as behaviour
+       in web/tests/cancel_pending_stop.test.js);
 GR4-6  /evolve start clears ``evolution_owner_stopped`` BEFORE the campaign
        mint (both ingresses), and the owner-stop backstop defers while any
        other evolution task is live;
@@ -366,25 +367,6 @@ def test_gr4_4_cascade_digest_reports_the_current_durable_child_state(tmp_path, 
     )
     # A child with no settled durable status keeps the sweep's honest outcome.
     assert outcomes["c5"] == "failed"
-
-
-# --------------------------------------------------------------------------
-# GR4-5 — chat.js: a failed detail fetch proves nothing (web static)
-# --------------------------------------------------------------------------
-
-
-def test_gr4_5_failed_detail_fetch_keeps_cancel_disabled_and_pending():
-    src = (REPO_ROOT / "web" / "modules" / "chat.js").read_text(encoding="utf-8")
-    body_at = src.index("async function cancelRunFromCard")
-    guard_at = src.index("if (stored === null) {", body_at)
-    restore_at = src.index("restoreLiveCardPhaseState(record, priorPhase);", body_at)
-    assert guard_at < restore_at, (
-        "GR4-5: the null-detail guard must return BEFORE the phase restore / "
-        "button re-enable — a failed fetch proves nothing"
-    )
-    assert "Only a fetched, live, non-pending detail restores the button." in src
-    # The old behavior (restore on an unverifiable state) is gone.
-    assert "fall through to the restore below" not in src
 
 
 # --------------------------------------------------------------------------
