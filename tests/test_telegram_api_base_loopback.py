@@ -531,3 +531,40 @@ def test_another_saved_server_does_not_end_other_blocks(tmp_path, monkeypatch, r
 
     assert asyncio.run(scenario()) is companion._GenerationResult.DISABLED
     assert len(ticks) == 3
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_unreadable_menu_settings_recover_through_the_companion_owner_check(tmp_path, monkeypatch, invalid):
+    _load()
+    read_base = telegram_menu.telegram_api_base
+    reads = []
+
+    def unavailable_once(state):
+        reads.append(1)
+        if len(reads) == 1:
+            error = ValueError if invalid else telegram_menu.TelegramSettingsError
+            raise error("unavailable test setting")
+        return read_base(state)
+
+    monkeypatch.setattr(telegram_menu, "telegram_api_base", unavailable_once)
+
+    async def scenario():
+        async with _BotServer() as server:
+            state, _api = _state(tmp_path, TELEGRAM_API_BASE=server.origin)
+            status = _CompanionStatus()
+
+            async def tick(_delay, _stop, **_kwargs):
+                assert status.state == "degraded"
+                assert status.reason_code == "telegram_owner_unobservable"
+                assert not server.calls
+
+            monkeypatch.setattr(companion, "_wait_or_stop", tick)
+            async with httpx.AsyncClient(timeout=12, follow_redirects=False, trust_env=False) as shared:
+                owner, _menu = await companion._wait_for_owner(
+                    companion.TelegramSettingsObserver(state, 8765), _TOKEN, state, shared, status, asyncio.Event())
+            assert owner == 42
+            assert [method for method, _form in server.calls] == ["getMe", "getChat"]
+            assert status.transitions == [("degraded", "telegram_owner_unobservable")]
+
+    asyncio.run(scenario())
+    assert len(reads) == 3

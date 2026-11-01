@@ -18,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from platform_support import fsync_directory, path_is_link_or_reparse
-from telegram_settings import telegram_api_base, telegram_proxy
+from telegram_settings import TelegramSettingsError, telegram_api_base, telegram_proxy
 
 
 _SNAPSHOT_NAME = "menu_button_snapshot.json"
@@ -150,7 +150,10 @@ class TelegramMenuManager:
         *,
         request_timeout_sec: float | None = None,
     ) -> Any:
-        api_root = self._api_root or telegram_api_base(self.state_dir)
+        try:
+            api_root = self._api_root or telegram_api_base(self.state_dir)
+        except (TelegramSettingsError, ValueError):
+            raise TelegramMenuTransportError("Telegram Bot API settings are unavailable or invalid.") from None
         owned_client = self._client is None
         client = self._client or httpx.AsyncClient(
             timeout=12,
