@@ -391,6 +391,13 @@ def _finish_task_done_dispatch(
     from ouroboros.post_task_checkpoint import settle_terminal_projection
     from ouroboros.project_dialogue import append_terminal_task_projection
 
+    try:  # the durable terminal is established: its own clock settles whatever delivery does next
+        from supervisor.consciousness_carriers import finish_pooled_wake
+
+        finish_pooled_wake(ctx, str(task_id or ""), final_task_result, {"metadata": evt.get("metadata"), **task})
+    except Exception:
+        log.warning("Own-clock settlement failed for %s", task_id, exc_info=True)
+
     # This seam is shared by the normal task_done path AND the lifecycle-fault
     # resolver, so open owner-quiz/hurry projections settle on EVERY dispatched
     # terminal transition (ingress lazy-heal covers producers that bypass it,
@@ -695,6 +702,11 @@ def _resolve_lifecycle_fault(
             task_row = dict(meta["task"])
     except Exception:
         task_row = {}
+    # A missing or unstarted result keeps what the host still knows of this attempt, for every reader.
+    owner = task_row.get("_execution_owner") if isinstance(task_row.get("_execution_owner"), dict) else {}
+    identity = task_row.get("metadata") or evt.get("metadata")
+    known = {"metadata": identity if isinstance(identity, dict) else None, "execution_owner": owner,
+             "task_attempt": owner.get("task_attempt")}
     # GR4-3: the synthetic terminal fires the SAME assisted-update hooks the
     # normal task_done path reaches — an orphaned managed-update transaction or
     # a held assisted writer gate would otherwise survive a lifecycle-fault
@@ -734,6 +746,7 @@ def _resolve_lifecycle_fault(
             return {
                 "status": status, "reason_code": "task_done_lifecycle_fault", "outcome_axes": axes,
                 **({"result": detail} if not current.get("result") else {}),
+                **{key: value for key, value in known.items() if value and not current.get(key)},
             }
 
         write_task_result(
@@ -1065,8 +1078,6 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         "artifact_status": artifact_status,
         **terminal_cost,
     }
-    from supervisor.consciousness_carriers import finish_pooled_wake
-    finish_pooled_wake(ctx, task_id, final_task_result)
     if str(evt.get("typed_routing_action") or "").strip():
         task_done_event["typed_routing_action"] = str(evt.get("typed_routing_action") or "").strip()
     if isinstance(artifact_bundle, dict):

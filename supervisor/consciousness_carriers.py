@@ -55,11 +55,26 @@ def stop_pooled_wake(task_id: str) -> None:
                    requested_stop_policy=STOP_POLICY_FINALIZE)
 
 
-def finish_pooled_wake(ctx, task_id: str, result: dict) -> None:
-    """The detached attempt's end starts the ordinary next-wake interval."""
+def pooled_terminal_ok(result: dict):
+    """A pooled attempt's recorded end as the clock reads it; None while nothing settled it
+    (``interrupted`` stays with its restore owner, an inline carrier with its own callback).
+    An early ``completed`` keeps its sticky lifecycle beside the fault's ``infra_failed`` axis."""
+    from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes
     from ouroboros.task_carrier import execution_kind
+    from ouroboros.task_status import SETTLED_STATUSES
 
+    status = result.get("status")
+    if status not in SETTLED_STATUSES or execution_kind(result) != "pooled":
+        return None
+    return status == "completed" and normalize_outcome_axes(result)["execution"]["status"] != EXECUTION_INFRA_FAILED
+
+
+def finish_pooled_wake(ctx, task_id: str, result: dict, known: dict | None = None) -> None:
+    """The detached attempt's end starts the ordinary next-wake interval. ``known``: the identity
+    its RUNNING row or terminal event still carries when the durable result lost it."""
+    known = known or {}
     clock = getattr(ctx, "consciousness", None)
-    if (clock is not None and execution_kind(result) == "pooled"
-            and is_own_clock_wake(result.get("metadata"))):
-        clock._wake_finished(task_id, result.get("status") == "completed", metadata=result["metadata"], pooled=True)
+    metadata = result.get("metadata") or known.get("metadata")
+    ok = pooled_terminal_ok({**known, **result, "status": result.get("status")})
+    if clock is not None and ok is not None and is_own_clock_wake(metadata):
+        clock._wake_finished(task_id, ok, metadata=metadata, pooled=True)
