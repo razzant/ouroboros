@@ -64,11 +64,11 @@ EVIDENCE_DIRNAME = ".review-evidence"
 # What the host declares about the scratch it made for one run, before the run uses it.
 # Purpose and ownership, never a promise that the contents come back byte for byte.
 DISPOSABLE_SCRATCH = (
-    "disposable by the host's declaration: it is never captured, and it is removed when the task that "
-    "started this run retires its work folder under the shared retention term, unless its producer "
-    "retained it or the owner kept that task (the OS may clear it sooner), so anything left only there "
-    "may be lost: keep edits in your working tree and return the results you need; nothing installed "
-    "there is reinstalled for a later session, which builds its own from the project's files")
+    "disposable by the host's declaration: it is never captured, and it is removed soon after the task "
+    "that started this run is over, unless its producer retained it or the owner kept that task (the OS "
+    "may clear it sooner), so anything left only there may be lost: keep edits in your working tree and "
+    "return the results you need; nothing installed there is reinstalled for a later session, which "
+    "builds its own from the project's files")
 
 
 def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:

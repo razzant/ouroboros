@@ -473,9 +473,10 @@ def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> No
                 _step_recovered(name)
         except Exception:
             _step_failed(step, "Periodic custody step %s failed")
-        # The working copies' and old engine programs' retirers, after the delegated runs above settled: a
-        # server that stays up for weeks retires them too (each keeps what a task, custody, review or daemon holds).
-        for prune in (_prune_worktrees, _prune_delegated_snapshots, _prune_engine_runtimes):
+        # The working copies', old engine programs' and finished tasks' scratch retirers, after the delegated
+        # runs above settled: a server up for weeks retires them too (each keeps what a task, custody, review
+        # or daemon holds).
+        for prune in (_prune_worktrees, _prune_delegated_snapshots, _prune_engine_runtimes, _release_finished_scratch):
             if not _stop_requested(stop_event):
                 prune()
         if not _stop_requested(stop_event):
@@ -795,6 +796,19 @@ def _prune_engine_runtimes() -> None:
         _prune_event("engine_runtime_prune", ("removed", "errors"), report=prune_unpinned_runtimes())
     except Exception:
         log.debug("Engine runtime prune failed", exc_info=True)
+
+
+def _release_finished_scratch() -> None:
+    """Session scratch of tasks proven over goes to the custody trash on this pass, not with the drive
+    a retention term later (#2586); the maintenance child deletes it. Unknown liveness keeps it."""
+    try:
+        from ouroboros.workspace_preflight import release_finished_scratch
+        from supervisor.queue import task_settlement_liveness
+
+        _prune_event("session_scratch_release", ("released", "errors"),
+                     report=release_finished_scratch(DATA_DIR, task_settlement_liveness))
+    except Exception:
+        log.debug("Session scratch release failed", exc_info=True)
 
 
 from ouroboros.maintenance_retirement import prune_agent_media_uploads as prune_agent_media_uploads

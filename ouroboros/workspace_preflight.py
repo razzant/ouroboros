@@ -3,6 +3,7 @@ service directories a writable session's engine may grant besides its copy."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -15,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import uuid
 from typing import Any, Dict, Iterable, List, NamedTuple, Tuple
 
 from ouroboros.platform_layer import (
@@ -221,6 +223,9 @@ def package_downloads_root(data_root: Any) -> pathlib.Path:
 SESSION_SCRATCH_DIRNAME = "session_scratch_owners"
 # The typed limitation of a full-access start whose scratch could not be made: no grant was ever due.
 SCRATCH_UNAVAILABLE = "scratch_unavailable"
+# Under the canonical root, ``<task_id>/<key>.json`` names each record's folder while its task may still
+# reuse the scratch; the custody pass releases it once that task is over (``release_finished_scratch``).
+OPEN_SCRATCH_DIR = pathlib.Path("state") / "session_scratch"
 
 
 class ServiceDirectories(NamedTuple):
@@ -300,7 +305,8 @@ def _recorded_scratch(record: pathlib.Path) -> pathlib.Path:
 
 
 def _session_scratch(owner: pathlib.Path, execution: pathlib.Path) -> pathlib.Path:
-    """One short physical directory; its record stays in the ungranted task drive until retirement.
+    """One short physical directory; its record stays in the ungranted task drive until its task is
+    over (``release_finished_scratch``) or the drive retires, whichever comes first.
 
     A same-task/key start reuses it. Literal retries never call this function. Allocation is
     serialized using the existing file lock; no process owns an in-memory cleanup obligation.
@@ -340,12 +346,14 @@ def _session_scratch(owner: pathlib.Path, execution: pathlib.Path) -> pathlib.Pa
         release_exclusive_file_lock(lock, fd)
 
 
-def release_session_scratch(drive: pathlib.Path) -> None:
-    """Release short scratch only for a drive already retired by task custody.
+def release_session_scratch(drive: pathlib.Path) -> List[str]:
+    """Release short scratch whose ownership task custody retired: a drive's, or a finished task's.
 
-    Called by its existing trash remover, including nested child-drive layouts. An unreadable
-    record, changed identity or producer retention marker keeps the trash and its pointer for
-    the next pass. No temp-root scan, arbitrary symlink following or independent sweeper.
+    Called by the trash remover, including nested child-drive layouts. A producer retention marker
+    keeps that scratch where it is, and its path is returned: from then on nothing owns it, like any
+    other retained test root, so a custodied drive is not held for it. An unreadable record, changed
+    identity or incomplete removal keeps the trash and its pointer for the next pass. No temp-root
+    scan, arbitrary symlink following or independent sweeper.
     """
     from ouroboros.force_remove import force_rmtree
     from ouroboros.test_environment import retention_markers
@@ -355,6 +363,7 @@ def release_session_scratch(drive: pathlib.Path) -> None:
     owners = drive / SESSION_SCRATCH_DIRNAME
     if owners.is_symlink():
         raise OSError(f"linked scratch ownership directory: {owners}")
+    retained: List[str] = []
     if owners.is_dir():
         for owner in owners.iterdir():
             if owner.is_symlink() or not owner.is_dir():
@@ -369,7 +378,8 @@ def release_session_scratch(drive: pathlib.Path) -> None:
             except (ValueError, KeyError, TypeError) as exc:
                 raise OSError(f"invalid scratch ownership record: {record}") from exc
             if retention_markers(path):
-                raise OSError(f"session scratch was retained by its producer: {path}")
+                retained.append(str(path))  # the producer's to keep; never deleted here
+                continue
             force_rmtree(path)
             if os.path.lexists(path):
                 raise OSError(f"session scratch removal incomplete: {path}")
@@ -381,7 +391,89 @@ def release_session_scratch(drive: pathlib.Path) -> None:
             for child in children.iterdir():
                 nested = child.joinpath(*suffix)
                 if child.is_dir() and not child.is_symlink() and nested.is_dir() and not nested.is_symlink():
-                    release_session_scratch(nested)
+                    retained += release_session_scratch(nested)
+    return retained
+
+
+def _note_open_scratch(data_root: Any, task_id: str, key: str, owner: pathlib.Path) -> None:
+    """Name ``owner`` under its task in the canonical root (``OPEN_SCRATCH_DIR``). Best-effort: a
+    missing note only leaves the scratch to its drive's retirement, as before it existed."""
+    from ouroboros.utils import atomic_write_json
+
+    if not str(data_root or "").strip():
+        return
+    note = pathlib.Path(data_root) / OPEN_SCRATCH_DIR / task_id / f"{key}.json"
+    try:
+        if not note.is_file():
+            note.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(note, {"schema_version": 1, "owner": str(owner)})
+    except OSError:
+        logging.getLogger(__name__).warning("Open session scratch note not written: %s", note, exc_info=True)
+
+
+def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> Dict[str, Any]:
+    """Hand the session scratch of every task proven over to the custody trash (#2586).
+
+    A same-task start reuses its scratch while the task lives (``_session_scratch``), so the scratch
+    waits for its task, not for its drive's retention term: terminal, not live by the supervisor's
+    probe ``live``, no lineage process (``subagent_worktrees._task_proven_over``) and not kept by the
+    owner (``owner_keep.gate``, the recorded facts read again inside). Each noted record's folder
+    moves, cheaply, into ``state/custody_trash``, whose remover deletes the scratch in the maintenance
+    child, off the serving process (``release_session_scratch``). A note whose folder already retired
+    with its drive, or that names no record of its task, is dropped; unknown liveness, a busy custody
+    lock or a failed move keeps the note for the next pass."""
+    from ouroboros.body_candidate import _recorded_terminal
+    from ouroboros.owner_keep import gate
+    from ouroboros.subagent_worktrees import _task_proven_over
+    from ouroboros.task_custody import _TRASH_DIR
+    from ouroboros.task_results import validate_task_id
+
+    root = pathlib.Path(data_root)
+    report: Dict[str, Any] = {"released": [], "kept": 0, "errors": []}
+    try:
+        folders = [] if (root / OPEN_SCRATCH_DIR).is_symlink() else sorted((root / OPEN_SCRATCH_DIR).iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        return report
+    base = root.resolve()
+    for folder in folders:
+        if stop is not None and stop():
+            break
+        task_id = folder.name
+        try:
+            validate_task_id(task_id)
+        except ValueError:
+            continue  # no note of a task: nothing in it is read
+        if not _task_proven_over(task_id, root, live):
+            report["kept"] += 1
+            continue
+        with gate(root, task_id, timeout_sec=0) as held:
+            if held or not _recorded_terminal(task_id, root):
+                report["kept"] += 1
+                continue
+            for note in sorted(folder.glob("*.json")):
+                try:
+                    owner = pathlib.Path(str(json.loads(note.read_text(encoding="utf-8"))["owner"]))
+                    if (owner.name != note.stem or owner.parent.name != SESSION_SCRATCH_DIRNAME
+                            or owner.parent.parent.name != task_id or base not in owner.parents
+                            or owner.resolve() != owner):
+                        raise ValueError(f"names no scratch record of {task_id}: {owner}")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    report["errors"].append(f"{note}: {type(exc).__name__}: {exc}")
+                    with contextlib.suppress(OSError):
+                        note.unlink()  # its record, if any, still retires with its drive
+                    continue
+                try:
+                    if owner.is_dir() and not owner.is_symlink():
+                        entry = root / _TRASH_DIR / f"{task_id}.scratch-{uuid.uuid4().hex[:12]}"
+                        (entry / SESSION_SCRATCH_DIRNAME).mkdir(parents=True)
+                        os.replace(owner, entry / SESSION_SCRATCH_DIRNAME / owner.name)
+                        report["released"].append(str(owner))
+                    note.unlink()
+                except OSError as exc:
+                    report["errors"].append(f"{owner}: {type(exc).__name__}: {exc}")
+            with contextlib.suppress(OSError):
+                folder.rmdir()  # empty once every note went
+    return report
 
 
 def session_service_directories(gateway: Any, route_id: str, *, access: str, mode: str, data_root: Any,
@@ -396,12 +488,13 @@ def session_service_directories(gateway: Any, route_id: str, *, access: str, mod
     reaches the scratch already, so no catalog is read and nothing is sent: the host only owns and
     names it. No install, no links, and no Git ancestor. The engine never creates, captures or
     deletes them; the instructions declare the scratch disposable before use
-    (``DISPOSABLE_SCRATCH``); drive settlement's trash removal retires it unless its producer
-    retained it; the cache stays (PERSISTENCE). A route without that capability prepares nothing,
-    and a folder that cannot be made grants nothing either: both are a typed ``limitation`` and the
-    start goes on without the field. Read-only, and a ``workspace_write`` ``tool_policy`` route,
-    keep their on-demand behavior: nothing is made. A retry replays its
-    recorded request and never comes here.
+    (``DISPOSABLE_SCRATCH``); the record is noted under its task (``OPEN_SCRATCH_DIR``), the custody
+    pass retires it once that task is over (``release_finished_scratch``), or its drive's settlement
+    does, unless its producer retained it; the cache stays (PERSISTENCE). A route without that
+    capability prepares nothing, and a folder that cannot be made grants nothing either: both are a
+    typed ``limitation`` and the start goes on without the field. Read-only, and a
+    ``workspace_write`` ``tool_policy`` route, keep their on-demand behavior: nothing is made. A
+    retry replays its recorded request and never comes here.
     """
     if mode != "agent" or access not in ("workspace_write", "full"):
         return ServiceDirectories()
@@ -416,14 +509,15 @@ def session_service_directories(gateway: Any, route_id: str, *, access: str, mod
         from ouroboros.task_results import validate_task_id
 
         execution = pathlib.Path(execution_root).resolve()
-        owner = _owned_directory(drive_root, ("task_drives", validate_task_id(task_id),
-                                              SESSION_SCRATCH_DIRNAME, key), execution)
+        task_id = validate_task_id(task_id)
+        owner = _owned_directory(drive_root, ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, key), execution)
         caches = [_owned_directory(data_root, (PACKAGE_DOWNLOADS_DIRNAME, name), execution)
                   for name, _variable in (_CACHE_VARIABLES if granted else ())]
         scratch = _session_scratch(owner, execution)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return ServiceDirectories(limitation=f"{'service_directories_unavailable' if granted else SCRATCH_UNAVAILABLE}: "
                                              f"{type(exc).__name__}: {exc}")
+    _note_open_scratch(data_root, task_id, key, owner)
     return ServiceDirectories(roots=tuple(str(path) for path in (scratch, *caches)) if granted else (),
                               scratch=str(scratch))
 

@@ -1433,9 +1433,10 @@ def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
 def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Delete the drives settlements moved aside: each was fully custodied before its move, and
     nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
-    off the serving process. Returns the count removed and each entry that survived its removal
-    (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)."""
-    report: Dict[str, Any] = {"removed": 0, "stuck": {}}
+    off the serving process. Returns the count removed, each entry that survived its removal
+    (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)
+    and the session scratch its producer retained, left in place (``release_session_scratch``)."""
+    report: Dict[str, Any] = {"removed": 0, "stuck": {}, "retained": []}
     root = pathlib.Path(canonical_root) / _TRASH_DIR
     try:
         entries = [] if root.is_symlink() else list(root.iterdir())
@@ -1448,9 +1449,9 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
             if entry.is_dir() and not entry.is_symlink():
                 from ouroboros.workspace_preflight import release_session_scratch
 
-                release_session_scratch(entry)
+                report["retained"] += release_session_scratch(entry)
                 if (entry / "data").is_dir() and not (entry / "data").is_symlink():
-                    release_session_scratch(entry / "data")
+                    report["retained"] += release_session_scratch(entry / "data")
             _remove_entry(entry)
         try:
             stat = entry.lstat()

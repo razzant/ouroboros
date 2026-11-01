@@ -145,7 +145,8 @@ def _trash_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str,
     state = "failed" if report["stuck"] else "done"
     row = maintenance_jobs.job(root, "custody_trash") or {}
     if report["removed"] or (row.get("state"), row.get("stuck") or {}) != (state, report["stuck"]):
-        maintenance_jobs.record(root, "custody_trash", state=state, stuck=report["stuck"], removed=report["removed"])
+        maintenance_jobs.record(root, "custody_trash", state=state, stuck=report["stuck"], removed=report["removed"],
+                                retained=report["retained"])
     return {"state": state, "items": report["removed"]}
 
 
