@@ -63,8 +63,9 @@ def session_material(surface: str, contract: str, schema: Any, accesses: Any) ->
 def seat_service_directories(gateway: Any, route_id: str, shape: Any, data_root: Any, task_id: str,
                              operation_id: str, area: str, thread_seat: str = "") -> Any:
     """What a writable seat may write outside its copy (``workspace_preflight.session_service_directories``):
-    one run's short scratch is owned by its review task's drive, keyed by the seat's directory name. A sticky
-    thread's turns carry only geometry (``start_review_thread_turn``), so its seat negotiates none."""
+    one run's short scratch is owned by its review task's drive, keyed by the seat's directory name, and
+    granted, or at full access only named. A sticky thread's turns carry only geometry
+    (``start_review_thread_turn``), so its seat gets none."""
     from ouroboros.review_checking import seat_dir
     from ouroboros.workspace_preflight import ServiceDirectories, session_service_directories
 
@@ -77,7 +78,7 @@ def seat_service_directories(gateway: Any, route_id: str, shape: Any, data_root:
 
 
 # A writable seat's own note inside the environment facts every delegated run is given.
-_ENVIRONMENT_NOTE = {"scratch": "in {scratch}, the scratch your engine grants this run, never inside this copy",
+_ENVIRONMENT_NOTE = {"scratch": "in {scratch}, this run's disposable scratch, never inside this copy",
                      "outside": "outside this copy", "note": "{where}, since its changes are retained as evidence"}
 
 
@@ -86,7 +87,7 @@ def seat_environment_facts(area: str, source: Any, data_root: Any, service: Any 
 
     Its copy's changes are retained as evidence (``review_checking``), so the facts say
     where an environment may live; a folder read in place has no copy to build in, so
-    its seat hears only ``service``: what the engine grants it outside its folder. The
+    its seat hears only ``service``: the scratch the host made for it outside its folder. The
     body's documented recipe is named only for a frozen tree of the body."""
     from ouroboros.workspace_preflight import (
         ENVIRONMENT_FACTS_HEADING,
@@ -98,7 +99,7 @@ def seat_environment_facts(area: str, source: Any, data_root: Any, service: Any 
     kind, body, service = str(source.get("kind") or ""), False, service or ServiceDirectories()
     if kind not in ("git_tree", "directory"):  # a folder read in place: only what the seat may write outside
         return (ENVIRONMENT_FACTS_HEADING + session_service_facts(service, data_root).rstrip("\n")
-                if service.roots or service.limitation else "")
+                if service.scratch or service.limitation else "")
     if kind == "git_tree":
         try:
             from ouroboros.config import resolve_repo_dir
@@ -129,7 +130,6 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
     from ouroboros.review_execution import ReviewRouteUnavailable, _CLAUDEXOR_MAX_SECONDS
     from ouroboros.subagents import delegated_run_shape
     shape = shape or delegated_run_shape(False, str(getattr(invocation, "access", "") or "readonly"))
-    seconds = bounded_seconds(invocation.timeout_sec, default=300, maximum=_CLAUDEXOR_MAX_SECONDS)
     use_thread, output_schema = invocation.use_thread, invocation.output_schema
     instructions = instructions or invocation.instructions
     run_request = {
@@ -142,8 +142,9 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
         # A one-element explicit pool is the pin; primaryHarness is only preference.
         "harnesses": [route.route_id],
         "primaryHarness": route.route_id,
-        "maxSeconds": seconds,
     }
+    if invocation.timeout_sec is not None:  # no logical window: the engine's run clock stays off
+        run_request["maxSeconds"] = bounded_seconds(invocation.timeout_sec, default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
     if execution:
         run_request["execution"] = dict(execution)
     if use_thread:

@@ -61,8 +61,10 @@ def in_place_refusal(authority, selector_root, workspace, mode, strategy, scope_
                  f"workspace='in_place' was refused: {reason}. Nothing was started.", definitely_unrun=True) if reason else None
 
 
-def in_place_start(adopted_copy, target_root):
-    """(snapshot, refusal, resource_ref, binding) for an in-place Git writer: no copy is made."""
+def in_place_start(adopted_copy, target_root, service=None):
+    """(snapshot, refusal, resource_ref, binding) for an in-place Git writer: no copy is made.
+    ``service`` makes its disposable scratch (``subagent_work_order.session_service_directories``),
+    called only once the start is accepted, so a refusal leaves nothing behind."""
     from ouroboros.delegate_shared import _fail
     from ouroboros.delegate_start_instructions import in_place_binding_instruction
 
@@ -72,7 +74,7 @@ def in_place_start(adopted_copy, target_root):
                   "use directory_strategy='direct'")
         return None, _fail("delegate_start", "workspace_in_place_unavailable",
                            f"workspace='in_place' was refused: {detail}. Nothing was started.", definitely_unrun=True), {}, ""
-    return None, "", in_place_ref(), in_place_binding_instruction(target_root)
+    return None, "", in_place_ref(), in_place_binding_instruction(target_root, service() if service else None)
 
 
 def in_place_block(entry):

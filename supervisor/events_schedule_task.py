@@ -90,12 +90,12 @@ def _cleanup_rejected_worktree(tid: str, result_fields: Dict[str, Any]) -> None:
     if not write_root:
         return
     try:
-        from ouroboros import subagent_worktrees
+        from ouroboros import genesis_project, subagent_worktrees
 
         if surface == "self_worktree":
             subagent_worktrees.remove_worktree(task_id=str(tid))
         elif surface == "genesis":
-            subagent_worktrees.remove_genesis_project(write_root)
+            genesis_project.remove_genesis_project(write_root, task_id=str(tid))
     except Exception:
         log.debug("Failed to clean up rejected acting write surface for %s", tid, exc_info=True)
 

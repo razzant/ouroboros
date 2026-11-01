@@ -27,7 +27,6 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "get_event_q", lambda **kwargs: bus)
     monkeypatch.setattr(queue, "load_state", lambda: {})
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 900.0)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1800.0)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: None)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 120)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kwargs: True)
@@ -177,6 +176,17 @@ def test_pending_observation_defers_attention_but_only_folded_progress_resolves(
     assert host.meta["last_progress_at"] == host.clock[0]
     assert _controls(host) == [] and "finalization_requested_at" not in host.meta
     assert host.meta["silence_attention"]["state"] == "progress_observed"
+
+
+@pytest.mark.parametrize("silent_sec, dated", [(899.0, False), (901.0, True)])
+def test_the_configured_window_itself_dates_silence(host, silent_sec, dated):
+    """Owner 30 Oct (A): the silence window is Idle Timeout itself (900 s here), no longer floored at
+    the retired per-call ceiling plus 120 s (1920 s by default). Attention is a fact: nothing
+    finalizes, reaps or leaves the pool."""
+    host.meta["last_progress_at"] = host.clock[0] - silent_sec
+    host.tick()
+    assert bool(host.meta.get("silence_attention")) is dated
+    assert _controls(host) == [] and queue._reap_queue.empty() and host.running["root"] is host.meta
 
 
 def test_unknown_observation_does_not_invent_progress(host):

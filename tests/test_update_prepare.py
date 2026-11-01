@@ -950,3 +950,26 @@ def test_checks_that_did_not_complete_are_unverified_never_a_failed_test(scene, 
 
     assert (row["state"], row["reason"]) == ("failed", reason) and row["checks"]["tests"] == tests
     assert "prepare" in update_prepare.projection()["actions"]
+
+
+@pytest.mark.parametrize("step", ["remote", "fetch", "resolve"])
+def test_a_target_step_a_begun_stop_refused_or_ended_is_that_stop_never_an_unavailable_update(monkeypatch, step):
+    """Resolving the pinned target runs three tracked Git steps (the remote's configuration, the fetch, the target's
+    resolution). A begun stop refuses each start (127) or ends it (-15/-9): that is the stop's typed refusal, as for
+    every other Git step of a preparation, never ``UPDATE_UNAVAILABLE``. Without a stop the same failure stays that."""
+    from ouroboros.tools import shell_process
+    from supervisor import git_ops
+
+    said = "Emergency Stop has retired command admission"
+    monkeypatch.setattr(git_ops, "_managed_update_target", lambda: ("managed", "ouroboros", "managed/ouroboros"))
+    monkeypatch.setattr("ouroboros.update_channels.get_update_channel", lambda: "dev")
+    monkeypatch.setattr(git_ops, "ensure_official_update_remote", lambda: (step != "remote", said))
+    monkeypatch.setattr(git_ops, "git_fetch_bounded", lambda _remote: (127, "", said) if step == "fetch" else (0, "", ""))
+    monkeypatch.setattr(git_ops, "_resolve_managed_update_target", lambda *_a: (
+        ("", "", said) if step == "resolve" else ("managed/ouroboros", "a" * 40, "")))
+    monkeypatch.setattr("supervisor.update_merge.managed_update_constitution_present", lambda _sha: True)
+    for stop, code in ((False, "UPDATE_UNAVAILABLE"), (True, "UPDATE_PREPARE_STOPPED")):
+        monkeypatch.setattr(shell_process, "_panic_requested", stop)
+        with pytest.raises(update_prepare.PrepareRefused) as refused:
+            update_prepare.resolve_target(fetch=True)
+        assert refused.value.code == code, (stop, refused.value.text)

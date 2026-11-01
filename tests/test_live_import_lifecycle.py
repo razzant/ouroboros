@@ -1,6 +1,8 @@
 """Automatic call-skill replacement waits; an explicit disable still cancels work."""
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import TimeoutError as FutureTimeout
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +84,62 @@ def test_new_work_cannot_attach_to_a_replaced_publication(publication):
             pytest.fail("stale call work was admitted")
     with registry.extension_work_scope({**spec, "extension_generation": "generation-two"}, Work()):
         assert registry.realtime_load_refusal(spec["skill"]) == "live_call_active"
+
+
+def test_ordinary_work_is_cancellable_but_never_a_call(publication):
+    from ouroboros import extension_loader as loader
+    from ouroboros.contracts.plugin_api import ExtensionRegistrationError
+
+    name, bundle, spec = publication
+    work, call = Work(), Work()
+    with registry.extension_work_scope(spec, work, call_work=False):
+        assert work in bundle.supervised_futures and bundle.active_call_work == 0
+        assert registry.realtime_load_refusal(name) == ""
+        # A real call beside it still owns the fence, and only for its own life.
+        with registry.extension_work_scope(spec, call):
+            assert registry.realtime_load_refusal(name) == "live_call_active"
+        assert registry.realtime_load_refusal(name) == "" and call not in bundle.supervised_futures
+        loader.unload_extension(name)
+        assert work.cancelled and name not in registry._extensions
+    assert bundle.supervised_futures == [] and bundle.active_call_work == 0
+    with pytest.raises(ExtensionRegistrationError, match="generation changed"):
+        with registry.extension_work_scope(spec, Work(), call_work=False):
+            pytest.fail("stale ordinary work was admitted")
+
+
+def test_only_call_admission_waits_for_a_running_load(publication):
+    from concurrent.futures import ThreadPoolExecutor
+
+    name, _bundle, spec = publication
+
+    def enter(**kind):
+        with registry.extension_work_scope(spec, Work(), **kind):
+            return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        # The load holds this for its whole duration; a held loop would stop every request.
+        with registry._lifecycle_lock_for(name):
+            assert pool.submit(enter, call_work=False).result(timeout=5)
+            admission = pool.submit(enter)
+            with pytest.raises(FutureTimeout):
+                admission.result(timeout=0.1)
+        assert admission.result(timeout=5)
+
+
+def test_an_isolated_route_response_is_ordinary_work(publication):
+    from contextlib import nullcontext
+    from ouroboros.extension_route_stream import RouteStreamResponse
+
+    name, bundle, spec = publication
+    response = RouteStreamResponse(spec, nullcontext)
+
+    async def serve():
+        async with response._child_scope():
+            assert response in bundle.supervised_futures
+            assert registry.realtime_load_refusal(name) == ""
+
+    asyncio.run(serve())
+    assert response not in bundle.supervised_futures
 
 
 def test_direct_load_refuses_only_live_calls(publication, monkeypatch, tmp_path):

@@ -30,7 +30,6 @@ from ouroboros.config import (
     DATA_DIR,
     FINALIZATION_GRACE_DEFAULT_SEC,
     get_finalization_grace_sec,
-    get_per_call_timeout_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
     get_task_abs_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
     get_task_idle_timeout_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
 )
@@ -551,7 +550,7 @@ def ensure_control_task_result(task_id: str) -> Dict[str, Any]:
         fields = {key: task[key] for key in (
             "type", "chat_id", "metadata", "task_contract", "root_task_id", "parent_task_id",
             "delegation_role", "project_id", "workspace_root", "workspace_mode", "memory_mode",
-            "budget_drive_root", "queued_at", "admitted_dispatch", "_admission_owner_token",
+            "drive_root", "child_drive_root", "budget_drive_root", "queued_at", "admitted_dispatch", "_admission_owner_token",
             "origin_message_text", "origin_message_ref", "objective", "title", "suggested_name",
             "original_task_id", "timeout_retry_from", "deadline_at", "execution_timeout_sec", "root_cost_ceiling_usd",
             "billing_group", "task_constraint", "objective_author", "owner_corpus", "task_group_id", "task_group",

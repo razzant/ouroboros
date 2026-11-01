@@ -58,7 +58,8 @@ from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
 from ouroboros.chronicle_quotes import SPEAKERS
 from ouroboros.chronicle_store import (DELEGATED_FOCUS_ROLES, STORY_KINDS, ChronicleStore, PublishResult, capture,
                                        draft_signer, source_time_span, verify_quotes)
-from ouroboros.dialogue_provenance import memory_row_header, recorded_finality, render_row_text, row_author
+from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recorded_finality, render_row_text,
+                                          row_author, wordless_reaction)
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
 from ouroboros.memory_view_account import source_change_lines
@@ -310,7 +311,8 @@ def host_stamp(root: Any, task_ids: Iterable[Any], *, rows: Iterable[Any] = ()) 
 
 def _quote_resolver(root: Path, lineage: Dict[str, Any],
                     positions: Optional[Dict[str, int]] = None) -> Callable[[Any], Optional[Tuple[str, str]]]:
-    """``address -> (rendered row text, author kind)`` for ``verify_quotes``; reads chat, takes no lock."""
+    """``address -> (the row's quotable words, author kind)`` for ``verify_quotes``; reads chat, takes no lock.
+    The words are ``quote_words``: never a host label rendered beside a typed reaction carrier's own text."""
     def resolve(address: Any) -> Optional[Tuple[str, str]]:
         try:
             row, found = chat_chain.resolve_row(root, address)
@@ -327,7 +329,7 @@ def _quote_resolver(root: Path, lineage: Dict[str, Any],
             if pos is None:
                 return None
             author = _author_of(row, pos, lineage)
-        return render_row_text(row), author["kind"]
+        return quote_words(row), author["kind"]
     return resolve
 
 
@@ -1006,11 +1008,13 @@ def _source_texts(root: Path, ref: Dict[str, Any]) -> List[str]:
 
 
 def _task_final_text(root: Path, task_id: str) -> str:
-    """The task's last outgoing row in chat: its final words to people."""
+    """The task's last outgoing row in chat: its final words to people (``quote_words``). A wordless reaction
+    receipt is a gesture, no words, so the words before it stay final."""
     final = ""
     for _address, row, _pos in chat_chain.iter_rows(root):
-        if str(row.get("task_id") or "") == task_id and str(row.get("direction") or "") in ("out", "outgoing"):
-            final = render_row_text(row)
+        if (str(row.get("task_id") or "") == task_id and str(row.get("direction") or "") in ("out", "outgoing")
+                and not wordless_reaction(row)):
+            final = quote_words(row)
     return final
 
 
@@ -1026,7 +1030,7 @@ def _mark_target(ctx: Any, root: Path, store: ChronicleStore, a: Dict[str, Any])
         row, found = chat_chain.resolve_row(root, a["address"])
         if row is None:
             return None, None, str(found.get("status") or "row_missing")
-        if quote and quote not in render_row_text(row):
+        if quote and quote not in quote_words(row):
             return None, None, "quote_mismatch"
         return found["address"], None, ""
     if a["task_id"]:
@@ -1131,10 +1135,10 @@ def chronicle_tools() -> List[ToolEntry]:
         "quotes": quotes,
         "task_id": {"type": "string", "description": "note: the task it belongs to (default: this task)."},
         "target_id": {"type": "string", "description": "correction: the record corrected; decision: the helper's draft page or part; selection: the account."},
-        "sources": {"type": "array", "description": "account: the records it is based on, each {id, revision?} (revision: the one I read, as memory_read shows it; default the current one) or a bare id. Any page, part, note, legacy record, gap or account, of any room; citing one neither seals nor folds it. To incorporate later source corrections, write a new account citing the corrected direct source revisions, then select it; correcting or reselecting an old account leaves its source versions unchanged, and citing it retains its older nested edges.",
+        "sources": {"type": "array", "description": "account: the records it is based on, each {id, revision?} (revision: the one I read, as memory_read shows it; default the current one) or a bare id. Any page, part, note, legacy record, gap or account, of any room; citing one neither seals nor folds it. To incorporate later source corrections, write a new account citing the corrected direct source revisions, then select it; correcting or reselecting an old account leaves its source versions unchanged, and citing it retains its older nested edges. Reporting later source changes does not check whether the account omitted content from the cited version.",
                     "items": {"anyOf": [string, {"type": "object", "additionalProperties": False, "required": ["id"],
                                                  "properties": {"id": string, "revision": string}}]}},
-        "replaces": {"type": "array", "items": string, "description": "selection: the records of my story the account tells in its place. Their count and period stay visible, their exact IDs remain in the account's memory_read composition and selections, and each room keeps its detail. To supersede an earlier account, include its ID here or withdraw it. Empty shows the account beside everything."},
+        "replaces": {"type": "array", "items": string, "description": "selection: the records of my story the account tells in its place. In views carrying my story their words leave it and their room's page (a replaced part's folded members too); their count and period stay visible, their exact IDs remain in the account's memory_read composition and selections, and each stays readable through memory_read. Citing a record in sources does not replace it. To supersede an earlier account, include its ID here or withdraw it. Empty shows the account beside everything."},
         "shown": {"type": "boolean", "description": "selection: true (default) shows the account in the common view, false withdraws it; the latest selection of an account acts."},
         "expected_revision": {"type": "string", "description": "correction: the target's current revision when it already has a correction (memory_read node_id shows it)."},
         "expected_sequence": {"type": "integer", "minimum": 0, "description": "The room head your text is based on (memory_read room's first line). Required for a part; optional for a page or correction. A newer head is refused with the current head and the newer record ids."},

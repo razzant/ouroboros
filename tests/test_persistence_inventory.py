@@ -899,7 +899,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # state.json that a providerless generation never initializes.
 # 438 -> 440: ``state/body_adoption/handoff.json`` and ``state/body_adoption/*`` (its ``lock``), which authorization now
 # makes before any record and a retirement removes in order under that lock (both in the body_adoption row).
-EXPECTED_SCAN_PATHS = 440
+# 440 -> 442 (upstream 389783d4): two existing disposable families are now named by their owner-keep readers:
+# task_drives/*/session_scratch_owners and task_trees/*.
+EXPECTED_SCAN_PATHS = 442
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

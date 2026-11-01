@@ -48,7 +48,7 @@ export function historyFactWords(row) {
     const facts = row.place_history || {};
     const attention = facts.attention;
     const heard = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
-        no_wake_match: 'Heard; no wake matched', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection' };
+        no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection' };
     return [attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
         ? heard[attention.reason] || 'Heard' : '',
     { authored: 'Delivery not confirmed', accepted: 'Accepted by service; delivery not confirmed',
@@ -107,10 +107,20 @@ function messageNode(row, markdown, place) {
         <time data-i18n-authored datetime="${escapeHtml(time.at)}" title="${escapeHtml(time.title)}">${escapeHtml(timeText(time.at))}</time>
         ${historyFactWords(row).map((fact) => `<span class="place-convo-fact">${escapeHtml(fact)}</span>`).join('')}${heard}${sender ? `<span class="place-convo-fact">${sender}</span>` : ''}`;
     updateHeardLabels(meta, place);
-    const text = document.createElement('div'); text.className = 'chat-markdown place-convo-text'; text.dataset.i18nAuthored = '';
-    if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); markdown.add(text); }
-    else { text.classList.add('place-history-plain'); text.textContent = row.text; }
-    article.append(meta, text);
+    article.append(meta);
+    const reaction = facts.reaction?.summary;
+    if (row.text || !reaction) { // a reaction row has no words of its own; words sent beside one stay speech
+        const text = document.createElement('div'); text.className = 'chat-markdown place-convo-text'; text.dataset.i18nAuthored = '';
+        if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); markdown.add(text); }
+        else { text.classList.add('place-history-plain'); text.textContent = row.text; }
+        article.append(text);
+    }
+    if (reaction) {
+        const line = document.createElement('p'); line.className = 'place-sheet-note place-convo-reaction';
+        const summary = document.createElement('span'); summary.dataset.i18nAuthored = ''; summary.textContent = reaction;
+        line.append(`${tr('places.history.reaction', 'Reaction:')} `, summary);
+        article.append(line);
+    }
     if (facts.held === true && facts.checked === false && typeof facts.held_text === 'string') {
         const label = document.createElement('p'); label.className = 'place-sheet-note';
         label.textContent = tr('places.history.held_unchecked', 'held, unchecked');

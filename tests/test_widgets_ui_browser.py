@@ -316,16 +316,31 @@ _WIDGET_TEMPORAL_TRACE_SCRIPT = r"""
             if (!frames.has(frame)) { frames.add(frame); frameObserver.observe(frame); }
         });
     };
+    const frameOf = (source) => [...document.querySelectorAll('[data-widget-key] iframe')]
+        .find((candidate) => candidate.contentWindow === source);
+    // Resize reports travel on each frame's bridge channel: its hello names the frame that owns the port.
+    const portFrames = new WeakMap();
     addEventListener('message', (event) => {
         const message = event.data || {};
-        if (!['ouro-widget-resize', 'fixture-geometry'].includes(message.type)) return;
-        const frame = [...document.querySelectorAll('[data-widget-key] iframe')]
-            .find((candidate) => candidate.contentWindow === event.source);
-        record(message.type === 'ouro-widget-resize' ? 'message' : 'child', frame, {
-            heightValue: message.height,
-            child: message.sample || null,
-        });
+        if (message.type === 'ouro-widget-hello' && event.ports?.[0]) portFrames.set(event.ports[0], frameOf(event.source));
+        if (message.type !== 'fixture-geometry') return;
+        record('child', frameOf(event.source), { heightValue: message.height, child: message.sample || null });
     }, true);
+    const handler = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage');
+    Object.defineProperty(MessagePort.prototype, 'onmessage', {
+        configurable: true,
+        get() { return handler.get.call(this); },
+        set(fn) {
+            const port = this;
+            handler.set.call(this, fn && function (event) {
+                const message = event.data || {};
+                if (message.type === 'ouro-widget-resize') {
+                    record('message', portFrames.get(port), { heightValue: message.height, child: null });
+                }
+                return fn.call(this, event);
+            });
+        },
+    });
     const start = () => {
         const observer = new MutationObserver((records) => {
             records.forEach((row) => {

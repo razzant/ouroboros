@@ -65,6 +65,12 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     # beneath) each worker's own sibling root. Fence their common parent: the
     # launcher's root under safe_test, the invoking temp directory otherwise.
     _PYTEST_DEFAULTS["GIT_CEILING_DIRECTORIES"] = str(_PYTEST_ROOT.parent)
+    # A prepared Update's checks may declare the user base its installation keeps its packages in: readable by every
+    # process that keeps this environment, writes still in this session's own (test_environment.installation_user_site:
+    # nothing when the base holds no site-packages or this session was started with its own PYTHONNOUSERSITE).
+    # The default a scrubbed child gets back (_isolated_child_env) follows: an explicit PYTHONNOUSERSITE=1 stays.
+    if _environment["installation_user_site"](os.environ, _PYTEST_DEFAULTS["PYTHONUSERBASE"]):
+        _PYTEST_DEFAULTS["PYTHONNOUSERSITE"] = ""  # an empty value is unset for Python; otherwise "1" stays
     os.environ.update(_PYTEST_DEFAULTS)
     # Run identities, never lane controls: launcher authority, and the isolated
     # review's run cap / attach-only engine selection (no test reaches a host engine).

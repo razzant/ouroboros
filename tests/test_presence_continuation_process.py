@@ -46,6 +46,8 @@ ANSWER = "The checked status report is ready."
 REVISED_ANSWER = "The checked status report is ready; the independent report remains scheduled."
 LATE_CHILD = "work-promoted-after-first-yield"
 MANUAL = "I checked the prior delivery. Continue the interrupted report as a new turn."
+ACKNOWLEDGEMENT = "On it: checking the report now."
+TOOL_NOTE = "My transport tool already delivered the checked report."
 pytestmark = [pytest.mark.serial, pytest.mark.skipif(
     os.name != "posix", reason="This fixture qualifies POSIX SIGKILL/process-group custody only")]
 
@@ -671,37 +673,47 @@ def test_proactive_caller_process_death_and_recycle_preserve_interrupted_work(tm
         second_host.close()
 
 
+def _tool_receipt(ref, text):
+    """An isolated transport fixture reports a tool effect it already delivered; no provider is contacted."""
+    return {"schema_version": 1, "delivery_id": "fixture-tool-effect", "part_id": "0",
+            "state": "delivered", "provider": "telegram", "account_id": "bot-1",
+            "conversation_id": "room-1", "thread_id": "topic-1", "text": text,
+            "format": "plain", "message": {"message_id": "fixture-tool-message"},
+            "origin": {"kind": "tool", "task_id": ref, "source_event_id": "original"}}
+
+
+@pytest.mark.parametrize("scenario", ["acknowledged", "tool_silent"])
 @pytest.mark.parametrize("mode", ["blocking", "advisory"])
-def test_tool_delivered_host_replay_and_poll_never_offer_duplicate_speech(tmp_path, mode):
-    host = Host(tmp_path, 1, mode, "tool_delivered")
+def test_a_delivered_tool_send_never_selects_the_final_and_replay_never_duplicates(tmp_path, mode, scenario):
+    """A receipt is evidence of what was sent, not a completion: the author's new final is new
+    speech once, its explicit silence adds nothing, and replay or polling never offers either again."""
+    host = Host(tmp_path, 1, mode, scenario)
     try:
         initial = host.turn().json()
         assert initial["status"] == "continuing"
         ref = initial["turn_ref"]
-        # An isolated transport fixture reports an already delivered tool effect.
-        # No actual provider is contacted and the model has no direct send tool.
-        receipt = {"schema_version": 1, "delivery_id": "fixture-tool-effect", "part_id": "0",
-            "state": "delivered", "provider": "telegram", "account_id": "bot-1",
-            "conversation_id": "room-1", "thread_id": "topic-1", "text": ANSWER,
-            "format": "plain", "message": {"message_id": "fixture-tool-message"},
-            "origin": {"kind": "tool", "task_id": ref, "source_event_id": "original"}}
+        sent = ACKNOWLEDGEMENT if scenario == "acknowledged" else ANSWER
         for _ in range(2):
-            reply = host.client.post("/presence/delivery", json=receipt)
+            reply = host.client.post("/presence/delivery", json=_tool_receipt(ref, sent))
             assert reply.status_code == 200, reply.text
         assert initial["text"] == "" and initial["output_ref"] == ""
         assert host.work(ref).status_code == 202
         assert host.client.post("/fixture/release-review").status_code == 200
         final = eventually(lambda: (reply if (reply := host.work(ref)).status_code == 200 else None)).json()
-        assert final["status"] == "completed" and final["outcome"] == "tool_delivered"
-        assert final["text"] == "" and final["output_ref"] == "" and final["outputs"] == []
+        assert final["status"] == "completed" and final["outputs"] == []
+        if scenario == "acknowledged":
+            assert (final["outcome"], final["text"]) == ("message", ANSWER) and final["output_ref"]
+        else:
+            assert (final["outcome"], final["text"], final["output_ref"]) == ("silent", "", "")
+            assert host_result(tmp_path / "data", ref)["result"] == TOOL_NOTE  # the words stay internal
         assert host.turn().json() == initial and host.work(ref).json() == final
         rows = dialogue_test.log_rows(tmp_path / "data" / "logs" / "chat.jsonl")
         deliveries = [row for row in rows if row.get("type") == "presence_delivery"]
-        assert len(deliveries) == 1 and deliveries[0]["text"] == ANSWER
+        assert len(deliveries) == 1 and deliveries[0]["text"] == sent
         assert len(host.inputs()) == 3
         assert all("send_message" not in tool for row in host.inputs() for tool in row["tools"])
         (tmp_path / "consumer-facts.json").write_text(json.dumps({
-            "mode": mode, "initial": initial, "final": final,
+            "mode": mode, "scenario": scenario, "initial": initial, "final": final,
             "fixture_delivery_receipt_rows": len(deliveries), "model_calls": 3,
             "provider_transport_scripted": True}, indent=2))
     finally:

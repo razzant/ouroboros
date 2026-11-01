@@ -177,7 +177,7 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             record.titleEl.textContent = name;
             renamed(record);
             // An unnamed successor's own latest line stood in for its title; under the work's name it is the line again.
-            renderCollapsedActivity(record, projectCollapsedActivity({ suggestedName: name, headline: record.collapsedActivity,
+            renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: name, headline: record.collapsedActivity,
                 previous: record.collapsedActivity }));
             changed = true;
         }
@@ -209,7 +209,7 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             if (titleChanged) { record.titleEl.textContent = name; renamed(record); }
             // Restore the deferred collapsed activity after naming.
             changed = renderCollapsedActivity(record, projectCollapsedActivity({
-                suggestedName: name, headline: record.collapsedActivity,
+                record, suggestedName: name, headline: record.collapsedActivity,
                 previous: record.collapsedActivity,
             })) || changed;
             changed = sync(record) || changed;

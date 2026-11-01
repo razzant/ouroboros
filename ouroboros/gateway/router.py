@@ -79,7 +79,7 @@ def collect_routes(
         api_skill_toggle,
     )
     from ouroboros.gateway.widgets import api_widget_fault_post, api_widgets
-    from ouroboros.gateway.widget_assets import api_widget_asset_lease
+    from ouroboros.gateway.widget_assets import api_widget_asset_lease, api_widget_bridge_script
     from ouroboros.gateway.contributions import api_extension_host_asset
     from ouroboros.gateway.files import (
         api_chat_upload,
@@ -194,6 +194,7 @@ def collect_routes(
         Route("/api/consciousness", endpoint=api_consciousness, methods=["GET"]),
         Route("/api/widgets", endpoint=api_widgets, methods=["GET"]),
         Route("/api/widgets/fault", endpoint=api_widget_fault_post, methods=["POST"]),
+        Route("/api/widget-bridge.js", endpoint=api_widget_bridge_script, methods=["GET"]),
         Route("/api/widgets/asset-leases", endpoint=api_widget_asset_lease, methods=["POST"]),
         Route("/api/widgets/asset-leases/{op}", endpoint=api_widget_asset_lease, methods=["POST"]),
         Route("/api/extensions", endpoint=api_extensions_index, methods=["GET"]),

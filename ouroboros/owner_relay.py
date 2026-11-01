@@ -267,6 +267,41 @@ def quote_content(ctx, entry, row, body):
     return build_incoming_user_content({"text": body, "attachment_manifest": manifest}, ctx.drive_root, ctx.task_id)
 
 
+def quoted_inputs(root, refs: list) -> list:
+    """The owner files a relay's quoted rows carried (their saved chat uploads, which ``quote_content`` stages on
+    delivery), as rows another task's own copy reads (``artifacts.materialize_inherited_attachment_manifest``): each
+    upload verified against its saved identity and named by its unique upload id, so two same-named files stay two. One
+    gone or changed is a rejected ``source_missing`` row under its name, never other bytes; a secret-named one is
+    refused as staging refuses it (``secret_source``)."""
+    import re
+
+    from ouroboros.artifacts import stream_artifact_file
+    from ouroboros.chat_uploads import file_media, upload_id, uploads_dir
+    from ouroboros.workspace_patch_rules import _sensitive_untracked_reason
+
+    rows = []
+    for ordinal, ref in enumerate(refs):
+        uid = upload_id(ref.get("upload"))
+        path, original = uploads_dir(root) / uid, re.sub(r"^[0-9a-f]{32}_", "", uid)
+        row = {"ordinal": ordinal, "label": str(ref.get("name") or "attachment"),
+               **{key: ref[key] for key in ("mime", "size", "sha256") if key in ref}}
+        if uid and (reason := _sensitive_untracked_reason(original)):
+            rows.append({**row, "status": "rejected", "reason": "secret_source",
+                         "rule": f"uploaded file name {original!r}: {reason}"})
+            continue
+        try:
+            if not uid:
+                raise OSError("the quoted row names no saved upload")
+            stream_artifact_file(path, expected=ref)
+            mime, kind = file_media(path)
+        except OSError:
+            rows.append({**row, "status": "rejected", "reason": "source_missing"})
+            continue
+        rows.append({**row, "status": "staged", "root": "artifact_store", "relpath": f"attachments/{uid}",
+                     "abs_path": str(path), "mime": mime, "is_image": kind == "image"})
+    return rows
+
+
 def select_return(ctx, relay_id: str) -> tuple[dict, str]:
     relays = getattr(ctx, "_open_relays", None) or {}
     if relay_id and relay_id in relays:

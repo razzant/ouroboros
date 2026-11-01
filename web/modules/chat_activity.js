@@ -866,8 +866,9 @@ export function clearStickyCardState(record) {
  * activity, so the line is suppressed to avoid duplication. Subagent titles
  * keep the role · model identity (the id only for twins), so their routed progress body always feeds
  * the line. A frame without new activity keeps `previous`, so finishing a card
- * never blanks its last activity. Geometry is owned by the two-line CSS clamp;
- * this character ceiling is only a defensive DOM/accessibility bound.
+ * never blanks its last activity. This character ceiling bounds a child's and a
+ * portal's line (their geometry is the fitted one or two lines); an ordinary
+ * root's title and line are whole (owner 30.10, B).
  */
 export const COLLAPSED_ACTIVITY_MAX = 240;
 
@@ -898,18 +899,44 @@ export function plainActivityText(text = '') {
     return trimmed || source;
 }
 
+/** An authored line's whole normalized text: the preview's own projection, never cut. */
+export function wholeActivityText(value = '') {
+    return plainActivityText(value).replace(/\s+/g, ' ').trim();
+}
+
 export function boundActivityPreview(value = '') {
-    const candidate = plainActivityText(value).replace(/\s+/g, ' ').trim();
+    const candidate = wholeActivityText(value);
     if (candidate.length <= COLLAPSED_ACTIVITY_MAX) return candidate;
     return candidate.slice(0, COLLAPSED_ACTIVITY_MAX - 1).trimEnd() + '…';
 }
 
+// An ordinary root card: neither a nested child nor a Main portal (both keep a bounded preview and a meta-line clock).
+const ordinaryRoot = (record) => Boolean(record) && !record.isSubagent && record.root?.dataset?.portal !== '1';
+
+/**
+ * The authored words a card keeps as its line (an unnamed root's title is the same words): an ordinary root's whole
+ * normalized text, from the frame's complete words (`fullHeadline`, which the host sends whole, live and on replay);
+ * a child's or a portal's bounded preview. A frame with no preview has no line.
+ */
+export function authoredLine(record, summary = {}) {
+    const preview = summary.activityPreview ?? summary.headline;
+    return ordinaryRoot(record) && preview ? wholeActivityText(summary.fullHeadline || preview) : boundActivityPreview(preview);
+}
+
+/** An unnamed card's title from its newest authored words: an ordinary root's whole line, else the bounded headline. */
+export function authoredTitle(record) {
+    return (ordinaryRoot(record) && record.lastHumanHeadlineSource?.preview) || record?.lastHumanHeadline || '';
+}
+
 export function projectCollapsedActivity({
-    isSubagent = false, suggestedName = '', headline = '', body = '', previous = '',
+    record = null, isSubagent = Boolean(record?.isSubagent), portal = record?.root?.dataset?.portal === '1',
+    suggestedName = '', headline = '', body = '', previous = '',
 } = {}) {
-    const current = boundActivityPreview(isSubagent ? body : headline);
-    const candidate = current || boundActivityPreview(previous);
-    if (!isSubagent && candidate === boundActivityPreview(suggestedName || headline)) return '';
+    // A child's and a portal's line is a bounded preview; an ordinary root's is its whole normalized text.
+    const shape = isSubagent || portal ? boundActivityPreview : wholeActivityText;
+    const current = shape(isSubagent ? body : headline);
+    const candidate = current || shape(previous);
+    if (!isSubagent && candidate === shape(suggestedName || headline)) return '';
     return candidate;
 }
 
@@ -1225,12 +1252,12 @@ export function markIngressSaved(root, row) {
 
 // Full narration stays in the timeline, not a mouse-only title.
 // How many lines a COLLAPSED card's activity line shows (the CSS clamps say the same: a child 1, a Main portal
-// 2, a root card 3); an expanded card shows the whole line.
+// 2); a root card and an expanded card show the whole line (0).
 export function collapsedActivityLines(record) {
     const root = record?.root;
     if (!root || root.dataset?.expanded === '1') return 0;
     if (record.isSubagent || root.dataset?.subagent === '1') return 1;
-    return root.dataset?.portal === '1' ? 2 : 3;
+    return root.dataset?.portal === '1' ? 2 : 0;
 }
 
 /** Re-fit the activity line after the card's form changed (expanded, collapsed, bound as a portal). */
@@ -1353,8 +1380,9 @@ function updatedLabel(record) {
     return text ? `updated ${text}` : '';
 }
 
-// An unfinished card always carries a time on its meta line: its last narration's, else when the work
-// started (the census start, else the card's first row). The line is never empty beside a control.
+// An unfinished card always carries a time: its last narration's, else when the work started (the census
+// start, else the card's first row). A root card says it in its head beside the chip; a child and a Main
+// portal end their meta line with it.
 function clockLabel(record) {
     const updated = updatedLabel(record);
     if (updated || record.finished) return updated;
@@ -1408,6 +1436,9 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     // cost · updated, plus the facts that change what the owner may trust. Executor, model and
     // effort details stay on the room's card.
     const portal = record.root?.dataset?.portal === '1';
+    const clock = record.finished ? '' : clockLabel(record);
+    // A root card's clock moves whole to its head; a portal and a child keep it last on this line.
+    const headClock = ordinaryRoot(record);
     const text = (item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`;
     // The compact line says who ran the work, on what, how long and for how much (DESIGN §5 "A task card's
     // summary outranks its details"). A delegated child names its executor and only the executor's own model
@@ -1437,7 +1468,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         !record.finished && record.projectHoldDetail || '',
         // A settled portal needs no activity clock: its chip states how the work ended and the author's
         // final (with its own end time) arrives as a message.
-        toolCalls, ...cost, record.finished ? '' : clockLabel(record),
+        toolCalls, ...cost, clock,
     ].filter(Boolean).map(text)) : metaLineHtml([
         chip ? executorIdentityMarkup(chip, { model }) : (model ? text(key ? `${model} · ${key}` : model) : ''),
         effortChipMarkup(record.effort),
@@ -1450,9 +1481,10 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
             !supervision && record.toolCalls > 0 ? toolCalls : '',
             ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),
             ...cost,
-            record.finished ? '' : clockLabel(record),
+            headClock ? '' : clock,
         ].filter(Boolean).map(text),
     ]);
+    const clockChanged = paintHeadClock(record, headClock ? clock : '');
     const factsChanged = paintLiveFacts(record, portal ? [] : [
         ['Executor', chip?.title ? escapeHtml(chip.title) : ''],
         // Provenance is a recorded fact of the schedule (chosen_by / coordinator_provenance), never inferred here.
@@ -1467,17 +1499,36 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Updated', escapeHtml(updated)],
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));
-    if (record.metaEl.innerHTML === html) return (detailChanged || factsChanged) && Boolean(record.metaEl.isConnected);
+    if (record.metaEl.innerHTML === html) return (detailChanged || factsChanged || clockChanged) && Boolean(record.metaEl.isConnected);
     record.metaEl.innerHTML = html;
     return Boolean(record.metaEl.isConnected);
+}
+
+// The head's clock (`data-live-when`, beside the chip): written only on change, hidden while it says nothing.
+function paintHeadClock(record, text) {
+    const el = record.summaryButtonEl?.querySelector?.('[data-live-when]');
+    if (!el || (el.textContent === text && el.hidden === !text)) return false;
+    el.textContent = text;
+    el.hidden = !text;
+    return true;
+}
+
+// The Reviews door stands in a root card's head beside Details; a child docks it in its own foot, before its
+// controls, the action row under its metadata (DESIGN "Reviews inside task cards"). The same node moves, never a copy.
+export function dockChildReviewDoor(record) {
+    const door = record?.reviewSummaryEl;
+    const end = ownFootEnd(record);
+    if (!record?.isSubagent || !door || !end || door.parentElement === end) return false;
+    end.prepend(door);
+    return true;
 }
 
 // Only host-attested cancelable queue roots receive this control.
 // A card's OWN actions row: a nested child card carries a row of its own, and a
 // descendant lookup would hand a root without one its child's.
-// The row lives at the end of the card's own foot, under its meta line (right-docked, after the quiet
-// Reviews count or a portal's Project reference), and the summary above it keeps its own inset. A nested
-// child's foot is its own, so a descendant lookup is never used.
+// The row lives at the end of the card's own foot: a root's beside its meta line, right-docked, and under it
+// when the two do not fit; a child's and a portal's under the meta line, after the child's docked Reviews door
+// or the portal's Project reference. A nested child's foot is its own, so a descendant lookup is never used.
 function ownFootEnd(record) {
     const foot = record?.footEl;
     const end = record?.footEndEl;

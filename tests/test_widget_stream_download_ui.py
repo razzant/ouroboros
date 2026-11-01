@@ -89,7 +89,9 @@ window.fetch=async (...args)=>{
  }
  return response;
 };
-window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),{skill:'export_widget',ws_prefix:''},{entry:'widget.js',height:520});
+// A classic mount mints its route lease for the live tab's publication.
+const live=(await (await fetch('/api/widgets')).json()).ui_tabs.find(row=>row.skill==='export_widget'&&row.tab_id==='main');
+window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),{skill:'export_widget',ws_prefix:'',tab_id:live.tab_id,generation:live.generation},{entry:'widget.js',height:520});
 window.fixtureReady=true;
 </script></body></html>'''
 
@@ -101,8 +103,10 @@ def widget_server(tmp_path, monkeypatch):
     from starlette.routing import Mount, Route
     from starlette.staticfiles import StaticFiles
     import uvicorn
-    from ouroboros import extension_loader
+    from ouroboros import extension_loader, server_auth
     from ouroboros.gateway.extensions import api_extension_module, api_extension_dispatch
+    from ouroboros.gateway.widget_assets import api_widget_asset_lease
+    from ouroboros.gateway.widgets import api_widgets
     from ouroboros.skill_loader import find_skill, save_enabled, save_review_state, SkillReviewState
     from tests._extension_loader_shared import _write_ext_skill, _add_fake_native_dep, _mark_isolated_deps_installed
     from tests._shared import clean_extension_runtime_state
@@ -126,13 +130,17 @@ def widget_server(tmp_path, monkeypatch):
     expected = {'widget-blob.txt': b'blob export', 'widget-data.txt': b'data export',
                 'widget-explicit.txt': b'explicit export', 'widget-large.bin': (root / 'large.bin').read_bytes()}
     app = Starlette(routes=[Route('/', lambda _r: HTMLResponse(_HTML)),
+        Route('/api/widgets', api_widgets),
+        Route('/api/widgets/asset-leases', api_widget_asset_lease, methods=['POST']),
+        Route('/api/widgets/asset-leases/{op}', api_widget_asset_lease, methods=['POST']),
         Route('/api/extensions/{skill}/module/{entry:path}', api_extension_module),
         Route('/api/extensions/{skill}/{rest:path}', api_extension_dispatch, methods=['GET','HEAD']),
         Mount('/web', app=StaticFiles(directory=REPO / 'web'))])
     app.state.drive_root, app.state.repo_dir = root, REPO
     sock = socket.socket()
     sock.bind(('127.0.0.1', 0))
-    server = uvicorn.Server(uvicorn.Config(app, log_level='warning'))
+    # The real gate owns the lease controls and the route-lease reads, as in the core.
+    server = uvicorn.Server(uvicorn.Config(server_auth.NetworkAuthGate(app), log_level='warning'))
     thread = threading.Thread(target=server.run, kwargs={'sockets':[sock]}, daemon=True)
     thread.start()
     deadline = time.monotonic() + 10

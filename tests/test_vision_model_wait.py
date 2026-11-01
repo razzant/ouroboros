@@ -259,7 +259,9 @@ def test_real_child_retains_one_generation_and_unknown_cost(child_fixture, mode)
         assert all(row["fields"] == ["invocation_id", "operation_id", "request_manifest_ref", "request_ref"] for row in custody)
     if mode == "slow":
         assert len([row for row in rows if row["kind"] == "poll"]) >= 8
-        assert state["timeouts"][0] > 90
+        # No task clock: the child has no timeout at all (retired pin: > 90, the 6 h window),
+        # and the 20 ms transport bound never becomes its inference deadline.
+        assert state["timeouts"][0] is None
     request = next((root / "observability" / "calls" / "image-task").glob("*_model_request.json"))
     assert json.loads(request.read_text())["operation_id"] == "operation-exact"
 
@@ -315,6 +317,9 @@ def _parent_cancel(child_fixture, mode, reason):
     rows = _events(events)
     assert len([row for row in rows if row["kind"] == "generation"]) == 1
     assert {row["operation_id"] for row in rows if row["kind"] == "cancel"} == {"operation-exact"}
+    # No task clock bounds this subscription call: the child ran without a timeout and
+    # Stop still ended it, through its control watcher (1A: never an uninterruptible wait).
+    assert state["timeouts"] == [None]
 
 
 def test_parent_cancel_reaches_same_live_operation(child_fixture):
@@ -424,6 +429,9 @@ def test_subscription_tool_envelope_uses_existing_task_ceiling(monkeypatch):
     monkeypatch.setattr(vision, "_get_llm_client", lambda: None)
     monkeypatch.setattr(vision, "_vision_execution_window", lambda: 900)
     assert vision._vision_tool_timeout(None, {}) == 900 + 2 * vision.NESTED_SETTLEMENT_MARGIN_SEC
+    # No task clock: no envelope at all (retired: the 6 h window); the child's watcher owns Stop.
+    monkeypatch.setattr(vision, "_vision_execution_window", lambda: None)
+    assert vision._vision_tool_timeout(None, {}) is None
     monkeypatch.setattr(vision, "_resolve_vlm_model", lambda *_a, **_k: "api-model")
     assert vision._vision_tool_timeout(None, {}) == 0
 

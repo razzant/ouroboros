@@ -290,7 +290,7 @@ def _dispose_delegated(drive: Any, entry: Any, snapshot_key: str, reason: str,
             removed = False
         note = "" if removed else (
             " (snapshot cleanup deferred to custody GC at boot or a later custody pass, "
-            "once the owning task is proven over.)")
+            "once the owning task is proven over and the owner no longer keeps it.)")
     return True, note
 
 

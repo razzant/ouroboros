@@ -37,7 +37,7 @@ export function continueNonce(taskId, storage, retainedNonce = '') {
     return nonce;
 }
 
-/** @returns {{kind: 'offer'|'retry'|'successor'|'refusal'|'none', successorId?: string, cause?: string, actionNonce?: string}} */
+/** @returns {{kind: 'offer'|'retry'|'successor'|'refusal'|'none', successorId?: string, cause?: string, refusal?: string, actionNonce?: string}} */
 export function continueOfferView(detail) {
     const offer = detail?.continuation_offer;
     if (!offer || typeof offer !== 'object') return { kind: 'none' };
@@ -47,7 +47,19 @@ export function continueOfferView(detail) {
     if (offer.eligible === false && offer.refusal === 'hard_limit_reached') {
         return { kind: 'refusal', cause: String(offer.cause || offer.refusal) };
     }
+    // A finite budget whose remainder the saved execution clock cannot establish: the host refuses
+    // rather than guess. Its `cause` is the interruption's, so the note names the budget instead.
+    if (offer.eligible === false && offer.refusal === 'execution_budget_unknown') {
+        return { kind: 'refusal', refusal: 'execution_budget_unknown' };
+    }
     return offer.eligible ? { kind: 'offer', cause: String(offer.cause || '') } : { kind: 'none' };
+}
+
+function refusalPhrase(view) {
+    return view.refusal === 'execution_budget_unknown'
+        ? tr('task.continue.budget_unknown',
+            "The time left in this task's execution budget could not be read from its saved clock, so no new task starts.")
+        : taskReasonPhrase(view.cause);
 }
 
 /**
@@ -152,7 +164,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
             note.dataset.continueRefusal = String(record.groupId || '');
             actions.appendChild(note);
         }
-        setInlineStatus(note, `${tr('task.continue.unavailable', 'Continue unavailable.')} ${taskReasonPhrase(view.cause)}`, 'neutral');
+        setInlineStatus(note, `${tr('task.continue.unavailable', 'Continue unavailable.')} ${refusalPhrase(view)}`, 'neutral');
         return !refusal;
     }
     refusal?.remove();

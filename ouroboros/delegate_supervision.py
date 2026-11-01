@@ -15,6 +15,7 @@ from ouroboros.owner_mailbox import (
     KIND_HURRY,
     KIND_TASK_MESSAGE,
     drain_owner_entries,
+    place_arrival_wake,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import utc_now_iso
@@ -499,7 +500,7 @@ def _addressed_wakes(ctx: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
             "text": str(entry.get("text") or ""),
             "ts": str(entry.get("ts") or ""),
         }
-        for entry in entries
+        for entry in entries if place_arrival_wake(entry) is not False  # context only: unread for the drain
     ]
 
 

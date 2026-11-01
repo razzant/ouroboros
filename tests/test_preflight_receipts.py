@@ -689,6 +689,9 @@ def test_only_a_complete_default_run_with_a_root_and_a_baseline_becomes_durable(
 
 @pytest.mark.parametrize("outcome", ["red", "timeout", "containment", "workers_lost", "parallel_empty"])
 def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, outcome):
+    from tests._shared import retire_synthetic_gate_hold
+    from tests.test_preflight_runner import _pin_preflight_root
+
     receipts.capture_executing_source_baseline()
     repo = _tiny_repo(tmp_path)
     canonical = tmp_path / "canonical"
@@ -699,14 +702,21 @@ def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, ou
         "parallel" if "-n" in args else "serial", (0, "green", "")))
     monkeypatch.setattr(pr, "_observed_worker_ids", lambda *_a: {"gw0"} if outcome == "workers_lost" else {"gw0", "gw1"})
     ctx = _ctx(repo, canonical)
-    error = pr.run_hermetic_pytest(repo, ctx=ctx)
-    assert _receipt_files(canonical) == []
-    if outcome == "parallel_empty":  # a green gate whose parallel lane proved no concurrency
-        assert error is None and ctx._preflight_test_proof
-        receipt = ctx._preflight_test_disclosure["receipt"]
-        assert (receipt["status"], receipt["reason"]) == ("declined", "the parallel pass collected no tests")
-    else:
-        assert error and not getattr(ctx, "_preflight_test_proof", None)
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    try:
+        error = pr.run_hermetic_pytest(repo, ctx=ctx)
+        assert _receipt_files(canonical) == []
+        if outcome == "parallel_empty":  # a green gate whose parallel lane proved no concurrency
+            assert error is None and ctx._preflight_test_proof
+            receipt = ctx._preflight_test_disclosure["receipt"]
+            assert (receipt["status"], receipt["reason"]) == ("declined", "the parallel pass collected no tests")
+        else:
+            assert error and not getattr(ctx, "_preflight_test_proof", None)
+        assert temp_root.exists() is (outcome == "containment")
+    finally:
+        retire_synthetic_gate_hold(repo, temp_root, "pid 4242 is still alive")  # the stubbed lane proved no process
 
 
 def _replace(doc: dict, **changes) -> str:

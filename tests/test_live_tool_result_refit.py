@@ -131,3 +131,83 @@ def test_successful_send_retires_only_the_whole_result_fallback(host_world, whol
             await drain_exposure(host)
         assert ('done' in host._tool_delivery_fallbacks) is not whole
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('thinking', [False, True])
+def test_second_tool_refit_waits_for_speech_on_its_active_response(host_world, monkeypatch, record_property, thinking):
+    import threading
+    from ouroboros.tools.tool_result import ToolResult
+    from tests._live_stack import stack
+
+    async def scenario():
+        async with stack(host_world, monkeypatch, 'gemini', thinking=thinking) as live:
+            host, call, old = live.host, live.call, live.wire
+            native = call.session
+            complete = old.complete
+            old.complete = lambda: None
+            old.answer = lambda: None
+            old.tool('first-result', 'list_available_tools', {})
+            await live.wait(lambda: 'first-result' in old.outputs and not call.tools_running)
+
+            entered, release = threading.Event(), threading.Event()
+            batch = host.tool_batch
+            body = 'Result from one completed effect. ' * 1600
+            monkeypatch.setattr(host.tools, 'execute_result',
+                                lambda *args: ToolResult(status='ok', code='OK', text=body))
+            refit_facts = {}
+
+            async def second_batch(calls):
+                # A normal near-full serving window, as in the existing result-refit
+                # tests. The production result projector decides whether to refit.
+                host._held_input = host._renewal_window.total_equivalent - host._renewal_window.reserve - 1200
+                host._history_at_receipt = host._history_estimate()
+                host._serving_history_at_receipt = host._serving_history_estimate()
+                changes = await batch(calls)
+                refit_facts.update(refit=host.state.get('refit'),
+                    fits=await host.delivery_fits(changes, call.serving_catalog()),
+                    whole_result=any(body in str(row.get('content', '')) for row in changes))
+                entered.set()
+                while not release.is_set():
+                    await asyncio.sleep(.01)
+                return changes
+
+            monkeypatch.setattr(host, 'tool_batch', second_batch)
+            old.tool('second-result', 'list_available_tools', {})
+            await live.wait(entered.is_set)
+            assert refit_facts == {'refit': True, 'fits': False, 'whole_result': True}
+            response = native.response
+            old.say('The first result means that ', complete=False)
+            await live.wait(lambda: native.text.get('ouroboros') and not call.unheard())
+            assert response == native.response
+            assert call.active_responses and native.turn_busy
+            release.set()
+            try:
+                await live.wait(lambda: not call.tools_running and call.preparation_ready())
+                await asyncio.sleep(.15)
+                switched_before_completion = call.session is not native
+                recorded = dict(thinking=thinking, switched_before_completion=switched_before_completion,
+                    refit_facts=refit_facts,
+                    native_complete=native.response_complete, native_busy=native.turn_busy,
+                    native_output_pending=native.output_pending,
+                    old_outputs=list(old.outputs), active=list(call.active_responses),
+                    tool_responses=list(call.tool_responses), connections=len(live.provider.connections))
+                if not switched_before_completion:
+                    old.complete = complete
+                    old.complete()
+                    await live.wait(lambda: call.session is not native)
+                await live.wait(lambda: not call.pending_offers)
+                await live.quiet()
+                recorded.update(effects=len([row for row in host.trace['tool_calls']
+                    if row.get('tool_call_id') in ('first-result', 'second-result')]),
+                    successor_outputs=list(live.wire.outputs), successor_spoken=live.wire.spoken,
+                    setup=live.wire.sent[0]['setup']['sessionResumption'])
+                record_property('refit_speech', json.dumps(recorded))
+                assert not switched_before_completion, recorded
+                assert len([row for row in host.trace['tool_calls']
+                            if row.get('tool_call_id') in ('first-result', 'second-result')]) == 2
+                assert 'second-result' not in old.outputs
+                assert not live.wire.outputs
+            finally:
+                release.set()
+        assert live.result[1]['execution_status'] == 'ok', live.result
+    asyncio.run(scenario())

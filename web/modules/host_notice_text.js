@@ -30,6 +30,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '⚙️ Review settings could not be migrated automatically: '],
     optional_bounds_notice: ['⚙️ Task limits on this install: '],
     legacy_memory_notice: ['🧠 Memory: '],
+    command_timeout_notice: ['⏱️ The separate per-call ceiling'],
     task_admission_notice: ['🚫 Budget exhausted. '],
     budget_notice: ['🚫 Model budget reached. '],
     deep_self_review_queued: ['🔎 Deep self-review queued: '],
@@ -48,7 +49,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     finalization_notice: ['⏳ Task ', '▶️ Task '],
     skill_review: ['✅ Skill review round ', '⚠️ Skill review round ', '❌ Skill review round ', '⏳ Skill review round '],
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
-        '🌐 Provider connection ', '🌐 The primary provider temporarily refused ',
+        '🌐 Provider connection ', '🌐 The primary provider temporarily refused ', '🌐 No local model slot was free',
         '🌐 The request did not reach the provider ', '🌐 Primary provider answered after ',
         '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan: ', '✅ PR #', '⚠️ PR #',
         // web_search legs (`tools/search.py`) and a declared-output baseline (`tools/shell_outputs.py`).

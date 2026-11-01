@@ -144,7 +144,7 @@ def test_real_api_known_preparation_exception_cleans_only_its_attempt(room, tmp_
 
 @pytest.mark.parametrize("stage", ["before_scope", "before_bind", "before_ensure", "during_ensure"])
 def test_promotion_never_recreates_a_vanished_prepared_room(host, tmp_path, monkeypatch, stage):  # noqa: F811
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
     from supervisor.events_project_routing import _handle_promote_chat_to_task
 
     registry.create_project(host.root, "target")
@@ -165,7 +165,7 @@ def test_promotion_never_recreates_a_vanished_prepared_room(host, tmp_path, monk
         if stage == "during_ensure":
             _drop_project(host.root)
         return SimpleNamespace(path=folder)
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", provision)
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", provision)
     result = _handle_promote_chat_to_task({
         "task_id": "gone-room", "routing_token": "ours", "objective": "Use prepared room",
         "project_id": "target", "chat_id": 1, "_project_admission": basis,
@@ -247,7 +247,7 @@ def test_duplicate_or_malformed_raw_authority_never_admits_or_rewrites(room, raw
 
 
 def test_legacy_omitted_routing_fields_survive_writer_and_new_preparation(room, tmp_path, monkeypatch):  # noqa: F811
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
 
     path = registry._registry_path(room.root)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -260,7 +260,7 @@ def test_legacy_omitted_routing_fields_survive_writer_and_new_preparation(room, 
     assert basis["project"]["lifecycle"] == "active" and basis["project"]["routing_generation"] == 0
     folder = tmp_path / "legitimate-new-room"
     folder.mkdir()
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
     missing = registry.project_admission_view(room.root, "new-room", allow_unregistered=True)
     created = registry.ensure_project_workspace(room.root, "new-room", tmp_path / "repo",
                                                 return_project=True, admission_basis=missing)

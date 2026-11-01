@@ -795,7 +795,7 @@ def _row_references(row: Dict[str, Any], resource: Dict[str, Any]) -> bool:
 
 def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
     """Remove exactly the copy ``resource`` names; a different or unknown holder is kept."""
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project, subagent_worktrees
 
     surface, path = str(resource.get("surface") or ""), str(resource.get("path") or "")
     try:
@@ -811,7 +811,7 @@ def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
                                   check=False) if pathlib.Path(path).is_dir() else None
             if head is None or head.returncode != 0 or head.stdout.strip() != str(resource.get("base_sha") or ""):
                 return "retained_not_owned"
-            return "removed" if subagent_worktrees.remove_genesis_project(path) else "retained_remove_failed"
+            return "removed" if genesis_project.remove_genesis_project(path, task_id=task_id) else "retained_remove_failed"
     except Exception:
         log.warning("Prepared copy %s of %s was kept: disposal failed", path, task_id, exc_info=True)
         return "retained_remove_failed"

@@ -346,7 +346,8 @@ def account_candidates(root, place_id):
 
     This is a recent UI suggestion, never owner identity evidence or a history
     scan. It uses the existing place/time index and stores no second actor list.
-    The connected account's own imported messages among them suggest no person.
+    The connected account's own imported messages among them suggest no person; nor does a reaction's
+    chat or anonymous aggregate actor.
     """
     if not _dialogue_indexes(root):
         return []
@@ -354,12 +355,14 @@ def account_candidates(root, place_id):
         rows = conn.execute(f"SELECT json_extract(body,'$.sender_session_id') AS actor, "
                             "json_extract(body,'$.sender_label') AS label, "
                             "json_extract(body,'$.transport.actor.is_bot') AS bot, "
+                            "json_extract(body,'$.transport.actor.kind') AS kind, "
                             "json_extract(body,'$.historical_import.authorship') AS authorship "
                             f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} "
                             f"AND {_PLACE}=? ORDER BY ts DESC LIMIT 50", (place_id,)).fetchall()
     people = {}
     for row in rows:
         actor = str(row['actor'] or '')
-        if actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people:
+        if (actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people
+                and row['kind'] not in {'chat', 'anonymous'}):
             people[actor] = {'platform_actor_id': actor, 'label': str(row['label'] or actor)}
     return list(people.values())[:20]

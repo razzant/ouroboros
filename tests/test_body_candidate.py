@@ -604,7 +604,12 @@ def test_gc_removes_only_candidates_without_unique_work(body):
     _terminal(data, "gc-junk")
     report = _expire_all()
 
-    assert report["removed"] == 2
+    # A name the patch rules leave out is no evidence the file is temporary: that candidate stays.
+    assert report["removed"] == 1
+    assert not pathlib.Path(clean["path"]).exists() and pathlib.Path(junk["path"]).is_dir() and env_root.is_dir()
+    (pathlib.Path(junk["path"]) / "ouroboros/__pycache__/mod_a.cpython-311.pyc").unlink()
+    assert _expire_all()["removed"] == 1
+
     assert not pathlib.Path(clean["path"]).exists() and not pathlib.Path(junk["path"]).exists()
     assert not env_root.exists()
     assert git(serving, "branch", "--list", "candidate/*") == ""

@@ -589,7 +589,8 @@ def _observed_worker_ids(temp_root: pathlib.Path) -> set:
 def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, create=True, cwd=None,
                    workers: Optional[int] = None) -> dict:
     from ouroboros.test_environment import (
-        DIAGNOSTIC_OUTPUT_KEYS, isolated_environment, retain_diagnostic_outputs, without_launch_descriptors,
+        DIAGNOSTIC_OUTPUT_KEYS, INSTALLATION_USER_BASE_ENV, isolated_environment, retain_diagnostic_outputs,
+        without_launch_descriptors,
     )
     from ouroboros.preflight_node import node_environment
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV
@@ -597,9 +598,12 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, crea
     temp_root = pathlib.Path(temp_root).resolve(strict=False)
     # The scrub drops settings keys (`test_environment.settings_keys`), secret suffixes,
     # `NODE_OPTIONS`, `VIRTUAL_ENV`, the OUROBOROS_/GH_/GIT_/PYTEST_/PYTHON/UV_/PIP_
-    # prefixes and launch descriptors; writable paths are re-rooted under `temp_root`.
+    # prefixes and launch descriptors; writable paths are re-rooted under `temp_root`. The gate declares no
+    # installation user site of its own, even inside a session that reads one: its producer declares
+    # (`update_checks._user_base`).
+    source = {key: value for key, value in os.environ.items() if key != INSTALLATION_USER_BASE_ENV}
     env = node_environment(without_launch_descriptors(isolated_environment(
-        temp_root, repo_worktree, create=create, keep=DIAGNOSTIC_OUTPUT_KEYS)))
+        temp_root, repo_worktree, source=source, create=create, keep=DIAGNOSTIC_OUTPUT_KEYS)))
     # PREPENDED, so `-p ouroboros_preflight_probe` resolves to the gate's own
     # worker-count plugin and not to anything the candidate tree or the
     # operator's PYTHONPATH happens to shadow it with.
@@ -869,7 +873,6 @@ def _execute_pytest_pass(
     container = ProcessContainer(lifeline=True, overload=True)
     output = FileOutput(temp_root, "pytest")
     proc = None
-    reap_error = "lane did not finish"
     try:
         proc = container.spawn(
             [agent_python, "-m", "pytest", *args], cwd=str(worktree),
@@ -896,6 +899,8 @@ def _execute_pytest_pass(
             output.failed("controller diagnostics", exc)
         return CapturedPass(returncode, preview, reap_error, output.errors)
     except BaseException as exc:
+        if proc is not None and proc.poll() is None:
+            _terminate_preflight_tree(proc, temp_root)
         note_lane_process(exc, container, proc)
         raise
     finally:
@@ -1183,10 +1188,11 @@ def _release_hermetic_tree(repo, temp_root, worktree, worktree_added: bool, unpr
     """Delete the disposable tree, unless a contained lane left its teardown unproven.
 
     ``unproven`` is armed before each contained lane starts and cleared only by
-    that lane's own proven reap, so a lane that RAISED keeps the tree exactly
-    like one whose container reported a live or undeterminable leftover: a
-    surviving process never loses the worktree it runs in, and the source
-    repository keeps the registration for whoever proves those processes gone.
+    that lane's own proven reap, returned or carried by its exception, so a lane
+    that RAISED without proof keeps the tree exactly like one whose container
+    reported a live or undeterminable leftover: a surviving process never loses
+    the worktree it runs in, and the source repository keeps the registration
+    for whoever proves those processes gone.
     The marker is the enclosing layers' retention protocol; this decision does
     not depend on the marker write succeeding."""
     from ouroboros.test_environment import retention_markers
@@ -1322,8 +1328,7 @@ def _run_hermetic_pytest(
     source_index_tree, source_index_error = _capture_source_index_tree(repo, max_output)
     if source_index_error is not None:
         return source_index_error
-    temp_root_path = tempfile.mkdtemp(prefix="ouroboros-preflight-", dir=default_temp_parent())
-    temp_root = pathlib.Path(temp_root_path).resolve(strict=False)
+    temp_root = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-preflight-", dir=default_temp_parent())).resolve()
     worktree = temp_root / "repo"
     worktree_added = False
     unproven_teardown = ""
@@ -1543,6 +1548,7 @@ def _run_hermetic_pytest(
     except Exception as exc:
         failure = f"⚠️ PRE_PUSH_TEST_ERROR: hermetic preflight failed: {exc}"
     finally:
+        unproven_teardown = evidence.pop("lane_teardown", unproven_teardown)
         evidence["cleanup"] = (repo, temp_root, worktree, worktree_added, unproven_teardown)
         from ouroboros.preflight_inventory import record_failed_attempt
         record_failed_attempt(ctx, selection, subject, inventory, evidence)

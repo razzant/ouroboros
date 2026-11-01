@@ -3,7 +3,7 @@
 A pure *preview* lists what the app's own retirers would remove now, in two groups: G1, the work
 folders of finished tasks (direct and helper drives whose row is terminal and whose task the
 supervisor's liveness probe proves not live), and G2, working copies of finished work (plain
-worktrees with the same proof, delegated snapshots by the custody GC's own proof
+worktrees with the same proof and their unique work proven saved (``copy_capture_proof``), delegated snapshots by the custody GC's own proof
 (``subagent_worktrees.snapshot_released``: task proven over, custody closed and readable), own-body
 candidates whose owner is terminal with no live lineage process). The preview changes nothing:
 no file under the data root (the task rows are read through the read-only fact reader, never the
@@ -27,6 +27,14 @@ entry survived its removal (the child retries it at its next run); free space is
 fresh on every projection. Words (labels, loss sentences) live in the client with the other
 storage copy; this module reports ids, counts, sizes and typed reasons.
 
+The ordinary action works on exact objects: the *pool* (``storage_free_view``) is every offered work folder,
+working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
+is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
+lock and the owner's keep (``owner_keep``); ``groups`` stays for the groups below, with their own words.
+``manual`` is a third, separate form: exact finished copies whose work no capture holds, each named with what it
+would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them (``copy_capture_proof.discard_offer``,
+``copy_capture_proof.discard_unsaved_copy``).
+
 Five more groups hold what no background retirer removes, so only the owner's press frees them
 (the client starts those holding saved work unchecked): G3, reviewer seat homes of tasks proven
 over whose copy is gone (``review_checking_prune.finished_seat_homes``; moved into the custody
@@ -49,14 +57,19 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
+from ouroboros.storage_free_view import (  # noqa: F401 -- public re-exports
+    StorageFreeEntry, StorageFreeItemsResponse, StorageFreeKept, StorageFreeManual, StorageFreePool, UNSAVED_LISTED, VIEWS, manual_ids,
+    ordinary_ids, outcomes, page, pool,
+)
 from ouroboros.utils import utc_now_iso
 
 try:  # Python 3.11+
-    from typing import TypedDict  # type: ignore[attr-defined]
+    from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
-    from typing_extensions import TypedDict  # type: ignore[assignment]
+    from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 
@@ -78,11 +91,18 @@ _KEPT_REASONS = {
                         "inputs_uncustodied", "unread_mailbox_uncustodied", "verification_receipts_uncustodied",
                         "canonical_changed", "drive_occupant_changed", "canonical_not_settled", "post_work_open",
                         "artifacts_not_terminal", "child_drive_mismatch"),
-    "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "task_not_terminal", "parent_not_terminal"),
-    "busy": ("custody_busy", "mailbox_busy", "store_busy"),
-    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable"),
+    "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "owner_not_terminal", "task_not_terminal", "parent_not_terminal",
+               "not_proven_over", "custody_held", "owner_paused"),
+    "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
+    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable"),
+    "capture_unproven": ("capture_unproven", "capture_incomplete"),
+    "retained_evidence": ("retained_process_environment",),
+    "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
+    "unproven_excluded_inputs": ("unproven_excluded_inputs",),
+    "owner_keep": ("owner_keep",),
     "restart": ("generation_closed",),
 }
+_RETIRER_STAMPS = ("scratch_retention", "retiring", "removal_failed", "removal_failed_identity")  # no change of ownership
 
 
 class StorageFreeItem(TypedDict):
@@ -102,11 +122,6 @@ class StorageFreeGroup(TypedDict):
     items: List[StorageFreeItem]  # the largest, at most LARGEST_ITEMS
 
 
-class StorageFreeKept(TypedDict):
-    reason: str  # results_pending | in_use | busy | unreadable_record | restart | other
-    count: int
-
-
 class StorageFreeRun(TypedDict):
     groups: List[str]
     selected: int
@@ -117,6 +132,9 @@ class StorageFreeRun(TypedDict):
     deleting_bytes: int
     stuck: int  # moved aside and survived the child's removal; retried at the child's next run
     kept: List[StorageFreeKept]
+    failed: int  # the removal itself failed; not in ``kept``
+    not_started: int  # stopped before it: untouched
+    outcomes_ready: bool  # ``view=outcomes`` answers for this run
     free_before: Optional[int]
     free_after: Optional[int]
     stopped: bool
@@ -131,15 +149,21 @@ class StorageFree(TypedDict):
     done: int  # folders sized so far (listing) or attempted (running)
     total: int
     groups: List[StorageFreeGroup]
+    pool: Optional[StorageFreePool]  # the ordinary action's pool: null until a plan exists
     run: Optional[StorageFreeRun]
     error: Optional[str]
 
 
 class StorageFreeRequest(TypedDict):
-    """``POST /api/storage/free``: the plan id the preview answered with and the groups to free of it."""
+    """``POST /api/storage/free``: the plan id the preview answered with and what to free of it:
+    exact ``items`` of the ordinary pool, whole ``groups``, or the exact ``manual`` discards with
+    ``accept_loss``; one form per request."""
 
     plan: str
-    groups: List[str]  # ids of GROUPS
+    groups: NotRequired[List[str]]  # ids of GROUPS
+    items: NotRequired[List[str]]  # ids of ``view=pool``
+    manual: NotRequired[List[str]]  # ids of ``view=manual``
+    accept_loss: NotRequired[bool]  # exactly true: the listed unsaved paths of ``manual`` are lost
 
 
 class _Stopped(Exception):
@@ -147,32 +171,45 @@ class _Stopped(Exception):
 
 
 class _Candidate:
-    __slots__ = ("group", "key", "path", "layout", "inside_wait", "bytes", "unreadable", "name", "task", "row")
+    __slots__ = ("group", "key", "path", "layout", "inside_wait", "bytes", "unreadable", "name", "task", "row",
+                 "owner", "kind", "ordinary", "reason", "eligible_after", "manual")
 
     def __init__(self, group: str, key: str, path: pathlib.Path, layout: str, *, inside_wait: bool = False,
-                 task: str = "", row: Optional[Dict[str, Any]] = None) -> None:
+                 task: str = "", row: Optional[Dict[str, Any]] = None, owner: str = "") -> None:
         self.group, self.key, self.path, self.layout, self.inside_wait = group, key, path, layout, inside_wait
         self.bytes: Optional[int] = None  # None until sized, and when the folder could not be listed
         self.unreadable = 0  # entries inside it the sizing could not read
         self.name = key
         self.task = task  # the owner task its name is read from; none: the folder's name
-        self.row = row or {}  # a copy record (G7 pins)
+        self.row = row or {}  # a copy record (G2 copies, G7 pins)
+        self.owner = owner or task  # the task whose keep holds it; a leftover's name may carry one
+        self.kind = {GROUP_WORK_FOLDERS: "work_folder", GROUP_WORKING_COPIES: "working_copy"}.get(group, "other")
+        self.ordinary = group in (GROUP_WORK_FOLDERS, GROUP_WORKING_COPIES)  # the ordinary action's pool
+        self.reason: Optional[str] = None  # why it stays out of the pool
+        self.eligible_after: Optional[str] = None
+        self.manual: Optional[Dict[str, Any]] = None  # ``discard_offer``'s answer, its largest paths and ``unsaved_count``,
+        # when the owner may discard it by hand
 
 
-def _sorted_into(group: Dict[str, Any], verdict: str, candidate: "_Candidate") -> None:
-    """A lister's verdict: offered, in use (named only) or unreadable (shown, never freed)."""
+def _sorted_into(root: pathlib.Path, group: Dict[str, Any], verdict: str, candidate: "_Candidate", reason: str = "") -> None:
+    """A lister's verdict: offered, or named with its reason; in use or unreadable (shown, never freed)."""
+    from ouroboros.owner_keep import OWNER_KEEP, is_kept
+
+    if verdict == "offer" and is_kept(root, candidate.owner):
+        verdict, reason = "in_use", OWNER_KEEP
     if verdict == "offer":
         group["candidates"].append(candidate)
-    else:
-        group["unreadable" if verdict == "unreadable" else "in_use"] += 1
+        return
+    group["unreadable" if verdict == "unreadable" else "in_use"] += 1
+    candidate.reason = reason or ("unreadable_record" if verdict == "unreadable" else verdict if verdict == OWNER_KEEP else "in_use")
+    candidate.ordinary = False
+    group["excluded"].append(candidate)
 
 
-def _copy_owner(name: str) -> str:
-    """The owner task a copies-root folder name carries (``dlg_<task>_<snapshot>``, ``body_<task>``, a task id)."""
-    for prefix in ("dlg_", "dlgp_"):
-        if name.startswith(prefix):
-            return name[len(prefix):].rsplit("_", 1)[0]
-    return name[len("body_"):] if name.startswith("body_") else name
+def _eligible_after(instant: Optional[float], days: int) -> Optional[str]:
+    if instant is None:
+        return None
+    return datetime.fromtimestamp(float(instant) + days * 86400, tz=timezone.utc).isoformat()
 
 
 def _run_finished(run: pathlib.Path) -> bool:
@@ -210,15 +247,21 @@ def _free_bytes(root: pathlib.Path) -> Optional[int]:
         return None
 
 
-def _title(root: pathlib.Path, task_id: str) -> str:
-    """The task's own title, best effort; the folder name when there is none."""
-    try:
-        from ouroboros.task_store import read_document
+def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
+    """Every listed object's name: its task's title when it has one, else the folder's; one display read
+    (no bulky evidence) per page of ids."""
+    from ouroboros.task_store import display_documents
 
-        document = read_document(root, task_id) or {}
-        return str(document.get("title") or document.get("suggested_name") or task_id).strip() or task_id
-    except Exception:
-        return task_id
+    tasks = sorted({item.task for item in items if item.task})
+    documents: Dict[str, Dict[str, Any]] = {}
+    for start in range(0, len(tasks), 500):
+        try:
+            documents.update((task, json.loads(text)) for task, text in display_documents(root, tasks[start:start + 500]).items())
+        except Exception:
+            log.debug("Task titles unreadable: folder names stand", exc_info=True)
+    for item in items:
+        document = documents.get(item.task) or {}
+        item.name = str(document.get("title") or document.get("suggested_name") or item.task or item.path.name).strip() or item.path.name
 
 
 def _reason(raw: str) -> str:
@@ -292,6 +335,7 @@ class FreeSpace:
             "finished_at": (plan or {}).get("finished_at"),
             "done": progress["done"], "total": progress["total"],
             "groups": groups,
+            "pool": pool(plan) if plan else None,
             "run": self._run_view(root, run) if run else None,
             "error": error,
         }
@@ -310,6 +354,21 @@ class FreeSpace:
             "bytes_complete": len(sized) == len(candidates) and not any(item.unreadable for item in sized),
             "items": [{"id": item.key, "name": item.name, "bytes": item.bytes} for item in ranked],
         }
+
+    def items(self, data_root: Any, plan_id: Any, view: Any, cursor: Any, limit: Any, version: Any) -> Dict[str, Any]:
+        """One page of ``view`` of the held plan, or ``{"error": <reason code>}``: no disk walk per page."""
+        root = pathlib.Path(data_root)
+        with self._lock:
+            state, plan, run = self._state, self._plan, self._run
+        if view not in VIEWS or not isinstance(cursor, int) or cursor < 0 or not isinstance(limit, int) or not 1 <= limit <= 500:
+            return {"error": "bad_view"}
+        if plan is None or str(plan_id or "") != plan["id"]:
+            return {"error": "preview_outdated"}
+        if state == "listing":
+            return {"error": "listing"}
+        rows = outcomes(run, self._settled(root, run)) if view == "outcomes" and run else None
+        answer = page(plan, str(view), rows, cursor, limit)
+        return {"error": "view_changed"} if version and str(version) != answer["version"] else answer
 
     def _settled(self, root: pathlib.Path, run: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
         """The run's folders as they stand now, by id: a moved folder is removed once its trash entry is gone,
@@ -335,6 +394,10 @@ class FreeSpace:
             "deleting": len(deleting), "deleting_bytes": sum(sizes.get(key) or 0 for key in deleting),
             "stuck": len(stuck),
             "kept": [{"reason": reason, "count": count} for reason, count in sorted(run["kept"].items()) if count],
+            "failed": len(run["failed"]),
+            "not_started": sum(1 for item in run["items"] if item.key not in run["kept_items"] and item.key not in run["failed"]
+                               and item.key not in removed and item.key not in deleting and item.key not in stuck),
+            "outcomes_ready": True,
             "free_before": run["free_before"],
             "free_after": _free_bytes(root),
             "stopped": run["stopped"], "error": run["error"],
@@ -371,8 +434,13 @@ class FreeSpace:
             self._thread.start()
         return True
 
-    def start(self, data_root: Any, repo_dir: Any, plan_id: Any, groups: Any) -> Dict[str, Any]:
-        """Free the previewed items of GROUPS under PLAN_ID: ``{"started": bool, "reason": str}``."""
+    def start(self, data_root: Any, repo_dir: Any, plan_id: Any, groups: Any, items: Any = None, manual: Any = None,
+              accept_loss: Any = False) -> Dict[str, Any]:
+        """Free the previewed objects under PLAN_ID: exact ITEMS of the pool, whole GROUPS, or the exact
+        MANUAL discards with ACCEPT_LOSS exactly true: ``{"started": bool, "reason": str}``. Any bad id
+        refuses the whole request before any effect."""
+        if sum(form is not None for form in (items, groups, manual)) > 1:
+            return {"started": False, "reason": "selection_conflict"}
         chosen = [str(group) for group in groups] if isinstance(groups, list) else None
         with self._lock:
             if self._stopped.is_set() or self._busy():
@@ -380,16 +448,61 @@ class FreeSpace:
             if self._plan is None or self._state != "ready" or str(plan_id or "") != self._plan["id"]:
                 return {"started": False, "reason": "preview_outdated"}
             known = {group["id"] for group in self._plan["groups"]}
-            if not chosen or any(group not in known for group in chosen):
+            selected: Optional[set] = None
+            if manual is not None:
+                refusal, discards = self._exact_manual(self._plan, manual, accept_loss)
+                if refusal:
+                    return {"started": False, "reason": refusal}
+                self._cancel.clear()
+                self._state, self._error = "running", None
+                self._progress = {"done": 0, "total": len(discards)}
+                self._thread = threading.Thread(target=self._free, args=(pathlib.Path(data_root), self._plan, [], None, discards),
+                                                name="storage-free-run", daemon=True)
+                self._thread.start()
+                return {"started": True, "reason": ""}
+            if items is not None:
+                refusal, selected = self._exact(self._plan, items)
+                if refusal:
+                    return {"started": False, "reason": refusal}
+                chosen = [group["id"] for group in self._plan["groups"]
+                          if any(item.key in selected for item in group["candidates"])]
+            elif not chosen or any(group not in known for group in chosen):
                 return {"started": False, "reason": "unknown_group" if chosen else "nothing_selected"}
             self._cancel.clear()
             self._state, self._error = "running", None
-            self._progress = {"done": 0, "total": sum(len(group["candidates"]) for group in self._plan["groups"]
-                                                     if group["id"] in chosen)}
-            self._thread = threading.Thread(target=self._free, args=(pathlib.Path(data_root), self._plan, chosen),
+            self._progress = {"done": 0, "total": sum(sum(1 for item in group["candidates"] if selected is None or item.key in selected)
+                                                     for group in self._plan["groups"] if group["id"] in chosen)}
+            self._thread = threading.Thread(target=self._free, args=(pathlib.Path(data_root), self._plan, chosen, selected),
                                             name="storage-free-run", daemon=True)
             self._thread.start()
         return {"started": True, "reason": ""}
+
+    @staticmethod
+    def _exact(plan: Dict[str, Any], items: Any) -> Tuple[str, set]:
+        """The selection of exact pool ids, or why it is refused; a saved-work group is no ordinary item."""
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            return "unknown_item", set()
+        if not items:
+            return "nothing_selected", set()
+        pooled = ordinary_ids(plan)
+        known = {item.key for group in plan["groups"] for item in [*group["candidates"], *group["excluded"]]}
+        if any(item not in known for item in items):
+            return "unknown_item", set()
+        return ("not_offered", set()) if any(item not in pooled for item in items) else ("", set(items))
+
+    @staticmethod
+    def _exact_manual(plan: Dict[str, Any], ids: Any, accept_loss: Any) -> Tuple[str, set]:
+        """The exact discards, or why they are refused: only ``view=manual`` ids, and only with the loss accepted."""
+        if accept_loss is not True:
+            return "loss_not_accepted", set()
+        if not isinstance(ids, list) or any(not isinstance(item, str) for item in ids):
+            return "unknown_item", set()
+        if not ids:
+            return "nothing_selected", set()
+        known = {item.key for group in plan["groups"] for item in [*group["candidates"], *group["excluded"]]}
+        if any(item not in known for item in ids):
+            return "unknown_item", set()
+        return ("not_offered", set()) if set(ids) - manual_ids(plan) else ("", set(ids))
 
     def cancel(self) -> bool:
         """Stop the listing (nothing is kept) or the run (what was freed stays freed)."""
@@ -416,33 +529,42 @@ class FreeSpace:
     # ---- the preview ------------------------------------------------------------------------
 
     def _candidates(self, root: pathlib.Path) -> List[Dict[str, Any]]:
-        from ouroboros import body_candidate
+        from ouroboros import body_candidate, owner_keep
+        from ouroboros.copy_capture_proof import discard_offer, plain_copy_verdict
+        from ouroboros.copy_environments import environment_verdict, scratch_owner
         from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, drive_candidates
+        from ouroboros.private_copy_read import _copy_owner, read_records
         from ouroboros.retention import age_cutoff, get_gc_retention_days
+        from ouroboros.subagent_worktrees import (
+            _record_file, _record_name, _records_dir, _resolve_root, _task_proven_over, snapshot_released,
+        )
         from ouroboros.task_status import FINAL_STATUSES
+        from ouroboros.test_environment import SCRATCH_MARKER
 
         live = self._probe()
-        cutoff = age_cutoff(get_gc_retention_days())
+        days = get_gc_retention_days()
+        cutoff = age_cutoff(days)
         groups: List[Dict[str, Any]] = []
+
+        def new_group(group_id: str) -> Dict[str, Any]:
+            return {"id": group_id, "candidates": [], "excluded": [], "in_use": 0, "unreadable": 0}
+
         if GROUP_WORK_FOLDERS in self._offered:
-            group = {"id": GROUP_WORK_FOLDERS, "candidates": [], "in_use": 0, "unreadable": 0}
+            group = new_group(GROUP_WORK_FOLDERS)
             for layout, base in (("headless", root / HEADLESS_TASKS_DIR), ("direct", root / TASK_DRIVES_DIR)):
                 if not base.is_dir():
                     continue
-                for task_id, status, _at, inside, fact in drive_candidates(base, root, cutoff, self._closed, record=False):
+                for task_id, status, at, inside, fact in drive_candidates(base, root, cutoff, self._closed, record=False):
                     if self._closed():
                         raise _Stopped()
-                    if not fact:
-                        group["unreadable"] += 1  # no readable row: shown, never freed
-                    elif status not in FINAL_STATUSES or live(task_id) is not False:
-                        group["in_use"] += 1
-                    else:
-                        group["candidates"].append(_Candidate(GROUP_WORK_FOLDERS, f"{layout}:{task_id}", base / task_id,
-                                                              layout, inside_wait=inside, task=task_id))
+                    item = _Candidate(GROUP_WORK_FOLDERS, f"{layout}:{task_id}", base / task_id, layout, inside_wait=inside, task=task_id)
+                    item.eligible_after = _eligible_after(at, days)
+                    # No readable row: shown, never freed.
+                    _sorted_into(root, group, "unreadable" if not fact else "in_use" if status not in FINAL_STATUSES
+                                 or live(task_id) is not False else "offer", item)
             groups.append(group)
-        from ouroboros.subagent_worktrees import _resolve_root, _task_proven_over, list_worktrees, snapshot_released
-
-        rows = list_worktrees(data_dir=root)  # one record read per copy; an unreadable one lists nothing
+        read = read_records(root)  # one passive read per copy: no import, no event row; unreadable ones are named
+        rows = list(read.rows)
         open_ids: Optional[set] = None
         if any(row.get("kind") == "delegated_exec" for row in rows):
             try:
@@ -451,8 +573,9 @@ class FreeSpace:
                 open_ids = open_snapshot_ids(root)
             except Exception:
                 log.debug("Delegated custody unreadable: snapshots stay out of the preview", exc_info=True)
+        copies_group: Optional[Dict[str, Any]] = None
         if GROUP_WORKING_COPIES in self._offered:
-            group = {"id": GROUP_WORKING_COPIES, "candidates": [], "in_use": 0, "unreadable": 0}
+            group = copies_group = new_group(GROUP_WORKING_COPIES)
             for row in rows:
                 if self._closed():
                     raise _Stopped()
@@ -464,74 +587,101 @@ class FreeSpace:
                     # Offered by the retirer's own proof (D6): a snapshot whose task is not proven
                     # over, or that custody holds, is in use; unreadable custody is shown, never freed.
                     snapshot = str(row.get("snapshot_id") or "")
-                    if open_ids is None:
-                        group["unreadable"] += 1
-                    elif snapshot_released(row, open_ids, data_dir=root, live=live):
-                        group["candidates"].append(_Candidate(GROUP_WORKING_COPIES, f"snapshot:{snapshot}", path, "delegated"))
-                    else:
-                        group["in_use"] += 1
+                    item = _Candidate(GROUP_WORKING_COPIES, f"snapshot:{snapshot}", path, "delegated", task=task_id, row=row)
+                    item.eligible_after = _eligible_after(float(row.get("created_at") or 0), 0)
+                    kept = owner_keep.is_kept(root, task_id)  # the proof reads the keep too: name it, not "in use"
+                    _sorted_into(root, group, "in_use" if kept else "unreadable" if open_ids is None else "offer"
+                                 if snapshot_released(row, open_ids, data_dir=root, live=live) else "in_use", item,
+                                 owner_keep.OWNER_KEEP if kept else "")
                     continue
+                item = _Candidate(GROUP_WORKING_COPIES, f"{kind or 'plain'}:{_record_name(path)}", path, kind or "plain",
+                                  task=task_id, row=row)
+                item.eligible_after = _eligible_after(max(float(row.get("created_at") or 0), float(row.get("used_at") or 0)), days)
                 over = body_candidate._recorded_terminal(task_id, root) and not body_candidate.live_lineage_processes(root, task_id)
-                if kind != "body_candidate":
-                    over = over and live(task_id) is False
-                if over:
-                    group["candidates"].append(_Candidate(GROUP_WORKING_COPIES, f"{kind or 'plain'}:{task_id}", path,
-                                                          kind or "plain", task=task_id))
-                else:
-                    group["in_use"] += 1
+                reason = ""
+                if over and kind == "body_candidate":
+                    # The retirer's own order (``retention_verdict``), its scratch witness left unwritten.
+                    reason = ("retained_evidence" if body_candidate._retained_scratch(row, classify=True, record_witness=False)
+                              else "unproven_excluded_inputs" if body_candidate.unique_work(row).get("excluded") else "")
+                elif over:
+                    over = live(task_id) is False
+                    reason = plain_copy_verdict(row, root)["reason"] if over else ""
+                    reason = reason if reason == "capture_unproven" else ""
+                reason = "owner_keep" if reason and owner_keep.is_kept(root, task_id) else reason  # the keep is what holds it now
+                _sorted_into(root, group, "in_use" if not over or reason else "offer", item, reason)
+                if reason in ("capture_unproven", "unproven_excluded_inputs"):
+                    offer = discard_offer(row, root, live, _resolve_root())  # held for the plan's life: the largest paths only
+                    item.manual = None if offer["refusal"] else {**offer, "unsaved": offer["unsaved"][:UNSAVED_LISTED],
+                                                                 "unsaved_count": len(offer["unsaved"])}
             groups.append(group)
         if {GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS} & set(self._offered):
             from ouroboros import review_checking_prune as seats
 
             homes = seats.finished_seat_homes(root, live, self._closed)  # one proof per seat task for both groups
             if GROUP_REVIEW_EVIDENCE in self._offered:
-                group = {"id": GROUP_REVIEW_EVIDENCE, "candidates": [], "in_use": 0, "unreadable": 0}
+                group = new_group(GROUP_REVIEW_EVIDENCE)
                 for home, verdict, task_id in homes:
-                    _sorted_into(group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat",
-                                                            task=task_id))
+                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat", task=task_id))
                 groups.append(group)
             if GROUP_REVIEW_CHECKOUTS in self._offered:
-                group = {"id": GROUP_REVIEW_CHECKOUTS, "candidates": [], "in_use": 0, "unreadable": 0}
+                group = new_group(GROUP_REVIEW_CHECKOUTS)
                 for entry, verdict in seats.orphan_review_checkouts(root, live, homes):
-                    _sorted_into(group, verdict, _Candidate(GROUP_REVIEW_CHECKOUTS, f"checkout:{entry.name}", entry,
-                                                            "checkout"))
+                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_CHECKOUTS, f"checkout:{entry.name}", entry, "checkout"))
                 groups.append(group)
             if self._closed():
                 raise _Stopped()
         from ouroboros.unindexed import COPIES
 
-        # Older copies sit at the root, new ones in COPIES, each with its environment and test runs beside it.
+        # Older copies sit at the root, new ones in COPIES, each with its environment and test runs beside it:
+        # one name can stand in both, so each id below is the folder's full path (``_record_name``).
         folders = [_resolve_root(), _resolve_root() / COPIES]
         listing = [entry for folder in folders if folder.is_dir() and not folder.is_symlink()
                    and {GROUP_LOST_COPIES, GROUP_SERVICE_FOLDERS} & set(self._offered)
                    for entry in sorted(folder.iterdir()) if entry.name != COPIES]
         recorded = {str(pathlib.Path(str(row["path"])).resolve(strict=False)) for row in rows if row.get("path")}
+        named_unreadable: set = set()
         if GROUP_LOST_COPIES in self._offered:
             # A copy's record precedes its folder, so a folder no record names is no copy being made.
-            group = {"id": GROUP_LOST_COPIES, "candidates": [], "in_use": 0, "unreadable": 0}
+            group = new_group(GROUP_LOST_COPIES)
             for entry in listing:
                 if (entry.name.startswith(".") or entry.name.endswith(".env") or entry.is_symlink()
                         or not entry.is_dir() or str(entry.resolve(strict=False)) in recorded):
                     continue
-                _sorted_into(group, "in_use" if live(_copy_owner(entry.name)) is not False else "offer",
-                             _Candidate(GROUP_LOST_COPIES, f"lost:{entry.name}", entry, "lost"))
+                owner = _copy_owner(entry.name)
+                item = _Candidate(GROUP_LOST_COPIES, f"lost:{_record_name(entry)}", entry, "lost", owner=owner)
+                if read.unlistable or _record_file(entry, root).name in read.unreadable:
+                    named_unreadable.add(_record_file(entry, root).name)
+                    _sorted_into(root, group, "unreadable", item)  # a record may name it: unread is not unregistered
+                    continue
+                _sorted_into(root, group, "in_use" if live(owner) is not False else "offer", item)
             groups.append(group)
+        if copies_group is not None:  # a record whose folder this listing did not reach is still named
+            for name in sorted(read.unreadable - named_unreadable):
+                _sorted_into(root, copies_group, "unreadable",
+                             _Candidate(GROUP_WORKING_COPIES, f"record:{name}", _records_dir(root) / name, "record"))
         if GROUP_SERVICE_FOLDERS in self._offered:
-            group = {"id": GROUP_SERVICE_FOLDERS, "candidates": [], "in_use": 0, "unreadable": 0}
+            group = new_group(GROUP_SERVICE_FOLDERS)
             for entry in listing:  # a copy's environment folder beside it, once the copy is gone
                 if entry.name.endswith(".env") and entry.is_dir() and not entry.is_symlink() \
                         and not os.path.lexists(entry.with_name(entry.name[:-len(".env")])):
-                    _sorted_into(group, "in_use" if live(_copy_owner(entry.name[:-len(".env")])) is not False else "offer",
-                                 _Candidate(GROUP_SERVICE_FOLDERS, f"env:{entry.name}", entry, "env"))
+                    declared = str((scratch_owner(entry) or {}).get("task_id") or "")
+                    owner = declared or _copy_owner(entry.name[:-len(".env")])
+                    item = _Candidate(GROUP_SERVICE_FOLDERS, f"env:{_record_name(entry)}", entry, "env", owner=owner, task=declared)
+                    why = environment_verdict(entry, root, live)
+                    item.ordinary = not why
+                    if not why:
+                        item.kind = "environment"
+                        item.eligible_after = _eligible_after((entry / SCRATCH_MARKER).stat().st_mtime, days)
+                    _sorted_into(root, group, "in_use" if live(owner) is not False else "offer", item, why if why == "in_use" else "")
             for runs in (folder / ".test-evidence" for folder in folders):  # runs inside copies without a task drive
                 for run in sorted(runs.iterdir()) if runs.is_dir() and not runs.is_symlink() else ():
                     if run.is_dir() and not run.is_symlink():
-                        _sorted_into(group, "offer" if _run_finished(run) else "in_use",
-                                     _Candidate(GROUP_SERVICE_FOLDERS, f"test_run:{run.name}", run, "test_run"))
+                        _sorted_into(root, group, "offer" if _run_finished(run) else "in_use",
+                                     _Candidate(GROUP_SERVICE_FOLDERS, f"test_run:{_record_name(run)}", run, "test_run"))
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
             # Held by custody (no disposition) while its task is over and its checkout is gone: only the pins remain.
-            group = {"id": GROUP_RESULT_PINS, "candidates": [], "in_use": 0, "unreadable": 0}
+            group = new_group(GROUP_RESULT_PINS)
             for row in rows:
                 snap = str(row.get("snapshot_id") or "")
                 if row.get("kind") != "delegated_exec" or not (row.get("baseline_ref") or row.get("result_ref")) \
@@ -539,7 +689,7 @@ class FreeSpace:
                     continue  # a checkout is G2's; a snapshot custody releases goes with the custody GC
                 verdict = "unreadable" if open_ids is None else "offer" if _task_proven_over(
                     str(row.get("task_id") or ""), root, live) else "in_use"
-                _sorted_into(group, verdict, _Candidate(GROUP_RESULT_PINS, f"pins:{snap}", pathlib.Path(
+                _sorted_into(root, group, verdict, _Candidate(GROUP_RESULT_PINS, f"pins:{snap}", pathlib.Path(
                     str(row.get("path") or "")), "pins", task=str(row.get("task_id") or ""), row=row))
             groups.append(group)
         return groups
@@ -607,10 +757,8 @@ class FreeSpace:
             with self._lock:
                 self._plan = plan  # the counts appear at once; the sizes fill in while the state stays listing
             candidates = [item for group in groups for item in group["candidates"]]
-            self._size(root, repo_dir, candidates)
-            for group in groups:
-                for item in sorted(group["candidates"], key=lambda item: -(item.bytes or 0))[:LARGEST_ITEMS]:
-                    item.name = _title(root, item.task) if item.task else item.path.name
+            self._size(root, repo_dir, candidates + [item for group in groups for item in group["excluded"] if item.manual])
+            _name_items(root, [item for group in groups for item in [*group["candidates"], *group["excluded"]]])
             with self._lock:
                 self._plan, self._state = {**plan, "finished_at": utc_now_iso()}, "ready"
         except _Stopped:
@@ -627,25 +775,28 @@ class FreeSpace:
 
     # ---- the run ----------------------------------------------------------------------------
 
-    def _free(self, root: pathlib.Path, plan: Dict[str, Any], chosen: List[str]) -> None:
+    def _free(self, root: pathlib.Path, plan: Dict[str, Any], chosen: List[str], selected: Optional[set] = None,
+              discards: Optional[set] = None) -> None:
         from ouroboros.store import supervisor_row
 
         started = time.monotonic()
-        run: Dict[str, Any] = {"groups": chosen, "selected": 0, "done": 0, "moved": [], "removed": [], "kept": {},
-                               "sizes": {}, "free_before": _free_bytes(root),
+        lists = {group["id"]: [item for item in group["candidates"] if selected is None or item.key in selected]
+                 for group in plan["groups"] if group["id"] in chosen}
+        manual = [item for group in plan["groups"] for item in group["excluded"] if item.key in (discards or ())]
+        items = [item for listed in lists.values() for item in listed] + manual
+        run: Dict[str, Any] = {"groups": chosen, "selected": len(items), "done": 0, "moved": [], "removed": [], "kept": {},
+                               "kept_items": {}, "failed": [], "items": items,
+                               "sizes": {item.key: item.bytes for item in items}, "free_before": _free_bytes(root),
                                "stopped": False, "error": None}
         with self._lock:
             self._run = run
         try:
-            for group in plan["groups"]:
-                if group["id"] not in chosen:
-                    continue
-                run["selected"] += len(group["candidates"])
-                run["sizes"].update({item.key: item.bytes for item in group["candidates"]})
+            for group_id, listed in lists.items():
                 free = {GROUP_WORK_FOLDERS: self._free_drives, GROUP_WORKING_COPIES: self._free_copies,
                         GROUP_REVIEW_EVIDENCE: self._free_seats, GROUP_REVIEW_CHECKOUTS: self._free_checkouts,
-                        GROUP_RESULT_PINS: self._free_pins}.get(group["id"], self._free_leftovers)
-                free(root, group["candidates"], run)
+                        GROUP_RESULT_PINS: self._free_pins}.get(group_id, self._free_leftovers)
+                free(root, listed, run)
+            self._free_manual(root, manual, run)
         except _Stopped:
             run["stopped"] = True
         except Exception as exc:
@@ -656,13 +807,17 @@ class FreeSpace:
             self._plan = {**plan, "finished_at": utc_now_iso()}
         settled = self._settled(root, run)
         view = self._run_view(root, run, settled)
-        self._record(root, view, time.monotonic() - started, settled)
+        self._record(root, view, time.monotonic() - started, settled, list(run["failed"]), dict(run["kept_items"]),
+                     {item.key: {"unsaved_count": item.manual["unsaved_count"], "unsaved_bytes": item.manual["unsaved_bytes"]}
+                      for item in manual})
         supervisor_row(root, "storage_free", {"phase": self._state, "duration_seconds": round(time.monotonic() - started, 2),
                                                **{key: view[key] for key in ("groups", "selected", "removed", "removed_bytes",
-                                                                             "deleting", "stuck", "kept", "free_before", "free_after")}})
+                                                                             "deleting", "stuck", "kept", "failed", "not_started",
+                                                                             "free_before", "free_after")}})
 
     @staticmethod
-    def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...]) -> None:
+    def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...],
+                failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None) -> None:
         try:
             from ouroboros.server_maintenance import _prune_event
 
@@ -670,8 +825,9 @@ class FreeSpace:
             # cadence's own prune names what it removed: who removed a task's folder is then one search.
             removed, deleting, stuck = settled
             _prune_event("storage_free", ("removed", "deleting", "kept"), report={
-                **view, "duration_seconds": round(seconds, 2),
-                "removed_ids": removed, "deleting_ids": deleting, "stuck_ids": stuck})
+                **view, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
+                "stuck_ids": stuck, "failed_ids": failed, "kept_ids": kept_ids,
+                **({"manual_discards": discards} if discards else {})})
         except Exception:
             log.debug("storage_free event not recorded", exc_info=True)
 
@@ -679,6 +835,15 @@ class FreeSpace:
         with self._lock:
             run["done"] = count
             self._progress["done"] = count
+
+    @staticmethod
+    def _keep(run: Dict[str, Any], item: _Candidate, reason: str) -> None:
+        """One object stays with its reason; a removal that failed for no named reason is ``failed``."""
+        if reason == "other":
+            run["failed"].append(item.key)
+            return
+        run["kept"][reason] = run["kept"].get(reason, 0) + 1
+        run["kept_items"][item.key] = reason
 
     def _free_drives(self, root: pathlib.Path, candidates: List[_Candidate], run: Dict[str, Any]) -> None:
         from ouroboros import maintenance
@@ -718,7 +883,7 @@ class FreeSpace:
                 if not item.path.exists():
                     run["moved"].append(item.key)  # the cadence settled it first; its trash may still exist
                 else:
-                    run["kept"][_reason(row.get("reason"))] = run["kept"].get(_reason(row.get("reason")), 0) + 1
+                    self._keep(run, item, _reason(row.get("reason")))
             for row in report["errors"]:
                 item = selected.get(row["task_id"])
                 if item is None:
@@ -727,8 +892,7 @@ class FreeSpace:
                 if not item.path.exists():
                     run["moved"].append(item.key)
                 else:
-                    reason = "unreadable_record" if "ValueError" in str(row.get("error")) else "other"
-                    run["kept"][reason] = run["kept"].get(reason, 0) + 1
+                    self._keep(run, item, "unreadable_record" if "ValueError" in str(row.get("error")) else "other")
             if report["deferred"]:
                 raise _Stopped()
             for task_id, item in selected.items():
@@ -738,7 +902,7 @@ class FreeSpace:
                 if not item.path.exists():
                     run["moved"].append(item.key)  # gone before listing; follow the cadence's trash too
                 else:
-                    run["kept"]["other"] = run["kept"].get("other", 0) + 1
+                    self._keep(run, item, "other")
             self._tick(run, attempted)
         if run["moved"]:
             maintenance.child.request()  # the moved drives' deletion is the maintenance child's job
@@ -746,7 +910,9 @@ class FreeSpace:
     def _free_copies(self, root: pathlib.Path, candidates: List[_Candidate], run: Dict[str, Any]) -> None:
         """One retirer call per copy, so Stop lands between copies and each record-lock hold covers
         one checkout; a stop leaves the remaining copies as they were."""
-        from ouroboros.subagent_worktrees import prune_execution_snapshots, prune_orphans
+        from ouroboros.subagent_worktrees import (
+            SubagentWorktreeRegistryCorrupt, WorktreeOpsLockBusy, find_execution_snapshot, prune_execution_snapshots, prune_orphans,
+        )
 
         live, stop = self._probe(), self._closed
         open_ids: Optional[set] = None
@@ -760,23 +926,89 @@ class FreeSpace:
         for item in candidates:
             if stop():
                 raise _Stopped()
-            task_id = item.key.split(":", 1)[1]
-            if item.layout == "delegated":
-                if open_ids is not None:
-                    prune_execution_snapshots(open_ids, data_dir=root, only=[task_id], live=live)
-            else:
-                prune_orphans(data_dir=root, retention_days=0, live=live, only=[task_id])
+            task_id, path, reasons = item.task, str(item.row.get("path") or ""), {}
+            try:
+                if item.layout == "delegated":
+                    snapshot = item.key.split(":", 1)[1]
+                    if open_ids is not None and find_execution_snapshot(snapshot, root) == item.row:
+                        prune_execution_snapshots(open_ids, data_dir=root, only=[snapshot], live=live, reasons=reasons)
+                else:
+                    prune_orphans(data_dir=root, retention_days=0, live=live, only_rows={path: item.row}, reasons=reasons)
+            except WorktreeOpsLockBusy:  # one held copy stays with its reason: the run goes on
+                reasons[path] = "record_busy"
+            except SubagentWorktreeRegistryCorrupt:
+                reasons[path] = "record_unreadable"
             if not item.path.exists():
                 run["removed"].append(item.key)
             else:
-                reason = "in_use" if item.layout != "delegated" and live(task_id) is not False else "other"
-                run["kept"][reason] = run["kept"].get(reason, 0) + 1
+                self._keep(run, item, self._copy_stays(root, item, task_id, live, reasons.get(path, "")))
             self._tick(run, run["done"] + 1)
+
+    def _free_manual(self, root: pathlib.Path, candidates: List[_Candidate], run: Dict[str, Any]) -> None:
+        """The owner's exact discards, one retirer call per copy: a copy that stays says the retirer's reason."""
+        from ouroboros.copy_capture_proof import discard_unsaved_copy
+        from ouroboros.subagent_worktrees import SubagentWorktreeRegistryCorrupt, WorktreeOpsLockBusy
+
+        live = self._probe()
+        for item in candidates:
+            if self._closed():
+                raise _Stopped()
+            path, reasons = str(item.row.get("path") or ""), {}
+            try:
+                discard_unsaved_copy(item.row, item.manual["signature"], data_dir=root, live=live, reasons=reasons)
+            except WorktreeOpsLockBusy:
+                reasons[path] = "record_busy"
+            except SubagentWorktreeRegistryCorrupt:
+                reasons[path] = "record_unreadable"
+            if not item.path.exists():
+                run["removed"].append(item.key)
+            else:
+                self._keep(run, item, _reason(reasons.get(path, "")))
+            self._tick(run, run["done"] + 1)
+
+    @staticmethod
+    def _copy_stays(root: pathlib.Path, item: _Candidate, task_id: str, live: Callable[[str], Optional[bool]], named: str = "") -> str:
+        """Why a copy the retirer left stays: the owner kept it, its record changed beyond the retirer's own
+        stamps, the retirer named a reason (``named``), else its proof read fresh: in use, its work unproven.
+        ``other``, a failed removal, only when every proof still holds."""
+        from ouroboros import delegate_custody
+        from ouroboros.copy_capture_proof import CAPTURE_UNPROVEN, plain_copy_verdict
+        from ouroboros.owner_keep import OWNER_KEEP, is_kept
+        from ouroboros.private_copy_read import checkout_registration
+        from ouroboros.subagent_worktrees import _record_at, _task_proven_over, snapshot_released, SubagentWorktreeRegistryCorrupt
+
+        def owned(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+            return {key: value for key, value in (row or {}).items() if key not in _RETIRER_STAMPS}
+
+        if is_kept(root, task_id):
+            return OWNER_KEEP
+        if checkout_registration(item.path, root) == "unknown":
+            return "unreadable_record"
+        try:
+            if owned(_record_at(item.path, root, op="free_copy")) != owned(item.row):
+                return "changed"
+        except SubagentWorktreeRegistryCorrupt:
+            return "unreadable_record"
+        if named:
+            return _reason(named)
+        if item.layout == "delegated":
+            try:
+                if delegate_custody.custody_log_unreadable(root):
+                    return "unreadable_record"
+                return "other" if snapshot_released(item.row, delegate_custody.open_snapshot_ids(root), data_dir=root, live=live) else "in_use"
+            except Exception:
+                return "unreadable_record"
+        if not _task_proven_over(task_id, root, live):
+            return "in_use"
+        if item.layout == "body_candidate":
+            return "other"
+        reason = plain_copy_verdict(item.row, root)["reason"]
+        return reason if reason == CAPTURE_UNPROVEN else "other"
 
     def _settle(self, run: Dict[str, Any], item: _Candidate, reason: str, *, moved: bool = False) -> None:
         """One attempted item of G3-G7: removed (or moved into the trash) when ``reason`` is empty, else kept."""
         if reason:
-            run["kept"][reason] = run["kept"].get(reason, 0) + 1
+            self._keep(run, item, reason)
         else:
             run["moved" if moved else "removed"].append(item.key)
         self._tick(run, run["done"] + 1)
@@ -816,26 +1048,38 @@ class FreeSpace:
     def _free_leftovers(self, root: pathlib.Path, candidates: List[_Candidate], run: Dict[str, Any]) -> None:
         """G5/G6: folders in the copies' root, each re-checked, then removed in this thread (a linked
         worktree also leaves its repository's registration)."""
+        from ouroboros.copy_environments import retire_environment
+        from ouroboros.owner_keep import gate
+        from ouroboros.private_copy_read import checkout_registration
         from ouroboros.review_checking import CheckingAreaUnavailable, _remove_checking_area
-        from ouroboros.subagent_worktrees import _deletable, _resolve_root, registered_checkout
+        from ouroboros.subagent_worktrees import _deletable, _resolve_root
 
         live, copies = self._probe(), _resolve_root()
         for item in candidates:
             if self._closed():
                 raise _Stopped()
             path, name = item.path, item.path.name
-            owner = _copy_owner(name[:-len(".env")] if item.layout == "env" else name)
+            if item.ordinary and item.layout == "env":  # the declared environment: the one rule the background goes by
+                try:
+                    self._settle(run, item, retire_environment(path, root, live, copies) if os.path.lexists(path) else "")
+                except OSError:
+                    self._settle(run, item, "other")
+                continue
+            registration = checkout_registration(path, root) if item.layout == "lost" else "absent"
             if item.layout == "test_run":
                 holds = not _run_finished(path)
             else:
-                holds = live(owner) is not False or (registered_checkout(path, root) if item.layout == "lost"
-                                                     else os.path.lexists(path.with_name(name[:-len(".env")])))
-            reason = "in_use" if holds else ""
+                holds = live(item.owner) is not False or registration == "registered" or (
+                    item.layout == "env" and os.path.lexists(path.with_name(name[:-len(".env")])))
+            reason = "unreadable_record" if registration == "unknown" else "in_use" if holds else ""
             if not reason and os.path.lexists(path):  # gone already counts as removed
                 try:
-                    if not _deletable(path, copies):
-                        raise CheckingAreaUnavailable(f"{path} is not inside the copies' root")
-                    _remove_checking_area(path)
+                    with gate(root, item.owner, timeout_sec=0) as why:
+                        reason = why
+                        if not why:
+                            if not _deletable(path, copies):
+                                raise CheckingAreaUnavailable(f"{path} is not inside the copies' root")
+                            _remove_checking_area(path)
                 except (CheckingAreaUnavailable, OSError):
                     reason = "other"
             self._settle(run, item, reason)
@@ -860,6 +1104,7 @@ def _release_pins(root: pathlib.Path, snapshot_id: str, live: Callable[[str], Op
     from ouroboros import delegate_custody as custody
     from ouroboros import subagent_worktrees as sw
     from ouroboros.delegate_custody_current import runs
+    from ouroboros.owner_keep import gate
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
     entry = next((row for row in runs(root).values() if row.snapshot_id == snapshot_id), None)
@@ -878,7 +1123,10 @@ def _release_pins(root: pathlib.Path, snapshot_id: str, live: Callable[[str], Op
             return "other"  # a checkout came back, or custody let it go: the custody GC owns it now
         if not sw._task_proven_over(str(row.get("task_id") or ""), root, live):
             return "in_use"
-        with sw._record_lock(row["path"], root, op="release_pins", task_id=str(row.get("task_id") or "")):
+        with sw._record_lock(row["path"], root, op="release_pins", task_id=str(row.get("task_id") or "")), \
+                gate(root, row.get("task_id"), timeout_sec=0) as why:
+            if why:
+                return why
             current = sw._record_at(row["path"], root, op="release_pins") or row
             sw._unpin_snapshot(pathlib.Path(str(current.get("git_dir") or current.get("target_root") or ".")), current)
             sw._put_record({**{key: value for key, value in current.items()
@@ -905,7 +1153,11 @@ __all__ = [
     "StorageFree",
     "StorageFreeGroup",
     "StorageFreeItem",
+    "StorageFreeEntry",
+    "StorageFreeItemsResponse",
     "StorageFreeKept",
+    "StorageFreeManual",
+    "StorageFreePool",
     "StorageFreeRequest",
     "StorageFreeRun",
     "free",

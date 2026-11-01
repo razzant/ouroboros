@@ -426,30 +426,14 @@ flowchart LR
   `data/state/skills/<name>/install.json`, outside the payload. ClawHub
   installs also keep their `.clawhub.json` sidecar; skills installed from the
   hub by earlier versions keep `.ouroboroshub.json`.
-- **Review** is one wave of the shared review mechanism (`skill_review` →
-  `review_change(subject="skill")`, `tools/review_skill.py`): the panel the
-  review mode composes answers the one skill question against the Skill Review
-  Checklist (see [`docs/CHECKLISTS.md`](CHECKLISTS.md)) in the common
-  findings-only form — Blocking seats every ticked reviewer; Advisory accepts a
-  panel of at least one ticked reviewer when the narrowing carries its reason;
-  in Cyber Pro the review is evidence for Ouroboros's judgment. The record is a
-  `surface="skill"` entry of the review ledger; `review.json` is the run gate's
-  projection of it, bound to the content hash of every runtime-reachable file
-  in the skill directory, so any later edit stales that verdict. A review after
-  an edit is change-focused in every mode: reviewers get the manifest, the
-  changed files and a diff since the last verdict, every unchanged file one
-  read away, and judge the whole current skill. Under Advisory, after the first
-  feedback the author may accept a later edit with
-  `skill_review(author_disposition="accepted", author_rationale=…)` (the
-  deterministic preflight still runs) instead of buying another panel. The tool
-  waits for the panel but hears an addressed owner message: it then returns
-  pending while the reviewers finish, and the same call later collects the
-  verdict at $0.
-  `.self_authored.json` is provenance only; self-authored skills use the same
-  review, grant, enable, and extension reload flow as other executable skills.
-  Reviewers also read how the skill was installed (`install.json`: by the
-  owner or by Ouroboros, from which source and trust, why, in which task) as
-  context, never as approval.
+- **Review** uses `skill_review` → `review_change(subject="skill")` (`tools/review_skill.py`).
+  Panel composition, verdicts and author acceptance follow the [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist),
+  not a separate skill policy. A `surface="skill"` ledger record projects into `review.json`, bound to all runtime-reachable
+  payload bytes; edits stale it. Change-focused review sees the manifest, changed files and diff, with unchanged files
+  readable, and judges the whole skill. Advisory authors may finish through
+  `skill_review(author_disposition="accepted", author_rationale=…)` with current preflight; see “Skill Review Checklist” below.
+  An addressed owner message can return the tool pending while reviewers finish; the same call later collects at $0.
+  `.self_authored.json` and installation history are provenance, never approval; self-authored skills use the same lifecycle.
 - **Isolated deps** (pip / npm / uv / node) install into
   `data/skills/<bucket>/<name>/.ouroboros_env/`. Status is recorded
   in `data/state/skills/<name>/deps.json`. Its Python venv names the app's interpreter: after
@@ -892,37 +876,17 @@ approved (the tool returns `SKILL_TOGGLE_ERROR` with `code: "grants"` and the se
 do not authorize grants or enablement. Automatic grants and first enablement
 follow the setting below; an explicitly authorized task toggle remains separate.
 
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` is enabled by default as of v6.10.0; the
-owner may disable it in Settings → Behavior → Skills (desktop asks for native
-confirmation and web uses the owner endpoint). When enabled, current executable
-review authority grants only the manifest-declared keys and host permissions for the
-current content hash. Under
-blocking enforcement, blocker reviews are not executable and do not auto-grant;
-under advisory enforcement, blocker findings may auto-grant only because that
-mode makes the review executable. Qualified current Advisory author acceptance
-uses the same gate even when the original critic state stays pending. Editing the
-skill still invalidates those grants.
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
+(native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
+release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
+label alone; see the Skill Review Checklist. Editing the payload invalidates grants.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
 same release has one identity on every install.
 
-Transport and control skills are first-class control surfaces — a legitimate
-full replacement for the local UI, not demos. An owner may have no screen, no
-notebook, and no terminal; the control skill (Telegram today, any remote-control
-skill tomorrow) is how they run Ouroboros. After fresh executable review,
-enablement, content-hash-bound token issuance, explicit grants, and owner/chat
-binding, such a skill is **expected** to carry every owner command the direct UI
-accepts (`/panic`, `/restart`, `/evolve`, `/bg`, `/review`, `/status`, and
-free-form owner text), run a long-lived poller (`supervised_task`), and observe
-the owner-conversation events it mirrors. Power is not a defect: review judges
-the skill's actual safety properties — owner/chat binding, trustworthy source
-attribution, bounded polling/backpressure, cleanup on unload/panic, host-token
-confinement, and no exfiltration of secrets or owner-conversation content to
-unrelated parties — never the breadth of control it exposes. The capability is
-gated by the host (token + fresh review + enablement + content-hash grants) and
-by core owner/chat binding, not by withholding control from the skill. See
-`docs/CHECKLISTS.md` → "Transport and control skills are first-class".
+Transport/control skills are first-class local-UI replacements: every owner command (Panic included), supervised
+polling and justified owner-event mirroring. Their review and runtime obligations belong to [CHECKLISTS](CHECKLISTS.md#transport-and-control-skills-are-first-class-binding-for-all-reviewers).
 
 `POST /chat/inject` treats text beginning with `/panic` (case-insensitive, surrounding whitespace ignored,
 trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop.
@@ -964,8 +928,10 @@ contributes:
   Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
   gives `message` its speech semantics (a flagged message returns to the mind; the identical re-issue is sent and
   recorded). A tool that reads or writes depending on its arguments is `write`. MCP tools are always `write`.
-- `target`/`conversation`/`thread` let the host attribute a call to one place; a write it cannot attribute is held
-  while any place of that connector is Silent or Paused, and the refusal says so.
+- `target`/`conversation`/`thread` attribute each destination. Declare `account_id` for multi-account writes:
+  an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
+  Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
+  in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.
 - `icon` is reduced at staging to viewBox and geometry (path, circle, ellipse, line, polyline, polygon, rect, g),
   bounded, with fills and strokes set to `currentColor`; anything else falls back to the house glyph.
   Authors of `provides: place` skills must include `ui/icon.svg` and declare `icon: ui/icon.svg`.
@@ -1071,8 +1037,9 @@ Each entry has exactly nonblank `id` and `label` strings (at most 200 characters
 Invalid event identity returns 400 `presence_identity_invalid`. The voice line, owner match, focused
 Safety facts and delivery stamp read the event snapshot only; an undeclared event has no identity.
 Outside that focus, Safety and own-wake text use the first valid identity among the place's newest 50
-captured arrivals, or none. The sheet reads identity from the status payload it already fetches for
-readiness. The server never dispatches a connector route for a place view, focus, Safety check or own wake.
+captured arrivals, or none. The sheet requests its `account_id` on the declared status route, for identity and readiness;
+Connect omits it to list instances. Return only that account, never a neighbor. An optional response `account_id`
+must match the query; older responses without it remain supported. The server never dispatches a connector route for a place view, focus, Safety check or own wake.
 Neither carrier adds fields to `places.json`.
 
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
@@ -1105,6 +1072,9 @@ Use the connector's ordinary content-hash-bound skill token for:
   Main messages/questions and live/late answer routing; `presence_work_output_version: 1`
   advertises canonical output identities and separate producer/child references in
   work polls. `presence_wake_facts` lists accepted provider facts.
+  `presence_explicit_completion: 1` advertises that a new completion's outcome comes from
+  its explicit answer, silence or handoff, never from a delivery receipt. An absent key means
+  an older host without this promise: any confirmed tool receipt may suppress its final.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1128,11 +1098,36 @@ Use the connector's ordinary content-hash-bound skill token for:
   facts. `review_requested` and `assigned` mean requests addressed to the watched
   identity; narrow wake declarations may use them. A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
-- `GET /presence/place?provider=&account_id=&conversation_id=&thread_id=`: returns
-  `{place_id, label, state}` for the connector's outbox recheck. `/identity`
-  advertises `places_version: 1`. Optional `thread_id` selects the topic; omission keeps
-  the room lookup. An empty conversation id is an opaque queued mutation:
-  any Silent/Paused place for that connector, provider and matching/broad account restricts it.
+- Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
+  without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
+  `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
+  paired exactly with `actor.kind: anonymous`. These are observations of this event only, never the whole state; `target`
+  `{message_id, resolution: resolved|unresolved, author?, excerpt?: {text (500 max), truncated}}`. `actor.kind` is
+  `user`, `chat` or `anonymous`: the last two are `authenticated: false` and never account candidates; `anonymous`
+  has no id; `kind: user` does not mean the owner. `event.thread_id` is the proven conversation, empty when
+  unresolved. Invalid: 400 `presence_reaction_invalid`. After Paused/Off it settles `silent`
+  (`reaction_context_only`), never a focus or retry, whatever the wake list says; a live author of a resolved
+  target's conversation hears it as background (a bot only under `from_bot`), which ends no wait and reopens no
+  final. `/identity` `presence_reaction_context: 1` (strictly that integer; an older host has no such key) promises
+  this for `schema_version: 1` and tells a connector to send it; without it a connector keeps reactions locally and
+  never replays them, live or as history: `/presence/history` refuses a whole batch holding one, recording none of
+  its messages. A reaction reaches a live author as context and never becomes its `reply_anchor`. A receipt's
+  `message.reaction` (`schema_version`, `operation` set/add/remove, `new`, `old` only if known, `target`, `effect`
+  applied/already_present/already_absent) is later turns' action evidence, never speech; a missing effect reads
+  as not reported, never as done. Its `target` is the requested address, never proof of which message changed.
+  Words a receipt sends beside its reaction stay that part's speech.
+- `GET /presence/place?provider=&account_id=&conversation_id=&thread_id=` (`places_version: 1`) returns `{place_id,label,state}`;
+  missing means 404 `place_not_connected`, never permission. With empty conversation, matching account/broad
+  Silent/Paused scopes restrict the opaque operation; a thread selects its topic.
+  Hosts advertising `presence_place_binding_version: 1` additionally accept `operation=bind` at enqueue,
+  returning `{ok,allowed,binding,state,code,label,place_id}`. The snapshot is
+  `{version:1,connector,provider,account_id,conversation_id,thread_id,place_id,connected_revision}`; empty `place_id` means confirmed
+  unbound, null binding means unresolved. Retain it with the effect. Delivery uses `operation=check`, JSON-encoded
+  `binding` and identical targets. Current scopes apply; disconnected work stays held even after reconnect with the same ID.
+  The stamp survives ordinary edits and repeated Connect. An older body can read/write Places, but its changed row
+  cannot prove connection continuity: prior bindings stay held; a fresh operation captures the newly observed revision.
+  `require_place=true` requires a Place for transport-bound replies, not every tool call from a Presence focus.
+  Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
   the authenticated connector must still own the stored work.
@@ -1168,15 +1163,15 @@ handoff is not exactly-once across a Host crash. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
 arrivals alone never do.
 
-A focus uses ordinary `finish_task`, including `silent=true`. The host derives
-`message`, `silent`, `tool_delivered` or `deferred` from the final, delivery receipts
-and successfully started long work. Automatic speech passes the `place_reply`
-Safety check; a flag returns to the mind, including for long work promoted from a
-focus. Silent/Paused/disconnected destinations and Advises autonomy hold the reply
+A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
+`silent=true`; receipts never choose its outcome. An answer after any send, file or
+reaction is new speech; started work stays `deferred` (empty after silence).
+Automatic speech passes the `place_reply` Safety check; a flag returns to the mind.
+Silent/Paused/disconnected destinations and Advises autonomy hold the reply
 with a System fact. Cached replies, continuation envelopes and work polls apply the
 current place state without another generation or paid check. A held projection keeps
 the durable answer and its output identity; repeated holds record one fact per subject.
-Late receipts still record what happened and add a visible warning. Proactive speech uses the connector's own tools; `presence_finish` and
+Late receipts still record what happened, with a visible warning. Proactive speech uses the connector's own tools; `presence_finish` and
 `initiate_presence` are no longer public tools.
 
 Private Main contact uses the mind's existing tools: a Presence root can call
@@ -1319,7 +1314,7 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   facts carry whole, never those named only by address. "Last" is the greatest
   `message.source_order`, or delivery order when one lacks it.
   - Arrivals drained after that send, such as at the author's final closure, never move the
-    anchor.
+    anchor. Nor does a typed reaction (`event.message.reaction`), whenever it arrives.
   - A send refused before dispatch, or answered by nothing, covers nothing.
   - A forced final keeps the coverage of the last answered send before it.
   - Reply to the anchored message in the turn's conversation and thread.
@@ -1460,9 +1455,10 @@ event facts resolve the place). Never send history through `/presence/turn` or
 
 - `import_id` (1-128 characters) is provenance, never identity. `records` holds 1-100
   records of one provider, account, conversation and thread.
-- `event` has exactly the live event fields; `facts` and `identity` are refused. Use the
-  source event id and provider facts live capture would send for that revision (an edited
-  message is its current revision), with the sender in `actor.platform_actor_id`.
+- `event` has exactly the live event fields; `facts`, `identity` and a typed
+  `message.reaction` are refused. Use the source event id and provider facts live capture
+  would send for that revision (an edited message is its current revision), with the
+  sender in `actor.platform_actor_id`.
 - `authorship` is `participant` (someone else sent it) or `platform_account` (sent from
   the connected account itself). Neither makes the sender the owner or Ouroboros.
 - `source_timestamp` is the provider's original send time, timezone-qualified and not
@@ -1747,6 +1743,22 @@ def register(api):
     keys = api.get_settings(["OPENROUTER_API_KEY"])
 ```
 
+### Provider sign-in return
+
+Redirect to `<public base>/onboarding/static/provider-return.html`. This builtin page survives custom/disabled main UI
+and retains network login. Check it exists before consent. Remote Web clients need their registered reachable base;
+loopback requires a browser on that host.
+An opaque widget's `location.origin` is `null`: use the host-bridged begin request's Origin or a configured public base
+(prefix included), not the frame's URL. Telegram launches need the ordinary authorized web/desktop handoff.
+
+Encode OAuth `state` as base64url UTF-8 JSON `{v:1,skill:<canonical name>,nonce:<random>}` and retain it with PKCE
+in your state directory. Register POST `oauth/complete`; the page forwards `{state,code}` or
+`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix. The skill validates
+its issued state, handles denial, exchanges credentials and stores tokens. The page neither validates grants nor owns tokens.
+Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
+The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported.
+Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.
+
 ### Reading memory
 
 With `plugin_api: "2.1"`, `api.read_memory(operation, parameters)` is the supported memory read
@@ -1828,7 +1840,7 @@ same promises through the host-side protocol in
 
 Framed render declarations may add a bounded `height` (320–8,192 pixels).
 When a module omits `height`, the host starts at 320px and measures its
-existing `#root` through a nonce-bound resize message. The host
+existing `#root` through a resize message on the bridge's channel. The host
 integer-deduplicates and clamps that value to 8,192px by default; an optional
 module-only `max_height` lowers the ceiling. A fixed `height` disables
 auto-growth. Legacy route iframes accept explicit `height` only because the
@@ -1869,11 +1881,11 @@ can raise the same error.
 
 The frame has no scriptable network of its own: `connect-src` stays closed, so
 `XMLHttpRequest`, `WebSocket`, `EventSource` and beacons are refused by the
-document policy, and every request goes through the parent over one nonce-bound
-message grammar (passive image, media and font loads from your own route prefix,
-and an ESM widget's native imports, stylesheets and passive loads of its own
-declared files, are the exceptions — "What the frame may do" below). The bridge
-exposes:
+document policy, and every request goes through the parent over one message
+grammar on a channel bound to your frame's own document (a classic widget's passive image, media and font loads through
+its route lease, and an ESM widget's native imports, stylesheets and passive
+loads of its own declared files, are the exceptions — "What the frame may do"
+below). The bridge exposes:
 
 - **`OuroborosWidget.fetch(url, init)`** (also installed as the frame's
   `fetch`). `url` must resolve under `/api/extensions/<skill>/...`, or, for an
@@ -1901,6 +1913,13 @@ exposes:
   aborts the parent's request; the optional `init.timeoutMs` is an author-side
   bound that aborts it for you (the read fails with
   `widget request timed out`).
+- **`OuroborosWidget.resourceUrl(url)`** (classic widgets) returns the URL your
+  frame's own elements load a route through: this mount's route lease,
+  `OuroborosWidget.resourceBase` (`<origin>/api/widget-resources/<lease>/`).
+  A relative path (`'media/clip.webm'`) and a URL under your own
+  `/api/extensions/<skill>/` prefix both map onto it; any other URL comes back
+  unchanged, for the frame policy to refuse. `OuroborosWidget.fetch` and
+  `download` accept these URLs too and send them as the matching own route.
 - **`OuroborosWidget.onEvent(callback)`** returns an unsubscribe function. The
   callback receives `{type, data}` for every event this skill emits with
   `api.send_ws_message(type, data)` — `type` is the short name you passed; the
@@ -1909,7 +1928,7 @@ exposes:
 
 - **`OuroborosWidget.onTheme(callback)`** is an optional resolved-palette
   subscription for module widgets. The callback receives `light` or `dark`
-  through the nonce-bound parent bridge; `onTheme` returns an unsubscribe function.
+  through the parent bridge; `onTheme` returns an unsubscribe function.
   The module applies the value itself, commonly with
   `document.documentElement.dataset.theme = theme`; the host never injects CSS,
   changes the child DOM or forces a remount. The first callback receives the
@@ -1919,8 +1938,8 @@ exposes:
   normally sees the injected bootstrap value immediately, then the parent
   confirms the current value asynchronously; after a prior unsubscribe, the
   next listener waits for that confirmation instead of using stale bootstrap.
-  Route
-  iframes have no bridge. A module declaration may record
+  A route
+  page gets the bridge by loading it ("What the frame may do" below). A module declaration may record
   `render.appearance: host | independent | fixed` for author/reviewer intent:
   `host` opts into the resolved bridge, `independent` leaves palette choice to
   the author, and `fixed` names an intentionally stable visual world;
@@ -1972,9 +1991,9 @@ default-src 'none';
 script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: <origin>/api/extensions/<skill>/module/;
 worker-src blob:;
 style-src 'unsafe-inline';
-img-src data: blob: <origin>/api/extensions/<skill>/;
-media-src data: blob: <origin>/api/extensions/<skill>/;
-font-src data: blob: <origin>/api/extensions/<skill>/
+img-src data: blob: <origin>/api/widget-resources/<lease>/;
+media-src data: blob: <origin>/api/widget-resources/<lease>/;
+font-src data: blob: <origin>/api/widget-resources/<lease>/
 ```
 
 ESM opt-in replaces script/resource prefixes with the mount's finite asset URL,
@@ -1989,17 +2008,18 @@ closed. The classic capabilities below are verified on Chromium and WebKit throu
   `instantiateStreaming` on bytes your own route serves — the recipe below.
 - **Workers** from `blob:` URLs (`new Worker(URL.createObjectURL(new Blob([src])))`);
   `importScripts` inside one may load from your module prefix.
-- **Images, audio, video and fonts** from your own route prefix and from
-  `data:` / `blob:` URLs — "Assets" below, including the CORS rule for fonts.
+- **Images, audio, video and fonts** from your own routes through the mount's
+  route lease (`OuroborosWidget.resourceUrl`), and from `data:` / `blob:` URLs —
+  "Assets" below, including the CORS rule for fonts.
 - **Clipboard write** (`navigator.clipboard.writeText`) from a user click; the
   clipboard is never readable from the frame.
 - **Downloads**: module widgets use `OuroborosWidget.download` or ordinary
   `<a download>` controls for their own route files, declared ESM files, data
   URLs and frame-created Blobs; the existing host save path supports both the
   desktop app and browsers.
-  A legacy `kind: iframe` route page has no module bridge: its downloads still
-  depend on the embedding engine. Use a module widget or a host-side declarative
-  `file` component when a native Downloads handoff is required.
+  A `kind: iframe` route page gets the same native Downloads handoff through
+  `OuroborosWidget.download` once it loads the bridge; its own `<a download>`
+  clicks are left to the embedding engine.
 - **Pointer lock** (`allow-pointer-lock`) and **fullscreen**
   (`allowfullscreen` + `allow="fullscreen"`) for games and emulators. Both need
   a user gesture and a focused window; feature-detect with
@@ -2011,12 +2031,32 @@ closed. The classic capabilities below are verified on Chromium and WebKit throu
   rules (a user gesture for audible playback) still apply.
 
 A `kind: iframe` route frame is your own page under the same sandbox and
-permissions set, with no bridge and no host CSP: its scripts may use the
-network exactly as your skill's backend already can, without the SPA's cookies
-or DOM. Because its origin is opaque, its `fetch` calls are cross-origin: a
-route it reads must answer with `Access-Control-Allow-Origin: *` (or be
-requested with `mode: "no-cors"` for a fire-and-forget opaque response), and
-on a network install its requests carry no session cookie either.
+permissions set, with no bridge and no host CSP, loaded from the mount's route
+lease (`/api/widget-resources/<lease>/<route>`): your page keeps its own HTTP
+`Content-Security-Policy`, and its own URL is its base, so **relative** URLs
+(images, styles, scripts, `<audio>`/`<video>`, fonts, a relative HLS playlist
+and its segments, and GET reads) reach your routes through the lease without
+the SPA's cookies or DOM. The core refuses the frame's requests to the raw
+`/api/extensions/...` prefix (its origin is opaque, another site's page to the
+core), and the lease reads only GET/HEAD. For everything else, load the host
+bridge, admitted by your own policy (a nonce, or `'self'`):
+
+```html
+<script nonce="…" src="/api/widget-bridge.js"></script>
+```
+
+It gives the page `OuroborosWidget.fetch` (any method, headers and body, to
+your own routes, with the owner's session, streamed back), `onEvent`, `onTheme`,
+`download`, `openExternal`, `resourceUrl` and `ready` (resolves once the host
+accepted the page). A relative `url` resolves against your page. It changes
+nothing else: your page's own `fetch`, links, popups and error handling stay
+yours, and media stay native under the lease. The host hears the page only on a
+channel its own document opened, proven by the lease in its URL: a page your
+frame navigates or redirects to, on another site, gets neither the channel nor
+the lease. Your next own page (a link within your routes) joins again. Because
+its origin is opaque, the page's own `fetch` calls are cross-origin: a route it
+reads that way must answer with `Access-Control-Allow-Origin: *` (or be
+requested with `mode: "no-cors"` for a fire-and-forget opaque response).
 
 What the module frame does not give you, by design: a scriptable network (`connect-src` is
 closed — use `OuroborosWidget.fetch`), `eval`/`new Function` (there is no
@@ -2163,10 +2203,30 @@ state directory remains available for dynamic data. Declared automatic
 dependencies select the existing process executor; persistent subscriptions
 and long-lived work still use the documented companion facilities.
 Locally installed skills have no per-file cap; the review pack budget is the
-only bound. The frame's `img-src`/`media-src`/`font-src` admit your skill's
-route prefix, so `<img src="/api/extensions/<skill>/logo.png">`,
-`<audio src>` / `<video src>` and `@font-face { src: url(...) }` load straight
-from your routes. Two rules come with that:
+only bound. A classic frame's elements load your routes natively through the
+mount's **route lease**: `img.src = OuroborosWidget.resourceUrl('logo.png')`,
+`<audio>` / `<video>` sources and `@font-face { src: url(...) }` built the same
+way. The browser streams them as usual: playback starts before the body ends,
+`Range` requests seek, and an endless live stream keeps playing; nothing is
+buffered into a Blob. A raw `/api/extensions/<skill>/...` URL in a media
+attribute, CSS or a playlist your script resolves must go through
+`resourceUrl` (the frame policy refuses it otherwise); a playlist the browser
+reads itself (HLS in a route page) should use relative entries.
+
+The lease reads only your own skill's GET/HEAD routes, with no session cookie
+or credential header reaching the handler, so it works the same on a network
+install. A redirect to your own prefix stays under the lease; one to another
+skill or the core is answered 403; one to another site is followed without the
+lease or a referrer. Responses are `no-store` with `Referrer-Policy:
+no-referrer`. The URL is a bearer capability like the file lease below: the
+frame can see and share it, it is renewed with the mount, and stop, a module
+frame that navigates to another document, unload, disable, logout and password
+changes end it, ending its open responses too (a route page may navigate within
+its own routes; leaving them does not hand the lease on). A failed or hanging
+renewal and a core restart do not: the host retries and re-establishes the same
+URL, so your running page keeps its state (requests made while the core is down
+fail as usual; reconnect live streams yourself). Your GET routes must not be
+effects you would not let the frame trigger. Two rules come with that:
 
 - **Fonts need the CORS header.** The frame is an opaque origin, so
   `@font-face` (like `import()`) is a CORS-mode fetch: a font route must answer
@@ -2174,19 +2234,10 @@ from your routes. Two rules come with that:
   face (`FontFace.status === "error"`; WebKit is lenient, so test on Chromium).
   Images and media are plain no-cors loads and need no header; the module
   endpoint already sends it for scripts.
-- **Passive network loads are browser-dependent.** On a password-protected
-  install, an opaque frame's requests may lack the `SameSite=Lax` session and
-  get 401. A passive image was refused in Chromium but sent the cookie and
-  loaded in WebKit in the separate-host tests; this is not a guarantee for
-  other browsers or request modes. Loopback remains exempt from the gate.
-  For an asset that must work across browsers, use the bridge — the parent
-  sends the session — and hand the bytes to the element as a `blob:` URL, which
-  `img-src`/`media-src`/`font-src` admit:
-
-  ```js
-  const blob = await (await OuroborosWidget.fetch('/api/extensions/<skill>/logo.png')).blob();
-  img.src = URL.createObjectURL(blob);
-  ```
+- **The lease, not the session, authorizes these loads.** They need no cookie
+  on any browser or install. For bytes your script must read, use
+  `OuroborosWidget.fetch` (it sends the owner's session) and, if an element
+  needs them, a `blob:` URL, which `img-src`/`media-src`/`font-src` admit.
 
 #### Native modules and declared resources
 
@@ -2336,19 +2387,9 @@ else:
 
 ## Skill Review Checklist
 
-Reviewers grade your skill on the checklist defined in
-[`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist". That file is
-the authoritative SSOT — read it there once and consult it whenever you author
-or repair a skill instead of reading a paraphrase here. Review verdicts are
-`clean`, `warnings`, `blockers`, or `pending`; execution is decided by
-`review_gate.executable_review`.
-Advisory explicit author finish can accept unchanged or corrected bytes after
-feedback (a verdict in `review.json` or a settled skill record with findings), or
-the exact `review_reference` (`record_id`/`job_id` + `content_hash`) returned by a
-terminal review that formed no verdict, with current deterministic preflight. It
-buys no second critic and retains the original hash, status and findings; a review
-still running is not unavailable. Blocking requires fresh reviewer approval. See
-ARCHITECTURE §13 for the shared runtime gate.
+Read the authoritative [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist) when authoring or repairing:
+its verdicts, enforcement and Advisory author-finish rules are not a separate policy here. `clean`, `warnings`,
+`blockers` and `pending` remain independent from `review_gate.executable_review`. Calls: the lifecycle above; runtime gate: ARCHITECTURE §13. A running review is not unavailable.
 
 ## Reference skills
 

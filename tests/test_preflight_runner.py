@@ -1262,7 +1262,7 @@ def test_a_caller_supplied_parallel_argv_is_not_blocked_for_missing_worker_evide
 
 
 def test_a_pass_whose_tree_cannot_be_proven_gone_blocks_even_when_it_exits_zero(
-    tmp_path, two_pass_env, stub_passes
+    tmp_path, two_pass_env, stub_passes, monkeypatch
 ):
     """The container's failure reason has to reach the verdict, or it is inert.
 
@@ -1279,23 +1279,26 @@ def test_a_pass_whose_tree_cannot_be_proven_gone_blocks_even_when_it_exits_zero(
     second pass runs — a tree that may still be alive must not be handed one.
     """
     from ouroboros import preflight_runner as pr
+    from tests._shared import retire_synthetic_gate_hold
 
-    events = stub_passes([
-        (0, "1 passed", "the live process table could not be enumerated"),
-        (0, "1 passed"),
-    ])
+    reason = "the live process table could not be enumerated"
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    events = stub_passes([(0, "1 passed", reason), (0, "1 passed")])
     repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
 
-    result = pr.run_hermetic_pytest(repo, timeout=120)
+    try:
+        result = pr.run_hermetic_pytest(repo, timeout=120)
 
-    assert result is not None, "a green pass over an unprovable teardown returned green"
-    assert "PREFLIGHT_CONTAINMENT_FAILED" in result, result
-    assert "the live process table could not be enumerated" in result, (
-        "the diagnosis must carry the container's own reason"
-    )
-    assert [event[0] for event in events].count("pass") == 1, (
-        "the serial pass ran on top of a tree that could not be proven gone"
-    )
+        assert result is not None, "a green pass over an unprovable teardown returned green"
+        assert "PREFLIGHT_CONTAINMENT_FAILED" in result, result
+        assert reason in result, "the diagnosis must carry the container's own reason"
+        assert [event[0] for event in events].count("pass") == 1, (
+            "the serial pass ran on top of a tree that could not be proven gone"
+        )
+    finally:
+        retire_synthetic_gate_hold(repo, temp_root, reason)  # the stubbed pass proved no process
 
 
 @pytest.mark.parametrize("lane", ["proven", "pass_reported", "pass_raised", "node_reported", "node_raised"])
@@ -1354,14 +1357,12 @@ def test_the_hermetic_tree_is_deleted_only_after_every_lane_proved_its_teardown(
         assert any(line.startswith("hermetic preflight: ") for line in marker.splitlines()), marker
         assert (unproven in marker) == lane.endswith("_reported"), marker
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
-                       cwd=str(repo), capture_output=True)
         # Every lane here is a stub: retire only the reason it was told to report.
-        from tests._shared import retire_synthetic_retention
+        from tests._shared import retire_synthetic_gate_hold
         reason = unproven if lane.endswith("_reported") else (
             "the node lane did not return, so its teardown is unconfirmed" if lane == "node_raised"
             else "the parallel pass did not return, so its teardown is unconfirmed")
-        retire_synthetic_retention(temp_root, reason, "hermetic preflight: " + reason)
+        retire_synthetic_gate_hold(repo, temp_root, reason)
 
 
 def test_the_retention_notice_precedes_the_body_and_stays_inside_the_budget():

@@ -86,11 +86,10 @@ function resizeHarness({
         innerHeight: 768,
         requestAnimationFrame(callback) { frames.set(++frameId, callback); return frameId; },
         cancelAnimationFrame(id) { frames.delete(id); },
-        parent: {
-            postMessage(message) {
-                messages.push(message);
-                sequence.push('message');
-            },
+        // The bridge's channel, which the resize reporter posts through.
+        __ouroWidgetReport(message) {
+            messages.push(message);
+            sequence.push('message');
         },
         addEventListener(type, listener) { listeners.set(type, listener); },
         removeEventListener(type, listener) {
@@ -116,7 +115,7 @@ function resizeHarness({
         'window',
         'ResizeObserver',
         'getComputedStyle',
-        moduleResizeScript('nonce', floor, maxHeight, borderReserve),
+        moduleResizeScript(floor, maxHeight, borderReserve),
     )(document, window, FakeResizeObserver, getComputedStyle);
     return {
         messages,
@@ -224,7 +223,7 @@ test('module overflow ownership covers floor equality, fixed-height no-op, and c
     assert.match(framedSource, /const resizeBridge = autoHeight\s*\? moduleResizeScript\(/);
     assert.match(
         framedSource,
-        /moduleResizeScript\(\s*nonce,\s*WIDGET_FRAME_DEFAULT_HEIGHT,\s*maxHeight,\s*WIDGET_FRAME_BORDER_RESERVE,/,
+        /moduleResizeScript\(WIDGET_FRAME_DEFAULT_HEIGHT,\s*maxHeight,\s*WIDGET_FRAME_BORDER_RESERVE\)/,
     );
     assert.doesNotMatch(framedSource, /scrolling="no"|syncModuleFrameScrolling/);
 });

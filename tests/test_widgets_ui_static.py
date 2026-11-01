@@ -22,7 +22,8 @@ def _render_js() -> str:
 def _framed_widget_sources() -> str:
     """widgets.js (page host, dispatcher) plus the declarative renderer split
     out of it (widget_render.js), the framed mounts (widget_module.js), the
-    in-frame bootstrap (widget_frame.js), the framed-card chrome
+    in-frame bootstrap (widget_frame.js and its classic bridge,
+    widget_frame_bridge.js), the framed-card chrome
     (widget_card.js), the card reorder handles (widget_reorder.js) and the
     declarative chart helpers (widget_chart.js). Negative pins run against this
     union so the moved code never leaves their coverage."""
@@ -31,6 +32,7 @@ def _framed_widget_sources() -> str:
         + _render_js()
         + _read("web/modules/widget_module.js")
         + _read("web/modules/widget_frame.js")
+        + _read("web/modules/widget_frame_bridge.js")
         + _read("web/modules/widget_card.js")
         + _read("web/modules/widget_reorder.js")
         + _read("web/modules/widget_chart.js")
@@ -226,7 +228,7 @@ def test_widgets_keep_iframe_sandbox_locked_down():
     assert "iframe.setAttribute('sandbox', 'allow-scripts');" not in source
     assert "iframe.srcdoc = srcdoc;" in source
     assert 'srcdoc="' not in source
-    assert "iframe.src = src;" in module
+    assert "iframe.src = `${lease.baseUrl}${route}`;" in module
     assert 'src="${src}"' not in source
     for forbidden in (
         "allow-same-origin",
@@ -241,28 +243,31 @@ def test_widgets_keep_iframe_sandbox_locked_down():
     # The module document CSP, one builder per entry mode. Sources are ABSOLUTE (an
     # opaque frame's 'self' is nothing). Classic: scripts run inline / from blob: /
     # from this skill's module prefix with 'wasm-unsafe-eval', workers from blob:,
-    # passive image / media / font loads from data: / blob: / this skill's route
-    # prefix. ESM, only with a lease: the same shape over this mount's file URL
+    # passive image / media / font loads from data: / blob: / this mount's
+    # route lease (GET/HEAD of its own routes; nothing without one). ESM, only
+    # with a lease: the same shape over this mount's file URL
     # alone, which also serves stylesheets and is the only document base. Neither
     # has anything else: no connect-src (falls to default-src 'none'; the parent
     # bridge is the frame's one request path) and never plain 'unsafe-eval'.
-    assert "export function moduleFrameCsp(skill, origin = window.location.origin, assetBase = '') {" in module
+    assert "export function moduleFrameCsp(skill, origin = window.location.origin, assetBase = '', resourceBase = '') {" in module
     assert "const prefix = `${origin}${extensionRoutePrefix(skill)}`;" in module
     builders = module.split("export function moduleFrameCsp(", 1)[1].split("\n}\n", 1)[0]
     assert "if (assetBase) return [" in builders
     esm, classic = ([directive for _quote, directive in re.findall(r"""^\s*(["'`])(.*)\1,$""", body, re.M)]
                     for body in re.findall(r"return \[\n(.*?)\]\.join\('; '\);", builders, re.S))
     assert classic == ["default-src 'none'", "script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ${prefix}module/",
-                       "worker-src blob:", "style-src 'unsafe-inline'", "img-src data: blob: ${prefix}",
-                       "media-src data: blob: ${prefix}", "font-src data: blob: ${prefix}"]
+                       "worker-src blob:", "style-src 'unsafe-inline'", "img-src ${passive}",
+                       "media-src ${passive}", "font-src ${passive}"]
+    assert "const passive = ['data:', 'blob:', resourceBase].filter(Boolean).join(' ');" in builders
     assert esm == ["default-src 'none'", "script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ${assetBase}",
                    "worker-src blob:", "style-src 'unsafe-inline' ${assetBase}", "img-src data: blob: ${assetBase}",
                    "media-src data: blob: ${assetBase}", "font-src data: blob: ${assetBase}", "base-uri ${assetBase}"]
-    assert "const assetBase = lease?.baseUrl || '';" in module
-    assert "const csp = moduleFrameCsp(tab.skill, window.location.origin, assetBase);" in module
+    assert "const assetBase = esm ? lease?.baseUrl || '' : '';" in module
+    assert "const resourceBase = esm ? '' : lease?.baseUrl || '';" in module
+    assert "const csp = moduleFrameCsp(tab.skill, window.location.origin, assetBase, resourceBase);" in module
     assert "connect-src" not in source
     assert "'unsafe-eval'" not in source
-    assert "window.OuroborosWidget = { fetch: request, onEvent, onTheme, download, openExternal: (url) => openExternal(url) };" in source
+    assert "window.OuroborosWidget = { fetch: request, onEvent, onTheme, download, openExternal: (url) => openExternal(url),\n        resourceBase, resourceUrl, ready };" in source
     assert "module widget fetch outside extension route prefix" in source
 
 
@@ -286,7 +291,7 @@ def test_widgets_frame_geometry_and_teardown_contract():
     assert source.index("setVerticalOverflowSuppressed(true);") < source.index("const report = () =>")
     assert "setVerticalOverflowSuppressed(outerHeight <" in source
     assert "setVerticalOverflowSuppressed(false);" in source
-    assert "nonce, WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE," in source
+    assert "moduleResizeScript(WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE)" in source
     # The document runs the bridge, then the size reporter, then the entry: classic inline, or ESM as a module.
     assert '<body><div id="root"></div><script>${bridge}</script><script>${resizeBridge}</script>${entryScript}</body>' in source
     assert ": `<script>${escapeScript(moduleSource)}</script>`;" in source
@@ -315,7 +320,7 @@ def test_widgets_framed_dispose_is_ordered_and_acknowledged():
     after ``WIDGET_DISPOSE_ACK_TIMEOUT_MS`` (1 s, beside the 25 s request
     timeout) — asynchronously, never blocking a page switch. The page keeps
     one settle promise per key so a remount waits for the pending stop."""
-    child = _read("web/modules/widget_frame.js")
+    child = _read("web/modules/widget_frame_bridge.js")
     parent = _read("web/modules/widget_module.js")
     jobs = _read("web/modules/widget_job.js")
     page = _widgets_js()
@@ -326,7 +331,7 @@ def test_widgets_framed_dispose_is_ordered_and_acknowledged():
     assert "await Promise.allSettled(hooks.map((fn) => Promise.resolve().then(fn)));" in dispose_body
     assert dispose_body.index("Promise.allSettled") < dispose_body.index("type: 'ouro-widget-disposed'")
     assert dispose_body.index("type: 'ouro-widget-disposed'") < dispose_body.index("item.fail(new Error('widget disposed'))")
-    assert dispose_body.index("item.fail(new Error('widget disposed'))") < dispose_body.index("window.removeEventListener('message', onMessage);")
+    assert dispose_body.index("item.fail(new Error('widget disposed'))") < dispose_body.index("port.onmessage = null;")
     # The bridge answers during the hooks: frames are refused only once `disposed`,
     # and the dispose message itself is honoured before that gate.
     frames = child.split("const onMessage = (event) =>", 1)[1].split("const request =", 1)[0]
@@ -335,11 +340,16 @@ def test_widgets_framed_dispose_is_ordered_and_acknowledged():
     # Parent: the old synchronous tail is now the post-ack `finish`.
     assert "if (msg.type === 'ouro-widget-disposed') {" in parent
     tail = parent.split("const finish = () =>", 1)[1]
-    assert tail.index("pendingRequests.forEach((controller) => controller.abort());") < tail.index("window.removeEventListener('message', onMessage);")
-    assert tail.index("window.removeEventListener('message', onMessage);") < tail.index("if (iframe?.parentNode === mount) iframe.remove();")
+    # The document's work ends (requests aborted, subscriptions and its port retired) before unlisten and removal.
+    retire = parent.split("const retireDocument = () =>", 1)[1].split("};", 1)[0]
+    assert retire.index("pendingRequests.forEach((controller) => controller.abort());") < retire.index("port.close();")
+    assert tail.index("retireDocument();") < tail.index("window.removeEventListener('message', onHello);")
+    assert tail.index("window.removeEventListener('message', onHello);") < tail.index("if (iframe?.parentNode === mount) iframe.remove();")
     assert "onDisposed = finish;" in tail
     assert "setTimeout(finish, WIDGET_DISPOSE_ACK_TIMEOUT_MS)" in tail
-    assert "postMessage({ type: 'ouro-widget-dispose', nonce }, '*');" in tail
+    # The stop is asked on the document's channel, never posted to the frame window.
+    assert "if (port && !left) post({ type: 'ouro-widget-dispose' });" in tail
+    assert "contentWindow.postMessage" not in parent and "contentWindow?.postMessage" not in parent
     assert "if (disposing) return disposing;" in parent
     # Page: one settle promise per key; a remount and the facade wait for it.
     assert "const widgetDisposing = new Map();" in page
@@ -808,7 +818,7 @@ def test_widgets_module_bridge_is_one_streaming_grammar():
     timeout constant is applied to a bridged fetch — the only timer in the relay
     is the author's opt-in ``init.timeoutMs`` (declarative requests and the
     module source load keep ``WIDGET_REQUEST_TIMEOUT_MS``)."""
-    child = _read("web/modules/widget_frame.js")
+    child = _read("web/modules/widget_frame.js") + _read("web/modules/widget_frame_bridge.js")
     parent = _read("web/modules/widget_module.js")
     page = _widgets_js()
     framed = _framed_widget_sources()
@@ -851,10 +861,13 @@ def test_widgets_module_bridge_is_one_streaming_grammar():
     assert "if (msg.op === 'subscribe') messageHandlers?.add(onWsMessage);" in parent
     assert "else if (msg.op === 'unsubscribe') messageHandlers?.delete(onWsMessage);" in parent
     assert "return mountModuleWidget(mount, tab, render, mountSignal, widgetMessageHandlers);" in page
-    # Dispose tail: open streams aborted with the pending requests, forwarding dropped.
+    # Dispose tail: the document retires (open streams aborted with the pending requests, forwarding dropped,
+    # its port closed) before the page stops listening for hellos.
+    retire = parent.split("const retireDocument = () =>", 1)[1].split("};", 1)[0]
+    assert retire.index("pendingRequests.forEach((controller) => controller.abort());") < retire.index("messageHandlers?.delete(onWsMessage);")
+    assert retire.index("messageHandlers?.delete(onWsMessage);") < retire.index("port.close();")
     tail = parent.split("const finish = () =>", 1)[1]
-    assert tail.index("pendingRequests.forEach((controller) => controller.abort());") < tail.index("messageHandlers?.delete(onWsMessage);")
-    assert tail.index("messageHandlers?.delete(onWsMessage);") < tail.index("window.removeEventListener('message', onMessage);")
+    assert tail.index("retireDocument();") < tail.index("window.removeEventListener('message', onHello);")
     # Negative pins: no string path, no alias, no second transport, no default bridge timeout.
     assert "ouro-widget-fetch-result" not in framed
     assert ".text()" not in relay
@@ -884,7 +897,7 @@ def test_widgets_module_frame_faults_reach_the_card_status_slot():
     ``dispose()``. The two height-cap attributes are stamped BEFORE the
     ``nextHeight === appliedHeight`` early return, which is exactly the case they
     exist to explain."""
-    child = _read("web/modules/widget_frame.js")
+    child = _read("web/modules/widget_frame_bridge.js")
     parent = _read("web/modules/widget_module.js")
     card = _read("web/modules/widget_card.js")
 

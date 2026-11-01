@@ -40,11 +40,19 @@ def _chat_id(row: dict) -> int:
 
 def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, pos: int | None = None,
                     lineage: dict | None = None) -> dict:
-    from ouroboros.dialogue_provenance import row_author
+    from ouroboros.dialogue_provenance import reaction_fact, reaction_note, row_author
 
     result = {key: row[key] for key in _ROW_FACTS if key in row}
     result.update(stream=stream, source_ordinal=ordinal)
     result["text"] = str(row.get("content", row.get("text", "")) or "")
+    transport = row.get("transport") if isinstance(row.get("transport"), dict) else {}
+    if fact := reaction_fact(transport.get("message")):
+        # A typed reaction keeps its exact fact, who acted and a receipt's state beside the row's own words
+        # (none, unless a receipt sent some), with the shared non-speech words every room reader shows.
+        receipt = row.get("type") == "presence_delivery"
+        actor, delivery = (transport.get(key) if isinstance(transport.get(key), dict) else {} for key in ("actor", "delivery"))
+        result["reaction"] = {"fact": dict(fact), "actor_kind": "ouroboros" if receipt else str(actor.get("kind") or ""),
+                              **({"state": str(delivery.get("state") or "")} if receipt else {}), "words": reaction_note(row)}
     # One attribution source, the row's own fields: a quiz answer is the Owner's, a
     # mailbox delivery keeps its own provenance, every other row is signed by its fields
     # and, for a chat row with a stream position, by the activation's lineage epoch.

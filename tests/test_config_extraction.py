@@ -104,6 +104,9 @@ _ADDED_OWNERS = {
     "CLAUDEXOR_STOP_EXIT_WAIT_SEC": runtime_limits,
     # The native platform build envelope is owned by the common runtime-limits leaf.
     "EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC": runtime_limits,
+    # A prepared Update's readiness-check budget and its prerequisite probes' bound (update_checks).
+    "UPDATE_CHECKS_TIMEOUT_SEC": runtime_limits,
+    "UPDATE_CHECKS_PROBE_TIMEOUT_SEC": runtime_limits,
     # Consciousness settings scaffolding: the alarm's SSOT default interval, the closed
     # autonomy enum and the readers for the three consciousness keys.
     "WAKE_DEFAULT_SEC": runtime_limits,
@@ -129,8 +132,7 @@ _ADDED_OWNERS = {
     "defaults_for_settings_document": settings_scales,
     "_optional_bound_setting": runtime_limits,
     "get_max_rounds": runtime_limits,
-    "OPERATION_WINDOW_FALLBACK_SEC": runtime_limits,
-    "operation_window_sec": runtime_limits,
+    "IDLE_LEASE_MAX_SEC": runtime_limits,
     # #939: the numeric duration resolver is a leaf; config supplies its settings seam.
     "_CURRENT_TASK_CEILING": runtime_limits,
     "explicit_execution_timeout_sec": runtime_limits,
@@ -249,8 +251,6 @@ _MOVED_OWNERS = {
     "get_max_active_subagents_per_root": runtime_limits,
     "get_max_subagent_depth": runtime_limits,
     "get_max_workers": runtime_limits,
-    "get_per_call_timeout_ceiling_sec": runtime_limits,
-    "get_plan_task_deadline_min_sec": runtime_limits,
     "get_post_task_evolution_budget_usd": runtime_limits,
     "get_restart_drain_max_sec": runtime_limits,
     "get_safety_call_timeout_sec": runtime_limits,

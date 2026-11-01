@@ -106,8 +106,9 @@ function statusSheetDom(t) {
 }
 
 const sendingAccount = { id: 'mailbox-id', label: 'mail@example.test', kind: 'user' };
-const statusUrl = `/api/extensions/${slack.connector}/status`;
-const identityPlace = (fields = {}) => normalizePlace({ ...FIXTURE.places.places[0], source: { url: statusUrl }, ...fields });
+const declaredStatusUrl = `/api/extensions/${slack.connector}/status`;
+const statusUrl = `${declaredStatusUrl}?${new URLSearchParams({ account_id: slack.accountId })}`;
+const identityPlace = (fields = {}) => normalizePlace({ ...FIXTURE.places.places[0], source: { url: declaredStatusUrl }, ...fields });
 const identityPayload = (identity = { sends_as: sendingAccount,
     reads_as: [{ ...sendingAccount, id: 'reader-id', label: 'Reader account' }] }) => ({ text: 'Mailbox ready', tone: 'ok', identity });
 const jsonResponse = (data) => ({ ok: true, status: 200, json: async () => data });

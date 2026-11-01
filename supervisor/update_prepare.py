@@ -7,9 +7,8 @@ recorded as a ``kind=update_candidate`` row of the existing copy registry
 (``ouroboros.subagent_worktrees``) beside body candidates:
 
 * The owner's local work is three independent layers, read without writing the real
-  index (the temporary-index technique of ``body_candidate._preserve``): H, the HEAD
-  commit; I, the tree of the real index copied entry by entry into a temporary index;
-  W, that temporary index after ``add -A`` (tracked and untracked files, ignored ones
+  index (``snapshot``): H, the HEAD commit; I, the tree of a temporary copy of the real
+  index; W, that copy after ``add -A`` (tracked and untracked files, ignored ones
   excluded), checked against the disk with ``diff-files``. They are pinned as K1 = I on
   H and K2 = W on K1 under ``refs/ouroboros/update/<id>/``, never on a branch. Index
   states Git cannot carry this way (unmerged entries, skip-worktree, assume-unchanged,
@@ -18,38 +17,31 @@ recorded as a ``kind=update_candidate`` row of the existing copy registry
 * C merges the channel's pinned target into H inside the workspace (a fast-forward is
   the target itself); version carriers resolve and project exactly as the legacy planner
   does (``update_merge_plan``). C carries the whole target as its second parent.
-* The layers ride onto C by three-way merges on an exact base (``_merge_tree``: objects only with
-  ``git merge-tree --write-tree``, in the workspace on an older Git):
+* The layers ride onto C by three-way merges on an exact base (``_merge_tree``):
   I' = merge(H; C, K1) and W' = merge(K1; I' on C, K2). Only C enters the branch's history
   at activation; I' and W' stay staged and unstaged work. A conflict in any step stays
   in the workspace with its paths (``needs_adaptation``); the serving tree is unchanged.
   ``without_local_changes`` is the separate explicit choice I' = W' = C, which keeps K1
   and K2 on their private refs.
 * ``ready`` means C, I' and W' exist and their workspace checks passed. Activation
-  (``ouroboros.gateway.update_activation``) re-reads the base and the serving runtime and
-  packages it was prepared on (``environment_moved``) after the writer fence and hands the
-  candidate to ``body_adoption.authorize_update``.
+  (``ouroboros.gateway.update_activation``) asks ``activation_check`` after the writer fence
+  and hands the candidate to ``body_adoption.authorize_update``.
 * The boot's settled activation outcome lands on the candidate record and, in one retained
-  record of this module's own (``ACTIVATION_REL``, never the supervisor's state, which a
-  providerless generation lacks), outlives the record the GC retires until the next admitted
-  preparation; the keep policy's healthy composition and start failure live there as well.
-* A step records the process that works in it (``worker``). Every child it starts goes through
-  the shell's tracked admission (``_run``), so a stop that has begun refuses the next one and the
-  step fails typed (``stopped``). The boot fails as interrupted a candidate left preparing or
-  checking by a process proven ended (``reconcile_interrupted``).
+  record of this module's own (``ACTIVATION_REL``), outlives the record the GC retires until
+  the next admitted preparation; the keep policy's facts live there as well (``KEEP_FACTS``).
+* A step records the process that works in it (``_worker``). Every child it starts goes through
+  the shell's tracked admission (``_run``), so a begun stop fails the step typed (``stopped``).
+  The boot fails as interrupted a step whose process provably ended (``reconcile_interrupted``).
 
 The record is installation-owned, not task-owned: it lives while the Update names it
-(preparing through an open activation) and the worktree GC retires its checkout, its
-sibling scratch, its refs and its generation environment only once it is discarded,
-superseded or settled AND nothing still works in it: no step of this process and no
-resolver task or descendant whose exit is unproven (``retention_verdict``). A discard
-or supersession cancels the resolver through the task owner first. At most one
-candidate exists at a time: a new preparation supersedes the previous one, so retained
-data is one checkout of the body plus its scratch and, after a lock change, one
-copy-on-write clone of the serving packages. Record transitions (supersession,
-resolver admission, discard, activation, the boot's settlement) are serialized by
-``lifecycle()``; a settled record is never written again, so a step that outlived its
-candidate stops at its next write.
+(preparing through an open activation), and the worktree GC retires its checkout, sibling
+scratch, refs and generation environment only once it is settled and nothing still works
+in it (``retention_verdict``). A discard or supersession first cancels the resolver
+(``_stop_resolver``). At most one candidate exists at a time: a new preparation supersedes
+the previous one, so retained data is one checkout of the body plus its scratch and, after
+a lock change, one copy-on-write clone of the serving packages. Record transitions
+(supersession, resolver admission, discard, activation, the boot's settlement) are
+serialized by ``lifecycle()``; a settled record is never written again (``_update``).
 """
 
 from __future__ import annotations
@@ -126,21 +118,21 @@ def stopped() -> None:
 
 
 def _run(repo: Any, *args: str, env: Optional[Dict[str, str]] = None, data: Optional[bytes] = None,
-         check: bool = True) -> subprocess.CompletedProcess:
-    """One Git process in ``repo`` through the existing Git owner (``git_ops._run_git_process_bounded``: the
-    shell's tracked admission and publication, its tree ended at the deadline), so a begun stop refuses it and
-    the generation's stop ends one still running. A refused start raises (``stopped``), and so does one that ran
-    out of time, whatever ``check`` says."""
+         check: bool = True, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+    """One Git process in ``repo`` through the existing Git owner (``git_ops._run_git_process_bounded``: the shell's
+    tracked admission and publication, its tree ended at the deadline). Whatever ``check`` says, a nonzero exit once
+    a stop has begun raises (``stopped``: a refused start, or a child that stop ended, answering -15 or -9), and so
+    does running out of ``timeout`` (a caller's remaining budget, else the owner's own bound)."""
     from supervisor.git_ops import FETCH_TIMEOUT_RC, _run_git_process_bounded
 
-    cmd = ["git", *args]
+    cmd, timeout = ["git", *args], _GIT_TIMEOUT_SEC if timeout is None else timeout
     returncode, out, err = _run_git_process_bounded(
-        cmd, timeout=_GIT_TIMEOUT_SEC, cwd=pathlib.Path(repo), text=False, input_data=data,
+        cmd, timeout=timeout, cwd=pathlib.Path(repo), text=False, input_data=data,
         env=env if env is not None else _registry()._host_env(GIT_OPTIONAL_LOCKS="0", **_IDENTITY))
-    if returncode == 127:
+    if returncode != 0:
         stopped()
     if returncode == FETCH_TIMEOUT_RC:
-        raise subprocess.TimeoutExpired(cmd, _GIT_TIMEOUT_SEC, output=out, stderr=err)
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
     if check and returncode != 0:
         raise _registry().GitFailed(returncode, cmd, out, err)
     return subprocess.CompletedProcess(cmd, returncode, out, err)
@@ -166,10 +158,9 @@ def snapshot(repo: Any, branch_dev: str) -> Dict[str, Any]:
 
     Reads only: the real index is copied once, byte for byte with its own time, and never refreshed or written.
     Every index fact comes from that one copy, whose stat data lets ``add -A`` hash only what changed (a listing
-    carries none, so it rehashed the whole tree on every call) and whose time keeps Git checking by content an entry
-    stamped in that second (racily clean: a copy stamped later trusts a same-size edit made then). A split index's
-    shared part is read from the repository where Git keeps it, and the copy is written whole (``core.splitIndex``
-    off), so nothing is written beside the real one. The copy lives outside the work tree and is deleted.
+    carries none) and whose time keeps Git checking by content an entry stamped in that second (racily clean: a copy
+    stamped later trusts a same-size edit made then). A split index's shared part is read from the repository where
+    Git keeps it, and the copy is written whole (``core.splitIndex`` off), so nothing is written beside the real one.
     ``refusals`` lists typed reasons with up to five paths each; an empty list means the layers are complete.
     """
     repo = pathlib.Path(repo)
@@ -183,7 +174,7 @@ def snapshot(repo: Any, branch_dev: str) -> Dict[str, Any]:
     busy = [name for name in _IN_PROGRESS if (git_dir / name).exists()]
     if busy:
         refusals.append("operation_in_progress:" + ", ".join(busy))
-    with tempfile.TemporaryDirectory(prefix="ouroboros-update-index-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="ouroboros-update-index-") as scratch:  # outside the work tree; deleted
         index = pathlib.Path(scratch) / "index"
         env = _registry()._host_env(GIT_INDEX_FILE=str(index), **_IDENTITY)
 
@@ -205,14 +196,13 @@ def snapshot(repo: Any, branch_dev: str) -> Dict[str, Any]:
                     flagged.setdefault("skip_worktree", []).append(path)
                 elif tag.islower():
                     flagged.setdefault("assume_unchanged", []).append(path)
-        for chunk in real.split(b"\0"):
-            if chunk:
-                meta, _tab, path = chunk.partition(b"\t")
-                mode, _sha, stage = meta.decode().split(" ")
-                if stage != "0":
-                    flagged.setdefault("unmerged", []).append(path.decode("utf-8", "surrogateescape"))
-                elif mode == "160000":
-                    flagged.setdefault("submodule", []).append(path.decode("utf-8", "surrogateescape"))
+        for chunk in _paths(real):
+            meta, _tab, path = chunk.partition("\t")
+            mode, _sha, stage = meta.split(" ")
+            if stage != "0":
+                flagged.setdefault("unmerged", []).append(path)
+            elif mode == "160000":
+                flagged.setdefault("submodule", []).append(path)
         for chunk in copy("status", "--porcelain=v1", "-z", "--untracked-files=no").stdout.split(b"\0"):
             if chunk[:2] == b" A":
                 flagged.setdefault("intent_to_add", []).append(chunk[3:].decode("utf-8", "surrogateescape"))
@@ -471,8 +461,7 @@ def _merge(workspace: pathlib.Path, head: str, target_sha: str) -> Dict[str, Any
         stopped()  # a refused start (rc 127) is no merge result
         raise PrepareRefused("UPDATE_MERGE_FAILED", f"the merge could not run in the workspace: {error}")
     unmerged = _paths(_run(workspace, "diff", "--name-only", "-z", "--diff-filter=U").stdout)
-    # The resolver's Git through the tracked owner: once the stop began none starts, so that file is kept, and the
-    # merge's next step, refused the same way, raises ``stopped``.
+    # Once a stop began ``tracked_run_git`` starts nothing (the file is kept); the merge's next step raises ``stopped``.
     carriers = list(resolve_carrier_conflicts(str(workspace), unmerged, prefer="theirs",
                                               run_git=tracked_run_git)["resolved"]) if unmerged else []
     remaining = sorted(set(unmerged) - set(carriers))
@@ -516,15 +505,19 @@ def resolve_target(*, fetch: bool) -> Dict[str, Any]:
     channel = get_update_channel()
     if not branch_ref:
         raise PrepareRefused("UPDATE_UNAVAILABLE", "no managed update remote is configured")
+    # Each Git step below is tracked: one a begun stop refused or ended is that stop (``stopped``), never "unavailable".
     if fetch and remote_name:
         ok, error = g.ensure_official_update_remote()
         if not ok:
+            stopped()
             raise PrepareRefused("UPDATE_UNAVAILABLE", error or "could not configure the official update remote")
         rc, _out_text, error = g.git_fetch_bounded(remote_name)
         if rc != 0:
+            stopped()
             raise PrepareRefused("UPDATE_UNAVAILABLE", error or f"git fetch {remote_name} failed")
     target_ref, target_sha, error = g._resolve_managed_update_target(remote_name, remote_branch, branch_ref, channel)
     if not target_ref or not target_sha:
+        stopped()
         raise PrepareRefused("UPDATE_UNAVAILABLE", error or "could not resolve the update target")
     if not managed_update_constitution_present(target_sha):
         raise PrepareRefused("UPDATE_UNAVAILABLE", "the official update target does not preserve BIBLE.md")
@@ -537,10 +530,9 @@ def prepare(*, fetch: bool = True, without_local_changes: bool = False, checks=N
 
     Returns the record. ``checks(row)`` (the workspace checks owner, injectable) returns ``{"ok": bool, ...}`` over
     the final composition. A refusal before provisioning raises ``PrepareRefused`` and leaves any previous candidate
-    as it was; so does a copy whose checkout could not be made, discarded at once. ``expected`` names the candidate
-    this preparation replaces (an apply without local changes asks for exactly one); a different live candidate at
-    the admission refuses it with ``UPDATE_CANDIDATE_CHANGED`` and nothing of it remains. ``admitted``: the caller
-    already holds this process's preparation slot (``admit``), which this call releases.
+    as it was; so does a copy whose checkout could not be made, discarded at once. ``expected``: the candidate this
+    preparation replaces (``_expect_live``). ``admitted``: the caller already holds this process's preparation slot
+    (``admit``), which this call releases.
     """
     if not admitted and not _running.acquire(blocking=False):
         raise PrepareRefused("UPDATE_PREPARE_RUNNING", "an update is already being prepared")
@@ -552,12 +544,9 @@ def prepare(*, fetch: bool = True, without_local_changes: bool = False, checks=N
 
 
 def admit(expected: Optional[str] = None) -> None:
-    """Take this process's one preparation slot for a request that starts ``prepare(admitted=True)`` on a thread.
-
-    With ``expected`` (an apply without local changes), only while exactly that candidate is the
-    live one and its state offers the action: a request from a screen that showed another one
-    changes nothing. Raises ``PrepareRefused`` holding nothing; otherwise the caller owns the slot.
-    """
+    """Take this process's one preparation slot for a request that starts ``prepare(admitted=True)`` on a thread,
+    with ``expected`` only while ``_expect_live`` admits it. Raises ``PrepareRefused`` holding nothing; otherwise the
+    caller owns the slot."""
     if not _running.acquire(blocking=False):
         raise PrepareRefused("UPDATE_PREPARE_RUNNING", "an update is already being prepared")
     try:
@@ -570,8 +559,9 @@ def admit(expected: Optional[str] = None) -> None:
 
 
 def _expect_live(expected: str, *, besides: str = "") -> None:
-    """Refuse unless ``expected`` is the newest unsettled candidate (other than ``besides``, the one being made)
-    and its state offers the update without local changes. The caller holds ``lifecycle()``."""
+    """Refuse (``UPDATE_CANDIDATE_CHANGED``: nothing of the request remains) unless ``expected``, what an apply without
+    local changes asks to replace, is the newest unsettled candidate (other than ``besides``, the one being made) and
+    its state offers that update: a screen that showed another one changes nothing. The caller holds ``lifecycle()``."""
     live = [entry for entry in _rows() if entry.get("state") not in SETTLED and entry.get("candidate_id") != besides]
     newest = max(live, key=lambda entry: float(entry.get("created_at") or 0)) if live else None
     if not expected or newest is None or newest.get("candidate_id") != expected \
@@ -739,8 +729,7 @@ def _advance(row: Dict[str, Any], checks=None) -> Dict[str, Any]:
     row = _update(row, environment=environment)
     if not environment["same"] or staged:
         # A new app runs its own bootstrap's pip before any hooked entry: its generation gets private packages
-        # even when the lock is unchanged, prepared and checked by the interpreter that will run them (the clone
-        # of a --runtime-venv of the app's Python is pointed at the staged app's until its checks are done).
+        # even when the lock is unchanged, prepared and checked by the interpreter that will run them.
         try:
             environment["generation"] = prepare_generation_environment(
                 row, files_commit, python=native.get("python") if staged else None)
@@ -795,10 +784,9 @@ def serving_environment() -> Tuple[str, pathlib.Path]:
     ``pyvenv.cfg`` beside it; Windows renames both while their native modules, console image or venv
     redirector run (measured on NTFS), and a process holding one as its working directory refuses
     the rename, which the switch returns from (``body_switch._select_environment``). ``("private",
-    root)`` for a bare interpreter, whose generations get a venv of their own at
-    ``private_environment_root`` (absent until the first one is selected), and for that venv once it
-    serves; under a launcher only one that hands itself over to new packages (``launcher_refusal``).
-    ``("", prefix)`` where no such seam exists (``_no_seam``).
+    root)`` for a bare interpreter, whose generations get a venv of their own at ``private_environment_root``,
+    and for that venv once it serves; under a launcher only one that hands itself over to new packages
+    (``launcher_refusal``). ``("", prefix)`` where no such seam exists (``_no_seam``).
     """
     import sys
 
@@ -868,20 +856,23 @@ def _no_seam() -> str:
     return launcher_refusal() or "this installation's packages cannot be switched; update by hand"
 
 
+def _pip_env() -> Dict[str, str]:
+    """The host environment for a generation's pip, without the inherited variables that steer an install."""
+    return {key: value for key, value in _registry()._host_env(PYTHONDONTWRITEBYTECODE="1").items() if key not in (
+        "PYTHONUSERBASE", "PYTHONNOUSERSITE", "PIP_REQUIRE_VIRTUALENV", "PIP_TARGET", "PIP_PREFIX", "PIP_USER",
+        "VIRTUAL_ENV", "PYTHONHOME")}
+
+
 def _install_lock(target: pathlib.Path, lock: pathlib.Path, kind: str = "user_site",
                   python: Optional[str] = None) -> Dict[str, Any]:
-    """The lock installed into ``target`` alone, bounded, through the shell's tracked process owner (its
-    admission, Emergency Stop latch and reaping): ``pip install --user`` with that user base (by
-    ``python``, a new app's own interpreter, when one comes), or the cloned venv's own interpreter
-    installing into itself."""
+    """The lock installed into ``target`` alone, bounded, through the shell's tracked process owner (``run_tracked``):
+    ``pip install --user`` with that user base (by ``python``, a new app's own interpreter, when one comes), or the
+    cloned venv's own interpreter installing into itself."""
     import sys
 
     from supervisor.update_checks import run_tracked
 
-    env = _registry()._host_env(PYTHONDONTWRITEBYTECODE="1")
-    for key in ("PYTHONUSERBASE", "PYTHONNOUSERSITE", "PIP_REQUIRE_VIRTUALENV", "PIP_TARGET", "PIP_PREFIX",
-                "PIP_USER", "VIRTUAL_ENV", "PYTHONHOME"):
-        env.pop(key, None)
+    env = _pip_env()
     if kind in ("venv", "private"):
         env["PYTHONNOUSERSITE"] = "1"
         install = [interpreter(target), "-m", "pip", "install", "-q", "-r", str(lock)]
@@ -905,18 +896,14 @@ def _install_lock(target: pathlib.Path, lock: pathlib.Path, kind: str = "user_si
 
 def _create_private(generation: pathlib.Path) -> str:
     """A bare interpreter's first private environment: a venv of exactly this interpreter with its own pip
-    (``runtime_venv.create_with_pip``: ``ensurepip``, else this interpreter's own pip, else the lock's pip
-    wheel). Where it cannot make one the preparation stops typed; the interpreter's own packages are never
-    the fallback. Returns how the venv got its pip."""
+    (``runtime_venv.create_with_pip``). Where it cannot make one the preparation stops typed; the interpreter's own
+    packages are never the fallback. Returns how the venv got its pip."""
     import sys
 
     from ouroboros.runtime_venv import RuntimeVenvRefused, create_with_pip
     from supervisor.update_checks import run_tracked
 
-    env = _registry()._host_env(PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1")
-    for key in ("PYTHONUSERBASE", "PIP_REQUIRE_VIRTUALENV", "PIP_TARGET", "PIP_PREFIX", "PIP_USER", "VIRTUAL_ENV",
-                "PYTHONHOME"):
-        env.pop(key, None)
+    env = {**_pip_env(), "PYTHONNOUSERSITE": "1"}
     try:
         return create_with_pip(generation, sys.executable, lambda cmd: run_tracked(cmd, generation.parent, 600,
                                                                                    env=env))
@@ -931,26 +918,22 @@ def prepare_generation_environment(row: Dict[str, Any], composition: str,
                                    python: Optional[str] = None) -> Dict[str, Any]:
     """The new composition's packages beside the serving ones, never in them.
 
-    Every generation runs with its packages at one path (``serving_environment``: the
-    packaged user site, or a venv's root), the one every launcher starts the body with,
-    so the new generation's copy is a sibling directory named for its candidate: a
-    copy-on-write clone of the serving one where the volume offers one, then the new
-    lock installed into the clone alone (with ``cp -c`` on APFS only the changed
-    packages take space). Checks run it at that path, where everything pip wrote
-    names it. The switch helper renames the two before the next generation imports
-    anything and points a venv's console scripts at the path they then run from
-    (``body_switch._select_environment``); a return renames them back. The serving
-    copy stays beside as ``.previous-<adoption>`` until the update is adopted; the
-    worktree GC removes an unused clone once its candidate is retired. A bare interpreter
-    (``private``) gets a new venv of itself whose own pins are the whole lock, its own
-    packages visible underneath, bound to this checkout; the package-init hook runs its
-    entries there once it is selected. An interpreter without a seam refuses a lock
-    change: nothing is ever prepared on the serving packages. ``python``: a new app's interpreter, which
-    installs the lock into its user site and later runs it (``update_checks``). A venv's
-    clone installs and runs with its own interpreter; when a new app is staged, the clone of a
-    venv of the installed app's Python names the staged app's Python until its checks are done
-    (``runtime_venv.point_base``; ``links`` keeps what ``_restore_venv`` writes back,
-    ``staged_python`` what it ran), and one of the owner's own Python keeps it (``venv_python``).
+    Every generation runs with its packages at one path (``serving_environment``), so the new
+    generation's copy is a sibling directory named for its candidate: a copy-on-write clone of the
+    serving one where the volume offers one (with ``cp -c`` on APFS only the changed packages take
+    space), then the new lock installed into the clone alone (``_install_lock``). Checks run it at
+    that path, where everything pip wrote names it. The switch selects it before the next
+    generation imports anything and a return puts the serving copy back
+    (``body_switch._select_environment``); that copy stays beside as ``.previous-<adoption>`` until
+    the update is adopted, and the worktree GC removes an unused clone (``reclaim_environments``).
+    A bare interpreter (``private``) gets a new venv of itself (``_create_private``) bound to this
+    checkout; the package-init hook runs its entries there once it is selected. An interpreter
+    without a seam refuses a lock change: nothing is ever prepared on the serving packages.
+    ``python``: a new app's interpreter, which installs the lock into its user site and later runs
+    it (``update_checks``). When a new app is staged, the clone of a venv of the installed app's
+    Python names the staged app's Python until its checks are done (``runtime_venv.point_base``;
+    ``links`` keeps what ``_restore_venv`` writes back, ``staged_python`` what it ran), and one of
+    the owner's own Python keeps it (``venv_python``).
     """
     import sys
 
@@ -1015,7 +998,10 @@ def prepare_generation_environment(row: Dict[str, Any], composition: str,
     if kind == "private":  # the checkout whose entries run in it once it is selected
         atomic_write_json(generation / PRIVATE_MARKER, {"schema_version": 1, "candidate_id": row["candidate_id"],
                                                         "repo_dir": os.path.realpath(row["repo_dir"])})
+    from ouroboros.body_switch import mark_generation  # device and inode alone prove no directory: a token too
+
     return {"kind": kind, "user_base": str(generation), "current": str(current), "cloned": bool(cloned), **selected,
+            "identity": mark_generation(str(generation)),
             "packages": packages, **({"python": python} if python else {}), **({"pip": pip} if pip else {}),
             **({"links": links, "staged_python": base_interpreter(generation)} if links else {})}
 
@@ -1039,12 +1025,11 @@ def _restore_venv(generation: Dict[str, Any]) -> str:
 def environment_moved(row: Dict[str, Any]) -> str:
     """Why the interpreter or the packages this candidate was prepared on no longer serve, or ``""``.
 
-    The serving runtime and dependency input are read again exactly as preparation recorded them
-    (``environment_identity``). A candidate that switches packages in (``environment.generation``) is
-    bound to where the serving ones live (``serving_environment``) and to their state when its copy was
-    taken (``package_state``): a package installed there since, by the local model runtime's install
-    or by a task, would otherwise be left behind at the switch. One that switches none keeps the
-    serving packages as they are, so a later install there stays."""
+    The serving ``environment_identity`` is read again as preparation recorded it. A candidate that
+    switches packages in (``environment.generation``) is bound to where the serving ones live
+    (``serving_environment``) and to their state when its copy was taken (``package_state``): a package
+    installed there since, by the local model runtime's install or by a task, would otherwise be left
+    behind at the switch. One that switches none keeps them as they are, so a later install there stays."""
     environment = row.get("environment") or {}
     recorded, base = environment.get("serving"), row.get("base") or {}
     if not isinstance(recorded, dict) or not base.get("files_tree"):
@@ -1064,22 +1049,37 @@ def environment_moved(row: Dict[str, Any]) -> str:
     return ""
 
 
+def _prepared_missing(row: Dict[str, Any]) -> str:
+    """``environment_missing`` with why, when the generation this candidate switches in is not the one its preparation
+    marked, or ``""``: by its token (``body_switch._is_prepared``), as authorization proves it; an identity recorded
+    without a token proves none, and authorization refuses it too (``ADOPTION_ENVIRONMENT_MISSING``)."""
+    from ouroboros import body_switch
+
+    generation = (row.get("environment") or {}).get("generation") or {}
+    identity = generation.get("identity") or []
+    if generation and (len(identity) < 3
+                       or not body_switch._is_prepared(str(generation.get("user_base") or ""), identity)):
+        return "environment_missing: its prepared packages are gone"
+    return ""
+
+
 def activation_check(row: Dict[str, Any]) -> str:
     """Why this READY candidate may not be activated now (after the writer fence), or ``""``.
 
-    The caller holds ``lifecycle()``. The base is read again: any change of HEAD, branch,
-    index or files since the preparation makes the candidate ``stale:local_changed``.
-    The owner's explicit change of the update channel makes it ``stale:channel_changed``;
-    the channel merely moving forward does not (the candidate keeps its pinned target,
-    and the panel says a newer one exists). A staged app recorded by an identity from before
-    ``Contents`` was part of it (``body_switch.identity_stale``) makes it
-    ``stale:native_identity_stale``: nothing proves those bundles any more. Another serving
-    interpreter or dependency input, or packages installed where a prepared copy would replace
-    them, make it ``stale:environment_changed`` (``environment_moved``).
+    The caller holds ``lifecycle()``. What makes it ``stale``, each with its reason: ``native_identity_stale``, a staged
+    app whose recorded identity proves no bundle (``body_switch.identity_stale``); ``environment_missing``
+    (``_prepared_missing``), so Prepare again is offered instead of authorization's refusal; ``channel_changed``, the
+    owner's explicit change of the update channel, never the channel merely moving forward (the candidate keeps its
+    pinned target, and the panel says a newer one exists); ``local_changed``, a base read again that differs
+    (``fingerprint``); ``environment_changed`` (``environment_moved``).
     """
     from ouroboros.body_switch import identity_stale
     from ouroboros.update_channels import get_update_channel
     from supervisor import git_ops as g
+
+    def stale(reason: str, rest: str) -> str:
+        _update(row, state="stale", reason=reason)
+        return reason + rest
 
     if row.get("state") != "ready":
         return f"the candidate is {row.get('state')}, not ready"
@@ -1088,21 +1088,20 @@ def activation_check(row: Dict[str, Any]) -> str:
         return f"launcher_cannot_take_packages: {launcher_refusal()}"  # the candidate stays ready for that start
     if native.get("status") == "staged" and any(identity_stale(native.get(key))
                                                 for key in ("previous_identity", "new_identity")):
-        _update(row, state="stale", reason="native_identity_stale")
-        return ("native_identity_stale: the update was prepared before the apps' contents were part of their "
-                "identity; prepare it again")
+        return stale("native_identity_stale", ": the update was prepared before the apps' contents were part of their "
+                     "identity; prepare it again")
+    missing = _prepared_missing(row)
+    if missing:
+        return stale(missing, "; prepare the update again")
     channel = get_update_channel()
     if str((row.get("target") or {}).get("channel") or "") != channel:
-        _update(row, state="stale", reason="channel_changed")
-        return f"channel_changed: the update channel is {channel} now; prepare the update again"
+        return stale("channel_changed", f": the update channel is {channel} now; prepare the update again")
     snap = snapshot(row["repo_dir"], g.BRANCH_DEV)
     if snap["refusals"] or fingerprint(snap) != row.get("base"):
-        _update(row, state="stale", reason="local_changed")
-        return "local_changed: the checkout changed after the update was prepared; prepare it again"
+        return stale("local_changed", ": the checkout changed after the update was prepared; prepare it again")
     moved = environment_moved(row)
     if moved:
-        _update(row, state="stale", reason=f"environment_changed: {moved}")
-        return f"environment_changed: {moved}; prepare the update again"
+        return stale(f"environment_changed: {moved}", "; prepare the update again")
     return ""
 
 
@@ -1130,10 +1129,8 @@ def _stop_resolver(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def discard(row: Dict[str, Any]) -> Dict[str, Any]:
-    """The owner's discard of exactly ``row``'s candidate, read again under ``lifecycle()``.
-
-    Its resolver is cancelled first; the record settles; the GC retires checkout,
-    scratch and generation environment once nothing works in them."""
+    """The owner's discard of exactly ``row``'s candidate, read again under ``lifecycle()``: its resolver is
+    cancelled first, then the record settles (``_settle``)."""
     from ouroboros import body_adoption
     from supervisor import git_ops as g
 
@@ -1200,21 +1197,20 @@ def record_activation(data_dir: Any, result: Dict[str, Any]) -> None:
             _update(row, data_dir, state=state, activation=activation, reason=reason)
         if outcome not in ("returning", "unconfirmed"):  # a return under way, or a start yet to be confirmed, goes on
             _retain_activation(row, activation, data_dir)
-    # The previous generation's packages, kept for a return the adoption has now closed, and any
-    # other environment no record names any more: the next worktree GC pass reclaims them.
+    # Packages no record names any more (a closed adoption's previous ones): ``reclaim_environments``.
 
 
 def _prepared_moved(row: Dict[str, Any]) -> str:
     """Why a candidate whose activation changed nothing cannot be activated as prepared any more, or ``""``: its
-    workspace or prepared packages are gone, or its base or environment moved (``activation_check`` reads both
-    again at the next activation)."""
+    workspace or prepared packages are gone (``_prepared_missing``, as ``activation_check`` reads them), or its base or
+    environment moved (``activation_check`` reads both again at the next activation)."""
     from supervisor import git_ops as g
 
-    generation = (row.get("environment") or {}).get("generation") or {}
     if not pathlib.Path(str(row.get("path") or "")).is_dir():
         return "candidate_missing: its workspace is gone"
-    if generation and not pathlib.Path(str(generation.get("user_base") or "")).is_dir():
-        return "environment_missing: its prepared packages are gone"
+    missing = _prepared_missing(row)
+    if missing:
+        return missing
     try:
         snap = snapshot(row["repo_dir"], g.BRANCH_DEV)
         if snap["refusals"] or fingerprint(snap) != row.get("base"):
@@ -1285,8 +1281,7 @@ def _forget_activation(data_dir: Optional[Any] = None) -> None:
         log.warning("the retained update activation outcome could not be replaced", exc_info=True)
 
 
-# The keep policy's boot facts (``git_ops_reset``), in the same record on every root: a providerless one has no
-# supervisor state. ``_retained_lock``: one read-modify-write of ACTIVATION_REL at a time in this process.
+# The keep policy's boot facts (``git_ops_reset``) share ACTIVATION_REL; ``_retained_lock``: one rewrite at a time here.
 KEEP_FACTS, _retained_lock = ("healthy_composition", "start_failure", "private_environment"), threading.Lock()
 
 
@@ -1319,11 +1314,10 @@ def retain_fact(name: str, value: Optional[Dict[str, Any]], data_dir: Optional[A
 def reconcile_interrupted(data_dir: Optional[Any] = None) -> List[str]:
     """The boot's settlement of preparations their process left unfinished; returns the candidates it failed.
 
-    A step runs on a thread of the serving process and names that process in its record (``worker``). A
-    candidate still ``preparing`` or ``checking`` that no step of this process works in, whose worker provably
-    ended (``local_custody_repair.owner_ended``: its pid gone, or another birth or custody session there), will
-    never move on: it fails as interrupted, which offers preparing it again or discarding it. A live, unknown
-    or unrecorded worker leaves the record as it is.
+    A step runs on a thread of the process its record names (``_worker``). A candidate still ``preparing`` or
+    ``checking`` that no step of this process works in, whose worker provably ended (``owner_ended``), will never
+    move on: it fails as interrupted, which offers preparing it again or discarding it. A live, unknown or
+    unrecorded worker leaves the record as it is.
     """
     from ouroboros.local_custody_repair import owner_ended
 
@@ -1396,8 +1390,7 @@ def retention_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None, live=
 
 
 def release_refs(row: Dict[str, Any]) -> None:
-    """Drop the settled candidate's private refs, except the layers an apply without local changes left
-    behind; its checkout, scratch and generation environment stay for the GC."""
+    """Drop the settled candidate's private refs, except the layers an apply without local changes left behind."""
     repo = pathlib.Path(str(row.get("repo_dir") or ""))
     keep = ("k1", "k2") if row.get("without_local_changes") and row.get("state") == "activated" else ()
     for name in ("base", "k1", "k2", "c", "i_prime", "w_prime"):
@@ -1446,8 +1439,8 @@ def reclaim_environments(data_dir: Optional[Any] = None, rows: Optional[List[Dic
     ``<serving>.previous-<adoption>`` to the open handoff that may return to it. A
     preparation that crashed, a candidate retired before its environment, a previous
     generation after its adoption closed or after a refused return: no record names
-    them, and they are each a full package set (a clone shares unchanged files on APFS).
-    ``rows`` (the caller's listing) only proposes; ownership is read again before a deletion.
+    them, and they are each a full package set. ``rows`` (the records the caller already
+    listed: a GC pass keeps its listing budget) only proposes; ownership is read again.
     """
     try:
         return _reclaim_environments(data_dir, rows)
@@ -1457,13 +1450,12 @@ def reclaim_environments(data_dir: Optional[Any] = None, rows: Optional[List[Dic
 
 
 def _environment_owners(data_dir: Optional[Any], entries: List[Dict[str, Any]]) -> Tuple[set, set, set]:
-    """``(named, currents, live)``: the paths the records and an open handoff name, the serving paths beside
-    which generations live, and the candidates whose clone may exist before a record names it."""
+    """``(named, currents, live)``: the paths the records and an open handoff name, the serving paths beside which
+    generations live, and the candidates whose clone may exist before a record names it (cloning and pip take minutes;
+    its name carries its candidate): every unsettled one and every one a step of this process works in."""
     from ouroboros import body_adoption
 
     named, currents = set(), set()
-    # A clone exists before its record names it (cloning and pip take minutes): its name carries its
-    # candidate, so every unsettled candidate and every one a step of this process works in keeps it.
     live = set(_working)
     for entry in entries:
         generation = (entry.get("environment") or {}).get("generation") or {}
@@ -1486,7 +1478,6 @@ def _owned(sibling: pathlib.Path, base: str, named: set, live: set) -> bool:
 
 
 def _reclaim_environments(data_dir: Optional[Any], rows: Optional[List[Dict[str, Any]]]) -> List[str]:
-    # ``rows``: the copy records the caller already listed (the GC pass keeps its listing budget).
     named, currents, live = _environment_owners(
         data_dir, _rows(data_dir) if rows is None else [row for row in rows if row.get("kind") == KIND])
     try:
@@ -1507,11 +1498,9 @@ def _reclaim_environments(data_dir: Optional[Any], rows: Optional[List[Dict[str,
                    and not _owned(sibling, base.name, named, live) and sibling.is_dir() and not sibling.is_symlink()]
     if not doomed:
         return []
-    # That view may predate a preparation that created, or even finished, its generation since. Each deletion is
-    # decided again on the records, the handoff and this process's steps as they are now, under the lock every
-    # record transition takes. An unowned generation regains no owner: a record exists before its clone, a new
-    # candidate or adoption gets a fresh random id, and a settled record is never written again nor starts a step.
-    # So the deletions themselves run outside the lock.
+    # That view may predate a preparation's generation, so ownership is read again under the lock every transition
+    # takes. The deletions run outside it: an unowned generation regains no owner (a record exists before its clone,
+    # a new candidate or adoption gets a fresh random id, a settled record is never written again nor starts a step).
     with _lifecycle:
         named, _currents, live = _environment_owners(data_dir, _rows(data_dir))
         doomed = [(sibling, base) for sibling, base in doomed if not _owned(sibling, base, named, live)]

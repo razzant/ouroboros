@@ -95,6 +95,47 @@ test('delivery rows stamp the recorded account, as you for its owner, and nothin
     reader.close();
 });
 
+test('a reaction row reads as its fact, never as an empty or spoken message', async (t) => {
+    const f = fixture(t);
+    const heard = { kind: 'message', attention: { decision: 'heard', reason: 'reaction_context_only' } };
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('anonymous'), text: '', sender_label: 'Anonymous reactions', place_history: { ...heard, reaction: { summary: 'counts observed: 👍 3 on message 7' } } },
+        { ...row('mine'), text: '', role: 'assistant', markdown: true, place_history: { kind: 'delivery', delivery_state: 'delivered', reaction: { summary: 'set reaction 👍, requested on message 7' } } },
+        { ...row('plain'), text: '', place_history: { kind: 'message' } },
+    ]) });
+    await tick();
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    const word = (node) => node.querySelector('.place-convo-reaction')?.textContent;
+    assert.deepEqual(rows.map(word), ['Reaction: counts observed: 👍 3 on message 7', 'Reaction: set reaction 👍, requested on message 7', undefined]);
+    assert.ok(rows[0].querySelector('.place-convo-who').textContent.includes('Anonymous reactions'));
+    assert.ok(rows[0].querySelector('.place-convo-meta').textContent.includes('Heard as context'));
+    assert.equal(rows[1].querySelector('.chat-markdown'), null, 'no markdown body is mounted for a receipt');
+    reader.close();
+});
+
+test('words a receipt carries beside its reaction stay its speech, and only the prefix translates', async (t) => {
+    const f = fixture(t);
+    setMissTransport(() => Promise.resolve(null));
+    applyPayload({ language: 'fr', english: false, entries: {
+        'code:places.history.reaction': { text: 'Réaction :' }, Settings: { text: 'Réglages' },
+    } });
+    t.after(() => applyPayload({ language: '', english: true, entries: {} }));
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('mine', 'On it.'), role: 'assistant', markdown: true, place_history: { kind: 'delivery', delivery_state: 'delivered', reaction: { summary: 'Settings' } } },
+        { ...row('failed', ''), role: 'system', place_history: { kind: 'delivery', delivery_state: 'failed', reaction: { summary: 'failed: Settings' } } },
+    ]) });
+    await tick();
+    createTranslator({ skipRoots: '[data-i18n-authored]', userContent: '', excludeSelector: '' }).applyTo(f.doc.body);
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    assert.equal(rows[0].querySelector('.chat-markdown').textContent.trim(), 'On it.', 'the words are mounted as speech');
+    assert.equal(rows[0].querySelector('.place-convo-reaction').textContent, 'Réaction : Settings');
+    assert.equal(rows[0].querySelector('.place-convo-reaction').querySelector('[data-i18n-authored]')?.textContent, 'Settings', 'the summary stays authored');
+    assert.equal(rows[1].className, 'place-convo-row is-system', 'a failed receipt keeps its System row');
+    assert.equal(rows[1].querySelector('.chat-markdown'), null);
+    assert.equal(rows[1].querySelector('.place-convo-reaction').textContent, 'Réaction : failed: Settings');
+    reader.close();
+});
+
 test('heard facts sit beside the reason with core words and authored signal labels', async (t) => {
     const f = fixture(t);
     const heard = { ...row('heard'), place_history: { kind: 'message', attention: { decision: 'heard', reason: 'no_wake_match' },
@@ -154,7 +195,8 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
         facts: ['direct_message', 'from_bot', { id: 'signal.words', label: 'PR words' }], labels: { direct_message: 'Declared mail' } });
     const heard = { ...row('heard'), place_history: { kind: 'message', attention: { decision: 'heard' },
         facts: ['any_message', 'direct_message', 'from_bot', 'signal.words'] } };
-    f.reply(({ url }) => url === current.source.url ? status.promise : page([heard]));
+    const statusUrl = `${current.source.url}?account_id=${encodeURIComponent(current.accountId)}`;
+    f.reply(({ url }) => url === statusUrl ? status.promise : page([heard]));
     const sheet = openPlaceSheet(current, { readRooms: async () => index() });
     t.after(() => sheet.close());
     const payload = { text: 'Ready', tone: 'ok', labels: { any_message: 'Every arrival', direct_message: unsafeText } };
@@ -171,7 +213,7 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
     assert.ok(f.q('[data-heard-fact="direct_message"]').hasAttribute('data-i18n-authored'));
     assert.equal(f.q('img'), null);
     assert.deepEqual(sheet.place.labels, { direct_message: 'Declared mail' });
-    assert.equal(f.requests.filter(({ url }) => url === current.source.url).length, 1);
+    assert.equal(f.requests.filter(({ url }) => url === statusUrl).length, 1);
 });
 
 test('reader labels return to core words when absent without replacing the retained message', async (t) => {

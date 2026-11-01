@@ -70,7 +70,6 @@ def test_idle_parent_with_pending_descendant_survives(tmp_path, monkeypatch):
     workers = {1: SimpleNamespace(busy_task_id="root1", proc=_FakeProc(), reaping=False)}
     _patch_queue(q, w, monkeypatch, tmp_path, workers)
     monkeypatch.setattr(q, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(q, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(q, "PENDING", [{"id": "child1", "parent_task_id": "root1", "root_task_id": "root1"}])
     now = time.time()
     q.RUNNING["root1"] = {

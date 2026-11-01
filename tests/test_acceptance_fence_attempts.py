@@ -146,7 +146,6 @@ def test_live_silence_keeps_the_exact_active_fence_and_queues_no_reap(tmp_path, 
     job["meta"].update(started_at=time.time() - 1000, last_heartbeat_at=time.time() - 1000)
     write_task_result(tmp_path, task_id, "running")
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "load_state", lambda: {})
     monkeypatch.setattr(task_reaper, "send_with_budget", lambda *_a, **_kw: None)

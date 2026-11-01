@@ -159,7 +159,7 @@ def wake_on_schema():
     return {"type": "object", "additionalProperties": False,
             "description": "End only this wait on selected mail, task/run terminals, counted reviewer outcomes or wake_at. "
                            "Explicit ids only; omitted/empty means the whole wave plus mail/control attention. "
-                           "Owner input and responsible-child questions always wake. Reviewers continue; waking grants no landing. "
+                           "Owner input, responsible-child questions and host-marked waking place arrivals bypass selectors; context-only place arrivals stay unread until a genuine wake. Reviewers continue; waking grants no landing. "
                            "Panel waves only; subject=system retains its synchronous report wait.",
             "properties": {**{key: {"type": "array", "items": {"type": "string"}, "description": description}
                               for key, description in {

@@ -961,11 +961,13 @@
  */
 
 /**
- * Parent-only controls for a finite widget file lease; the token is a read capability, not API auth.
+ * Parent-only controls for a widget lease; the token is a read capability, not API auth.
  * @typedef {Object} WidgetAssetLeaseRequest
  * @property {string} skill
  * @property {string} tab_id
  * @property {string} generation
+ * @property {'files'|'routes'=} scope  // files (default): ESM declared files; routes: GET/HEAD of the own skill's routes
+ * @property {string=} token  // routes only: re-establish the lease the running frame already uses
  */
 
 /**
@@ -1447,6 +1449,24 @@
  * @property {number=} attempt_key
  * @property {boolean=} duplicate
  * @property {string=} error
+ */
+/**
+ * POST /api/tasks/{task_id}/owner-keep: keep or release the materials of exactly this task; any other field is 400
+ * `unexpected_fields`. No page sends it yet.
+ * @typedef {Object} OwnerKeepRequest
+ * @property {boolean=} keep
+ * @property {string=} note
+ */
+/**
+ * 200; 404 `task_not_found`; 503 `task_unreadable`. `reason` is '' unless inflight (`custody_busy`) or refused.
+ * @typedef {Object} OwnerKeepResponse
+ * @property {string} task_id
+ * @property {boolean} keep  // the fact as it now stands
+ * @property {('kept'|'released'|'partly_retired'|'already_retired'|'inflight'|'refused')} status
+ * @property {string} reason
+ * @property {string[]} retained  // material on disk now: paths, and `pins:<snapshot>` for result pins
+ * @property {string[]} retired  // material a record names that is gone or accepted for deletion
+ * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
  */
 /**
  * @typedef {Object} LogTailResponse

@@ -349,11 +349,11 @@ def test_api_unknown_persistence_never_removes_possible_admission(room, monkeypa
 
 
 def test_own_ensure_returns_the_exact_winning_preparation_row(room, tmp_path, monkeypatch):
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
 
     chosen = tmp_path / "own-folder"
     chosen.mkdir()
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=chosen))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=chosen))
     row = registry.ensure_project_workspace(room.root, "target", tmp_path / "repo", return_project=True)
     basis = registry.project_admission_basis("target", row)
     assert row["working_dir"] == str(chosen)
@@ -593,7 +593,7 @@ def test_selected_writer_refuses_invalid_authority_without_changing_bytes(room, 
 
 @pytest.mark.parametrize("shape", ["existing_folder", "existing_empty", "new_room"])
 def test_real_promotion_provisions_healthy_room_beside_malformed_neighbor(host, tmp_path, monkeypatch, shape):  # noqa: F811
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
     from supervisor import workers
     from supervisor.events_project_routing import _handle_promote_chat_to_task
 
@@ -603,7 +603,7 @@ def test_real_promotion_provisions_healthy_room_beside_malformed_neighbor(host, 
         registry.create_project(host.root, "target", working_dir=str(folder) if shape == "existing_folder" else "")
     registry.create_project(host.root, "other")
     raw = corrupt_neighbor(host.root, routing_generation="unknown", visible_revision=[1], delete_error={"x": 2})
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
     events = []
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
     outcome = _handle_promote_chat_to_task({

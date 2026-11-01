@@ -14,6 +14,7 @@ import pathlib
 import time
 from typing import Any, Dict, List, Optional
 
+from ouroboros.model_wait import execution_close
 from ouroboros.outcomes import (
     EXECUTION_FAILED,
     EXECUTION_INFRA_FAILED,
@@ -600,7 +601,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 outcome_axes=terminal_outcome_axes(lifecycle=STATUS_FAILED, execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
                 crash_signal=crash_signal,
                 crash_exitcode=exitcode if isinstance(exitcode, int) else None,
-                **r_cost_fields,
+                **r_cost_fields, **execution_close(task, meta),  # the dead attempt's #939 clock
             )
         except Exception as exc:
             raise TerminalFileRecoveryPending("crash terminal result could not be stored") from exc
@@ -742,7 +743,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                         reason_code=reason_code,
                         review_trigger="worker_terminal",
                     ),
-                    **r_cost_fields,
+                    **r_cost_fields, **execution_close(task, meta),  # the dead attempt's #939 clock
                 )
             except Exception:
                 log.debug(

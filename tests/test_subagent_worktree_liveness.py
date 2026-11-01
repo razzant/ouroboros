@@ -216,7 +216,8 @@ def test_a_checkout_surviving_its_removal_keeps_its_row_and_is_retried(world, mo
     assert _git(repo, "branch", "--list", "subagent/stubborn*").stdout.strip(), "the branch is kept with the row"
 
     # Restore only deletion faults, keeping the fixture's canonical install selected.
-    (stubborn / "released").touch()
+    (stubborn / "released").touch()  # a changed identity, no unique work left behind
+    (stubborn / "released").unlink()
     assert _prune(world, retention_days=0, live=lambda _task: False) == {"removed": 1, "kept": 0}
     assert not stubborn.exists() and sw.list_worktrees(data_dir=data) == []
 
@@ -224,12 +225,12 @@ def test_a_checkout_surviving_its_removal_keeps_its_row_and_is_retried(world, mo
 def test_remove_worktree_keeps_the_row_when_the_directory_survives(world, monkeypatch):
     repo, data, root = world
     path = _copy(world, "held")
-    monkeypatch.setattr(sw, "_force_rmtree", lambda _path: None)
-    monkeypatch.setattr(sw, "_git_quiet", lambda *_args: None)
-    assert sw.remove_worktree(task_id="held", worktree_root=root, data_dir=data) is False
+    with monkeypatch.context() as failed:  # restore only the deletion faults: the fixture's install stays selected
+        failed.setattr(sw, "_force_rmtree", lambda _path: None)
+        failed.setattr(sw, "_git_quiet", lambda *_args: None)
+        assert sw.remove_worktree(task_id="held", worktree_root=root, data_dir=data) is False
     [row] = sw.list_worktrees(data_dir=data)
     assert row["removal_failed"] and path.is_dir()
-    monkeypatch.undo()
     (path / "released").touch()
     assert sw.remove_worktree(task_id="held", worktree_root=root, data_dir=data) is True
     assert sw.list_worktrees(data_dir=data) == [] and not path.exists()
@@ -403,11 +404,13 @@ def test_failed_removal_waits_for_changed_directory_identity_without_rewriting_f
         assert record.read_bytes() == before and record.stat().st_mtime_ns == mtime
         assert attempts == [path] and len(verdicts) == judged and commands == []
 
-    (path / "changed").touch()  # a changed root identity authorizes another attempt, not elapsed time
+    (path / "changed").touch()
+    (path / "changed").unlink()  # a changed root identity authorizes another attempt, not elapsed time
     assert not prune() and attempts == [path, path]
     assert sw.list_worktrees(data)[0]["removal_failed"] == stamp
     monkeypatch.setattr(sw, "_force_rmtree", real_remove)
     (path / "changed_again").touch()
+    (path / "changed_again").unlink()
     assert prune() and not path.exists() and sw.list_worktrees(data) == []
 
 
@@ -461,6 +464,8 @@ def test_a_deep_survivor_retries_once_in_each_new_process(world, monkeypatch, ki
     held.write_text("held by another process")
     monkeypatch.setattr(sw, "_force_rmtree", lambda _: None)
     monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _: False)
+    monkeypatch.setattr("ouroboros.copy_capture_proof.plain_copy_verdict",  # this test's subject is the survivor
+                        lambda *_a, **_k: {"remove": True, "keep_branch": False, "reason": "no_unique_work"})
     if kind == "snapshot":
         assert sw.prune_execution_snapshots(set(), worktree_root=root, data_dir=data)["removed"] == []
     else:

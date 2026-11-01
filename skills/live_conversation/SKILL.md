@@ -1,7 +1,7 @@
 ---
 name: live_conversation
 description: Talk with Ouroboros using this room's ordinary memory, tools and controls.
-version: 0.1.23
+version: 0.1.29
 type: extension
 runtime: python3
 entry: plugin.py

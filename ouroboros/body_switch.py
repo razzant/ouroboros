@@ -35,33 +35,24 @@ A managed Update (``kind=update``, schema 2) carries the owner's uncommitted
 work: each switch row names the commit side, the INDEX side and the FILE side
 separately, so one path may differ in all three. Its switch set may be dirty by
 design; a path is later work only when its file or index entry is neither
-recorded side. After the branch moves, an import probe of the new tree runs in
-a child with a scratch data root before any successor touches the real one; a
-failed probe returns files, index and branch at once. A successor server entry
-is recorded before its imports (one that cannot make the first record stops there
-and the next start retries), and a later entry after an unready one asks
-``qualify_return`` whether the previous generation may run on what is there
-now: only ``compatible`` evidence returns it (after an entry, only a switch of
-passive stylesheets over an otherwise unchanged composition, on a root with no
-owned engine and no switched environment), data is never rolled back, and a
-Panic forbids every automatic step. Its own packages (a changed lock, a new
-app) are selected at the one path the body runs with, and returned, by the
-identities authorization recorded: what else is found there is kept aside, a
-venv's console scripts (Windows launchers too) are pointed at that path, and a
-rename the system refuses returns the whole transition before any entry, the
-error recorded as said. A bare interpreter's private environment
-(``kind=private``) names the interpreter the probe and the hand-over run.
+recorded side (``_foreign_paths``). After the branch moves, its own packages (a
+changed lock, a new app) are selected at the one path the body runs with
+(``_select_environment``), then an import probe of the new tree runs in a scratch
+child (``_probe``); either failing returns the whole transition before any entry.
+Entries are recorded before their imports (``_update_entry``), and a later entry
+after an unready one asks ``qualify_return`` whether the previous generation may
+run on what is there now: data is never rolled back, and a Panic forbids every
+automatic step. A bare interpreter's private environment (``kind=private``)
+names the interpreter the probe and the hand-over run.
 
 An Update that also replaces the official macOS app (a ``native`` record) is
-switched by the captured app installer (``app_install.py``), never by a hook:
-the new app's frozen bootstrap installs packages and imports the tree before
-any hooked entry, so the installer switches files, index, branch and
-environment (``native_switch``) once the old app is gone and before the new app
-opens. An entry that finds such a transition armed leaves it to a live
-installer and abandons it when that process is provably gone; an entry that
-finds the tree switched while the installed app is still the previous one
-(the installer died before its exchange) returns the tree. Once the new app
-may have run, no return is automatic.
+switched by the captured app installer (``app_install.py``, ``native_switch``),
+never by a hook: the new app's frozen bootstrap installs packages and imports
+the tree before any hooked entry. An entry that finds such a transition armed
+leaves it to a live installer and abandons it when that process is provably
+gone; an entry that finds the tree switched while the installed app is still
+the previous one (the installer died before its exchange) returns the tree
+(``_app_not_exchanged``). Once the new app may have run, no return is automatic.
 """
 import contextlib
 import json
@@ -94,8 +85,7 @@ _PROBE_TIMEOUT_SEC = 600
 _INSTALL_SCOPE_PREFIX = "OURO_INSTALL_SCOPE_"
 # Source paths whose code a launcher process runs before any server entry of the new tree.
 _LAUNCHER_PATHS = ("launcher.py", "ouroboros/launcher")
-# The environment state this process's entry found (``main``): one that started on a switched-in
-# environment has run its startup files, so a return hands the tree to a fresh process.
+# The environment state this process's entry found (``main``); ``_return_to_old`` says why a return reads it.
 _ENTERED_ON = []
 
 
@@ -161,8 +151,7 @@ def _git(root, *args, data=None, check=True, index=None):
 
 
 def git_dir(root):
-    out = _git(root, "rev-parse", "--absolute-git-dir")[1].decode("utf-8", "surrogateescape").strip()
-    return out
+    return _git(root, "rev-parse", "--absolute-git-dir")[1].decode("utf-8", "surrogateescape").strip()
 
 
 def pointer_path(root):
@@ -714,16 +703,62 @@ def _return_to_old(root, helper_dir, handoff, reason, files_at_start, phase="aba
                                  for row in rows)
 
 
+def _returned(root, helper_dir, handoff, trigger, files_at_start=None, reason="", **facts):
+    """Record the decision ``returned`` and write the previous composition back (``_return_to_old``, ``reason``
+    defaulting to ``trigger``); ``files_at_start`` (what was there before this process wrote) defaults to now."""
+    handoff["return"] = {"outcome": "returned", "trigger": trigger, "reasons": [], "at": _now(), **facts}
+    if files_at_start is None:
+        files_at_start = _states(root, handoff["switch"], _tracks_filemode(root))
+    return _return_to_old(root, helper_dir, handoff, reason or trigger, files_at_start, phase="returned")
+
+
 def _path_identity(path):
     """``[device, inode]`` of what is at ``path`` itself (a link is not followed), ``None`` when nothing is.
 
-    A rename on its volume keeps it; a directory made again at that path has another.
+    A rename on its volume keeps it. A directory made again at that path may get the same one
+    (ext4 hands out a freed inode at once), and one emptied in place keeps it everywhere.
     """
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return None
     return [st.st_dev, st.st_ino]
+
+
+GENERATION_WITNESS = "ouroboros-update-generation.json"
+
+
+def mark_generation(path):
+    """Preparation's ``[device, inode, token]`` of a generation it made, a fresh token written inside it.
+
+    Authorization and the switch prove the generation by it (``_is_prepared``). The renames of a
+    selection and a return keep the token with the directory; a directory made again at the path,
+    or the generation emptied in place, has none, whatever inode it keeps.
+    """
+    token = os.urandom(16).hex()
+    _write_json(os.path.join(path, GENERATION_WITNESS), token)
+    return _path_identity(path) + [token]
+
+
+def _is_prepared(path, prepared):
+    """Is what is at ``path`` the generation its preparation marked (``mark_generation``)?
+
+    By its token, the directory itself at ``path`` (a link is not followed): the device and inode
+    recorded beside it neither prove it (a directory made again may get them) nor disprove it (a
+    reboot may renumber the device: btrfs's anonymous device numbers, a renumbered disk).
+    An identity recorded before the token was part of it (``[device, inode]``) is compared as it was written.
+    """
+    if not prepared:
+        return False
+    if len(prepared) < 3:
+        return _path_identity(path) == prepared[:2]
+    if os.path.islink(path) or not os.path.isdir(path):
+        return False
+    try:
+        with open(os.path.join(path, GENERATION_WITNESS), encoding="utf-8") as fh:
+            return json.load(fh) == prepared[2]
+    except (OSError, ValueError):
+        return False
 
 
 def _set_aside(helper_dir, handoff, path):
@@ -743,12 +778,13 @@ def _select_environment(helper_dir, handoff):
 
     Two renames on one volume, recorded first and resumed by what is where: the serving
     packages move aside (kept for a return), the prepared ones take their place. Each is
-    told by the identity authorization recorded (``identity``), never by a name alone: a
+    told by what authorization recorded (``identity``), never by a name alone: the serving
+    one by its device and inode, the prepared one by the token its preparation wrote into it (``mark_generation``): a
     directory something else made at the fixed path between the renames (a launcher's user
-    base, a fresh runtime venv) is neither, so it is kept aside (``_set_aside``), never
-    selected or deleted. A bare interpreter's first private environment has no serving one
-    (``None``). Before any import of the new tree; a launcher's dependency sync then finds
-    the new lock already satisfied.
+    base, a fresh runtime venv), even one that got the prepared inode again, is neither, so it
+    is kept aside (``_set_aside``), never selected or deleted. A bare interpreter's first
+    private environment has no serving one (``None``). Before any import of the new tree; a
+    launcher's dependency sync then finds the new lock already satisfied.
     """
     environment = handoff.get("environment")
     if not environment or environment.get("state") == "selected":
@@ -760,11 +796,11 @@ def _select_environment(helper_dir, handoff):
     if serving and _path_identity(current) == serving and not os.path.lexists(previous):
         _rename(current, previous, "serving_aside")  # refused (on Windows, say, a process inside it): nothing moved
     _fail_point("mid_environment")
-    if _path_identity(current) not in (None, prepared, serving):
+    if _path_identity(current) not in (None, serving) and not _is_prepared(current, prepared):
         _set_aside(helper_dir, handoff, current)
-    if _path_identity(generation) == prepared and not os.path.lexists(current):
+    if _is_prepared(generation, prepared) and not os.path.lexists(current):
         _rename(generation, current, "prepared_in")  # refused: the return puts the serving packages back
-    if _path_identity(current) != prepared or (serving and _path_identity(previous) != serving):
+    if not _is_prepared(current, prepared) or (serving and _path_identity(previous) != serving):
         raise _Stuck("the prepared dependency environment could not be selected at %s" % current)
     if environment.get("kind") in ("venv", "private"):
         _retarget_scripts(current, generation, current)  # resumable: a second pass finds nothing to change
@@ -894,10 +930,10 @@ def _moved_line(data, start, end, old, new, windows):
 def _restore_environment(helper_dir, handoff):
     """A return puts the previous generation's own packages back where it runs them.
 
-    By identity, as the selection moved them: the prepared generation goes back to its own
-    name, anything else at the fixed path is kept aside, and the serving packages return. A
-    bare interpreter's first private environment leaves the fixed path empty: that
-    interpreter's own packages serve again.
+    By identity, as the selection moved them: the prepared generation (by its token) goes
+    back to its own name, anything else at the fixed path is kept aside, and the serving
+    packages return. A bare interpreter's first private environment leaves the fixed path
+    empty: that interpreter's own packages serve again.
     """
     environment = handoff.get("environment")
     if not environment or environment.get("state") not in ("selecting", "selected"):
@@ -905,7 +941,7 @@ def _restore_environment(helper_dir, handoff):
     current, generation, previous = environment["current"], environment["generation"], environment["previous"]
     serving, prepared = environment["identity"]["current"], environment["identity"]["generation"]
     try:
-        if _path_identity(current) == prepared and not os.path.lexists(generation):
+        if _is_prepared(current, prepared) and not os.path.lexists(generation):
             os.rename(current, generation)
         if _path_identity(current) not in (None, serving):
             _set_aside(helper_dir, handoff, current)
@@ -1020,12 +1056,10 @@ def owned_engine(data_dir):
 def _composition(root):
     """The checkout's index tree and working-files tree, or ``None`` when either cannot be measured.
 
-    Measured as preparation's snapshot measures the layers it records (``update_prepare.snapshot``):
-    a byte copy of the real index with its own time (its stat data spares rehashing unchanged files,
-    and its time keeps an entry stamped in that second checked by content, so a same-size edit then
-    is seen; a split index reads its shared part from the repository and is written whole,
-    ``core.splitIndex`` off) gives the index tree, then ``add -A`` (untracked included, ignored files
-    excluded) gives the files tree. The real index is only copied.
+    Measured as preparation's snapshot measures the layers it records (``update_prepare.snapshot`` says
+    why): a byte copy of the real index with its own time, written whole (``core.splitIndex`` off), gives
+    the index tree, then ``add -A`` (untracked included, ignored files excluded) gives the files tree.
+    The real index is only copied.
     """
     rc, path = _git(root, "rev-parse", "--git-path", "index", check=False)
     if rc != 0:
@@ -1216,8 +1250,6 @@ def _probe(root, handoff):
     the entry ends it too) and is bounded by ``_PROBE_TIMEOUT_SEC``; it imports only, on
     the Python the new generation runs (``_probe_command``).
     """
-    import shutil
-
     scratch = tempfile.mkdtemp(prefix="ouroboros-switch-probe-")
     env = _probe_env(handoff, scratch)
     try:
@@ -1261,10 +1293,7 @@ def _update_entry(root, helper_dir, handoff):
     if handoff.get("native") and _app_not_exchanged(handoff):
         if installation_panic(handoff.get("data_dir") or ""):
             raise _Stuck("the app installer stopped before its exchange and a Panic is recorded; nothing was returned")
-        handoff["return"] = {"outcome": "returned", "trigger": "app_not_exchanged", "reasons": [], "at": _now()}
-        rows, tracked = handoff["switch"], _tracks_filemode(root)
-        return _return_to_old(root, helper_dir, handoff, "app_not_exchanged", _states(root, rows, tracked),
-                              phase="returned")
+        return _returned(root, helper_dir, handoff, "app_not_exchanged")
     entries = handoff.setdefault("entries", [])
     kind = _entry_kind()
     servers = [entry for entry in entries if entry.get("kind") == "server"]
@@ -1272,12 +1301,9 @@ def _update_entry(root, helper_dir, handoff):
             handoff.get("return_requested") or (servers and not servers[-1].get("ready"))):
         trigger = "return_requested" if handoff.get("return_requested") else "successor_start_failed"
         outcome, reasons = qualify_return(root, handoff)
-        decision = {"outcome": "returned" if outcome == "compatible" else outcome, "trigger": trigger,
-                    "reasons": reasons, "at": _now()}
-        handoff["return"] = decision
-        if outcome == "compatible":
-            rows, tracked = handoff["switch"], _tracks_filemode(root)
-            return _return_to_old(root, helper_dir, handoff, trigger, _states(root, rows, tracked), phase="returned")
+        if outcome == "compatible":  # no reasons
+            return _returned(root, helper_dir, handoff, trigger)
+        handoff["return"] = {"outcome": outcome, "trigger": trigger, "reasons": reasons, "at": _now()}
     if "census" not in handoff:
         handoff["census"] = data_census(handoff.get("data_dir") or "")  # what the successor has not touched yet
     if kind or not any(entry.get("kind") == "other" for entry in entries):  # one record says another ran
@@ -1347,9 +1373,7 @@ def _switch(root, helper_dir, handoff):
             raise _Stuck("the new tree failed its import probe and a Panic is recorded; nothing was returned")
         if failure:
             # Nothing of the new tree ran outside the scratch probe: positive evidence for this return.
-            handoff["return"] = {"outcome": "returned", "trigger": "import_probe_failed", "reasons": [],
-                                 "detail": failure[:2000], "at": _now()}
-            return _return_to_old(root, helper_dir, handoff, "import_probe_failed", files, phase="returned")
+            return _returned(root, helper_dir, handoff, "import_probe_failed", files, detail=failure[:2000])
     record(helper_dir, handoff, "switched", "files, index and branch are at the candidate")
     return True
 
@@ -1452,25 +1476,20 @@ def main(serving_root):
 def _hook_switch(root, helper_dir, handoff, phase):
     """An entry's own switch of an armed or interrupted transition, under the lock; True: hand over."""
     try:
+        native = handoff.get("native")
         if phase == "armed":
             reason = _armed_refusal(root, handoff)
+            if native and not reason:
+                # The app installer switches this transition once the old app is gone; never an entry.
+                if not process_gone(native.get("installer")):
+                    return False
+                reason = "installer_gone: nothing was switched"
             if reason:
                 record(helper_dir, handoff, "abandoned", reason)
                 _remove_pointer(root)
                 return False
-        native = handoff.get("native")
-        if native and phase == "armed":
-            # The app installer switches this transition once the old app is gone; never an entry.
-            if process_gone(native.get("installer")):
-                record(helper_dir, handoff, "abandoned", "installer_gone: nothing was switched")
-                _remove_pointer(root)
-            return False
         if native:  # the installer died mid-switch, before any app exchange: back by content
-            rows, tracked = handoff["switch"], _tracks_filemode(root)
-            handoff["return"] = {"outcome": "returned", "trigger": "native_switch_interrupted", "reasons": [],
-                                 "at": _now()}
-            return _return_to_old(root, helper_dir, handoff, "native_switch_interrupted",
-                                  _states(root, rows, tracked), phase="returned")
+            return _returned(root, helper_dir, handoff, "native_switch_interrupted")
         handoff["attempts"] = int(handoff.get("attempts") or 0) + 1
         record(helper_dir, handoff, "switching", "attempt %d" % handoff["attempts"])
         return _switch(root, helper_dir, handoff)
@@ -1504,9 +1523,7 @@ def native_switch(serving_root, helper_dir):
         return str(handoff.get("phase") or ""), "the transition is not armed for the app installer"
     reason = _armed_refusal(root, handoff)
     if reason:
-        record(helper_dir, handoff, "abandoned", reason)
-        _remove_pointer(root)
-        return "abandoned", reason
+        return native_abandon(root, helper_dir, reason), reason
     handoff["attempts"] = int(handoff.get("attempts") or 0) + 1
     record(helper_dir, handoff, "switching", "attempt %d by the app installer" % handoff["attempts"])
     try:
@@ -1531,10 +1548,7 @@ def native_return(serving_root, helper_dir, reason, handoff=None):
     handoff = handoff or read_handoff(helper_dir)
     if handoff.get("phase") not in ("switching", "switched"):
         return str(handoff.get("phase") or "")
-    handoff["return"] = {"outcome": "returned", "trigger": reason.split(":", 1)[0], "reasons": [],
-                         "detail": reason[:2000], "at": _now()}
-    rows, tracked = handoff["switch"], _tracks_filemode(root)
-    _return_to_old(root, helper_dir, handoff, reason, _states(root, rows, tracked), phase="returned")
+    _returned(root, helper_dir, handoff, reason.split(":", 1)[0], reason=reason, detail=reason[:2000])
     return "returned"
 
 

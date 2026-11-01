@@ -2216,7 +2216,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .chat-live-card[data-portal="1"] > [data-live-reviews-host],
 .chat-live-card[data-portal="1"] > .chat-subagents,
 .chat-live-card[data-portal="1"] > .chat-live-summary-button .chat-live-summary-side,
-.chat-live-card[data-portal="1"] > .chat-live-foot > .chat-live-foot-end > .chat-live-review-summary {
+.chat-live-card[data-portal="1"] > .chat-live-summary-button .chat-live-review-summary,
+.chat-live-card[data-portal="1"] > .chat-live-summary-button .chat-live-doors {
     display: none;
 }
 
@@ -2253,8 +2254,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     gap: var(--space-3);
 }
 
-/* A root card reads top to bottom: status (chip + quiet fact) with its disclosure on the right,
-   then the work's name on a line of its own, at the card-title size and title weight 500. */
+/* A root card reads top to bottom (owner 30.10, B): its status row (chip, quiet fact and clock) with its doors on the
+   right, then the work's name on a line of its own, at the card-title size and title weight 500. */
 .chat-live-card:not(.subagent) > .chat-live-summary-button > .chat-live-summary {
     flex-wrap: wrap;
     align-items: center;
@@ -2262,7 +2263,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 
 /* The status box spans its row and centres its own chip, so an empty status (a terminal projection) starts at
-   the row's top with the disclosure instead of floating to the row's middle. */
+   the row's top with the doors instead of floating to the row's middle. */
 .chat-live-card:not(.subagent) > .chat-live-summary-button .chat-live-summary-main {
     align-self: stretch;
 }
@@ -2274,9 +2275,66 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     line-height: var(--line-title);
 }
 
-.chat-live-card:not(.subagent) > .chat-live-summary-button .chat-live-summary-side {
+/* The whole name wraps at the reading measure of the line under it (a portal keeps its own two lines). */
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-summary-button .chat-live-title {
+    line-height: 1.45;
+}
+
+/* A status row of the doors' height, whose box takes the room the doors leave: its clock wraps under the chip before
+   a door leaves the row. A portal has no doors and keeps its chip's own box. */
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-summary-button .chat-live-summary-main {
+    flex: 1 1 0;
+    min-width: min-content;
+    min-height: var(--space-5);
+}
+
+/* The card's doors: `Reviews N` (once there are reviews) then `Details`, one quiet group at the end of the status
+   row and on its first line (a narrow card's clock wraps under the chip, never a door), each paying its padding back
+   at the group's end so the words stand where words stand. A child keeps `Details` alone in its identity row (its
+   Reviews door docks in its foot): the group adds no box there. */
+.chat-live-doors {
+    display: contents;
+}
+
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-summary-button .chat-live-doors {
     order: 2;
-    margin-inline-start: auto;
+    display: inline-flex;
+    align-self: flex-start;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: var(--space-5);
+    margin-inline: auto calc(var(--space-2) * -1);
+}
+
+.chat-live-card:not(.subagent) > .chat-live-summary-button .chat-live-doors > .chat-live-summary-side {
+    margin-inline: 0;
+}
+
+/* Beside Details, the Reviews door is its twin: the same box, words and chevron. */
+.chat-live-card:not(.subagent) > .chat-live-summary-button .chat-live-doors > .chat-live-review-summary {
+    box-sizing: content-box;
+    min-height: calc(1.45 * var(--type-body));
+    margin: calc(var(--space-1) * -1) 0;
+    padding: var(--space-1) var(--space-2);
+    color: var(--text-secondary);
+    font-weight: inherit;
+}
+
+.chat-live-card:not(.subagent) > .chat-live-summary-button .chat-live-doors > .chat-live-review-summary > .chat-live-chevron {
+    color: var(--text-disabled);
+}
+
+/* The card's clock beside its chip (chat_activity.js paintHeadClock): `updated` or `started` in the meta line's ink.
+   A child's clock ends its meta line; a shell that became a child never keeps a root's clock in its identity row. */
+.chat-live-when {
+    color: var(--text-secondary);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    white-space: nowrap;
+}
+
+.chat-live-card.subagent > .chat-live-summary-button .chat-live-when {
+    display: none;
 }
 
 /* Chip + typing dots only; the title is their sibling so a narrow container can
@@ -2418,11 +2476,12 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     overflow-wrap: anywhere;
 }
 
-/* Collapsed summaries have a stable compact geometry. Expanded cards keep the
-   ordinary wrapping behavior; complete activity/review/result text lives in
-   their existing timeline disclosure rather than in a mouse-only tooltip. */
-.chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-title,
-.chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-activity {
+/* A collapsed child and a Main portal keep a compact geometry; a root card's name and latest line wrap whole
+   (owner 30.10, B). Expanded cards keep the ordinary wrapping behavior; complete activity/review/result text lives
+   in their existing timeline disclosure rather than in a mouse-only tooltip. `:where` keeps the old weight, so the
+   `:empty` rules below still win. */
+.chat-live-card:where(.subagent, [data-portal="1"]):not([data-expanded="1"]) > .chat-live-summary-button .chat-live-title,
+.chat-live-card:where(.subagent, [data-portal="1"]):not([data-expanded="1"]) > .chat-live-summary-button .chat-live-activity {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
@@ -2430,8 +2489,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     overflow: hidden;
 }
 
-/* One reserved title line (a coined two-line name still clamps to two; the
-   stable-viewport seam absorbs that one-line growth). */
+/* One reserved title line (a child's or a portal's coined two-line name still clamps to two; the
+   stable-viewport seam absorbs that growth, as it does a root's longer name). */
 .chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-title {
     min-height: 1.45em;
 }
@@ -2453,9 +2512,9 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     min-width: 0;
     overflow-wrap: anywhere;
 }
-.chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-activity {
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
+/* A root card's latest line follows its name closely: the two are one statement (B's 4px). */
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-summary-button {
+    row-gap: var(--space-1);
 }
 .chat-live-card > .chat-live-summary-button .chat-live-activity:empty { display: none; }
 
@@ -2476,7 +2535,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     transition: transform 0.18s ease;
 }
 
-.chat-live-card[data-expanded="1"] > .chat-live-summary-button .chat-live-chevron {
+/* Details' own state, never the card's: the Reviews door beside it turns only with its own (below). */
+.chat-live-summary-side[aria-expanded="true"] > .chat-live-chevron {
     transform: rotate(180deg);
 }
 
@@ -2496,11 +2556,11 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     min-height: 1.35em;
 }
 
-/* The card's foot: the meta line (tool calls · cost · updated) at full width, then ONE action row. Controls
-   never sit on the meta/timestamp band. The row leads with the quiet Reviews count (under the metadata, DESIGN
-   "Reviews inside task cards") and ends right-aligned with the commands over the work: [Turn into project]
-   [Resume] [Stop…]; Reply is the row menu's (DESIGN "Replies"). A work portal's row leads with its Project
-   reference instead. Same structure at every width. */
+/* The card's foot: the meta line (who ran it · how long · tool calls · cost), then ONE action row of the commands
+   over the work, right-aligned: [Turn into project] [Resume] [Stop…]; Reply is the row menu's (DESIGN "Replies").
+   A root card's foot is one band (owner 30.10, B, below): the meta at its left, the commands at its right end. A
+   child's row leads with its docked Reviews count and a work portal's with its Project reference, each under the
+   meta line (with its clock) at every width. */
 .chat-live-foot {
     display: flex;
     flex-direction: column;
@@ -2522,15 +2582,55 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     margin-inline-end: auto;
 }
 
-/* A root card's action row, wherever it stands (a control, or a Reviews count alone), keeps the controls'
-   height, so a row of words breathes like a row of buttons. */
+/* A root card's action row, wherever it stands, keeps the controls' height, so a row of words breathes like a row
+   of buttons. */
 .chat-live-card:not(.subagent) > .chat-live-foot > .chat-live-foot-end {
     min-height: calc(var(--space-5) + var(--space-1));
 }
 
-/* Under a finger the Reviews door and the commands keep their 28px look and gain the shared hit area (ui.css
-   .ui-hit-area), which reaches out above and below; rows that wrap on a phone part by that overshoot, so a finger's
-   targets never overlap. */
+/* The root card's band: facts left, the command cluster right on the controls' height; when the two do not fit the
+   cluster wraps whole under the facts, so no fact is ever stranded under a button. It sits 12px under the card's
+   line and keeps the card's 16px inset below. With no receipt, fact or command it closes the card on its summary
+   (`> *`, never `:empty`, inside `:has()`: WebKit re-matches that when a late Continue lands). */
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-foot {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-4);
+    min-height: calc(var(--space-5) + var(--space-1));
+    padding-top: 0;
+    padding-bottom: var(--space-4);
+}
+
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-foot > .chat-live-meta {
+    flex: 0 1 auto;
+}
+
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-foot > .chat-live-foot-end {
+    margin-inline-start: auto;
+}
+
+/* A Swarm root's receipt stays one line of its own, first in the foot (DESIGN "Composer owner controls"), the band under
+   it; with no fact beside it, the empty meta adds no line. */
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-foot > .chat-live-swarm-receipt {
+    flex: 0 0 100%;
+}
+
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-foot > .chat-live-swarm-receipt ~ .chat-live-meta:empty {
+    display: none;
+}
+
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-foot:not(:has(> .chat-live-swarm-receipt, > .chat-live-meta > *, > .chat-live-foot-end > .chat-live-actions > *)) {
+    display: none;
+}
+
+.chat-live-card:not(.subagent):not([data-portal="1"]) > .chat-live-summary-button:not(:has(~ .chat-live-foot > .chat-live-swarm-receipt, ~ .chat-live-foot > .chat-live-meta > *, ~ .chat-live-foot > .chat-live-foot-end > .chat-live-actions > *)) {
+    padding-bottom: var(--space-4);
+}
+
+/* Under a finger the foot's commands (and a child's docked Reviews door) keep their 28px look and gain the shared hit
+   area (ui.css .ui-hit-area), which reaches out above and below; rows that wrap on a phone part by that overshoot, so a
+   finger's targets never overlap. A root's doors stand in its head, a row away from them. */
 @media (pointer: coarse) {
     .chat-live-foot-end,
     .chat-live-foot-end > .chat-live-actions {
@@ -5806,7 +5906,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .storage-summary-actions { flex: 0 0 auto; }
 /* A busy action keeps its focus (aria-disabled, not disabled) but stops looking pressable. */
-.storage-actions > .btn[aria-disabled="true"] { box-shadow: none; color: var(--text-meta); cursor: default; }
+.storage-actions > .btn[aria-disabled="true"], .storage-free-picks > .btn[aria-disabled="true"] { box-shadow: none; color: var(--text-meta); cursor: default; }
 .storage-progress {
     display: flex;
     align-items: baseline;
@@ -5856,6 +5956,26 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-group-places { display: grid; margin: var(--space-2) 0 0 calc(8px + var(--space-2)); padding: 0; list-style: none; }
 .storage-place.is-member { grid-template-columns: minmax(0, 1fr) auto minmax(56px, auto); padding-block: var(--space-2); border-top: 1px solid var(--surface-border-soft); }
 .storage-group-places > .storage-place:first-child { border-top: 0; }
+/* A group folds under its head and one line; the caret is drawn because the row's own layout drops the native marker. */
+.storage-group-fold > summary { position: relative; display: block; padding-inline-end: 20px; list-style: none; cursor: pointer; }
+.storage-group-fold > summary::-webkit-details-marker { display: none; }
+.storage-group-fold > summary::after {
+    content: '';
+    position: absolute;
+    inset-inline-end: 4px;
+    top: 7px;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--text-meta);
+    border-bottom: 1.5px solid var(--text-meta);
+    transform: rotate(-45deg);
+}
+.storage-group-fold[open] > summary::after { transform: rotate(45deg); }
+.storage-group-fold > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+.storage-group-said { display: block; margin: 2px 0 0 calc(8px + var(--space-2)); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-group-open { margin-top: var(--space-2); }
+.storage-group-open > .storage-group-places,
+.storage-group-open > .storage-group-body { margin-top: 0; }
 .storage-place-label { grid-column: 1; min-width: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 500; overflow-wrap: anywhere; }
 .storage-place.is-member > .storage-place-size { grid-column: 2; }
 .storage-place.is-member > .storage-place-delta { grid-column: 3; }
@@ -5867,8 +5987,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-parts-list > li { display: flex; justify-content: space-between; gap: var(--space-3); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .storage-parts-rest { justify-content: flex-start; }
 
-/* Temporary space: the tray closing the list card (layout B1). */
-.storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--surface-border); }
+/* Free temporary space: the flow under the free-space reading in the first card. */
+.storage-auto { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--surface-border); }
 .storage-tray:empty { display: none; }
 .storage-tray p { margin: 0; }
 .storage-tray-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
@@ -5898,7 +6019,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .storage-free-size { grid-column: 3; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); white-space: nowrap; }
 .storage-free-why { grid-column: 2 / -1; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-/* One offered group: no checkbox column, the name is plain text. */
+/* Rows of a read-only list: no checkbox column, the name is plain text. */
 .storage-free-groups.is-single > .storage-free-group { grid-template-columns: minmax(0, 1fr) auto; }
 .storage-free-groups.is-single .storage-free-label { grid-column: 1; cursor: auto; }
 .storage-free-groups.is-single .storage-free-size { grid-column: 2; }
@@ -5911,6 +6032,19 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-largest-size { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); white-space: nowrap; }
 .storage-largest-group { grid-column: 1 / -1; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .storage-tray > .storage-actions > .storage-meta { margin: 0; }
+.storage-free-more { padding-top: 0; }
+.storage-free-more .storage-free-groups { margin-top: var(--space-1); }
+.storage-free-list > .storage-free-group:first-child { border-top: 0; }
+.storage-free-path { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+/* A copy offered by hand: what it would lose is the row's one line of ink, its largest unsaved paths fold under it. */
+.storage-free-risk { color: var(--text-primary); }
+.storage-free-group > .storage-free-paths { grid-column: 2 / -1; margin-top: var(--space-1); }
+.storage-free-paths .storage-largest-list { gap: 2px; }
+.storage-free-paths :is(.storage-largest-name.storage-free-path, .storage-largest-size) { font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-free-paths .storage-largest-size { color: var(--text-meta); }
+.storage-free-sub { margin: var(--space-3) 0 0; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 650; }
+.storage-free-picks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-top: var(--space-2); }
+.storage-free-picks > .storage-meta { margin: 0 auto 0 0; }
 
 /* A size that carries a qualifier ("3.7 GB (some could not be read)") is too long to share the name's line on a
    narrow card: it goes under the name, so a group's name never shrinks to a column of a few letters. The card's own
@@ -5928,6 +6062,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     .storage-summary-actions { align-self: stretch; }
     .storage-actions { flex-direction: column; align-items: stretch; }
     .storage-actions > .btn { width: 100%; }
+    .storage-panel-actions { flex-direction: row; }
+    .storage-panel-actions > .btn { width: auto; }
     .storage-group-head { grid-template-columns: 8px minmax(0, 1fr) auto; }
     .storage-group-head > .storage-place-delta { grid-column: 2 / -1; text-align: start; }
     .storage-place.is-member { grid-template-columns: minmax(0, 1fr) auto; }
@@ -6733,9 +6869,11 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     max-width: 520px;
 }
 
+/* A commit hash or a path is one long word: it wraps inside the dialog, never past its edge. */
 .confirm-dialog .marketplace-modal-body p {
     margin: 0;
     white-space: pre-line;
+    overflow-wrap: anywhere;
 }
 
 /* A dialog carrying rendered prose (the update description before Apply) reads at a wider

@@ -72,19 +72,18 @@ def _session_task_text(system_prompt: str, user_content: str, session_root: str)
 
 
 def plan_deadline_skip(ctx: ToolContext, *, emit: bool = False) -> str:
-    """Project the existing deadline rail without starting a paid reviewer panel."""
-    from ouroboros.config import get_plan_task_deadline_min_sec
+    """Project the existing deadline rail without starting a paid reviewer panel: only a
+    deadline spent down to its finalization reserve refuses; any time beyond it is the panel's."""
+    from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
+    from ouroboros.task_pacing import effective_finalization_reserve_sec
 
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
     deadline = parse_deadline_ts(metadata.get("deadline_at"))
-    if deadline is None:
+    reserve = effective_finalization_reserve_sec(ctx)
+    if deadline is None or not owner_deadline_exhausted_for_context(ctx, reserve_sec=reserve):
         return ""
     remaining = (deadline - utc_now()).total_seconds()
-    scaled = max(0.0, remaining / 4.0)
-    minimum = get_plan_task_deadline_min_sec()
-    if remaining > 0 and scaled >= minimum:
-        return ""
     if emit:
         try:
             event_queue = getattr(ctx, "event_queue", None)
@@ -93,8 +92,7 @@ def plan_deadline_skip(ctx: ToolContext, *, emit: bool = False) -> str:
                     "type": "plan_task_deadline_skip",
                     "task_id": str(getattr(ctx, "task_id", "") or ""),
                     "remaining_sec": round(remaining, 1),
-                    "scaled_ceiling_sec": round(scaled, 1),
-                    "min_useful_sec": minimum,
+                    "reserve_sec": reserve,
                     "ts": utc_now_iso(),
                 })
         except Exception:
@@ -102,8 +100,8 @@ def plan_deadline_skip(ctx: ToolContext, *, emit: bool = False) -> str:
     cause = (
         "the task deadline has expired; no reviewer work was started."
         if remaining <= 0 else
-        f"insufficient time for useful planning — remaining {int(remaining)}s gives a "
-        f"review window of {int(scaled)}s (< {int(minimum)}s useful floor)."
+        f"the remaining {int(remaining)}s are inside the {int(reserve)}s finalization reserve; "
+        "no reviewer work was started."
     )
     return (
         f"PLAN_TASK_SKIPPED_DEADLINE: {cause} This call dispatched no reviewer; remaining time "

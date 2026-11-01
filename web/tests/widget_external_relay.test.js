@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { mountModuleWidget } from '../modules/widget_module.js';
+import { joinFrame } from './helpers/fake_channel.js';
 
 // Exercise the production parent mount and host opener. This DOM double does
 // not establish browser user activation; click/Enter/touch need browser proof.
@@ -15,7 +16,8 @@ async function relayHarness(t, api = null, initialTheme = '') {
         dataset: {},
         style: { setProperty() {} },
         setAttribute(name, value) { attributes.set(name, value); },
-        contentWindow: { postMessage(message) { replies.push(message); } },
+        contentWindow: { postMessage(message) { replies.push(message); } },  // never used: replies take the channel
+        addEventListener() {},
         remove() { this.isConnected = false; this.parentNode = null; },
     };
     const mount = {
@@ -31,7 +33,8 @@ async function relayHarness(t, api = null, initialTheme = '') {
         },
         ...(api ? { pywebview: { api } } : {}),
     };
-    t.mock.method(globalThis, 'fetch', async () => new Response('// reviewed module'));
+    t.mock.method(globalThis, 'fetch', async (url) => (url === '/api/widgets/asset-leases'
+        ? Response.json({ token: 'route-lease', base_url: '/api/widget-resources/route-lease/', expires_in: 120, renew_after: 40 }) : new Response('// reviewed module')));
     const globals = new Map();
     let dispose;
     let send;
@@ -57,11 +60,15 @@ async function relayHarness(t, api = null, initialTheme = '') {
         Object.defineProperty(globalThis, name, { configurable: true, value });
     }
     dispose = await mountModuleWidget(mount, { skill: 'links' }, { entry: 'widget.js', height: 320 });
-    const nonce = JSON.parse(iframe.srcdoc.match(/const nonce = ("[^"]+");/)[1]);
     const onMessage = listeners.get('message');
-    send = (data = {}, source = iframe.contentWindow) => onMessage({
-        source, data: { type: 'ouro-widget-open-external', id: 1, nonce, url: 'https://example.test/target', ...data },
-    });
+    const frame = joinFrame(iframe, onMessage);
+    frame.channel.port1.onmessage = (event) => { if (event.data?.type !== 'ouro-widget-ready') replies.push(event.data); };
+    const { nonce } = frame;
+    send = (data = {}, source = iframe.contentWindow) => {
+        const message = { type: 'ouro-widget-open-external', id: 1, nonce, url: 'https://example.test/target', ...data };
+        if (source === iframe.contentWindow) frame.channel.port1.postMessage(message);
+        else onMessage({ source, data: message });
+    };
     const flush = () => new Promise((resolve) => setImmediate(resolve));
     return { win, iframe, attributes, opened, replies, listeners, send, dispose, flush };
 }
@@ -121,7 +128,7 @@ test('module parent uses the native bridge and detaches the relay after disposal
 
 test('module parent embeds the resolved Light theme in the initial bridge script', async (t) => {
     const h = await relayHarness(t, null, 'light');
-    assert.match(h.iframe.srcdoc, /const initialTheme = "light";/);
+    assert.match(h.iframe.srcdoc, /"initialTheme":"light"/);
 });
 
 test('module parent releases a live theme relay when disposed', async (t) => {

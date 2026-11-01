@@ -90,12 +90,14 @@ DIAGNOSTIC_OUTPUT_KEYS = (
 OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", *DIAGNOSTIC_OUTPUT_KEYS)
 
 
-def declare_scratch(root, role: str) -> None:
-    """A fresh producer declares reproducibility, never liveness or deletion authority."""
+def declare_scratch(root, role: str, *, owner: str = "") -> None:
+    """A fresh producer declares its tree disposable state it made: purpose, never liveness, deletion
+    authority or a promise that the contents come back byte for byte.
+    ``owner``: a one-line fact naming what it was made for (``copy_environments`` reads it)."""
     if role not in {"pytest-session", "pytest-basetemp", "body-process"}:
         raise ValueError(f"unknown test scratch role: {role}")
     with (Path(root) / SCRATCH_MARKER).open("x", encoding="utf-8") as stream:
-        stream.write(role + "\n")
+        stream.write(role + "\n" + (owner.strip() + "\n" if owner else ""))
 
 
 def retain_tree(root, reason: str) -> bool:
@@ -140,7 +142,7 @@ def _retention_identity(path):
 def scratch_retention(root, *, previous=None, classify=False) -> dict:
     """One walk per quiescent tree; later checks read only its recorded witness.
 
-    A declaration proves reproducibility, not absence of nested retained readers.
+    A declaration states purpose, not absence of nested retained readers.
     Unclassified/changed trees stay retained until an unlocked classification;
     undeclared legacy trees and unreadable subtrees never certify deletion.
     """
@@ -185,9 +187,15 @@ def retain_diagnostic_outputs(root, env, *, cwd=None) -> None:
 
 
 def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create=True) -> dict[str, str]:
-    """Create all writable defaults beneath a caller-owned disposable directory."""
+    """Create all writable defaults beneath a caller-owned disposable directory.
+
+    A declared installation user site that ``source`` reads (``installation_user_site``: a prepared Update's checks on
+    an installation keeping its packages in a user base) is the product's own environment, so the child reads it too,
+    through its own fresh user base (``create`` only); a caller's later ``PYTHONNOUSERSITE=1``, ``-I`` or ``-s`` keeps
+    it out. Without the declaration nothing differs."""
     root, repo = Path(root).resolve(), Path(repo).resolve()
-    env = scrub_environment(os.environ if source is None else source, keep=keep)
+    source = os.environ if source is None else source
+    env = scrub_environment(source, keep=keep)
     paths = {
         "HOME": root / "home", "USERPROFILE": root / "home",
         "OUROBOROS_APP_ROOT": root / "app",
@@ -224,4 +232,72 @@ def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create
         "GIT_OPTIONAL_LOCKS": "0", "GIT_CEILING_DIRECTORIES": str(root),
         "PIP_REQUIRE_VIRTUALENV": "true",
     })
+    if create and installation_user_site(source, paths["PYTHONUSERBASE"]):
+        env.update({"PYTHONNOUSERSITE": "", INSTALLATION_USER_BASE_ENV: source[INSTALLATION_USER_BASE_ENV]})
     return env
+
+
+# The user base a prepared Update's checks declare as where the installation under test keeps its own packages, when
+# it keeps them in one (``supervisor.update_checks``; a venv or private environment declares nothing). The test
+# conftest reads it through ``installation_user_site``; a tree whose harness predates this ignores the declaration.
+INSTALLATION_USER_BASE_ENV = "OUROBOROS_TEST_INSTALLATION_USER_BASE"
+# The one file ``installation_user_site`` writes into a fresh user base's site-packages.
+INSTALLATION_PTH = "ouroboros-installation-user-site.pth"
+
+
+def user_site_packages(base) -> str:
+    """The user site-packages CPython's own site processing reads for user base ``base`` with this interpreter."""
+    import sysconfig
+
+    return sysconfig.get_path("purelib", sysconfig.get_preferred_scheme("user"), vars={"userbase": str(base)})
+
+
+def installation_user_site(source, fresh_base) -> str:
+    """Make a declared installation user site readable by every process that keeps this environment.
+
+    Without the declaration (``INSTALLATION_USER_BASE_ENV`` in ``source``) nothing happens: ``""``. A declared base
+    must be an existing absolute directory, else ``ValueError`` names it (never a silent fallback). One without user
+    site-packages for this interpreter (a packaged boot's ``pip --user`` the bundle already satisfied writes none)
+    holds nothing to add: ``""`` too, and so is a ``source`` whose own non-empty ``PYTHONNOUSERSITE`` already turned
+    user sites off (a test that isolated itself starting a nested session keeps its choice for that session's
+    children). Otherwise one ``.pth`` in ``fresh_base``'s own user site-packages runs ``site.addsitedir`` on them: a
+    process whose user site is ``fresh_base`` (``pip --user`` and user configuration still write there) reads the
+    installation's packages right after it, their ``.pth`` paths and startup lines included, before the interpreter's
+    own site-packages; ``-I``, ``-s`` and ``PYTHONNOUSERSITE`` still turn all of it off. Its one line is ASCII
+    (``ascii``): CPython before 3.13 decodes a ``.pth`` in the locale's encoding, and a profile path may not be.
+    Returns that directory."""
+    declared = str(source.get(INSTALLATION_USER_BASE_ENV) or "")
+    if not declared:
+        return ""
+    site_dir = user_site_packages(declared)
+    if not os.path.isabs(declared) or not os.path.isdir(declared):
+        raise ValueError(f"{INSTALLATION_USER_BASE_ENV}={declared!r} names no existing absolute user base for this "
+                         f"interpreter (its user site-packages: {site_dir}): the installation's packages cannot be "
+                         "read")
+    if not os.path.isdir(site_dir) or source.get("PYTHONNOUSERSITE"):
+        return ""
+    fresh = Path(user_site_packages(fresh_base))
+    fresh.mkdir(parents=True, exist_ok=True)
+    (fresh / INSTALLATION_PTH).write_text(_installation_line(site_dir), encoding="ascii")
+    return site_dir
+
+
+def _installation_line(site_dir: str) -> str:
+    return f"import site; site.addsitedir({ascii(site_dir)})\n"
+
+
+def release_installation_site(fresh_base, source) -> list[Path]:
+    """Undo ``installation_user_site(source, fresh_base)`` for an owner releasing ``fresh_base`` as one of its empty
+    defaults (``safe_test_supervisor.release_scratch``): its ``.pth`` is removed only while it is still a regular file
+    holding exactly the line written for ``source``'s declaration; anything else there is the command's own data and
+    stays. Returns the directories that write may have made, deepest first, for the owner's removal of empty ones."""
+    fresh, base = Path(user_site_packages(fresh_base)), Path(fresh_base)
+    declared = str(source.get(INSTALLATION_USER_BASE_ENV) or "")
+    pth = fresh / INSTALLATION_PTH
+    try:
+        if declared and not pth.is_symlink() and pth.is_file() and pth.read_bytes() == _installation_line(
+                user_site_packages(declared)).encode("ascii"):
+            pth.unlink()
+    except OSError:
+        pass  # kept: the owner's removal of empty directories then keeps the root as well
+    return [fresh, *(parent for parent in fresh.parents if parent != base and parent.is_relative_to(base))]

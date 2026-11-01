@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import pathlib
+import re
 import struct
 import textwrap
 import wave
@@ -123,9 +124,13 @@ PAGE_HTML = '''<!doctype html><html><head><title>route</title></head><body><div 
     const out = { ran: true };
     try { out.cookie = 'readable:' + document.cookie; } catch (err) { out.cookie = err.name; }
     try { void window.parent.document; out.parentDom = 'reachable'; } catch (err) { out.parentDom = err.name; }
-    try { out.ping = (await fetch('/api/extensions/__SKILL__/ping?from=route')).status; } catch (err) { out.ping = err.name; }
-    try { out.plain = (await fetch('/api/extensions/__SKILL__/plain')).status; } catch (err) { out.plain = err.name; }
-    try { out.opaque = (await fetch('/api/extensions/__SKILL__/plain', { mode: 'no-cors' })).type; } catch (err) { out.opaque = err.name; }
+    // The page lives under its mount's route lease: relative reads reach its own routes there.
+    try { out.ping = (await fetch('ping?from=route')).status; } catch (err) { out.ping = err.name; }
+    try { out.plain = (await fetch('plain')).status; } catch (err) { out.plain = err.name; }
+    try { out.opaque = (await fetch('plain', { mode: 'no-cors' })).type; } catch (err) { out.opaque = err.name; }
+    // The raw prefix is another site's request to the core from this opaque frame: refused before the handler
+    // (ping would answer with the CORS header, so a readable answer would mean the request got through).
+    try { out.raw = (await fetch('/api/extensions/__SKILL__/ping?from=raw')).status; } catch (err) { out.raw = err.name; }
     document.title = 'route-ran';
     out.done = true;
     window.__routeProbe = out;
@@ -255,7 +260,7 @@ _CAPABILITY_PROBE_JS = """\
                 ]);
             } finally { worker.terminate(); URL.revokeObjectURL(url); }
         },
-        ownImage() { return loadImage(base + 'pixel.png'); },
+        ownImage() { return loadImage(OuroborosWidget.resourceUrl('pixel.png')); },
         async siblingImage() {
             const before = violations.length;
             const result = await loadImage('/api/extensions/other_skill/pixel.png');
@@ -281,7 +286,7 @@ _CAPABILITY_PROBE_JS = """\
         },
         async audio() {
             const audio = document.createElement('audio');
-            audio.src = base + 'beep.wav';
+            audio.src = OuroborosWidget.resourceUrl('beep.wav');
             document.body.appendChild(audio);
             const loaded = await Promise.race([
                 new Promise((resolve) => { audio.onloadedmetadata = () => resolve('loadedmetadata'); audio.onerror = () => resolve('error'); }),
@@ -294,7 +299,7 @@ _CAPABILITY_PROBE_JS = """\
         },
         async font(path, family) {
             const style = document.createElement('style');
-            style.textContent = `@font-face { font-family: "${family}"; src: url("${base}${path}") format("woff2"); }`;
+            style.textContent = `@font-face { font-family: "${family}"; src: url("${OuroborosWidget.resourceUrl(path)}") format("woff2"); }`;
             document.head.appendChild(style);
             const span = document.createElement('span');
             span.style.fontFamily = `"${family}"`;
@@ -438,18 +443,22 @@ def test_ui_smoke_widget_frame_capabilities(direct_server_with_data, browser_nam
                     assert frame_node.get_attribute("sandbox") == "allow-scripts allow-pointer-lock allow-downloads", tab_id
                     assert frame_node.get_attribute("allow") == "autoplay; fullscreen; clipboard-write", tab_id
                     assert frame_node.get_attribute("allowfullscreen") == "", tab_id
-                assert page.locator(f"{card('page')} iframe").get_attribute("src") == f"{prefix}page"
+                route_src = page.locator(f"{card('page')} iframe").get_attribute("src")
+                assert re.fullmatch(rf"{url}/api/widget-resources/[A-Za-z0-9_-]{{43}}/page", route_src), route_src
                 frame = page.locator(f"{card('probe')} iframe").element_handle().content_frame()
                 frame.wait_for_function("() => Boolean(window.__capProbe)", timeout=10_000)
                 csp = probe(frame, "csp")
+                # Passive loads come only from this mount's route lease (the classic frame's resource base).
+                lease = frame.evaluate("() => OuroborosWidget.resourceBase")
+                assert re.fullmatch(rf"{url}/api/widget-resources/[A-Za-z0-9_-]{{43}}/", lease), lease
                 assert csp == "; ".join([
                     "default-src 'none'",
                     f"script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: {url}{prefix}module/",
                     "worker-src blob:",
                     "style-src 'unsafe-inline'",
-                    f"img-src data: blob: {url}{prefix}",
-                    f"media-src data: blob: {url}{prefix}",
-                    f"font-src data: blob: {url}{prefix}",
+                    f"img-src data: blob: {lease}",
+                    f"media-src data: blob: {lease}",
+                    f"font-src data: blob: {lease}",
                 ]), csp
                 assert probe(frame, "origin")["origin"] == "null", "the module frame must stay an opaque origin"
 
@@ -538,6 +547,8 @@ def test_ui_smoke_widget_frame_capabilities(direct_server_with_data, browser_nam
                 assert route["ping"] == 200, route
                 assert route["plain"] == "TypeError", route
                 assert route["opaque"] == "opaque", route
+                assert route["raw"] == "TypeError", route  # the core's refusal carries no CORS header
+                assert "ping:raw" not in hits(page), "the refused raw request never reached the handler"
                 assert route["cookie"] in ("SecurityError", "readable:"), route
                 assert route["parentDom"] == "SecurityError", route
 

@@ -112,7 +112,12 @@ def _page(browser_name, tabs, ledger=None):
                 if route.request.method == "POST":
                     state["preferences"].update(route.request.post_data_json)
                 reply(state["preferences"])
-            elif url.path.startswith("/api/extensions/"):
+            elif url.path.startswith("/api/widgets/asset-leases"):
+                # A framed mount's route lease (mint, renew, revoke): the frame then loads under its URL.
+                lease = "L" * 43
+                reply({"ok": True} if url.path.endswith("/revoke") else
+                      {"token": lease, "base_url": f"/api/widget-resources/{lease}/", "expires_in": 120, "renew_after": 40})
+            elif url.path.startswith(("/api/extensions/", "/api/widget-resources/")):
                 state["requests"].append(url.path + (f"?{url.query}" if url.query else ""))
                 if state["hold"] and url.path.endswith(state["hold"]):
                     state["pending"].append(route)

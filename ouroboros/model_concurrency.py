@@ -67,6 +67,13 @@ class ModelSlotCancelled(ModelSlotUnavailable):
     """The waiter was cancelled before dispatch."""
 
 
+def capacity_refusal(usage: object) -> bool:
+    """Whether a turn's latest attempt is this limiter's refusal (no slot, nothing sent), from the
+    per-failure code ``loop_llm_call`` stamps. Words only (``loop_transport``): never a retry,
+    pacing or admission input, and silent about the episode's earlier attempts."""
+    return isinstance(usage, dict) and str(usage.get("_last_llm_provider_code") or "") == ModelSlotUnavailable.code
+
+
 def _owner_awaits() -> bool:
     """This call belongs to a turn the owner awaits; an unreadable binding queues it as background."""
     try:

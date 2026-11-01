@@ -694,7 +694,7 @@ def profile_from_task_constraint(task_constraint: Dict[str, Any]) -> str:
 
 def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
     """Mint (once per task-tree) ONE shared from-scratch git tree for a cooperative
-    acting-subagent build, reusing ``subagent_worktrees.provision_genesis_project``
+    acting-subagent build, reusing ``genesis_project.provision_genesis_project``
     (a durable standalone repo under the projects root, outside repo/ and data/).
     Cached by ``root_task_id`` so multiple fan-out waves share ONE tree. Children
     write into it via ``write_surface=external_workspace``; deeper descendants inherit
@@ -709,7 +709,7 @@ def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
         if cached and pathlib.Path(cached).is_dir():
             return cached
         try:
-            from ouroboros.subagent_worktrees import provision_genesis_project
+            from ouroboros.genesis_project import provision_genesis_project
 
             handle = provision_genesis_project(
                 repo_dir=ctx.repo_dir,

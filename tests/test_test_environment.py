@@ -297,6 +297,33 @@ def test_safe_test_forwards_interrupt_then_reaps_the_whole_tree(tmp_path, stop):
     assert not survivors
 
 
+def test_a_declared_launcher_releases_the_installation_pth_it_wrote_and_keeps_anything_else(tmp_path):
+    """Started inside a declared session (a prepared Update's checks on a user-site installation), the launcher's own
+    fresh user base gets the installation ``.pth`` (``installation_user_site``), so its command reads the declared
+    site. The run releases its root with that one file; a user base holding anything else, or that file rewritten,
+    holds the command's own data and keeps the root."""
+    from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV, user_site_packages
+
+    _installation_base(tmp_path / "installation")
+    env = {**os.environ, INSTALLATION_USER_BASE_ENV: str(tmp_path / "installation"), "PYTHONNOUSERSITE": ""}
+    pth = "pathlib.Path(site.getusersitepackages(), 'ouroboros-installation-user-site.pth')"
+    seen = {}
+    for label, then in (("released", "pass"), ("other_file", "pathlib.Path(site.getuserbase(), 'note.txt').write_text('kept')"),
+                        ("rewritten", f"{pth}.write_text('import sys\\n')")):
+        command = [sys.executable, "-c", f"import pathlib, site\nassert {pth}.is_file(), {pth}\n{then}\n"]
+        done = run_in_group(_LAUNCHER + ["--temp-parent", str(tmp_path), "--", *command], cwd=REPO, env=env,
+                            timeout=120)
+        assert done.returncode == 0, done.stderr
+        state, root = _final_root(done.stderr)
+        seen[label] = (state, Path(root))
+    assert {label: state for label, (state, _root) in seen.items()} == {
+        "released": "SAFE_TEST_RELEASED", "other_file": "SAFE_TEST_RETAINED", "rewritten": "SAFE_TEST_RETAINED"}
+    assert not seen["released"][1].exists()
+    assert (seen["other_file"][1] / "userbase" / "note.txt").read_text(encoding="utf-8") == "kept"
+    kept = Path(user_site_packages(seen["rewritten"][1] / "userbase")) / "ouroboros-installation-user-site.pth"
+    assert kept.read_text(encoding="utf-8") == "import sys\n"
+
+
 def _live_conftest():
     return next(module for module in list(sys.modules.values())
                 if getattr(module, "__file__", "")
@@ -507,3 +534,210 @@ def test_a_marker_left_in_a_tests_tmp_path_fails_that_test_under_a_releasing_own
     finally:
         for held in launcher_root.glob("b*/t/*/held"):
             retire_synthetic_retention(held, "probe: stubbed reap")  # the nested run's manufactured marker
+
+
+def _installation_base(root, label="installation"):
+    """A user base keeping an installation's packages for this interpreter: a module, a ``.pth`` path line to another
+    and a ``.pth`` startup line, plus a stdlib name it also holds."""
+    from ouroboros.test_environment import user_site_packages
+
+    site = Path(user_site_packages(root))
+    for rel, text in {"gen_plain.py": f"WHERE = {label!r}\n", "gen_pth_dir/gen_pth_added.py": f"WHERE = {label!r}\n",
+                      "gen_pth_hook.py": f"import sys\nsys._gen_pth_ran = {label!r}\n",
+                      "tabnanny.py": f"WHERE = {label!r}\n",
+                      "zz_gen.pth": "gen_pth_dir\nimport gen_pth_hook\n"}.items():
+        (site / rel).parent.mkdir(parents=True, exist_ok=True)
+        (site / rel).write_text(text, encoding="utf-8")
+    return site
+
+
+def test_an_installation_user_site_is_read_only_when_declared_and_a_bad_declaration_is_named(tmp_path):
+    """Nothing declared changes nothing; a declared base that is relative or missing is named; an existing base without
+    user site-packages for this interpreter (a packaged boot's ``pip --user`` the bundle already satisfied) adds
+    nothing, no ``.pth``; one with them gets the ``.pth``."""
+    from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV, installation_user_site, user_site_packages
+
+    fresh = tmp_path / "fresh"
+    assert installation_user_site({}, fresh) == "" and not fresh.exists()  # nothing declared: nothing changes
+    for declared in ("relative/base", str(tmp_path / "gone")):
+        with pytest.raises(ValueError, match=f"^{INSTALLATION_USER_BASE_ENV}="):
+            installation_user_site({INSTALLATION_USER_BASE_ENV: declared}, fresh)
+    assert installation_user_site({INSTALLATION_USER_BASE_ENV: str(tmp_path)}, fresh) == "" and not fresh.exists()
+    site = _installation_base(tmp_path / "installation")
+    assert installation_user_site({INSTALLATION_USER_BASE_ENV: str(tmp_path / "installation")}, fresh) == str(site)
+    assert (Path(user_site_packages(fresh)) / "ouroboros-installation-user-site.pth").read_text(encoding="utf-8") == (
+        f"import site; site.addsitedir({str(site)!r})\n")
+
+
+def test_the_installation_pth_line_reads_the_same_path_in_any_locale_encoding(tmp_path):
+    """CPython 3.10-3.12 decode a ``.pth`` in the locale's encoding when UTF-8 mode is off (Windows ships 3.10, and a
+    profile path may be Cyrillic): the line is pure ASCII, so decoded as Latin-1 or cp1251 it names the same path. No
+    non-UTF-8 locale needs to be installed: the bytes are decoded here as those encodings would."""
+    import ast
+
+    from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV, installation_user_site, user_site_packages
+
+    base = tmp_path / "Антон Ä" / "python-userbase"
+    Path(user_site_packages(base)).mkdir(parents=True)
+    fresh = tmp_path / "fresh"
+    site = installation_user_site({INSTALLATION_USER_BASE_ENV: str(base)}, fresh)
+    data = (Path(user_site_packages(fresh)) / "ouroboros-installation-user-site.pth").read_bytes()
+    assert data.isascii(), data
+    for encoding in ("latin-1", "cp1251", "utf-8"):
+        line = data.decode(encoding)
+        assert line.startswith("import site; site.addsitedir(") and line.endswith(")\n")
+        call = ast.parse(line.split("; ", 1)[1]).body[0].value
+        assert ast.literal_eval(call.args[0]) == site == user_site_packages(base), encoding
+
+
+def test_a_session_started_with_its_own_pythonnousersite_keeps_it_and_writes_no_pth(tmp_path):
+    """A test that isolated itself (``PYTHONNOUSERSITE=1``) and starts a nested session that inherits the declaration
+    keeps its choice: the declaration is still checked, but no ``.pth`` is written, so the nested session's conftest
+    leaves its defaults' ``PYTHONNOUSERSITE=1`` for its children. An empty value is unset for Python: it reads."""
+    from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV, installation_user_site, user_site_packages
+
+    site = _installation_base(tmp_path / "installation")
+    declared = {INSTALLATION_USER_BASE_ENV: str(tmp_path / "installation")}
+    for value in ("1", "yes"):
+        fresh = tmp_path / f"fresh-{value}"
+        assert installation_user_site({**declared, "PYTHONNOUSERSITE": value}, fresh) == "" and not fresh.exists()
+    with pytest.raises(ValueError, match=f"^{INSTALLATION_USER_BASE_ENV}="):
+        installation_user_site({INSTALLATION_USER_BASE_ENV: str(tmp_path / "gone"), "PYTHONNOUSERSITE": "1"},
+                               tmp_path / "fresh-gone")
+    fresh = tmp_path / "fresh-reads"
+    assert installation_user_site({**declared, "PYTHONNOUSERSITE": ""}, fresh) == str(site)
+    assert (Path(user_site_packages(fresh)) / "ouroboros-installation-user-site.pth").is_file()
+
+
+def test_a_declared_installation_site_reads_as_cpythons_site_processing_orders_it_and_writes_stay_fresh(tmp_path):
+    """Through the fresh user base's ``.pth``, CPython's own site processing reads the declared site after that fresh
+    user site and before the interpreter's own site-packages: its module, its ``.pth`` path and startup lines, the
+    stdlib still first; the process's own user site, where ``pip --user`` writes, stays the fresh one. ``-s``, ``-I``
+    and a child's own ``PYTHONNOUSERSITE=1`` turn all of it off."""
+    from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV, installation_user_site, user_site_packages
+
+    # The interpreter this suite's venv was made from: outside a venv, a user site works.
+    base = Path(sys.base_prefix, "python.exe" if os.name == "nt" else f"bin/python{sys.version_info[0]}."
+                                                                      f"{sys.version_info[1]}")
+    python = str(base) if base.is_file() else sys.executable
+    clean = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+    fresh = tmp_path / "fresh"
+    enabled = subprocess.run([python, "-c", "import site; print(site.ENABLE_USER_SITE)"], capture_output=True,
+                             text=True, env={**clean, "PYTHONUSERBASE": str(fresh),
+                                             "PYTHONNOUSERSITE": ""}).stdout.strip()
+    if enabled != "True":
+        pytest.skip(f"{python} enables no user site")
+    declared = _installation_base(tmp_path / "installation")
+    installation_user_site({INSTALLATION_USER_BASE_ENV: str(tmp_path / "installation")}, fresh)
+    probe = ("import json, os, site, sys, sysconfig\n"
+             "def where(name):\n"
+             "    try:\n        return getattr(__import__(name), 'WHERE', 'stdlib')\n"
+             "    except ImportError:\n        return None\n"
+             "paths = [os.path.normcase(os.path.abspath(p or os.curdir)) for p in sys.path]\n"
+             "at = lambda p: paths.index(os.path.normcase(os.path.abspath(p))) if os.path.normcase(os.path.abspath(p))"
+             " in paths else None\n"
+             "print(json.dumps([where('gen_plain'), where('gen_pth_added'), getattr(sys, '_gen_pth_ran', None),\n"
+             "    where('tabnanny'), [at(os.path.dirname(os.__file__)), at(site.getusersitepackages()),\n"
+             "    at(sys.argv[1]), at(sysconfig.get_paths()['purelib'])], site.getusersitepackages()]))\n")
+
+    def child(*flags, **extra):
+        env = {**clean, "PYTHONUSERBASE": str(fresh), "PYTHONNOUSERSITE": "", **extra}  # this conftest's too
+        done = subprocess.run([python, *flags, "-c", probe, str(declared)], capture_output=True, text=True, env=env,
+                              timeout=120)
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout)
+
+    plain, added, ran, shadow, order, user_site = child()
+    assert (plain, added, ran, shadow) == ("installation", "installation", "installation", "stdlib")
+    assert None not in order and order == sorted(order), order  # stdlib, fresh user site, declared, site-packages
+    assert user_site == user_site_packages(fresh) != str(declared)
+    for flags, extra in (("-s",), {}), (("-I",), {}), ((), {"PYTHONNOUSERSITE": "1"}):
+        assert child(*flags, **extra)[:4] == [None, None, None, "stdlib"], (flags, extra)
+
+
+def test_product_children_of_a_declared_session_read_the_installation_and_an_explicit_opt_out_stays_out(tmp_path):
+    """On a packaged install the declared user base is the product's own environment: a package a dependency-changing
+    Update brings may exist only there. A test process of a declared session (the real conftest, its child isolation
+    installed) starts product children through ``isolated_environment`` or with an environment it cleared: each reads
+    the installation through its own fresh user base, so W' does not fail "only with the update" on an import. The
+    same children with an explicit ``PYTHONNOUSERSITE=1`` stay out. The gate's own environment (``_preflight_env``)
+    keeps declaring nothing: its producer declares (``update_checks._user_base``)."""
+    import sysconfig
+
+    from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV, user_site_packages
+
+    base = Path(sys.base_prefix, "python.exe" if os.name == "nt" else f"bin/python{sys.version_info[0]}."
+                                                                      f"{sys.version_info[1]}")
+    python = str(base) if base.is_file() else sys.executable
+    clean = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+    enabled = subprocess.run([python, "-c", "import site; print(site.ENABLE_USER_SITE)"], capture_output=True,
+                             text=True, env={**clean, "PYTHONUSERBASE": str(tmp_path / "probe"),
+                                             "PYTHONNOUSERSITE": ""}).stdout.strip()
+    if enabled != "True":
+        pytest.skip(f"{python} enables no user site")
+    installation = tmp_path / "installation"
+    site = Path(user_site_packages(installation))
+    site.mkdir(parents=True)
+    (site / "only_in_installation.py").write_text("WHERE = 'installation'\n", encoding="utf-8")
+    # The suite's own packages (pytest among them) for that interpreter, through the same site.
+    (site / "zz_suite_packages.pth").write_text("".join(f"{path}\n" for path in dict.fromkeys(
+        (sysconfig.get_path("purelib"), sysconfig.get_path("platlib")))), encoding="utf-8")
+    script = (
+        "import json, os, pathlib, subprocess, sys\n"
+        "import tests.conftest as harness\n"
+        "harness._install_pytest_child_isolation()\n"
+        "from ouroboros.test_environment import isolated_environment\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "def reads(env):\n"
+        "    return subprocess.run([sys.executable, '-c', 'import only_in_installation'], env=env,\n"
+        "                          capture_output=True, timeout=120).returncode == 0\n"
+        "isolated = isolated_environment(root / 'isolated', pathlib.Path.cwd())\n"
+        "cleared = {'PATH': os.environ.get('PATH', '')}\n"
+        "from ouroboros.preflight_runner import _preflight_env\n"
+        "gate = _preflight_env(root / 'gate', pathlib.Path.cwd())\n"
+        "print(json.dumps({'isolated': reads(isolated),"
+        " 'isolated_opt_out': reads({**isolated, 'PYTHONNOUSERSITE': '1'}), 'cleared': reads(cleared), 'cleared_opt_out': reads({**cleared, 'PYTHONNOUSERSITE': '1'}),"
+        f" 'gate': [gate['PYTHONNOUSERSITE'], {INSTALLATION_USER_BASE_ENV!r} in gate]}}))\n")
+    env = {**isolated_environment(tmp_path / "session", REPO), "PYTHONUSERBASE": str(installation),
+           "PYTHONNOUSERSITE": "", INSTALLATION_USER_BASE_ENV: str(installation)}  # as update_checks._user_base does
+    done = subprocess.run([python, "-c", script, str(tmp_path / "children")], cwd=REPO, env=env, text=True,
+                          capture_output=True, timeout=300)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout.splitlines()[-1]) == {
+        "isolated": True, "isolated_opt_out": False, "cleared": True, "cleared_opt_out": False, "gate": ["1", False]}
+
+
+def test_the_test_conftest_reads_a_declared_installation_site_and_otherwise_keeps_its_isolated_defaults(tmp_path):
+    """The real conftest, imported as a nested session imports it: without the declaration its children get the
+    isolated defaults exactly as before; with one (and the empty ``PYTHONNOUSERSITE`` the checks pass) they keep the
+    fresh user base and get its ``.pth``, the user site left enabled for every process that keeps the environment; a
+    declared base without site-packages, or a session started with its own ``PYTHONNOUSERSITE=1``, keeps the
+    defaults; an invalid one stops the session, named."""
+    from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV, user_site_packages
+
+    site = _installation_base(tmp_path / "installation")
+    (tmp_path / "empty-userbase").mkdir()
+    report = ("import json, os\nprint(json.dumps({key: os.environ.get(key) for key in "
+              "('PYTHONUSERBASE', 'PYTHONNOUSERSITE')}))\n")
+    seen = {}
+    # Each case declares only what it names: a declaration this suite itself runs under (a prepared Update's checks)
+    # never reaches the "none" case, which is a session without one.
+    ambient = {key: value for key, value in os.environ.items() if key != INSTALLATION_USER_BASE_ENV}
+    for label, declared, nousersite in (("none", None, "1"), ("valid", str(tmp_path / "installation"), ""),
+                                        ("isolated", str(tmp_path / "installation"), "1"),
+                                        ("empty", str(tmp_path / "empty-userbase"), ""),
+                                        ("bad", str(tmp_path / "gone"), "")):
+        env = {**isolated_environment(tmp_path / label, REPO, source=ambient), "PYTHONNOUSERSITE": nousersite}
+        if declared:
+            env[INSTALLATION_USER_BASE_ENV] = declared
+        assert env.get(INSTALLATION_USER_BASE_ENV) == declared, label
+        seen[label] = subprocess.run([sys.executable, "-c", "import tests.conftest\n" + report], cwd=REPO, env=env,
+                                     text=True, capture_output=True, timeout=120)
+    none, valid, isolated, empty = (json.loads(seen[label].stdout.splitlines()[-1])
+                                    for label in ("none", "valid", "isolated", "empty"))
+    for kept in (none, isolated, empty):
+        assert kept["PYTHONNOUSERSITE"] == "1" and not Path(user_site_packages(kept["PYTHONUSERBASE"])).exists()
+    assert valid["PYTHONNOUSERSITE"] == "" and Path(valid["PYTHONUSERBASE"]).is_relative_to(tmp_path / "valid")
+    assert (Path(user_site_packages(valid["PYTHONUSERBASE"])) / "ouroboros-installation-user-site.pth").read_text(
+        encoding="utf-8") == f"import site; site.addsitedir({str(site)!r})\n"
+    assert seen["bad"].returncode != 0 and f"{INSTALLATION_USER_BASE_ENV}=" in seen["bad"].stderr

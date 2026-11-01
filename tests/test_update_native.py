@@ -193,7 +193,7 @@ def test_a_needed_official_app_is_staged_with_its_own_interpreter_and_private_pa
     generation = row["environment"]["generation"]
     assert (install["python"], install["kind"], str(install["target"])) == (staged["python"], "user_site",
                                                                             generation["user_base"])
-    assert generation["python"] == staged["python"]  # the checks run W' on it (update_checks._interpreters)
+    assert generation["python"] == staged["python"]  # the checks run W' on it (update_checks._environments)
     assert staged["previous_identity"] == body_switch.bundle_identity(str(scene.app))
     assert staged["new_identity"] == body_switch.bundle_identity(staged["staged_app"])
     assert scene.composition() == before and not (scene.userbase / "lib" / "generation-package").exists()
@@ -325,7 +325,7 @@ def test_a_runtime_venv_installation_stages_the_app_and_prepares_its_packages_be
     _target_speaks(scene, 2)
     seen = {}
 
-    def checks(row):  # W' runs <clone>/bin/python (update_checks._interpreters): what that names right now
+    def checks(row):  # W' runs <clone>/bin/python (update_checks._environments): what that names right now
         clone = pathlib.Path(row["environment"]["generation"]["user_base"])
         seen.update(link=_base_named(clone), config=(clone / "pyvenv.cfg").read_text())
         return {"ok": True, "stub": True}
@@ -408,7 +408,7 @@ def test_a_runtime_venv_on_the_owners_own_python_is_updated_under_the_launchers_
     _target_speaks(scene, 2)
     seen = {}
 
-    def checks(row):  # W' runs <clone>/bin/python (update_checks._interpreters): what that names right now
+    def checks(row):  # W' runs <clone>/bin/python (update_checks._environments): what that names right now
         generation = (row.get("environment") or {}).get("generation") or {}
         seen["link"] = _base_named(generation["user_base"]) if generation else None
         return {"ok": True, "stub": True}

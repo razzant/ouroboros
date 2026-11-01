@@ -386,7 +386,11 @@ def authorize_update(data_dir: Any, candidate: Dict[str, Any], *, reason: str = 
     if not dependencies_same or staged:
         # The new lock, or the new app (whose frozen bootstrap installs packages before any hooked
         # entry), runs on its own prepared packages, switched in before it starts.
-        if not generation.get("user_base") or not pathlib.Path(generation["user_base"]).is_dir():
+        # By the token preparation wrote into it (``body_switch.mark_generation``): a directory made again at that
+        # path, or the generation emptied in place, may keep its device and inode, never the token; a reboot since
+        # may renumber the device of the very generation, so its identity is read again here for the switch.
+        prepared = generation.get("identity") or []
+        if len(prepared) < 3 or not body_switch._is_prepared(str(generation.get("user_base") or ""), prepared):
             raise AdoptionRefused("ADOPTION_ENVIRONMENT_MISSING", "the update needs its own prepared package "
                                                                   "environment and it is gone; prepare it again.")
         environment = {"state": "prepared", "kind": generation.get("kind") or "", "current": generation["current"],
@@ -394,7 +398,8 @@ def authorize_update(data_dir: Any, candidate: Dict[str, Any], *, reason: str = 
                        "previous": f"{generation['current']}.previous-{adoption_id}",
                        # What is where now: the switch resumes and returns by these, never by names alone.
                        "identity": {"current": body_switch._path_identity(generation["current"]),
-                                    "generation": body_switch._path_identity(generation["user_base"])},
+                                    "generation": body_switch._path_identity(generation["user_base"])
+                                    + [prepared[2]]},
                        # A bare interpreter's private environment: the interpreter the previous generation runs on.
                        **({"python": sys.executable} if generation.get("kind") == "private" else {}),
                        # A venv of the installed app's Python: the staged app's, which it runs after the exchange.

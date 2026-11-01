@@ -330,7 +330,8 @@ class ToolRegistry:
         "project_journal", "presence",
         "recent_tasks",
         "query_code", "query_data", "review", "review_change", "search", "services", "shell", "skill_exec", "skill_publish",
-        "skill_preflight", "skill_source_tools", "subagent_integration", "task_tree", "tool_discovery", "vcs_read", "verify", "vision",
+        "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree", "tool_discovery",
+        "vcs_read", "verify", "vision",
     ]
 
     def _load_modules(self) -> _ToolCatalog:
@@ -1029,8 +1030,8 @@ class ToolRegistry:
             return ToolResult(status="error", code="TOOL_ERROR", text=text)
         return None if resolution.status == "callable" else self._name_miss_result(name, resolution.refusal(name))
 
-    def get_timeout(self, name: str) -> int:
-        """Return timeout_sec for the named tool (default 360)."""
+    def get_timeout(self, name: str) -> Optional[int]:
+        """Return timeout_sec for the named tool (default 360; ``None`` = a long-lived entry)."""
         entry = self._entries.get(str(name or "").strip())
         if entry is not None:
             return entry.timeout_sec

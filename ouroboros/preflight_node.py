@@ -196,6 +196,8 @@ def run_node_tests(
         output = capture.finish(returncode=returncode, containment_error=reap_error, argv=argv)
         result["evidence_errors"] = list(capture.errors)
     except BaseException as exc:
+        if proc is not None and proc.poll() is None:
+            pr._terminate_preflight_tree(proc, temp_root)
         note_lane_process(exc, container, proc)
         raise
     finally:

@@ -220,8 +220,13 @@ export async function readPlaceConnector(connector, init = {}) {
     const route = url.startsWith(prefix) ? url.slice(prefix.length) : '';
     const path = route && extensionRoutePath(connector.connector, route);
     if (!path || path !== url) throw new Error(tr('places.status.route_unavailable', 'The connector status route could not be read.'));
-    const data = await fetchJson(path, { ...init, cache: 'no-store' }, { rejectOkFalse: true });
+    const account = text(connector.accountId);
+    const statusPath = account ? extensionRoutePath(connector.connector, route, new URLSearchParams({ account_id: account })) : path;
+    const data = await fetchJson(statusPath, { ...init, cache: 'no-store' }, { rejectOkFalse: true });
     if (!object(data) || data.error) throw new Error(tr('places.status.unavailable', 'The connector status could not be read.'));
+    if (account && Object.hasOwn(data, 'account_id') && data.account_id !== account) {
+        throw new Error(tr('places.status.account_mismatch', 'The connector returned a different account.'));
+    }
     return data;
 }
 

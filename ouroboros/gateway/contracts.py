@@ -12,8 +12,10 @@ from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
 )
+from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
 from ouroboros.storage_free import (  # noqa: F401 -- public re-exports
-    StorageFree, StorageFreeGroup, StorageFreeItem, StorageFreeKept, StorageFreeRequest, StorageFreeRun,
+    StorageFree, StorageFreeEntry, StorageFreeGroup, StorageFreeItem, StorageFreeItemsResponse, StorageFreeKept, StorageFreePool,
+    StorageFreeRequest, StorageFreeRun,
 )
 from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-exports
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
@@ -1567,7 +1569,8 @@ __all__ = [
     "EffortRange", "OwnerEffortRangeResponse", "OwnerSubagentsModeResponse", "LogTailResponse",
     "StorageCount", "StorageCounting", "StorageError", "StoragePart", "StoragePlace", "StorageResponse",
     "StorageRest", "StorageVolume", "StorageRemover",
-    "StorageFree", "StorageFreeGroup", "StorageFreeItem", "StorageFreeKept", "StorageFreeRequest", "StorageFreeRun",
+    "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
+    "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
 ]

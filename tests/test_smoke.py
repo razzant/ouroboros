@@ -109,7 +109,7 @@ EXPECTED_TOOLS = [
     "integrate_subagent_patch", "compare_subagent_patches",
     # C1: the explicit acceptance seam for a delegated run's captured patch —
     # a first-class tool, so the registry contract must name it.
-    "integrate_delegated_patch", "cancel_task", "resume_child_task",
+    "integrate_delegated_patch", "cancel_task", "resume_child_task", "set_task_retention",
     "peek_task", "discard_child_result", "override_delegation_constraint",
     "request_deep_self_review", "chat_history", "update_scratchpad",
     "send_user_message", "update_identity", "update_world", "toggle_evolution",

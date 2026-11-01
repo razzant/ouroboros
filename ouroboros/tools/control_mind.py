@@ -107,5 +107,7 @@ def mind_tool_entries() -> list:
         ToolEntry("continue_task", _control_schema("continue_task",
              "Request one successor episode of listed interrupted work through "
              "the same Continue action as the owner's button. Author-finished work, owner Stop/Panic and "
-             "hard money/deadline stops refuse. Repeated delivery of this call reuses its one successor. "
-             "The outcome arrives in your task mailbox."), _continue_task)]
+             "hard money/deadline stops refuse. A finite execution budget carries only its recorded unspent "
+             "remainder; when that remainder cannot be read the request refuses as execution_budget_unknown "
+             "and starts no successor, never with fresh time. Repeated delivery of this call reuses its one "
+             "successor. The outcome arrives in your task mailbox."), _continue_task)]

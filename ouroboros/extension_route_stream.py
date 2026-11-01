@@ -195,7 +195,7 @@ class RouteStreamResponse(Response):
 
         stack = contextlib.ExitStack()
         def start():
-            stack.enter_context(extension_work_scope(self.spec, self))
+            stack.enter_context(extension_work_scope(self.spec, self, call_work=False))
             if self.cancelled:
                 raise asyncio.CancelledError
             return stack.enter_context(self.child_factory())

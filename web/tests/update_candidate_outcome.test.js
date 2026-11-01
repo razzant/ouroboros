@@ -347,6 +347,19 @@ test('an update staged with the earlier app identity is stale and prepared again
     assert.equal(stale('local_changed').headline, 'This checkout changed after the update was prepared.');
 });
 
+test('prepared packages that are gone are named as that, not as a changed checkout, and offer Prepare again', () => {
+    // The reason exactly as update_prepare._prepared_missing writes it.
+    const gone = updateVerdict({ ...STATUS, candidate: candidate({ state: 'stale',
+        reason: 'environment_missing: its prepared packages are gone', actions: ['prepare', 'discard_candidate'] }) });
+    assert.equal(gone.state, 'candidate_stale');
+    assert.equal(gone.headline, 'The Python packages prepared for this update are gone.');
+    assert.match(gone.hint, /^Prepare it again to make them anew\. Nothing was changed;/);
+    assert.doesNotMatch(`${gone.headline} ${gone.hint}`, /environment_missing|checkout changed/);
+    assert.equal(gone.action.id, 'prepare');
+    const producer = readFileSync(new URL('../../supervisor/update_prepare.py', import.meta.url), 'utf8');
+    assert.ok(producer.includes('"environment_missing: its prepared packages are gone"'), 'the producer still says so');
+});
+
 test('an app Homebrew installed and a --runtime-venv are named where the Update lists the app and the packages', () => {
     const native = { status: 'staged', version: '7.8.0', previous_version: '7.7.0',
         installed: '/Applications/Ouroboros.app', backup_app: '/Applications/.Ouroboros-7.7.0-backup.app',
@@ -435,7 +448,7 @@ test('the checks name what failed only here, what the official version fails too
     assert.equal(fact('No automatic test covers'), 'notes/local-ideas.md, web/my_panel.js and 7 more');
     const unverified = updateVerdict({ ...STATUS, candidate: candidate({ state: 'failed', reason: 'checks_unverified',
         checks: { ok: false, tests: { unverified: 'the selected run did not complete' } }, actions: ['prepare'] }) });
-    assert.equal(unverified.facts.find((item) => item.label === 'Checks').value, 'did not complete, so nothing was verified');
+    assert.equal(unverified.facts.find((item) => item.label === 'Checks').value, 'did not complete, so it neither passed nor failed');
 });
 
 test('a test file the official version requires and the update lacks is worded as missing, never as a test that failed', () => {
@@ -466,8 +479,8 @@ test('a test file the official version requires and the update lacks is worded a
     // An unreadable declaration of the floor, like a run that did not finish, verified nothing: neither passed nor failed.
     const unknown = shown('checks_unverified', { unverified: "the official target's required floor is unknown: cannot be read",
         blocking: [], failed: {}, floor: { source: `${SHA.target}:ouroboros/test_selection.py`, error: 'cannot be read' } });
-    assert.equal(checks(unknown), 'did not complete, so nothing was verified');
-    assert.equal(unknown.hint, 'Its checks did not complete, so it was neither passed nor failed. Prepare it again.');
+    assert.equal(checks(unknown), 'not run: the official version’s list of required tests could not be read');
+    assert.equal(unknown.hint, 'No test ran: the list of tests the official version requires could not be read.');
 
     // Status and actions are the failed checks' own, whatever the cause: Prepare again, with Discard beside it.
     const same = (view) => [view.state, view.tone, view.headline, view.action, view.secondary];
@@ -481,4 +494,186 @@ test('a test file the official version requires and the update lacks is worded a
     const refusal = producer.slice(producer.indexOf('except FloorMissing'), producer.indexOf('root = _process_root()'));
     assert.ok(refusal.includes('"floor_missing": exc.missing') && refusal.includes('"blocking": exc.missing'), 'the refusal moved');
     assert.ok(!refusal.includes('run_tests'), 'a refusal that runs tests is no longer "No test was run"');
+});
+
+// The records below are supervisor/update_checks.selected_tests's own shapes for checks that could not run, could not
+// finish, or could not excuse a failure the running version shares; the last test reads that producer for each key.
+const NODE_ABSENT = { tier: 'full', file_count: 412, budget_seconds: 1800, failed: {}, blocking: [],
+    unverified: "a prerequisite of the checks is missing: Node.js for the full tier's 37 browser-module test file(s) is "
+        + 'absent: none is bundled and none is on PATH', prerequisite: { prerequisite: 'node', status: 'absent' } };
+const lanes = (parallel, serial) => [{ lane: 'parallel', returncode: parallel[0], cases: parallel[1], seconds: 1790 },
+    { lane: 'serial', returncode: serial[0], cases: serial[1], seconds: 0 }];
+const DRAIN = 'tests/test_queue.py::test_drain';
+const DNS = 'tests/test_net.py::test_dns';
+const SIG = 'assert: AssertionError: expected 2';
+
+test('checks that could not run name the missing prerequisite; preparing again is offered, never promised to help', () => {
+    const shown = (tests) => updateVerdict({ ...STATUS, candidate: candidate({ state: 'failed', reason: 'checks_unverified',
+        checks: { ok: false, tests }, actions: ['prepare', 'discard_candidate'] }) });
+    const fact = (view, label) => view.facts.find((item) => item.label === label)?.value;
+    const absent = shown(NODE_ABSENT);
+    assert.equal(absent.headline, '7.8.2 (d2f6a91c) could not be checked. Nothing was changed.');
+    assert.equal(absent.hint, 'No test ran: Node.js, which its browser-module tests need, was not found. Preparing it '
+        + 'again gives the same result until that changes.');
+    assert.equal(fact(absent, 'Checks'), 'not run: Node.js was not found');
+    assert.equal(fact(absent, 'Why'), "A prerequisite of the checks is missing: Node.js for the full tier's 37 "
+        + 'browser-module test file(s) is absent: none is bundled and none is on PATH.');
+    assert.doesNotMatch(`${absent.hint} ${fact(absent, 'Checks')}`, /did not complete|neither passed nor failed/);
+    const old = shown({ ...NODE_ABSENT, prerequisite: { prerequisite: 'node', status: 'unusable', node: '/usr/local/bin/node',
+        version: '16.20.0' } });
+    assert.equal(fact(old, 'Checks'), 'not run: Node.js /usr/local/bin/node is 16.20.0, older than the tests need');
+    const slow = shown({ ...NODE_ABSENT, prerequisite: { prerequisite: 'node', status: 'timeout', node: '/opt/node' } });
+    assert.equal(slow.hint, 'No test ran: Node.js, which its browser-module tests need, did not answer in time. It may '
+        + 'answer when the update is prepared again.');
+    const site = shown({ ...NODE_ABSENT, prerequisite: { prerequisite: 'user_site', status: 'absent',
+        user_base: '/Users/o/Library/Python/3.10' } });
+    assert.equal(fact(site, 'Checks'), 'not run: the Python packages folder /Users/o/Library/Python/3.10 is not an existing '
+        + 'absolute path');
+    assert.ok(readFileSync(new URL('../../supervisor/update_checks.py', import.meta.url), 'utf8')
+        .includes('"absent": "is no existing absolute directory"'), 'absent means what _declared probes');
+    // The existing actions stay, and nothing new is offered.
+    assert.deepEqual([absent.state, absent.tone, absent.action?.id, absent.secondary.map((item) => item.id), absent.factsOpen],
+        ['candidate_failed', 'error', 'prepare', ['discard_candidate'], true]);
+});
+
+test('checks that ran out of time say so, and failures they measured stay named however the comparison ended', () => {
+    const shown = (reason, tests) => updateVerdict({ ...STATUS, candidate: candidate({ state: 'failed', reason,
+        checks: { ok: false, tests }, actions: ['prepare', 'discard_candidate'] }) });
+    const fact = (view, label) => view.facts.find((item) => item.label === label)?.value;
+    const unfinished = (parallel, serial) => 'the selected run did not complete (parallel: exit '
+        + `${parallel[0]}, ${parallel[1]} case(s), serial: exit ${serial[0]}, ${serial[1]} case(s)); 124 is its deadline`;
+
+    // Out of time, nothing failed before: neither passed nor failed, and the limit named.
+    const spent = shown('checks_unverified', { tier: 'selected', file_count: 40, budget_seconds: 1800, failed: {}, blocking: [],
+        new: { complete: false, returncode: 124, lanes: lanes([124, 812], [124, 0]) }, unverified: unfinished([124, 812], [124, 0]) });
+    assert.equal(spent.headline, '7.8.2 (d2f6a91c) could not be verified. Nothing was changed.');
+    assert.equal(spent.hint, 'Its checks reached their 30-minute limit before the tests finished, so it neither passed nor '
+        + 'failed.');
+    assert.equal(fact(spent, 'Checks'), 'stopped at the 30-minute limit before the tests finished');
+
+    // W' measured a failure, then ran out of time: the failure is named, the rest unknown, no excuse attempted.
+    const partial = shown('checks_unverified', { tier: 'selected', file_count: 40, budget_seconds: 1800,
+        failed: { [DRAIN]: SIG }, blocking: [DRAIN], target_failing: [],
+        new: { complete: false, returncode: 124, lanes: lanes([1, 300], [124, 0]) }, unverified: unfinished([1, 300], [124, 0]) });
+    assert.equal(partial.headline, '7.8.2 (d2f6a91c) did not pass its checks. Nothing was changed.');
+    assert.equal(partial.hint, `Tests that failed with the update: ${DRAIN}. Its checks reached their 30-minute limit `
+        + 'before the other tests finished, so they have no result and none was compared with 7.8.1.');
+    assert.equal(fact(partial, 'Checks'), `failed: ${DRAIN}; the other tests did not finish`);
+
+    // W' complete, its failure measured, the comparison on W unfinished: failed, never "only with the update".
+    const uncompared = shown('checks_unverified', { tier: 'selected', file_count: 40, budget_seconds: 1800,
+        failed: { [DRAIN]: SIG }, blocking: [DRAIN], already_failing: [], target_failing: [DRAIN],
+        new: { complete: true, returncode: 1, lanes: lanes([1, 300], [5, 0]) },
+        target_run: { complete: true, cases: 1, returncode: 1 },
+        baseline: { complete: false, failed: {}, returncode: 2, excuses: true },
+        unverified: 'the comparison run on W, the installation serving now, did not complete (parallel: exit 2, 0 case(s))' });
+    assert.equal(uncompared.headline, '7.8.2 (d2f6a91c) did not pass its checks. Nothing was changed.');
+    assert.equal(uncompared.hint, `Tests that failed with the update: ${DRAIN}. The comparison run on 7.8.1 did not `
+        + 'finish, so whether they fail there too is unknown.');
+    assert.equal(fact(uncompared, 'Checks'), `failed with the update: ${DRAIN}; not compared with 7.8.1`);
+    assert.equal(fact(uncompared, 'Also failing in the official version'), DRAIN, 'a complete T run is still attribution');
+    assert.match(fact(uncompared, 'Why'), /^The comparison run on W/);
+    for (const view of [partial, uncompared]) {
+        assert.doesNotMatch(`${view.hint} ${fact(view, 'Checks')}`, /only with the update|neither passed nor failed|nothing was verified/);
+    }
+    // The official version's run that did not finish attributes nothing, and says so.
+    const noTarget = shown('checks_failed', { failed: { [DRAIN]: SIG }, blocking: [DRAIN], target_failing: [],
+        baseline: { complete: true, failed: {}, returncode: 0, excuses: true },
+        target_run: { complete: false, cases: 0, unavailable: "reading T's files did not finish within 60s" } });
+    assert.equal(fact(noTarget, 'Official version'), "not compared: reading T's files did not finish within 60s");
+    assert.equal(noTarget.hint, `Tests that fail only with the update: ${DRAIN}.`);
+});
+
+const shownChecks = (reason, tests) => updateVerdict({ ...STATUS, candidate: candidate({ state: 'failed', reason,
+    checks: { ok: false, tests }, actions: ['prepare', 'discard_candidate'] }) });
+const factOf = (view, label) => view.facts.find((item) => item.label === label)?.value;
+const MEASURED = { tier: 'selected', file_count: 40, budget_seconds: 1800, already_failing: [], target_failing: [],
+    new: { complete: true, returncode: 1, lanes: lanes([1, 300], [5, 0]) } };
+
+test('a comparison run the budget ended is said to have reached the limit, from the exit its record keeps', () => {
+    const [shown, fact, measured] = [shownChecks, factOf, MEASURED];
+    // The comparison run on W was cut by the budget: its record keeps the run's exit (124), not its lanes.
+    const cut = shown('checks_unverified', { ...measured, failed: { [DRAIN]: SIG }, blocking: [DRAIN],
+        baseline: { complete: false, failed: {}, returncode: 124, excuses: true },
+        unverified: 'the comparison run on W, the installation serving now, did not complete (parallel: exit 124, 0 '
+            + 'case(s), serial: exit 124, 0 case(s)); 124 is its deadline' });
+    assert.equal(cut.hint, `Tests that failed with the update: ${DRAIN}. The comparison run on 7.8.1 reached the checks’ `
+        + '30-minute limit, so whether they fail there too is unknown.');
+    assert.equal(fact(cut, 'Checks'), `failed with the update: ${DRAIN}; not compared with 7.8.1`);
+});
+
+test('a case W fails with another failure still blocks and is named as failing there too, never as only with the update', () => {
+    const [shown, fact, measured] = [shownChecks, factOf, MEASURED];
+    // W failed one blocking case too, with another failure: it still blocks (only the same failure is excused), and
+    // the panel says W failed it rather than that it fails only with the update.
+    const other = "failure:AssertionError:['AssertionError: /tmp/tmp2b8c']";
+    const differently = shown('checks_failed', { ...measured, failed: { [DNS]: SIG, [DRAIN]: SIG }, blocking: [DNS, DRAIN],
+        baseline: { complete: true, failed: { [DNS]: other }, returncode: 1, excuses: true } });
+    assert.equal(fact(differently, 'Checks'), `failed only with the update: ${DRAIN}`);
+    assert.equal(differently.hint, `Tests that fail only with the update: ${DRAIN}. Failing in 7.8.1 too, with another `
+        + `failure: ${DNS}; a different failure there excuses nothing.`);
+    assert.equal(fact(differently, 'Failing in 7.8.1 too, differently'), DNS);
+    const allDifferent = shown('checks_failed', { ...measured, failed: { [DNS]: SIG }, blocking: [DNS],
+        baseline: { complete: true, failed: { [DNS]: other }, returncode: 1, excuses: true } });
+    assert.equal(fact(allDifferent, 'Checks'), 'failed in 7.8.1 too, differently');
+    for (const view of [differently, allDifferent]) {
+        assert.doesNotMatch(`${view.hint} ${fact(view, 'Checks')}`, new RegExp(`only with the update: [^.;]*${DNS}`));
+    }
+});
+
+test('a session that failed outside its tests is said as that, with or without failures it measured', () => {
+    const [shown, fact, measured] = [shownChecks, factOf, MEASURED];
+    // Every case passed and the session itself then failed (a lane exited 1 with no failing case): no verdict, and why.
+    const outside = (failed, blocking) => shown('checks_unverified', { ...measured, failed, blocking,
+        new: { complete: false, returncode: 1, lanes: [{ lane: 'parallel', returncode: 1, cases: 3, seconds: 1,
+            no_failing_case: true }, { lane: 'serial', returncode: 1, cases: 2, seconds: 1 }] },
+        unverified: 'the selected run did not complete (parallel: exit 1, 3 case(s), serial: exit 1, 2 case(s); parallel '
+            + 'exited 1 though none of its cases failed); 124 is its deadline' });
+    const session = outside({}, []);
+    assert.equal(session.headline, '7.8.2 (d2f6a91c) could not be verified. Nothing was changed.');
+    assert.equal(session.hint, 'Its test session failed though none of its tests did, so it neither passed nor failed.');
+    assert.equal(fact(session, 'Checks'), 'its test session failed outside its tests');
+    const mixed = outside({ [DRAIN]: SIG }, [DRAIN]);
+    assert.equal(mixed.hint, `Tests that failed with the update: ${DRAIN}. Its test session also failed outside its `
+        + 'tests, so none was compared with 7.8.1.');
+    assert.equal(fact(mixed, 'Checks'), `failed: ${DRAIN}; its test session also failed outside its tests`);
+});
+
+test('a failure the running version shares but cannot excuse is named as shared, never as failing only with the update', () => {
+    const shown = (tests) => updateVerdict({ ...STATUS, candidate: candidate({ state: 'failed', reason: 'checks_failed',
+        checks: { ok: false, tests }, actions: ['prepare', 'discard_candidate'] }) });
+    const fact = (view, label) => view.facts.find((item) => item.label === label)?.value;
+    const why = "W's test harness predates the installation user-site opt-in: its tests' own children could not import "
+        + "the installation's packages, so a failure W shares proves nothing and blocks, attributed through T";
+    const record = (harness, blocking, notExcused) => ({ failed: Object.fromEntries(blocking.map((id) => [id, SIG])),
+        blocking, already_failing: [], target_failing: [], user_site: { declared: '/u', serving: '/u',
+            harness: { "W'": 'opt_in', W: harness, T: 'opt_in' } },
+        baseline: { complete: true, failed: Object.fromEntries(notExcused.map((id) => [id, SIG])), returncode: 1,
+            excuses: false, not_excused: notExcused, why } });
+    const both = shown(record('predates_opt_in', [DNS, DRAIN], [DNS]));
+    assert.equal(both.headline, '7.8.2 (d2f6a91c) did not pass its checks. Nothing was changed.');
+    assert.equal(both.hint, `Tests that fail only with the update: ${DRAIN}. Also failing in 7.8.1: ${DNS}. The tests of `
+        + '7.8.1 cannot give their own processes this installation’s packages, so a failure there excuses nothing.');
+    assert.equal(fact(both, 'Checks'), `failed only with the update: ${DRAIN}`);
+    assert.equal(fact(both, 'Failing in 7.8.1 too, not excused'), DNS);
+    const shared = shown(record('unknown', [DNS], [DNS]));
+    assert.equal(shared.hint, `Also failing in 7.8.1: ${DNS}. Whether the tests of 7.8.1 can use this installation’s `
+        + 'packages could not be read, so a failure there excuses nothing.');
+    assert.equal(fact(shared, 'Checks'), 'failed in 7.8.1 too');
+    assert.equal(fact(shared, 'Failing in 7.8.1 too, not excused'), DNS);
+    for (const view of [both, shared]) {
+        assert.doesNotMatch(`${view.hint} ${fact(view, 'Checks')}`, new RegExp(`only with the update: [^.;]*${DNS}`));
+    }
+});
+
+test('every checks field the panel reads for these states is one update_checks writes', () => {
+    const producer = readFileSync(new URL('../../supervisor/update_checks.py', import.meta.url), 'utf8');
+    for (const key of ['unverified', 'prerequisite', 'budget_seconds', 'not_excused', 'excuses', 'target_run',
+        'unavailable', 'harness', 'complete', 'lanes', 'returncode', 'blocking', 'target_failing', 'baseline',
+        'no_failing_case']) {
+        assert.ok(producer.includes(`"${key}"`) || producer.includes(`${key}=`), `update_checks writes ${key}`);
+    }
+    for (const status of ['absent', 'unusable', 'timeout', 'unstartable']) assert.ok(producer.includes(`"${status}"`), status);
+    assert.ok(producer.includes('status="unusable", node=node, version=version'), 'an old Node keeps its version');
+    assert.ok(producer.includes('{"returncode": 124, "stdout": ""'), 'a lane the deadline never started is exit 124');
 });

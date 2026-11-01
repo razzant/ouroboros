@@ -45,7 +45,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "integrate_delegated_patch",
     "wait_task", "wait_tasks", "get_task_result",
     # Serial addressed turns: wait for an unread mailbox entry without spending
-    # model rounds (slot held, clamped to the per-call ceiling, delivers nothing).
+    # model rounds (slot held for the requested window, delivers nothing).
     "await_messages", "continue_in_background", "pause_task", "resume_task", "continue_task",
     # D#7 soft-join child controls (siblings of tell_task): inspect/decide a child's fate
     # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
@@ -466,6 +466,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
     "move_to_project", "close_project", "delegate_start", "initiate_presence",
     "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
+    "set_task_retention",
     # writing files, running processes, integrating patches
     "write_file", "edit_text", "apply_patch", "edit_batch",
     "generate_image", "recover_image",

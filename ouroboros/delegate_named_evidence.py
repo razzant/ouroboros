@@ -58,7 +58,8 @@ def retain_files(area, paths, files_dir, *, preserve_mode=True):
         size = source.stat().st_size
         target = files_dir / relative
         private_directory(target.parent, files_dir.parent)
-        # Fresh regular files: ordinary delegates keep writable copies; reviewers preserve modes.
+        # Fresh regular files: ordinary delegates keep writable copies; reviewers preserve modes. Streamed from
+        # the descriptor that proved the file regular, and never a clone: the record compression refuses one.
         with _open_regular(source) as src, target.open("xb") as dst:
             shutil.copyfileobj(src, dst, 1 << 20)
         mode = stat.S_IMODE(source.stat().st_mode)

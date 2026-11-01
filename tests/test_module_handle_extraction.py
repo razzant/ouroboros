@@ -106,7 +106,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_ensure_reaper_started", "_has_pending_descendant",
         "_is_descendant_of", "_queue_lock", "_reap_queue",
         "_request_finalization_grace", "_subtree_progressing", "_task_deadline_ts",
-        "_task_drive_for_task", "coerce_chat_identity", "get_per_call_timeout_ceiling_sec",
+        "_task_drive_for_task", "coerce_chat_identity",
         "get_task_abs_ceiling_sec", "get_task_idle_timeout_sec", "load_state",
         "persist_queue_snapshot",
     })),

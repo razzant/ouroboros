@@ -176,7 +176,8 @@ def test_preview_lists_finished_not_live_folders_and_copies_and_names_the_rest(t
     assert folders["bytes_complete"] is True and folders["bytes"] >= 3 * 4096
     assert all(item["bytes"] >= 4096 for item in folders["items"])
     copies = _group(view, "working_copies")
-    assert [item["id"] for item in copies["items"]] == ["plain:copy-done"]
+    assert [item["name"] for item in copies["items"]] == ["copy-done"]
+    assert [item["id"].rsplit("-", 1)[0] for item in copies["items"]] == ["plain:copy-done"]  # one object, not its task
     assert (copies["count"], copies["in_use"]) == (1, 1)
     assert view["done"] == view["total"] == 4
 
@@ -641,7 +642,7 @@ def test_working_copies_of_finished_work_are_freed_and_a_running_ones_stays(tmp_
     owner = _owner({"finished": False, "busy": True})
     view = _preview(owner, root, tmp_path)
     copies = _group(view, "working_copies")
-    assert [item["id"] for item in copies["items"]] == ["plain:finished"] and copies["in_use"] == 1
+    assert [item["id"].rsplit("-", 1)[0] for item in copies["items"]] == ["plain:finished"] and copies["in_use"] == 1
 
     view = _run(owner, root, tmp_path, groups=("working_copies",))
     assert view["state"] == "done"
@@ -718,7 +719,7 @@ def test_stop_between_working_copies_leaves_the_rest_and_reports_a_stopped_run(t
 
     def retire_then_stop(*args, **kwargs):
         outcome = real(*args, **kwargs)
-        calls.append(list(kwargs["only"]))
+        calls.append(list(kwargs.get("only") or kwargs["only_rows"]))
         if len(calls) == 1:
             assert owner.cancel() is True  # Stop lands as the first copy's retirer returns
         return outcome
@@ -804,8 +805,8 @@ def test_leftover_groups_offer_only_proven_leftovers_and_the_run_frees_exactly_t
     assert offered == {
         "review_evidence": ([f"seat:{seats['done'].name}"], 2, 1),
         "review_checkouts": (["checkout:orphan"], 1, 0),
-        "lost_copies": ([f"lost:{folders['lost'].name}"], 1, 0),
-        "service_folders": (["env:gone.env", "test_run:run-done"], 1, 0),
+        "lost_copies": ([f"lost:{sw._record_name(folders['lost'])}"], 1, 0),  # the full path: one name may stand in two roots
+        "service_folders": ([f"env:{sw._record_name(folders['env'])}", f"test_run:{sw._record_name(folders['run_done'])}"], 1, 0),
     }
     requested = []
     monkeypatch.setattr(maintenance.child, "request", lambda: requested.append(True))
@@ -849,6 +850,38 @@ def test_leftover_listing_is_pure_and_a_run_re_checks_each_item(tmp_path, monkey
         view = _run(owner, root, tmp_path, groups=("review_evidence",))
     assert sorted((row["reason"], row["count"]) for row in view["run"]["kept"]) == [("busy", 1), ("in_use", 1)]
     assert seats["done"].is_dir() and second.is_dir()
+
+
+@pytest.mark.parametrize("state", ["readable", "unreadable"])
+def test_the_checkout_run_reads_the_review_state_once_and_unknown_custody_keeps_every_checkout(tmp_path, monkeypatch, state):
+    """The run's own listing reads the review state, and the markerless fallback one more time, not once per
+    checkout; a state that turns unreadable keeps every checkout, named, as the listing would."""
+    from ouroboros import review_checking_prune as rp
+
+    root = tmp_path / "data"
+    base = root / "state" / "review_checkouts"
+    entries = [base / name for name in ("first", "second", "third")]
+    for entry in entries:
+        (entry / "repo").mkdir(parents=True)
+        (entry / "repo" / "f.txt").write_text("x", encoding="utf-8")
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("review_checkouts",))
+    assert _group(_preview(owner, root, tmp_path), "review_checkouts")["count"] == 3
+    real, calls = rp._review_rounds, []
+
+    def counted(data_root):
+        calls.append(data_root)
+        if state == "unreadable" and len(calls) > 1:
+            raise ValueError("the review state changed shape under the run")
+        return real(data_root)
+
+    monkeypatch.setattr(rp, "_review_rounds", counted)
+    view = _run(owner, root, tmp_path, groups=("review_checkouts",))
+    assert view["state"] == "done" and view["run"]["error"] is None
+    if state == "readable":
+        assert len(calls) == 2 and view["run"]["removed"] == 3 and not any(entry.exists() for entry in entries)
+    else:
+        assert view["run"]["kept"] == [{"reason": "unreadable_record", "count": 3}] and all(entry.is_dir() for entry in entries)
 
 
 def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_dropped(tmp_path, monkeypatch):

@@ -441,9 +441,16 @@ def _root_cost_stop_authority(scope: Any) -> Tuple[str, Optional[float]]:
     pct = normalize_budget_profile(contract.get("budget_profile")).get("cost_hard_stop_pct")
     if pct is not None:
         return COST_STOP_EXPLICIT, float(pct)
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    producer = _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
+    producer = recorded_producer_ceiling(row)
     return (COST_STOP_PRODUCER, producer) if producer is not None else (COST_STOP_NONE, None)
+
+
+def recorded_producer_ceiling(row: Dict[str, Any]) -> Optional[float]:
+    """A task row's recorded producer allowance (``root_cost_ceiling_usd`` on the row, else in its metadata) when
+    strictly positive, else ``None``: what a member's root authored (``_root_cost_stop_authority``) and the TOTAL a
+    Continue hands on unchanged, its stop comparing the whole work's group spend (``loop_budget``)."""
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
 
 
 def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:

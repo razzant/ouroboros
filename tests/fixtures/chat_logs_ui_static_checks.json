@@ -405,7 +405,7 @@
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-live-card[data-expanded=\"1\"] > .chat-live-summary-button .chat-live-chevron {"
+    "value": ".chat-live-summary-side[aria-expanded=\"true\"] > .chat-live-chevron {"
   },
   {
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",

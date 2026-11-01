@@ -688,7 +688,7 @@ async function mountTab(card, tab, mountSignal = null) {
     const render = tab.render || {};
     if (!mount) return;
     if (render.kind === 'iframe' && render.route) {
-        return mountRouteIframeWidget(mount, tab, render);
+        return mountRouteIframeWidget(mount, tab, render, mountSignal, null, widgetMessageHandlers);
     }
     // A kept living card is Ouroboros's, not a skill's: no route, its presses go to the card's decisions.
     if (tab.pinned_card) return mountPinnedCard(mount, tab);
@@ -716,7 +716,8 @@ function trackSettling(key, result) {
 }
 
 // Returns the settle promise of an ordered stop, or null when nothing is left to
-// wait for (declarative and route-iframe disposers finish synchronously).
+// wait for (declarative disposers, and route pages that never joined the bridge,
+// finish synchronously).
 function disposeWidgetByKey(key) {
     const dispose = widgetDisposers.get(key);
     if (!dispose) return widgetDisposing.get(key) || null;

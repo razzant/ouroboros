@@ -98,10 +98,11 @@ def test_auth_endpoints_are_the_gate_owned_public_paths(gated_client):
     from ouroboros import server_auth
 
     paths = {token.split(" ", 1)[1] for token in endpoint_index.AUTH_ENDPOINTS}
-    assets = '/api/widget-assets/{token}/{path:path}'
-    assert paths == {"/auth/login", "/auth/logout", assets}
-    assert paths - {assets} <= server_auth._PUBLIC_HTTP_PATHS
+    assets = {'/api/widget-assets/{token}/{path:path}', '/api/widget-resources/{token}/{path:path}'}
+    assert paths == {"/auth/login", "/auth/logout", *assets}
+    assert paths - assets <= server_auth._PUBLIC_HTTP_PATHS
     assert gated_client.get('/api/widget-assets/' + 'x' * 43 + '/main.js').status_code == 404
+    assert gated_client.get('/api/widget-resources/' + 'x' * 43 + '/page').status_code == 404
     # The inner fixture has no auth routes: these responses prove gate ownership.
     assert gated_client.get("/auth/login").status_code == 200
     logout = gated_client.get("/auth/logout", follow_redirects=False)
@@ -234,8 +235,10 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
         assert not validate_ingress(entry, client_contracts.ContractHttpEntry), entry
         token = f"{entry['method']} {entry['path']}"
         assert entry["typed"] == (token in _all_shapes()), token
-        assert entry["auth"] == ("asset_lease" if entry["path"] == '/api/widget-assets/{token}/{path:path}' else
-                                 "public" if entry["path"] in {"/api/health", "/auth/login", "/auth/logout"} else "gate")
+        assert entry["auth"] == ("asset_lease" if entry["path"] in {'/api/widget-assets/{token}/{path:path}',
+                                                                  '/api/widget-resources/{token}/{path:path}'} else
+                                 "public" if entry["path"] in {"/api/health", "/auth/login", "/auth/logout",
+                                                               "/api/widget-bridge.js"} else "gate")
         for body in [entry.get("request"), *entry.get("responses", {}).values()]:
             for name in (body or {}).get("schemas", []):
                 assert name in document["schemas"], (token, name)

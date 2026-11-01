@@ -232,3 +232,256 @@ def test_restart_to_update_discloses_its_candidate_effects_before_post(engine, w
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("engine,width", [("chromium", 1360), ("chromium", 390), ("webkit", 390)])
+def test_a_refused_carried_list_is_said_never_saved_and_restore_keeps_its_commit_in_view(engine, width, tmp_path):
+    """The complete list downloads only while the server serves it for the candidate shown: its refusals (409 another
+    candidate is live, 404 no list is kept) are said, nothing is saved and the status is read again, the reader keeping
+    their place; a served list is saved whole. Restore names its exact commit inside the dialog at every width, and
+    Cancel sends nothing."""
+    if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
+        pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1")
+    playwright = pytest.importorskip("playwright.sync_api")
+    base, target = "88acfdbe3c1f0a2b4d5e6f708192a3b4c5d6e7f8", "d2f6a91c7e5b4a3928170f6e5d4c3b2a19087f6e"
+    later = CANDIDATE_ID[:-1] + "2"  # a later preparation that superseded the one shown
+    url, name = f"/api/files/download?carried_list={later}", f"{later}.uncommitted.txt"
+    notes = [["A", f"notes/n{index:03d}.md"] for index in range(250)]
+    listing = "Staged: 0\n\nIn the files: 250\n" + "".join(f"{status}\t{path}\n" for status, path in notes)
+    candidate = {"candidate_id": CANDIDATE_ID, "state": "ready", "target_sha": target, "target_version": "7.9.1",
+                 "base_sha": base, "base_version": "7.9.0", "local_changes": True,
+                 "carried": {"index": {"count": 0, "paths": []}, "files": {"count": 250, "paths": notes[:200]},
+                             "list": f"/o/{CANDIDATE_ID}.uncommitted.txt",
+                             "list_url": f"/api/files/download?carried_list={CANDIDATE_ID}"},
+                 "checks": {"ok": True, "tests": {"file_count": 3}}, "actions": ["activate", "discard_candidate"]}
+    superseding = {**candidate, "candidate_id": later, "carried": {
+        "index": {"count": 0, "paths": []}, "files": {"count": 230, "paths": notes[:200]}, "list": f"/o/{name}",
+        "list_url": url}}
+    status = {"managed": True, "check_ok": True, "available": True, "safe_to_apply": True, "current_sha": base,
+              "latest_sha": target, "latest_version": "7.9.1", "warnings": [], "update_tx": {"active": False},
+              "candidate": candidate}
+    refusals = {409: {"error": "the prepared update changed; check again", "reason_code": "candidate_changed"},
+                404: {"error": "this update keeps no list of carried work", "reason_code": "list_unavailable"}}
+    answer = {"status": 409}
+    calls = []
+
+    def respond(route):
+        parts = urlparse(route.request.url)
+        calls.append((route.request.method, parts.path))
+        if parts.path == "/api/files/download":
+            if answer["status"] == 200:
+                route.fulfill(status=200, content_type="text/plain; charset=utf-8", body=listing,
+                              headers={"Content-Disposition": f'attachment; filename="{name}"'})
+            else:
+                if answer["status"] == 409:
+                    status["candidate"] = superseding
+                route.fulfill(status=answer["status"], content_type="application/json",
+                              body=json.dumps(refusals[answer["status"]]))
+            return
+        body = status if parts.path == "/api/update/status" else {"commits": [], "tags": []}
+        route.fulfill(content_type="application/json", body=json.dumps(body))
+
+    def asked(path, method=None):
+        return [seen for seen in calls if seen[1] == path and (method is None or seen[0] == method)]
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(WEB)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with playwright.sync_playwright() as pw:
+            if engine == "webkit" and not Path(pw.webkit.executable_path).is_file():
+                pytest.skip(f"{engine} is not installed in the test interpreter")
+            browser = getattr(pw, engine).launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": width, "height": 900}, has_touch=width < 980,
+                                        accept_downloads=True)
+                errors = PageErrors(page, engine)
+                page.route("**/api/**", respond)
+                fixture = f"http://127.0.0.1:{server.server_port}/fixture"
+                page.goto(fixture)
+                page.wait_for_function("document.querySelector('#btn-update-primary').textContent === 'Restart to update'")
+                page.locator("#updates-candidate-details > summary").click()
+                link = page.locator("#updates-candidate-facts a[download]")
+                link.scroll_into_view_if_needed()
+                place = "document.querySelector('.updates-scroll').scrollTop"
+                for code, words in ((409, "The prepared update changed; its list was not downloaded. Review it again."),
+                                    (404, "This update no longer keeps a list of its carried work; nothing was downloaded.")):
+                    answer["status"] = code
+                    reads, before = len(asked("/api/update/status")), page.evaluate(place)
+                    with pytest.raises(playwright.TimeoutError):
+                        with page.expect_download(timeout=2_000):
+                            link.click()
+                    page.locator("#toast-stack").get_by_text(words).wait_for()
+                    for _ in range(50):  # the read again follows the words; routes are answered while the page waits
+                        if len(asked("/api/update/status")) > reads:
+                            break
+                        page.wait_for_timeout(100)
+                    assert len(asked("/api/update/status")) > reads, "the status is read again after a refusal"
+                    assert asked("/api/files/download", "GET") == [], "a refused list is never fetched as the list"
+                    page.locator("#updates-candidate-facts").get_by_text("230 change(s): 0 staged").wait_for()  # the live one
+                    assert before > 0 and abs(page.evaluate(place) - before) <= 1, "the reader keeps their place"
+                answer["status"] = 200
+                with page.expect_download() as saved:
+                    link.click()
+                assert saved.value.suggested_filename == name
+                assert Path(saved.value.path()).read_text(encoding="utf-8") == listing
+                assert len(asked("/api/files/download", "GET")) == 1
+                # The last Restart to update's outcome names the commit Restore goes back to, whole.
+                status["candidate"] = {"state": "none", "actions": ["prepare"], "last_activation": {
+                    "candidate_id": CANDIDATE_ID, "at": "2026-10-31T09:05:00+00:00", "outcome": "adopted",
+                    "sha": target, "previous": base, "target_sha": target, "target_version": "7.9.1",
+                    "base_version": "7.9.0", "merge_kind": "fast_forward", "local_commits": 0, "local_changes": False,
+                    "without_local_changes": False}}
+                page.goto(fixture)
+                page.locator("#updates-attempt-restore").click()
+                dialog = page.get_by_role("dialog")
+                dialog.wait_for()
+                assert f"commit {base}," in dialog.inner_text()
+                output = diagnostic_directory(tmp_path, "update-effects") / f"restore-{engine}-{width}.png"
+                page.screenshot(path=str(output))
+                print(f"UPDATE_EFFECTS_SCREENSHOT={output}")
+                inside = dialog.locator(".marketplace-modal-body").evaluate(
+                    "(body) => [body.scrollWidth, body.clientWidth]")
+                assert inside[0] <= inside[1], f"the commit runs past the dialog: {inside}"
+                dialog.get_by_role("button", name="Cancel", exact=True).click()
+                assert asked("/api/git/rollback") == []
+                assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+                assert not errors.unexpected(), errors
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+_DRAIN, _DNS, _SIG = "tests/test_queue.py::test_drain", "tests/test_net.py::test_dns", "assert: AssertionError: expected 2"
+_LANES = [{"lane": "parallel", "returncode": 1, "cases": 300, "seconds": 1790.2},
+          {"lane": "serial", "returncode": 124, "cases": 0, "seconds": 0.0}]
+# Each record is the shape supervisor/update_checks.selected_tests writes for that outcome (reason, then checks.tests),
+# with the panel's expected headline and a phrase of its hint.
+CHECK_SCENES = {
+    "passed": ("ready", "", {"ok": True, "tier": "selected", "file_count": 14, "blocking": [], "already_failing": []},
+               "7.9.1 (bbbbbbbb) is ready. Restart to switch to it.", "If it does not start"),
+    "failed": ("failed", "checks_failed", {"ok": False, "tier": "selected", "file_count": 14, "failed": {_DRAIN: _SIG},
+                                           "blocking": [_DRAIN], "already_failing": [], "target_failing": [],
+                                           "baseline": {"complete": True, "failed": {}, "returncode": 0, "excuses": True}},
+               "7.9.1 (bbbbbbbb) did not pass its checks. Nothing was changed.", "fail only with the update"),
+    "prerequisite": ("failed", "checks_unverified", {
+        "ok": False, "tier": "full", "file_count": 412, "budget_seconds": 1800, "failed": {}, "blocking": [],
+        "unverified": "a prerequisite of the checks is missing: Node.js for the full tier's 37 browser-module test "
+                      "file(s) is absent: none is bundled and none is on PATH",
+        "prerequisite": {"prerequisite": "node", "status": "absent"}},
+        "7.9.1 (bbbbbbbb) could not be checked. Nothing was changed.", "until that changes"),
+    "unfinished": ("failed", "checks_unverified", {
+        "ok": False, "tier": "selected", "file_count": 40, "budget_seconds": 1800, "failed": {_DRAIN: _SIG},
+        "blocking": [_DRAIN], "new": {"complete": False, "returncode": 1, "lanes": _LANES},
+        "unverified": "the selected run did not complete (parallel: exit 1, 300 case(s), serial: exit 124, 0 case(s)); "
+                      "124 is its deadline, 125 a refused start, 2 an interrupted collection, 5 nothing collected"},
+        "7.9.1 (bbbbbbbb) did not pass its checks. Nothing was changed.", "reached their 30-minute limit"),
+    "not_excused": ("failed", "checks_failed", {
+        "ok": False, "tier": "selected", "file_count": 14, "failed": {_DRAIN: _SIG, _DNS: _SIG},
+        "blocking": [_DNS, _DRAIN], "already_failing": [], "target_failing": [],
+        "user_site": {"declared": "/u", "serving": "/u", "harness": {"W'": "opt_in", "W": "predates_opt_in",
+                                                                     "T": "opt_in"}},
+        "baseline": {"complete": True, "failed": {_DNS: _SIG}, "returncode": 1, "excuses": False, "not_excused": [_DNS],
+                     "why": "W's test harness predates the installation user-site opt-in: its tests' own children could "
+                            "not import the installation's packages, so a failure W shares proves nothing and blocks, "
+                            "attributed through T"}},
+        "7.9.1 (bbbbbbbb) did not pass its checks. Nothing was changed.", "a failure there excuses nothing"),
+    "differently": ("failed", "checks_failed", {
+        "ok": False, "tier": "selected", "file_count": 14, "failed": {_DRAIN: _SIG, _DNS: _SIG},
+        "blocking": [_DNS, _DRAIN], "already_failing": [], "target_failing": [],
+        "baseline": {"complete": True, "failed": {_DNS: "failure:AssertionError:['AssertionError: /tmp/tmp2b8c']"},
+                     "returncode": 1, "excuses": True}},
+        "7.9.1 (bbbbbbbb) did not pass its checks. Nothing was changed.", "with another failure"),
+    "outside_tests": ("failed", "checks_unverified", {
+        "ok": False, "tier": "selected", "file_count": 14, "budget_seconds": 1800, "failed": {}, "blocking": [],
+        "new": {"complete": False, "returncode": 1, "lanes": [
+            {"lane": "parallel", "returncode": 1, "cases": 300, "seconds": 812.4, "no_failing_case": True},
+            {"lane": "serial", "returncode": 5, "cases": 0, "seconds": 2.1}]},
+        "unverified": "the selected run did not complete (parallel: exit 1, 300 case(s), serial: exit 5, 0 case(s); "
+                      "parallel exited 1 though none of its cases failed); 124 is its deadline, 125 a refused start, 2 "
+                      "an interrupted collection, 5 nothing collected"},
+        "7.9.1 (bbbbbbbb) could not be verified. Nothing was changed.", "failed though none of its tests did"),
+}
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_checks_outcomes_name_failures_and_missing_evidence_apart(engine, tmp_path):
+    """Each readiness-check outcome the producer records reads as itself in the real panel at the desk and phone
+    windows, light and dark: one headline, its hint, and the specifics in the open facts list; the actions stay the
+    failed checks' own (Prepare again, Discard), never a new one."""
+    if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
+        pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1")
+    playwright = pytest.importorskip("playwright.sync_api")
+    base, target = "a" * 40, "b" * 40
+    status = {"managed": True, "check_ok": True, "available": True, "safe_to_apply": True, "current_sha": base,
+              "current_version": "7.9.0", "latest_sha": target, "latest_version": "7.9.1", "warnings": [],
+              "update_tx": {"active": False}}
+
+    def respond(route):
+        path = urlparse(route.request.url).path
+        body = status if path == "/api/update/status" else {"commits": [], "tags": []}
+        route.fulfill(content_type="application/json", body=json.dumps(body))
+
+    output = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or diagnostic_directory(tmp_path, "update-checks"))
+    output.mkdir(parents=True, exist_ok=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(WEB)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with playwright.sync_playwright() as pw:
+            if engine == "webkit" and not Path(pw.webkit.executable_path).is_file():
+                pytest.skip(f"{engine} is not installed in the test interpreter")
+            browser = getattr(pw, engine).launch(headless=True)
+            try:
+                for (width, height), theme in [(size, theme) for size in ((1110, 750), (390, 844))
+                                               for theme in ("light", "dark")]:
+                    page = browser.new_page(viewport={"width": width, "height": height}, color_scheme=theme,
+                                            has_touch=width < 980)
+                    errors = PageErrors(page, engine)
+                    page.route("**/api/**", respond)
+                    for scene, (state, reason, tests, headline, phrase) in CHECK_SCENES.items():
+                        status["candidate"] = {
+                            "candidate_id": CANDIDATE_ID, "state": state, "reason": reason, "target_sha": target,
+                            "target_version": "7.9.1", "base_sha": base, "base_version": "7.9.0",
+                            "merge_kind": "fast_forward", "environment_same": True,
+                            "checks": {"ok": tests["ok"], "tests": tests},
+                            "actions": ["activate", "discard_candidate"] if state == "ready"
+                            else ["prepare", "discard_candidate"]}
+                        page.goto(f"http://127.0.0.1:{server.server_port}/fixture")
+                        page.locator("#updates-summary").get_by_text(headline, exact=True).wait_for()
+                        hint = page.locator("#updates-hint").inner_text()
+                        assert phrase in hint, (scene, hint)
+                        details = page.locator("#updates-candidate-details")
+                        if not details.evaluate("node => node.open"):
+                            details.locator("summary").click()
+                        facts = page.locator("#updates-candidate-facts").inner_text()
+                        # The recorded reason is one disclosure away whenever the checks reached no verdict.
+                        assert ("Why" in facts) == (reason == "checks_unverified"), (scene, facts)
+                        if scene in ("unfinished", "not_excused", "differently"):  # a test failed: never "neither"
+                            assert "neither passed nor failed" not in f"{hint}\n{facts}", (scene, hint, facts)
+                            assert _DRAIN in hint, (scene, hint)
+                        if scene == "differently":  # W failed it too, differently: named so, never "only"
+                            assert "Failing in 7.9.0 too, differently" in facts, (scene, facts)
+                            assert f"only with the update: {_DNS}" not in hint, (scene, hint)
+                        labels = [page.locator("#btn-update-primary").inner_text(),
+                                  *page.locator("[data-secondary]").all_inner_texts()]
+                        assert labels == (["Restart to update", "Discard"] if state == "ready"
+                                          else ["Prepare again", "Discard"]), (scene, labels)
+                        name = f"checks-{scene}-{engine}-{width}x{height}-{theme}"
+                        page.screenshot(path=str(output / f"{name}.png"))
+                        page.locator("#updates-status-card").screenshot(path=str(output / f"{name}-card.png"))
+                        (output / f"{name}.txt").write_text(
+                            f"{page.locator('#updates-summary').inner_text()}\n{hint}\n\n{facts}\n", encoding="utf-8")
+                        print(f"UPDATE_CHECKS_SCREENSHOT={output / name}.png")
+                        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+                    assert not errors.unexpected(), errors
+                    page.close()
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

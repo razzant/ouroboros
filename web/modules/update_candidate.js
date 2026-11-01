@@ -76,6 +76,20 @@ const CODE_WORDS = {
     runtime_differs: 'the new app runs another Python version',
     download_failed: 'the new app could not be downloaded',
     channel_changed: 'the update channel changed after it was prepared',
+    // A conflict's reviewed adaptation (update_adaptation): why the queue did not take its resolver (_admit_resolver),
+    // then what its settlement found.
+    restart_intake_closed: 'Ouroboros was about to restart and took no new work',
+    restart_admission_unconfirmed: 'the task queue could not be saved, so the task was not kept',
+    billing_authority_unavailable: 'the record its spending would be counted in could not be confirmed',
+    worker_pool_unavailable: 'no worker could be started to run it',
+    admission_unknown: 'the task queue did not say whether it took the task',
+    // Git's list of the files that still hold markers, one "<commit>:<path>" per line and cut at 300 characters: the
+    // paths as recorded, a line without that prefix as written.
+    adaptation_markers_left: (detail) => {
+        const paths = detail.split('\n').map((line) => line.trim().replace(/^[0-9a-f]{40}(?:[0-9a-f]{24})?:/, ''))
+            .filter(Boolean);
+        return `its reviewed adaptation still has conflict markers${paths.length ? ` in ${paths.join(', ')}` : ''}`;
+    },
 };
 function codeWords(code) {
     const text = String(code || '');
@@ -112,22 +126,130 @@ const MERGE_WORDS = {
 // (update_checks.selected_tests: `floor_missing`, also in `blocking`): it is missing, never a test that failed.
 const lacking = (missing, limit) => `the update lacks test file(s) the official version requires: ${named(missing, limit)}`;
 
-function checksText(candidate) {
+// A prerequisite probed before any test runs (update_checks._node, _declared): what it is, and what was found.
+const PREREQUISITE_WORDS = { absent: 'was not found', unstartable: 'could not be started',
+    timeout: 'did not answer in time', unusable: 'failed when asked' };
+function prerequisiteWords(record) {
+    const found = PREREQUISITE_WORDS[record.status] || `is ${record.status || 'unusable'}`;
+    if (record.prerequisite === 'node') {
+        if (record.status === 'unusable' && record.version) {
+            const at = record.node ? ` ${record.node}` : '';
+            return { fact: `Node.js${at} is ${record.version}, older than the tests need`,
+                hint: `Node.js${at} is ${record.version}, older than its browser-module tests need` };
+        }
+        return { fact: `Node.js ${found}`, hint: `Node.js, which its browser-module tests need, ${found}` };
+    }
+    const where = `the Python packages folder${record.user_base ? ` ${record.user_base}` : ''}`;
+    const site = record.status === 'absent' ? `${where} is not an existing absolute path` : `${where} ${found}`;
+    return { fact: site, hint: site };
+}
+
+// A run the checks' one budget ended (update_checks.run_tests: exit 124 is its deadline), by a lane's exit or, where
+// the record keeps no lanes (the comparison run on W, `baseline`), by the run's own.
+const minutes = (seconds) => (Number(seconds) >= 60 && Number(seconds) % 60 === 0 ? `${seconds / 60}-minute`
+    : Number(seconds) > 0 ? `${seconds}-second` : '');
+const outOfTime = (run) => object(run)?.returncode === 124
+    || (Array.isArray(object(run)?.lanes) && run.lanes.some((lane) => lane?.returncode === 124));
+
+/** What the checks found, from update_checks.selected_tests's record: `kind` (`passed`, `failed`: a test failed or a
+ *  required one is missing; `unverified`: no verdict either way; `unchecked`: a prerequisite stopped them before any
+ *  test ran), the Checks fact, the failed verdict's hint and the extra fact rows. Tests that failed are named whatever
+ *  else is missing; a comparison that did not run or could not excuse a failure is said beside them. */
+function checksView(candidate, running) {
     const checks = object(candidate.checks) || {};
     const tests = object(checks.tests) || {};
-    if (candidate.state === 'checking') return 'running in the separate copy';
+    const rows = [];
+    if (candidate.state === 'checking') return { kind: '', fact: 'running in the separate copy', hint: '', rows };
     if (checks.ok === true) {
-        if (checks.skipped) return `not run (${checks.skipped})`;
-        return Number.isInteger(tests.file_count) ? `passed: ${tests.file_count} selected test file(s)` : 'passed';
+        return { kind: 'passed', hint: '', rows, fact: checks.skipped ? `not run (${checks.skipped})`
+            : Number.isInteger(tests.file_count) ? `passed: ${tests.file_count} selected test file(s)` : 'passed' };
     }
-    if (checks.ok === false) {
-        if (tests.unverified) return 'did not complete, so nothing was verified';
-        const missing = strings(tests.floor_missing);
-        if (missing.length) return `not run: ${lacking(missing)}`;
-        const blocking = strings(tests.blocking);
-        return blocking.length ? `failed only with the update: ${named(blocking)}` : 'failed';
+    if (checks.ok !== false) return { kind: '', fact: '', hint: '', rows };
+    const unverified = String(tests.unverified || '');
+    if (unverified) rows.push(['Why', cap(sentence(unverified))]);
+    const missing = strings(tests.floor_missing);
+    if (missing.length) {
+        return { kind: 'failed', fact: `not run: ${lacking(missing)}`, hint: `No test was run: ${lacking(missing, 5)}.`, rows };
     }
-    return '';
+    const prerequisite = object(tests.prerequisite);
+    if (unverified && prerequisite) {
+        const words = prerequisiteWords(prerequisite);
+        const lasting = ['absent', 'unusable'].includes(prerequisite.status);
+        return { kind: 'unchecked', fact: `not run: ${words.fact}`, rows, hint: `No test ran: ${words.hint}. ${lasting
+            ? 'Preparing it again gives the same result until that changes.'
+            : 'It may answer when the update is prepared again.'}` };
+    }
+    if (unverified && object(tests.floor)?.error) {
+        return { kind: 'unverified', fact: 'not run: the official version’s list of required tests could not be read',
+            hint: 'No test ran: the list of tests the official version requires could not be read.', rows };
+    }
+    const blocking = strings(tests.blocking);
+    const limit = minutes(tests.budget_seconds);
+    const reached = limit ? `reached their ${limit} limit` : 'ran out of time';
+    const target = object(tests.target_run);
+    if (target && target.complete === false) {
+        rows.push(['Official version', `not compared: ${target.unavailable || 'its run did not finish'}`]);
+    }
+    const newRun = object(tests.new);
+    if (newRun && newRun.complete === false) {  // W' itself did not finish: only what it measured is known
+        const stopped = outOfTime(newRun);
+        // A lane that exited 1 with no failing case of its own: its session failed outside its tests (run_tests).
+        const outside = !stopped && Array.isArray(newRun.lanes) && newRun.lanes.some((lane) => lane?.no_failing_case);
+        if (!blocking.length) {
+            return { kind: 'unverified', rows,
+                fact: stopped ? `stopped at the ${limit || 'time'} limit before the tests finished`
+                    : outside ? 'its test session failed outside its tests'
+                        : 'did not complete, so it neither passed nor failed',
+                hint: stopped ? `Its checks ${reached} before the tests finished, so it neither passed nor failed.`
+                    : outside ? 'Its test session failed though none of its tests did, so it neither passed nor failed.'
+                        : 'Its checks did not complete, so it neither passed nor failed.' };
+        }
+        if (outside) {
+            return { kind: 'failed', rows, fact: `failed: ${named(blocking)}; its test session also failed outside its tests`,
+                hint: `Tests that failed with the update: ${named(blocking, 5)}. Its test session also failed outside its `
+                    + `tests, so none was compared with ${running}.` };
+        }
+        const ended = stopped ? `Its checks ${reached} before the other tests finished` : 'Its checks did not complete';
+        return { kind: 'failed', rows, fact: `failed: ${named(blocking)}; the other tests did not finish`,
+            hint: `Tests that failed with the update: ${named(blocking, 5)}. ${ended}, so they have no result and none `
+                + `was compared with ${running}.` };
+    }
+    const baseline = object(tests.baseline);
+    if (blocking.length && baseline && baseline.complete === false) {  // measured on W', never compared on W
+        return { kind: 'failed', rows, fact: `failed with the update: ${named(blocking)}; not compared with ${running}`,
+            hint: `Tests that failed with the update: ${named(blocking, 5)}. The comparison run on ${running} `
+                + `${outOfTime(baseline) ? reached.replace('their', 'the checks’') : 'did not finish'}, so whether they `
+                + 'fail there too is unknown.' };
+    }
+    if (blocking.length) {
+        // W failed these the same way, but its harness could not give its tests the installation's packages.
+        const shared = baseline?.excuses === false ? strings(baseline.not_excused).filter((id) => blocking.includes(id)) : [];
+        // W failed these too, with another failure: only the same failure excuses one, so they block, but not "only".
+        const failedThere = Object.keys(object(baseline?.failed) || {});
+        const differently = blocking.filter((id) => failedThere.includes(id) && !shared.includes(id));
+        const only = blocking.filter((id) => !shared.includes(id) && !differently.includes(id));
+        const said = only.length ? [`Tests that fail only with the update: ${named(only, 5)}.`] : [];
+        if (differently.length) {
+            rows.push([`Failing in ${running} too, differently`, named(differently, 6)]);
+            said.push(`Failing in ${running} too, with another failure: ${named(differently, 5)}; a different failure `
+                + 'there excuses nothing.');
+        }
+        if (shared.length) {
+            rows.push([`Failing in ${running} too, not excused`, named(shared, 6)]);
+            const harness = object(object(tests.user_site)?.harness)?.W;
+            const why = harness === 'predates_opt_in'
+                ? `The tests of ${running} cannot give their own processes this installation’s packages`
+                : `Whether the tests of ${running} can use this installation’s packages could not be read`;
+            said.push(`Also failing in ${running}: ${named(shared, 5)}. ${why}, so a failure there excuses nothing.`);
+        }
+        return { kind: 'failed', rows, hint: said.join(' '), fact: only.length ? `failed only with the update: ${named(only)}`
+            : `failed in ${running} too${shared.length ? '' : ', differently'}` };
+    }
+    if (unverified) {
+        return { kind: 'unverified', rows, fact: 'did not complete, so it neither passed nor failed',
+            hint: 'Its checks did not complete, so it neither passed nor failed.' };
+    }
+    return { kind: 'failed', fact: 'failed', hint: 'Its selected tests did not pass.', rows };
 }
 
 // The owner's work as the restart leaves it (update_prepare.carried_layers): what each layer changes on the update.
@@ -238,7 +360,9 @@ export function candidateFacts(data = {}, candidate = object(data.candidate)) {
         : 'its own copy, prepared by the new app’s Python')
         : candidate.environment_same === true ? 'the same as the running app'
         : candidate.environment_same === false ? sentence(checks.environment_note || 'the dependency lock differs') : '');
-    add('Checks', checksText(candidate));
+    const outcome = checksView(candidate, data.current_version ? String(data.current_version) : 'the running version');
+    add('Checks', outcome.fact);
+    for (const [label, value] of outcome.rows) add(label, value);
     const tests = object(checks.tests) || {};
     add('Already failing before', named(strings(tests.already_failing), 6));
     add('Also failing in the official version', named(strings(tests.target_failing), 6));
@@ -468,11 +592,19 @@ export function candidateVerdict(data = {}, base = {}) {
         const what = { merge: 'Your local commits', index: 'Your staged changes', files: 'Your uncommitted changes' }[step]
             || 'Your local changes';
         const without = offered.has('apply_without_local_changes') ? ', or prepare without your uncommitted changes' : '';
+        // A resolver the queue did not take leaves the candidate here with its refusal (update_adaptation._adapt:
+        // "<step>_conflicts: resolver not admitted: <refusal>", and no task); Prepare again asks for it again.
+        const refused = /\bresolver not admitted: ([\s\S]+)$/.exec(String(candidate.reason || ''))?.[1].trim() || '';
+        const next = refused
+            ? `${sentence(`The reviewed task that adapts your changes could not start: ${codeWords(refused)}`)} Prepare `
+                + `again to retry it, or resolve the conflict in this checkout and prepare again${without}. ${Running} `
+                + 'keeps running with your local changes.'
+            : `${Running} keeps running with your local changes. Resolve the conflict in this checkout and prepare `
+                + `again${without}.`;
         return make({ state: 'candidate_needs_adaptation', tone: 'warn', factsOpen: true,
             headline: `${what} conflict with ${target || 'the update'}. Nothing was changed.`,
             hint: `${paths.length ? `Conflicting: ${named(paths, 3, Number(candidate.conflict_count) || paths.length)}. `
-                : ''}${Running} keeps running with your local changes. Resolve the conflict in this checkout and `
-                + `prepare again${without}.`,
+                : ''}${next}`,
             action: again || null, secondary: rest });
     }
     if (state === 'adapting') {
@@ -506,6 +638,13 @@ export function candidateVerdict(data = {}, base = {}) {
     if (state === 'stale') {
         // An app staged by an earlier preparation was recorded without its contents (body_switch.identity_stale).
         const earlier = String(candidate.reason || '') === 'native_identity_stale';
+        // Its prepared packages are gone, emptied or replaced (update_prepare._prepared_missing).
+        if (String(candidate.reason || '').startsWith('environment_missing')) {
+            return make({ state: 'candidate_stale', tone: 'warn',
+                headline: 'The Python packages prepared for this update are gone.',
+                hint: `Prepare it again to make them anew. Nothing was changed; ${running} keeps running.`,
+                action: again || null, secondary: rest });
+        }
         return make({ state: 'candidate_stale', tone: 'warn',
             headline: earlier ? 'This update was prepared by an earlier version of Ouroboros.'
                 : 'This checkout changed after the update was prepared.',
@@ -521,9 +660,6 @@ export function candidateVerdict(data = {}, base = {}) {
     }
     if (state === 'failed') {
         const reason = String(candidate.reason || '');
-        const tests = object(object(candidate.checks)?.tests);
-        const blocking = strings(tests?.blocking);
-        const missing = strings(tests?.floor_missing);
         const collision = reason.startsWith('ignored_path_collision:') ? reason.slice(reason.indexOf(':') + 1).trim() : '';
         if (reason.startsWith('activation:')) {  // the restart's other outcomes; the Last attempt keeps the record
             const ended = STARTED_WORDS[activation.outcome] || STARTED_WORDS.unknown;
@@ -532,18 +668,22 @@ export function candidateVerdict(data = {}, base = {}) {
         }
         // A typed refusal is recorded as "CODE: its sentence": the sentence is the owner's, the code stays in the record.
         const refusal = /^[A-Z][A-Z0-9_]+: ([\s\S]+)$/.exec(reason);
+        // This panel's own words for a code start their sentence; a text it has no words for stays as written.
+        const worded = codeWords(reason);
         const checked = reason === 'checks_failed' || reason === 'checks_unverified';
-        const hint = reason === 'checks_failed'
-            ? (missing.length ? `No test was run: ${lacking(missing, 5)}.`
-                : blocking.length ? `Tests that fail only with the update: ${named(blocking, 5)}.` : 'Its selected tests did not pass.')
-            : reason === 'checks_unverified' ? 'Its checks did not complete, so it was neither passed nor failed. Prepare it again.'
+        // The record, not the reason code alone, says whether a test failed: an unfinished run keeps what it measured.
+        const outcome = checked ? checksView(candidate, running) : null;
+        const hint = outcome ? outcome.hint
             : collision ? `It adds files where this checkout keeps ignored files: ${collision}.`
-                : sentence(refusal ? refusal[1] : codeWords(reason));
+                : sentence(refusal ? refusal[1] : worded === reason ? reason : cap(worded));
         return make({ state: 'candidate_failed', tone: 'error', factsOpen: checked,
-            headline: reason === 'checks_failed' ? `${name} did not pass its checks. Nothing was changed.`
-                : reason === 'checks_unverified' ? `${name} could not be verified. Nothing was changed.`
-                : `${name} could not be prepared. Nothing was changed.`,
-            hint, action: again || null, secondary: rest });
+            headline: !outcome ? `${name} could not be prepared. Nothing was changed.`
+                : outcome.kind === 'unchecked' ? `${name} could not be checked. Nothing was changed.`
+                : outcome.kind === 'unverified' || (reason === 'checks_unverified' && outcome.kind !== 'failed')
+                    ? `${name} could not be verified. Nothing was changed.`
+                    : `${name} did not pass its checks. Nothing was changed.`,
+            hint: hint || (reason === 'checks_unverified' ? 'Its checks did not complete, so it neither passed nor failed.'
+                : 'Its selected tests did not pass.'), action: again || null, secondary: rest });
     }
     return null;  // none, activated, unknown or a state this panel does not know: the ordinary verdict speaks
 }
@@ -732,15 +872,20 @@ export function paintVerdictActions(bar, primary, verdict) {
     else primary.dataset.action = '';
 }
 
-/** Paint the "This update" list (`nodes`: section, details, title, list). It is rewritten only when its rows change,
- *  so a refresh keeps a selection; the verdict opens it where it must be read, once per state (`memo`). */
+/** Paint the "This update" list (`nodes`: section, details, title, list, and the panel's `scroller`). It is rewritten
+ *  only when its rows change, so a refresh keeps a selection, and the reader's place: WebKit puts the scroller back at
+ *  its top when the list is rewritten. The verdict opens it where it must be read, once per state (`memo`). */
 export function paintCandidateFacts(nodes, verdict, rowHtml, memo) {
     const rows = verdict.facts || [];
     nodes.section.hidden = !rows.length;
     if (!rows.length) return;
     nodes.title.textContent = verdict.factsTitle || 'This update';
     const html = rows.map(rowHtml).join('');
-    if (html !== memo.html) nodes.list.innerHTML = memo.html = html;
+    if (html !== memo.html) {
+        const place = nodes.scroller?.scrollTop;
+        nodes.list.innerHTML = memo.html = html;
+        if (place && nodes.scroller.scrollTop !== place) nodes.scroller.scrollTop = place;
+    }
     if (verdict.state !== memo.state) {
         memo.state = verdict.state;
         nodes.details.open = Boolean(verdict.factsOpen);

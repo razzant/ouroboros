@@ -96,7 +96,6 @@ def test_reply_guard_flag_reissue_silent_and_receipted(focus, monkeypatch):
     task = task_for(focus)
     ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root)
     monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
-    monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
     calls = []
     def check(name, args, **kw):
         calls.append((name, args, kw))
@@ -115,9 +114,25 @@ def test_reply_guard_flag_reissue_silent_and_receipted(focus, monkeypatch):
     assert prepare_focus_reply(ctx, "Changed")[0]
     assert ctx._presence_completion["outcome"] == "silent" and "Reply held" in ctx._focus_reply_hold
     p.edit_place(root, place.place_id, "set_state", author="owner", state="active")
-    monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset({"receipt"}))
-    assert prepare_focus_reply(ctx, "Duplicate")[0]
-    assert ctx._presence_completion["outcome"] == "tool_delivered"
+    # A real confirmed tool receipt (here an empty-text reaction) never selects the outcome:
+    # new words are new speech under the current check; only the mind's silence says nothing.
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_context import confirmed_delivery_receipts
+    from ouroboros.presence_delivery import PresenceDeliveryRecorder
+    from ouroboros.task_results import write_task_result
+    task["metadata"]["presence"]["event"]["conversation_key"] = conversation_key("chat", "a", "r", "")  # the Host's key
+    write_task_result(root, task["id"], "running", metadata=task["metadata"])
+    PresenceDeliveryRecorder(root).record("bridge", {
+        "schema_version": 1, "delivery_id": "reaction-1", "part_id": "status", "state": "delivered",
+        "provider": "chat", "account_id": "a", "conversation_id": "r", "thread_id": "", "text": "",
+        "format": "", "message": {"kind": "operation", "method": "setMessageReaction", "reaction": []},
+        "origin": {"kind": "tool", "task_id": task["id"], "source_event_id": "event1"}})
+    assert confirmed_delivery_receipts(ctx) == frozenset({("reaction-1", "status")})
+    assert prepare_focus_reply(ctx, "Final after the reaction")[0]
+    assert ctx._presence_completion["outcome"] == "message" and len(calls) == 4
+    assert prepare_focus_reply(ctx, "Internal note", quiet=True)[0]
+    assert ctx._presence_completion["outcome"] == "silent" and ctx._presence_completion["quiet"] is True
+    assert len(calls) == 4  # silence buys no check
 
 
 def test_owner_verb_authorship_and_atomic_api(focus, monkeypatch):
@@ -272,7 +287,9 @@ def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent,
     text, usage, _trace = loop.run_llm_loop([{"role": "user", "content": "Hello"}], registry,
         SimpleNamespace(default_model=lambda: "test-model"), root / "logs", lambda *_a, **_k: None,
         queue.Queue(), task_id=task["id"], drive_root=root)
-    result = build_presence_result_event(task, text, registry._ctx, terminal_origin=usage["terminal_origin"])
+    # The pipeline passes the terminal's own quiet fact (emit_task_results), never a selection the ctx kept.
+    result = build_presence_result_event(task, text, registry._ctx, terminal_origin=usage["terminal_origin"],
+                                         silent=usage.get("wake_silent") is True)
     if silent:
         assert len(calls) == 1 and not checks
         assert result["outcome"] == "silent" and result["text"] == ""

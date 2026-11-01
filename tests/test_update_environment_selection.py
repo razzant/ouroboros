@@ -6,8 +6,9 @@ dies between the two renames (a Panic during activation, a power loss) leaves th
 and the next start makes it again before any hook resumes: the packaged launcher's user base
 (``launcher_bootstrap.embedded_python_env``) or a fresh ``--runtime-venv``
 (``runtime_venv.prepare_runtime_venv``). The resume tells the recorded directories apart from
-that one by the identities authorization recorded: the made directory is kept aside, never
-selected, and a return then restores exactly the previous generation's packages. A selection
+that one by the identities authorization recorded, the prepared one also by the token its preparation
+wrote into it (a directory made again at a path, or emptied in place, can keep the inode): the made
+directory is kept aside, never selected, and a return then restores exactly the previous generation's packages. A selection
 that cannot complete returns the whole transition before any entry. The fault point is the
 helper's own (``OUROBOROS_BODY_SWITCH_FAIL_AT=mid_environment``); entries are real processes.
 """
@@ -37,7 +38,7 @@ def scene(tmp_path, monkeypatch):
     return Scene(tmp_path, monkeypatch)
 
 
-def _ready_lock_change(scene, kind, current, *, breaks):
+def _ready_lock_change(scene, kind, current, *, breaks, activate=True):
     """A prepared, armed Update whose new lock gets its own packages (``lib/toydep-2.0`` in the generation)."""
     (current / "lib").mkdir(parents=True)
     (current / "lib" / "toydep-1.0").write_text("old\n")
@@ -58,6 +59,8 @@ def _ready_lock_change(scene, kind, current, *, breaks):
     scene.local_work(commit=False)
     row = scene.prepare()
     assert row["state"] == "ready", row.get("reason")
+    if not activate:
+        return row, None, pathlib.Path(row["environment"]["generation"]["user_base"])
     handoff = scene.activate(row)
     assert handoff["environment"]["identity"]["current"] and handoff["environment"]["identity"]["generation"]
     return row, handoff, pathlib.Path(row["environment"]["generation"]["user_base"])
@@ -128,6 +131,117 @@ def test_a_selection_that_cannot_complete_returns_the_whole_transition_before_an
     assert generation.is_dir() and not any(generation.iterdir())  # the other directory is left as found
     assert git(scene.serving, "rev-parse", "HEAD") == row["layers"]["old_commit"]
     assert [report["a"] for report in scene.reports()] == ["GEN_OLD"]
+
+
+def _empty_in_place(path):
+    for child in list(path.iterdir()):
+        shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+
+
+def test_a_prepared_generation_emptied_in_place_keeps_its_inode_and_is_still_never_selected(scene):
+    """Device and inode do not prove the prepared packages: ext4 gives a directory made again at the path the freed
+    inode, and a generation emptied in place (here; an interrupted removal) keeps it on every filesystem."""
+    current = scene.data / "state" / "python-userbase"
+    row, handoff, generation = _ready_lock_change(scene, "user_site", current, breaks=False)
+    _empty_in_place(generation)
+    assert body_switch._path_identity(generation) == handoff["environment"]["identity"]["generation"][:2]
+
+    first = scene.boot()
+
+    assert first.returncode == 0, first.stderr
+    handoff = scene.handoff()
+    assert (handoff["return"]["outcome"], handoff["return"]["trigger"]) == ("returned", "environment_selection_failed")
+    assert (handoff["phase"], handoff["environment"]["state"], handoff["entries"]) == ("returned", "restored", [])
+    assert sorted(path.name for path in (current / "lib").iterdir()) == ["toydep-1.0"]
+    assert generation.is_dir() and not any(generation.iterdir())  # left as found, never selected or deleted
+    assert git(scene.serving, "rev-parse", "HEAD") == row["layers"]["old_commit"]
+    assert [report["a"] for report in scene.reports()] == ["GEN_OLD"]
+
+
+@pytest.mark.parametrize("change", ["emptied_in_place", "made_again"])
+def test_a_generation_changed_after_its_preparation_is_refused_at_authorization(scene, change):
+    """Authorization proves the generation by the token its preparation wrote, never by its name or inode: a READY
+    candidate whose packages were emptied or replaced since is refused before anything is pinned or switched."""
+    current = scene.data / "state" / "python-userbase"
+    row, _, generation = _ready_lock_change(scene, "user_site", current, breaks=False, activate=False)
+    if change == "emptied_in_place":
+        _empty_in_place(generation)
+    else:
+        shutil.rmtree(generation)
+        generation.mkdir()
+
+    with pytest.raises(body_adoption.AdoptionRefused) as refused:
+        body_adoption.authorize_update(scene.data, update_prepare.find(row["candidate_id"]))
+
+    assert refused.value.code == "ADOPTION_ENVIRONMENT_MISSING" and body_adoption.read(scene.data) == {}
+    assert update_prepare._prepared_moved(update_prepare.find(row["candidate_id"])) == (
+        "environment_missing: its prepared packages are gone")
+    assert sorted(path.name for path in (current / "lib").iterdir()) == ["toydep-1.0"]
+    assert generation.is_dir() and not any(generation.iterdir())
+
+
+@pytest.mark.parametrize("change", ["emptied_in_place", "made_again", "token_missing"])
+def test_restart_to_update_finds_prepared_packages_that_are_gone_and_offers_prepare_again(scene, change):
+    """The activation check reads the prepared generation as authorization proves it (by its token): one emptied,
+    replaced or without its token since preparation makes the READY candidate stale with that reason before
+    authorization, so the panel offers Prepare again instead of a refused Restart to update."""
+    current = scene.data / "state" / "python-userbase"
+    row, _, generation = _ready_lock_change(scene, "user_site", current, breaks=False, activate=False)
+    if change == "emptied_in_place":
+        _empty_in_place(generation)
+    elif change == "made_again":
+        shutil.rmtree(generation)
+        generation.mkdir()
+    else:
+        (generation / body_switch.GENERATION_WITNESS).unlink()
+
+    why = update_prepare.activation_check(update_prepare.find(row["candidate_id"]))
+
+    assert why == "environment_missing: its prepared packages are gone; prepare the update again"
+    stale = update_prepare.find(row["candidate_id"])
+    assert (stale["state"], stale["reason"]) == ("stale", "environment_missing: its prepared packages are gone")
+    assert body_adoption.read(scene.data) == {} and generation.is_dir()
+
+
+def test_a_renumbered_device_keeps_the_prepared_generation_its_token_proves(scene):
+    """A reboot between preparation and Restart to update may give the very generation another device number (btrfs's
+    anonymous device numbers, a renumbered disk), so the device and inode preparation recorded no longer match. Its
+    token still proves it: authorization accepts it, records its identity afresh and the switch selects it."""
+    import copy
+
+    current = scene.data / "state" / "python-userbase"
+    row, _, generation = _ready_lock_change(scene, "user_site", current, breaks=False, activate=False)
+    rebooted = copy.deepcopy(update_prepare.find(row["candidate_id"]))
+    recorded = rebooted["environment"]["generation"]["identity"]
+    recorded[0] += 1  # what a renumbered device looks like to the identity preparation recorded
+    assert body_switch._path_identity(generation) != recorded[:2]
+
+    assert update_prepare._prepared_moved(rebooted) == "" and update_prepare.activation_check(rebooted) == ""
+    handoff = scene.activate(rebooted)
+
+    assert handoff["environment"]["identity"]["generation"] == body_switch._path_identity(generation) + [recorded[2]]
+    assert scene.boot().returncode == 0
+    assert (scene.handoff()["phase"], scene.handoff()["environment"]["state"]) == ("switched", "selected")
+    assert sorted(path.name for path in (current / "lib").iterdir()) == ["toydep-2.0"]
+
+
+@pytest.mark.parametrize("token", ["missing", "different"])
+def test_a_generation_whose_token_is_gone_or_another_is_refused_though_its_device_and_inode_match(scene, token):
+    """The token decides, never the device and inode: the generation at its own path, with the identity preparation
+    recorded, but without its token or with another one, is refused at authorization and named gone."""
+    current = scene.data / "state" / "python-userbase"
+    row, _, generation = _ready_lock_change(scene, "user_site", current, breaks=False, activate=False)
+    candidate = update_prepare.find(row["candidate_id"])
+    assert body_switch._path_identity(generation) == candidate["environment"]["generation"]["identity"][:2]
+    witness = generation / body_switch.GENERATION_WITNESS
+    witness.unlink() if token == "missing" else witness.write_text('"%s"' % ("0" * 32), encoding="utf-8")
+
+    with pytest.raises(body_adoption.AdoptionRefused) as refused:
+        body_adoption.authorize_update(scene.data, candidate)
+
+    assert refused.value.code == "ADOPTION_ENVIRONMENT_MISSING" and body_adoption.read(scene.data) == {}
+    assert update_prepare._prepared_moved(candidate) == "environment_missing: its prepared packages are gone"
+    assert (generation / "lib" / "toydep-2.0").exists()
 
 
 def test_serving_packages_that_cannot_move_aside_are_never_set_aside_and_return_in_place(tmp_path):

@@ -23,6 +23,7 @@ transition of an exact reviewed candidate commit into the serving checkout.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -626,7 +627,9 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
         from ouroboros.settings_integrity import runtime_environ
         from ouroboros.test_environment import isolated_environment
 
-        return isolated_environment(scratch_root(candidate), candidate,
+        owner = json.dumps({"task_id": str((bound or {}).get("task_id") or getattr(ctx, "task_id", "") or ""),
+                            "copy": str(candidate)})
+        return isolated_environment(scratch_root(candidate, owner=owner), candidate,
                                     source=runtime_environ() if source is None else source)
     except Exception as exc:
         log.warning("candidate process environment unavailable", exc_info=True)
@@ -637,11 +640,12 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
             "environment") from exc
 
 
-def scratch_root(candidate: Any) -> pathlib.Path:
+def scratch_root(candidate: Any, *, owner: str = "") -> pathlib.Path:
     """The candidate's sibling ``.env`` scratch, declared reproducible when this producer creates it.
 
     Every process environment beside a candidate (its author's, an Update's checks)
     lives here, so the GC's retirement (``discard_scratch``) can tell it from data.
+    ``owner`` is the declaration's one-line owner fact (``declare_scratch``), written only at creation.
     """
     from ouroboros.test_environment import SCRATCH_MARKER, declare_scratch
 
@@ -655,7 +659,7 @@ def scratch_root(candidate: Any) -> pathlib.Path:
         if (env_root / SCRATCH_MARKER).is_file() and not (env_root / SCRATCH_MARKER).is_symlink():
             (env_root / SCRATCH_MARKER).touch()
     else:
-        declare_scratch(env_root, "body-process")
+        declare_scratch(env_root, "body-process", owner=owner)
     return env_root
 
 
@@ -808,34 +812,44 @@ def unreviewed_commits(row: Dict[str, Any], candidate_sha: str) -> List[str]:
 def unique_work(row: Dict[str, Any]) -> Dict[str, Any]:
     """What only this candidate holds: dirty/untracked/ignored files and unadopted commits.
 
-    Env/cache/junk paths (the patch-capture static rules) are reproducible
-    scratch. A failed read is reported as unique: unknown never means empty.
+    Env/cache/junk paths (the patch-capture static rules) are not part of a capture; they are
+    listed as ``excluded``, since those rules decide transport and no producer declared them
+    disposable. A failed read is reported as unique: unknown never means empty.
     """
     from ouroboros.workspace_patch_rules import _patch_exclude_reason
 
     path = pathlib.Path(str(row.get("path") or ""))
     try:
-        env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
-        status = _wt._git_env(path, "status", "--porcelain", "-z", "--untracked-files=all", env=env).stdout
-        ignored = _wt._git_env(path, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", env=env).stdout
-        tracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
-                   if chunk and not chunk.startswith(b"??")]
-        loose = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
-                 if chunk.startswith(b"??")]
-        loose += [chunk.decode("utf-8", "surrogateescape") for chunk in ignored.split(b"\0") if chunk]
+        raw = checkout_work(path)
         # The static rules name env/cache DIRECTORIES and runtime junk tails; a plain file that
         # merely carries such a directory's name ("env", "venv") is the author's own and unique.
-        loose = [rel for rel in loose
+        files = [*raw["untracked"], *raw["ignored"]]
+        loose = [rel for rel in files
                  if not _patch_exclude_reason(rel) or ("/" not in rel and not (path / rel).is_dir()
                                                        and _patch_exclude_reason(rel).startswith("top-level"))]
-        tip = _git(path, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
         serving = pathlib.Path(str(row["repo_dir"]))
         # Only the serving checkout establishes adoption. Another candidate or a
         # temporary child's branch can retain this tip without ever having adopted it.
-        ahead = _git(serving, "rev-list", "--count", tip, "--not", "HEAD").stdout.strip()
-        return {"readable": True, "tracked": tracked, "loose": loose, "tip": tip, "unadopted_commits": int(ahead or 0)}
+        ahead = _git(serving, "rev-list", "--count", raw["tip"], "--not", "HEAD").stdout.strip()
+        return {"readable": True, "tracked": raw["tracked"], "loose": loose, "tip": raw["tip"],
+                "unadopted_commits": int(ahead or 0), "excluded": sorted(set(files) - set(loose))}
     except Exception as exc:
         return {"readable": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def checkout_work(path: pathlib.Path) -> Dict[str, Any]:
+    """A checkout's raw state beyond its HEAD, no path judged by its name: changed tracked paths,
+    untracked and ignored files, and its tip. A failed read raises."""
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    status = _wt._git_env(path, "status", "--porcelain", "-z", "--untracked-files=all", env=env).stdout
+    ignored = _wt._git_env(path, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", env=env).stdout
+    tracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
+               if chunk and not chunk.startswith(b"??")]
+    untracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
+                 if chunk.startswith(b"??")]
+    return {"tracked": tracked, "untracked": untracked,
+            "ignored": [chunk.decode("utf-8", "surrogateescape") for chunk in ignored.split(b"\0") if chunk],
+            "tip": _git(path, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()}
 
 
 def has_unique_work(work: Dict[str, Any]) -> bool:
@@ -873,9 +887,11 @@ def _work_signature(row: Dict[str, Any], work: Dict[str, Any]) -> str:
 def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
     """Capture the candidate's whole unique state on a private pin; ``""`` unless COMPLETE.
 
-    A temporary index stages tracked changes plus every unique loose file,
-    ignored ones included. The capture counts only when each loose path became
-    a blob entry and the whole staged tree still equals the files on disk;
+    A temporary index refreshes the tracked and staged paths, then adds every unique loose file by
+    its exact name, ignored ones included. The ``excluded`` paths are never staged, nor written as
+    objects: they reach a capture only as the owner's accepted loss (``retention_verdict``'s
+    ``discard_excluded``), and would carry whole caches into Git. The capture counts only when each
+    loose path became a blob entry and the whole staged tree still equals the files on disk;
     anything Git cannot hold (a nested repository, an unreadable file) leaves it
     incomplete, and the caller then keeps the original directory.
     """
@@ -892,12 +908,12 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
         if real_index.strip(b"\0"):
             _wt._git_env(path, "update-index", "-z", "--index-info", env=env, input_bytes=real_index)
         staged_tree = _wt._git_env(path, "write-tree", env=env).stdout.decode().strip()
-        _wt._git_env(path, "add", "-A", "--", ".", env=env)
+        _wt._git_env(path, "add", "-u", "--", ".", env=env)  # modified, deleted and staged paths; no untracked one
         loose = [str(rel) for rel in work.get("loose") or []]
-        if loose:
+        if loose:  # each by its exact name: a pattern ("*") would sweep in the excluded paths too
             spec = b"\0".join(rel.encode("utf-8", "surrogateescape") for rel in loose) + b"\0"
-            _wt._git_env(path, "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul", env=env,
-                         input_bytes=spec)
+            _wt._git_env(path, "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul",
+                         env={**env, "GIT_LITERAL_PATHSPECS": "1"}, input_bytes=spec)
             staged = _wt._git_env(path, "ls-files", "-s", "-z", env=env).stdout
             blobs = {chunk.partition(b"\t")[2].decode("utf-8", "surrogateescape")
                      for chunk in staged.split(b"\0") if chunk and not chunk.startswith(b"160000")}
@@ -930,12 +946,15 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
             pass
 
 
-def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None) -> Dict[str, Any]:
+def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None,
+                      discard_excluded: bool = False) -> Dict[str, Any]:
     """Whether the worktree GC may delete this candidate's checkout, and with what kept.
 
     ``{"remove": bool, "keep_branch": bool, "reason": str, "pin": str}``. Age alone
     never removes unique work: it is first captured COMPLETELY on a private pin,
-    and an incomplete capture retains the original directory.
+    and an incomplete capture retains the original directory. ``discard_excluded`` is the
+    owner's explicit discard alone (``copy_capture_proof.discard_unsaved_copy``): the paths
+    the capture leaves out are the accepted loss, everything else is still captured first.
     """
     path = pathlib.Path(str(row.get("path") or ""))
     if not path.is_dir():
@@ -951,6 +970,9 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
     if _retained_scratch(row, classify=True, data_dir=data_dir):
         return {"remove": False, "keep_branch": True, "reason": "retained_process_environment", "pin": ""}
     work = unique_work(row)
+    if work.get("excluded") and not discard_excluded:
+        # No evidence these are temporary or saved, and a pin would copy whole caches into Git.
+        return {"remove": False, "keep_branch": True, "reason": "unproven_excluded_inputs", "pin": ""}
     if not has_unique_work(work):
         return {"remove": True, "keep_branch": False, "reason": "no_unique_work", "pin": "", "work": work,
                 "owner": _owner_stamp(row)}
@@ -992,7 +1014,7 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     seen = verdict.get("work") or {}
     now = unique_work(row)
     if not (bool(now.get("readable")) and all(now.get(key) == seen.get(key)
-                                                for key in ("tip", "tracked", "loose"))):
+                                                for key in ("tip", "tracked", "loose", "excluded"))):
         return False
     if verdict.get("reason") == "preserved_on_pin":
         if not verdict.get("signature") or _work_signature(row, now) != verdict["signature"]:
@@ -1000,8 +1022,9 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     return True
 
 
-def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=None) -> bool:
-    """Keep a candidate's one quiescent scratch observation on its existing row."""
+def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=None, record_witness: bool = True) -> bool:
+    """Keep a candidate's one quiescent scratch observation on its existing row
+    (``record_witness=False``: the same answer for a reader that must write nothing)."""
     from ouroboros.test_environment import scratch_retention
 
     path = pathlib.Path(str(row.get("path") or ""))
@@ -1012,7 +1035,7 @@ def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=N
     observed = scratch_retention(env_root, previous=previous.get("observation")
                                  if previous.get("owner") == owner else None, classify=classify)
     record = {"owner": owner, "observation": observed}
-    if classify and row.get("kind") == KIND and record != previous:
+    if record_witness and classify and row.get("kind") == KIND and record != previous:
         # The walk is outside the lock. Publish only against its exact preview,
         # including retirement/ownership; update that preview for GC's same-row check.
         with _wt._record_lock(path, data_dir, op="record_scratch_retention"):
@@ -1024,7 +1047,7 @@ def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=N
 
 
 def discard_scratch(row: Dict[str, Any]) -> None:
-    """Delete reproducible scratch only when no nested teardown retained it."""
+    """Delete declared disposable scratch only when no nested teardown retained it."""
     path = pathlib.Path(str(row.get("path") or ""))
     env_root = path.with_name(path.name + ".env")
     if path.name and _wt._deletable(env_root, _wt._resolve_root()) and env_root.exists() and not _retained_scratch(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
 
+import inspect
 import logging
 import os
 
@@ -1009,11 +1010,33 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "") -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
-    without a Presence binding) may choose silence and may leave one sentence for its human."""
+    without a Presence binding) may choose silence and may leave one sentence for its human.
+    A task that answers its own retained place conversation (its reply carrier: a promoted or
+    scheduled place root) may choose silence too; inherited binding authority alone names no speaker."""
+    request, error = completion_request(ctx, {
+        "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
+        "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
+        "swarm_comparison": swarm_comparison, "summary": summary,
+    })
+    if error:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                                                 text="ERROR: COMPLETION_ARGUMENT: " + error))
+    return _stage_checked_completion(ctx, request, source="finish_task", reply_later=False)
+
+
+def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict | None, str]:
+    """The finish_task contract as one pure read: ``(request, "")`` ready to stage, or ``(None, error)``.
+
+    It builds no ToolResult and writes no context, so a forced rail reads the same request from a
+    native ``finish_task`` call or its serialized text and executes nothing (DEVELOPMENT "Forced
+    resolution is pure"). The argument names are the handler's own signature."""
     from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
     from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.place_reply import reply_carrier
     from ouroboros.task_results import resolve_ctx_lineage
 
+    if not isinstance(arguments, dict) or "action" not in arguments or set(arguments) - _FINISH_TASK_ARGUMENTS:
+        return None, "finish_task takes action and only its own arguments"
     metadata = getattr(ctx, "task_metadata", None) or {}
     occurrence = metadata.get("schedule_occurrence")
     self_started = (bool(getattr(ctx, "is_direct_chat", False)) and (is_own_clock_wake(metadata) or is_focus_wake(metadata))
@@ -1022,31 +1045,44 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                         and str(occurrence.get("token") or "").strip()
                         and resolve_ctx_lineage(ctx)["is_root_task"]
                         and presence_caller_binding(ctx) is None))
-    summary = " ".join(str(summary or "").split())
+    action, answer, selector = arguments.get("action"), arguments.get("answer"), arguments.get("answer_sha256")
+    silent, summary = arguments.get("silent"), arguments.get("summary")
+    # A native call's parsed arguments were never checked against the schema: read each at its schema type before
+    # any truth test, so the string "false" is no silence and an object no sentence; null names nothing.
+    if silent is not None and not isinstance(silent, bool):
+        return None, "silent must be true or false"
+    if summary is not None and not isinstance(summary, str):
+        return None, "summary must be text"
+    summary = " ".join((summary or "").split())
     if silent and action != "finish":
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-            text="ERROR: COMPLETION_ARGUMENT: silent requires action=finish"))
-    if (summary or silent) and not self_started:
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-            text="ERROR: COMPLETION_ARGUMENT: silent and summary are available only on a self-started run: "
-                 "a consciousness wake's own turn, or a schedule-born root without a Presence binding"))
-    allow_empty = False
-    if silent:
-        allow_empty = True
-        if answer is None and not answer_sha256:
-            answer = ""  # silence needs no words; complete bytes given anyway stay an internal result
-    return stage_completion_request(ctx, {
-        "action": action, "answer": answer, "answer_sha256": answer_sha256,
-        "rationale": rationale, "acceptance_subject": acceptance_subject,
-        "pending_review": pending_review, "wake_silent": bool(silent) or None, "wake_summary": summary or None,
-        "swarm_comparison": swarm_comparison,
-    }, allow_empty=allow_empty)
+        return None, "silent requires action=finish"
+    if (summary and not self_started) or (silent and not self_started and not reply_carrier(metadata)):
+        return None, ("silent and summary are available only on a self-started run: "
+                      "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
+                      "silent also on a task answering its own place conversation")
+    if silent and answer is None and not selector:
+        answer = ""  # silence needs no words; complete bytes given anyway stay an internal result
+    return checked_completion_request(ctx, {
+        "action": action, "answer": answer, "answer_sha256": selector,
+        "rationale": arguments.get("rationale", ""), "acceptance_subject": arguments.get("acceptance_subject"),
+        "pending_review": arguments.get("pending_review"), "wake_silent": bool(silent) or None,
+        "wake_summary": summary or None, "swarm_comparison": arguments.get("swarm_comparison"),
+    }, allow_empty=bool(silent))
 
 
 def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "finish_task",
                              allow_empty: bool = False, reply_later: bool = False) -> str:
+    checked, error = checked_completion_request(ctx, request, allow_empty=allow_empty, reply_later=reply_later)
+    if error:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text="ERROR: COMPLETION_ARGUMENT: " + error))
+    return _stage_checked_completion(ctx, checked, source=source, reply_later=reply_later)
+
+
+def checked_completion_request(ctx: ToolContext | None, request: dict, *, allow_empty: bool = False,
+                               reply_later: bool = False) -> tuple[dict | None, str]:
+    """The pure half of staging: the normalized request (``None`` fields dropped, ``allow_empty`` set)
+    or the argument error; nothing is written."""
     import copy
-    import json
     from ouroboros.task_results import resolve_task_lineage
 
     action, answer, selector = request.get("action"), request.get("answer"), request.get("answer_sha256")
@@ -1059,8 +1095,11 @@ def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "
         answer = None
         request = {**request, "answer": None}
     error = ""
-    if action not in {"finish", "stop"}:
+    # Types before membership: an unhashable value in a set test raised TypeError out of a forced rail.
+    if not isinstance(action, str) or action not in {"finish", "stop"}:
         error = "action must be finish or stop"
+    elif request.get("rationale") is not None and not isinstance(request["rationale"], str):
+        error = "rationale must be text"
     elif action == "stop" and not str(request.get("rationale") or "").strip():
         error = "stop requires a rationale naming unfinished work"
     elif not reply_later and ((answer is None) == (selector is None)):
@@ -1069,7 +1108,8 @@ def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "
         error = "answer must be complete nonempty text"
     elif selector is not None and (not isinstance(selector, str) or not selector.strip()):
         error = "answer_sha256 must name an offered answer"
-    elif request.get("pending_review") not in {None, "wait", "finish"}:
+    elif request.get("pending_review") is not None and (not isinstance(request["pending_review"], str)
+                                                        or request["pending_review"] not in {"wait", "finish"}):
         error = "pending_review must be wait or finish"
     elif request.get("swarm_comparison") is not None and not isinstance(request["swarm_comparison"], str):
         error = "swarm_comparison must be text"
@@ -1079,14 +1119,26 @@ def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "
     )["is_root_task"]:
         error = "pending_review is available only on root tasks"
     if error:
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text="ERROR: COMPLETION_ARGUMENT: " + error))
-    staged = {key: copy.deepcopy(value) for key, value in request.items() if value is not None}
-    staged.update(source=source, reply_later=reply_later, allow_empty=allow_empty,
-                  observation=copy.deepcopy(getattr(ctx, "_completion_observation", {})))
+        return None, error
+    checked = {key: copy.deepcopy(value) for key, value in request.items() if value is not None}
+    checked["allow_empty"] = allow_empty
+    return checked, ""
+
+
+def _stage_checked_completion(ctx: ToolContext, checked: dict, *, source: str, reply_later: bool) -> str:
+    import copy
+    import json
+
+    staged = {**checked, "source": source, "reply_later": reply_later,
+              "observation": copy.deepcopy(getattr(ctx, "_completion_observation", {}))}
     previous = getattr(ctx, "_completion_request", None)
     if previous is not None and previous.get("observation") == staged["observation"] and previous != staged:
         ctx._completion_conflict = True
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_CONFLICT: contradictory completion requests in one response; select again after seeing all results."))
     ctx._completion_request = staged
-    return json.dumps({"status": "completion_requested", "completion_control": True, "action": action}, ensure_ascii=False)
+    return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"]},
+                      ensure_ascii=False)
+
+
+_FINISH_TASK_ARGUMENTS = frozenset(inspect.signature(_finish_task).parameters) - {"ctx"}

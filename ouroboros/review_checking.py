@@ -99,6 +99,16 @@ def _remove_checking_area(path: pathlib.Path, git: Optional[Mapping[str, Any]] =
     _worktree(common, "remove", "--force", "--force", str(path))
 
 
+def _release_unless_kept(data_root: Any, task_id: str, area: pathlib.Path, summary: Dict[str, Any],
+                         git: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Release a captured copy unless the owner keeps its task (``owner_keep``): the receipt stands either
+    way, and a kept copy goes at a later pass once the keep is lifted. Taken under the seat lock, never waiting."""
+    from ouroboros.owner_keep import gate
+
+    with gate(data_root, task_id, timeout_sec=0) as why:
+        return summary if why else _release_area(area, summary, git)
+
+
 def _move_area(source: pathlib.Path, target: pathlib.Path, git: Optional[Mapping[str, Any]] = None) -> None:
     """Rename a copy; a linked worktree whose facts ``git`` names moves through Git, so its registration
     follows it. A move Git refuses is a plain rename: the copy keeps its objects, and Git's own prune
@@ -234,6 +244,13 @@ def _accepts(accept: Any, view: pathlib.Path) -> bool:
         return False
 
 
+def _copy_folder(source: Any, destination: Any, **kwargs: Any) -> None:
+    """A physical copy of a folder a seat reads, links kept: it shares blocks where the filesystem clones."""
+    from ouroboros.artifact_storage import clone_or_copy2
+
+    shutil.copytree(source, destination, symlinks=True, copy_function=clone_or_copy2, **kwargs)
+
+
 def _retained_view(folder: pathlib.Path, data_root: Any, *, payload: bool = False, name: str = "",
                    copy: Any = None, accept: Any = None) -> pathlib.Path:
     """One retained copy of a folder under the install's data root beside the
@@ -264,7 +281,7 @@ def _retained_view(folder: pathlib.Path, data_root: Any, *, payload: bool = Fals
     staging = views / f".{container.name}.{uuid.uuid4().hex[:8]}"
     try:
         if copy is None:
-            shutil.copytree(folder, staging / relative, symlinks=True)
+            _copy_folder(folder, staging / relative)
         else:
             copy(folder, staging / relative)
         if accept is not None and not accept(staging / relative):
@@ -338,7 +355,7 @@ def _materialize(area: pathlib.Path, source: Mapping[str, Any]) -> Dict[str, str
     if kind == "git_tree":
         return _materialize_git(area, source)
     if kind == "directory":
-        shutil.copytree(str(source["view"]), area, symlinks=True)
+        _copy_folder(str(source["view"]), area)
     elif kind == "workspace":  # the reviewer reads the folder in place and copies what it runs
         area.mkdir()
     else:
@@ -365,7 +382,7 @@ def _materialize_git(area: pathlib.Path, source: Mapping[str, Any]) -> Dict[str,
         raise CheckingAreaUnavailable(
             f"checking copy tree {applied[:12]} is not the frozen tree {str(source['tree'])[:12]}")
     for name, view in evidence_views:
-        shutil.copytree(view, area / name, symlinks=True, dirs_exist_ok=True)
+        _copy_folder(view, area / name, dirs_exist_ok=True)
     return {"common_dir": str(common), "objects": str(common / "objects")}
 
 
@@ -658,7 +675,7 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str
         area = unindexed(seat_dir(data_root, task_id, f"thread:{thread_seat}"), "area")
     prior = _receipt(data_root, task_id, operation_id)
     if prior.get("status") in _RECEIPTED:
-        return prior if thread_copy else _release_area(area, prior, marker.get("git"))
+        return prior if thread_copy else _release_unless_kept(data_root, task_id, area, prior, marker.get("git"))
     if area.is_symlink():
         return {"status": "capture_failed", "area": str(area),
                 "error": "checking area was replaced by a symlink; target was not read"}
@@ -722,7 +739,7 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str
 
             _force_rmtree(evidence)  # copies keep read-only modes, which Windows refuses to unlink
         return {"status": "capture_failed", "area": str(area), "error": f"{type(exc).__name__}: {exc}"}
-    return summary if thread_copy or errors else _release_area(area, summary, marker.get("git"))
+    return summary if thread_copy or errors else _release_unless_kept(data_root, task_id, area, summary, marker.get("git"))
 
 
 def _receipt_path(data_root: Any, task_id: str, operation_id: str) -> pathlib.Path:

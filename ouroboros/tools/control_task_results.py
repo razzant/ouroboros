@@ -13,11 +13,11 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.model_sleep import HOLD_NOTE, IN_SLOT_HOLD_NOTE, hold_notice, in_slot_wait, unshown_holds
 from ouroboros.outcomes import normalize_outcome_axes
-from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
+from ouroboros.runtime_limits import IDLE_LEASE_MAX_SEC, NESTED_SETTLEMENT_MARGIN_SEC
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -560,7 +560,7 @@ def _wait_attention_poll(
     from ouroboros.owner_mailbox import OwnerMailboxPeek
 
     rid = tree_root_id(ctx)
-    mailbox_peek = OwnerMailboxPeek()
+    mailbox_peek = OwnerMailboxPeek(waking_only=True)  # a False place arrival waits for the drain
 
     cursor_store = getattr(ctx, "_wait_attention_cursors", None)
     if not isinstance(cursor_store, dict):
@@ -898,39 +898,41 @@ _AWAIT_MESSAGES_NOTE = (
 
 
 def _wait_window(
-    ctx: Any, requested: int, *, clamp: int, minimum: int, margin: int,
+    ctx: Any, requested: int, *, clamp: Optional[int], minimum: int, margin: int,
 ) -> tuple[int, str]:
     """The wait window in seconds and the bound that set it — ONE ladder for
     ``wait_task``, ``wait_tasks`` and ``await_messages``.
 
-    ``requested`` is clamped to [``minimum``, ``clamp``]. Under a task deadline the
-    window also stops ``margin`` seconds short of the emit window (remaining minus
-    the finalization reserve, subtracted ONCE) that ``_deadline_clamped_timeout``
-    gives the executor's kill timer, so the tool returns and builds its result
-    instead of being timed out mid-sleep; a spent emit window is a zero-second
-    window (one peek, then return). Without a deadline the kill timer is at least
-    the tool's entry timeout, which each caller keeps at ``clamp + margin`` or
-    more. Inside the finalization reserve the executor's 1 s floor stays the
-    bounded exit.
+    ``requested`` is clamped to [``minimum``, ``clamp``]; ``clamp=None`` (``await_messages``,
+    owner 30 Oct, B) keeps the requested time with no ceiling of its own. Under a task bound, the
+    deadline or the explicit execution window (#939), the window also stops ``margin`` seconds
+    short of the kill timer the executor gives the call, resolved as a command's timeout is
+    (``shell_process._resolve_effective_timeout``): a spent bound (``command_bound_spent``) is a
+    zero-second window (one peek, then return); otherwise the nearer bound less the finalization
+    reserve, subtracted ONCE (``deadline_clamped_timeout_sec``, the clamp
+    ``_deadline_clamped_timeout`` gives the kill timer), so the tool returns and builds its result
+    instead of being timed out mid-sleep. The result names either bound ``deadline``. Without
+    one the kill timer is at least the tool's entry timeout, which each caller keeps at
+    ``clamp + margin`` or more, or omits when its own window is the only bound. Inside the
+    finalization reserve the executor's 1 s floor stays the bounded exit.
 
     The task waits pass minimum 0 and ``NESTED_SETTLEMENT_MARGIN_SEC``, so they end
     that far inside the executor's emission; ``await_messages`` passes minimum 1 and
     margin 1, and its last poll sleep is clipped to the remaining window.
     """
-    from ouroboros.deadline_utils import deadline_remaining_sec, has_deadline
-    from ouroboros.task_pacing import effective_finalization_reserve_sec
+    from ouroboros.deadline_utils import deadline_clamped_timeout_sec
+    from ouroboros.tools.shell_process import command_bound_spent
 
     if requested < minimum:
         window, bound = minimum, "minimum"
-    elif requested > clamp:
+    elif clamp is not None and requested > clamp:
         window, bound = clamp, "ceiling"
     else:
         window, bound = requested, "requested"
-    if has_deadline(ctx):
-        emit_window = deadline_remaining_sec(ctx) - effective_finalization_reserve_sec(ctx)
-        deadline_window = max(0, int(emit_window) - margin)
-        if deadline_window < window:
-            window, bound = deadline_window, "deadline"
+    kill = 0 if command_bound_spent(ctx) else deadline_clamped_timeout_sec(ctx, None)
+    bounded = None if kill is None else max(0, int(kill) - margin)
+    if bounded is not None and bounded < window:
+        window, bound = bounded, "deadline"
     return window, bound
 
 
@@ -939,26 +941,30 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
                     services: Any = None) -> str:
     """Hold this task's worker slot until an unread mailbox entry exists or the
     window elapses. Delivers nothing: the round-top drain owns delivery and
-    acknowledgement, exactly as after a wait_task early return. An owner Stop
-    is a mailbox control, so it ends the wait like any message; a cancel kills
-    the worker process; the window is bounded by ``_wait_window``.
+    acknowledgement, exactly as after a wait_task early return. The mailbox is
+    one Stop rail's carrier: Wrap up and a direct turn's Stop are controls that end
+    the wait like any message; Stop now of an in-process turn writes none for a
+    Presence turn, so each poll also reads the turn's open intent
+    (``owner_stop.in_process_stop_now``), and an unreadable one is recorded as
+    unknown; a pooled worker's Stop kills the process. ``_wait_window`` bounds it.
 
     Idle rail, honestly: the supervisor stamps ``last_progress_at`` on completed
     model rounds, on narration and, when a tool's typed lease closes, on the
-    completed tool call (``supervisor/cognitive_operations``); the per-call
-    ceiling alone would not keep a round that already spent long in earlier tools
-    under the rail ``max(idle, ceiling + 120)``. What spares a task while this
+    completed tool call (``supervisor/cognitive_operations``); the wait's own length
+    never keeps a round inside the configured silence window. What spares a task while this
     tool runs is the executor's typed cognitive-operation lease that EVERY tool
     call holds while physically in flight (``loop_tool_execution._emit_live_log``,
-    kind ``tool``, bounded by the absolute ceiling and the deadline), and the
+    kind ``tool``; it ends at the deadline or a finite execution bound, else
+    ``IDLE_LEASE_MAX_SEC`` after the call starts: the exemption ends there, never the wait), and the
     close of that lease is the progress stamp the next model round starts from —
-    a full idle window even after a wait that spent the whole ceiling, so the
+    a full idle window even after a wait as long as it asked, so the
     supervisor tick between the finished wait and the next model call never
     dates the turn the wait was for as silent. Its separate in_slot_wait mark identifies
     the wait for reply-preparation readers, adds no idle exemption and lends no
     slot; tests/test_await_messages.py drives that lifecycle.
     """
     from ouroboros.model_sleep import wake_reason
+    from supervisor.owner_stop import in_process_stop_now
 
     if mode != "in_slot" or senders or tasks or runs or services or wake_at or wake_after_sec:
         return _await_as_sleep(ctx, mode, senders=senders, tasks=tasks, runs=runs, services=services,
@@ -975,25 +981,25 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
         return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", meta=meta, text=json.dumps(
             {"reason": "dependency_held", "elapsed_sec": 0.0, "held": held, "note": IN_SLOT_HOLD_NOTE + withdrawn},
             ensure_ascii=False)))
-    from ouroboros.config import get_per_call_timeout_ceiling_sec
-
-    window, bound = _wait_window(ctx, requested, clamp=int(get_per_call_timeout_ceiling_sec()),
-                                 minimum=1, margin=1)
+    window, bound = _wait_window(ctx, requested, clamp=None, minimum=1, margin=1)
     start = time.monotonic()
+    stop_unread = False
     with in_slot_wait(ctx, window):
         while True:
             # The transport wait's non-destructive peek over a COPY of the seen
             # set; the mailbox and its acknowledgements are untouched.
             observed = wake_reason(ctx, {"any_mail": True})
             pending = bool(observed)
+            stopped = not pending and in_process_stop_now(ctx)
+            stop_unread = stop_unread or stopped is None
             elapsed = time.monotonic() - start
-            if pending or elapsed >= window:
+            if pending or stopped or elapsed >= window:
                 break
             time.sleep(min(_AWAIT_MESSAGES_POLL_SEC, max(0.0, window - elapsed)))
     if pending:
         reason = observed if observed.startswith("run_question:") else "owner_mailbox_pending"
     else:
-        reason = "deadline" if bound == "deadline" else "timeout"
+        reason = "owner_stop" if stopped else "deadline" if bound == "deadline" else "timeout"
     out: Dict[str, Any] = {
         "reason": reason,
         "pending": pending,
@@ -1003,6 +1009,7 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
         "window_bound": bound,
         "slot": "held",
         "note": _AWAIT_MESSAGES_NOTE,
+        **({"owner_stop_state": "unknown"} if stop_unread and not stopped else {}),
     }
     horizon_note = cache_horizon_note(ctx, elapsed)
     if horizon_note:
@@ -1034,10 +1041,10 @@ def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
 
 
 def await_messages_entry() -> ToolEntry:
-    """The await_messages catalog entry, owned beside its handler; the kill timeout
-    sits 60s above the largest window the tool can choose (the per-call ceiling)."""
-    from ouroboros.config import get_per_call_timeout_ceiling_sec
-
+    """The await_messages catalog entry, owned beside its handler. Its in-slot window is the
+    requested time, narrowed by a task bound (``_wait_window``), and an owner Stop ends it (its
+    mail, or an in-process turn's open intent), so the entry keeps no outer window of its own (``ToolEntry.timeout_sec=None``):
+    the executor's deadline clamp is the only kill timer."""
     return ToolEntry("await_messages", {
         "name": "await_messages",
         "description": (
@@ -1046,10 +1053,11 @@ def await_messages_entry() -> ToolEntry:
             "an owner message, a child's escalation) or the window elapses. Use it when you have "
             "asked a peer or your parent for its next turn and have nothing useful to do until "
             "it arrives; you decide when waiting is worth it. The wait holds your worker slot "
-            "and releases nothing; the window is clamped to the per-call timeout ceiling and, "
-            "under a deadline, to the finalization emit window (the result names the bound); "
-            "while it runs, the ordinary in-flight tool lease keeps the supervisor's silence attention "
-            "(a notice, never a stop) off you and its completion counts as progress, so your next round "
+            "and releases nothing for as long as you ask; only your deadline or execution budget narrows "
+            "the window, to the finalization emit window (the result names the bound); "
+            "the ordinary in-flight tool lease keeps the supervisor's silence attention (a notice, never a stop) "
+            f"off you until that bound, or for at most {IDLE_LEASE_MAX_SEC // 3600} hours without one (a longer "
+            "wait keeps running and may draw that notice), and its completion counts as progress, so your next round "
             "starts inside a full silence window — call again to keep waiting. It delivers nothing itself: the message "
             "reaches you at the next round top, exactly as after a wait_task early return. The "
             "result says when the applied prompt-cache horizon elapsed since the last model response. "
@@ -1058,7 +1066,7 @@ def await_messages_entry() -> ToolEntry:
             "them or its subtree, the terminal of delegated `runs` you "
             "own, the exit of your own `services` (warm only: the start each has now; a replaced, stopped "
             "or lost one wakes you as unknown, never as success), and/or `wake_at`/`wake_after_sec`; with "
-            "nothing selected any addressed mail wakes you. The "
+            "nothing selected any addressed mail wakes you. A place event the host marks as a wake wakes any wait past its selectors; one marked as context ends none and stays unread for your next round. The "
             "owner's messages, controls and typed descendant escalations always wake you; other unselected mail waits unread. Warm keeps your "
             "process and browser (a pooled slot is lent meanwhile). Cold saves your continuation and releases "
             "the process only after the body accepts custody of your bound external runs; local services "
@@ -1072,8 +1080,8 @@ def await_messages_entry() -> ToolEntry:
         ),
         "parameters": {"type": "object", "properties": {
             "timeout_sec": {"type": "integer", "description":
-                            "In-slot wait only: seconds to wait; clamped to the per-call timeout ceiling and to "
-                            "the deadline emit window (the bound is reported in the result)."},
+                            "In-slot wait only: seconds to wait (at least 1); narrowed only by the emit window of "
+                            "your deadline or execution budget (the bound is reported in the result)."},
             "mode": {"type": "string", "enum": ["in_slot", "warm", "cold"],
                      "description": "in_slot (default) holds your slot for timeout_sec; warm/cold is a sleep."},
             "senders": {"type": "array", "items": {"type": "string"},
@@ -1088,7 +1096,7 @@ def await_messages_entry() -> ToolEntry:
             "wake_at": {"type": "string", "description": "Requires mode=warm or cold. Sleep: an absolute ISO-8601 wake time (with timezone)."},
             "wake_after_sec": {"type": "integer", "description": "Requires mode=warm or cold. Sleep: wake after this many seconds."},
         }},
-    }, _await_messages, timeout_sec=get_per_call_timeout_ceiling_sec() + 60)
+    }, _await_messages, timeout_sec=None)
 
 
 def _count_live_sibling_children(ctx: ToolContext, status_drive_root: Path, *, exclude_task_id: str,

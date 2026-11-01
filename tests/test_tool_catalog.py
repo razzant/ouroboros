@@ -56,7 +56,8 @@ def test_tool_entry_is_shallow_frozen():
         "schema": typing.Dict[str, typing.Any],
         "handler": typing.Callable,
         "is_code_tool": bool,
-        "timeout_sec": int,
+        # 1A: additive ``None`` for a long-lived, Stop-observing entry; the default stays 360.
+        "timeout_sec": typing.Optional[int],
         "mutates_worktree": bool,
         # tip drift: upstream added the compat-alias field after the reference
         # cutoff (pinned in tests/test_tool_owner_facades.py as well).

@@ -187,6 +187,23 @@ test('a canonical hard-bound refusal remains one readable fact beside the existi
     } finally { restoreDom(prior); }
 });
 
+test('an unreadable execution budget reads as unknown, never as a spent one or the interruption', () => {
+    const { prior } = installDom();
+    try {
+        const card = settledRootCard('unknown-budget-root');
+        const detail = { status: 'failed', reason_code: 'provider_unavailable',
+            continuation_offer: { eligible: false, refusal: 'execution_budget_unknown', cause: 'provider_unavailable' } };
+        assert.deepEqual(continueOfferView(detail), { kind: 'refusal', refusal: 'execution_budget_unknown' });
+        syncContinueAction(card, detail);
+        const note = card.root.querySelector('[data-continue-refusal]');
+        assert.equal(note.textContent, "Continue unavailable. The time left in this task's execution budget could not "
+            + 'be read from its saved clock, so no new task starts.');
+        assert.doesNotMatch(note.textContent, /exhaust|used up|spent|zero/i);
+        assert.notEqual(note.textContent, `Continue unavailable. ${taskReasonPhrase('provider_unavailable')}`);
+        assert.equal(card.root.querySelector('[data-continue-task]'), null);
+    } finally { restoreDom(prior); }
+});
+
 test('missing offers, other refusals and converted Main pointers gain no hard-bound claim', () => {
     const { prior } = installDom();
     try {

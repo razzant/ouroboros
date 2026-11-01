@@ -996,6 +996,13 @@ def _prune_delegated_snapshots() -> None:
             return
         snapshot_report = _snap_worktrees.prune_execution_snapshots(
             _delegate_custody.open_snapshot_ids(DATA_DIR))
+        from ouroboros.copy_environments import prune_environments
+        from supervisor.queue import task_settlement_liveness
+
+        environments = prune_environments(DATA_DIR, task_settlement_liveness)
+        if environments["removed"] or environments["errors"]:
+            append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "copy_environment_prune", "report": environments})
         if snapshot_report.get("removed"):
             append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),

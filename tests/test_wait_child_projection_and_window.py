@@ -6,10 +6,10 @@ child's own open delegated runs as dated observation facts read once from its
 supervision record. A settled child, or a caller whose known hash no longer
 matches, still gets the full single-child handoff.
 
-E. wait_task, wait_tasks and await_messages share ``_wait_window``: under a deadline
-the window stops a margin inside the executor's emit window (the finalization
-reserve subtracted once), and each entry timeout stays at least ceiling + margin,
-so a full window ends inside its kill timer instead of in TOOL_TIMEOUT.
+E. wait_task, wait_tasks and await_messages share ``_wait_window``: under a deadline or
+an explicit execution budget the window stops a margin inside the executor's emit window
+(the finalization reserve subtracted once), and each entry timeout stays at least
+ceiling + margin, so a full window ends inside its kill timer instead of in TOOL_TIMEOUT.
 """
 
 from __future__ import annotations
@@ -237,6 +237,11 @@ def _deadline_ctx(drive, remaining_sec):
         "deadline_at": (utc_now() + _dt.timedelta(seconds=remaining_sec)).isoformat()})
 
 
+def _budget_ctx(drive, budget_sec, used_sec=0.0):
+    """An explicit execution budget (#939) with ``used_sec`` of it already spent."""
+    return _ctx(drive, task_metadata={"execution_timeout_sec": budget_sec}, task_started_at=time.time() - used_sec)
+
+
 @pytest.mark.parametrize("requested, clamp, minimum, margin, remaining, expected", [
     (180, 3600, 0, 30, None, (180, "requested")),
     (0, 3600, 0, 30, None, (0, "requested")),       # the zero-second peek survives
@@ -245,14 +250,32 @@ def _deadline_ctx(drive, remaining_sec):
     (3600, 3600, 0, 30, 1000.5, (910, "deadline")),  # emit window 940, less the margin once
     (3600, 3600, 0, 30, 90.5, (0, "deadline")),      # emit window 30: nothing left to wait
     (3600, 3600, 0, 30, -5, (0, "deadline")),        # spent deadline: one peek
-    (0, 1800, 1, 1, None, (1, "minimum")),           # await_messages keeps its minimum ...
-    (600, 1800, 1, 1, 400.5, (339, "deadline")),     # ... and its one-second margin
+    (0, None, 1, 1, None, (1, "minimum")),           # await_messages keeps its minimum ...
+    (600, None, 1, 1, 400.5, (339, "deadline")),     # ... and its one-second margin ...
+    (10_000, None, 1, 1, None, (10_000, "requested")),  # ... and the time it asked for (owner 30 Oct, B)
 ])
 def test_the_one_window_ladder(tmp_path, monkeypatch, requested, clamp, minimum, margin, remaining, expected):
     monkeypatch.setattr(pacing, "effective_finalization_reserve_sec", lambda ctx: 60.0)
     ctx = _ctx(tmp_path) if remaining is None else _deadline_ctx(tmp_path, remaining)
 
     assert mod._wait_window(ctx, requested, clamp=clamp, minimum=minimum, margin=margin) == expected
+
+
+@pytest.mark.parametrize("requested, clamp, minimum, margin, budget, used, expected", [
+    (3600, 3600, 0, 30, 1000.5, 0, (910, "deadline")),  # emit window 940, less the margin once
+    (600, None, 1, 1, 400.5, 0, (339, "deadline")),     # await_messages: its one-second margin
+    (3600, 3600, 0, 30, 60, 120, (0, "deadline")),      # a spent budget: one peek
+    (600, None, 1, 1, 60, 120, (0, "deadline")),
+])
+def test_an_execution_budget_narrows_the_window_as_a_deadline_does(tmp_path, monkeypatch, requested, clamp,
+                                                                   minimum, margin, budget, used, expected):
+    """The executor's kill timer counts the explicit execution budget beside the deadline
+    (``deadline_clamped_timeout_sec``), so the window ends inside it the same way."""
+    monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "unlimited")
+    monkeypatch.setattr(pacing, "effective_finalization_reserve_sec", lambda ctx: 60.0)
+
+    assert mod._wait_window(_budget_ctx(tmp_path, budget, used), requested, clamp=clamp, minimum=minimum,
+                            margin=margin) == expected
 
 
 _WINDOWED = {
@@ -262,35 +285,35 @@ _WINDOWED = {
 }
 
 
-def _executor_margins(tmp_path, monkeypatch, name, get_timeout, settings_timeout):
-    import ouroboros.config as config_mod
+def _executor_margins(tmp_path, monkeypatch, name, get_timeout, settings_timeout, bound="deadline"):
     import ouroboros.loop_tool_execution as lte
 
-    monkeypatch.setattr(config_mod, "get_per_call_timeout_ceiling_sec", lambda: 1800)
+    monkeypatch.setenv("OUROBOROS_TASK_ABS_CEILING_SEC", "unlimited")
     monkeypatch.setattr(lte, "load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": settings_timeout})
     monkeypatch.setattr(pacing, "effective_finalization_reserve_sec", lambda ctx: 60.0)
     clamp, minimum, margin = _WINDOWED[name]
-    clamp = 1800 if clamp is None else clamp
+    bounded = _deadline_ctx if bound == "deadline" else _budget_ctx
     margins = []
     for remaining in (None, 95.5, 400.5, 3000.5, 3650.5, 7000.5, 7300.5, 20_000.5):
-        ctx = _ctx(tmp_path) if remaining is None else _deadline_ctx(tmp_path, remaining)
+        ctx = _ctx(tmp_path) if remaining is None else bounded(tmp_path, remaining)
         executor = lte._get_tool_timeout(SimpleNamespace(_ctx=ctx, get_timeout=get_timeout), name, {})
         window, _bound = mod._wait_window(ctx, 10**6, clamp=clamp, minimum=minimum, margin=margin)
-        if window > 0:
-            margins.append(executor - window)
+        if window > 0:  # no kill timer at all (await_messages without a deadline): its window is the bound
+            margins.append(float("inf") if executor is None else executor - window)
     return margins, margin
 
 
 @pytest.mark.parametrize("name", sorted(_WINDOWED))
 @pytest.mark.parametrize("settings_timeout", [0, 60, 99_999])
+@pytest.mark.parametrize("bound", ["deadline", "execution budget"])
 def test_the_executor_kill_timer_outlives_every_window_by_the_margin(tmp_path, monkeypatch, name,
-                                                                     settings_timeout):
-    """Exactly one reserve subtraction on both sides of the executor seam: with and
-    without a deadline, and whatever OUROBOROS_TOOL_TIMEOUT_SEC says."""
+                                                                     settings_timeout, bound):
+    """Exactly one reserve subtraction on both sides of the executor seam: without a bound, under a
+    deadline or an explicit execution budget, and whatever OUROBOROS_TOOL_TIMEOUT_SEC says."""
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path)
-    margins, margin = _executor_margins(tmp_path, monkeypatch, name, registry.get_timeout, settings_timeout)
+    margins, margin = _executor_margins(tmp_path, monkeypatch, name, registry.get_timeout, settings_timeout, bound)
 
     assert margins and min(margins) >= margin, margins
 

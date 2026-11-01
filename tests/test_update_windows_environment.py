@@ -124,8 +124,10 @@ def test_a_windows_generation_installs_checks_and_hands_over_on_its_scripts_inte
     update_prepare._install_lock(venv, tmp_path / "requirements-runtime.lock", "private")
 
     assert [cmd[0] for cmd in seen] == [str(venv / "Scripts" / "python.exe")] * 2
-    row = {"environment": {"generation": {"kind": "venv", "user_base": str(venv)}}}
-    assert update_checks._interpreters(row, {})[0] == str(venv / "Scripts" / "python.exe")
+    row = {"path": str(tmp_path / "ws"), "environment": {"generation": {"kind": "venv", "user_base": str(venv)}}}
+    monkeypatch.setattr("ouroboros.preflight_runner._preflight_env", lambda *_a, **_kw: {})  # the interpreter alone
+    (tmp_path / "root").mkdir()
+    assert update_checks._environments(row, tmp_path / "root", tmp_path)[0][0] == str(venv / "Scripts" / "python.exe")
     assert body_switch._venv_python(str(venv)) == os.path.join(str(venv), "Scripts", "python.exe")
 
 

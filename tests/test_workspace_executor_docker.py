@@ -107,7 +107,7 @@ def test_docker_executor_run_script_uses_backend_script_path(tmp_path, monkeypat
     data.mkdir()
     captured: dict[str, object] = {}
 
-    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None):
+    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, stop=None):
         backend = str(cmd[1])
         host = workspace / backend.removeprefix("/workspace/")
         assert host.name == "script.py"
@@ -159,7 +159,7 @@ def test_docker_executor_accepts_backend_absolute_write_targets_and_outputs(tmp_
     data.mkdir()
     captured: dict[str, object] = {}
 
-    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, executor=None):
+    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, executor=None, stop=None):
         assert executor.container_name == "pinned-container-id"
         captured["cmd"] = list(cmd)
         captured["env_overlay"] = env_overlay

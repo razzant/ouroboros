@@ -7,7 +7,8 @@ the boundary before starting the command. It installs nothing and is not a sandb
 
 Stage two retains complete raw output and declared diagnostics, reaps the
 contained command, then releases declared reproducible test scratch on green
-and red. Unknown command data, debug and unconfirmed teardown stay in place.
+and red, including a command that could not be launched (exit 2, `launch_error`
+in its result). Unknown command data, debug and unconfirmed teardown stay in place.
 The last stderr line names the root once: `SAFE_TEST_RETAINED` or
 `SAFE_TEST_RELEASED` describes that path, not every process anywhere.
 
@@ -87,7 +88,7 @@ def main() -> int:
     for node in ast.walk(tree):
         names = ([item.name for item in node.names] if isinstance(node, ast.Import)
                  else [node.module] if isinstance(node, ast.ImportFrom) else [])
-        if any(name not in {"__future__", "ast", "os", "pathlib", "sys", "tempfile"} for name in names):
+        if any(name not in {"__future__", "ast", "os", "pathlib", "sys", "sysconfig", "tempfile"} for name in names):
             raise RuntimeError("test environment helper must import only its audited stdlib leaves")
     environment = runpy.run_path(str(helper))
     boundary = environment["isolated_environment"]

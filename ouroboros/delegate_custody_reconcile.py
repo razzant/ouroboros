@@ -530,14 +530,16 @@ def _owner_terminal_is_deliberate(drive_root: Any, task_id: str, *,
     the run: an undignified nanny death must not kill a healthy paid run, and
     "unknown" is exactly the case the answer is about. No reason-code table and no
     special crash branch: the axis the finalizers already write is the class. The
-    spared run's own ``maxSeconds`` stays its damage limit (ARCHITECTURE, custody).
+    spared run keeps the bounds it started with: the ``maxSeconds`` it was sent, else none
+    but its own end, a later verdict and the owner's Stop (a run of an unbounded task is
+    sent no invented window; ARCHITECTURE, custody).
 
     ``review_owned`` raises that floor to the ONE verdict that also speaks for a
     review panel's run: an explicit cancellation. Task association does not confer
     lifecycle authority, so a reviewed task that merely finished — completed,
     degraded, best-effort or failed — is not a verdict about its own reviewer, and
-    killing the live panel on it is exactly the incident behind issue #1006. The panel's own bounds (its slot window and the run's ``maxSeconds``)
-    stay the reviewer's damage limit.
+    killing the live panel on it is exactly the incident behind issue #1006. The panel's own bounds (its slot window and the run's ``maxSeconds``,
+    where the task gives it any) stay the reviewer's limit.
     """
     from ouroboros.outcomes import (
         EXECUTION_BEST_EFFORT,

@@ -37,6 +37,11 @@ test('a typed known prefix loses only its leading mark; everything else stays', 
     // A translated sentence (a `tx` type) loses the same mark; the match reads the stored English.
     assert.equal(hostNoticeDisplayText('🧠 Memory: kept.', 'legacy_memory_notice', '🧠 Память: сохранена.'), 'Память: сохранена.');
     assert.equal(hostNoticeDisplayText('🧠 Memory: kept.', 'legacy_memory_notice', 'Память: сохранена.'), 'Память: сохранена.');
+    // The per-call ceiling notice as `upgrade_notices.command_timeout_notice` writes it, with and without a value.
+    assert.equal(hostNoticeDisplayText("⏱️ The separate per-call ceiling of earlier versions (1800 s by default; 900 s in this install's settings) is retired.",
+        'command_timeout_notice'), "The separate per-call ceiling of earlier versions (1800 s by default; 900 s in this install's settings) is retired.");
+    assert.equal(hostNoticeDisplayText('⏱️ The separate per-call ceiling of earlier versions (1800 s by default) is retired.',
+        'command_timeout_notice'), 'The separate per-call ceiling of earlier versions (1800 s by default) is retired.');
 });
 
 // Each entry is one producer's prefix: its mark (variation selector included) and its

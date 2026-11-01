@@ -6,12 +6,18 @@ import { UPDATE_STAGE_LABELS, afterUpdateRows, attemptTime, bindPreflightDescrip
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { downloadViaHostBridge } from './ui_helpers.js';
 import { activationAttemptView, candidateDialog, candidateName, candidateVerdict, candidateWarning, paintCandidateFacts,
     paintVerdictActions, prepareHint } from './update_candidate.js';
 
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
 const STATE_WARNINGS = new Set(['official_status_requires_check', 'managed_updates_unavailable']);
+// What the carried list's download answers instead of the list (update_activation.carried_list_download).
+const CARRIED_LIST_REFUSALS = {
+    409: 'The prepared update changed; its list was not downloaded. Review it again.',
+    404: 'This update no longer keeps a list of its carried work; nothing was downloaded.',
+};
 
 // ONE relative-time vocabulary for this panel: the same four buckets carry the
 // "checked …" age on the action row and the "written …" age on the letter, so
@@ -681,7 +687,8 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const actionsBar = page.querySelector('#updates-actions');
     const recoveryDetails = page.querySelector('.updates-recovery');
     const candidateNodes = { section: page.querySelector('#updates-candidate'), title: page.querySelector('#updates-candidate-title'),
-        details: page.querySelector('#updates-candidate-details'), list: page.querySelector('#updates-candidate-facts') };
+        details: page.querySelector('#updates-candidate-details'), list: page.querySelector('#updates-candidate-facts'),
+        scroller: page.querySelector('.updates-scroll') };
     const candidateMemo = { html: '', state: '' };
     const letterSection = page.querySelector('#updates-letter');
     const letterLabel = page.querySelector('#updates-letter-label');
@@ -1319,6 +1326,23 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         await loadStatus({ preservePhase: false });
     }
 
+    // The complete list of the work a prepared update carries, served only for the live candidate: asked for first, so
+    // a list the server refuses is said and never saved as one, and the status is read again; nothing asks again by
+    // itself. The download itself is the Files page's (the desktop shell saves it to Downloads).
+    async function downloadCarriedList(href, name) {
+        try {
+            const answer = await apiFetch(href, { method: 'HEAD', cache: 'no-store' });
+            // The download's result says whether it saved: a save the desktop bridge refuses resolves `ok: false` once
+            // the shell has copied the link.
+            if (answer.ok && (await downloadViaHostBridge(href, name)).ok) return;
+            showToast(answer.ok ? 'The list was not downloaded.'
+                : CARRIED_LIST_REFUSALS[answer.status] || `The list was not downloaded (HTTP ${answer.status}).`, 'error');
+        } catch (err) {
+            showToast(`The list was not downloaded: ${err?.message || err}`, 'error');
+        }
+        await loadStatus({ preservePhase: true });
+    }
+
     async function restartNow() {
         primaryBtn.disabled = true;
         try {
@@ -1359,6 +1383,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     });
     replaceBtn.addEventListener('click', replaceWithOfficial);
     attemptRestore.addEventListener('click', () => rollback(attemptRestore.dataset.target, attemptRestore.dataset.name));
+    candidateNodes.list.addEventListener('click', (event) => {
+        const link = event.target.closest?.('a[download]');
+        if (!link) return;
+        event.preventDefault();  // at once: the desktop shell's own link handler skips a handled click
+        downloadCarriedList(link.getAttribute('href'), link.getAttribute('download'));
+    });
     meta.addEventListener('click', (event) => {
         if (event.target.closest?.('[data-open-settings-advanced]')) {
             openSettingsTab?.('advanced');

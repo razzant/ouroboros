@@ -397,6 +397,21 @@ test('every candidate state has one verdict: its words, its buttons and its fact
             'candidate_needs_adaptation', 'Your uncommitted changes conflict with 7.8.2 (d2f6a91c). Nothing was changed.',
             /^Conflicting: supervisor\/queue\.py\. 7\.8\.1 keeps running with your local changes\./,
             ['Prepare without local changes', 'Discard', '*Prepare again']],
+        // The queue refused its resolver (update_adaptation._adapt, as the real queue's refusal leaves it: no task).
+        ['needs adaptation, its resolver not started', { candidate: candidate({ state: 'needs_adaptation',
+            reason: 'merge_conflicts: resolver not admitted: restart_intake_closed', merge_kind: 'conflicting',
+            conflict_paths: ['ouroboros/mod_a.py'], conflict_count: 1, layer_conflicts: { merge: ['ouroboros/mod_a.py'] },
+            adaptation: { step: 'merge' }, actions: ['discard_candidate', 'prepare'] }) },
+            'candidate_needs_adaptation', 'Your local commits conflict with 7.8.2 (d2f6a91c). Nothing was changed.',
+            /^Conflicting: ouroboros\/mod_a\.py\. The reviewed task that adapts your changes could not start: Ouroboros was about to restart and took no new work\. Prepare again to retry it, or resolve the conflict in this checkout and prepare again\. 7\.8\.1 keeps running with your local changes\.$/,
+            ['Discard', '*Prepare again']],
+        // Its reviewed commit kept conflict markers (update_adaptation._settle_locked: Git's "<commit>:<path>" lines).
+        ['failed, markers left by its adaptation', { candidate: candidate({ state: 'failed', merge_kind: 'conflicting',
+            reason: `adaptation_markers_left: ${'c9cf1d54'.repeat(5)}:ouroboros/mod_a.py\n${'c9cf1d54'.repeat(5)}:web/app.js\n`,
+            adaptation: { step: 'merge', task_id: 'update_adapt_5a5046a6' }, actions: ['prepare', 'discard_candidate'] }) },
+            'candidate_failed', '7.8.2 (d2f6a91c) could not be prepared. Nothing was changed.',
+            /^Its reviewed adaptation still has conflict markers in ouroboros\/mod_a\.py, web\/app\.js\.$/,
+            ['Discard', '*Prepare again']],
         ['failed checks', { ...LOCAL, candidate: candidate({ state: 'failed', reason: 'checks_failed', checks: { ok: false,
             tests: { blocking: ['tests/test_queue.py'], already_failing: ['tests/test_net.py'] } },
             actions: ['prepare', 'discard_candidate'] }) },
@@ -407,7 +422,7 @@ test('every candidate state has one verdict: its words, its buttons and its fact
             tests: { unverified: 'the selected run did not complete (parallel: exit 124, 0 case(s))', blocking: [] } },
             actions: ['prepare', 'discard_candidate'] }) },
             'candidate_failed', '7.8.2 (d2f6a91c) could not be verified. Nothing was changed.',
-            /^Its checks did not complete, so it was neither passed nor failed\. Prepare it again\.$/, ['Discard', '*Prepare again']],
+            /^Its checks did not complete, so it neither passed nor failed\.$/, ['Discard', '*Prepare again']],
         ['failed', { candidate: candidate({ state: 'failed', reason: 'UPDATE_SPACE: 2.1 GB free, the copy needs 3.4 GB',
             actions: ['prepare', 'discard_candidate'] }) },
             'candidate_failed', '7.8.2 (d2f6a91c) could not be prepared. Nothing was changed.',
@@ -483,6 +498,19 @@ test('every candidate state has one verdict: its words, its buttons and its fact
     assert.equal(many.headline, 'Your staged changes conflict with 7.8.2 (d2f6a91c). Nothing was changed.');
     assert.match(many.hint, /^Conflicting: a\.py, b\.py and 23 more\./, 'a bounded list counts what it did not carry');
     assert.equal(many.facts.find((row) => row.label === 'Conflicts in your staged changes').value, 'a.py\nb.py\nand 23 more');
+    // A refusal this panel has no words for stays as written, so no reason is lost.
+    const unworded = updateVerdict({ ...STATUS, ...LOCAL, candidate: candidate({ state: 'needs_adaptation', local_changes: true,
+        reason: 'files_conflicts: resolver not admitted: RuntimeError: queue offline', layer_conflicts: { files: ['a.py'] },
+        actions: ['apply_without_local_changes', 'discard_candidate', 'prepare'] }) });
+    assert.match(unworded.hint, /^Conflicting: a\.py\. The reviewed task that adapts your changes could not start: RuntimeError: queue offline\. Prepare again to retry it, or resolve the conflict in this checkout and prepare again, or prepare without your uncommitted changes\. 7\.8\.1 keeps/);
+    // Marker paths as recorded: a line without Git's commit prefix as written, none recorded the fact alone. The
+    // panel's own words for a code start the sentence; an unknown text stays as written.
+    const failedWith = (reason) => updateVerdict({ ...STATUS, candidate: candidate({ state: 'failed', reason,
+        actions: ['prepare', 'discard_candidate'] }) }).hint;
+    assert.equal(failedWith('adaptation_markers_left: notes/plain.md'), 'Its reviewed adaptation still has conflict markers in notes/plain.md.');
+    assert.equal(failedWith('adaptation_markers_left:'), 'Its reviewed adaptation still has conflict markers.');
+    assert.equal(failedWith('channel_changed'), 'The update channel changed after it was prepared.');
+    assert.equal(failedWith('adaptation_unknown_code: x'), 'adaptation_unknown_code: x.');
     assert.deepEqual(buttons(adaptation), ['Discard', '*Prepare again'], 'an action the server does not list is never offered');
     const unknown = updateVerdict({ ...STATUS, candidate: { state: 'unknown', error: 'OSError: registry unreadable' } });
     assert.equal(unknown.state, 'available');
@@ -629,6 +657,103 @@ test('navigation to Updates reads the status and applies nothing, whatever the c
     } finally {
         Object.assign(globalThis, saved);
     }
+});
+
+// The panel's "Download the full list", pressed: what the page asked, what it saved, handed to a desktop shell's file
+// bridge (`bridge`), copied and said. `answer`: the status the list's download route gives (update_activation.carried_list_download);
+// `saveAnswer`: what it gives the save itself, which differs once another preparation replaced the candidate after the ask.
+// The bridge refuses that save as launcher.download_file_to_downloads does, and the shell copies the link instead.
+const LIST_URL = '/api/files/download?carried_list=update_d2f6a91c7e5b_4f9a1c';
+const LIST_NAME = 'update_d2f6a91c7e5b_4f9a1c.uncommitted.txt';
+async function pressCarriedList({ answer, saveAnswer = answer, bridge = false }) {
+    const notes = Array.from({ length: 200 }, (_v, index) => ['A', `notes/n${String(index).padStart(3, '0')}.md`]);
+    const status = { ...STATUS, ...LOCAL, candidate: candidate({ state: 'ready', checks: PASSED, local_changes: true,
+        carried: { index: { count: 0, paths: [] }, files: { count: 250, paths: notes }, list: `/o/${LIST_NAME}`,
+            list_url: LIST_URL }, actions: ['activate', 'discard_candidate'] }) };
+    const calls = [];
+    const saved = [];
+    const bridged = [];
+    const copied = [];
+    const kept = { fetch: globalThis.fetch, window: globalThis.window, document: globalThis.document };
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const shown = [];
+    try {
+        globalThis.fetch = async (url, init = {}) => {
+            calls.push(`${init.method || 'GET'} ${url}`);
+            if (String(url).startsWith('/api/files/download')) {
+                const code = init.method === 'HEAD' ? answer : saveAnswer;
+                return { ok: code < 400, status: code, blob: async () => new Blob(['the list']), json: async () => ({}) };
+            }
+            const body = String(url).startsWith('/api/update/status') ? status
+                : { branch: 'ouroboros', sha: '88acfdbe', commits: [], tags: [] };
+            return { ok: true, status: 200, json: async () => body };
+        };
+        const api = { download_file_to_downloads: async (...args) => {
+            bridged.push(args);
+            return saveAnswer < 400 ? { ok: true, path: `/Users/o/Downloads/${LIST_NAME}` }
+                : { ok: false, error: `HTTP Error ${saveAnswer}` };  // urllib refuses before the file is opened
+        } };
+        globalThis.window = { addEventListener: (type, fn) => { if (type === 'ouro:dashboard-subtab-shown') shown.push(fn); },
+            location: { href: 'http://127.0.0.1:8765/' }, navigator: { clipboard: { writeText: async (text) => { copied.push(text); } } },
+            ...(bridge ? { pywebview: { api } } : {}) };
+        const body = stubElement('body');  // its toast stack is found again, as on a page
+        globalThis.document = { body, activeElement: null, getElementById: (id) => body.children.find((node) => node.id === id) ?? null,
+            addEventListener() {}, removeEventListener() {},
+            createElement: (tag) => Object.assign(stubElement(tag), { click() { saved.push(this.download); } }) };
+        const page = { appended: [], appendChild(child) { this.appended.push(child); } };
+        initUpdates({ mount: page, state: { activePage: 'dashboard' }, ws: new FakeWS(), openSettingsTab() {} });
+        shown.forEach((fn) => fn({ detail: { tab: 'updates' } }));
+        for (let i = 0; i < 4; i += 1) await tick();
+        calls.length = 0;
+        let prevented = false;
+        const link = { getAttribute: (name) => ({ href: LIST_URL, download: LIST_NAME })[name] ?? null };
+        page.appended[0].querySelector('#updates-candidate-facts').listeners.click[0]({
+            target: { closest: (selector) => (selector === 'a[download]' ? link : null) },
+            preventDefault() { prevented = true; } });
+        for (let i = 0; i < 8; i += 1) await tick();
+        const stack = globalThis.document.body.children.find((node) => node.id === 'toast-stack');
+        return { prevented, calls, saved, bridged, copied, toasts: (stack?.children || []).map((node) => node.textContent),
+            tones: (stack?.children || []).map((node) => node.className) };
+    } finally {
+        Object.assign(globalThis, kept);
+    }
+}
+
+test('the carried list is saved only while the server serves it: a refusal is said, never saved, and the status read again', async () => {
+    const changed = await pressCarriedList({ answer: 409 });
+    assert.equal(changed.prevented, true, 'the link never downloads by itself');
+    assert.deepEqual(changed.calls, [`HEAD ${LIST_URL}`, 'GET /api/update/status'], 'asked, never fetched as the list');
+    assert.deepEqual([changed.saved, changed.toasts],
+        [[], ['The prepared update changed; its list was not downloaded. Review it again.']]);
+    const gone = await pressCarriedList({ answer: 404 });
+    assert.deepEqual([gone.saved, gone.toasts, gone.calls],
+        [[], ['This update no longer keeps a list of its carried work; nothing was downloaded.'],
+            [`HEAD ${LIST_URL}`, 'GET /api/update/status']]);
+    const served = await pressCarriedList({ answer: 200 });
+    assert.deepEqual([served.calls, served.saved, served.toasts], [[`HEAD ${LIST_URL}`, `GET ${LIST_URL}`], [LIST_NAME], []],
+        'asked, then saved once under its own name; nothing is read again');
+    // The desktop shell saves through its file bridge: only a list the server serves is handed to it.
+    const app = await pressCarriedList({ answer: 200, bridge: true });
+    assert.deepEqual([app.calls, app.bridged, app.saved, app.toasts], [[`HEAD ${LIST_URL}`], [[LIST_URL, LIST_NAME, false]], [], []],
+        'a save the app completes says nothing and reads nothing again');
+    const refused = await pressCarriedList({ answer: 409, bridge: true });
+    assert.deepEqual([refused.bridged, refused.toasts.length], [[], 1]);
+});
+
+test('a save refused after a served ask ends on its failure and one status read, in the desktop app as in a browser', async () => {
+    // Another preparation replaced the candidate between the ask and the save. The desktop bridge's refusal resolves
+    // unsuccessful once the shell has copied the link (ui_helpers.bridgeRefusalFallback): no download either.
+    const app = await pressCarriedList({ answer: 200, saveAnswer: 409, bridge: true });
+    assert.deepEqual([app.calls, app.bridged, app.saved, app.copied],
+        [[`HEAD ${LIST_URL}`, 'GET /api/update/status'], [[LIST_URL, LIST_NAME, false]], [], [`http://127.0.0.1:8765${LIST_URL}`]],
+        'handed to the bridge once, nothing saved, then the status is read once');
+    assert.deepEqual([app.toasts, app.tones.at(-1)],
+        [['Link copied — open it in your browser.', 'The list was not downloaded.'], 'toast toast-danger'],
+        'it ends on the failure, never on the copied link');
+    // In a browser the same refused save throws inside the Files page's download, as it did before.
+    const browser = await pressCarriedList({ answer: 200, saveAnswer: 409 });
+    assert.deepEqual([browser.calls, browser.saved, browser.toasts],
+        [[`HEAD ${LIST_URL}`, `GET ${LIST_URL}`, 'GET /api/update/status'], [], ['The list was not downloaded: download failed: HTTP 409']]);
 });
 
 // The real page: its click handler, the effects read for the shown candidate (`read`: that reply's status and body),

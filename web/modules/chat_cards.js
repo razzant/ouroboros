@@ -257,7 +257,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             const hooks = { fit: fit.fit, fault };
             Promise.resolve().then(() => (tab.render.kind === 'module'
                 ? mountModuleWidget(host, tab, tab.render, controller.signal, messageHandlers, hooks)
-                : mountRouteIframeWidget(host, tab, tab.render))).then((fn) => {
+                : mountRouteIframeWidget(host, tab, tab.render, controller.signal, hooks, messageHandlers))).then((fn) => {
                 if (tab.render.kind !== 'module') {
                     host.querySelector('iframe')?.style.removeProperty('--widget-frame-height');
                     fit.fit(frameHeight(tab.render));

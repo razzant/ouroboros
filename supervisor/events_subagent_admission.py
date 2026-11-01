@@ -492,9 +492,9 @@ def _resolve_subagent_constraint(
             )
     if surface == "genesis":
         try:
-            from ouroboros import subagent_worktrees
+            from ouroboros import genesis_project
 
-            handle = subagent_worktrees.provision_genesis_project(
+            handle = genesis_project.provision_genesis_project(
                 repo_dir=ctx.REPO_DIR,
                 task_id=tid,
                 parent_task_id=parent_task_id,
@@ -511,7 +511,7 @@ def _resolve_subagent_constraint(
             except Exception:
                 stray = []
             if stray:
-                subagent_worktrees.remove_genesis_project(handle.path)
+                genesis_project.remove_genesis_project(handle.path, task_id=str(tid))
                 return readonly, workspace_root, workspace_mode, (
                     f"Subagent rejected: freshly provisioned genesis root is not empty "
                     f"({len(stray)} stray entries) — possible provisioning collision."

@@ -215,6 +215,8 @@ class _Call:
         self.pending_context_rows = []
         self.delivered_catalog = None
         self.preparing_revision = None
+        self.resume_revision = 0
+        self.resume_tool_output = None
 
     async def run(self):
         writer = self.writer = asyncio.create_task(self.save_rows())
@@ -294,6 +296,7 @@ class _Call:
 
     async def consume(self, session):
         self.session = self.last_session = session
+        self.resume_tool_output = None
         if not self.resume:
             self.delivered_catalog = None
         self.connection_resumed = self.resume
@@ -391,8 +394,16 @@ class _Call:
                         'You may answer, act or stay silent.'})
                 return
             try:
+                resume_revision = self.resume_revision
                 result = await session.send(command)
                 if isinstance(command, ToolOutputs):
+                    # Adapters may distinguish native response writes from pixels
+                    # and queue acceptance. Older sessions keep send-boundary order.
+                    if getattr(session, 'resume_after_tool_response', False) is not None:
+                        previous = self.resume_tool_output
+                        self.resume_tool_output = (resume_revision, bool(previous and previous[1]) or any(
+                            row.get('tool_call_id') not in command.silent
+                            for row in command.messages if row.get('role') == 'tool'))
                     self.delivered_catalog = command.tools
                     delivered = getattr(self.host, 'tool_results_delivered', None)
                     if delivered is not None:
@@ -418,6 +429,12 @@ class _Call:
     def consume_revisit(self):
         self.attention.revisit_at = None
         self.pending_offers[:] = [row for row in self.pending_offers if not row.get("_requested_look")]
+
+    @staticmethod
+    def tool_answer_pointer():
+        return {"role": "user", "content":
+            "[Host fact; not owner words] The requested tool batch returned; its results are in the fitted history. "
+            "You may continue from them, act or stay silent; completed effects stay done."}
 
     @staticmethod
     def room_answer_pointer():
@@ -669,15 +686,18 @@ class _Call:
                 offline_tools = getattr(self.session, "tools_need_renewal", None)
                 needs_fit = (self.host.state.get("refit") or self.host.renewal_due()
                              or (offline_tools is not None and offline_tools(tuple(self.host.schemas))))
+                if not needs_fit and (self.resume or images):
+                    # Fresh projection can collapse a prior frame that this socket
+                    # still holds. Price the complete native delivery, images too.
+                    needs_fit = not await self.host.delivery_fits(
+                        tuple(changes) + tuple(images), self.serving_catalog())
                 if (self.renewing and not self.resume) or self.tool_refit.is_set() or needs_fit:
                     if not self.hub.ended_by_ouroboros:
                         # Results and execution receipts are already canonical.
                         # Waiting for quiet would deadlock on the withheld result.
                         offers = []
                         if any(call["id"] not in silent for call in calls):
-                            offers = [*({**image, "_canonical": True} for image in images), {"role": "user", "content":
-                                "[Host fact; not owner words] The requested tool batch returned; its results are in the fitted history. "
-                                "You may continue from them, act or stay silent; completed effects stay done."}]
+                            offers = [*({**image, "_canonical": True} for image in images), self.tool_answer_pointer()]
                             self.pending_offers.extend(offers)
                         if needs_fit or not self.renewing:
                             self.request_renewal()
@@ -732,6 +752,9 @@ class _Call:
                 if refusal is not None and not (event.kind == "response_done"
                         or (event.kind == "caption" and data.get("final"))):
                     continue
+                if event.kind == 'audio' or event.kind == 'caption' and data['speaker'] == 'ouroboros':
+                    # Refit must wait for speech to finish; continuation custody is unchanged.
+                    self.tool_responses.difference_update(self.active_responses)
                 if event.kind == "ready":
                     if self.tool_refit.is_set():
                         continue  # a late ready cannot release work to the retiring connection
@@ -806,6 +829,7 @@ class _Call:
                 elif event.kind == "renew":
                     self.request_renewal(resuming=data["resume"], within=data["within_s"])
                 elif event.kind == "resumable":
+                    self.resume_revision += 1
                     self.host.state["resume_handle"] = data["handle"]
                 elif event.kind == "closed":
                     resuming = bool(data.get('resumable') and self.host.state.get('resume_handle'))
@@ -868,6 +892,17 @@ class _Call:
                 if self.renewing:
                     if self.quiet() and (self.resume or self.preparation_ready()):
                         self.timing("quiet")
+                        if self.resume and self.resume_tool_output is not None:
+                            revision, ordinary = self.resume_tool_output
+                            covered = getattr(self.session, 'resume_after_tool_response',
+                                              revision != self.resume_revision)
+                            if not self.host.state.get("resume_handle") or not covered:
+                                self.resume = False
+                                if ordinary:
+                                    # Always offer continuation, even if the old socket spoke.
+                                    self.pending_offers.append(self.tool_answer_pointer())
+                                self.request_renewal()
+                                continue  # adopt the fresh result-bearing fit before offering its pointer
                         if self.resume and not self.host.state.get("resume_handle"):
                             raise RealtimeSetupError("resume_unavailable", "provider has not supplied a resume handle")
                         self.hub.send_state(cp.STATE_RECONNECTING, "provider_renewal")
