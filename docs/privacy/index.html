@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="How a self-hosted Ouroboros installation accesses, uses, stores and shares connected mail and calendar data.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://ouroboros-agent.ai/privacy/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ouroboros">
+  <meta property="og:title" content="Privacy and account connections · Ouroboros">
+  <meta property="og:description" content="Connected account data, local records, configured providers and your controls in a self-hosted installation.">
+  <meta property="og:url" content="https://ouroboros-agent.ai/privacy/">
+  <title>Privacy and account connections · Ouroboros</title>
+  <link rel="icon" href="/assets/icon_1024.png" type="image/png">
+  <link rel="stylesheet" crossorigin href="/assets/ouroboros-CMTHrJbp.css">
+</head>
+<body class="text-page">
+  <div class="ambient" aria-hidden="true"></div>
+  <header class="text-nav"><a class="brand" href="/" aria-label="Ouroboros home"><img src="/assets/icon_1024.png" alt=""><span>Ouroboros</span></a><nav aria-label="Text pages"><a href="/about/">About</a><a href="/install/">Install</a><a href="/terms/">Terms</a><a href="https://github.com/razzant/ouroboros">GitHub</a></nav></header>
+  <main class="text-document">
+    <p class="chapter-index">PRIVACY / ACCOUNT CONNECTIONS</p>
+    <h1>Privacy and account connections</h1>
+    <p>Last updated: 1 November 2026</p>
+    <p class="text-lede">Ouroboros is self-hosted, open-source software. The official project does not operate a hosted mailbox or calendar service. Each installation controls its own connected accounts and credentials.</p>
+
+    <h2>Data access and use</h2>
+    <p>With the mail and calendar skills, an installation may access messages, attachments, mailbox labels and settings, calendars and events within the permissions you grant. It uses those capabilities for work permitted by your instructions, tasks and operating modes, including autonomous work you enable. The Google consent screen lists the permissions requested by your installation's OAuth client.</p>
+
+    <h2>Storage and sharing</h2>
+    <p>Credentials and captured account data are stored locally by your installation, in settings and skill state as appropriate. Task history, delivery receipts and other local records can also contain account content. Selected content may be sent to model and tool providers configured for that work, and to recipients you authorize. Those providers have their own data policies. The official project does not receive your mail or calendar data merely because you install the software, and it does not operate a model-training pipeline using connected account content.</p>
+
+    <h2>Retention and disconnection</h2>
+    <p>Local records can remain until you explicitly remove them. Disconnecting an account is different from deleting its saved history. Revoke Google access through your <a href="https://myaccount.google.com/">Google Account</a> when you want to withdraw the provider grant; local settings and credentials may also need removal. Revocation or local deletion cannot undo a message already sent, an invitation already delivered, or a copy already shared elsewhere.</p>
+
+    <h2>Telemetry and this website</h2>
+    <p>Ouroboros sends no telemetry by default, and the official project runs no usage or crash-report collection. Installations can configure their own monitoring. Requests through OpenRouter carry the application name for OpenRouter's app statistics. The public website's hosting provider may process ordinary request metadata under its own policies; it does not receive connected mail or calendar content through this website.</p>
+
+    <h2>Your installation</h2>
+    <p>An installation can be configured and modified, including by Ouroboros itself. Review the skills, permissions, model-provider settings and changes of the installation you use. This notice describes the official software's data flow; it does not certify the behavior of every fork or custom deployment.</p>
+  </main>
+  <footer class="text-footer"><a href="/">Home</a><a href="/about/">About</a><a href="/install/">Install</a><a href="/terms/">Terms and license</a></footer>
+</body>
+</html>
