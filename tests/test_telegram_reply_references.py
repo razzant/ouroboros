@@ -431,13 +431,14 @@ def test_silent_mode_mutes_and_replaces_the_hosts_technical_progress_but_not_its
     async def run():
         await handle(_host_note("Checkpoint 3 at round 12"))
         await handle(_host_note("Running the tests"))
-        await handle(_host_note("Fallback: switching model lane", task_incident="model_lane_switch"))
+        await handle(_host_note("Fallback: trying other/model", task_incident="model_lane_attempt"))
+        await handle(_host_note("Fallback: other/model is now the active route; it answered."))
         await handle(_note("Reading the failing test first."))
 
     asyncio.run(run())
     assert [(method, data.get("disable_notification")) for method, data in b.calls] == [
-        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None)]
-    assert b.calls[1][1]["message_id"] == b.calls[3][1]["message_id"] == "101"  # the first note, form-encoded
+        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None), ("editMessageText", None)]
+    assert b.calls[1][1]["message_id"] == b.calls[3][1]["message_id"] == b.calls[4][1]["message_id"] == "101"  # the first note, form-encoded
 
 
 def test_the_agents_host_progress_reaches_the_phone_muted_and_replaced(phone, monkeypatch):  # noqa: F811
@@ -453,11 +454,32 @@ def test_the_agents_host_progress_reaches_the_phone_muted_and_replaced(phone, mo
     agent, events = _agent()
     _emit(agent, "Checkpoint 3 at round 12")
     _emit(agent, "Running the tests")
-    _emit(agent, "Fallback: switching model lane", incident={"task_incident": "model_lane_switch", "toast_once": "lane"})
-    for _ in range(3):
+    _emit(agent, "Fallback: trying other/model", incident={"task_incident": "model_lane_attempt", "toast_once": "lane"})
+    _emit(agent, "Fallback: other/model is now the active route; it answered.")  # ordinary progress: Silent mutes it
+    for _ in range(4):
         assert events_chat_delivery._handle_send_message(events.get_nowait(), phone.ctx) is True
     assert [(method, data.get("disable_notification")) for method, data in phone.calls] == [
-        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None)]
+        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None)]
+
+
+def test_with_silent_mode_off_mirrored_route_rows_keep_the_phones_own_sound(phone, monkeypatch):  # noqa: F811
+    """The same real chain with Silent mode off and progress mirrored, the owner's other existing choice: every
+    note, the walk's ordinary outcome row included, is its own message with the phone's own notification. The
+    outcome row adds no incident or toast; it is not promised silence."""
+    from supervisor import events_chat_delivery
+    from tests.test_progress_narration_voice import _agent, _emit
+
+    phone.plugin.merge_settings(phone.api.state_dir, {"TELEGRAM_SILENT_MODE": "off", "TELEGRAM_MIRROR_PROGRESS": "on"})
+    monkeypatch.setattr(events_chat_delivery, "_bound_project_chat_id", lambda *_: 0)
+    phone.ctx.RUNNING["task-1"] = {"task": {"id": "task-1", "_attempt": 0}}
+    agent, events = _agent()
+    _emit(agent, "Running the tests")
+    _emit(agent, "Fallback: trying other/model", incident={"task_incident": "model_lane_attempt", "toast_once": "lane"})
+    _emit(agent, "Fallback: other/model is now the active route; it answered.")
+    for _ in range(3):
+        assert events_chat_delivery._handle_send_message(events.get_nowait(), phone.ctx) is True
+    assert [(method, data.get("disable_notification")) for method, data in phone.calls] == [("sendMessage", None)] * 3
+    assert phone.calls[-1][1]["text"].endswith("other/model is now the active route; it answered.")
 
 
 def test_silent_mode_setting_explains_sound_not_replacement(tmp_path):
