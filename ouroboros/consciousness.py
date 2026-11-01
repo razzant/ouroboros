@@ -22,6 +22,9 @@ wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup`` pers
 [min, max]; a runner failure — or a wake the lane could not admit — doubles it up to max until a
 wake succeeds. The persisted own actor id and cause fence completion; a carrier handoff
 does not finish the logical wake, and repeated terminal callbacks do not advance it twice.
+A wake a pending Restart refuses before its start stays a refusal, like every closed door:
+no failure, no row, no owner and no observation (``handle_wake_direct``). A pooled terminal
+no dispatcher reported settles only at the tick that would start over it.
 Nothing else moves the alarm (owner 12 Oct, #1603: no accelerated wake, only the
 scheduled time): a task finishing, a project digest or an orphan-heal sweep never pulls the next
 wake earlier — they wait as observed facts for the scheduled wake (``observe_wake``), so every
@@ -231,6 +234,7 @@ class BackgroundConsciousness:
         """One supervisor pass; never blocks on a wake. Returns the typed decision."""
         now = time.time() if now is None else float(now)
         wake = self.live_wake()  # never wait for Q while holding the clock lock
+        ended_live = not wake and self._enabled and now >= self._next_wake_at and self._settle_unreported_terminal()
         with self._lock:
             from supervisor.state import control_is
 
@@ -240,7 +244,7 @@ class BackgroundConsciousness:
             self._enabled = not self._stopped and control_is(self._read_state(), "bg_consciousness_enabled", True)
             if not self._enabled:
                 return "disabled"
-            if wake:
+            if wake or ended_live:
                 return "wake_live"
             if now < self._next_wake_at:
                 return "not_due"
@@ -255,6 +259,32 @@ class BackgroundConsciousness:
             if not self._owner_chat_id():
                 return self._skip("waiting_for_first_conversation", now + self.floor, now=now)
         return self._launch(now, int(self._owner_chat_id() or 0), window)
+
+    def _settle_unreported_terminal(self) -> bool:
+        """Settle its own known wake from a pooled terminal no dispatcher reported (an orphan sweep, a
+        boot restore, a lost event): one addressed row and one ownership probe, only when this tick
+        would otherwise start over it. True while that wake's effects may still live: the next one
+        waits. An unreadable, absent, unsettled or inline row settles nothing and blocks nothing; a
+        cancelled one is no runner failure, and its stop door's next start stands."""
+        from ouroboros.task_results import load_task_result
+        from supervisor.consciousness_carriers import pooled_terminal_ok
+        from supervisor.queue import task_settlement_liveness
+
+        task_id = "" if self._own_wake.get("finished") else str(self._own_wake.get("task_id") or "")
+        if not task_id:
+            return False
+        try:
+            row = load_task_result(self._drive_root, task_id, strict=True) or {}
+        except Exception:
+            log.debug("Own wake %s is unreadable; its terminal stays unknown", task_id, exc_info=True)
+            return False
+        ok = pooled_terminal_ok(row)
+        if ok is None or row.get("status") == "cancelled":
+            return False
+        if task_settlement_liveness(task_id) is not False:
+            return True
+        self._wake_finished(task_id, ok, pooled=True)
+        return False
 
     def _skip(self, reason: str, next_at: float, *, now: float, error: str = "") -> str:
         self._last_wake_outcome, self._last_error = f"skipped:{reason}", error
@@ -301,14 +331,15 @@ class BackgroundConsciousness:
                 max_tasks=get_consciousness_max_tasks(), interval=self._interval(), events=events, previous_wake=previous,
                 appointment_at=self._appointment_at, **context)
 
-        accepted_boundary = None
+        accepted_boundary = bound_over = None
 
         def bind_input(task):
-            nonlocal accepted_boundary
+            nonlocal accepted_boundary, bound_over
             if not is_own_clock_wake(task.get("metadata")):
                 return
             # Bind before the thread starts: even an immediate completion has an owner.
             with self._lock:
+                bound_over = self._own_wake, self._last_wake_task_id, self._last_wake_outcome, self._last_error
                 self._in_flight = str(task["id"])
                 self._own_wake = {"task_id": str(task["id"]), "wake_cause": metadata["wake_cause"],
                                   "initiator": metadata["initiator"], "finished": False}
@@ -328,6 +359,10 @@ class BackgroundConsciousness:
         finally:
             if not receipt.get("admitted"):
                 self._in_flight = ""  # refused or raised after binding: no callback will come
+                if bound_over is not None:  # and nothing ran, so this id never was its wake
+                    with self._lock:
+                        self._own_wake, self._last_wake_task_id, self._last_wake_outcome, self._last_error = bound_over
+                        self._set_state(OWN_WAKE_STATE_KEY, self._own_wake)
         if not receipt.get("admitted"):
             why = str(receipt.get("reason") or "refused")
             self._last_wake_outcome = f"rejected:{why}"

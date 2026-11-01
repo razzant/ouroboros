@@ -635,7 +635,7 @@ def test_panic_flag_blocks_constructor_tick_and_public_wake_after_failed_disable
     clock = BackgroundConsciousness(root, root, lambda: 7, now=0)
     assert not clock.enabled
     assert clock.tick(now=99999) == 'panic_stop'
-    monkeypatch.setattr(worker_chat_lane, 'wake_gate_open', lambda: True)
+    monkeypatch.setattr(worker_chat_lane, 'wake_gate_refusal', lambda: '')
     assert worker_chat_lane.handle_wake_direct(7, 'wake', {})['reason'] == 'consciousness_disabled_or_unknown'
     assert (root / 'state/panic_stop.flag').exists()
 
