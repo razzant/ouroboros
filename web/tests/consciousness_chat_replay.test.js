@@ -76,7 +76,7 @@ test('live terminal frames add and clear the authored summary through card facts
 });
 
 // A self-started run says what it did: a schedule-born root keeps the schedule's name as its title and
-// shows its sentence as the line under it; a wake's sentence is its title. Live and replay meet in one place.
+// shows its sentence as the line under it; a wake's sentence is its title alone. Live and replay meet in one place.
 const SENTENCE = 'Checked the disk: 30 GiB free, 30 less than last night; the cause is still unknown.';
 const AT = '2026-10-28T06:39:00+00:00';
 const checkpoint = (task_id, extra = {}) => {
@@ -127,13 +127,24 @@ test('replay: a quiet schedule run is titled by its schedule and says what it di
 const narration = (task_id, words, extra = {}) => ({ task_id, chat_id: 1, ts: '2026-10-28T06:30:00+00:00', role: 'assistant',
     is_progress: true, narration: true, text: `💬 ${words}`, content: `💬 ${words}`, ...extra });
 
-test('replay and live: a wake\'s sentence is its title and its last narration stays its line; origin rows name their fact or stay absent', async () => {
+test('replay and live: a wake whose sentence is its title shows that sentence alone, no older narration under it', async () => {
     const wake = narration('w1', 'Reading the rooms', { initiator: 'consciousness', suggested_name: 'Own time' });
     await replay({ messages: [wake, terminal('w1', { suggested_name: SENTENCE, wake_summary: SENTENCE, initiator: 'consciousness' })], window: { complete: true } }, (feed) => {
         const seen = view(feed, 'w1');
         assert.equal(seen.title, SENTENCE);
-        assert.equal(seen.line, 'Reading the rooms', 'the title already says the sentence; the narration keeps the line');
+        assert.equal(seen.line, '', 'the title already says the sentence; the earlier narration stays in Details');
         assert.match(seen.facts, /<dt>Started by<\/dt><dd>Consciousness<\/dd>/);
+    });
+    // The saved shape: every row names the card, the last (legacy, unmarked) narration carries the outcome and sentence.
+    const long = 'Weighing whether a body edit — "after merge" — asks anything of me; it **does not**. '.repeat(60);
+    const ended = { initiator: 'consciousness', suggested_name: SENTENCE, task_terminal_status: 'completed', outcome_phase: 'done',
+        outcome_final: true, outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } }, wake_summary: SENTENCE,
+        _is_direct_chat: true, tool_calls: 2, ts: AT };
+    const saved = [narration('w2', 'Reading the rooms', { initiator: 'consciousness', suggested_name: SENTENCE }), narration('w2', long, ended)];
+    await replay({ messages: saved, window: { complete: true } }, (feed) => {
+        const seen = view(feed, 'w2');
+        assert.equal(seen.title, SENTENCE);
+        assert.equal(seen.line, '', 'a reload does not resurrect the long narration under the summary');
     });
     await replay({ messages: [], window: { complete: true } }, (feed, handlers) => {
         handlers.get('chat')(wake);
@@ -142,7 +153,7 @@ test('replay and live: a wake\'s sentence is its title and its last narration st
         handlers.get('task_named')({ task_id: 'w1', suggested_name: SENTENCE });  // _wake_finished names the card after task_done
         const seen = view(feed, 'w1');
         assert.equal(seen.title, SENTENCE);
-        assert.equal(seen.line, 'Reading the rooms');
+        assert.equal(seen.line, '');
     });
     await replay({ messages: [checkpoint('o1'), terminal('o1', { suggested_name: 'Owner work', quiet_effective: false, wake_silent: false })], window: { complete: true } }, (feed) => {
         assert.doesNotMatch(view(feed, 'o1').facts, /Started by/);

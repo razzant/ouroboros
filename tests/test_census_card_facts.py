@@ -47,6 +47,9 @@ def test_moved_work_uses_narration_and_incremental_counts_without_history_reads(
                                ("💬 Host checkpoint", False, "2026-10-16T12:00:01Z"),
                                (" ", True, "2026-10-16T12:00:02Z")):
         message_bus.send_with_budget(1, text, is_progress=True, task_id="work", narration=voice, ts=stamp)
+    # The model's display reasoning is its own narration but never the work's line.
+    message_bus.send_with_budget(1, "💬 Weighing the change", is_progress=True, task_id="work", narration=True,
+                                 progress_meta={"reasoning": True}, ts="2026-10-16T12:00:03Z")
     # A delayed older delivery cannot overwrite the newer visible model narration.
     record_narration(tmp_path, {"task_id": "work", "narration": True, "text": "Older",
                                 "ts": "2026-10-16T11:59:00Z"})

@@ -32,8 +32,9 @@ def _record(root, task_id, facts):
 
 
 def record_narration(root, row):
-    """Only an appended, explicitly model-authored progress row supplies this line."""
-    if row.get("narration") is not True:
+    """Only an appended, explicitly model-authored progress row of visible speech supplies this line;
+    the model's display reasoning (``reasoning``) stays in the card's details."""
+    if row.get("narration") is not True or row.get("reasoning") is True:
         return
     text = str(row.get("content", row.get("text", "")) or "")
     # The worker's presentation prefix is removed by the room card as well.
