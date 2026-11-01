@@ -1,0 +1,56 @@
+# Two bounded native cases of the unified Update qualification, each on its own fresh GitHub-hosted macOS arm64 runner
+# (test equipment, not product): A (b1a, the venv of the 7.7.0 app's own Python) and b1e (the venv of an external copy
+# of that Python). In both, the official 7.7.0 app, the owner's existing copy opened through LaunchServices, is updated
+# by product C's own Update (its real preparation and checks, then its activation) to the official 7.8.0 app. Public
+# inputs only, no secrets. Each case uploads its own output root whatever it reached, provided its runner survives to
+# its upload step (a lost runner uploads nothing).
+# See ci-macos-native/README.md. The execution commit is C plus this overlay; each case checks that itself.
+name: qualification-update-native-macos
+
+on:
+  push:
+    branches:
+      - 'qualification/update-native-macos-25fc93a8e3a4-r1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-update-native-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [b1a, b1e]
+    runs-on: macos-latest
+    # GitHub's own limit for a hosted job; the case step ends 15 minutes earlier so the upload still runs.
+    timeout-minutes: 360
+    env:
+      QB_CASE: ${{ matrix.case }}
+    steps:
+      - name: Check out the execution commit (read-only token, not persisted)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # exec: the runner script is the step's own process, so a cancel or timeout signal reaches it directly.
+      - name: Run the native case (verdicts in RESULT.txt and claims.tsv)
+        timeout-minutes: 345
+        shell: bash
+        run: exec /bin/bash ci-macos-native/native/run-native.sh "$RUNNER_TEMP/qb-ci-native-$QB_CASE-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$QB_CASE"
+
+      # Only the output root this case created: its receipts and out/guest-evidence (qb1's evidence folder is a link
+      # into it, made by this run), never a path the run did not create.
+      - name: Upload the case's output (public)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qb-ci-native-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qb-ci-native-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}/out
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
