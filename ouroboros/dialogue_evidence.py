@@ -26,7 +26,7 @@ _ROW_FACTS = (
     "source_task_id", "relayed_from_task_id", "provenance", "client_surface",
     "status", "reason_code", "outcome", "outcome_axes", "terminal_host_notice", "task_terminal_status", "summary_kind",
     "lifecycle", "quiz", "actions", "title", "filename", "caption", "mime",
-    "project_origin_projection", "presence_provenance", "attachment_gap",
+    "project_origin_projection", "presence_provenance", "presence_contact", "attachment_gap",
     "reply_to", "relay", "reply_to_relay",  # the host-resolved relations: what a row replies to, the owner words a relay quotes
 )
 

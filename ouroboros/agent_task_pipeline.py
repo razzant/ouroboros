@@ -81,11 +81,13 @@ from ouroboros.task_finalization import (
     set_terminal_host_notice,
     model_execution_projection,
     build_swarm_efficiency as _build_swarm_efficiency,  # moved (module ceiling); tests import it here
-    deliver_final_message_live, prepare_terminal_send_event, register_final_answer_owed, stamp_root_final_phase,
+    deliver_final_message_live, prepare_terminal_send_event, register_final_answer_owed,
+    stamp_root_final_phase,
     sealed_final_prompt_section, terminal_result_fields, terminal_notice_text,  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
 )
 from ouroboros.dialogue_provenance import is_presence_task, presence_provenance_fields  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
-from ouroboros.presence_runner import build_presence_result_event
+from ouroboros.presence_runner import PRESENCE_DELIVERY_KEYS, build_presence_result_event
+from ouroboros.task_finalization import PROJECT_ROOM_ADDRESS, presence_root_project_room
 
 log = logging.getLogger(__name__)
 
@@ -744,11 +746,13 @@ def _root_post_task_blocking(
 
 
 def _deliver_answer_first(env: Any, task: Dict[str, Any], event_queue: Any, pending_events: List[Dict[str, Any]],
-                          *, register: bool = False) -> bool:
+                          *, register: bool = False, undrained: bool = False) -> bool:
     """Owner 1A(1): the owed answer leaves on the live bus BEFORE cost reconstruction,
     review-evidence/input capture and ``_store_task_result``; ``task_done`` stays
     buffered after the store. The lane is the one whose post-task would run inline
     (``_root_post_task_blocking``) — the nonblocking lane returns its buffered copy.
+    ``undrained``: no drain will send that copy (an inline Presence turn's runner returns
+    its result, not its events), so the final it owes leaves here whatever its lane.
     ``register`` is for the lane that did not owe the frame itself (a presence root,
     whose result event is its own); every other root registered just before.
     True only when the live ``put`` actually succeeded (never a queue refusal)."""
@@ -758,7 +762,7 @@ def _deliver_answer_first(env: Any, task: Dict[str, Any], event_queue: Any, pend
 
     budget_drive_root, split_drive, parent_env, parent_task = _root_post_task_lanes(env, task)
     project_scoped = bool(resolve_project_id(task))
-    if not _root_post_task_blocking(
+    if not undrained and not _root_post_task_blocking(
         task, split_drive=split_drive, project_scoped=project_scoped,
         project_task=project_scoped and not bool(task.get("_is_direct_chat")),
         parent_env=parent_env, parent_task=parent_task,
@@ -882,6 +886,12 @@ def emit_task_results(
     if getattr(ctx, "_skip_post_task_synthesis", False):   # "Stop now": paid root predicates see it
         task["_skip_post_task_synthesis"] = True
     _presence = is_presence_task(task)
+    # Its conversation hears the Presence result alone; a root that lives in an internal Project (an
+    # inline turn too, once turned into one) also answers there through the ordinary final below, as
+    # every root does (never a place room). A room the strict read cannot answer now (None) is owed
+    # unaddressed; the outbox replay decides it.
+    _local_room = presence_root_project_room(env.drive_root, task) if _presence and _root_outbox else 0
+    _ordinary, _room_owed = not _presence or bool(_local_room), _local_room is None
     _typed_routing_action = str(getattr(ctx, "_typed_routing_action_emitted", "") or "").strip()
     # The final frame's durable identity: the child lineage and the turn's
     # origin label (a wake-up's "consciousness"), so the chat row keeps both.
@@ -889,7 +899,7 @@ def emit_task_results(
     from ouroboros.post_task_synthesis import task_tool_metrics
     tool_metrics = task_tool_metrics(llm_trace)
     send_event = {
-        "type": "send_message", "chat_id": task["chat_id"],
+        "type": "send_message", "chat_id": _local_room or task["chat_id"],
         "text": published or "\u200b", "log_text": published or "",
         "format": "markdown",
         "task_id": task.get("id"), "ts": utc_now_iso(),
@@ -899,23 +909,33 @@ def emit_task_results(
         # on a nearby progress row that may age out independently.
         send_event["progress_meta"] = dict(_message_meta)
     send_event = prepare_terminal_send_event(env.drive_root, task, published, usage, send_event,
-                                             presence=_presence, custody_audit=custody_audit)
+                                             presence=not (_ordinary or _room_owed), custody_audit=custody_audit)
     if notice:  # the host's words, never the model's: a System row with its own delivery identity
         from supervisor.terminal_delivery import project_terminal_result_event
 
         send_event = project_terminal_result_event(env.drive_root, task, str(task.get("id") or ""), result_text=notice,
                                                    terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE, base_event=send_event)
-    if not quiet or _presence:
+    if _room_owed:  # no chat until the replay's room rule reads: never the conversation's, maybe a place
+        send_event.pop("chat_id", None)
+        send_event.update(address=PROJECT_ROOM_ADDRESS, **{key: task[key] for key in ("parent_task_id", "root_task_id")
+                                                           if task.get(key)})
+    if _presence:
         pending_events.append(build_presence_result_event(
             task, text, ctx, terminal_origin=str(usage.get("terminal_origin") or ""),
             retain_scheduled_handoff=failed_or_forced, silent=usage.get("wake_silent") is True,
-        ) if _presence else send_event)
+        ))
+        # Its conversation's own delivery rides the local final this root owes: a recovery that
+        # finalizes from that final (``adopt_registered_answer``) keeps it, never the final's text.
+        send_event["presence_delivery"] = {key: task["metadata"][key] for key in PRESENCE_DELIVERY_KEYS
+                                           if key in task["metadata"]}
+    if _ordinary and not quiet:
+        pending_events.append(send_event)
     # Every root registers its full answer payload in the durable outbox BEFORE
     # the live send and the result write, including the nonblocking post-task
     # lane. After a crash, boot replays the owed row without scanning
     # task_results; reversing these writes could strand a terminal result with
     # no delivery. Registration and deduplication share ouroboros/task_finalization.py.
-    if _root_outbox and not _presence and not quiet:
+    if _root_outbox and (_ordinary or _room_owed) and not quiet:
         # The answer-time debt rides beside the cause it never replaces (#1583); replay
         # overlays the row's current list (gateway.history terminal truth).
         debt = list(custody_audit.get("unreconciled") or []) if isinstance(custody_audit, dict) else []
@@ -930,7 +950,9 @@ def emit_task_results(
         register_final_answer_owed(task, send_event, env_drive_root=env.drive_root)
     # Answer first (owner 1A(1)): the owner's answer is on the live bus before
     # the heavy tail below (cost ledger, evidence capture, the result store).
-    _live_delivered = _root_outbox and not quiet and _deliver_answer_first(env, task, event_queue, pending_events, register=_presence)
+    _live_delivered = _root_outbox and not quiet and _deliver_answer_first(
+        env, task, event_queue, pending_events, register=not _ordinary,
+        undrained=bool(_presence and _ordinary and task.get("_presence_turn")))
     # A failed live put keeps its owed/buffered answer and skips optional annotation.
     # Children and silent runs retain their existing buffered/no-chat lifecycle.
     if _live_delivered or not _root_outbox or quiet:

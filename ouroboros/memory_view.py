@@ -215,22 +215,27 @@ def _task_ctx(task: Mapping[str, Any]) -> SimpleNamespace:
 
 def view_room_id(task: Mapping[str, Any], ctx: Any, drive_root: Any, *, project_chat_ids: Any,
                  presence: bool = False) -> str:
-    """Use the focus room when supplied, then ``own_room_chat`` for other tasks.
+    """The task's own room (``own_room_chat``): the internal Project it lives in, then a Presence
+    focus's own conversation, then any other own room.
 
     A result outside the Projects and Main, or none (the hidden partition, another
     transport chat, a task without a chat), is Main, as the old focused view was; a
-    Presence turn keeps its own conversation.
+    Presence turn keeps its own conversation. Work a focus started carries that focus by
+    value, and its Project is still its room: the stored focus never outranks it.
     """
     from ouroboros.dialogue_evidence import own_room_chat  # D03->D06 is lazy-only
 
-    focus = _mapping(_mapping(task.get("metadata")).get("focus") or task.get("focus"))
-    if presence and focus.get("room_chat_id") is not None:
-        return str(focus["room_chat_id"])
     try:
         own = own_room_chat(ctx if ctx is not None else _task_ctx(task), drive_root)
     except (TypeError, ValueError, OSError):
         own = None
-    if own is not None and (presence or str(own) == MAIN_ROOM or int(own) in set(project_chat_ids or ())):
+    projects = set(project_chat_ids or ())
+    if own is not None and int(own) in projects:
+        return str(own)
+    focus = _mapping(_mapping(task.get("metadata")).get("focus") or task.get("focus"))
+    if presence and focus.get("room_chat_id") is not None:
+        return str(focus["room_chat_id"])
+    if own is not None and (presence or str(own) == MAIN_ROOM):
         return str(own)
     return MAIN_ROOM
 

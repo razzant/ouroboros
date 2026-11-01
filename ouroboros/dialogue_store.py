@@ -243,7 +243,8 @@ def create(root: Any, *, tier: Optional[str] = None) -> pathlib.Path:
                 # An empty store has nothing to derive: its appearance mark starts at the first row's start.
                 conn.execute(APPEARANCES_DDL)
                 for key, value in (("schema_version", SCHEMA_VERSION), ("lock_tier", tier), ("created_at", utc_now_iso()),
-                                   (APPEARANCES_MARK, 0)):
+                                   (APPEARANCES_MARK, 0), (APPEARANCES_CONTACT_REPLIES, {"next": 0, "upper": 0}),
+                                   (APPEARANCES_COVERED, 0)):
                     conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
                 store.commit(conn)
             os.replace(tmp, target)
@@ -460,6 +461,15 @@ APPEARANCES_MARK = "room_appearances_mark"
 # Chat import segments this body planned and has not derived yet (``dialogue_import``): one an older
 # body imports turns ``done`` while still listed, and the job derives exactly its rows.
 APPEARANCES_AWAITING = "room_appearances_awaiting"
+# The job's one-time pass over Main's rows below the mark it began under that an older rule kept there
+# alone, private contact and the owner's Replies (``room_appearances._contact_replies``): ``{"next",
+# "upper"}``; a new store has none to pass. Absent, every row below the mark is unknown to a reader.
+APPEARANCES_CONTACT_REPLIES = "room_appearances_contact_replies"
+# Below it every chat row took this body's rule or is owed to that pass: this body's appends, import planning and
+# job move it with the mark, from exactly the same start, and a plan owes the pass its rows until this body's own
+# import derives them. An older body that moves the mark leaves it behind, and the job owes the pass exactly the
+# rows between (``room_appearances._owe_uncovered``).
+APPEARANCES_COVERED = "room_appearances_covered"
 
 
 def _unstamped(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -536,8 +546,9 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
             conn.executemany("INSERT OR IGNORE INTO room_appearances (key, stream, seq) VALUES (?, ?, ?)",
                              [(key, stream, seq) for key in keys])
         if stream == "chat" and appearances is not None:
-            conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
-                         (json.dumps(seq + length), APPEARANCES_MARK, json.dumps(seq)))
+            for key in (APPEARANCES_MARK, APPEARANCES_COVERED):
+                conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
+                             (json.dumps(seq + length), key, json.dumps(seq)))
         conn.execute("UPDATE streams SET next_seq=?, next_ordinal=next_ordinal+1, next_pos=next_pos+? WHERE stream=?",
                      (seq + length, int(counted), stream))
     if stream == "progress" and emit_live:

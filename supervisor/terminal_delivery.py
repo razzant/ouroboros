@@ -98,8 +98,9 @@ def _capture_emitted_answer(drive_root: Any, delivery_id: str, emitted: Dict[str
         record = {"delivery_id": delivery_id, "task_id": task_id, "chat_id": int(emitted["chat_id"]),
                   "text": text, "sent_at": emitted.get("sent_at") or utc_now_iso(), "basis": "send_handler_returned",
                   **{key: str(emitted.get(key) or "") for key in ("format", "role", "system_type", "terminal_origin")}}
-        if isinstance(emitted.get("routing"), dict):
-            record["routing"] = dict(emitted["routing"])
+        # A Presence root's final keeps its conversation's own delivery (``working_checkpoint.registered_answer``).
+        record.update({key: dict(emitted[key]) for key in ("routing", "presence_delivery")
+                       if isinstance(emitted.get(key), dict)})
         ref = store_actor_source_bytes(
             pathlib.Path(drive_root), task_id, category="context_checkpoints", source_id="terminal-delivery",
             data=json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8"), extension="json")
@@ -677,6 +678,7 @@ def replay_pending_deliveries(drive_root: Any, *, event_queue: Any = None) -> Li
             settle_terminal_projection(drive_root, task_id, event_queue=event_queue)
         except StoreForeign as exc:  # a copy's debt never stops this replay; the room shows it foreign
             log.debug("Main delivery of %s retained: %s", task_id, exc)
+    rows = _address_project_rows(drive_root, rows)
     owed = [row for row in rows if not row.get("terminal_projection_token") and _replay_due(row)]
     if not owed:
         return continued
@@ -718,6 +720,60 @@ def replay_pending_deliveries(drive_root: Any, *, event_queue: Any = None) -> Li
         _stamp_replay_queued(drive_root, replayed)
         log.info("Replayed %d undelivered terminal answer(s): %s", len(replayed), replayed)
     return continued + replayed
+
+
+def _address_project_rows(drive_root: Any, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Address the finals owed while their Project room was unreadable; return the rows a sweep may send.
+
+    Such a row has no ``chat_id`` (``PROJECT_ROOM_ADDRESS``). First, outside the registry lock, the
+    strict room rule that could not answer at finalization (``presence_root_project_room``) is asked
+    again per row; then one registry update, under its lock, rewrites only the rows still unaddressed
+    there: its Project room becomes the row's ``chat_id``, an ordinary owed row from then on; proven
+    none withdraws it (the conversation's Presence result was the whole answer: nothing is owed
+    anywhere; typed ``terminal_delivery_withdrawn`` after the update). A read that still cannot answer
+    leaves its row untouched, owed, unsent and unspent, holding the Done card. Never the
+    conversation's own room, which may be a place.
+    """
+    from ouroboros.task_finalization import PROJECT_ROOM_ADDRESS, presence_root_project_room
+
+    def unaddressed(row: Dict[str, Any]) -> bool:
+        return row.get("address") == PROJECT_ROOM_ADDRESS and not row.get("chat_id")
+
+    rooms = {row["delivery_id"]: room for row in rows if unaddressed(row) and (room := presence_root_project_room(
+        drive_root, {"id": row.get("task_id"), **{key: row.get(key) for key in ("parent_task_id", "root_task_id")}}))
+        is not None}
+    decided: Dict[str, Dict[str, Any]] = {}
+
+    def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        decided.clear()
+        pending = _mapping_rows(current, "pending", strict=True)
+        for did, room in rooms.items():
+            if isinstance(pending.get(did), dict) and unaddressed(pending[did]):
+                decided[did] = {**{key: value for key, value in pending[did].items() if key != "address"},
+                                "chat_id": room}
+                if room:
+                    pending[did] = decided[did]
+                else:
+                    pending.pop(did)
+        return _registry_document(current, _delivered_rows(current, strict=True), pending) if decided else None
+
+    if rooms:
+        try:
+            update_json_locked(_registry_path(drive_root), _mutate, strict_existing_dict=True)
+        except Exception:
+            log.warning("owed Project finals stay unaddressed this sweep", exc_info=True)
+            decided.clear()
+    sendable = []
+    for row in rows:
+        did = row["delivery_id"]
+        if did in decided and decided[did]["chat_id"]:
+            sendable.append({**decided[did], "delivery_id": did})
+        elif did in decided:
+            _record_event(drive_root, {"type": "terminal_delivery_withdrawn", "task_id": str(row.get("task_id") or ""),
+                                       "delivery_id": did, "detail": "its run lives in no Project room"})
+        elif not unaddressed(row):
+            sendable.append(row)
+    return sendable
 
 
 def _put_unless_outstanding(event_queue: Any, event: Dict[str, Any]) -> Optional[bool]:

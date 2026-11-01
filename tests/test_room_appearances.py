@@ -5,7 +5,8 @@ a relay's source room) and are members of their work's Project too; the owner's 
 to a Project message is a member of that Project. Readers find such a row through the dialogue
 store's derived appearance index (``room_appearances``), never by walking another room, live,
 on reload, around an exact row and in memory. Ordinary conversion still moves a work's own
-speech; host refusals and Presence private contact stay where they were issued.
+speech; host refusals stay where they were issued; Presence private contact stays in Main and
+is a member of its work's Project, never of a place room.
 """
 from __future__ import annotations
 
@@ -170,22 +171,89 @@ class TestWorkSpeechWrittenElsewhere:
             assert text not in project
         assert {row.get("text") for row in _read(tmp_path, 1)[1]["messages"]} >= {"Not started", "Moved to Nova"}
 
-    def test_presence_private_contact_never_spills_into_a_project(self, tmp_path, host):
-        nova = _project(tmp_path, "nova")
-        _bound(tmp_path, "presence-root", "nova", nova)
-        contact = {"task_id": "presence-root", "binding_id": "place-1", "source_event_id": "evt-1"}
-        q = queue.Queue()
-        ctx = _ctx(tmp_path, "presence-root", nova, q)
+    def test_presence_private_contact_is_one_row_in_main_and_its_project_and_never_a_place_room(self, tmp_path, host):
+        """It was Main-only before; Main keeps it, its work's internal Project shows the same row, a place never."""
+        from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+        from ouroboros.room_membership import row_rooms
         from ouroboros.tools.owner_delivery import deliver_owner_event
-        deliver_owner_event(ctx, {"type": "send_message", "chat_id": 1, "text": "A private question.",
-                                  "format": "markdown", "is_progress": False, "system_type": "main_notice",
-                                  "progress_meta": {"presence_contact": contact}})
-        host.handle(q.get_nowait())
-        frame = next(f for f in host.frames if f.get("system_type") == "main_notice")
-        assert "also_rooms" not in frame and set(frame.get("room_revisions") or {"1": 0}) == {"1"}
-        assert "A private question." in _texts(tmp_path, 1)
-        assert "A private question." not in _texts(tmp_path, nova)
-        assert "A private question." not in _room_rows(tmp_path, nova)
+        from supervisor import message_bus
+
+        nova, place_room = _project(tmp_path, "nova"), 1_234_567  # a place room's id passes the Project range
+        _bound(tmp_path, "presence-root", "nova", nova)
+        _born_in(tmp_path, "place-root", place_room)
+        for task, text in (("presence-root", "A private question."), ("place-root", "A note about a place.")):
+            q = queue.Queue()
+            deliver_owner_event(_ctx(tmp_path, task, nova, q), {
+                "type": "send_message", "chat_id": 1, "text": text, "format": "markdown", "is_progress": False,
+                "system_type": "main_notice", "progress_meta": {"presence_contact": {
+                    "task_id": task, "binding_id": "place-1", "source_event_id": f"evt-{task}"}}})
+            host.handle(q.get_nowait())
+        frames = [f for f in host.frames if f.get("system_type") == "main_notice"]
+        assert len(frames) == 2  # one live frame each: one notification, one message
+        assert frames[0]["also_rooms"] == [nova] and set(frames[0]["room_revisions"]) == {"1", str(nova)}
+        assert "also_rooms" not in frames[1] and set(frames[1]["room_revisions"]) == {"1"}
+        stored = [row for row in (entry.row for entry in ds.iter_rows(tmp_path, "chat"))
+                  if row.get("text") in {"A private question.", "A note about a place."}]
+        assert [row["chat_id"] for row in stored] == [1, 1]  # each its one Main address
+        projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+        assert [row_rooms(1, row, projects, rooms) for row in stored] == [{1, nova}, {1}]
+        assert {"A private question.", "A note about a place."} <= set(_texts(tmp_path, 1))
+        assert "A private question." in _texts(tmp_path, nova) and "A private question." in _room_rows(tmp_path, nova)
+        assert "A note about a place." not in _texts(tmp_path, nova) + _texts(tmp_path, place_room)
+        address, vega = frames[0]["row_address"], _project(tmp_path, "vega")
+        for room, anchor in ((1, {"state": "found", "chat_id": 1}), (nova, {"state": "found", "chat_id": nova}),
+                             (vega, {"state": "moved", "chat_id": 1})):
+            assert {key: value for key, value in _read(tmp_path, room, around=address)[1]["anchor"].items()
+                    if key in {"state", "chat_id"}} == anchor  # found where shown; from elsewhere its home is Main, its address
+        # The owner's direct Reply to it follows its work, one hop; a Reply to that Reply stays Main's.
+        bridge = message_bus.get_bridge()
+        reply, dispatched = _owner(bridge, tmp_path, "Research only, no promises.", frames[0]["row_address"],
+                                   message_id="owner-private")
+        assert reply["reply_to"]["target_home"] == "work" and [call["chat_id"] for call in dispatched] == [1]
+        _owner(bridge, tmp_path, "And a second thought.", format_address(row_address(reply)), message_id="owner-hop")
+        assert "Research only, no promises." in _texts(tmp_path, nova)
+        assert "And a second thought." not in _texts(tmp_path, nova)
+        assert {"Research only, no promises.", "And a second thought."} <= set(_texts(tmp_path, 1))
+
+
+    @pytest.mark.parametrize("admitted", [1, 1_234_567])
+    def test_the_done_row_of_place_started_work_stands_in_the_project_it_moved_to(self, tmp_path, admitted):
+        """Work a place started (admitted in Main or in its place room) and bound later: the host's Done row, written
+        where it was admitted, also stands in that Project, as every root's does; the place's own speech and notices
+        stay its room's, and unbound work's Done row joins no Project. History, around and memory read one rule."""
+        from ouroboros import memory_inventory as mi
+        from ouroboros.chat_chain import room_rows
+        from ouroboros.projects_registry import bind_task_to_project
+        from ouroboros.task_results import load_task_result, write_task_result
+        from ouroboros.terminal_projection import _project_row
+
+        nova = _project(tmp_path, "nova")
+        presence = {"presence": {"binding_id": "b1", "event": {"conversation_key": "k", "source_event_id": "e1"}}}
+        rows = {}
+        for tid in ("bound-root", "unbound-root"):
+            write_task_result(tmp_path, tid, "completed", chat_id=admitted, metadata=presence, root_task_id=tid,
+                              delegation_role="root", result="Compiled.", title=tid)
+            if tid == "bound-root":
+                bind_task_to_project(tmp_path, tid, "nova", nova, origin={"absent": "system"})
+            rows[tid] = ds.append(tmp_path, "chat", _project_row(tid, load_task_result(tmp_path, tid), {},
+                                                                 {"chat_id": admitted}))
+        own = {"presence_provenance": {"binding_id": "b1"}, "task_id": "bound-root", "chat_id": admitted}
+        rows["place speech"] = ds.append(tmp_path, "chat", {"ts": "2026-10-31T10:00:00Z", "direction": "out",
+                                                            "type": "presence_delivery", "text": "Said in the place.", **own})
+        rows["place notice"] = ds.append(tmp_path, "chat", {"ts": "2026-10-31T10:01:00Z", "direction": "system",
+                                                            "type": "place_notice", "text": "Reply held.", **own})
+        facts = mi.membership_facts(tmp_path)
+        for name, receipt in rows.items():
+            address = format_address(row_address(receipt.row))
+            shown = {room for room in {1, admitted, nova}
+                     if address in {m.get("row_address") for m in _read(tmp_path, room, n_human=50)[1]["messages"]}}
+            expected = ({nova} if name == "bound-root" else set()) | ({admitted} - {1})
+            assert shown == expected, (name, shown)
+            assert {int(room) for room in mi.rooms_of_row(mi.row_meta(receipt.row), facts)} == expected, name
+            if name == "bound-root":
+                assert receipt.row["type"] == "task_summary" and receipt.row["text"].startswith("Done.")
+                assert _read(tmp_path, nova, around=address)[1]["anchor"]["state"] == "found"
+                assert receipt.seq in {entry.seq for entry in room_rows(tmp_path, nova)}
 
 
 class TestOwnerReplyLink:
@@ -328,7 +396,7 @@ class TestSavedReplyTargets:
         ds.append(root, "chat", row, feed=True, appearances=None)
         return row
 
-    def test_a_saved_reply_to_a_project_system_row_joins_it_and_refusals_or_private_rows_do_not(self, tmp_path):
+    def test_a_saved_reply_to_a_project_system_or_private_row_joins_it_and_refusals_do_not(self, tmp_path):
         from ouroboros import room_appearances
 
         nova = _project(tmp_path, "nova")
@@ -347,8 +415,8 @@ class TestSavedReplyTargets:
         bodies = {name: ds.row_at(tmp_path, "chat", receipt.seq).row for name, receipt in replies.items()}
         assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
         project = _texts(tmp_path, nova)
-        assert "Owner words summary" in project
-        assert not {"Owner words refusal", "Owner words private", "Owner words absent"} & set(project)
+        assert {"Owner words summary", "Owner words private"} <= set(project)  # private contact is its work's speech
+        assert not {"Owner words refusal", "Owner words absent"} & set(project)
         assert {f"Owner words {name}" for name in replies} <= set(_texts(tmp_path, 1))  # all stay in Main
         assert {name: ds.row_at(tmp_path, "chat", receipt.seq).row for name, receipt in replies.items()} == bodies
 
@@ -403,8 +471,9 @@ class TestSavedReplyTargets:
 
 def test_an_older_bodys_archive_import_below_the_mark_is_derived_by_its_segment(tmp_path, monkeypatch):
     """The supported downgrade window: this body cut over (its live rows derived, the mark past them) with
-    an archive segment still pending; an older body imported that segment, deriving nothing. The segment
-    stays awaiting, a Project page discloses the gap, and the job derives exactly its rows, changing none."""
+    an archive segment still pending, which its plan alone never counts as derived; an older body imported that
+    segment, deriving nothing. The segment stays awaiting, a Project page discloses the gap, and the job derives
+    exactly its rows, changing none."""
     from ouroboros import dialogue_import, room_appearances
     from tests._dialogue import seed
 
@@ -415,7 +484,11 @@ def test_an_older_bodys_archive_import_below_the_mark_is_derived_by_its_segment(
     seed(tmp_path, archives={"chat_20261001T000000.jsonl": [archived]},
          live={"chat": [{"ts": "2026-10-02T00:00:00Z", "direction": "in", "chat_id": 1, "text": "live"}]})
     dialogue_import.cutover(tmp_path)  # this body: the live tail imported and derived, the archive planned
-    assert room_appearances.mark(tmp_path) == ds.stream_end(tmp_path, "chat") and not room_appearances.owed(tmp_path)
+    pending = [(row["base"], row["base"] + row["size"]) for row in dialogue_import.pending_segments(tmp_path)
+               if row["stream"] == "chat"]
+    cut = ds.meta(tmp_path, ds.APPEARANCES_CONTACT_REPLIES)
+    assert room_appearances.mark(tmp_path) == ds.stream_end(tmp_path, "chat") and room_appearances.owed(tmp_path)
+    assert pending == [(cut["next"], cut["upper"])]  # exactly the planned rows no import of this body derived
     with monkeypatch.context() as older:
         older.setattr(dialogue_import, "import_keys", lambda *_args, **_kwargs: None)  # derives nothing, moves nothing
         dialogue_import.run_dialogue_import(tmp_path)
@@ -484,11 +557,11 @@ class TestSavedTargetRecovery:
         source = read_room_source(tmp_path, nova)
         assert "Owner words torn" in [row.get("text") for row in source["rows"]]
         assert "reply_target_unreadable" not in _gap_kinds(source["coverage"]["chat"])
-        # The existing catch-up derives the row again: its gap keys go, the keys of its found home stay.
-        assert "gap:task:nova-root" in _index_keys(tmp_path, stored.seq)
+        # The existing catch-up derives the row again: its gap keys of both prefixes go, the keys of its found home stay.
+        assert {"gap:task:nova-root", "gap2:task:nova-root"} <= _index_keys(tmp_path, stored.seq)
         assert room_appearances.owed(tmp_path) and room_appearances.run(tmp_path, lambda: False)["state"] == "done"
         keys = _index_keys(tmp_path, stored.seq)
-        assert not [key for key in keys if key.startswith("gap:")] and "task:nova-root" in keys
+        assert not [key for key in keys if key.startswith(("gap:", "gap2:"))] and "task:nova-root" in keys
         assert "Owner words torn" in _texts(tmp_path, nova)
         assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row  # the owner's row is unchanged
 
@@ -693,3 +766,218 @@ def test_the_memory_view_names_the_gap_of_a_room_a_reply_could_belong_to(tmp_pat
                           if any(meta.get("client_message_id") == "unknown-target" for _a, meta, _p in entries)}
     assert gaps == {}
     assert "cannot be read" not in head(alpha)
+
+
+class TestContactRepliesPass:
+    """Replies saved while a Reply to private Presence contact was stamped "none" (owner choice: every such old
+    direct Reply) follow its work once its exact target proves that contact: the job's one-time pass in the
+    existing index, under the one decision membership reads (``room_membership.reply_target``). The owner's row,
+    its address and every room's revision stay as they were; any other "none" stays none."""
+
+    CONTACT = {"task_id": "nova-root", "binding_id": "place-1", "source_event_id": "evt-1"}
+
+    def _store_of_an_older_body(self, root):
+        """Rows a body before this rule wrote: its stamps, its (empty) keys, the mark past them, no pass."""
+        from ouroboros.chat_references import reference_from_row
+
+        nova, _place_room = _project(root, "nova"), 1_234_567
+        _born_in(root, "nova-root", nova)
+        _born_in(root, "place-root", _place_room)
+        targets = {
+            "private": {"direction": "out", "type": "main_notice", "task_id": "nova-root", "presence_contact": self.CONTACT},
+            "question": {"direction": "out", "type": "quiz", "task_id": "nova-root",
+                         "quiz": {"quiz_id": "q1", "question": "May I?", "presence_contact": self.CONTACT}},
+            "placeless": {"direction": "out", "type": "main_notice", "task_id": "place-root",
+                          "presence_contact": {**self.CONTACT, "task_id": "place-root"}},
+            "ordinary": {"direction": "out", "type": "main_notice", "task_id": "nova-root"},
+            "refusal": {"direction": "system", "type": "task_not_started", "task_id": "nova-root"},
+        }
+        replies = {}
+        for index, (name, fields) in enumerate(targets.items()):
+            target = {"ts": f"2026-10-28T05:0{index}:00Z", "chat_id": 1, "text": f"target {name}", **fields}
+            ds.append(root, "chat", target, feed=True, appearances=[])
+            ref = {**reference_from_row(target), "target_home": "none"}  # the older rule's stamp, also for "ordinary"
+            row = {"ts": f"2026-10-28T06:0{index}:00Z", "direction": "in", "chat_id": 1, "client_message_id": name,
+                   "text": f"Owner words {name}", "reply_to": ref}
+            replies[name] = ds.append(root, "chat", row, feed=True, appearances=[])
+        with ds.transaction(root, write=True) as conn:  # an older body's store never names the pass
+            conn.execute("DELETE FROM meta WHERE key='room_appearances_contact_replies'")
+        from ouroboros import room_membership
+        room_membership._SAVED_TARGETS.clear()
+        return nova, replies
+
+    def test_an_interrupted_pass_resumes_and_a_second_pass_changes_nothing(self, tmp_path, monkeypatch):
+        from ouroboros import room_appearances
+
+        nova, replies = self._store_of_an_older_body(tmp_path)
+        bodies = {name: ds.row_at(tmp_path, "chat", receipt.seq) for name, receipt in replies.items()}
+        revisions = {room["chat_id"]: room["revision"] for room in ds.rooms(tmp_path)}
+        assert room_appearances.mark(tmp_path) == ds.stream_end(tmp_path, "chat") and room_appearances.owed(tmp_path)
+        assert not {"Owner words private", "Owner words question"} & set(_texts(tmp_path, nova))
+        assert "chat_appearances_deriving" in _read(tmp_path, nova)[1]["window"]["truncated_by"]  # absent: said so
+        monkeypatch.setattr(room_appearances, "_BATCH", 1)
+        assert room_appearances.run(tmp_path, lambda: True)["state"] == "pending"  # cut short after one row
+        cut = ds.meta(tmp_path, ds.APPEARANCES_CONTACT_REPLIES)
+        assert 0 < cut["next"] < cut["upper"] == ds.stream_end(tmp_path, "chat") and room_appearances.owed(tmp_path)
+        assert "chat_appearances_deriving" in _read(tmp_path, nova)[1]["window"]["truncated_by"]  # still unfinished
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done" and not room_appearances.owed(tmp_path)
+        assert "chat_appearances_deriving" not in _read(tmp_path, nova)[1]["window"]["truncated_by"]
+        keys = {name: _index_keys(tmp_path, receipt.seq) for name, receipt in replies.items()}
+        assert keys == {"private": {f"room:{nova}", "task:nova-root"}, "question": {f"room:{nova}", "task:nova-root"},
+                        "placeless": {"task:place-root"}, "ordinary": set(), "refusal": set()}
+        project = set(_texts(tmp_path, nova))
+        assert {"Owner words private", "Owner words question"} <= project
+        assert not {"Owner words placeless", "Owner words ordinary", "Owner words refusal"} & project
+        assert {f"Owner words {name}" for name in replies} <= set(_texts(tmp_path, 1))  # Main keeps every one
+        index = self._index(tmp_path)
+        assert room_appearances.run(tmp_path, lambda: False) == {"state": "done", "items": 0}
+        assert self._index(tmp_path) == index
+        for name, receipt in replies.items():  # the owner's row, its address and coordinate are unchanged
+            after = ds.row_at(tmp_path, "chat", receipt.seq)
+            assert (after.row, after.length) == (bodies[name].row, bodies[name].length)
+            assert format_address(row_address(after.row)) == format_address(row_address(receipt.row))
+        assert {room["chat_id"]: room["revision"] for room in ds.rooms(tmp_path)} == revisions  # no unread arrival
+
+    def test_live_membership_and_the_memory_inventory_read_the_same_decision_before_the_index_does(self, tmp_path):
+        from ouroboros import memory_inventory as mi
+        from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+        from ouroboros.room_membership import row_rooms
+
+        nova, replies = self._store_of_an_older_body(tmp_path)
+        projects, rooms, facts = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path), mi.membership_facts(tmp_path)
+        rows = {name: ds.row_at(tmp_path, "chat", receipt.seq).row for name, receipt in replies.items()}
+        expected = {"private": {1, nova}, "question": {1, nova}, "placeless": {1}, "ordinary": {1}, "refusal": {1}}
+        assert {name: row_rooms(1, row, projects, rooms) for name, row in rows.items()} == expected
+        # The model's memory reads the stored facts of a row (``row_meta``), not its body: the same rooms.
+        assert {name: mi.rooms_of_row(mi.row_meta(row), facts) for name, row in rows.items()} == {
+            name: {str(chat) for chat in chats} for name, chats in expected.items()}
+
+    def test_a_none_stamped_reply_whose_target_is_unreadable_is_a_gap_where_its_work_lives(self, tmp_path):
+        from ouroboros import room_appearances
+        from ouroboros.chat_references import reference_from_row
+        from tests._dialogue import import_all, seed
+
+        nova, other = _project(tmp_path, "nova"), _project(tmp_path, "other")
+        _born_in(tmp_path, "nova-root", nova)
+        target = {"ts": "2026-10-01T05:00:00Z", "direction": "out", "chat_id": 1, "task_id": "nova-root",
+                  "type": "main_notice", "text": "A private question.", "presence_contact": self.CONTACT}
+        reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "torn",
+                 "text": "Owner words torn", "reply_to": {**reference_from_row(target), "target_home": "none"}}
+        seed(tmp_path, archives={"chat_20261001T000000.jsonl": [json.dumps(target)[:48] + "\n", reply]})
+        import_all(tmp_path)
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+        stored = ds.rows_by_identity(tmp_path, 1, reply["ts"])[0]
+        assert "Owner words torn" not in _texts(tmp_path, nova) and "Owner words torn" in _texts(tmp_path, 1)
+        assert "chat_reply_target_unreadable" in _read(tmp_path, nova)[1]["window"]["truncated_by"]
+        assert "chat_reply_target_unreadable" not in _read(tmp_path, other)[1]["window"]["truncated_by"]
+        assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row
+
+    @staticmethod
+    def _index(root):
+        with ds.transaction(root, write=False) as conn:
+            return sorted(tuple(record) for record in conn.execute("SELECT key, stream, seq FROM room_appearances"))
+
+    def _older_private_contact(self, root):
+        """An older body's private contact of a root admitted in its Project with no binding: my notice, my question
+        and its answer (rows the older rule kept in Main alone), and the owner's direct Replies to each in both saved
+        forms (the "none" stamp, and one from before ``target_home``): no keys, the mark past them, no pass named."""
+        from ouroboros import room_membership
+        from ouroboros.chat_references import reference_from_row
+
+        nova = _project(root, "nova")
+        _born_in(root, "nova-root", nova)
+        quiz = {"quiz_id": "q1", "question": "May I?", "options": ["Yes", "No"], "presence_contact": self.CONTACT}
+        targets = {
+            "notice": {"direction": "out", "type": "main_notice", "presence_contact": self.CONTACT},
+            "question": {"direction": "out", "type": "quiz", "quiz": quiz},
+            "answer": {"direction": "system", "type": "quiz_answer", "source": "owner_quiz_answer",
+                       "client_message_id": "quiz_answer:nova-root:q1",
+                       "quiz": {**quiz, "state": "answered", "answered_index": 0}},
+        }
+        rows, minute = {}, 0
+        for name, fields in targets.items():
+            target = {"ts": f"2026-10-28T05:{minute:02d}:00Z", "chat_id": 1, "task_id": "nova-root",
+                      "text": f"target {name}", **fields}
+            rows[name] = ds.append(root, "chat", target, feed=fields["direction"] == "out", appearances=[])
+            ref = reference_from_row(target)
+            for form, saved in (("stamped", {**ref, "target_home": "none"}),
+                                ("legacy", {key: value for key, value in ref.items() if key != "target_home"})):
+                minute += 1
+                reply = {"ts": f"2026-10-28T05:{minute:02d}:00Z", "direction": "in", "chat_id": 1,
+                         "client_message_id": f"{name}-{form}", "text": f"Owner words {name} {form}", "reply_to": saved}
+                rows[f"{name} {form}"] = ds.append(root, "chat", reply, appearances=[])
+            minute += 1
+        with ds.transaction(root, write=True) as conn:
+            conn.execute("DELETE FROM meta WHERE key='room_appearances_contact_replies'")
+        room_membership._SAVED_TARGETS.clear()
+        return nova, rows
+
+    def _project_reads(self, root, room, rows):
+        """Which rows a room's ordinary reads give (its history page and ``chat_chain.room_rows``), and the
+        causes its history window names: never ``around``, never a membership helper. The answer row is not a
+        message of its own in any room: its question card shows it (``answered`` when the page read it)."""
+        from ouroboros.chat_chain import room_rows
+
+        addresses = {format_address(row_address(receipt.row)): name for name, receipt in rows.items()}
+        _status, page = _read(root, room, n_human=50)
+        history = {addresses[row["row_address"]] for row in page["messages"] if row.get("row_address") in addresses}
+        if any((row.get("quiz") or {}).get("state") == "answered" for row in page["messages"]
+               if addresses.get(row.get("row_address")) == "question"):
+            history.add("answer")
+        seqs = {entry.seq for entry in room_rows(root, room)}
+        return history, {name for name, receipt in rows.items() if receipt.seq in seqs}, page["window"]["truncated_by"]
+
+    def test_an_older_bodys_private_contact_and_both_reply_forms_join_the_projects_ordinary_reads(self, tmp_path):
+        from ouroboros import room_appearances
+
+        nova, rows = self._older_private_contact(tmp_path)
+        bodies = {name: ds.row_at(tmp_path, "chat", receipt.seq) for name, receipt in rows.items()}
+        revisions = {room["chat_id"]: room["revision"] for room in ds.rooms(tmp_path)}
+        history, listed, gaps = self._project_reads(tmp_path, nova, rows)
+        assert (history, listed) == (set(), set()) and "chat_appearances_deriving" in gaps  # absent, and said so
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done" and not room_appearances.owed(tmp_path)
+        history, listed, gaps = self._project_reads(tmp_path, nova, rows)
+        assert history == listed == set(rows), (sorted(set(rows) - history), sorted(set(rows) - listed))
+        assert "chat_appearances_deriving" not in gaps
+        assert self._project_reads(tmp_path, 1, rows)[:2] == (set(rows), set(rows))  # Main keeps every one
+        for name, receipt in rows.items():  # bytes, address and coordinate unchanged; nothing arrives unread
+            after = ds.row_at(tmp_path, "chat", receipt.seq)
+            assert (after.row, after.length) == (bodies[name].row, bodies[name].length)
+        assert {room["chat_id"]: room["revision"] for room in ds.rooms(tmp_path)} == revisions
+        index = self._index(tmp_path)
+        assert room_appearances.run(tmp_path, lambda: False) == {"state": "done", "items": 0}  # once
+        assert self._index(tmp_path) == index
+
+    def test_a_read_reaching_the_unfinished_pass_names_its_gap_from_the_pass_metadata_alone(self, tmp_path, monkeypatch):
+        """Absent pass metadata is unknown below the mark; a cut-short pass leaves exactly ``[next, upper)`` unknown;
+        a read wholly outside that interval names no gap; the finished pass none. No reader derives anything."""
+        from ouroboros import room_appearances
+
+        nova, rows = self._older_private_contact(tmp_path)
+        keys, upper = [f"room:{nova}", "task:nova-root"], room_appearances.mark(tmp_path)
+        index = self._index(tmp_path)
+
+        def gap(lower, upper_):
+            return room_appearances.APPEARANCES_DERIVING in room_appearances.read_gaps(tmp_path, nova, keys, lower, upper_)
+
+        def window(n_human):
+            return "chat_appearances_deriving" in _read(tmp_path, nova, n_human=n_human)[1]["window"]["truncated_by"]
+
+        assert ds.meta(tmp_path, ds.APPEARANCES_CONTACT_REPLIES) is None and upper == ds.stream_end(tmp_path, "chat")
+        assert gap(0, upper) and gap(upper - 1, upper) and window(50)  # every row below the mark is unknown
+        assert self._index(tmp_path) == index  # reading derived nothing
+        monkeypatch.setattr(room_appearances, "_BATCH", 1)
+        assert room_appearances.run(tmp_path, lambda: True)["state"] == "pending"
+        cut = ds.meta(tmp_path, ds.APPEARANCES_CONTACT_REPLIES)
+        assert 0 < cut["next"] < cut["upper"] == upper
+        from ouroboros.gateway import history_paging
+
+        newer = ds.append(tmp_path, "chat", {  # one row past the recent page's byte window: that page ends at it
+            "ts": "2026-10-28T07:00:00Z", "direction": "out", "chat_id": nova, "task_id": "nova-root",
+            "text": "A newer Project row. " + "x" * history_paging._RECENT_WINDOW_BYTES}, appearances=[])
+        end = ds.stream_end(tmp_path, "chat")
+        assert gap(0, end) and gap(cut["next"], cut["next"] + 1) and not gap(0, cut["next"]) and not gap(newer.seq, end)
+        assert window(50) and not window(1)  # the newest page alone reaches no unfinished row: no false gap either
+        monkeypatch.setattr(room_appearances, "_BATCH", 500)
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+        assert not gap(0, end) and not window(50)
