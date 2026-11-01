@@ -152,7 +152,7 @@ ouroboros/ — agent core and shared runtime (§6)
   owner_quiz.py — canonical questions: answer/close first-winner, publication address, retained delivery debt, terminal reconcile of paired `owner_wait` (§3, §11.1)
   card_store.py — living cards (`show_card`): `state/cards` records with recorded presses, content-addressed apps, Widgets pins (§4)
   owner_wait.py — cognition serialization, native waits, acknowledged restart handoffs (§5, §6)
-  model_sleep.py, model_detach.py, sleep_custody.py — warm/cold sleep, same-id `continue_in_background` and body acceptance (§6 The model's own sleep)
+  model_sleep.py, model_detach.py, sleep_custody.py, native_task_wait.py — warm/cold sleep, same-id `continue_in_background`, body acceptance (§6)
   task_carrier.py — actual attempt ownership, separate from historical direct-chat origin (§5)
   work_diagnostics.py — diagnostic source binding, controls and revocation (§5)
   budget_pause.py, tool_custody.py — exact pause/Resume, invocation futures and durable residuals (§6)
@@ -495,7 +495,7 @@ ouroboros/ — agent core and shared runtime (§6)
     memory_tools.py — Memory registry tools for data sources, gaps and trust
     health.py — Codebase health tool: complexity metrics and self-assessment
     compact_context.py — LLM-requested tool-history compaction trigger, applied on the next round
-    control.py — control tools: restart, timeout settings, scheduling, review, chat history and model switching; the `schedule_subagent` contract and compact `wait_task` projections (§6 Delegated subagents)
+    control.py — control tools: restart, timeout settings, scheduling, review, chat history, model switching, the `schedule_subagent` contract (§6 Delegated subagents)
     control_delegation.py — Delegation-budget affordances and `move_to_project` (§6 Project placement)
     control_events.py, control_mind.py, control_relay.py, control_routing.py, control_runtime.py, control_scheduling.py, control_subagent_spec.py, control_task_results.py, control_ui_translation.py, control_update_description.py, task_result_views.py — the control tools' leaves: events and their durable outcomes, the mind's lifecycle controls, `tell_task` relays, routing, runtime self-control, scheduling, the `schedule_subagent` parameter surface, absorbing a child's result and retained redacted call sources, owner wording pins (§3)
     tool_discovery.py — List/enable owner: callable catalog by namespace in every mode; grants nothing
