@@ -291,13 +291,22 @@ def _release_delivery(event_q: Any, evt: Any) -> None:
 
 
 def flush_budget_projection(ctx: Any) -> None:
-    """One compatibility budget-projection write per loop turn, AFTER bridge intake.
+    """The usage-driven projections of one loop turn, paid once, AFTER bridge intake.
 
-    ``llm_usage`` events only mark ``ctx.budget_projection_dirty``; this is the one
-    place that pays the ledger render and the STATE_LOCK write. The flag clears only
-    when the writer returns True; a False (unknown or stale ledger marker) or an
-    exception keeps it dirty and the next attempt waits ``BUDGET_PROJECTION_RETRY_SEC``,
-    logged once per attempt, so a frozen-marker install does not render every turn."""
+    ``llm_usage`` events only mark: the root they name in ``LIVE_ROOT_COSTS``, whose
+    marked roots are read again here (the cost figure root heartbeats carry, so a
+    heartbeat itself reads no store), and ``ctx.budget_projection_dirty``. This is the
+    one place that pays the compatibility budget-projection ledger render and the
+    STATE_LOCK write. The flag clears only when the writer returns True; a False
+    (unknown or stale ledger marker) or an exception keeps it dirty and the next attempt
+    waits ``BUDGET_PROJECTION_RETRY_SEC``, logged once per attempt, so a frozen-marker
+    install does not render every turn."""
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+
+    try:
+        LIVE_ROOT_COSTS.refresh(getattr(ctx, "RUNNING", None), getattr(ctx, "DRIVE_ROOT", None))
+    except Exception:
+        log.warning("Live root cost figures not refreshed this turn", exc_info=True)
     if not getattr(ctx, "budget_projection_dirty", False):
         return
     now = time.monotonic()

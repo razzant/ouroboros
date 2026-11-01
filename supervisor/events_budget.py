@@ -95,6 +95,9 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     # its live frame) therefore says ``deferred``, not the outcome of that write.
     ctx.budget_projection_dirty = True
     projection_update_status = "deferred"
+    # The same flush re-reads this root's live heartbeat figure (``LIVE_ROOT_COSTS``).
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+    LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), evt.get("root_task_id") or _tid)
 
     # Server-side web-search citations ({url,title,content}, capped at 20 in
     # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see

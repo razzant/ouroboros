@@ -20,26 +20,56 @@ log = logging.getLogger(__name__)
 
 
 from supervisor.log_addressing import address_ctx_event as _address_ctx
-from ouroboros.cost_projection import live_root_cost_projection
+from ouroboros.cost_projection import LIVE_ROOT_COSTS
+
+
+def _heartbeat_source_time(evt: Dict[str, Any], meta: Dict[str, Any]) -> float | None:
+    """When the worker SPOKE this heartbeat, if it can belong to the attempt RUNNING holds.
+
+    The worker stamps ``ts`` in its own process when it queues the beat; the drain may serve it
+    much later (the telemetry lane once ran 1 h 49 min behind), so the moment of handling is no
+    evidence that the task is alive now. A beat spoken before this attempt started is an earlier
+    attempt's; one dated after the host's own now is clamped to now. No parsable stamp, no
+    liveness evidence (``None``).
+    """
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    stamped = parse_deadline_ts(evt.get("ts"))
+    if stamped is None:
+        return None
+    spoken = min(stamped.timestamp(), time.time())
+    try:
+        started_at = float(meta.get("started_at") or 0.0)
+    except (TypeError, ValueError):
+        started_at = 0.0
+    return None if spoken < started_at else spoken
 
 
 def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:
     """Liveness stamp and live frame for one running task; a no-op once it left RUNNING.
 
-    Mutates the RUNNING entry IN PLACE (the ``_handle_llm_usage`` rule): a
-    write-back would resurrect a task a cross-thread cancel popped between the
-    get and the write. The root cost figure is the stale-allowed projection,
-    so a heartbeat never reads the current task-result store on the drain.
+    Reads no store (cost law L4): ``last_heartbeat_at`` advances to the beat's own source
+    time when that is newer (``_heartbeat_source_time``: a drained backlog never makes a task
+    look freshly alive, and a late earlier beat never moves the stamp back), and a root's cost
+    figure is the one ``LIVE_ROOT_COSTS`` holds, read again only when the root's money moved.
+    Mutates the RUNNING entry IN PLACE (the ``_handle_llm_usage`` rule): a write-back would
+    resurrect a task a cross-thread cancel popped between the get and the write.
     """
     task_id = str(evt.get("task_id") or "")
     if task_id and task_id in ctx.RUNNING:
         meta = ctx.RUNNING.get(task_id)
         if not isinstance(meta, dict):
             return
-        meta["last_heartbeat_at"] = time.time()
+        spoken = _heartbeat_source_time(evt, meta)
+        try:
+            stamped = float(meta.get("last_heartbeat_at") or 0.0)
+        except (TypeError, ValueError):
+            stamped = 0.0
         phase = str(evt.get("phase") or "")
-        if phase:
-            meta["heartbeat_phase"] = phase
+        if spoken is not None and spoken > stamped:
+            meta["last_heartbeat_at"] = spoken
+            if phase:
+                meta["heartbeat_phase"] = phase
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
         started_at = float(meta.get("started_at") or 0.0)
         runtime_sec = round(max(0.0, time.time() - started_at), 1) if started_at > 0 else None
@@ -55,7 +85,7 @@ def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:
             _hb_chat_id = _bound_project_chat_id(ctx, task_id, task.get("parent_task_id"), task.get("root_task_id")) or int(task.get("chat_id") or 0)
         except (TypeError, ValueError):
             _hb_chat_id = 0
-        cost_fields = live_root_cost_projection(task_id, task, evt, ctx.DRIVE_ROOT)
+        cost_fields = LIVE_ROOT_COSTS.fields(ctx.DRIVE_ROOT, task_id, task, evt)
         try:
             ctx.bridge.push_log({
                 "ts": evt.get("ts", utc_now_iso()),
