@@ -1,10 +1,10 @@
 """Generic VCS inspection and rollback operations.
 
 The ``ouroboros/tools/git.py`` facade re-exports these definitions. Shared
-helpers are read through the call-time handle ``_git()`` so the facade binding
-stays the one tests monkeypatch. ``_sanitize_git_error`` and
-``format_protected_paths`` bind their owners at import time, including calls
-from f-strings.
+helpers are read through the call-time handle ``_git()`` so tests can patch the
+facade binding. Displayed diffs use this leaf's bytes runner; parsed output
+keeps ``run_cmd``. ``_sanitize_git_error`` and ``format_protected_paths`` bind
+their owners at import time, including calls from f-strings.
 """
 
 from __future__ import annotations
@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import pathlib
 import posixpath
+import subprocess
 from typing import List, Optional
 
-from ouroboros.git_observation import numstat_paths
+from ouroboros.git_observation import host_git_env, numstat_paths
 from ouroboros.runtime_mode_policy import format_protected_paths
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tool_access import ResolvedResourceBinding
@@ -41,6 +42,44 @@ def _limit_git_output(text: str, max_chars: int = 0) -> str:
     if limit <= 0 or len(text) <= limit:
         return text
     return text[:limit] + f"\n⚠️ OUTPUT_TRUNCATED: git output limited to {limit} characters by max_chars. Narrow with path, or ref/max_count for history."
+
+
+_NOT_UTF8_NOTE = (
+    "\n⚠️ OUTPUT_NOT_UTF8: Git's output contained bytes that are not valid UTF-8, rendered as \\xNN "
+    "escapes. Git can produce them itself, for example by cutting a combined diff's hunk-header context "
+    "mid-character, so they do not by themselves mean a file is invalid UTF-8."
+)
+
+
+def _git_display_text(cmd: List[str], repo_dir: pathlib.Path) -> tuple[str, str]:
+    """Run ``cmd`` as ``run_cmd`` does, but decode its bytes here; return (text, note).
+
+    Git writes bytes, not one file's text: the combined diff of an unmerged path
+    cuts its hunk-header context at a byte count, even through a character of a
+    valid UTF-8 file. Strict UTF-8 comes first, so valid output reads as
+    ``run_cmd`` returned it under a UTF-8 locale (text-mode newlines, stripped).
+    Otherwise the bytes that are not UTF-8 become backslash escapes and the note
+    discloses them, the policy of ``capture_staged_diff``; the caller appends the
+    note after any ``max_chars`` cut. Environment, failure text and the absent
+    timeout are ``run_cmd``'s.
+    """
+
+    def decode(raw: bytes) -> tuple[str, bool]:
+        try:
+            text, escaped = raw.decode("utf-8"), False
+        except UnicodeDecodeError:
+            text, escaped = raw.decode("utf-8", "backslashreplace"), True
+        return text.replace("\r\n", "\n").replace("\r", "\n"), escaped
+
+    res = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, env=host_git_env())
+    stdout, escaped = decode(res.stdout)
+    if res.returncode != 0:
+        stderr, stderr_escaped = decode(res.stderr)
+        note = _NOT_UTF8_NOTE if escaped or stderr_escaped else ""
+        raise RuntimeError(
+            f"Command failed: {' '.join(cmd)}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}{note}"
+        )
+    return stdout.strip(), _NOT_UTF8_NOTE if escaped else ""
 
 
 def _vcs_binding(
@@ -166,12 +205,13 @@ def _git_diff(
         )
         if protected_block:
             return _git()._vcs_result(protected_block, binding)
-        output = _git().run_cmd(cmd, cwd=repo_dir)
+        # name_only paths are parsed, not displayed: only displayed output takes escapes.
+        output, note = (_git().run_cmd(cmd, cwd=repo_dir), "") if name_only else _git_display_text(cmd, repo_dir)
         if name_only:
             paths = numstat_paths(output, cmd, lambda args: _git().run_cmd(args, cwd=repo_dir))
             output = "\n".join(json.dumps(path, ensure_ascii=False)
                                if any(ord(c) < 32 or c in '\\"' for c in path) else path for path in paths)
-        text = _git()._vcs_result(_git()._limit_git_output(output, max_chars), binding)
+        text = _git()._vcs_result(_git()._limit_git_output(output, max_chars) + note, binding)
         if comparison:
             comparison["kind"] = "tree_to_tree" if head else "tree_to_index" if staged else "tree_to_worktree"
             text += "\nComparison: " + json.dumps(comparison, ensure_ascii=False, sort_keys=True)
