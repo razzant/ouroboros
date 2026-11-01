@@ -131,6 +131,19 @@ def held_runs(root, also: str = "", params: tuple = ()):
     return runs(root, f"{HELD_WHERE} AND ({also})" if also else HELD_WHERE, (HELD, *params))
 
 
+# An open run (no durable settlement) is always held (``_held``), so the open runs are the held rows whose facts do
+# not say ``settled``. SQL drops only a definite true/numeric-one ``settled``; any other value (and ``machine_json``'s
+# NaN/Infinity, which ``json_valid`` rejects) passes and Python decides, as over ``runs``.
+_MAYBE_OPEN = "CASE WHEN json_valid(facts) THEN COALESCE(json_extract(facts, '$.settled'), 0)<>1 ELSE 1 END"
+
+
+def open_held_runs(root):
+    """The held runs that may still be open, on the held index: the open-only question's read. The settled held rows
+    (an undisposed patch, an owned registration, collection debt) are neither fetched nor decoded; the caller's
+    ``not settled`` decides (``delegate_custody_reconcile.open_runs``)."""
+    return held_runs(root, _MAYBE_OPEN)
+
+
 def _any_of(*terms: str) -> str:
     """A disjunction read as the union of its terms, each on its own index. Under the same statistics
     SQLite 3.46+ plans ``state=? OR output_unread=1`` (two-valued columns) as a scan of every run."""
