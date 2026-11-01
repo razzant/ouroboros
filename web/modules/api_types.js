@@ -376,6 +376,10 @@
  *   card title and the collapsed activity line. Absent = a frame that predates
  *   the fact (an older worker, a supervisor note, a stored row), which keeps
  *   the legacy reading that promoted every progress frame.
+ * @property {boolean=} reasoning
+ *   True only on narration that is the model's display reasoning: a Thinking
+ *   row in the timeline, never the title, collapsed line or census last_line.
+ *   Absent = visible speech (and every row written before the fact).
  * @property {{call_id:string,item_id:string,played_ms:number,status:'played'|'generated'|'interrupted'}=} spoken
  *   Generated speech and actual playback evidence; retained on history replay.
  * @property {string=} initiator

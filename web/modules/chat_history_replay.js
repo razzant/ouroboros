@@ -41,16 +41,16 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
         || String(summary.dedupeKey || '').startsWith('cardrow|');
     const activity = summary.activity ? { activity: summary.activity } : {};
     const key = evolving ? summary.dedupeKey : `history:${identity}`;
-    // Speech keeps its live occurrence alias beside the physical history identity:
-    // history may precede live delivery, or adopt a line before it is redelivered.
-    const occurrence = String(summary.dedupeKey || '').startsWith('subagent-line:')
+    // A child's words and a thought keep their live occurrence alias beside the physical history
+    // identity: history may precede live delivery, or adopt a line before it is redelivered.
+    const occurrence = /^(subagent-line|reasoning):/.test(String(summary.dedupeKey || ''))
         ? { occurrenceKey: summary.dedupeKey } : {};
     const source = { sourceHistoryId: identity, sourceHistoryRevision: summary.cardRowRevision,
         historyPosition: row.history_position };
     let item = record.items.find((entry) => entry.dedupeKey === key);
     if (!item && !evolving) {
         item = record.items.find((entry) => !entry.historyId
-            && entry.dedupeKey === summary.dedupeKey && entry.sourceTs === row.ts);
+            && (entry.occurrenceKey ?? entry.dedupeKey) === summary.dedupeKey && entry.sourceTs === row.ts);
     }
     if (item && evolving) {
         // Source revision advances independently of live content: an older
