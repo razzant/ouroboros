@@ -8,6 +8,7 @@ real deferred Restore over isolated Git and store roots, and Panic still ending 
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import os
 import pathlib
@@ -23,7 +24,7 @@ from ouroboros import claudexor_harness_install, extension_process_runner, owned
 from ouroboros.marketplace import isolated_deps
 from ouroboros.platform_layer import subprocess_new_group_kwargs
 from ouroboros.tools import shell_process, skill_exec, skill_preflight
-from supervisor import git_ops, git_ops_reset, update_merge
+from supervisor import git_ops, git_ops_reset, update_checks, update_merge
 from tests._shared import calls_function, wait_test_child_stop
 from tests.test_store_switch import git
 from tests.test_store_switch import switch_root as _switch_root
@@ -35,22 +36,62 @@ switch_root, target_repo = _switch_root, _switch_target_repo  # real store roots
 SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]
 
 
+def _publication_offence(source):
+    """A publisher names the registry itself (``add``, ``update``): only its owner does. A ``discard`` starts and
+    publishes nothing, it forgets a handle whose exit was observed, so its scope is not policed here; a module holding
+    one must still start its children through the owner: ``tracked_start`` or ``_tracked_subprocess_run`` over it."""
+    tree = ast.parse(source)
+    written = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and getattr(node.func, "attr", "") in ("add", "update", "discard")
+               and "_active_subprocesses" in (getattr(node.func.value, "id", ""), getattr(node.func.value, "attr", ""))}
+    if written & {"add", "update"}:
+        return "raw publication"
+    tracked = any(calls_function(tree, start) for start in ("tracked_start", "_tracked_subprocess_run"))
+    return "discard without a tracked start" if written and not tracked else ""
+
+
+@pytest.mark.parametrize(("source", "offence"), [
+    ("def f():\n    with tracked_start() as publish:\n        proc = publish(start())\n"
+     "    _active_subprocesses.discard(proc)\n", ""),
+    ("def f(out):\n    run = lambda: _tracked_subprocess_run(['x'], stdout=out)\n    run()\n"
+     "    shell_process._active_subprocesses.discard(proc)\n", ""),
+    ("def run():\n    _tracked_subprocess_run(['x'])\ndef forget(proc):\n    _active_subprocesses.discard(proc)\n", ""),
+    ("def f():\n    with tracked_start() as publish:\n        _active_subprocesses.add(publish(start()))\n",
+     "raw publication"),
+    ("def f():\n    tracked_start()\n    shell_process._active_subprocesses.update({proc})\n", "raw publication"),
+    ("def f():\n    # tracked_start()\n    _active_subprocesses.discard(proc)\n", "discard without a tracked start"),
+    ("def f():\n    'tracked_start() _tracked_subprocess_run()'\n    _active_subprocesses.discard(proc)\n",
+     "discard without a tracked start"),
+    ("def f():\n    subprocess.run(['x'])\n    _active_subprocesses.discard(proc)\n", "discard without a tracked start"),
+], ids=["tracked_start", "tracked_run_wrapper", "cleanup_helper_beside_the_start", "raw_add", "raw_update",
+        "comment_only", "string_only", "untracked_start"])
+def test_the_publication_scan_tells_a_tracked_owner_from_its_look_alikes(source, offence):
+    assert _publication_offence(source) == offence
+
+
 def test_tracked_registry_publishers_start_through_tracked_start():
     """A bounded helper the tracked registry names (``_active_subprocesses``) counts its start before
     Popen, is refused once the generation's stop door began and publishes the returned handle, all
     through ``shell_process.tracked_start``; a raw ``add`` can hide a child from that stop."""
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    offenders = []
+    offenders, discarding = [], set()
     for base in ("ouroboros", "supervisor"):
         for path in (repo_root / base).rglob("*.py"):
             rel = path.relative_to(repo_root).as_posix()
             if rel in ("ouroboros/tools/shell_process.py", "ouroboros/tools/shell.py"):
                 continue  # the registry's owner and its facade
             text = path.read_text(encoding="utf-8", errors="replace")
-            if "_active_subprocesses.add(" in text or (
-                    "_active_subprocesses.discard(" in text and "tracked_start()" not in text):
+            if "_active_subprocesses" not in text:
+                continue  # no name to call it by: the parse is for the modules that hold it
+            if _publication_offence(text):
                 offenders.append(rel)
+            if "_active_subprocesses.discard(" in text:
+                discarding.add(rel)
     assert not offenders, f"tracked children published without shell_process.tracked_start: {offenders}"
+    assert "supervisor/update_checks.py" in discarding and "supervisor/git_ops.py" in discarding, "the scan saw its sites"
+    # The supported wrapper is accepted because of its call: the same module started any other way is an offence.
+    checks = (repo_root / "supervisor" / "update_checks.py").read_text(encoding="utf-8")
+    assert _publication_offence(checks.replace("_tracked_subprocess_run(", "subprocess.run(")) != ""
 
 
 @pytest.fixture
@@ -202,6 +243,29 @@ def test_an_unconfirmed_kill_keeps_its_handle_and_says_so(registry, monkeypatch)
     assert child in shell_process._active_subprocesses
 
 
+def test_a_contained_lane_stays_named_until_the_stop_ends_it_and_its_exit_is_observed(registry, tmp_path):
+    """The supported wrapper's real consumer: ``update_checks._contained`` starts through ``_tracked_subprocess_run``
+    and forgets only an exited root, so the stop finds its running child by name, and the door refuses its next start."""
+    marker, ended = "contained-lane-witness", []
+    cmd = [*SLEEP, marker]
+    outputs = (tmp_path / "lane.stdout.txt", tmp_path / "lane.stderr.txt")
+    lane = threading.Thread(target=lambda: ended.append(update_checks.run_tracked(cmd, tmp_path, 60, outputs=outputs)))
+    lane.start()
+
+    def named():
+        return [proc for proc in shell_process._active_subprocesses.copy() if marker in proc.args]
+
+    _wait(named, timeout=30)
+    assert named()[0].poll() is None
+    report = shell_process.kill_all_tracked_subprocesses(deadline=time.monotonic() + 15)
+    lane.join(30)
+    assert not lane.is_alive() and report is None and ended[0]["containment"] == ""
+    assert ended[0]["returncode"] != 0 and not named()
+    owned_shutdown.begin_owned_stop(registry.data)
+    refused = update_checks.run_tracked(cmd, tmp_path, 5, outputs=outputs)
+    assert (refused["returncode"], refused["output"]) == (125, "none") and not named(), "nothing started after the door"
+
+
 def test_a_failed_spawn_settles_its_count_and_keeps_its_own_error(registry):
     with pytest.raises(FileNotFoundError):
         with shell_process.tracked_start() as publish:
@@ -318,7 +382,6 @@ def test_every_producer_refuses_after_the_door_in_its_own_contract(registry, mon
 
 def test_the_nine_producers_publish_only_through_the_shared_start():
     """Source shape: each producer function enters ``tracked_start`` and none adds to the set itself."""
-    import ast
     import inspect
     import textwrap
 

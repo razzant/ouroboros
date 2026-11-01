@@ -456,9 +456,11 @@ def test_a_candidate_discarded_while_its_exclusion_was_admitted_is_refused_at_th
 def test_an_activation_that_began_while_the_copy_was_made_discards_it_and_keeps_the_candidate_current(scene,
                                                                                                     monkeypatch):
     """The admission's own refusal keeps its answer: an activation authorized while the new copy was made discards
-    that copy at once, the candidate being activated stays current, and the preparation returns the discarded record."""
+    that copy at once and the candidate being activated stays current. The preparation raises that refusal like any
+    other end without a candidate of its own, and the status says it beside the activating candidate (Astra F4)."""
     from ouroboros import body_adoption
 
+    monkeypatch.setattr(update_prepare, "_last_refusal", {})  # this test's own panel memory
     scene.official({"ouroboros/mod_a.py": "GEN = 'GEN_CAND'\n"})
     ready = scene.prepare()
     provision = update_prepare._provision
@@ -469,10 +471,16 @@ def test_an_activation_that_began_while_the_copy_was_made_discards_it_and_keeps_
         return row
 
     monkeypatch.setattr(update_prepare, "_provision", activation_meanwhile)
-    made = scene.prepare()
+    with pytest.raises(update_prepare.PrepareRefused) as refused:
+        scene.prepare()
 
-    assert (made["state"], made["reason"]) == ("discarded", "UPDATE_ACTIVATION_PENDING: an activation started meanwhile")
-    assert update_prepare.current()["candidate_id"] == ready["candidate_id"] and not update_prepare._running.locked()
+    made = [row for row in update_prepare._rows() if row["candidate_id"] != ready["candidate_id"]]
+    assert [(row["state"], row["reason"]) for row in made] == [
+        ("discarded", "UPDATE_ACTIVATION_PENDING: an activation started meanwhile")]
+    assert refused.value.code == "UPDATE_ACTIVATION_PENDING" and not update_prepare._running.locked()
+    assert update_prepare.current()["candidate_id"] == ready["candidate_id"]
+    view = update_prepare.projection()
+    assert (view["candidate_id"], view["refusal"]["code"]) == (ready["candidate_id"], "UPDATE_ACTIVATION_PENDING")
 
 
 def _ended_worker():

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readdirSync, readFileSync } from 'node:fs';
 
 import { apiClient, updateStrategyForPlan } from '../modules/api_client.js';
-import { updatePillDetail, updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
+import { candidateNotice, updateNotice, updatePillDetail, updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
 import {
     applyFailureText,
     updateVerdict,
@@ -355,8 +355,77 @@ test('with a candidate projection the primary update action is Prepare: the upda
     const refused = updateVerdict({ ...STATUS, candidate: { state: 'none', actions: ['prepare'], refusal: {
         code: 'UPDATE_LOCAL_STATE_UNSUPPORTED', text: 'local work cannot be carried as it is: branch:main' } } });
     assert.match(refused.hint, /^The last preparation was refused: local work cannot be carried as it is: branch:main\./);
+    const crashed = updateVerdict({ ...STATUS, candidate: { state: 'none', actions: ['prepare'], refusal: {
+        code: 'UPDATE_PREPARE_CRASHED', text: 'it stopped on an unexpected error (ValueError: boom)' } } });
+    assert.match(crashed.hint, /^The last preparation failed: it stopped on an unexpected error \(ValueError: boom\)\./);
+    // No update is offered, only the app: the qualification's state. The refusal stays above the app's own words.
+    const needed = updateVerdict({ ...STATUS, available: false, candidate: { state: 'none', actions: ['prepare'],
+        app_needed: { status: 'needed', reason: 'bundle_too_old' }, refusal: { code: 'UPDATE_WORK_ROOT_UNDECIDED',
+            text: 'the default subagent_worktrees folder is undecided' } } });
+    assert.equal(needed.state, 'app_needed');
+    assert.match(needed.hint, /^The last preparation was refused: the default subagent_worktrees folder is undecided\. /);
+    assert.match(needed.hint, /Prepare downloads and checks it beside this app/);
+    // It left the ready candidate as it was: the candidate's verdict and action stay, and the refusal is said.
+    const held = updateVerdict({ ...STATUS, candidate: { state: 'ready', candidate_id: 'update_a', target_sha: 'd2f6a91c',
+        actions: ['activate', 'discard_candidate'], refusal: { code: 'UPDATE_PREPARE_CRASHED', text: 'it stopped' } } });
+    assert.deepEqual([held.state, held.action?.id], ['candidate_ready', 'activate']);
+    assert.match(held.hint, /^The last preparation failed: it stopped\. If it does not start/);
     // A status without the projection (an older core) keeps the in-place path and its own words.
     assert.deepEqual(buttons(updateVerdict(STATUS)), ['*Update to 7.8.2']);
+});
+
+test('after its 202 a preparation\'s end stays in whatever the channel says next, and on the Main indicator', () => {
+    // Astra F1/F2. The first status is the real passive route's reply after an API prepare with no checked cache and
+    // an undecided copies root (keys as the producer wrote them; its long folder paths shortened).
+    const refusal = { code: 'UPDATE_WORK_ROOT_UNDECIDED', at: '2026-11-01T08:07:47.393995+00:00',
+        text: 'the default subagent_worktrees folder is undecided: this data root\'s work-root basis is unknown (launch) '
+            + 'and the candidates differ: /h/Ouroboros/subagent_worktrees (earlier releases) and /a/subagent_worktrees '
+            + '(OUROBOROS_APP_ROOT). Set OUROBOROS_SUBAGENT_WORKTREE_ROOT to the folder to use; nothing was created or moved.' };
+    const passive = { current_version: '7.9.0', latest_version: '', update_tx: { active: false }, update_progress: {},
+        candidate: { state: 'none', actions: ['prepare'], refusal }, letter: null, managed: true, dirty: true,
+        dirty_count: 2, warnings: ['official_status_requires_check'], check_ok: null, available: false,
+        safe_to_apply: false };
+    const said = `The last preparation was refused: ${refusal.text}`;
+    const cases = [
+        ['unchecked', passive, 'Check for updates'],
+        ['check_failed', { ...passive, check_ok: false, warnings: ['fetch_error:offline'] }, 'Check for updates'],
+        ['current', { ...passive, check_ok: true, warnings: [] }, 'Check again'],
+        ['unknown', { ...passive, warnings: ['status_error:cannot read checkout'] }, 'Check for updates'],
+        // The record could not be read: the refusal the projection still carries is said all the same.
+        ['unknown', { ...passive, warnings: [], candidate: { state: 'unknown', error: 'copy records unreadable',
+            refusal } }, 'Check for updates'],
+    ];
+    for (const [state, status, action] of cases) {
+        const verdict = updateVerdict(status);
+        assert.deepEqual([verdict.state, verdict.action?.label], [state, action], state);
+        assert.ok(verdict.hint.startsWith(said), `${state}: ${verdict.hint}`);
+        assert.equal(verdict.hint.split(said).length - 1, 1, `${state} says it once`);
+    }
+    assert.match(updateVerdict(cases[1][1]).hint, /fetch_error:offline$/, 'the failed check keeps its own words after it');
+    const plain = updateVerdict({ ...passive, candidate: { state: 'none', actions: ['prepare'] } });
+    assert.deepEqual([plain.state, plain.hint], ['unchecked', ''], 'no refusal, no words');
+
+    // The indicator: an app-only preparation's stage, then its failure (DESIGN: retained until hidden), not nothing.
+    const appOnly = { ...passive, warnings: [], check_ok: true };
+    assert.equal(candidateNotice({ ...appOnly, candidate: { state: 'preparing', actions: [] } }).pill, 'Preparing update…');
+    const failed = updateNotice({ ...appOnly, candidate: { state: 'none', actions: ['prepare'], refusal,
+        app_needed: { status: 'needed', reason: 'signed_entry_missing' } } });
+    assert.deepEqual([failed.pill, failed.tone, failed.terminal, failed.when], ['Update not prepared', 'error', true, refusal.at]);
+    assert.equal(failed.title, said);
+    assert.equal(failed.id, `preparation:${refusal.at}:UPDATE_WORK_ROOT_UNDECIDED`, 'each attempt is hidden on its own');
+    const crash = candidateNotice({ candidate: { state: 'none', refusal: { code: 'UPDATE_PREPARE_CRASHED', at: refusal.at,
+        text: 'it stopped on an unexpected error (ValueError: boom); look for update_prepare_crashed, then prepare again' } } });
+    assert.equal(crash.title, 'The last preparation failed: it stopped on an unexpected error (ValueError: boom); look for '
+        + 'update_prepare_crashed, then prepare again.');
+    // A candidate that stays live keeps its own current fact; the panel says the refusal beside it.
+    assert.equal(updateNotice({ ...appOnly, candidate: { state: 'ready', candidate_id: 'prior', refusal } }).pill, 'Update ready');
+    // Beside an older concluded outcome the newer one shows, whichever it is.
+    const older = { candidate_id: 'prior', outcome: 'not_applied', at: '2026-11-01T08:00:00+00:00' };
+    const newer = { ...older, at: '2026-11-01T09:00:00+00:00' };
+    assert.equal(candidateNotice({ candidate: { state: 'none', refusal, last_activation: older } }).id, failed.id);
+    assert.equal(candidateNotice({ candidate: { state: 'none', refusal, last_activation: newer } }).id,
+        'activation:prior:not_applied');
+    assert.equal(candidateNotice({ candidate: { state: 'none' } }), null, 'nothing ended: no notice');
 });
 
 test('every candidate state has one verdict: its words, its buttons and its facts, from the payload alone', () => {

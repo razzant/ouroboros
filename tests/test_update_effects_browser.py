@@ -11,11 +11,19 @@ from urllib.parse import urlparse
 import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
+from supervisor import update_prepare
+from tests.test_update_activation_endpoint import _answered, _apply, _undecided_work_root
+from tests.test_update_activation_endpoint import scene as _scene
 from tests.test_update_letter_browser import BOOT, WEB
 from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+scene = _scene  # the real Update over a miniature body (``test_update_activation_endpoint``)
 CANDIDATE_ID = "update_bbbbbbbbbbbb_000001"
+# The real Main Update indicator beside the panel, reading the same routed status (``update_status.initUpdateStatus``).
+INDICATOR = "import('/static/modules/update_status.js').then((m) => m.initUpdateStatus({ws}));\n"
+ON_SCREEN = ("(node) => { const box = node.getBoundingClientRect(); return box.width > 0 && box.left >= 0 "
+             "&& box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight; }")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -25,12 +33,13 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/fixture":
+        if self.path in ("/fixture", "/fixture?indicator"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
+            boot = BOOT if self.path == "/fixture" else BOOT.replace("</script>", INDICATOR + "</script>")
             html = (WEB / "index.html").read_text(encoding="utf-8").replace(
-                '<script type="module" src="/static/app.js"></script>', BOOT)
+                '<script type="module" src="/static/app.js"></script>', boot)
             self.wfile.write(html.encode("utf-8"))
         else:
             self.path = self.path.removeprefix("/static")
@@ -479,6 +488,104 @@ def test_checks_outcomes_name_failures_and_missing_evidence_apart(engine, tmp_pa
                         assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
                     assert not errors.unexpected(), errors
                     page.close()
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_refused_preparation_is_said_in_the_real_panel_from_the_real_projection(engine, scene, monkeypatch, tmp_path):
+    """The candidate each scene shows is the projection after a real refused Prepare (only the app's need is stood in):
+    no candidate before any check (Astra F1), no candidate with an app needed, and a ready candidate that keeps its
+    action. The panel says the refusal first; the Main indicator keeps the failed attempt until it is hidden (F2), and
+    the ready candidate's own current state."""
+    if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
+        pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1")
+    playwright = pytest.importorskip("playwright.sync_api")
+    from ouroboros.gateway.update_activation import candidate_view
+
+    monkeypatch.setattr(update_prepare, "_last_refusal", {})
+    monkeypatch.setattr(update_prepare, "_app_need_now", lambda: {
+        "status": "needed", "reason": "signed_entry_missing", "installed_version": "7.7.0"})
+    _undecided_work_root(scene, monkeypatch)
+    assert _apply({"strategy": "prepare"})[0] == 202 and _answered() is None
+    needed = candidate_view()
+    monkeypatch.setattr(update_prepare, "_app_need_now", lambda: {})  # the same refusal under an app that hosts it
+    bare = candidate_view()
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(scene.tmp / "chosen"))
+    _apply({"strategy": "prepare"})
+    assert _answered()["state"] == "ready"
+    monkeypatch.delenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT")
+    assert _apply({"strategy": "prepare"})[0] == 202 and _answered()["state"] == "ready"
+    ready = candidate_view()
+    assert needed["refusal"]["code"] == ready["refusal"]["code"] == "UPDATE_WORK_ROOT_UNDECIDED"
+    status = {"managed": True, "check_ok": True, "available": False, "safe_to_apply": True, "current_sha": "a" * 40,
+              "current_version": "7.7.0", "latest_sha": "a" * 40, "warnings": [], "update_tx": {"active": False}}
+    # The passive status after an API prepare with no checked cache (``official_status_requires_check``, no check).
+    unchecked = {"check_ok": None, "warnings": ["official_status_requires_check"]}
+    scenes = {"unchecked": (bare, "has not been checked yet", ["Check for updates"], unchecked, "Update not prepared"),
+              "app-needed": (needed, "needs the official app", ["Prepare app update"], {}, "Update not prepared"),
+              "ready": (ready, "is ready", ["Restart to update", "Discard"], {}, "Update ready")}
+    assert "app_needed" not in bare and bare["refusal"] == needed["refusal"]
+    shown = {}
+
+    def respond(route):
+        path = urlparse(route.request.url).path
+        body = {**status, **shown} if path == "/api/update/status" else {"commits": [], "tags": []}
+        route.fulfill(content_type="application/json", body=json.dumps(body))
+
+    output = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or diagnostic_directory(tmp_path, "update-refusal"))
+    output.mkdir(parents=True, exist_ok=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(WEB)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with playwright.sync_playwright() as pw:
+            if engine == "webkit" and not Path(pw.webkit.executable_path).is_file():
+                pytest.skip(f"{engine} is not installed in the test interpreter")
+            browser = getattr(pw, engine).launch(headless=True)
+            try:
+                for (width, height), theme in (((1110, 750), "light"), ((390, 844), "dark")):
+                    page = browser.new_page(viewport={"width": width, "height": height}, color_scheme=theme,
+                                            has_touch=width < 980)
+                    errors = PageErrors(page, engine)
+                    page.route("**/api/**", respond)
+                    for name, (candidate, headline, labels, overrides, pill_text) in scenes.items():
+                        shown.clear()
+                        shown.update(overrides, candidate=candidate)
+                        page.goto(f"http://127.0.0.1:{server.server_port}/fixture?indicator")
+                        page.locator("#updates-summary").get_by_text(headline).wait_for()
+                        hint = page.locator("#updates-hint").inner_text()
+                        assert hint.startswith("The last preparation was refused: the default subagent_worktrees "), hint
+                        assert "OUROBOROS_SUBAGENT_WORKTREE_ROOT" in hint, hint
+                        assert [page.locator("#btn-update-primary").inner_text(),
+                                *page.locator("[data-secondary]").all_inner_texts()] == labels
+                        pill = page.locator("#update-pill")
+                        page.wait_for_function("(text) => document.getElementById('update-pill')?.textContent === text",
+                                               arg=pill_text)
+                        indicator = {"text": pill.inner_text(), "hidden": pill.evaluate("node => node.hidden"),
+                                     "tone": pill.get_attribute("data-tone"), "title": pill.get_attribute("title"),
+                                     "close": not page.locator(".update-notice-close").evaluate("node => node.hidden"),
+                                     "on_screen": pill.evaluate(ON_SCREEN)}  # 390 px: in the closed drawer
+                        failed = pill_text == "Update not prepared"
+                        assert (indicator["hidden"], indicator["tone"], indicator["close"]) == (
+                            False, "error" if failed else None, failed), indicator
+                        assert not failed or indicator["title"].startswith("The last preparation was refused: ")
+                        stem = f"refused-{name}-{engine}-{width}x{height}-{theme}"
+                        page.screenshot(path=str(output / f"{stem}.png"))
+                        page.locator("#updates-status-card").screenshot(path=str(output / f"{stem}-card.png"))
+                        if indicator["on_screen"]:
+                            page.locator(".update-notice").screenshot(path=str(output / f"{stem}-indicator.png"))
+                        (output / f"{stem}.json").write_text(json.dumps({"candidate": candidate, "hint": hint,
+                                                                         "indicator": indicator}, indent=1),
+                                                             encoding="utf-8")
+                        print(f"UPDATE_REFUSAL_SCREENSHOT={output / stem}.png")
+                        assert page.evaluate(
+                            "document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+                    assert not errors.unexpected(), errors
             finally:
                 browser.close()
     finally:

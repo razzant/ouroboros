@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 import threading
 import time
 from types import SimpleNamespace
@@ -444,3 +445,115 @@ def test_activation_holds_the_local_model_runtime_install_while_it_switches_pack
     assert status == 200 and body["restarting"] is True and request.restarts == [True]
     with pytest.raises(RuntimeError, match="an update is being activated"):
         manager.install_runtime()  # held until the restart switches the packages
+
+
+def _undecided_work_root(scene, monkeypatch):
+    """The shape a native qualification reached: APP_ROOT away from ``~/Ouroboros``, no work-root setting, and
+    supervisor history without state or witness. ``launch_roots`` leaves that default undecided on purpose."""
+    from ouroboros import launch_roots
+
+    app, home = scene.tmp / "app", scene.tmp / "home"
+    app.mkdir(), home.mkdir()
+    (scene.data / "state" / "queue_snapshot.json").write_text("{}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("OUROBOROS_APP_ROOT", str(app))
+    monkeypatch.delenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT")
+    monkeypatch.setenv(launch_roots.BASIS_ENV, "")  # restored afterwards; the pin below writes the process's own
+    assert launch_roots.pin_basis(scene.data) == launch_roots.UNKNOWN_BASIS
+    with pytest.raises(launch_roots.WorkRootUnavailable):
+        launch_roots.work_root_default("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "subagent_worktrees")  # the policy stands
+    return home / "Ouroboros" / "subagent_worktrees", app / "subagent_worktrees"
+
+
+def _crash_events(scene):
+    log = scene.data / "logs" / "supervisor.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return [row for row in rows if row.get("type") == "update_prepare_crashed"]
+
+
+def test_an_undecided_work_root_refuses_in_its_own_words_and_an_explicit_root_then_prepares(scene, monkeypatch):
+    """Native qualification read 202, ``preparing``, then ``none`` with no refusal and no record: the undecided root
+    left the preparation thread untyped. Now every client hears the refusal naming the setting that decides and both
+    candidates; neither folder is made or chosen, and the explicit root prepares a ready candidate."""
+    from ouroboros.gateway import update_activation, update_progress
+
+    monkeypatch.setattr(update_prepare, "_last_refusal", {})  # this test's own panel memory
+    heard = []
+    monkeypatch.setattr(update_progress, "notify_changed", lambda: heard.append(update_activation.candidate_view()))
+    historical, configured = _undecided_work_root(scene, monkeypatch)
+    before = scene.composition()
+
+    status, _body, _request = _apply({"strategy": "prepare"})
+
+    assert status == 202 and _answered() is None and not update_prepare._running.locked()
+    last = heard[-1]
+    assert (last["state"], last["actions"]) == ("none", ["prepare"])
+    assert last.get("refusal", {}).get("code") == "UPDATE_WORK_ROOT_UNDECIDED", last
+    for named in ("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(historical), str(configured)):
+        assert named in last["refusal"]["text"]
+    assert not historical.exists() and not configured.exists(), "no candidate folder is guessed or created"
+    assert update_prepare._rows() == [] and scene.composition() == before and _crash_events(scene) == []
+    status_response = asyncio.run(control.api_update_status(_Request({})))  # the route every client reads
+    assert json.loads(status_response.body)["candidate"]["refusal"]["code"] == "UPDATE_WORK_ROOT_UNDECIDED"
+
+    chosen = scene.tmp / "chosen"
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(chosen))
+    _apply({"strategy": "prepare"})
+    row = _answered()
+    assert row["state"] == "ready" and pathlib.Path(row["path"]).is_relative_to(chosen.resolve())
+    assert "refusal" not in heard[-1] and not historical.exists() and not configured.exists()
+
+
+def test_an_undecided_work_root_leaves_the_ready_candidate_current_and_activatable(scene, monkeypatch):
+    from ouroboros.gateway import update_activation
+
+    monkeypatch.setattr(update_prepare, "_last_refusal", {})  # this test's own panel memory
+    _apply({"strategy": "prepare"})
+    ready = _answered()
+    assert ready["state"] == "ready"
+    _undecided_work_root(scene, monkeypatch)
+
+    status, _body, _request = _apply({"strategy": "prepare"})
+
+    assert status == 202 and _answered()["candidate_id"] == ready["candidate_id"]
+    view = update_activation.candidate_view()
+    assert (view["state"], view["actions"]) == ("ready", ["activate", "discard_candidate"])
+    assert view.get("refusal", {}).get("code") == "UPDATE_WORK_ROOT_UNDECIDED", view
+    assert [row["candidate_id"] for row in update_prepare._rows()] == [ready["candidate_id"]], "no copy was started"
+    status, body, request = _apply({"strategy": "activate", "candidate_id": ready["candidate_id"]})
+    assert (status, body["restarting"], request.restarts) == (200, True, [True])
+
+
+@pytest.mark.parametrize("prior", ["none", "ready"])
+def test_an_unexpected_failure_before_any_copy_stays_visible_with_its_traceback(scene, monkeypatch, prior):
+    """Any other exception used to reach only ``log.warning``: the panel went back to Prepare as if nothing happened,
+    and a qualification that kept no server log kept nothing. Its words stay on the status, its traceback in the
+    supervisor's log, a prior candidate stays what it was, and the next attempt starts clean."""
+    from ouroboros.gateway import update_activation
+
+    monkeypatch.setattr(update_prepare, "_last_refusal", {})  # this test's own panel memory
+    held = None
+    if prior == "ready":
+        _apply({"strategy": "prepare"})
+        held = _answered()
+        assert held["state"] == "ready"
+    resolve = update_prepare.resolve_target
+
+    def broken(**_kw):
+        raise ValueError("a failure this test makes")
+
+    monkeypatch.setattr(update_prepare, "resolve_target", broken)
+    status, _body, _request = _apply({"strategy": "prepare"})
+
+    live = _answered()
+    assert status == 202 and not update_prepare._running.locked()
+    assert (live or {}).get("candidate_id") == (held or {}).get("candidate_id")
+    view = update_activation.candidate_view()
+    assert view["actions"] == (["activate", "discard_candidate"] if held else ["prepare"])
+    assert view.get("refusal", {}).get("code") == "UPDATE_PREPARE_CRASHED", view
+    assert "ValueError: a failure this test makes" in view["refusal"]["text"]
+    [event] = _crash_events(scene)
+    assert event["error"] == "ValueError: a failure this test makes" and "in broken" in event["traceback"]
+    monkeypatch.setattr(update_prepare, "resolve_target", resolve)
+    _apply({"strategy": "prepare"})
+    assert _answered()["state"] == "ready" and "refusal" not in update_activation.candidate_view()

@@ -8,7 +8,7 @@ import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { downloadViaHostBridge } from './ui_helpers.js';
 import { activationAttemptView, candidateDialog, candidateName, candidateVerdict, candidateWarning, paintCandidateFacts,
-    paintVerdictActions, prepareHint } from './update_candidate.js';
+    paintVerdictActions, prepareHint, withLastPreparation } from './update_candidate.js';
 
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
@@ -251,25 +251,27 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
     // The update prepared beside the running app, and a start that failed, outrank the channel's news.
     const prepared = candidateVerdict(data, base);
     if (prepared) return prepared;
+    // After a 202, how that preparation ended stays in whatever the channel says next, with that state's own action.
+    const said = (verdict) => withLastPreparation(data, verdict);
     const requiresCheck = !data.from_cache && Array.isArray(data.warnings) && data.warnings.includes('official_status_requires_check');
     if (requiresCheck && !data.checked_at) {
-        return {
+        return said({
             ...base,
             state: 'unchecked', tone: 'neutral',
             headline: 'Official update status has not been checked yet.',
             hint: '',
             action: { id: 'check', label: 'Check for updates' },
-        };
+        });
     }
     if (data.check_ok === false) {
-        return {
+        return said({
             ...base,
             state: 'check_failed', tone: 'error',
             headline: 'Could not check the official update channel.',
             hint: warnings.length ? warnings.join(' · ') : 'Try again when the network is available.',
             warnings: [],
             action: { id: 'check', label: 'Check for updates' },
-        };
+        });
     }
     const currentVersion = data.current_version || 'unknown';
     const currentSha = data.current_short_sha || '?';
@@ -281,41 +283,41 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
         if (data.candidate && typeof data.candidate === 'object') {
             // Prepared in its own copy with the local work carried: nothing changes until Restart to update.
             const offered = Array.isArray(data.candidate.actions) && data.candidate.actions.includes('prepare');
-            return {
+            return {  // prepareHint already leads with how the last preparation ended
                 ...base, state: 'available', tone: 'ok',
                 headline: `Update available: ${currentVersion} (${currentSha}) -> ${latestVersion} (${latestSha})`,
                 hint: prepareHint(data),
                 action: offered ? { id: 'prepare', label: 'Prepare update' } : { id: 'check', label: 'Check again' },
             };
         }
-        return {
+        return said({
             ...base,
             state: unsafe ? 'available_unsafe' : 'available',
             tone: unsafe ? 'warn' : 'ok',
             headline: `Update available: ${currentVersion} (${currentSha}) -> ${latestVersion} (${latestSha})`,
             hint: unsafe ? unsafeUpdateHint(data) : '',
             action: { id: 'update', label: `Update to ${latestVersion}` },
-        };
+        });
     }
     // "Up to date" is only claimed over an actual check result: a fresh
     // check_ok, or a cache-carried timestamp of the last real check.
     if (data.check_ok === true || data.checked_at) {
-        return {
+        return said({
             ...base,
             state: 'current', tone: 'ok',
             headline: `Ouroboros is up to date at ${currentVersion} (${currentSha}).`,
             hint: '',
             action: { id: 'check', label: 'Check again' },
-        };
+        });
     }
-    return {
+    return said({
         ...base,
         state: 'unknown', tone: 'neutral',
         headline: 'Update status is unknown.',
         hint: warnings.length ? warnings.join(' · ') : 'Run a check to get the official status.',
         warnings: [],
         action: { id: 'check', label: 'Check for updates' },
-    };
+    });
 }
 
 // --- The update description -------------------------------------------------

@@ -53,9 +53,11 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -81,7 +83,7 @@ _CARRIED_LIMIT = 200  # paths kept per carried layer; the counts stay exact
 _running = threading.Lock()  # one preparation or adaptation step at a time in this process
 _lifecycle = threading.RLock()  # record transitions; held briefly, never across merges or checks
 _working: set = set()  # candidates a step of this process works in: their checkout outlives the step
-_last_refusal: Dict[str, Any] = {}  # this process's latest refusal: it left no live candidate to say it
+_last_refusal: Dict[str, Any] = {}  # how this process's latest attempt ended without a candidate of its own
 
 
 def lifecycle() -> "threading.RLock":
@@ -394,10 +396,11 @@ def _worker() -> Dict[str, Any]:
     return {"pid": os.getpid(), "birth": process_start_time(os.getpid()), "proof": owner_proof()}
 
 
-def _provision(serving: pathlib.Path, target: Dict[str, str], snap: Dict[str, Any]) -> Dict[str, Any]:
+def _provision(serving: pathlib.Path, target: Dict[str, str], snap: Dict[str, Any],
+               root: pathlib.Path) -> Dict[str, Any]:
     from supervisor.update_native import _tree_version
 
-    root, data_root = _registry()._resolve_root(), _registry()._data_dir(None)
+    data_root = _registry()._data_dir(None)
     sha = target["target_sha"]
     # Both versions as pinned now: a channel that moves on later never renames what was prepared.
     target = {**target, "version": _tree_version(serving, sha)}
@@ -418,7 +421,6 @@ def _provision(serving: pathlib.Path, target: Dict[str, str], snap: Dict[str, An
         "base": fingerprint(snap), "base_version": _tree_version(serving, snap["files_tree"]),
         "refs": f"{REF_PREFIX}{candidate_id}/", "ready": True, "worker": _worker(),
     }
-    root.mkdir(parents=True, exist_ok=True)
     recorded = False
     try:
         with _registry()._record_lock(path, None, op="provision_update_candidate", task_id=candidate_id):
@@ -530,15 +532,26 @@ def prepare(*, fetch: bool = True, without_local_changes: bool = False, checks=N
 
     Returns the record. ``checks(row)`` (the workspace checks owner, injectable) returns ``{"ok": bool, ...}`` over
     the final composition. A refusal before provisioning raises ``PrepareRefused`` and leaves any previous candidate
-    as it was; so does a copy whose checkout could not be made, discarded at once. ``expected``: the candidate this
-    preparation replaces (``_expect_live``). ``admitted``: the caller already holds this process's preparation slot
-    (``admit``), which this call releases.
+    as it was; so does a copy whose checkout could not be made or that its admission refused, discarded at once. Each
+    such end is said (``_last_refusal``) before the slot frees. ``expected``: the candidate this preparation replaces
+    (``_expect_live``). ``admitted``: the caller already holds this process's preparation slot (``admit``), which this
+    call releases.
     """
     if not admitted and not _running.acquire(blocking=False):
         raise PrepareRefused("UPDATE_PREPARE_RUNNING", "an update is already being prepared")
     try:
         _last_refusal.clear()
         return _prepare(fetch=fetch, without_local_changes=without_local_changes, checks=checks, expected=expected)
+    except Exception as exc:  # said before the slot frees: a late end never overwrites the next attempt's
+        ended = exc
+        if not isinstance(exc, PrepareRefused):  # untyped: the same panel fact, its traceback in the data root's log
+            said = f"{type(exc).__name__}: {exc}"
+            _event("update_prepare_crashed", error=said, traceback=traceback.format_exc()[-8000:])
+            ended = PrepareRefused("UPDATE_PREPARE_CRASHED", f"it stopped on an unexpected error ({said}); look for "
+                                   "update_prepare_crashed in logs/supervisor.jsonl, then prepare again")
+        _last_refusal.update(code=ended.code, text=ended.text, at=utc_now_iso(), **{key: value for key, value in (
+            ended.facts or {}).items() if key in ("refusals", "target_sha", "target_ref")})
+        raise
     finally:
         _running.release()
 
@@ -571,15 +584,9 @@ def _expect_live(expected: str, *, besides: str = "") -> None:
                              state=str((newest or {}).get("state") or ""))
 
 
-def note_refusal(exc: PrepareRefused) -> None:
-    """Keep a refusal, which left no live candidate of its own, for the panel (this process only)."""
-    _last_refusal.clear()
-    _last_refusal.update(code=exc.code, text=exc.text, at=utc_now_iso(), **{
-        key: value for key, value in (exc.facts or {}).items() if key in ("refusals", "target_sha", "target_ref")})
-
-
 def _prepare(*, fetch: bool, without_local_changes: bool, checks, expected: Optional[str] = None) -> Dict[str, Any]:
     from ouroboros import body_adoption
+    from ouroboros.launch_roots import WorkRootUnavailable
     from supervisor import git_ops as g
     from supervisor.update_merge import active_update_tx
 
@@ -589,7 +596,7 @@ def _prepare(*, fetch: bool, without_local_changes: bool, checks, expected: Opti
             _expect_live(expected)  # before any copy exists; the admission below asks again
     if active_update_tx():
         raise PrepareRefused("UPDATE_ACTIVE", "a legacy managed update owns the checkout; let it settle first")
-    if body_adoption.read(g.DRIVE_ROOT).get("phase") in ("authorized", "armed", "switching", "switched", "stuck"):
+    if body_adoption.read(g.DRIVE_ROOT).get("phase") in body_adoption._PENDING:
         raise PrepareRefused("UPDATE_ACTIVATION_PENDING", "an activation is still in progress")
     target = resolve_target(fetch=fetch)
     head = _out(serving, "rev-parse", "--verify", "HEAD^{commit}")
@@ -605,16 +612,19 @@ def _prepare(*, fetch: bool, without_local_changes: bool, checks, expected: Opti
     if snap["refusals"]:
         raise PrepareRefused("UPDATE_LOCAL_STATE_UNSUPPORTED", "local work cannot be carried as it is: "
                              + "; ".join(snap["refusals"]), refusals=snap["refusals"])
-    shortage = _space(serving, _registry()._resolve_root(), target["target_sha"], snap["untracked_bytes"])
+    try:
+        root = _registry()._resolve_root()
+    except WorkRootUnavailable as exc:  # undecided on purpose: its sentence names the setting that decides
+        raise PrepareRefused("UPDATE_WORK_ROOT_UNDECIDED", str(exc)) from exc
+    shortage = _space(serving, root, target["target_sha"], snap["untracked_bytes"])
     if shortage:
         raise PrepareRefused("UPDATE_SPACE", shortage)
-    row = _provision(serving, target, snap)
+    row = _provision(serving, target, snap, root)  # ``_space`` made the root
     try:
         with _lifecycle:
             _working.add(row["candidate_id"])
             try:  # an admission that does not complete discards this copy at once: the live candidate stays current
-                if body_adoption.read(g.DRIVE_ROOT).get("phase") in ("authorized", "armed", "switching", "switched",
-                                                                      "stuck"):
+                if body_adoption.read(g.DRIVE_ROOT).get("phase") in body_adoption._PENDING:
                     raise PrepareRefused("UPDATE_ACTIVATION_PENDING", "an activation started meanwhile")
                 if expected is not None:
                     _expect_live(expected, besides=row["candidate_id"])  # the admission's own answer
@@ -628,10 +638,6 @@ def _prepare(*, fetch: bool, without_local_changes: bool, checks, expected: Opti
                 raise
             _forget_activation()  # this admitted attempt replaces the retained outcome of the last one
         return _layers_and_advance(serving, row, snap, without_local_changes, checks)
-    except PrepareRefused as exc:
-        if exc.code == "UPDATE_CANDIDATE_CHANGED":
-            raise  # a stale request: its refusal is the answer, and its copy is already settled
-        return _close_failed(row, f"{exc.code}: {exc.text}")
     finally:
         with _lifecycle:
             _working.discard(row["candidate_id"])
@@ -788,8 +794,6 @@ def serving_environment() -> Tuple[str, pathlib.Path]:
     and for that venv once it serves; under a launcher only one that hands itself over to new packages
     (``launcher_refusal``). ``("", prefix)`` where no such seam exists (``_no_seam``).
     """
-    import sys
-
     from ouroboros.platform_layer import pip_install_target_args
 
     # The one owner of where installs go decides which seam this interpreter has.
@@ -868,8 +872,6 @@ def _install_lock(target: pathlib.Path, lock: pathlib.Path, kind: str = "user_si
     """The lock installed into ``target`` alone, bounded, through the shell's tracked process owner (``run_tracked``):
     ``pip install --user`` with that user base (by ``python``, a new app's own interpreter, when one comes), or the
     cloned venv's own interpreter installing into itself."""
-    import sys
-
     from supervisor.update_checks import run_tracked
 
     env = _pip_env()
@@ -898,8 +900,6 @@ def _create_private(generation: pathlib.Path) -> str:
     """A bare interpreter's first private environment: a venv of exactly this interpreter with its own pip
     (``runtime_venv.create_with_pip``). Where it cannot make one the preparation stops typed; the interpreter's own
     packages are never the fallback. Returns how the venv got its pip."""
-    import sys
-
     from ouroboros.runtime_venv import RuntimeVenvRefused, create_with_pip
     from supervisor.update_checks import run_tracked
 
@@ -935,8 +935,6 @@ def prepare_generation_environment(row: Dict[str, Any], composition: str,
     ``links`` keeps what ``_restore_venv`` writes back, ``staged_python`` what it ran), and one of
     the owner's own Python keeps it (``venv_python``).
     """
-    import sys
-
     from ouroboros.body_adoption import dependency_lock
     from ouroboros.runtime_venv import base_interpreter
 
@@ -1557,17 +1555,17 @@ def projection(latest_sha: str = "", data_dir: Optional[Any] = None) -> Dict[str
     retained = read_json_dict(_registry()._data_dir(data_dir) / ACTIVATION_REL) or {}
     failure = retained.get("start_failure")  # this checkout did not import at its last start
     last = {key: value for key, value in retained.items() if key not in KEEP_FACTS}  # until the next admission
+    running = _running.locked()
     recovery = {**({"start_failure": failure} if isinstance(failure, dict) else {}),
-                **({"last_activation": last} if last.get("outcome") else {})}
+                **({"last_activation": last} if last.get("outcome") else {}),
+                **({"refusal": dict(_last_refusal)} if _last_refusal and not running else {})}  # also beside a live one
     try:
         row = current(data_dir)
     except Exception as exc:
         return {"state": "unknown", "error": f"{type(exc).__name__}: {exc}", **recovery}
     if row is None:
-        running = _running.locked()
         need = {} if running else _app_need_now()
         return {"state": "preparing" if running else "none",
-                **({"refusal": dict(_last_refusal)} if _last_refusal and not running else {}),
                 **({"app_needed": need} if need else {}),
                 "actions": [] if running else ["prepare"], **recovery}
     target = dict(row.get("target") or {})

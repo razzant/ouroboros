@@ -248,17 +248,27 @@ export function candidateNotice(status = {}) {
     const own = String(candidate.reason || '').startsWith('activation:')
         ? { ...plain(candidate.activation), candidate_id: candidate.candidate_id, at: candidate.updated_at } : {};
     const settled = last.outcome ? last : own;
+    let concluded = null;
     if (settled.outcome) {
         const outcome = OUTCOMES[activationOutcomeKey(settled.outcome)];
-        return { id: `activation:${settled.candidate_id || ''}:${settled.outcome}`, pill: outcome.pill, tone: outcome.tone,
-            title: outcome.headline, when: String(settled.at || ''), terminal: true };
-    }
-    if (state === 'failed') {
-        return { id: `candidate:${candidate.candidate_id || ''}:failed`, pill: 'Update not prepared', tone: 'error',
+        concluded = { id: `activation:${settled.candidate_id || ''}:${settled.outcome}`, pill: outcome.pill,
+            tone: outcome.tone, title: outcome.headline, when: String(settled.at || ''), terminal: true };
+    } else if (state === 'failed') {
+        concluded = { id: `candidate:${candidate.candidate_id || ''}:failed`, pill: 'Update not prepared', tone: 'error',
             title: 'The update could not be prepared. Nothing was changed.', when: String(candidate.updated_at || ''),
             terminal: true };
     }
-    return null;
+    // An admitted preparation that ended without a candidate of its own (`candidate.refusal`, after its 202; a refusal
+    // before admission stays with its request): beside none, or a candidate that keeps its state, the newer one shows.
+    const ended = plain(candidate.refusal);
+    const time = (notice) => Date.parse(notice?.when || '') || 0;
+    if (ended.text && (!concluded || time({ when: ended.at }) > time(concluded))) {
+        const how = ended.code === 'UPDATE_PREPARE_CRASHED' ? 'failed' : 'was refused';
+        return { id: `preparation:${ended.at || ''}:${ended.code || ''}`, pill: 'Update not prepared', tone: 'error',
+            title: `The last preparation ${how}: ${String(ended.text).replace(/[.\s]*$/, '.')}`,
+            when: String(ended.at || ''), terminal: true };
+    }
+    return concluded;
 }
 
 /**

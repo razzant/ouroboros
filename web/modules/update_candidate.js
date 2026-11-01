@@ -427,14 +427,29 @@ function carriedText(data, candidate) {
     return '';
 }
 
+/** How the last preparation ended without a candidate of its own (`candidate.refusal`, `update_prepare.prepare`). */
+function lastPreparation(candidate) {
+    const ended = object(candidate.refusal);
+    const text = String(ended?.text || '');
+    if (!text) return '';
+    return `The last preparation ${ended.code === 'UPDATE_PREPARE_CRASHED' ? 'failed' : 'was refused'}: ${sentence(text)}`;
+}
+
+/** `verdict` with how the last preparation ended leading its hint, once, whatever else its state says and offers. */
+export function withLastPreparation(data, verdict) {
+    const ended = lastPreparation(object(data?.candidate) || {});
+    if (!ended || String(verdict.hint || '').includes(ended)) return verdict;
+    return { ...verdict, hint: [ended, verdict.hint].filter(Boolean).join(' ') };
+}
+
 /** The available update's hint while preparation is the next step (no candidate yet). */
 export function prepareHint(data = {}) {
     const candidate = object(data.candidate) || {};
     const latest = data.latest_version || short(data.latest_sha) || 'the update';
     const files = Number(data.dirty_count) || 0;
     const commits = data.local_changes === 'present';
-    const refusal = String(object(candidate.refusal)?.text || '');
-    const parts = refusal ? [`The last preparation was refused: ${sentence(refusal)}`] : [];
+    const ended = lastPreparation(candidate);
+    const parts = ended ? [ended] : [];
     if (data.local_changes === 'unknown') parts.push('Could not compare this checkout with the official line.');
     if (commits && files) {
         parts.push(`Your local commits and ${files} uncommitted file(s) will be carried into ${latest}. `
@@ -479,7 +494,9 @@ export function candidateVerdict(data = {}, base = {}) {
     // The facts: what its activation recorded first, then the candidate's, then this checkout's last failed start.
     const factsWith = (rows = []) => [...rows.filter(([, value]) => value).map(([label, value]) => ({ label,
         value: String(value) })), ...own, ...(failure ? startFailureFacts(failure, { head: own.length > 0 }) : [])];
-    const make = (fields) => ({ ...base, facts: factsWith(), factsOpen: false, secondary: [], action: null, ...fields });
+    // A candidate that stays live, or none with an app needed, still says how the last preparation ended.
+    const make = (fields) => withLastPreparation(data, { ...base, facts: factsWith(), factsOpen: false, secondary: [],
+        action: null, ...fields });
     const listed = (...ids) => ids.filter((id) => offered.has(id)).map((id) => ({
         prepare: act('prepare', 'Prepare again'),
         apply_without_local_changes: act('apply_without_local_changes', 'Prepare without local changes'),

@@ -68,9 +68,9 @@ def _start_preparation(without_local_changes: bool, candidate_id: str = "") -> J
         try:
             update_prepare.prepare(fetch=True, without_local_changes=without_local_changes, checks=workspace_checks,
                                    expected=expected, admitted=True)
-        except update_prepare.PrepareRefused as exc:
-            update_prepare.note_refusal(exc)
-        except Exception:
+        except update_prepare.PrepareRefused:
+            pass  # ``prepare`` said how it ended (``candidate.refusal``) before it freed the slot
+        except Exception:  # said the same way, with its traceback in the data root's log
             log.warning("update preparation crashed", exc_info=True)
         finally:
             update_progress.notify_changed()
