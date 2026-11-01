@@ -42,9 +42,7 @@ from ouroboros.context import build_llm_messages
 from ouroboros.loop import carried_inline_round_cap, run_llm_loop
 from ouroboros.observability import task_timing_scope
 from ouroboros.process_custody import current_custody_session_id
-from ouroboros.config import EFFORT_SCALE, resolve_effort  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
 from ouroboros.agent_startup_checks import (
-    persist_early_origin_stub as _persist_early_origin_stub_impl,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     validate_task_authority_sources,
     verify_restart,
     verify_system_state,
@@ -60,14 +58,9 @@ from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.outcomes import infra_failed_axes
 from ouroboros import body_candidate, route_choice, subagent_bootstrap, subagent_runtime
 from ouroboros.subagents import (
-    CapabilityDelta,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
-    SubagentExecutorResolution,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
-    SUBAGENT_RESOLUTION_FIELDS,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     SubagentDispatch,
     effort_result_fields,
-    capability_delta_disclosures,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     envelope_from_task,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
-    resolve_subagent_dispatch,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
 )
 from ouroboros.settings_setup_contract import resolve_total_budget_usd
 from ouroboros.subagent_messages import initiator_meta, subagent_message_meta
@@ -500,6 +493,7 @@ class OuroborosAgent:
         atomic record instead of being minted by whichever surface writes next.
         """
         try:
+            from ouroboros.project_admission import carried_basis
             from ouroboros.task_status import execution_owner_record
 
             canonical = pathlib.Path(task.get("budget_drive_root") or getattr(self.env, "budget_drive_root", None)
@@ -543,6 +537,8 @@ class OuroborosAgent:
                 # api, ...): ``dialogue_provenance.run_origin`` reads it from this record.
                 source=task.get("source"),
                 project_id=str(task.get("project_id") or ""),
+                # A direct turn has no queue row: this record is its only durable basis carrier (#2547).
+                **carried_basis(task),
                 role=task.get("role"),
                 description=task.get("description"),
                 objective=task.get("objective") or task.get("description"),
@@ -766,12 +762,14 @@ class OuroborosAgent:
         # to the PROJECT FOLDER (project_room_lens_dir keys on this metadata; the
         # robot-room incident: "." resolved to the system repo and the agent
         # narrated the wrong tree). A set-but-broken working_dir rides as a LOUD
-        # note instead (never a silent repo fallback). Kept resources win (room_lens_applies).
+        # note instead (never a silent repo fallback). Kept resources win (room_lens_applies),
+        # and so does the folder the turn's carried basis was admitted with (#2547).
         from ouroboros.workspace_admission import room_chat_lens_dir, room_lens_applies
 
         if _resolved_project_id and room_lens_applies(task):
             try:
-                _room_dir, _room_note = room_chat_lens_dir(self.env.drive_root, _resolved_project_id)
+                _room_dir, _room_note = room_chat_lens_dir(
+                    self.env.drive_root, _resolved_project_id, basis=task.get("_project_admission"))
                 if _room_dir:
                     task_metadata["_project_room_dir"] = _room_dir
                 if _room_note:

@@ -7,6 +7,7 @@ occupancy never invalidates admission; each pass parses registry and bindings on
 """
 from __future__ import annotations
 
+import copy
 import json
 from contextlib import contextmanager
 from typing import Any, Optional
@@ -27,6 +28,32 @@ def host_unscoped(task: dict) -> bool:
     """Fresh host admission proved no Project scope; restore never backfills it."""
     return (task.get("_project_scope_none") is True
             and not task.get("project_id") and "_project_admission" not in task)
+
+
+def carried_basis(source: dict) -> dict:
+    """The Project basis a row or result carries, copied unchanged (#2547).
+
+    The one definition every writer of a task result and every rebuild of a
+    queue row (snapshot, direct root, restored locator) uses. A missing basis
+    stays missing, so restore still holds the row; nothing is recaptured.
+    Host-attested absence stays a queue-row fact: a Main row rebuilt from a
+    result takes no Project hold that it would release.
+    """
+    return {"_project_admission": copy.deepcopy(source["_project_admission"])} if "_project_admission" in source else {}
+
+
+def admitted_folder(basis: Any, project_id: str) -> Optional[str]:
+    """The room folder a carried basis recorded, ``""`` for a room with none (#2547).
+
+    Work admitted on this basis keeps that resource across stops and pooled
+    continuations: a later rebind, or a sibling's first folder for the room, never
+    moves it. ``None`` when nothing usable is carried (no basis, a legacy stamp,
+    another room), and the caller reads the room's current row as before.
+    """
+    if (not isinstance(basis, dict) or basis.get("legacy_basis") or basis.get("project_id") != project_id
+            or not isinstance(basis.get("project"), dict)):
+        return None
+    return str(basis["project"].get("working_dir") or "").strip()
 
 
 def hold_unreadable_result(task: dict) -> bool:
@@ -267,6 +294,21 @@ def project_admission_view(drive_root: Any, project_id: str, *,
     if project is None and not allow_unregistered:
         raise ProjectAdmissionError("project_routing_fence_changed", "The registered Project is missing.")
     return {**project_admission_basis(project_id, project, frozen=frozen), "registry_present": present}
+
+
+def direct_turn_basis(drive_root: Any, project_id: str) -> dict:
+    """The room row a direct turn's binding consumes, frozen as queued work keeps it (#2547).
+
+    A direct turn has no queue append, so its binding is the admission: the caller
+    binds under this basis. An absent room is registered first, as binding always did.
+    """
+    from ouroboros.projects_registry import create_project
+
+    basis = project_admission_view(drive_root, project_id, allow_unregistered=True, frozen=True)
+    if basis["project"] is None:
+        basis = project_admission_basis(
+            project_id, create_project(drive_root, project_id, admission_basis=basis), frozen=True)
+    return basis
 
 
 def _folder_owners(rows: Any, canonical: str) -> list:

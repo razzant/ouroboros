@@ -118,7 +118,7 @@ def test_pre_task_budget_refusal_remains_an_exact_failed_operation(tmp_path, mon
         "chat_id": CHAT, "client_message_id": MSG, "text": "do work",
     }).status_code == 202
     ref = bridge.get_updates(0, timeout=0)[0]["message"]["accepted_source_ref"]
-    worker_chat_lane._handle_chat_direct_locked(CHAT, "do work", task_metadata={"origin_message_ref": ref, "_host_operation": True})
+    worker_chat_lane._run_chat_task(None, CHAT, "do work", task_metadata={"origin_message_ref": ref, "_host_operation": True})
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
     assert result["status"] == "failed" and "Budget exhausted" in result["text"]
 
@@ -133,7 +133,7 @@ def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monke
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **kw: sent.append((a, kw)))
-    worker_chat_lane._handle_chat_direct_locked(chat_id, "hello", task_metadata={
+    worker_chat_lane._run_chat_task(None, chat_id, "hello", task_metadata={
         "origin_message_ref": build_owner_message_ref(chat_id=chat_id, client_message_id="ordinary", ts="now", text="hello"),
     })
     receipt = next(row for row in frames if row.get("type") == "typing")

@@ -270,15 +270,19 @@ def _project_room_fact(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         _room_pid = str(task.get("project_id") or "").strip()
         if _room_pid and not str(task.get("workspace_root") or "").strip():
             from ouroboros.config import DATA_DIR as _DATA_DIR
+            from ouroboros.project_admission import admitted_folder
             from ouroboros.projects_registry import get_project as _get_project
             from ouroboros.workspace_admission import room_chat_lens_dir as _room_lens, room_lens_applies
 
-            _room = _get_project(_DATA_DIR, _room_pid) or {}
-            _room_wd = str(_room.get("working_dir") or "").strip()
+            # A lens turn states the folder it was admitted with; folderless work (or none
+            # carried) states the room's current folder, which only promoted tasks use.
+            _basis = task.get("_project_admission") if room_lens_applies(task) else None
+            _room_wd = (admitted_folder(_basis, _room_pid)
+                        or str((_get_project(_DATA_DIR, _room_pid) or {}).get("working_dir") or "").strip())
             if _room_wd:
                 # Same resolver the agent uses for the tool lens, so the stated rule
                 # and the actual tool surface cannot diverge (the robot incident).
-                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid)
+                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid, basis=_basis)
                 _lens_active = room_lens_applies(task) and bool(_lens_dir)
                 fact = {
                     "project_id": _room_pid,
