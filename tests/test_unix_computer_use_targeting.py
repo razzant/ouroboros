@@ -54,7 +54,7 @@ def app_dict(triple) -> dict:
 
 
 def helper_op(argv: list[str]) -> list[str]:
-    """The native helper's op and args from its argv (``python -I macos_native.py <op> ...``)."""
+    """The native helper's op and args from its argv (``python -I -B macos_native.py <op> ...``)."""
     idx = next(i for i, part in enumerate(argv) if str(part).endswith("macos_native.py"))
     return [str(a) for a in argv[idx + 1:]]
 
@@ -363,6 +363,11 @@ def test_capabilities_report_real_grants_and_targeting(tmp_path, monkeypatch):
     assert caps["permission_state_verified"] is True
     assert caps["permissions"] == {"accessibility": "trusted", "screen_recording": "granted", "post_events": "granted", "listen_events": "denied"}
     assert caps["frontmost"]["app"] == "Safari" and caps["targeting"]["app"] == "supported"
+    helper_calls = [argv for argv in state["calls"] if any(p.endswith("macos_native.py") for p in argv)]
+    assert helper_calls
+    for argv in helper_calls:
+        script_index = next(i for i, p in enumerate(argv) if p.endswith("macos_native.py"))
+        assert argv[1:script_index] == ["-I", "-B"], "isolated helpers must not modify their signed interpreter bundle"
     module, api, state = mac(tmp_path, monkeypatch, helper=lambda args, st: {"ok": False, "error": "no answer"})
     caps = receipt(api.tools["capabilities"]())
     assert caps["permission_state_verified"] is False and "error" in caps["permissions"] and caps["targeting"]["app"] == "unavailable"

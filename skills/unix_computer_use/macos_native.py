@@ -1,6 +1,6 @@
 """macOS native facts for unix_computer_use, run as a short-lived helper process.
 
-``python -I macos_native.py <op> [args...]`` prints one JSON object. The plugin starts it
+``python -I -B macos_native.py <op> [args...]`` prints one JSON object. The plugin starts it
 through its ordinary process boundary (``_run``) so that a stuck or crashing native call
 can be killed and can never take the host server down, and so that every answer is fresh
 (AppKit caches such as ``NSWorkspace.frontmostApplication`` refresh only on a main run loop,

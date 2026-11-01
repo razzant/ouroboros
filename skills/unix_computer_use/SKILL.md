@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.6.0
+version: 0.6.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"

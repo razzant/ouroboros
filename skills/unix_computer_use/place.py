@@ -167,7 +167,8 @@ class PlaceMixin:
         A separate short-lived process so that a stuck or crashing native call can be killed
         and never takes the host down, and so that every answer is read anew (AppKit caches
         refresh only on a main run loop the server does not turn)."""
-        cmd = [self._helper_python(), "-I", str(pathlib.Path(__file__).with_name("macos_native.py")), op, *[str(a) for a in args]]
+        # -I ignores PYTHONDONTWRITEBYTECODE; keep the signed interpreter bundle read-only.
+        cmd = [self._helper_python(), "-I", "-B", str(pathlib.Path(__file__).with_name("macos_native.py")), op, *[str(a) for a in args]]
         rc, out, err = self._try(cmd, timeout=timeout)
         for line in reversed(out.strip().splitlines()):
             if line.startswith("{"):
