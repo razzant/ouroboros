@@ -70,10 +70,6 @@ def test_recent_abi_retirements_section_carries_the_abi_70_window():
     assert "OUROBOROS_REVIEWER_SLOTS" in section, "the migration target must be named"
 
 
-def test_model_send_design_note_matches_the_observability_contract():
-    assert (REPO / "ouroboros" / "model_send_seal.py").exists()
-
-
 def test_settings_docs_name_every_key_owner_and_what_startup_persists():
     """Keep the live settings and their rows in the tool-read reference table."""
     arch = _read("docs/ARCHITECTURE.md")

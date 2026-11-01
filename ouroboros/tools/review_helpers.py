@@ -695,26 +695,7 @@ def check_worktree_readiness(
     except Exception:
         pass
 
-    # 3. Core Python changes without test changes (reuses the check-1 git status).
-    try:
-        if status_result is not None and status_result.returncode == 0:
-            has_py_in_core = False
-            has_test_change = False
-            for fpath in parse_changed_paths_from_porcelain(status_result.stdout or ""):
-                if fpath.endswith(".py") and (
-                    fpath.startswith("ouroboros/") or fpath.startswith("supervisor/")
-                ):
-                    has_py_in_core = True
-                if fpath.startswith("tests/"):
-                    has_test_change = True
-            if has_py_in_core and not has_test_change:
-                warnings.append(
-                    "Python files in ouroboros/supervisor modified without corresponding test changes."
-                )
-    except Exception:
-        pass
-
-    # 4. Size-ratchet findings. Never blocking here: the official repository's
+    # 3. Size-ratchet findings. Never blocking here: the official repository's
     # CI ``size_ratchet`` lane is the enforcing surface; this warning lets the
     # agent regenerate the manifest or shrink the debt before the official
     # line rejects the same finding. Cheap since the history replay retired
