@@ -9,7 +9,7 @@ It acts on two phases of ``handoff.json`` and nothing else:
 
 * ``armed`` — the old generation's readers were confirmed stopped. Re-verify
   (base, branch, candidate object, clean switch set, no Panic), then switch.
-* ``switching`` — an interrupted switch. Resume it by content.
+* ``switching`` — an interrupted switch. Resume it by content; after a Panic, hold it.
 
 A ``stuck`` transition refuses the boot (exit 3): a mixed tree is never imported.
 
@@ -100,8 +100,11 @@ class _Stuck(Exception):
     """The transition cannot continue without the owner; the tree is left as found."""
 
 
-class _Foreign(Exception):
-    """A switch path holds bytes that are neither the old nor the new side."""
+def _panic_hold(handoff, what, trigger="panic_stop", **facts):
+    """A recorded Panic forbids every automatic step from here: ``refused`` is kept, the transition held as found."""
+    if installation_panic(handoff.get("data_dir") or ""):
+        handoff["return"] = {"outcome": "refused", "trigger": trigger, "reasons": ["panic_stop"], "at": _now(), **facts}
+        raise _Stuck("%s and a Panic is recorded; nothing was returned" % what)
 
 
 def _now():
@@ -137,9 +140,8 @@ def record(helper_dir, handoff, phase, detail=""):
 
 
 def _git(root, *args, data=None, check=True, index=None):
-    env = dict(os.environ, GIT_LITERAL_PATHSPECS="1", GIT_OPTIONAL_LOCKS="0")
-    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
-        env.pop(key, None)
+    env = {key: value for key, value in os.environ.items() if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+    env.update(GIT_LITERAL_PATHSPECS="1", GIT_OPTIONAL_LOCKS="0")
     if index:
         env["GIT_INDEX_FILE"] = index  # a scratch index outside the work tree; the real one is never written
     proc = subprocess.run(["git", *args], cwd=root, env=env, input=data,
@@ -187,9 +189,7 @@ def _tracks_filemode(root):
 
 def _file_mode(mode, tracked):
     """A tree mode as a comparable on-disk kind: the executable bit only where it is tracked."""
-    if mode in ("100644", "100755"):
-        return mode if tracked else "file"
-    return mode
+    return mode if tracked or mode not in ("100644", "100755") else "file"
 
 
 def _file_target(row, side):
@@ -659,6 +659,9 @@ def _handover(handoff=None):
     A bare interpreter's private environment (``kind=private``) names the interpreter: the
     selected environment's own, or after a return the one the previous generation ran on.
     """
+    if installation_panic((handoff or {}).get("data_dir") or ""):  # no fresh process: the record stands for the owner
+        sys.stderr.write("[body_switch] a Panic is recorded: no fresh process takes this tree; the record stands\n")
+        sys.exit(STUCK_EXIT_CODE)
     for stream in (sys.stdout, sys.stderr):
         with contextlib.suppress(AttributeError, OSError, ValueError):
             stream.flush()
@@ -707,9 +710,8 @@ def _returned(root, helper_dir, handoff, trigger, files_at_start=None, reason=""
     """Record the decision ``returned`` and write the previous composition back (``_return_to_old``, ``reason``
     defaulting to ``trigger``); ``files_at_start`` (what was there before this process wrote) defaults to now."""
     handoff["return"] = {"outcome": "returned", "trigger": trigger, "reasons": [], "at": _now(), **facts}
-    if files_at_start is None:
-        files_at_start = _states(root, handoff["switch"], _tracks_filemode(root))
-    return _return_to_old(root, helper_dir, handoff, reason or trigger, files_at_start, phase="returned")
+    files = _states(root, handoff["switch"], _tracks_filemode(root)) if files_at_start is None else files_at_start
+    return _return_to_old(root, helper_dir, handoff, reason or trigger, files, phase="returned")
 
 
 def _path_identity(path):
@@ -1291,8 +1293,7 @@ def _update_entry(root, helper_dir, handoff):
     (``_app_not_exchanged``) is returned at the first entry, before anything records it.
     """
     if handoff.get("native") and _app_not_exchanged(handoff):
-        if installation_panic(handoff.get("data_dir") or ""):
-            raise _Stuck("the app installer stopped before its exchange and a Panic is recorded; nothing was returned")
+        _panic_hold(handoff, "the app installer stopped before its exchange", "app_not_exchanged")
         return _returned(root, helper_dir, handoff, "app_not_exchanged")
     entries = handoff.setdefault("entries", [])
     kind = _entry_kind()
@@ -1355,23 +1356,17 @@ def _switch(root, helper_dir, handoff):
             # go back together rather than leave a switched tree no start can finish (exit 3 at every start).
             # A refused rename is recorded as the system said it, never classified further: an error code alone
             # does not name what holds the directory.
-            decision = {"trigger": "environment_selection_failed", "detail": str(exc)[:2000], "at": _now(),
-                        **({"error": _os_error(exc)} if isinstance(exc, OSError) else {})}
-            if installation_panic(handoff.get("data_dir") or ""):
-                handoff["return"] = {"outcome": "refused", "reasons": ["panic_stop"], **decision}
-                raise _Stuck("the environment selection failed and a Panic is recorded; nothing was returned")
+            facts = {"detail": str(exc)[:2000], **({"error": _os_error(exc)} if isinstance(exc, OSError) else {})}
+            _panic_hold(handoff, "the environment selection failed", "environment_selection_failed", **facts)
             # Reaching "returned" proves the packages are back too (``_return_to_old``): the candidate may try again.
-            handoff["return"] = {"outcome": "returned", "reasons": [], "retry": True, **decision}
+            handoff["return"] = {"outcome": "returned", "trigger": "environment_selection_failed", "reasons": [],
+                                 "retry": True, "at": _now(), **facts}
             return _return_to_old(root, helper_dir, handoff, "environment_selection_failed", files, phase="returned")
     if handoff.get("kind") == "update" and handoff.get("probe_command"):
         failure = _probe(root, handoff)
         _fail_point("after_probe")
-        if failure and installation_panic(handoff.get("data_dir") or ""):
-            handoff["return"] = {"outcome": "refused", "trigger": "import_probe_failed", "reasons": ["panic_stop"],
-                                 "detail": failure[:2000], "at": _now()}
-            record(helper_dir, handoff, "switched", "import probe failed after a Panic: nothing automatic follows")
-            raise _Stuck("the new tree failed its import probe and a Panic is recorded; nothing was returned")
         if failure:
+            _panic_hold(handoff, "the new tree failed its import probe", "import_probe_failed", detail=failure[:2000])
             # Nothing of the new tree ran outside the scratch probe: positive evidence for this return.
             return _returned(root, helper_dir, handoff, "import_probe_failed", files, detail=failure[:2000])
     record(helper_dir, handoff, "switched", "files, index and branch are at the candidate")
@@ -1465,16 +1460,15 @@ def main(serving_root):
     with _locked(helper_dir):
         handoff = read_handoff(helper_dir)
         phase = handoff.get("phase")
-        if phase == "switched":  # another entry finished it while this one waited for the lock
-            handover = True
-        elif phase in ("armed", "switching"):
+        if phase in ("armed", "switching", "switched"):  # switched: another entry finished it while this one waited
             handover = _hook_switch(root, helper_dir, handoff, phase)
     if handover:
         _handover(handoff)
 
 
 def _hook_switch(root, helper_dir, handoff, phase):
-    """An entry's own switch of an armed or interrupted transition, under the lock; True: hand over."""
+    """An entry's own switch of an armed, interrupted or meanwhile finished transition, under the lock; True: hand over.
+    After a Panic an armed one is abandoned untouched, any other step held as found, and no fresh process started."""
     try:
         native = handoff.get("native")
         if phase == "armed":
@@ -1488,11 +1482,18 @@ def _hook_switch(root, helper_dir, handoff, phase):
                 record(helper_dir, handoff, "abandoned", reason)
                 _remove_pointer(root)
                 return False
+        else:
+            _panic_hold(handoff, "the %s transition was not continued" % phase)
+            if phase == "switched":
+                return True
         if native:  # the installer died mid-switch, before any app exchange: back by content
             return _returned(root, helper_dir, handoff, "native_switch_interrupted")
         handoff["attempts"] = int(handoff.get("attempts") or 0) + 1
         record(helper_dir, handoff, "switching", "attempt %d" % handoff["attempts"])
-        return _switch(root, helper_dir, handoff)
+        handover = _switch(root, helper_dir, handoff)
+        if handover and handoff.get("phase") == "switched":  # a Panic that arrived during the switch or probe
+            _panic_hold(handoff, "the switched tree was not handed over")
+        return handover
     except _Stuck as exc:
         record(helper_dir, handoff, "stuck", str(exc))
         _refuse_boot(root, helper_dir, "body adoption stopped: %s. Nothing further was changed" % exc)

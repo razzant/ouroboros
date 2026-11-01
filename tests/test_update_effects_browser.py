@@ -378,7 +378,7 @@ CHECK_SCENES = {
                "7.9.1 (bbbbbbbb) did not pass its checks. Nothing was changed.", "fail only with the update"),
     "prerequisite": ("failed", "checks_unverified", {
         "ok": False, "tier": "full", "file_count": 412, "budget_seconds": 1800, "failed": {}, "blocking": [],
-        "unverified": "a prerequisite of the checks is missing: Node.js for the full tier's 37 browser-module test "
+        "unverified": "a prerequisite of the checks is missing: Node.js for the 37 browser-module test "
                       "file(s) is absent: none is bundled and none is on PATH",
         "prerequisite": {"prerequisite": "node", "status": "absent"}},
         "7.9.1 (bbbbbbbb) could not be checked. Nothing was changed.", "until that changes"),

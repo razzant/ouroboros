@@ -49,6 +49,8 @@ _APPARATUS = frozenset({
     "ouroboros/test_environment.py", ".github/workflows/ci.yml",
     "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
     "ouroboros/process_overload.py", "ouroboros/test_parallelism.py",
+    # The Update's own verifier: its readiness checks, and the full receipt an adaptation settles on.
+    "supervisor/update_checks.py", "supervisor/update_adaptation.py",
 })
 # What switches, attests, boots and restores a body: a selected run cannot qualify
 # adopting a change to the machinery that adopts it. A minimum, not a risk classifier.
@@ -56,6 +58,9 @@ _CUTOVER = frozenset({
     "server.py", "launcher.py", "ouroboros/__init__.py", "ouroboros/body_switch.py",
     "ouroboros/body_adoption.py", "supervisor/update_recovery.py",
     "ouroboros/launcher_bootstrap.py", "supervisor/git_ops_reset.py", "supervisor/update_merge.py",
+    # The unified Update: its prepared generation, activation, the body's interpreter and the official app step.
+    "supervisor/update_prepare.py", "ouroboros/gateway/update_activation.py", "ouroboros/runtime_venv.py",
+    "supervisor/update_native.py", "ouroboros/native_package.py", "ouroboros/app_install.py",
 })
 
 

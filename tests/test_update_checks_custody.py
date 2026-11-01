@@ -19,7 +19,8 @@ import pytest
 
 from supervisor import update_checks
 from tests import test_update_checks
-from tests.test_update_checks import _outcome, _toy_workspace
+from tests.test_preflight_node import requires_node
+from tests.test_update_checks import TOY_FLOOR, _outcome, _toy_workspace
 
 harness = test_update_checks.harness  # the same recorded outcomes and stand-ins
 
@@ -68,6 +69,90 @@ def test_a_descendant_in_its_own_session_does_not_outlive_its_lane(tmp_path):
     finally:
         if pid and _ours(pid, marker):  # only the sleeper this test started
             os.kill(pid, signal.SIGKILL)
+
+
+@posix_only
+@requires_node
+def test_a_descendant_of_the_browser_suite_does_not_outlive_its_node_lane(tmp_path):
+    """The browser suite's lane is contained as the pytest lanes are: a browser test starts a Node sleeper in its own
+    session and returns; once ``run_tests`` returns, the lane ended green and complete and nothing it started lives."""
+    from ouroboros.preflight_node import resolve_node
+
+    marker = f"custody-node-sleeper-{uuid.uuid4().hex}"
+    pidfile = tmp_path / "sleeper.pid"
+    ws, commit = _toy_workspace(tmp_path, {"tests/test_ok.py": "def test_ok():\n    assert True\n",
+                                           "web/tests/leaves.test.js": (
+        "const test = require('node:test');\nconst { spawn } = require('node:child_process');\n"
+        "const fs = require('node:fs');\n\ntest('leaves a session leader', () => {\n"
+        f"    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {{}}, 120000)', {marker!r}],\n"
+        "                        { detached: true, stdio: 'ignore' });\n"
+        f"    fs.writeFileSync({str(pidfile)!r}, String(child.pid));\n    child.unref();\n}});\n")})
+    pid = 0
+    try:
+        run = update_checks.run_tests(ws, commit, ["tests/test_ok.py"], tmp_path / "scratch", _lane_env(tmp_path, ws),
+                                      deadline=time.monotonic() + 60, node=resolve_node())
+        pid = int(pidfile.read_text())
+        assert not _ours(pid, marker), f"the node lane's descendant {pid} outlived it"
+        assert run["complete"] and run["ok"] and [(lane["lane"], lane["returncode"]) for lane in run["lanes"]] == [
+            ("node", 0), ("parallel", 0), ("serial", 5)]
+    finally:
+        if pid and _ours(pid, marker):  # only the sleeper this test started
+            os.kill(pid, signal.SIGKILL)
+
+
+@posix_only
+def test_a_begun_stop_refuses_the_node_lane_before_it_starts_and_leaves_no_readiness(tmp_path, monkeypatch):
+    """Stand-ins only: a shell script for Node and the in-process stop facts, no real Panic. The Node answered its
+    prerequisite and W' is in place when a stop begins, Emergency Stop or this server's own. The tracked owner refuses
+    the node lane (125, ``none``) and the lanes after it, the stand-in never runs, and once the run's record is kept the
+    stop's typed refusal is the checks' only answer: no verdict, so no ``ready``. With admission open the same recorded
+    command does run it, so its absence is the refusal's doing."""
+    import json
+    import shlex
+
+    from ouroboros.tools import shell_process
+    from supervisor import update_prepare
+
+    ran, node = tmp_path / "node-ran", tmp_path / "stand-in" / "node"
+    node.parent.mkdir()
+    node.write_text(f'#!/bin/sh\nif [ "$1" = --version ]; then echo v24.0.0; else : > {shlex.quote(str(ran))}; fi\n',
+                    encoding="utf-8")
+    node.chmod(0o755)
+    ws, commit = _toy_workspace(tmp_path, {"web/tests/a.test.js": "",
+                                           "tests/test_a.py": "def test_a():\n    assert True\n"})
+    monkeypatch.setattr("ouroboros.preflight_node.resolve_node", lambda: str(node))
+    monkeypatch.setattr(update_checks, "_contribution", lambda *_a: ({"ouroboros/x.py"}, set()))
+    monkeypatch.setattr(update_checks, "_target_floor", lambda *_a: dict(TOY_FLOOR))
+    seen, materialize = _root_seen(monkeypatch), update_checks._materialize
+    row = {"path": str(ws), "composition_commit": commit, "layers_base": {"k2": commit},
+           "target": {"target_sha": commit}, "environment": {"same": True}}
+
+    for fact, stopping in (("_panic_requested", True), ("stop_begun", lambda: True)):
+        admitting = getattr(shell_process, fact)
+
+        def stop_once_in_place(workspace, target, timeout=None, fact=fact, stopping=stopping):
+            done = materialize(workspace, target, timeout)
+            if timeout is not None:  # the run's own materialization: the stop begins just before its first lane
+                monkeypatch.setattr(shell_process, fact, stopping)
+            return done
+
+        monkeypatch.setattr(update_checks, "_materialize", stop_once_in_place)
+        scratch = tmp_path / fact / "scratch"
+        with pytest.raises(update_prepare.PrepareRefused) as refused:
+            update_checks.selected_tests(row, scratch)
+        assert refused.value.code == "UPDATE_PREPARE_STOPPED"
+        folder, = scratch.glob("junit-*")
+        manifest = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+        assert [(lane["lane"], lane["returncode"], lane["output"]) for lane in manifest["lanes"]] == [
+            ("node", 125, "none"), ("parallel", 125, "none"), ("serial", 125, "none")]
+        assert manifest["complete"] is False and manifest["node_failed"] is False
+        assert not ran.exists() and not seen[-1].exists()
+
+        monkeypatch.setattr(shell_process, fact, admitting)  # the control: admission open again
+        lane = manifest["lanes"][0]
+        assert update_checks.run_tracked(lane["argv"], pathlib.Path(lane["cwd"]), 30)["returncode"] == 0
+        assert ran.exists()
+        ran.unlink()
 
 
 @posix_only

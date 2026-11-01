@@ -499,7 +499,7 @@ test('a test file the official version requires and the update lacks is worded a
 // The records below are supervisor/update_checks.selected_tests's own shapes for checks that could not run, could not
 // finish, or could not excuse a failure the running version shares; the last test reads that producer for each key.
 const NODE_ABSENT = { tier: 'full', file_count: 412, budget_seconds: 1800, failed: {}, blocking: [],
-    unverified: "a prerequisite of the checks is missing: Node.js for the full tier's 37 browser-module test file(s) is "
+    unverified: "a prerequisite of the checks is missing: Node.js for the 37 browser-module test file(s) is "
         + 'absent: none is bundled and none is on PATH', prerequisite: { prerequisite: 'node', status: 'absent' } };
 const lanes = (parallel, serial) => [{ lane: 'parallel', returncode: parallel[0], cases: parallel[1], seconds: 1790 },
     { lane: 'serial', returncode: serial[0], cases: serial[1], seconds: 0 }];
@@ -516,7 +516,7 @@ test('checks that could not run name the missing prerequisite; preparing again i
     assert.equal(absent.hint, 'No test ran: Node.js, which its browser-module tests need, was not found. Preparing it '
         + 'again gives the same result until that changes.');
     assert.equal(fact(absent, 'Checks'), 'not run: Node.js was not found');
-    assert.equal(fact(absent, 'Why'), "A prerequisite of the checks is missing: Node.js for the full tier's 37 "
+    assert.equal(fact(absent, 'Why'), "A prerequisite of the checks is missing: Node.js for the 37 "
         + 'browser-module test file(s) is absent: none is bundled and none is on PATH.');
     assert.doesNotMatch(`${absent.hint} ${fact(absent, 'Checks')}`, /did not complete|neither passed nor failed/);
     const old = shown({ ...NODE_ABSENT, prerequisite: { prerequisite: 'node', status: 'unusable', node: '/usr/local/bin/node',
@@ -619,6 +619,31 @@ test('a case W fails with another failure still blocks and is named as failing t
     for (const view of [differently, allDifferent]) {
         assert.doesNotMatch(`${view.hint} ${fact(view, 'Checks')}`, new RegExp(`only with the update: [^.;]*${DNS}`));
     }
+});
+
+test('a failed browser-module suite blocks as itself, never compared with the running version or "only" the update', () => {
+    const [shown, fact, measured] = [shownChecks, factOf, MEASURED];
+    // supervisor/update_checks.selected_tests: the suite (NODE_SUITE) runs on the update alone and has no case a run on
+    // the running version could replay, so it blocks without a comparison; a Python case beside it keeps its own.
+    const SUITE = 'web/tests/*.test.js';
+    const browserLanes = [{ lane: 'node', returncode: 1, files: 37, seconds: 4 }, ...lanes([0, 300], [5, 0])];
+    const alone = shown('checks_failed', { ...measured, failed: {}, blocking: [SUITE],
+        new: { complete: true, returncode: 1, lanes: browserLanes } });
+    assert.equal(alone.headline, '7.8.2 (d2f6a91c) did not pass its checks. Nothing was changed.');
+    assert.equal(fact(alone, 'Checks'), `failed with the update: the browser-module tests (${SUITE}), not compared `
+        + 'with 7.8.1');
+    assert.equal(alone.hint, `The browser-module tests (${SUITE}) failed with the update; they are not compared with 7.8.1.`);
+    const both = shown('checks_failed', { ...measured, failed: { [DRAIN]: SIG }, blocking: [DRAIN, SUITE],
+        baseline: { complete: true, failed: {}, returncode: 0, excuses: true } });
+    assert.equal(fact(both, 'Checks'), `failed only with the update: ${DRAIN}; also failed: the browser-module tests `
+        + `(${SUITE}), not compared with 7.8.1`);
+    assert.equal(both.hint, `Tests that fail only with the update: ${DRAIN}. The browser-module tests (${SUITE}) failed `
+        + 'with the update; they are not compared with 7.8.1.');
+    for (const view of [alone, both]) {
+        assert.doesNotMatch(`${view.hint} ${fact(view, 'Checks')}`, /only with the update: [^.;]*web\/tests/);
+    }
+    const producer = readFileSync(new URL('../../supervisor/update_checks.py', import.meta.url), 'utf8');
+    assert.ok(producer.includes(`NODE_SUITE = "${SUITE}"`), 'the producer names the suite as this view reads it');
 });
 
 test('a session that failed outside its tests is said as that, with or without failures it measured', () => {

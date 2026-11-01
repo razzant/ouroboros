@@ -35,7 +35,7 @@ def harness(tmp_path, monkeypatch):
     outcomes = {}
 
     def run_tests(_workspace, commit, targets, _scratch, _env=None, _python="", record=None, deadline=None,
-                  unproven=None):
+                  unproven=None, node=""):
         calls.append((commit, list(targets)))
         return {**outcomes[commit], "evidence": f"junit-{commit}"}
 

@@ -226,11 +226,13 @@ def _already_running_window(line: str) -> None:
     webview.start(private_mode=False)
 
 
-def _exec_source_launcher() -> None:
+def _exec_source_launcher(*, restart: bool = False) -> None:
+    """``restart``: this launcher's own cycle, not the owner's start, so a recorded Panic cancels it as a stop does."""
     exec_source_launcher(_bootstrap_context(), _launch_argv, release_lock=release_pid_lock,
                          acquire_lock=acquire_pid_lock, before_release=lambda: stop_tray_before_exit(lambda: None),
                          on_failure=restore_tray_after_handoff, desktop=not _external_ui, macos=IS_MACOS,
-                         cancelled=_shutdown_event.is_set)
+                         cancelled=lambda: _shutdown_event.is_set() or (
+                             restart and not automatic_launch_allowed("automatic", DATA_DIR, log)))
 
 
 def _shell_facts() -> dict:
@@ -710,6 +712,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     """Start/monitor agent; restart on code 42 or bounded crashes."""
     global _external_host_result, _generation_port
     crash_times: list[float] = []
+    intent = _launch_intent  # an owner's start covers its first generation; later ones are automatic: Panic holds them
     while not _shutdown_event.is_set():
         unresolved = _pre_generation_cleanup()
         if unresolved:
@@ -719,10 +722,11 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
                       "stopped. Retrying in 3s.", unresolved)
             time.sleep(3)
             continue
-        if not automatic_launch_allowed(_launch_intent, DATA_DIR, log):
+        if not automatic_launch_allowed(intent, DATA_DIR, log):
             # Panic landed after main()'s check (a long bootstrap, a restart): stay stopped.
             _shutdown_event.set()
             break
+        intent = "automatic"
         port_file_cleared = _clear_port_file()
         _agent_exit_before_ready.clear()  # this generation proves itself
 
@@ -805,13 +809,13 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
             if loaded_packages_replaced(REPO_DIR):  # an Update switched the packages this process imported: a fresh
-                _exec_source_launcher()  # launcher syncs, installs and starts on them, before any work here
+                _exec_source_launcher(restart=True)  # launcher syncs, installs and starts on them, before any work
                 log.error("Packages replaced and no fresh launcher started: reopen Ouroboros.")
                 break  # no generation on mixed packages (Quit and Panic keep their own exit)
             _sync_existing_repo_from_bundle()
             restart_dependencies(_install_deps, log, _DEPS_RETRY_DELAY_SEC, (MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC))
             if launcher_sources_changed(REPO_DIR, bundle_dir=_bundle_dir(), source_root=pathlib.Path(__file__).parent):
-                _exec_source_launcher()  # a refused successor: this launcher starts the next generation itself
+                _exec_source_launcher(restart=True)  # a refused successor: this launcher starts the next itself
             continue
 
         now = time.time()

@@ -41,6 +41,7 @@ def test_leaf_selects_only_direct_importers_and_changed_tests_above_floor(repo):
     "ouroboros/preflight_runner.py", "ouroboros/test_selection.py", "scripts/run_tests.py",
     "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
     "ouroboros/process_overload.py", "ouroboros/test_parallelism.py", "tests/fixtures/sample.json",
+    "supervisor/update_checks.py", "supervisor/update_adaptation.py",
 ])
 def test_verification_changes_require_full(repo, path):
     result = selection.select_from_paths(repo, [path], base="base")
@@ -60,7 +61,10 @@ def test_no_product_hub_or_fraction_threshold(repo):
 @pytest.mark.parametrize("path", ["server.py", "launcher.py", "ouroboros/__init__.py", "ouroboros/body_switch.py",
                                   "ouroboros/body_adoption.py", "supervisor/update_recovery.py",
                                   "ouroboros/launcher_bootstrap.py", "supervisor/git_ops_reset.py",
-                                  "supervisor/update_merge.py"])
+                                  "supervisor/update_merge.py", "supervisor/update_prepare.py",
+                                  "ouroboros/gateway/update_activation.py", "ouroboros/runtime_venv.py",
+                                  "supervisor/update_native.py", "ouroboros/native_package.py",
+                                  "ouroboros/app_install.py"])
 def test_body_cutover_and_recovery_changes_require_full(repo, path):
     # The package init carries the adoption hook: it is cutover, not an ordinary hub of imports.
     result = selection.select_from_paths(repo, [path], base="base")

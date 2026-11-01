@@ -195,7 +195,9 @@ and its lock, not data or the exact package set.
 (both recipes): after Panic the automatic entry exits 0, leaving the stop marker
 intact, so the container stays stopped; Panic itself exits 99 in a direct server
 and 0 in the launcher. `always` and `unless-stopped` keep restarting clean exits;
-without automatic intent a restart policy consumes the marker. The recipes show
+without automatic intent a restart policy consumes the marker. A launcher's own
+restart of its server is automatic whatever started the launcher: Panic stops it.
+The recipes show
 the foreground owner resume (`--launch-intent owner`, or
 `OUROBOROS_LAUNCH_INTENT=owner` for the immutable image); an ordinary `docker
 start` keeps automatic intent, and deleting the marker is never the resume. A

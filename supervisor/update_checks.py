@@ -36,15 +36,16 @@ it (never W''s, never this process's), so an official rename of a witness is fol
 removal fails the checks, named; a T floor of no shape read here leaves them unverified. A local
 cutover, verifier or lock change keeps the selector's full tier, while a change the official update
 alone brings never escalates. The full tier names the suite directory, as the gate and CI do;
-a selected tier its exact modules. A full tier over a tree with browser-module tests needs a Node at
-their floor; one that is absent, cannot start, does not answer or is unusable leaves the checks
-unverified before any test runs, named (``_node``).
-It runs as the commit gate runs a battery: the non-serial cases spread over the admitted
-workers, then the serial ones (``preflight_runner``'s lanes, ``test_parallelism.worker_budget``),
-each lane's cases and seconds recorded. One monotonic budget (``config.UPDATE_CHECKS_TIMEOUT_SEC``,
-or the gate's explicit ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``) begins just before W' is materialized and
-bounds every process that follows (each materialization, test lane and T's one presence read), each getting what
-remains of it; restoring W' afterwards, also after a check that raised, keeps the Git owner's own bound. A begun stop
+a selected tier its exact modules. The browser-module suite (``web/tests/*.test.js``) runs whole in either tier, as in
+the gate and CI: a tree that has it needs a Node at its floor; one that is absent, cannot start, does not answer or is
+unusable leaves the checks unverified before any test runs, named (``_node``).
+It runs as the commit gate runs a battery: that suite first (``node`` lane, ``preflight_node.node_suite``), then the
+non-serial cases spread over the admitted workers, then the serial ones (``preflight_runner``'s lanes,
+``test_parallelism.worker_budget``), each lane's cases (the node lane's files) and seconds recorded. One monotonic
+budget (``config.UPDATE_CHECKS_TIMEOUT_SEC``, or the gate's explicit ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``) begins just
+before W' is materialized and bounds every process that follows (each materialization, test lane and T's one presence
+read), each getting what remains of it; restoring W' afterwards, also after a check that raised, keeps the Git owner's
+own bound. A begun stop
 that refused or ended one of those Git steps or a prerequisite probe raises its typed refusal, never read as their
 answer. Only the cases that fail there run
 again on W, the composition serving now, by their complete pytest node ids (classes and
@@ -55,8 +56,9 @@ fails the same way here is attributed to it (``target_failing``), never waived. 
 not complete (its deadline, a refused start, a collection error, a crashed test worker, nothing
 collected) leaves the candidate unverified: never ready. W' failures it measured stay named; a W
 comparison that did not complete excuses none of them and shows none failing only with the update,
-and an incomplete T attributes nothing. Changed paths
-no selected test reaches by name or direct import are named as unknown coverage, never a verdict.
+and an incomplete T attributes nothing. The browser-module suite reports no case a W or T run could replay, so its
+failure (``NODE_SUITE`` in ``blocking``) blocks, measured on W' alone: never excused, compared or attributed.
+Changed paths no selected test reaches by name or direct import are named as unknown coverage, never a verdict.
 Each run keeps what it saw beside its JUnit reports, in its own ``junit-*`` folder of the candidate's
 scratch (retired with the checkout): the exact selection, commit, interpreter, targets (the argument file
 every lane reads), what remained of the budget and argv, its materialization's own output, and every lane's complete
@@ -82,6 +84,8 @@ log = logging.getLogger(__name__)
 # xdist's own report of a worker lost mid-case (it runs the rest elsewhere and exits 1): no test result, an outage.
 _WORKER_CRASH = "crashed while running"
 _SELECTOR = "ouroboros/test_selection.py"  # where the official target declares its required floor
+# The browser-module suite (``preflight_node.WEB_DIR``/``TESTS_GLOB``) as ``blocking`` names it when it failed on W'.
+NODE_SUITE = "web/tests/*.test.js"
 _PROBE_WORDS = {"unstartable": "could not be started", "timeout": "did not answer in time", "unusable": "failed",
                 "absent": "is no existing absolute directory"}
 # Both files of a tested tree's harness name it when that harness reads a declared installation user site
@@ -425,18 +429,18 @@ def _harnesses(workspace: pathlib.Path, commits: Dict[str, str]) -> Dict[str, st
             for role, commit in commits.items()}
 
 
-def _node(workspace: pathlib.Path, selection, env: Dict[str, str], root: pathlib.Path) -> Dict[str, str]:
-    """The Node a full tier needs where the tree has browser-module tests (``web/tests``; Python tests drive them with
-    Node): the one the gate selects (``preflight_node.resolve_node``: the bundled one, else PATH's), already first on
-    the runs' PATH, must answer ``--version`` at the suite's floor (``NODE_MIN_VERSION``) through ``_probe``. ``{}``
-    when none is needed (a selected tier, or no such tests); ``{"node", "version"}`` when it answers; otherwise
+def _node(workspace: pathlib.Path, env: Dict[str, str], root: pathlib.Path) -> Dict[str, str]:
+    """The Node the browser-module suite (``web/tests/*.test.js``) needs where the tree has it, in either tier: the one
+    the gate selects (``preflight_node.resolve_node``: the bundled one, else PATH's), already first on the runs' PATH,
+    must answer ``--version`` at the suite's floor (``NODE_MIN_VERSION``) through ``_probe``. ``{}`` when the tree has
+    no such suite; ``{"node", "version"}`` when it answers (``run_tests`` runs the suite with it); otherwise
     ``_Unverified``: absent, unstartable, a timeout or unusable. Nothing is downloaded and no other Node is tried."""
     from ouroboros.preflight_node import NODE_MIN_VERSION, _version_tuple, candidate_node_tests, resolve_node
 
-    files = candidate_node_tests(workspace) if selection.tier == "full" else []
+    files = candidate_node_tests(workspace)
     if not files:
         return {}
-    node, subject = resolve_node(), f"Node.js for the full tier's {len(files)} browser-module test file(s)"
+    node, subject = resolve_node(), f"Node.js for the {len(files)} browser-module test file(s)"
     if not node:
         raise _Unverified(f"{subject} is absent: none is bundled and none is on PATH", prerequisite="node",
                           status="absent")
@@ -461,9 +465,12 @@ def _lanes(workers: int) -> List[Tuple[str, List[str]]]:
 
 def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch: pathlib.Path,
               env: Dict[str, str] = None, python: str = "", record: Dict[str, Any] = None,
-              deadline: Optional[float] = None, unproven: Optional[List[str]] = None) -> Dict[str, Any]:
+              deadline: Optional[float] = None, unproven: Optional[List[str]] = None, node: str = "") -> Dict[str, Any]:
     """Run ``targets`` (files, node ids or the suite directory) on ``commit`` materialized in the workspace, in the
-    gate's two lanes.
+    gate's two lanes; with ``node`` (``_node``'s), the tree's whole browser-module suite first, as the gate's ``node``
+    lane runs it (``preflight_node.node_suite``, from ``web/``), contained and bounded like the others. That lane is
+    complete when it exited 0 or 1 and its tree is proven gone; exit 1 is its measured failure (``node_failed``), and it
+    keeps its ``files``, not cases: ``node --test`` reports no case a later run could replay.
 
     ``deadline`` (``time.monotonic()``) bounds the materialization, under the Git owner's own bound as well, and
     every lane, each getting what remains: the checks' one budget, shared with the runs before and after this
@@ -496,6 +503,7 @@ def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch:
     as many as no command line takes on Windows (CreateProcess stops at 32767 characters); ``run.json`` names it
     (``targets_file``) beside the exact targets.
     """
+    from ouroboros.preflight_node import candidate_node_tests, node_suite
     from ouroboros.test_environment import INSTALLATION_USER_BASE_ENV
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV, nested_workers, worker_budget
     from ouroboros.utils import atomic_write_json, write_text_atomic
@@ -525,6 +533,9 @@ def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch:
     targets_file = folder / "targets.txt"
     write_text_atomic(targets_file, "".join(f"{target}\n" for target in targets))
     cases, lanes, tails = {}, [], []
+    # The worker budget the environment admitted to its xdist and nested runners, else this process's own.
+    workers = nested_workers(env) if NESTED_WORKERS_ENV in (env or {}) else worker_budget(os.cpu_count() or 1)
+    suite = candidate_node_tests(workspace) if node else []
     manifest = {"commit": commit, "python": python or sys.executable, "user_base": (env or {}).get("PYTHONUSERBASE"),
                 "installation_user_base": (env or {}).get(INSTALLATION_USER_BASE_ENV),
                 "pythonpath": (env or {}).get("PYTHONPATH"), "tmpdir": (env or {}).get("TMPDIR"),
@@ -532,14 +543,13 @@ def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch:
                 "deadline_seconds": round(deadline - started, 1),
                 "materialization": _kept(folder, "materialize", ["git", "reset", "--hard", "--quiet", commit], bound,
                                          *attempt), **(record or {}), "lanes": []}
-    # The worker budget the environment admitted to its xdist and nested runners, else this process's own.
-    for label, flags in _lanes(nested_workers(env) if NESTED_WORKERS_ENV in (env or {})
-                               else worker_budget(os.cpu_count() or 1)):
+    for label, flags in ([("node", [])] if suite else []) + _lanes(workers):
         report, begun = folder / f"{label}.xml", time.monotonic()
-        cmd = [python or sys.executable, "-m", "pytest", f"@{targets_file}", "-q", "-o",
-               "junit_family=xunit1", f"--junitxml={report}", *flags]
+        cmd, cwd, lane_env = (node_suite(workspace, node, suite, env or {}, workers) if label == "node" else (
+            [python or sys.executable, "-m", "pytest", f"@{targets_file}", "-q", "-o", "junit_family=xunit1",
+             f"--junitxml={report}", *flags], workspace, env))
         streams = {stream: folder / f"{label}.{stream}.txt" for stream in ("stdout", "stderr")}
-        run = (run_tracked(cmd, workspace, deadline - begun, env=env, outputs=(streams["stdout"], streams["stderr"]),
+        run = (run_tracked(cmd, cwd, deadline - begun, env=lane_env, outputs=(streams["stdout"], streams["stderr"]),
                            custody=None if unproven is None else (
                                lambda why, label=label: unproven.append(f"{label}: {why}")))
                if deadline > begun and not unstarted else
@@ -552,29 +562,32 @@ def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch:
         except (OSError, ElementTree.ParseError):
             found = {}
         cases.update(found)
-        lanes.append({"lane": label, "returncode": run["returncode"], "cases": len(found),
-                      "seconds": round(time.monotonic() - begun, 1)})
+        lanes.append({"lane": label, "returncode": run["returncode"], **({"files": len(suite)} if label == "node" else {
+            "cases": len(found)}), "seconds": round(time.monotonic() - begun, 1)})
         if run.get("containment"):  # its tree not proven gone: never a complete lane
             lanes[-1]["containment"] = run["containment"]
             tails.append(f"[{label}] its process tree was not proven gone: {run['containment']}")
         if run["returncode"] == 1 and found and not any(found.values()):  # its session failed outside its tests
             lanes[-1]["no_failing_case"] = True
-        manifest["lanes"].append({**lanes[-1], "argv": cmd, "output": run["output"]})
+        manifest["lanes"].append({**lanes[-1], "argv": cmd, "cwd": str(cwd), "output": run["output"]})
         if run["returncode"] not in (0, 5):
             tails.append(f"[{label}] " + (run["stdout"] or run["stderr"])[-2000:])
     failed = {nodeid: signature for nodeid, signature in cases.items() if signature}
     crashed = sorted(nodeid for nodeid, signature in failed.items() if _WORKER_CRASH in signature)
-    complete = not crashed and bool(cases) and all((lane["returncode"] in (0, 1) and lane["cases"]
-                                                    or lane["returncode"] == 5 and not lane["cases"])
+    # A pytest lane exits 0/1 with cases or 5 with none; the node lane (its files, no cases) exits 0 or 1.
+    complete = not crashed and bool(cases) and all((lane["returncode"] in (0, 1) and lane.get("cases", True)
+                                                    or lane["returncode"] == 5 and not lane.get("cases", True))
                                                    and not lane.get("containment") and not lane.get("no_failing_case")
                                                    for lane in lanes)
     returncode = next((lane["returncode"] for lane in lanes if lane["returncode"] not in (0, 5)), 0)
-    result = {"complete": complete, "ok": complete and returncode == 0 and not failed, "commit": commit,
-              "failed": failed, "crashed": crashed, "cases": len(cases), "returncode": returncode, "lanes": lanes,
+    node_failed = any(lane["lane"] == "node" and lane["returncode"] == 1 for lane in lanes)
+    result = {"complete": complete, "ok": complete and returncode == 0 and not failed and not node_failed,
+              "commit": commit, "failed": failed, "node_failed": node_failed, "crashed": crashed, "cases": len(cases),
+              "returncode": returncode, "lanes": lanes,
               "seconds": round(time.monotonic() - started, 1), "tail": "\n".join(tails)[-2000:],
               "evidence": str(folder)}
     atomic_write_json(folder / "run.json", {**manifest, **{key: result[key] for key in (
-        "complete", "returncode", "cases", "failed", "crashed", "seconds")}})
+        "complete", "returncode", "cases", "failed", "node_failed", "crashed", "seconds")}})
     if not complete:
         stopped()  # a begun stop that ended or refused a lane is that stop, raised once the run's evidence is kept
     return result
@@ -611,7 +624,9 @@ def _uncovered(selection, footprint: Set[str]) -> Dict[str, Any]:
 
 
 def _incomplete(run: Dict[str, Any], what: str = "the selected run") -> str:
-    lanes = ", ".join(f"{lane['lane']}: exit {lane['returncode']}, {lane['cases']} case(s)" for lane in run["lanes"])
+    lanes = ", ".join(f"{lane['lane']}: exit {lane['returncode']}, " + (f"{lane['files']} file(s)" if "files" in lane
+                                                                         else f"{lane['cases']} case(s)")
+                      for lane in run["lanes"])
     crashed = run.get("crashed") or []
     unproven = "; ".join(f"{lane['lane']}: {lane['containment']}" for lane in run["lanes"] if lane.get("containment"))
     outside = ", ".join(lane["lane"] for lane in run["lanes"] if lane.get("no_failing_case"))
@@ -744,7 +759,7 @@ def selected_tests(row: Dict[str, Any], scratch: pathlib.Path) -> Dict[str, Any]
                   "local_tests": len(carried), "dropped_local_tests": dropped, **_uncovered(selection, footprint)}
         try:
             (python, env), (serving_python, serving_env) = _environments(row, root, evidence)
-            result["node"] = _node(workspace, selection, env, root)
+            result["node"] = _node(workspace, env, root)
             declared = [(run, run_env) for run, run_env in ((python, env), (serving_python, serving_env))
                         if INSTALLATION_USER_BASE_ENV in run_env]
             if declared:  # where each run's tested tree can read the installation's packages, kept beside the verdict
@@ -763,13 +778,15 @@ def selected_tests(row: Dict[str, Any], scratch: pathlib.Path) -> Dict[str, Any]
                         else list(selection.files), scratch, env, python, deadline=deadline, record={
                             "selection": selection.record(), "floor": floor, "footprint": sorted(footprint),
                             "local_tests": sorted(carried), "dropped_local_tests": dropped, "node": result["node"],
-                            "user_site": result.get("user_site")}, unproven=unproven)
+                            "user_site": result.get("user_site")}, unproven=unproven,
+                        node=result["node"].get("node", ""))
         result.update(new={key: new[key] for key in ("complete", "ok", "cases", "crashed", "returncode", "lanes",
                                                      "seconds", "tail", "evidence")}, failed=new["failed"])
+        suite = [NODE_SUITE] if new.get("node_failed") else []  # measured on W' alone: never excused or attributed
         if not new["complete"]:
-            return {**result, "ok": False, "unverified": _incomplete(new), "blocking": sorted(new["failed"])}
-        if new["ok"]:
-            return {**result, "ok": True, "blocking": [], "already_failing": []}
+            return {**result, "ok": False, "unverified": _incomplete(new), "blocking": sorted(new["failed"]) + suite}
+        if new["ok"] or not new["failed"]:
+            return {**result, "ok": not suite, "blocking": suite, "already_failing": []}
         try:
             old = run_tests(workspace, previous, sorted(new["failed"]), scratch, serving_env, serving_python,
                             deadline=deadline, unproven=unproven)
@@ -794,7 +811,8 @@ def selected_tests(row: Dict[str, Any], scratch: pathlib.Path) -> Dict[str, Any]
         if not excuses:
             baseline.update(not_excused=shared, why=_UNEXCUSED.format(
                 "predates" if reads == "predates_opt_in" else "could not be read for"))
-        return {**result, "ok": not blocking, "blocking": blocking, "already_failing": already, "baseline": baseline}
+        return {**result, "ok": not blocking and not suite, "blocking": blocking + suite, "already_failing": already,
+                "baseline": baseline}
     finally:
         release.update(_release(root, "; ".join(unproven)))
 

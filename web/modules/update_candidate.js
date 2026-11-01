@@ -126,6 +126,10 @@ const MERGE_WORDS = {
 // (update_checks.selected_tests: `floor_missing`, also in `blocking`): it is missing, never a test that failed.
 const lacking = (missing, limit) => `the update lacks test file(s) the official version requires: ${named(missing, limit)}`;
 
+// The browser-module suite as `blocking` names it when it failed with the update (update_checks.NODE_SUITE): it has no
+// case a run on the running version could replay, so it is never compared there and never "only with the update".
+const BROWSER_SUITE = 'web/tests/*.test.js';
+
 // A prerequisite probed before any test runs (update_checks._node, _declared): what it is, and what was found.
 const PREREQUISITE_WORDS = { absent: 'was not found', unstartable: 'could not be started',
     timeout: 'did not answer in time', unusable: 'failed when asked' };
@@ -222,13 +226,18 @@ function checksView(candidate, running) {
                 + 'fail there too is unknown.' };
     }
     if (blocking.length) {
+        const browser = blocking.includes(BROWSER_SUITE);
+        const cases = blocking.filter((id) => id !== BROWSER_SUITE);
         // W failed these the same way, but its harness could not give its tests the installation's packages.
-        const shared = baseline?.excuses === false ? strings(baseline.not_excused).filter((id) => blocking.includes(id)) : [];
+        const shared = baseline?.excuses === false ? strings(baseline.not_excused).filter((id) => cases.includes(id)) : [];
         // W failed these too, with another failure: only the same failure excuses one, so they block, but not "only".
         const failedThere = Object.keys(object(baseline?.failed) || {});
-        const differently = blocking.filter((id) => failedThere.includes(id) && !shared.includes(id));
-        const only = blocking.filter((id) => !shared.includes(id) && !differently.includes(id));
+        const differently = cases.filter((id) => failedThere.includes(id) && !shared.includes(id));
+        const only = cases.filter((id) => !shared.includes(id) && !differently.includes(id));
         const said = only.length ? [`Tests that fail only with the update: ${named(only, 5)}.`] : [];
+        const suite = browser ? `the browser-module tests (${BROWSER_SUITE}), not compared with ${running}` : '';
+        if (browser) said.push(`The browser-module tests (${BROWSER_SUITE}) failed with the update; they are not `
+            + `compared with ${running}.`);
         if (differently.length) {
             rows.push([`Failing in ${running} too, differently`, named(differently, 6)]);
             said.push(`Failing in ${running} too, with another failure: ${named(differently, 5)}; a different failure `
@@ -242,8 +251,10 @@ function checksView(candidate, running) {
                 : `Whether the tests of ${running} can use this installation’s packages could not be read`;
             said.push(`Also failing in ${running}: ${named(shared, 5)}. ${why}, so a failure there excuses nothing.`);
         }
-        return { kind: 'failed', rows, hint: said.join(' '), fact: only.length ? `failed only with the update: ${named(only)}`
-            : `failed in ${running} too${shared.length ? '' : ', differently'}` };
+        const fact = only.length ? `failed only with the update: ${named(only)}`
+            : cases.length ? `failed in ${running} too${shared.length ? '' : ', differently'}` : '';
+        return { kind: 'failed', rows, hint: said.join(' '),
+            fact: fact && suite ? `${fact}; also failed: ${suite}` : fact || `failed with the update: ${suite}` };
     }
     if (unverified) {
         return { kind: 'unverified', rows, fact: 'did not complete, so it neither passed nor failed',

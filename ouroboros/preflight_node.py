@@ -94,6 +94,16 @@ def node_environment(env: dict) -> dict:
     return projected
 
 
+def node_suite(worktree: "pathlib.Path | str", node: str, files: list, env: dict, workers) -> tuple:
+    """The browser-module suite's one invocation: ``(argv, cwd, env)``. ``node --test`` over the web-relative
+    ``files`` (``candidate_node_tests``) from the tree's ``WEB_DIR``, ``workers`` at a time, as ``npm test`` runs
+    them, without an inherited ``NODE_OPTIONS``: it admits --test-only/--test-*-pattern/--require, which can green a
+    red suite (the class the pytest lane closes by scrubbing ``PYTEST_*``). The gate's lane (``run_node_tests``) and a
+    prepared Update's checks (``update_checks.run_tests``) both run it."""
+    return ([node, "--test", f"--test-concurrency={workers}", *files], pathlib.Path(worktree) / WEB_DIR,
+            {key: value for key, value in env.items() if key != "NODE_OPTIONS"})
+
+
 def _version_tuple(version: str) -> tuple:
     """Leading numeric components of a `--version` string, floor-comparable."""
     parts = []
@@ -164,23 +174,17 @@ def run_node_tests(
     # Same containment pattern as the pytest passes (`_execute_pytest_pass`):
     # spawned INSIDE the container — `node --test` forks one worker per file —
     # reaped unconditionally, and a live-or-undeterminable leftover is a hard
-    # block whatever the exit code said. Run from the candidate's web/ with
-    # web-relative paths so imports resolve exactly as under `npm test`.
+    # block whatever the exit code said.
     container = ProcessContainer(lifeline=True, overload=True)
     started = time.monotonic()
-    # NODE_OPTIONS admits --test-only/--test-*-pattern/--require: an inherited
-    # operator value can silently green a red suite — same class the pytest
-    # lane closes by scrubbing PYTEST_* (see _preflight_env).
     env = pr._preflight_env(temp_root, worktree, cwd=pathlib.Path(worktree) / WEB_DIR)
-    env.pop("NODE_OPTIONS", None)
+    argv, cwd, env = node_suite(worktree, node, files, env, env["PYTEST_XDIST_AUTO_NUM_WORKERS"])
     from ouroboros.test_evidence import FileOutput
 
     capture = FileOutput(temp_root, "node")
     proc = None
-    argv = [node, "--test", f"--test-concurrency={env['PYTEST_XDIST_AUTO_NUM_WORKERS']}", *files]
     try:
-        proc = container.spawn(argv, cwd=str(pathlib.Path(worktree) / WEB_DIR),
-                               env=env, stdout=capture.stdout, stderr=capture.stderr)
+        proc = container.spawn(argv, cwd=str(cwd), env=env, stdout=capture.stdout, stderr=capture.stderr)
         result["execution"] = "executed"
         try:
             returncode: Optional[int] = proc.wait(timeout=timeout)
