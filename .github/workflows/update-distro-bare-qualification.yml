@@ -1,0 +1,48 @@
+name: Disposable distro bare-Python qualification
+# One push to this equipment branch is one run: three cells, no retries, no secrets. The subject is checked out separately
+# by the exact commit in manifest.json and only read; the copy under test is disposable.
+# Bounds, nested: pytest-timeout per test (target_driver.py, 15 min) < the cell step (34 min) < the job (40 min), so a
+# hung test is a recorded row and a hung cell still leaves the upload step its turn. A runner's death is not bounded here.
+on:
+  push:
+    branches: [qualification/update-distro-bare-25fc93a8e3a4-r1]
+permissions:
+  contents: read
+jobs:
+  cell:
+    name: ${{ matrix.cell }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [root-no-ensurepip-no-pip, user-own-pip-no-ensurepip, root-ensurepip]
+    steps:
+      - name: Refuse a repeated attempt
+        run: '[ "$GITHUB_RUN_ATTEMPT" = "1" ]'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: equipment
+          persist-credentials: false
+      - name: Read the pinned subject
+        run: echo "SUBJECT_COMMIT=$(jq -er .subject.commit equipment/devtools/update_distro_bare/manifest.json)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SUBJECT_COMMIT }}
+          path: subject
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Run the cell
+        timeout-minutes: 34
+        run: bash equipment/devtools/update_distro_bare/cell.sh "${{ matrix.cell }}" "$GITHUB_WORKSPACE/subject" "$RUNNER_TEMP/q"
+      - name: Retain raw evidence even when the cell fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: distro-bare-${{ matrix.cell }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/q/evidence/
+          if-no-files-found: warn
+          retention-days: 14

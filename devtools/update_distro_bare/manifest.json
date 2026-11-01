@@ -1,0 +1,142 @@
+{
+ "schema": 2,
+ "purpose": "Real externally-managed distro Python, real venv/ensurepip and pip absence, root and non-root uid in a Docker container, for the Unified Update's private environment; in the root no-pip cell also the real lock, the real checkout's unchanged entry after selection, and its first entry under a live handoff. Prepared, not executed.",
+ "subject": {
+  "commit": "25fc93a8e3a406c5d79c5ab8004b6dda7f36b19f",
+  "tree": "f7d60f815b8b21ade58411a9cc334bfc80af4639",
+  "consumers_sha256": {
+   "tests/test_update_private_environment.py": "7384c31f58d1b30f35e9cbad2e54ab34d06af605c1433256896adf5f8a74616d",
+   "tests/test_update_environment.py": "bb5ea38db6820bf7244ea3828b1602539656be813e50824837e5a12a50bc447f",
+   "tests/test_update_activation.py": "587a29b7941362a48b12b21a7c5a9bb04a0ed78478d975d1826f3a669301a45a",
+   "tests/body_candidate_support.py": "2b5502fc2308bc3de8118b7b260f59856a33f7b3ca89d24a1ca771c14fac9a9d",
+   "tests/conftest.py": "63e1ceb31a1174e3eafcf8f5210d9dae5ccff4ce9201c3a6f1ecbb3a4febdec4",
+   "ouroboros/test_environment.py": "3b8580ff5022958056197e0c9568344d797ec6db6ffc2ffb34d8c436494ba9f0",
+   "supervisor/update_prepare.py": "78d39f97584497b307ff3dd15b2d19af41a8a7eceae6d3b3bad3c0e09a2e7f97",
+   "supervisor/update_checks.py": "456fb394048299158dde7e4a275429f1856fe8130cc42edee41b3040ad4e30b5",
+   "ouroboros/runtime_venv.py": "520a945d563303eb73fb51dd378c19d5334fb5e287d0a41851e0f28e5f8ef037",
+   "ouroboros/verified_download.py": "1533cad403bb3cc218acfc55a13257f51f5ce027591c8f29b6a5a8ceb55fcdae",
+   "ouroboros/platform_layer.py": "a6ced9bb3c908868b8a7f123097d73d11cae366154d823690e971857f9a48af0",
+   "ouroboros/body_switch.py": "aa27fa18e501617562d0f02920903bb1c50aa973148d8f932decb707e1e81119",
+   "ouroboros/body_adoption.py": "c51cbe4e35ca46bcefef5efe1193655862da807ba75546b01674d0710c2d9dc1",
+   "ouroboros/__init__.py": "eabfc4c4aa5859b4d9b6503a0c055b33e9c8d853861257ec352b105e17714795",
+   "ouroboros/launcher_bootstrap.py": "2e21dfc4c078bdc55acb1e8c36c81f1f232d7df26a166b15b29df19640e61c16",
+   "ouroboros/launch_roots.py": "33abc9650d5521437884d9019a676b2300059aab948ee02e1fbffe40f58245c8",
+   "ouroboros/server_entrypoint.py": "8b022d0bd2e7051dcb111c960052878b1c725fdd138a3edf85176168ac623805",
+   "server.py": "acde9dd1b14f4829d4f5c35e9c7802d3cde03ba8b0fc3f6d31cd8c1146740b7c",
+   "requirements-runtime.lock": "68e739bde5b7fbf90d2663eb01939f52c5c4b0b087097390e05807e143e8673d",
+   "docs/DEPLOYMENT.md": "7aa8ae2859c13371e3a916365b98e93d15dbebc13cd678f2ea06974aabb790e5"
+  }
+ },
+ "overlay_test": "tests/test_zz_distro_bare_overlay.py",
+ "image": {
+  "name": "ubuntu:24.04",
+  "digest": "sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d"
+ },
+ "tools": {
+  "uv": "0.12.1"
+ },
+ "cells": {
+  "root-no-ensurepip-no-pip": {
+   "apt": [],
+   "expect": {
+    "uid": "root",
+    "ensurepip_works": false,
+    "own_pip": false,
+    "expected_pip": "pip_wheel"
+   },
+   "phases": {
+    "positive": {
+     "network": "bridge",
+     "nodes": [
+      "tests/test_zz_distro_bare_overlay.py::test_this_process_is_the_bare_distro_interpreter_under_its_real_policy",
+      "tests/test_zz_distro_bare_overlay.py::test_preparation_takes_the_path_this_interpreter_really_has",
+      "tests/test_zz_distro_bare_overlay.py::test_the_real_lock_installs_on_this_interpreter_and_its_unchanged_entry_runs_there_once_selected",
+      "tests/test_zz_distro_bare_overlay.py::test_the_real_tree_enters_under_a_live_handoff_once_its_lock_changed"
+     ]
+    },
+    "no_index": {
+     "network": "none",
+     "nodes": [
+      "tests/test_zz_distro_bare_overlay.py::test_without_the_index_this_interpreter_stops_typed_and_changes_nothing"
+     ]
+    }
+   }
+  },
+  "user-own-pip-no-ensurepip": {
+   "apt": [
+    "python3-pip"
+   ],
+   "expect": {
+    "uid": "nonzero",
+    "ensurepip_works": false,
+    "own_pip": true,
+    "expected_pip": "interpreter_pip"
+   },
+   "phases": {
+    "positive": {
+     "network": "bridge",
+     "nodes": [
+      "tests/test_update_private_environment.py::test_the_first_private_environment_runs_every_entry_of_its_checkout_after_its_handoff_too",
+      "tests/test_update_private_environment.py::test_a_return_of_the_first_private_environment_leaves_the_interpreters_own_packages_serving",
+      "tests/test_update_private_environment.py::test_a_serving_private_environment_is_cloned_for_the_next_lock_change_and_switched_back",
+      "tests/test_zz_distro_bare_overlay.py::test_this_process_is_the_bare_distro_interpreter_under_its_real_policy",
+      "tests/test_zz_distro_bare_overlay.py::test_preparation_takes_the_path_this_interpreter_really_has"
+     ]
+    }
+   }
+  },
+  "root-ensurepip": {
+   "apt": [
+    "python3-pip",
+    "python3-venv"
+   ],
+   "expect": {
+    "uid": "root",
+    "ensurepip_works": true,
+    "own_pip": true,
+    "expected_pip": "ensurepip"
+   },
+   "phases": {
+    "positive": {
+     "network": "bridge",
+     "nodes": [
+      "tests/test_update_private_environment.py::test_a_private_generation_owns_every_pin_and_sees_the_interpreters_packages_underneath",
+      "tests/test_zz_distro_bare_overlay.py::test_this_process_is_the_bare_distro_interpreter_under_its_real_policy",
+      "tests/test_zz_distro_bare_overlay.py::test_preparation_takes_the_path_this_interpreter_really_has"
+     ]
+    }
+   }
+  }
+ },
+ "reused_once": "Tests 159, 198 and 222 run in one cell only, the non-root one, so the toy entry, return and clone are measured once on a distro interpreter and under a non-root uid; the root no-pip cell carries the real entry instead. How the venv got its pip does not reach those owners (source read).",
+ "node_meaning": {
+  "test_a_private_generation_owns_every_pin_and_sees_the_interpreters_packages_underneath": "With ensurepip working and the real marker, a private generation owns every toy pin, with the interpreter's packages hidden while pip decides and visible afterwards. The seam is patched to the value the product decides here.",
+  "test_the_first_private_environment_runs_every_entry_of_its_checkout_after_its_handoff_too": "The owner's unchanged BARE server.py cold entries of the TOY checkout run in the private environment, after the handoff is retired too; a toy purelib stays as it was. The seam is patched to the value the product decides here.",
+  "test_a_return_of_the_first_private_environment_leaves_the_interpreters_own_packages_serving": "A toy generation that fails its import probe is returned before entry and the interpreter's own packages serve again. The seam is patched to the value the product decides here.",
+  "test_a_serving_private_environment_is_cloned_for_the_next_lock_change_and_switched_back": "The next toy lock change is cloned beside the serving private environment, selected and switched back. The seam is patched and sys.prefix stood in for the serving one.",
+  "test_this_process_is_the_bare_distro_interpreter_under_its_real_policy": "This process is the distro's bare interpreter, the package-owned marker is in force for pip, and the product's own seam decision is private.",
+  "test_preparation_takes_the_path_this_interpreter_really_has": "Preparation takes the pip path this cell predicts, with no stand-in: the exact step order, each step's interpreter by its raw argv, and nothing written to the interpreter's package directories. PATH_NOT_COVERED: it took another legitimate path and everything else held for that one.",
+  "test_without_the_index_this_interpreter_stops_typed_and_changes_nothing": "NEGATIVE: with no pip, no ensurepip and no network, preparation stops typed, leaves no generation and changes nothing global.",
+  "test_the_real_lock_installs_on_this_interpreter_and_its_unchanged_entry_runs_there_once_selected": "The subject's real tree is the checkout and its real lock installs from the real index into a generation of this interpreter (every applicable pin there, pip check clean). After the product's selection owner places it, with no adoption record pending, the unchanged BARE server.py reaches its argument parser and the Update's own import probe completes on BARE from that checkout, both in the selected generation; before selection the same server.py stops at a missing import. Import and argument-parser entry only: not serving readiness, not the first entry under a live handoff.",
+  "test_the_real_tree_enters_under_a_live_handoff_once_its_lock_changed": "The real tree serves in the subject's activation Scene, the target changes only its real lock's bytes, and preparation installs that lock from the real index into this interpreter's first private generation. After authorize_update and arm, the owner's unchanged BARE server.py --help performs the switch, the Update's real import probe in the helper's own environment and the hand-over to the selected interpreter; that process records one server entry, with no return, and reaches the argument parser. Preparation's workspace checks are stubbed as in the Scene. Not serving readiness, finalize_on_boot or a later entry.",
+  "global_census": "Within this container, between its two snapshots, no file of the interpreter's package or pip-policy directories and no dpkg state changed. Bytecode is listed apart. A file or folder it could not read leaves this row INCOMPLETE, never PASS."
+ },
+ "excluded_subject_nodes": {
+  "test_an_interpreter_that_cannot_make_a_venv_stops_typed_and_changes_nothing": "a shell script stands in for the interpreter, so a distro changes nothing; the real negative is the no_index phase",
+  "test_an_interpreter_without_ensurepip_gets_a_venv_with_its_own_pip_from_its_own_pip": "builds its fixture from ensurepip's bundled wheel: on the target it errors or skips, either way saying nothing; the real path is the overlay's preparation test",
+  "test_an_interpreter_without_venv_or_pip_gets_a_venv_layout_and_the_runtime_locks_pip_wheel": "same fixture dependency, and stands in for the refusals; the layout path is not reachable on Ubuntu, whose stdlib ships venv",
+  "test_the_pip_fetched_for_an_interpreter_without_one_is_the_runtime_locks_pip": "a string comparison, no interpreter condition; passed on C8 Ubuntu",
+  "test_the_package_init_hook_restates_where_the_server_keeps_the_private_environment": "evaluates an expression, no interpreter condition; passed on C8 Ubuntu"
+ },
+ "not_proved": [
+  "Any server boot on this interpreter before an Update. No cell installs the server's dependencies globally, and nothing here says whether or how such a boot works.",
+  "Serving after an Update: only the real entry's argument parser and the Update's import probe run, in the root no-pip cell. No real server binds, finishes startup or serves.",
+  "Beyond the argument parser under a live handoff: the real tree's hand-over is measured up to the new process's entry record and its parser, after a lock-only change with workspace checks stubbed; readiness, finalize_on_boot, a return of the real tree and a code change with the lock are not.",
+  "Workspace checks against the real lock, the source launcher, or a data root on a root-owned host volume with another owner (Git's safe.directory).",
+  "Any distro, Python or architecture but this image: Debian, other Ubuntu releases and arm64 are unmeasured.",
+  "Root outside a default Docker container (a VM, a host, a user namespace, added or dropped capabilities).",
+  "Persistence across containers. Every row writes to the container's own layer (the root mount line is recorded); a kept data root persists exactly as its volume does, by source read only.",
+  "The pairing of root with own pip without ensurepip. The product has no uid branch on these paths by source, but no cell measures that pairing.",
+  "The layout+ path for a Python shipped without venv: Ubuntu's stdlib package ships venv."
+ ]
+}
