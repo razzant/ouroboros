@@ -86,9 +86,11 @@ def _ghost(document):
     pause, limit = document.get("budget_pause") or {}, document.get("resource_limit") or {}
     if pause.get("state") not in {"pausing", "paused", "resume_granted"} and limit.get("status") != "budget_hold":
         return None
+    from ouroboros.project_admission import carried_basis
     from supervisor.queue_snapshot import _PENDING_FIELDS
 
     task = {key: copy.deepcopy(document[key]) for key in _PENDING_FIELDS if document.get(key) is not None}
+    task.update(carried_basis(document))  # the result's admitted basis, never one recaptured later (#2547)
     task.update(id=document["task_id"], type=document.get("type") or "task",
                 chat_id=document.get("chat_id", 0), _attempt=document.get("task_attempt") or 1)
     lineage = resolve_task_lineage(task["id"], **{key: document.get(key) for key in (
