@@ -34,6 +34,7 @@ from tests.tool_classification_corpus import (
     typed_result,
 )
 from tests.test_skill_install_checks import registry_release  # noqa: F401  (fixtures)
+from tests.test_scratchpad_fold import install as scratchpad_install  # noqa: F401  (fixtures)
 
 GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" / "legacy_tool_classification_0f715831.json"
 
@@ -426,6 +427,11 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # A command whose task deadline or execution budget is already spent starts no child
     # (shell_process.command_bound_spent): the substrate's refusal, after the golden source.
     "TASK_DEADLINE_BLOCKED": (True, "blocked"),
+    # Stop now ending a running run_command/run_script publishes the calling tool's native SHELL_ERROR
+    # (shell_process.unfinished_command_result). Only the native producer is new; the bare text keeps
+    # its golden `ident:SHELL_ERROR` answer, restated here and retained intact.
+    "SHELL_ERROR": (True, "shell_error"),
+    "native:SHELL_ERROR:SHELL_ERROR": (True, "shell_error"),
     # Owner Batch4: a call the owner's Pause fenced before its launch handoff never
     # ran; it is the substrate's answer, homed with the other runtime refusals.
     "OWNER_PAUSE_NOT_STARTED": (True, "blocked"),
@@ -578,6 +584,21 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # after the retired oracle; a refused tool never ran, as for its subagent peers.
     "DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
     "native:ACCESS_BLOCKED:DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
+    # control_runtime `_send_user_message`: a relay answer that cannot be recorded as owed sends nothing and
+    # keeps the relay open, published as native CAPABILITY_UNAVAILABLE. The bare warning names no suffix the
+    # retired text chain keyed on, so it is the generic ok the retired chain gave FOCUS_STALE and CHERRY_PICK_CONFLICT.
+    "RELAY_RETURN_NOT_OWED": (False, "ok"),
+    "native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED": (True, "unavailable"),
+    # control_runtime `_fold_refusal`: a scratchpad fold that changed no block publishes native
+    # TOOL_REPORTED_FAILURE for a failed fold and for a conflict alike. The bare `_FAILED` warning is the
+    # retired chain's error (every prefix-free `_FAILED` golden row); a bare `_CONFLICT` reads as ok.
+    "SCRATCHPAD_FOLD_FAILED": (True, "error"),
+    "native:TOOL_REPORTED_FAILURE:SCRATCHPAD_FOLD_FAILED": (True, "tool_reported_failure"),
+    "SCRATCHPAD_FOLD_CONFLICT": (False, "ok"),
+    "native:TOOL_REPORTED_FAILURE:SCRATCHPAD_FOLD_CONFLICT": (True, "tool_reported_failure"),
+    # control_runtime `_update_scratchpad`: the canonical blocks hold the change and only the markdown
+    # projection is stale, so the warning trails a SUCCESSFUL write (status ok, code OK).
+    "SCRATCHPAD_PROJECTION_STALE": (False, "ok"),
 }
 
 
@@ -585,6 +606,11 @@ def _live_answer(case) -> tuple[bool, str]:
     typed = typed_result(case)
     is_error = _typed_execution_failure(True, typed)
     return is_error, _typed_result_metadata(case.tool, case.text, is_error, typed)["status"]
+
+
+def _published_answer(tool: str, result) -> tuple[bool, str]:
+    is_error = _typed_execution_failure(True, result)
+    return is_error, _typed_result_metadata(tool, result.text, is_error, result)["status"]
 
 
 @pytest.mark.parametrize("subject", tuple(CURRENT_PRODUCER_CONTRACTS))
@@ -660,6 +686,52 @@ def test_spent_execution_budget_publishes_the_actual_scheduling_refusal(tmp_path
     from ouroboros import store
 
     assert ctx.event_queue.empty() and not store.store_path(tmp_path).exists()  # no child row was written
+
+
+def test_unrecordable_relay_answer_publishes_the_current_producer_contract(tmp_path, monkeypatch):
+    from queue import Queue
+    from ouroboros.tools.control_runtime import _send_user_message
+    from tests.test_control_native_results import _published
+    from tests.test_owner_relay import context, source
+
+    _row, handle = source(tmp_path)
+    recipient = context(tmp_path)
+    recipient.task_id, recipient.event_queue = "recipient", Queue()
+    recipient._open_relays = {"once": {"relay_id": "once", "source": {"chat_id": 1, "address": handle, "label": "Main"}}}
+    monkeypatch.setattr("supervisor.terminal_delivery.register_pending_delivery", lambda *_a, **_k: False)
+    result = _published(recipient, "send_user_message", lambda: _send_user_message(
+        recipient, "Response after relay", reply_to_relay="once"),
+        owner_delta="an answer that cannot be recorded as owed is a typed unavailable refusal")
+    assert (result.status, result.code) == ("unavailable", "CAPABILITY_UNAVAILABLE")
+    assert "RELAY_RETURN_NOT_OWED" in result.text and recipient.event_queue.empty() and "once" in recipient._open_relays
+    assert _published_answer("send_user_message", result) == (
+        CURRENT_PRODUCER_CONTRACTS["native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED"])
+
+
+@pytest.mark.parametrize("scenario", ["fold_conflict", "fold_failed", "projection_stale"])
+def test_scratchpad_warnings_publish_the_current_producer_contract(scratchpad_install, monkeypatch, scenario):  # noqa: F811
+    from ouroboros.memory import Memory, ScratchpadFoldFailed
+    from tests.test_scratchpad_fold import _tool
+
+    identifier = f"SCRATCHPAD_{scenario.upper()}"
+    _env, _memory, registry = scratchpad_install
+    assert _tool(registry, content="a block for the fold to name").status == "ok"
+    if scenario == "projection_stale":
+        def stale_projection(self, blocks):
+            raise OSError("injected projection failure")
+        monkeypatch.setattr(Memory, "_write_scratchpad_markdown", stale_projection)
+        result = _tool(registry, content="a block whose projection cannot be written")
+        published, contract = ("ok", "OK"), CURRENT_PRODUCER_CONTRACTS[identifier]
+    else:
+        if scenario == "fold_failed":
+            def refuse(self, *args, **kwargs):
+                raise ScratchpadFoldFailed("write_failed", "injected disk failure")
+            monkeypatch.setattr(Memory, "fold_scratchpad_blocks", refuse)
+        result = _tool(registry, content="FOLD naming a block nobody holds.", replaces=["0" * 64])
+        published = ("error", "TOOL_REPORTED_FAILURE")
+        contract = CURRENT_PRODUCER_CONTRACTS[f"native:TOOL_REPORTED_FAILURE:{identifier}"]
+    assert (result.status, result.code) == published and identifier in result.text
+    assert _published_answer("update_scratchpad", result) == contract
 
 
 @pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])

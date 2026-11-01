@@ -14,8 +14,14 @@ def _isolated_queue(monkeypatch, tmp_path):
 
     pending = []
     running = {}
-    queue_mod.init_queue_refs(pending, running, {"value": 0})
-    queue_mod.ACCEPTANCE_FENCES.clear()
+    seq_counter = {"value": 0}
+    # Bound for this test only (an in-place clear left its last seal in the module map for
+    # the next queue test's snapshot); init_queue_refs still empties the admission maps.
+    monkeypatch.setattr(queue_mod, "PENDING", pending)
+    monkeypatch.setattr(queue_mod, "RUNNING", running)
+    monkeypatch.setattr(queue_mod, "QUEUE_SEQ_COUNTER_REF", seq_counter)
+    monkeypatch.setattr(queue_mod, "ACCEPTANCE_FENCES", {})
+    queue_mod.init_queue_refs(pending, running, seq_counter)
     monkeypatch.setattr(queue_mod, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue_mod, "QUEUE_SNAPSHOT_PATH", tmp_path / "state" / "queue_snapshot.json")
     return queue_mod, pending
@@ -35,6 +41,54 @@ def _write_restore_snapshot(tmp_path, tasks, fences):
         }),
         encoding="utf-8",
     )
+
+
+def _leftover_seal():
+    """The row ``test_refused_begin_is_typed_refused_with_its_reason`` once left in the module map."""
+    return {"token": "a" * 32, "root_task_id": "root-1", "task_id": "root-1",
+            "status": "sealed", "outcome": "terminal"}
+
+
+def test_isolated_queue_gives_the_module_queue_back_untouched(monkeypatch, tmp_path):
+    from supervisor import queue as queue_mod
+
+    names = ("ACCEPTANCE_FENCES", "PENDING", "RUNNING", "QUEUE_SEQ_COUNTER_REF")
+
+    def between_tests():
+        return {"ACCEPTANCE_FENCES": {"root-1": _leftover_seal()}, "PENDING": [{"id": "queued"}],
+                "RUNNING": {"running": {}}, "QUEUE_SEQ_COUNTER_REF": {"value": 7}}
+
+    before = between_tests()
+    for name, value in before.items():
+        monkeypatch.setattr(queue_mod, name, value)
+    with pytest.MonkeyPatch.context() as patch:
+        q, pending = _isolated_queue(patch, tmp_path)
+        inside = {name: getattr(q, name) for name in names}
+        q.transition_acceptance_fence(action="begin", token="b" * 32, root_task_id="root-2", task_id="root-2")
+        q.transition_acceptance_fence(action="end", token="b" * 32, outcome="terminal")
+    # An in-place clear once left this test's seal in the module map for the next queue test.
+    assert {name: getattr(queue_mod, name) for name in names} == between_tests()
+    assert all(getattr(queue_mod, name) is before[name] for name in names)
+    assert all(inside[name] is not before[name] for name in names) and inside["PENDING"] is pending
+    assert list(inside["ACCEPTANCE_FENCES"]) == ["root-2"]
+    assert inside["ACCEPTANCE_FENCES"]["root-2"]["status"] == "sealed"
+
+
+def test_install_queue_never_snapshots_a_seal_an_earlier_test_left(monkeypatch, tmp_path):
+    from supervisor import queue as queue_mod
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    leftover = {"root-1": _leftover_seal()}
+    monkeypatch.setattr(queue_mod, "ACCEPTANCE_FENCES", leftover)
+    with pytest.MonkeyPatch.context() as patch:
+        q, _state, _workers = _install_queue(tmp_path, patch)
+        inside = q.ACCEPTANCE_FENCES
+        assert q.persist_queue_snapshot(reason="fixture_isolation")
+    # A saved seal fences its root at restore, which cancels the root's never-started children.
+    snapshot = json.loads((tmp_path / "state" / "queue_snapshot.json").read_text(encoding="utf-8"))
+    assert snapshot["acceptance_fences"] == []
+    assert inside == {} and inside is not leftover
+    assert queue_mod.ACCEPTANCE_FENCES is leftover and leftover == {"root-1": _leftover_seal()}
 
 
 def test_acceptance_fence_atomically_blocks_then_releases_descendant(monkeypatch, tmp_path):
